@@ -126,6 +126,9 @@ struct ManageGroupsSheet: View {
     #endif
 
     private var reorderEnabled: Bool { orderStorageKey != nil }
+    /// GH #80: the "All" pill sentinel stored in the hidden set when the user
+    /// hides the All Channels pill (same token ChannelListView uses).
+    private let allChannelsToken = "All"
     private var modeKey: String? { orderStorageKey.map { $0 + ".sortMode" } }
 
     /// Groups in the order they should be displayed for the current mode.
@@ -302,6 +305,26 @@ struct ManageGroupsSheet: View {
                 }
             }
 
+            // GH #80: the All Channels pill is hideable too; pinned in its own
+            // section so the reorderable list's indices stay intact.
+            Section {
+                Button {
+                    toggleHidden(allChannelsToken)
+                } label: {
+                    HStack {
+                        Image(systemName: hiddenGroups.contains(allChannelsToken) ? "square" : "checkmark.square.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(hiddenGroups.contains(allChannelsToken) ? .textTertiary : .accentPrimary)
+                            .frame(width: 28)
+                        Text("All Channels")
+                            .font(.bodyMedium.weight(.semibold))
+                            .foregroundColor(hiddenGroups.contains(allChannelsToken) ? .textTertiary : .textPrimary)
+                        Spacer()
+                    }
+                }
+                .listRowBackground(Color.cardBackground)
+            }
+
             Section {
                 ForEach(displayList, id: \.self) { group in
                     Button {
@@ -381,6 +404,13 @@ struct ManageGroupsSheet: View {
                     // Lock the mode selector out while a group is grabbed.
                     .disabled(grabbedGroup != nil)
                 }
+
+                // GH #80: pinned All Channels toggle, never reordered.
+                TVGroupToggleRow(
+                    group: "All Channels",
+                    isOn: !hiddenGroups.contains(allChannelsToken),
+                    onToggle: { toggleHidden(allChannelsToken) }
+                )
 
                 ForEach(displayList, id: \.self) { group in
                     if reorderEnabled && sortMode == .manual {

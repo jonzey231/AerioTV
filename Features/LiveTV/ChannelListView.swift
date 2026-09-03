@@ -465,7 +465,7 @@ struct ChannelListView: View {
                        !selectedGroup.hasPrefix("collection:"),
                        !channelStore.orderedGroups.isEmpty,
                        !channelStore.orderedGroups.contains(selectedGroup) {
-                        selectedGroup = "All"
+                        selectedGroup = fallbackGroup
                     }
                     filterChannels()
                     favoritesStore.register(items: items)
@@ -499,8 +499,8 @@ struct ChannelListView: View {
                 // filter so the target channel is visible. EPGGuideView
                 // consumes the pending target (UserDefaults) and scrolls.
                 .onReceive(NotificationCenter.default.publisher(for: .aerioJumpToGuideProgram)) { _ in
-                    if selectedGroup != "All" {
-                        selectedGroup = "All"
+                    if selectedGroup != fallbackGroup {
+                        selectedGroup = fallbackGroup
                         filterChannels()
                     }
                     showGuideView = true
@@ -542,7 +542,7 @@ struct ChannelListView: View {
                     // can scroll to it once it mounts.
                     if UserDefaults.standard.object(forKey: "guideJumpChannelID") != nil {
                         showGuideView = true
-                        if selectedGroup != "All" { selectedGroup = "All" }
+                        if selectedGroup != fallbackGroup { selectedGroup = fallbackGroup }
                     }
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                     groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)
@@ -571,8 +571,8 @@ struct ChannelListView: View {
                         onDismiss: { updated in
                             hiddenGroups = updated
                             // Reset selection if the current group was hidden
-                            if selectedGroup != "All" && hiddenGroups.contains(selectedGroup) {
-                                selectedGroup = "All"
+                            if !selectedGroup.hasPrefix("collection:") && !groupTokens.contains(selectedGroup) {
+                                selectedGroup = fallbackGroup
                             }
                             filterChannels()
                         },
@@ -646,8 +646,8 @@ struct ChannelListView: View {
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                     groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)
                     groupSortMode = GroupOrderStore.loadMode(forKey: channelGroupSortModeKey)
-                    if selectedGroup != "All" && hiddenGroups.contains(selectedGroup) {
-                        selectedGroup = "All"
+                    if !selectedGroup.hasPrefix("collection:") && !groupTokens.contains(selectedGroup) {
+                        selectedGroup = fallbackGroup
                     }
                     filterChannels()
                 }
@@ -705,7 +705,7 @@ struct ChannelListView: View {
                 : "No channels in this group match that search.",
             action: {
                 searchText = ""
-                selectedGroup = "All"
+                selectedGroup = fallbackGroup
             },
             actionTitle: "Show All Channels"
         )
@@ -762,7 +762,7 @@ struct ChannelListView: View {
                         // debounce); OK or Right COMMITS and closes; Back
                         // reverts to the group the sidebar opened with.
                         GuideGroupSidebarPane(
-                            groups: ["All"] + visibleGroups,
+                            groups: groupTokens,
                             selectedToken: selectedGroup,
                             onSelect: { token in
                                 guideSidebarPreviewTask?.cancel()
@@ -1450,7 +1450,7 @@ struct ChannelListView: View {
                     collectionPill(c, canFocus: !leftHoldPinningAll)
                 }
 
-                ForEach(["All"] + visibleGroups, id: \.self) { group in
+                ForEach(groupTokens, id: \.self) { group in
                     #if os(tvOS)
                     TVGroupPill(
                         group: group,
@@ -1584,7 +1584,7 @@ struct ChannelListView: View {
         Button(role: .destructive) {
             // Mirror the hidden-group reset: if we're filtered to this
             // collection, drop back to All before its pill vanishes.
-            if selectedGroup == "collection:\(c.id)" { selectedGroup = "All" }
+            if selectedGroup == "collection:\(c.id)" { selectedGroup = fallbackGroup }
             ChannelCollectionsStore.shared.delete(id: c.id)
         } label: { Label("Delete Collection", systemImage: "trash") }
     }
@@ -1622,11 +1622,23 @@ struct ChannelListView: View {
             .filter { !hiddenGroups.contains($0) }
     }
 
+    /// GH #80: the pill tokens actually shown. "All" can be hidden like any
+    /// group (its sentinel lives in `hiddenGroups`); it is kept when nothing
+    /// else would be left so the list never goes unfilterable.
+    private var groupTokens: [String] {
+        let visible = visibleGroups
+        if hiddenGroups.contains("All") && !visible.isEmpty { return visible }
+        return ["All"] + visible
+    }
+
+    /// Where a reset lands: All when shown, else the first visible group.
+    private var fallbackGroup: String { groupTokens.first ?? "All" }
+
     /// Apple GH #55: step the selected group pill from a horizontal list
     /// swipe. The cycle matches the pill row (All first, then the visible
     /// groups in display order) and clamps at both ends.
     private func cycleGroup(forward: Bool) {
-        let cycle = ["All"] + visibleGroups
+        let cycle = groupTokens
         guard cycle.count > 1 else { return }
         let current = cycle.firstIndex(of: selectedGroup) ?? 0
         let target = min(max(forward ? current + 1 : current - 1, 0), cycle.count - 1)
@@ -1642,7 +1654,7 @@ struct ChannelListView: View {
     /// True when a swipe in that direction has a group to land on (the
     /// interactive drag rubber-bands instead of following at the ends).
     private func canCycleGroup(forward: Bool) -> Bool {
-        let cycle = ["All"] + visibleGroups
+        let cycle = groupTokens
         guard cycle.count > 1 else { return false }
         let current = cycle.firstIndex(of: selectedGroup) ?? 0
         let target = forward ? current + 1 : current - 1
