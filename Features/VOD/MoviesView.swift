@@ -946,7 +946,21 @@ struct MoviesView: View {
                                     onHeroFocusChange: { focused in
                                         #if os(tvOS)
                                         heroHasFocus = focused
-                                        if focused { tabBarOnScreen = TVFocusBridge.isTabBarOnScreen(preferredTitle: "Movies") }
+                                        guard focused else { return }
+                                        tabBarOnScreen = TVFocusBridge.isTabBarOnScreen(preferredTitle: "Movies")
+                                        // Any hero button gaining focus while the
+                                        // page is scrolled brings the page back to
+                                        // the top, focus staying on that button
+                                        // (Logan 2026-09-04: Up from Search should
+                                        // scroll up AND land on the hero button).
+                                        if !tabBarOnScreen {
+                                            debugLog("[FOCUS] hero focused while scrolled: scrolling to top")
+                                            withAnimation(.easeInOut(duration: 0.4)) {
+                                                scrollPosition.scrollTo(y: 0)
+                                            }
+                                            tvTabBarHidden = false
+                                            focusTabBarWhenOnScreen(attempt: 0)
+                                        }
                                         #endif
                                     },
                                     onPrimary: { heroPrimary($0) },
@@ -2559,6 +2573,7 @@ final class MoviesFocusTracer {
 
     func start() {
         guard token == nil else { return }
+        Self.installPressLogging()
         token = NotificationCenter.default.addObserver(
             forName: UIFocusSystem.didUpdateNotification, object: nil, queue: .main
         ) { note in
@@ -2597,6 +2612,46 @@ final class MoviesFocusTracer {
         if let token { NotificationCenter.default.removeObserver(token) }
         token = nil
         debugLog("[FOCUS] tracer off")
+    }
+
+    /// Logs every remote press the app receives (swizzled
+    /// UIApplication.sendEvent), so a press that moved no focus still
+    /// shows up. Installed once; only logs while the tracer is on.
+    static var pressLoggingInstalled = false
+    static func installPressLogging() {
+        guard !pressLoggingInstalled else { return }
+        pressLoggingInstalled = true
+        let cls: AnyClass = UIApplication.self
+        guard let original = class_getInstanceMethod(cls, #selector(UIApplication.sendEvent(_:))),
+              let swizzled = class_getInstanceMethod(cls, #selector(UIApplication.aerio_sendEvent(_:))) else { return }
+        method_exchangeImplementations(original, swizzled)
+    }
+    var isOn: Bool { token != nil }
+}
+
+extension UIApplication {
+    @objc func aerio_sendEvent(_ event: UIEvent) {
+        if event.type == .presses, let presses = (event as? UIPressesEvent)?.allPresses, MoviesFocusTracer.shared.isOn {
+            for press in presses where press.phase == .began || press.phase == .ended {
+                let name: String
+                switch press.type {
+                case .upArrow: name = "UP"
+                case .downArrow: name = "DOWN"
+                case .leftArrow: name = "LEFT"
+                case .rightArrow: name = "RIGHT"
+                case .select: name = "SELECT"
+                case .menu: name = "MENU"
+                case .playPause: name = "PLAY/PAUSE"
+                default: name = "type=\(press.type.rawValue)"
+                }
+                let env = UIApplication.shared.connectedScenes
+                    .compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+                let focused = env.flatMap { UIFocusSystem.focusSystem(for: $0)?.focusedItem }
+                let f = focused.map { String(describing: type(of: $0)) } ?? "nil"
+                debugLog("[PRESS] \(name) \(press.phase == .began ? "began" : "ended") focused=\(f)")
+            }
+        }
+        aerio_sendEvent(event)
     }
 }
 #endif
