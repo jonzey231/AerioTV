@@ -2582,9 +2582,12 @@ struct DispatcharrAPI {
     static let vodSearchItemCap = 300
 
     /// Server-side search — uses DRF's ?search= filter so items not yet locally fetched are found.
-    func searchVODMoviesStream(query: String) -> AsyncThrowingStream<[DispatcharrVODMovie], Error> {
+    /// `m3uAccountID`: DRF's `m3u_account` filter (`m3u_relations__m3u_account__id`),
+    /// the provider filter on Movies search results (Logan 2026-09-04).
+    func searchVODMoviesStream(query: String, m3uAccountID: Int? = nil) -> AsyncThrowingStream<[DispatcharrVODMovie], Error> {
         let encoded = Self.encodeQueryValue(query)
-        return makePageStream(firstPath: "/api/vod/movies/?search=\(encoded)&page_size=100",
+        let account = m3uAccountID.map { "&m3u_account=\($0)" } ?? ""
+        return makePageStream(firstPath: "/api/vod/movies/?search=\(encoded)\(account)&page_size=100",
                               itemCap: Self.vodSearchItemCap)
     }
 
@@ -4309,6 +4312,15 @@ struct DispatcharrStream: Decodable, Identifiable {
 struct DispatcharrM3UAccount: Decodable, Identifiable {
     let id: Int
     let name: String?
+    /// Dispatcharr's built-in "custom" account (hand-added streams) is
+    /// `locked`; it never carries VOD and is left out of provider filters.
+    let locked: Bool?
+    let isActive: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, locked
+        case isActive = "is_active"
+    }
 }
 
 /// Response of `POST /proxy/ts/change_stream/<uuid>`. We only need `url`

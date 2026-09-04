@@ -73,7 +73,18 @@ struct AuthPosterImage: View {
                 // that says exactly why credentials were withheld.
                 debugLog("🖼️ AuthPosterImage: headers WITHHELD host=\(url.host?.lowercased() ?? "nil") trusted=\(allowedHosts.sorted().joined(separator: ","))")
             }
-            guard let (data, _) = try? await URLSession.shared.data(for: req) else { return }
+            let data: Data
+            do {
+                let (d, resp) = try await URLSession.shared.data(for: req)
+                if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                    debugLog("🖼️ AuthPosterImage: HTTP \(http.statusCode) host=\(url.host ?? "nil") path=\(url.path.suffix(40))")
+                    return
+                }
+                data = d
+            } catch {
+                debugLog("🖼️ AuthPosterImage: FAILED host=\(url.host ?? "nil") \(error.localizedDescription)")
+                return
+            }
             let limit = maxPixel
             // Decode, downsample, and force-decompress OFF the main thread:
             // UIImage(data:) is lazy and would otherwise decode on first
@@ -125,6 +136,10 @@ struct MoviesView: View {
     @State private var navPath = NavigationPath()
     #if os(tvOS)
     @State private var showSearchField = false
+    /// Dispatcharr Direct Connect: M3U account id -> name, for the provider
+    /// filter on search results. Empty for other server types.
+    @State private var providerNames: [Int: String] = [:]
+    @State private var selectedProviderID: Int?
     /// Search circle focus: Menu collapses the field and lands here.
     @FocusState private var searchCircleFocused: Bool
     @State private var showSortMenu = false
@@ -274,12 +289,23 @@ struct MoviesView: View {
         dispatcharrHeaders = s.authHeaders
     }
 
+    private var isSearching: Bool { !searchText.isEmpty }
+
+    /// Search hits before the provider filter (drives the provider pills).
+    private var searchHits: [VODDisplayItem] {
+        var combined = vodStore.movies.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+        let localIDs = Set(combined.map { $0.id })
+        combined += vodStore.movieSearchResults.filter { !localIDs.contains($0.id) }
+        return combined
+    }
+
     private var filteredMovies: [VODDisplayItem] {
         if !searchText.isEmpty {
-            var combined = vodStore.movies.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
-            let localIDs = Set(combined.map { $0.id })
-            combined += vodStore.movieSearchResults.filter { !localIDs.contains($0.id) }
-            return combined
+            // A provider pick re-runs the server search with the account
+            // filter; local rows carry no provider, so only the server's
+            // answer counts then.
+            if selectedProviderID != nil { return vodStore.movieSearchResults }
+            return searchHits
         }
         var result = vodStore.movies
         // Exclude movies belonging to hidden groups
@@ -426,8 +452,10 @@ struct MoviesView: View {
             }
             .onChange(of: searchText) { _, query in
                 // Fire server-side search so items not yet locally fetched are found.
-                vodStore.searchMovies(query: query, servers: servers)
+                if query.isEmpty { selectedProviderID = nil }
+                vodStore.searchMovies(query: query, servers: servers, providerID: selectedProviderID)
             }
+            .task(id: activeServerIDString) { await loadProviderNames() }
             .onChange(of: navPath) { _, path in
                 isDetailPushed = !path.isEmpty
             }
@@ -965,15 +993,6 @@ struct MoviesView: View {
     // MARK: - Content
     private var content: some View {
         VStack(spacing: 0) {
-            #if os(tvOS)
-            // While a server search is in flight the header (with the
-            // field) stays put here so it does not vanish under the spinner.
-            if !searchText.isEmpty && vodStore.isSearchingMovies && filteredMovies.isEmpty {
-                libraryHeader(title: "Results", count: 0, showPills: false)
-                    .padding(.leading, contentLeadingInset)
-            }
-            #endif
-
             // Hidden groups indicator
             if !hiddenGroups.isEmpty && searchText.isEmpty {
                 HStack(spacing: 6) {
@@ -998,12 +1017,6 @@ struct MoviesView: View {
                 #endif
             }
 
-            if !searchText.isEmpty && vodStore.isSearchingMovies && filteredMovies.isEmpty {
-                ProgressView("Searching server…")
-                    .tint(.accentPrimary)
-                    .padding(.top, 60)
-                Spacer()
-            } else {
                 GeometryReader { outer in
                 ScrollViewReader { proxy in
                 ZStack(alignment: .topLeading) {
@@ -1020,15 +1033,10 @@ struct MoviesView: View {
                     // the bar region regardless, so nothing is lost.
                     Color.clear.frame(height: outer.safeAreaInsets.top)
                     #endif
-                    if !searchText.isEmpty {
-                        // Search: results grid only, no hero or shelves.
-                        VStack(alignment: .leading, spacing: sectionSpacing) {
-                            libraryHeader(title: "Results", count: filteredMovies.count, showPills: false)
-                                .padding(.leading, contentLeadingInset)
-                            posterGrid(filteredMovies)
-                                .padding(.leading, contentLeadingInset)
-                        }
-                    } else {
+                    // Search replaces only the library grid (Logan
+                    // 2026-09-04); the hero and shelves stay put and the
+                    // header with the field is never re-created mid-typing.
+                    Group {
                         VStack(alignment: .leading, spacing: sectionSpacing) {
                             #if os(iOS)
                             iOSTitleRow
@@ -1106,9 +1114,25 @@ struct MoviesView: View {
                                     .padding(.leading, contentLeadingInset)
                             }
 
-                            libraryHeader(title: "All Movies", count: libraryMovies.count, showPills: true)
+                            let gridItems = isSearching ? filteredMovies : libraryMovies
+                            libraryHeader(title: isSearching ? "Results" : "All Movies",
+                                          count: gridItems.count, showPills: !isSearching)
                                 .padding(.leading, contentLeadingInset)
-                            railCatcherAndGrid(libraryMovies)
+                            if isSearching {
+                                providerPills
+                                    .padding(.leading, contentLeadingInset)
+                                if vodStore.isSearchingMovies {
+                                    HStack(spacing: 10) {
+                                        ProgressView().tint(.accentPrimary)
+                                        Text("Searching server…")
+                                            .font(.labelMedium)
+                                            .foregroundColor(.textTertiary)
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .padding(.leading, contentLeadingInset)
+                                }
+                            }
+                            railCatcherAndGrid(gridItems)
                                 .background(GeometryReader { g in
                                     Color.clear.preference(
                                         key: GridTopKey.self,
@@ -1150,13 +1174,7 @@ struct MoviesView: View {
                         // Focus the circle FIRST: removing the field while it
                         // held focus parked focus on the hero's Resume, whose
                         // scroll-to-top rule fired (trace 17:16:00, "page jumps").
-                        searchCircleFocused = true
-                        DispatchQueue.main.async {
-                            withAnimation(.spring(response: 0.25)) {
-                                showSearchField = false
-                                searchText = ""
-                            }
-                        }
+                        clearSearch()
                     } else if tvTabBarHidden {
                         scrollMoviesToTop(proxy)
                     } else {
@@ -1167,13 +1185,7 @@ struct MoviesView: View {
                     if showSearchField {
                         // Same as the direct Menu path above; the header
                         // circles' presses arrive via HomeView instead.
-                        searchCircleFocused = true
-                        DispatchQueue.main.async {
-                            withAnimation(.spring(response: 0.25)) {
-                                showSearchField = false
-                                searchText = ""
-                            }
-                        }
+                        clearSearch()
                     } else if tvTabBarHidden {
                         scrollMoviesToTop(proxy)
                     } else if !heroHasFocus {
@@ -1414,7 +1426,6 @@ struct MoviesView: View {
                 }
                 }
                 }
-                }
                 #if os(iOS)
                 .onScrollGeometryChange(for: CGFloat.self) { scrollGeo in
                     scrollGeo.contentOffset.y
@@ -1583,6 +1594,13 @@ struct MoviesView: View {
                 }
             }
             .focused($searchCircleFocused)
+            if isSearching {
+                // Cancel: one press clears the query (it took reopening the
+                // field and deleting the text, Logan 2026-09-04).
+                TVNavActionCircle(systemImage: "xmark", label: "Clear Search") {
+                    clearSearch()
+                }
+            }
             TVNavActionCircle(systemImage: "arrow.up.arrow.down", label: "Sort") {
                 showSortMenu = true
             }
@@ -1726,6 +1744,74 @@ struct MoviesView: View {
                 #endif
             }
         }
+    }
+
+    /// Provider filter for search results. Dispatcharr Direct Connect only
+    /// (the only source that says which account carries a copy); shown when
+    /// the hits span more than one provider.
+    @ViewBuilder
+    private var providerPills: some View {
+        let ids = providerNames.keys.sorted()
+        if ids.count >= 2 {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: pillSpacing) {
+                    genrePill("All Providers", isSelected: selectedProviderID == nil) { selectProvider(nil) }
+                    ForEach(ids, id: \.self) { pid in
+                        genrePill(providerNames[pid] ?? "Provider \(pid)", isSelected: selectedProviderID == pid) {
+                            selectProvider(selectedProviderID == pid ? nil : pid)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                #if os(tvOS)
+                .padding(.vertical, 12)
+                #endif
+            }
+            #if os(tvOS)
+            .focusSection()
+            #endif
+        }
+    }
+
+    private func selectProvider(_ pid: Int?) {
+        guard pid != selectedProviderID else { return }
+        selectedProviderID = pid
+        vodStore.searchMovies(query: searchText, servers: servers, providerID: pid)
+    }
+
+    /// Clears the search and collapses the field, landing on Search.
+    private func clearSearch() {
+        searchCircleFocused = true
+        DispatchQueue.main.async {
+            withAnimation(.spring(response: 0.25)) {
+                showSearchField = false
+                searchText = ""
+                selectedProviderID = nil
+            }
+        }
+    }
+
+    private func loadProviderNames() async {
+        guard let server = servers.first(where: { $0.isActive }) ?? servers.first,
+              server.type == .dispatcharrAPI else {
+            providerNames = [:]
+            return
+        }
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode)
+        let accounts = (try? await api.getM3UAccounts()) ?? []
+        var map: [Int: String] = [:]
+        for a in accounts {
+            // Skip the locked built-in "custom" account and disabled ones
+            // (Logan 2026-09-04: "custom" showed up as a provider).
+            if a.locked == true || a.isActive == false { continue }
+            if a.name?.lowercased() == "custom" { continue }
+            map[a.id] = (a.name?.isEmpty == false) ? a.name! : "Provider \(a.id)"
+        }
+        providerNames = map
+        debugLog("[PROVIDERS] \(map.count) M3U accounts for the search filter")
     }
 
     private var pillSpacing: CGFloat {

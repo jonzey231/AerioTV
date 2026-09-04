@@ -214,7 +214,7 @@ final class VODStore: ObservableObject {
         await task.value
     }
 
-    func searchMovies(query: String, servers: [ServerConnection]) {
+    func searchMovies(query: String, servers: [ServerConnection], providerID: Int? = nil) {
         movieSearchTask?.cancel()
         guard !query.isEmpty else {
             movieSearchResults = []
@@ -246,7 +246,7 @@ final class VODStore: ObservableObject {
             // Live TV during this load, so a chunkier VOD fill is invisible.
             let publishInterval: TimeInterval = 2.0
             do {
-                for try await batch in api.searchVODMoviesStream(query: query) {
+                for try await batch in api.searchVODMoviesStream(query: query, m3uAccountID: providerID) {
                     guard !Task.isCancelled else { break }
                     let items = batch.map { m -> VODDisplayItem in
                         var movie = VODMovie(
