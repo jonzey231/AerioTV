@@ -1548,29 +1548,40 @@ extension TMDBService {
         let results: [Entry]?
     }
 
-    /// TMDB's recommendations for a title, falling back to "similar" when
-    /// the recommendations list is empty (common for new or niche titles).
-    /// Poster-less rows are dropped. Capped at 20; the caller narrows to
-    /// what exists in the user's library.
+    /// TMDB's recommendations for a title (pages 1-2, up to 40 rows),
+    /// falling back to "similar" when recommendations come back empty
+    /// (common for new or niche titles). Poster-less rows are dropped.
+    /// The caller narrows to what exists in the user's library, which is
+    /// why two pages are worth fetching: an exact-match library hit rate
+    /// of ~10-15% left a 20-row list with two or three posters.
     static func recommendations(forTMDBID id: String, isMovie: Bool, apiKey: String) async -> [TMDBKnownForItem] {
         let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
         let kind = isMovie ? "movie" : "tv"
         for endpoint in ["recommendations", "similar"] {
-            guard let req = makeRequest(path: "/\(kind)/\(trimmed)/\(endpoint)", key: apiKey) else { continue }
-            guard let (data, resp) = try? await session.data(for: req),
-                  let http = resp as? HTTPURLResponse, http.statusCode == 200,
-                  let decoded = try? JSONDecoder().decode(RecommendationsResponse.self, from: data)
-            else { continue }
-            let items: [TMDBKnownForItem] = (decoded.results ?? []).compactMap { e in
-                guard let rid = e.id?.value, !rid.isEmpty,
-                      let title = nonBlank(e.title ?? e.name),
-                      let poster = nonBlank(e.posterPath) else { return nil }
-                return TMDBKnownForItem(id: rid, title: title, posterPath: poster, isMovie: isMovie)
+            var items: [TMDBKnownForItem] = []
+            var seen = Set<String>()
+            for page in 1...2 {
+                guard let req = makeRequest(path: "/\(kind)/\(trimmed)/\(endpoint)",
+                                            queryItems: [URLQueryItem(name: "page", value: String(page))],
+                                            key: apiKey) else { break }
+                guard let (data, resp) = try? await session.data(for: req),
+                      let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                      let decoded = try? JSONDecoder().decode(RecommendationsResponse.self, from: data)
+                else { break }
+                let rows = decoded.results ?? []
+                for e in rows {
+                    guard let rid = e.id?.value, !rid.isEmpty, seen.insert(rid).inserted,
+                          let title = nonBlank(e.title ?? e.name),
+                          let poster = nonBlank(e.posterPath) else { continue }
+                    items.append(TMDBKnownForItem(id: rid, title: title, posterPath: poster, isMovie: isMovie))
+                }
+                // A short first page means there is no second one.
+                if rows.count < 20 { break }
             }
             if !items.isEmpty {
                 debugLog("🎬 TMDB \(endpoint) id \(trimmed) (\(kind)) -> \(items.count)")
-                return Array(items.prefix(20))
+                return items
             }
         }
         return []

@@ -360,6 +360,7 @@ struct VODDetailView: View {
                         #if os(tvOS)
                         tvDetailsBlock
                         tvRelatedSection
+                        tvRelatedRefresh
                         #endif
                     }
                     if item.type == .series {
@@ -520,6 +521,12 @@ struct VODDetailView: View {
     @State private var tvVersionPickerPresented = false
     /// "Related" strip: TMDB recommendations narrowed to the library.
     @State private var relatedItems: [VODDisplayItem] = []
+    /// The TMDB candidates, kept so the library match can re-run when the
+    /// sweep publishes more titles (a page opened 20 s after launch matched
+    /// against a near-empty library: 40 candidates -> 0, Logan 2026-09-04).
+    @State private var relatedCandidates: [TMDBKnownForItem] = []
+    @State private var relatedMatchedCount = -1
+    @ObservedObject private var relatedLibrary = VODStore.shared
 
     private var tvHeroURL: URL? {
         (fullMovie?.backdropURL ?? fullSeries?.backdropURL) ?? item.posterURL ?? tmdbPosterURL
@@ -724,7 +731,7 @@ struct VODDetailView: View {
     /// (Logan 2026-09-04 16:11).
     @MainActor
     private func loadRelatedIfNeeded() async {
-        guard usesTVMovieLayout, relatedItems.isEmpty,
+        guard usesTVMovieLayout, relatedCandidates.isEmpty,
               TMDBPosters.isEnabled, let apiKey = TMDBPosters.apiKey else { return }
         let stored = [fullMovie?.tmdbID, item.movie?.tmdbID].compactMap { $0 }.first { !$0.isEmpty }
         let tmdbID: String?
@@ -732,9 +739,19 @@ struct VODDetailView: View {
             tmdbID = await TMDBService.resolveID(forTitle: item.name, isMovie: true, apiKey: apiKey)
         }
         guard let tmdbID else { return }
-        let recs = await TMDBService.recommendations(forTMDBID: tmdbID, isMovie: true, apiKey: apiKey)
+        relatedCandidates = await TMDBService.recommendations(forTMDBID: tmdbID, isMovie: true, apiKey: apiKey)
+        await matchRelatedAgainstLibrary()
+    }
+
+    /// Re-runs the library match; cheap enough to repeat as the sweep
+    /// publishes (a dictionary build over a snapshot, off the main thread).
+    @MainActor
+    private func matchRelatedAgainstLibrary() async {
+        let recs = relatedCandidates
         guard !recs.isEmpty else { return }
         let library = VODStore.shared.movies + VODStore.shared.movieSearchResults
+        guard library.count != relatedMatchedCount else { return }
+        relatedMatchedCount = library.count
         let selfID = item.id
         let hits = await Task.detached(priority: .userInitiated) { () -> [VODDisplayItem] in
             var byTMDB: [String: VODDisplayItem] = [:]
@@ -758,7 +775,7 @@ struct VODDetailView: View {
             }
             return out
         }.value
-        debugLog("🎬 Related: \(recs.count) TMDB recommendations -> \(hits.count) in library")
+        debugLog("🎬 Related: \(recs.count) TMDB recommendations -> \(hits.count) in library (\(library.count) titles)")
         relatedItems = hits
     }
 
@@ -787,6 +804,14 @@ struct VODDetailView: View {
             .padding(.top, 16)
             .focusSection()
         }
+    }
+
+    /// Re-match once the sweep has published more titles.
+    private var tvRelatedRefresh: some View {
+        Color.clear.frame(height: 0)
+            .onChange(of: relatedLibrary.movies.count) { _, _ in
+                Task { await matchRelatedAgainstLibrary() }
+            }
     }
 
     /// Two-column facts block under the cast strip.
