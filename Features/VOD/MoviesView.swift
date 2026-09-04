@@ -140,6 +140,11 @@ struct MoviesView: View {
     /// filter on search results. Empty for other server types.
     @State private var providerNames: [Int: String] = [:]
     @State private var selectedProviderID: Int?
+    /// Cast & crew search: the TMDB person the query resolved to and their
+    /// films found in the library.
+    @State private var personMatchName: String?
+    @State private var personMatches: [VODDisplayItem] = []
+    @State private var personSearchTask: Task<Void, Never>?
     /// Search circle focus: Menu collapses the field and lands here.
     @FocusState private var searchCircleFocused: Bool
     @State private var showSortMenu = false
@@ -316,11 +321,21 @@ struct MoviesView: View {
     private var isSearching: Bool { !searchText.isEmpty }
 
     /// Search hits before the provider filter (drives the provider pills).
+    /// Title matches (local + server), plus local rows whose cast or
+    /// director text contains the query, plus the TMDB person's films
+    /// that exist in the library (personMatches). Sorted by the tab's
+    /// sort order (Logan 2026-09-04).
     private var searchHits: [VODDisplayItem] {
-        var combined = vodStore.movies.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
-        let localIDs = Set(combined.map { $0.id })
-        combined += vodStore.movieSearchResults.filter { !localIDs.contains($0.id) }
-        return combined
+        let q = searchText
+        var combined = vodStore.movies.filter {
+            $0.name.localizedCaseInsensitiveContains(q)
+                || ($0.movie?.cast.localizedCaseInsensitiveContains(q) ?? false)
+                || ($0.movie?.director.localizedCaseInsensitiveContains(q) ?? false)
+        }
+        var ids = Set(combined.map { $0.id })
+        for r in vodStore.movieSearchResults where ids.insert(r.id).inserted { combined.append(r) }
+        for r in personMatches where ids.insert(r.id).inserted { combined.append(r) }
+        return MoviesView.sortItems(combined, by: sortOrder)
     }
 
     private var filteredMovies: [VODDisplayItem] {
@@ -328,7 +343,7 @@ struct MoviesView: View {
             // A provider pick re-runs the server search with the account
             // filter; local rows carry no provider, so only the server's
             // answer counts then.
-            if selectedProviderID != nil { return vodStore.movieSearchResults }
+            if selectedProviderID != nil { return MoviesView.sortItems(vodStore.movieSearchResults, by: sortOrder) }
             return searchHits
         }
         var result = vodStore.movies
@@ -480,6 +495,7 @@ struct MoviesView: View {
                 // Fire server-side search so items not yet locally fetched are found.
                 if query.isEmpty { selectedProviderID = nil }
                 vodStore.searchMovies(query: query, servers: servers, providerID: selectedProviderID)
+                searchPeople(query)
             }
             .task(id: activeServerIDString) { await loadProviderNames() }
             .onChange(of: navPath) { _, path in
@@ -785,6 +801,52 @@ struct MoviesView: View {
                    hidden: effectiveHiddenGroups, genre: selectedGenre, sort: sortOrderRaw)
     }
 
+    /// The library sort, also applied to search results (Logan 2026-09-04).
+    nonisolated static func sortItems(_ items: [VODDisplayItem], by sort: MoviesSortOrder) -> [VODDisplayItem] {
+        var library = items
+        let keys = Dictionary(uniqueKeysWithValues: library.map {
+            ($0.id, String(AlphabetRail.stripQualityPrefix($0.name))
+                .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current))
+        })
+        func byTitle(_ a: VODDisplayItem, _ b: VODDisplayItem) -> Bool {
+            let ka = keys[a.id] ?? "", kb = keys[b.id] ?? ""
+            if ka != kb { return ka < kb }
+            return a.id < b.id
+        }
+        func ratingValue(_ i: VODDisplayItem) -> Double { Double(i.rating) ?? 0 }
+        switch sort {
+        case .titleAZ:    library.sort(by: byTitle)
+        case .titleZA:    library.sort { byTitle($1, $0) }
+        case .yearNewest:
+            library.sort {
+                if $0.releaseYear != $1.releaseYear { return $0.releaseYear > $1.releaseYear }
+                return byTitle($0, $1)
+            }
+        case .yearOldest:
+            // Unknown years sink to the end rather than leading the list.
+            library.sort {
+                let a = $0.releaseYear.isEmpty ? "9999" : $0.releaseYear
+                let b = $1.releaseYear.isEmpty ? "9999" : $1.releaseYear
+                if a != b { return a < b }
+                return byTitle($0, $1)
+            }
+        case .ratingHigh:
+            library.sort {
+                let a = ratingValue($0), b = ratingValue($1)
+                if a != b { return a > b }
+                return byTitle($0, $1)
+            }
+        case .recentlyAdded:
+            library.sort {
+                let a = $0.movie?.addedAt ?? .distantPast
+                let b = $1.movie?.addedAt ?? .distantPast
+                if a != b { return a > b }
+                return byTitle($0, $1)
+            }
+        }
+        return library
+    }
+
     nonisolated private static func computeDerived(movies: [VODDisplayItem], hidden: Set<String>,
                                        genre: String?, sort: MoviesSortOrder) -> LibraryDerived {
         let visible = Self.visible(movies, hidden: hidden)
@@ -803,31 +865,7 @@ struct MoviesView: View {
         // one localized compare per comparison.
         // Same stripped title the rail buckets on, so a rail jump lands on
         // the sorted run for that letter ("4K: Thor" sorts under T).
-        let keys = Dictionary(uniqueKeysWithValues: library.map {
-            ($0.id, String(AlphabetRail.stripQualityPrefix($0.name))
-                .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current))
-        })
-        func byTitle(_ a: VODDisplayItem, _ b: VODDisplayItem) -> Bool {
-            let ka = keys[a.id] ?? "", kb = keys[b.id] ?? ""
-            if ka != kb { return ka < kb }
-            return a.id < b.id
-        }
-        switch sort {
-        case .titleAZ:    library.sort(by: byTitle)
-        case .titleZA:    library.sort { byTitle($1, $0) }
-        case .yearNewest:
-            library.sort {
-                if $0.releaseYear != $1.releaseYear { return $0.releaseYear > $1.releaseYear }
-                return byTitle($0, $1)
-            }
-        case .recentlyAdded:
-            library.sort {
-                let a = $0.movie?.addedAt ?? .distantPast
-                let b = $1.movie?.addedAt ?? .distantPast
-                if a != b { return a > b }
-                return byTitle($0, $1)
-            }
-        }
+        library = MoviesView.sortItems(library, by: sort)
 
         var letters: Set<String> = []
         var firstID: [String: String] = [:]
@@ -1147,6 +1185,13 @@ struct MoviesView: View {
                                           count: gridItems.count, showPills: !isSearching)
                                 .padding(.leading, contentLeadingInset)
                             if isSearching {
+                                if let who = personMatchName {
+                                    Text("Includes titles with \(who)")
+                                        .font(.labelMedium)
+                                        .foregroundColor(.textTertiary)
+                                        .padding(.horizontal, 16)
+                                        .padding(.leading, contentLeadingInset)
+                                }
                                 providerPills
                                     .padding(.leading, contentLeadingInset)
                                 if vodStore.isSearchingMovies {
@@ -1809,6 +1854,47 @@ struct MoviesView: View {
         debugLog("[FILTER] \(why): providers on=\(enabled) groups tab=\(groupsForEnabledProviders.count) of \(vodStore.movieCategories.count), user-hidden=\(hiddenGroups.count), effective hidden=\(effectiveHiddenGroups.count), library=\(libraryMovies.count)")
     }
 
+    /// Cast & crew: resolve the query to a TMDB person (debounced), pull
+    /// their film credits, keep the ones in the library. The server search
+    /// only covers title/description/genre and list rows carry no cast.
+    private func searchPeople(_ query: String) {
+        personSearchTask?.cancel()
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard q.count >= 3, TMDBPosters.isEnabled, let apiKey = TMDBPosters.apiKey else {
+            personMatchName = nil
+            personMatches = []
+            return
+        }
+        personSearchTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            let people = await TMDBService.searchPeople(q, apiKey: apiKey)
+            guard !Task.isCancelled, !people.isEmpty else {
+                personMatchName = nil; personMatches = []
+                return
+            }
+            // Library index once; every candidate's credits match against it.
+            let library = vodStore.movies
+            let matcher = await Task.detached(priority: .userInitiated) { LibraryMatcher(library) }.value
+            var best: (name: String, hits: [VODDisplayItem])? = nil
+            for person in people {
+                guard !Task.isCancelled else { return }
+                let credits = await TMDBService.personMovieCredits(personID: person.id, apiKey: apiKey)
+                var seen = Set<String>()
+                var hits: [VODDisplayItem] = []
+                for c in credits {
+                    guard let hit = matcher.match(tmdbID: c.id, title: c.title), seen.insert(hit.id).inserted else { continue }
+                    hits.append(hit)
+                }
+                debugLog("[SEARCH] person \(person.name): \(credits.count) credits -> \(hits.count) in library (\(library.count) rows, \(matcher.idCount) with tmdb id)")
+                if hits.count > (best?.hits.count ?? 0) { best = (person.name, hits) }
+            }
+            guard !Task.isCancelled else { return }
+            personMatchName = best?.name
+            personMatches = best?.hits ?? []
+        }
+    }
+
     private func selectProvider(_ pid: Int?) {
         guard pid != selectedProviderID else { return }
         selectedProviderID = pid
@@ -1823,6 +1909,8 @@ struct MoviesView: View {
                 showSearchField = false
                 searchText = ""
                 selectedProviderID = nil
+                personMatchName = nil
+                personMatches = []
             }
         }
     }
@@ -2107,13 +2195,15 @@ struct VODPosterCard: View {
 // MARK: - Movies tab redesign: sort order
 
 enum MoviesSortOrder: String, CaseIterable {
-    case titleAZ, titleZA, yearNewest, recentlyAdded
+    case titleAZ, titleZA, yearNewest, yearOldest, ratingHigh, recentlyAdded
 
     var label: String {
         switch self {
         case .titleAZ:       return "Title · A to Z"
         case .titleZA:       return "Title · Z to A"
         case .yearNewest:    return "Year · Newest"
+        case .yearOldest:    return "Year · Oldest"
+        case .ratingHigh:    return "Rating · Highest"
         case .recentlyAdded: return "Recently Added"
         }
     }

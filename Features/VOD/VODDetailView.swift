@@ -763,22 +763,11 @@ struct VODDetailView: View {
         relatedMatchedCount = library.count
         let selfID = item.id
         let hits = await Task.detached(priority: .userInitiated) { () -> [VODDisplayItem] in
-            var byTMDB: [String: VODDisplayItem] = [:]
-            var byTitle: [String: VODDisplayItem] = [:]
-            for m in library {
-                let id = m.movie?.tmdbID ?? ""
-                if !id.isEmpty {
-                    if byTMDB[id] == nil { byTMDB[id] = m }
-                } else {
-                    let key = TMDBService.splitTitleYear(m.name).title.lowercased()
-                    if byTitle[key] == nil { byTitle[key] = m }
-                }
-            }
+            let matcher = LibraryMatcher(library)
             var seen: Set<String> = [selfID]
             var out: [VODDisplayItem] = []
             for rec in recs {
-                let hit = byTMDB[rec.id] ?? byTitle[TMDBService.splitTitleYear(rec.title).title.lowercased()]
-                guard let hit, seen.insert(hit.id).inserted else { continue }
+                guard let hit = matcher.match(tmdbID: rec.id, title: rec.title), seen.insert(hit.id).inserted else { continue }
                 out.append(hit)
                 if out.count >= 12 { break }
             }

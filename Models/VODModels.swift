@@ -1133,6 +1133,57 @@ struct VODCategory: Identifiable, Hashable {
     var providerIDs: [Int] = []
 }
 
+// MARK: - Library matcher (TMDB title lists -> library rows)
+
+/// Matches TMDB rows (id + title) to library items. Built once off the main
+/// thread, then looked up per candidate. Every row is indexed by BOTH its
+/// TMDB id (when present) and a cleaned title, so an id-less or mis-id'd
+/// row still matches by name. The cleaned title drops quality prefixes
+/// ("4K:"), trailing "(YYYY)" groups, punctuation and diacritics: "4K:
+/// Deadpool 2 (2018)" and "Deadpool 2" collide (Logan 2026-09-04: Ryan
+/// Reynolds matched 2 of 106 credits).
+struct LibraryMatcher: Sendable {
+    private var byTMDB: [String: VODDisplayItem] = [:]
+    private var byTitle: [String: VODDisplayItem] = [:]
+    private(set) var idCount = 0
+
+    nonisolated init(_ library: [VODDisplayItem]) {
+        for m in library {
+            let id = m.movie?.tmdbID ?? m.series?.tmdbID ?? ""
+            if !id.isEmpty {
+                if byTMDB[id] == nil { byTMDB[id] = m }
+                idCount += 1
+            }
+            let key = LibraryMatcher.cleanTitle(m.name)
+            if !key.isEmpty, byTitle[key] == nil { byTitle[key] = m }
+        }
+    }
+
+    nonisolated func match(tmdbID: String, title: String) -> VODDisplayItem? {
+        if !tmdbID.isEmpty, let hit = byTMDB[tmdbID] { return hit }
+        return byTitle[LibraryMatcher.cleanTitle(title)]
+    }
+
+    nonisolated static func cleanTitle(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Leading quality tags: "4K:", "[HD] ", "UHD - ".
+        while true {
+            var t = Substring(s)
+            if t.first == "[" || t.first == "(" { t = t.dropFirst() }
+            guard let tag = ["UHD", "FHD", "4K", "HD", "SD"].first(where: { t.uppercased().hasPrefix($0) }) else { break }
+            t = t.dropFirst(tag.count)
+            if t.first == "]" || t.first == ")" { t = t.dropFirst() }
+            guard let sep = t.first, sep == ":" || sep == "-" || sep == "|" || sep == " " else { break }
+            s = String(t.dropFirst()).trimmingCharacters(in: .whitespaces)
+        }
+        s = VODDisplayItem.strippingTrailingYears(s)
+        s = s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).lowercased()
+        s = s.replacingOccurrences(of: "&", with: " and ")
+        let scalars = s.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? Character($0) : " " }
+        return String(scalars).split(separator: " ").joined(separator: " ")
+    }
+}
+
 // MARK: - VOD Display Item (unified for search/grid)
 struct VODDisplayItem: Identifiable, Hashable {
     let id: String
@@ -1150,7 +1201,27 @@ struct VODDisplayItem: Identifiable, Hashable {
     /// "(YYYY)" groups ("#Horror (2015) (2015)"), and the UI shows the year
     /// on its own meta line, so every trailing year is dropped (Logan
     /// 2026-09-04). The raw `name` stays for matching and search.
-    var displayName: String { VODDisplayItem.strippingTrailingYears(name) }
+    var displayName: String {
+        VODDisplayItem.strippingTrailingYears(VODDisplayItem.strippingQualityPrefix(name))
+    }
+
+    /// Drops leading quality tags ("4K:", "[HD] ", "UHD - ") from a
+    /// provider name (Logan 2026-09-04). Case of the rest is untouched.
+    nonisolated static func strippingQualityPrefix(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while true {
+            var t = Substring(s)
+            if t.first == "[" || t.first == "(" { t = t.dropFirst() }
+            guard let tag = ["UHD", "FHD", "4K", "HD", "SD"].first(where: { t.uppercased().hasPrefix($0) }) else { break }
+            t = t.dropFirst(tag.count)
+            if t.first == "]" || t.first == ")" { t = t.dropFirst() }
+            guard let sep = t.first, sep == ":" || sep == "-" || sep == "|" || sep == " " else { break }
+            let rest = String(t.dropFirst()).trimmingCharacters(in: .whitespaces)
+            if rest.isEmpty { break }
+            s = rest
+        }
+        return s
+    }
 
     nonisolated static func strippingTrailingYears(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)

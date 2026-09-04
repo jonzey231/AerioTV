@@ -1532,6 +1532,86 @@ extension TMDBService {
         return await credits(forTMDBID: id, isMovie: isMovie, apiKey: apiKey)
     }
 
+    // MARK: People search (Movies tab cast & crew search)
+
+    struct PersonHit: Sendable {
+        let id: String
+        let name: String
+        let popularity: Double
+    }
+
+    private struct PersonSearchResponse: Decodable {
+        struct Entry: Decodable {
+            let id: FlexID?
+            let name: String?
+            let popularity: Double?
+            let knownForDepartment: String?
+            enum CodingKeys: String, CodingKey {
+                case id, name, popularity
+                case knownForDepartment = "known_for_department"
+            }
+        }
+        let results: [Entry]?
+    }
+
+    /// People matching a typed name: TMDB's first page, most popular
+    /// first, requiring the query to appear in the name (a two-letter
+    /// query would otherwise hit random people). The caller tries the top
+    /// few and keeps the one with the most films in the library: "boyle"
+    /// alone resolved to Peter Boyle (0 in library) over Danny Boyle
+    /// (28 Years Later is there), Logan 2026-09-04.
+    static func searchPeople(_ query: String, apiKey: String, limit: Int = 5) async -> [PersonHit] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard q.count >= 3 else { return [] }
+        guard let req = makeRequest(path: "/search/person",
+                                    queryItems: [URLQueryItem(name: "query", value: q),
+                                                 URLQueryItem(name: "include_adult", value: "false")],
+                                    key: apiKey) else { return [] }
+        guard let (data, resp) = try? await session.data(for: req),
+              let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let decoded = try? JSONDecoder().decode(PersonSearchResponse.self, from: data)
+        else { return [] }
+        let needle = q.lowercased()
+        return Array((decoded.results ?? []).compactMap { e -> PersonHit? in
+            guard let id = e.id?.value, let name = nonBlank(e.name),
+                  name.lowercased().contains(needle) else { return nil }
+            return PersonHit(id: id, name: name, popularity: e.popularity ?? 0)
+        }.sorted { $0.popularity > $1.popularity }.prefix(limit))
+    }
+
+    private struct MovieCreditsResponse: Decodable {
+        struct Entry: Decodable {
+            let id: FlexID?
+            let title: String?
+            let posterPath: String?
+            enum CodingKeys: String, CodingKey {
+                case id, title
+                case posterPath = "poster_path"
+            }
+        }
+        let cast: [Entry]?
+        let crew: [Entry]?
+    }
+
+    /// Every film a person acted in or crewed on (deduped by id). Poster-
+    /// less rows are kept here: the caller matches against the library,
+    /// which supplies its own artwork.
+    static func personMovieCredits(personID: String, apiKey: String) async -> [TMDBKnownForItem] {
+        guard let req = makeRequest(path: "/person/\(personID)/movie_credits", key: apiKey) else { return [] }
+        guard let (data, resp) = try? await session.data(for: req),
+              let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let decoded = try? JSONDecoder().decode(MovieCreditsResponse.self, from: data)
+        else { return [] }
+        var seen = Set<String>()
+        var out: [TMDBKnownForItem] = []
+        for e in (decoded.cast ?? []) + (decoded.crew ?? []) {
+            guard let id = e.id?.value, !id.isEmpty, seen.insert(id).inserted,
+                  let title = nonBlank(e.title) else { continue }
+            out.append(TMDBKnownForItem(id: id, title: title, posterPath: e.posterPath ?? "", isMovie: true))
+        }
+        return out
+    }
+
     // MARK: Recommendations (detail page "Related")
 
     private struct RecommendationsResponse: Decodable {
