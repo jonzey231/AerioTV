@@ -1021,6 +1021,8 @@ struct VODSeries: Identifiable, Hashable {
     let serverID: UUID
     var seasons: [VODSeason]
     let episodeCount: Int
+    /// Ingest time when the source reports one (Dispatcharr created_at).
+    var addedAt: Date? = nil
 
     // v1.6.12: same TMDB-derived metadata vocabulary as VODMovie —
     // tmdbID drives the "View on TMDB" deep-link, youtubeTrailer
@@ -1204,6 +1206,16 @@ struct VODDisplayItem: Identifiable, Hashable {
     var displayName: String {
         VODDisplayItem.strippingTrailingYears(VODDisplayItem.strippingQualityPrefix(name))
     }
+
+    // Kind-neutral accessors so one library view serves movies and series.
+    var categoryName: String? { movie?.categoryName ?? series?.categoryName }
+    var addedAt: Date? { movie?.addedAt ?? series?.addedAt }
+    var castText: String { movie?.cast ?? series?.cast ?? "" }
+    var directorText: String { movie?.director ?? series?.director ?? "" }
+    var plotText: String { movie?.plot ?? series?.plot ?? "" }
+    var genreText: String { movie?.genre ?? series?.genre ?? "" }
+    var durationText: String { movie?.duration ?? "" }
+    var backdropURL: URL? { movie?.backdropURL ?? series?.backdropURL }
 
     /// Drops leading quality tags ("4K:", "[HD] ", "UHD - ") from a
     /// provider name (Logan 2026-09-04). Case of the rest is untouched.

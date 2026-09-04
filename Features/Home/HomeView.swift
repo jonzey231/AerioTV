@@ -292,7 +292,7 @@ final class VODStore: ObservableObject {
         }
     }
 
-    func searchSeries(query: String, servers: [ServerConnection]) {
+    func searchSeries(query: String, servers: [ServerConnection], providerID: Int? = nil) {
         seriesSearchTask?.cancel()
         guard !query.isEmpty else {
             seriesSearchResults = []
@@ -324,7 +324,7 @@ final class VODStore: ObservableObject {
             // Live TV during this load, so a chunkier VOD fill is invisible.
             let publishInterval: TimeInterval = 2.0
             do {
-                for try await batch in api.searchVODSeriesStream(query: query) {
+                for try await batch in api.searchVODSeriesStream(query: query, m3uAccountID: providerID) {
                     guard !Task.isCancelled else { break }
                     let items = batch.map { s -> VODDisplayItem in
                         var show = VODSeries(
@@ -762,7 +762,10 @@ final class VODStore: ObservableObject {
             }
             debugLog("📺 VODStore: \(apiCats.count) total categories, \(enabledSeriesCats.count) enabled series categories")
 
-            seriesCategories = enabledSeriesCats.map { VODCategory(id: String($0.id), name: $0.name) }
+            seriesCategories = enabledSeriesCats.map {
+                VODCategory(id: String($0.id), name: $0.name,
+                            providerIDs: $0.m3uAccounts.filter(\.enabled).map(\.m3uAccount))
+            }
 
             if enabledSeriesCats.isEmpty {
                 series = []
@@ -799,7 +802,7 @@ final class VODStore: ObservableObject {
                         guard !Task.isCancelled else { isLoadingSeries = false; return }
                         for s in batch {
                             guard seenUUIDs.insert(s.uuid).inserted else { continue }
-                            let show = VODSeries(
+                            var show = VODSeries(
                                 id: String(s.id), name: s.name,
                                 posterURL: s.posterURL.flatMap { resolveURL($0, base: baseURL) },
                                 backdropURL: nil,
@@ -810,6 +813,8 @@ final class VODStore: ObservableObject {
                                 categoryName: category.name,
                                 serverID: sID, seasons: [], episodeCount: 0
                             )
+                            show.tmdbID = s.tmdbID ?? ""
+                            show.addedAt = s.createdAt.flatMap(VODService.parseISODate)
                             accumulated.append(VODDisplayItem(series: show))
                         }
                         if isLoadingSeries {
@@ -5189,8 +5194,9 @@ struct MainTabView: View {
                     .tabItem { Label(AppTab.movies.title, systemImage: AppTab.movies.icon) }
                     .tag(AppTab.movies)
 
-                TVShowsView(vodStore: vodStore, isPlaying: $isPlaying,
-                            isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
+                MoviesView(vodStore: vodStore, isPlaying: $isPlaying,
+                           isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested,
+                           isSelected: selectedTab == .tvShows, kind: .series)
                     .tabItem { Label(AppTab.tvShows.title, systemImage: AppTab.tvShows.icon) }
                     .tag(AppTab.tvShows)
             }

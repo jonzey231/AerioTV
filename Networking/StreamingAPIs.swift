@@ -2591,9 +2591,10 @@ struct DispatcharrAPI {
                               itemCap: Self.vodSearchItemCap)
     }
 
-    func searchVODSeriesStream(query: String) -> AsyncThrowingStream<[DispatcharrVODSeries], Error> {
+    func searchVODSeriesStream(query: String, m3uAccountID: Int? = nil) -> AsyncThrowingStream<[DispatcharrVODSeries], Error> {
         let encoded = Self.encodeQueryValue(query)
-        return makePageStream(firstPath: "/api/vod/series/?search=\(encoded)&page_size=100",
+        let account = m3uAccountID.map { "&m3u_account=\($0)" } ?? ""
+        return makePageStream(firstPath: "/api/vod/series/?search=\(encoded)\(account)&page_size=100",
                               itemCap: Self.vodSearchItemCap)
     }
 
@@ -4840,6 +4841,8 @@ struct DispatcharrVODSeries: Decodable, Identifiable {
     let tmdbID: String?
     let imdbID: String?
     let customProperties: DispatcharrVODCustomProperties?
+    /// Ingest time (Recently Added on the TV Shows tab).
+    let createdAt: String?
 
     var posterURL: String? { logo?.url }
 
@@ -4852,6 +4855,7 @@ struct DispatcharrVODSeries: Decodable, Identifiable {
         case tmdbID = "tmdb_id"
         case imdbID = "imdb_id"
         case customProperties = "custom_properties"
+        case createdAt = "created_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -4878,6 +4882,7 @@ struct DispatcharrVODSeries: Decodable, Identifiable {
         imdbID           = try? c.decode(String.self, forKey: .imdbID)
         customProperties = try? c.decode(DispatcharrVODCustomProperties.self,
                                          forKey: .customProperties)
+        createdAt = try? c.decode(String.self, forKey: .createdAt)
     }
 }
 

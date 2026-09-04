@@ -1579,13 +1579,14 @@ extension TMDBService {
         }.sorted { $0.popularity > $1.popularity }.prefix(limit))
     }
 
-    private struct MovieCreditsResponse: Decodable {
+    private struct CreditsResponse: Decodable {
         struct Entry: Decodable {
             let id: FlexID?
             let title: String?
+            let name: String?
             let posterPath: String?
             enum CodingKeys: String, CodingKey {
-                case id, title
+                case id, title, name
                 case posterPath = "poster_path"
             }
         }
@@ -1593,21 +1594,22 @@ extension TMDBService {
         let crew: [Entry]?
     }
 
-    /// Every film a person acted in or crewed on (deduped by id). Poster-
-    /// less rows are kept here: the caller matches against the library,
+    /// Every film (or show) a person acted in or crewed on, deduped by id.
+    /// Poster-less rows are kept: the caller matches against the library,
     /// which supplies its own artwork.
-    static func personMovieCredits(personID: String, apiKey: String) async -> [TMDBKnownForItem] {
-        guard let req = makeRequest(path: "/person/\(personID)/movie_credits", key: apiKey) else { return [] }
+    static func personCredits(personID: String, isMovie: Bool, apiKey: String) async -> [TMDBKnownForItem] {
+        let path = isMovie ? "/person/\(personID)/movie_credits" : "/person/\(personID)/tv_credits"
+        guard let req = makeRequest(path: path, key: apiKey) else { return [] }
         guard let (data, resp) = try? await session.data(for: req),
               let http = resp as? HTTPURLResponse, http.statusCode == 200,
-              let decoded = try? JSONDecoder().decode(MovieCreditsResponse.self, from: data)
+              let decoded = try? JSONDecoder().decode(CreditsResponse.self, from: data)
         else { return [] }
         var seen = Set<String>()
         var out: [TMDBKnownForItem] = []
         for e in (decoded.cast ?? []) + (decoded.crew ?? []) {
             guard let id = e.id?.value, !id.isEmpty, seen.insert(id).inserted,
-                  let title = nonBlank(e.title) else { continue }
-            out.append(TMDBKnownForItem(id: id, title: title, posterPath: e.posterPath ?? "", isMovie: true))
+                  let title = nonBlank(e.title ?? e.name) else { continue }
+            out.append(TMDBKnownForItem(id: id, title: title, posterPath: e.posterPath ?? "", isMovie: isMovie))
         }
         return out
     }

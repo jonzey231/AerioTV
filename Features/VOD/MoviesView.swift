@@ -119,6 +119,36 @@ struct MoviesView: View {
     /// False while another tab is selected: both VOD tabs stay mounted in
     /// the TabView, so observers that move focus are gated on this.
     var isSelected: Bool = true
+    /// Movies or TV shows: one library view, two data sources.
+    var kind: VODItemType = .movie
+
+    private var tab: AppTab { kind == .series ? .tvShows : .movies }
+    private var kindString: String { kind == .series ? "series" : "movie" }
+    /// WatchProgress rows that feed this tab's Continue Watching hero.
+    private var progressType: String { kind == .series ? "episode" : "movie" }
+    private var kindTitle: String { kind == .series ? "TV Shows" : "Movies" }
+    private var kindLower: String { kind == .series ? "TV shows" : "movies" }
+    private var kindIcon: String { kind == .series ? "tv" : "film.stack" }
+    private var libraryItems: [VODDisplayItem] { kind == .series ? vodStore.series : vodStore.movies }
+    private var libraryCategories: [VODCategory] { kind == .series ? vodStore.seriesCategories : vodStore.movieCategories }
+    private var searchResults: [VODDisplayItem] { kind == .series ? vodStore.seriesSearchResults : vodStore.movieSearchResults }
+    private var isSearchingLibrary: Bool { kind == .series ? vodStore.isSearchingSeries : vodStore.isSearchingMovies }
+    private var isLoadingLibrary: Bool { kind == .series ? vodStore.isLoadingSeries : vodStore.isLoadingMovies }
+    private var libraryError: String? { kind == .series ? vodStore.seriesError : vodStore.moviesError }
+    private func searchLibrary(_ query: String, providerID: Int?) {
+        if kind == .series {
+            vodStore.searchSeries(query: query, servers: servers, providerID: providerID)
+        } else {
+            vodStore.searchMovies(query: query, servers: servers, providerID: providerID)
+        }
+    }
+    private func refreshLibrary() {
+        if kind == .series { vodStore.refreshSeries(servers: servers) } else { vodStore.refreshMovies(servers: servers) }
+    }
+    /// The hero page an episode row belongs to: its series.
+    private func heroKey(_ p: WatchProgress) -> String? {
+        kind == .series ? p.seriesID : p.vodID
+    }
     /// Nested-push router for pushed details (identity-stable, see
     /// VODPushRouter).
     @State private var pushRouter = VODPushRouter()
@@ -221,9 +251,9 @@ struct MoviesView: View {
     @State private var resumeVersionOptions: [VODVersionOption] = []
     @State private var resumeVersionSelectionKey: String = ""
 
-    private let hiddenGroupsKey = "hiddenMovieGroups"
+    private var hiddenGroupsKey: String { kind == .series ? "hiddenSeriesGroups" : "hiddenMovieGroups" }
     /// Filter page, Providers tab: M3U account ids the user switched off.
-    private let disabledProvidersKey = "disabledMovieProviders"
+    private var disabledProvidersKey: String { kind == .series ? "disabledSeriesProviders" : "disabledMovieProviders" }
     @State private var disabledProviders: Set<String> = []
 
     /// Groups the user hid PLUS every group that only lives on disabled
@@ -231,7 +261,7 @@ struct MoviesView: View {
     private var effectiveHiddenGroups: Set<String> {
         guard !disabledProviders.isEmpty else { return hiddenGroups }
         var out = hiddenGroups
-        for cat in vodStore.movieCategories where !cat.providerIDs.isEmpty {
+        for cat in libraryCategories where !cat.providerIDs.isEmpty {
             if cat.providerIDs.allSatisfy({ disabledProviders.contains(String($0)) }) {
                 out.insert(cat.name)
             }
@@ -242,7 +272,7 @@ struct MoviesView: View {
     /// Groups offered on the Filter page's Groups tab: only those on an
     /// enabled provider (categories with no provider info always show).
     private var groupsForEnabledProviders: [String] {
-        vodStore.movieCategories.filter { cat in
+        libraryCategories.filter { cat in
             cat.providerIDs.isEmpty || cat.providerIDs.contains { !disabledProviders.contains(String($0)) }
         }.map(\.name)
     }
@@ -258,7 +288,12 @@ struct MoviesView: View {
     /// Watchlist, newest first; scoped to the active playlist below.
     @Query(sort: \WatchlistEntry.addedAt, order: .reverse)
     private var watchlistEntries: [WatchlistEntry]
-    @AppStorage("moviesSortOrder") private var sortOrderRaw = MoviesSortOrder.titleAZ.rawValue
+    @AppStorage("moviesSortOrder") private var movieSortRaw = MoviesSortOrder.titleAZ.rawValue
+    @AppStorage("seriesSortOrder") private var seriesSortRaw = MoviesSortOrder.titleAZ.rawValue
+    private var sortOrderRaw: String {
+        get { kind == .series ? seriesSortRaw : movieSortRaw }
+        nonmutating set { if kind == .series { seriesSortRaw = newValue } else { movieSortRaw = newValue } }
+    }
     /// Genre pill selection; nil = All. Not persisted: a filter that
     /// silently survives a relaunch reads as "my movies vanished".
     @State private var selectedGenre: String? = nil
@@ -350,13 +385,13 @@ struct MoviesView: View {
     /// sort order (Logan 2026-09-04).
     private var searchHits: [VODDisplayItem] {
         let q = searchText
-        var combined = vodStore.movies.filter {
+        var combined = libraryItems.filter {
             $0.name.localizedCaseInsensitiveContains(q)
-                || ($0.movie?.cast.localizedCaseInsensitiveContains(q) ?? false)
-                || ($0.movie?.director.localizedCaseInsensitiveContains(q) ?? false)
+                || ($0.castText.localizedCaseInsensitiveContains(q))
+                || ($0.directorText.localizedCaseInsensitiveContains(q))
         }
         var ids = Set(combined.map { $0.id })
-        for r in vodStore.movieSearchResults where ids.insert(r.id).inserted { combined.append(r) }
+        for r in searchResults where ids.insert(r.id).inserted { combined.append(r) }
         for r in personMatches where ids.insert(r.id).inserted { combined.append(r) }
         return MoviesView.sortItems(combined, by: sortOrder)
     }
@@ -366,15 +401,15 @@ struct MoviesView: View {
             // A provider pick re-runs the server search with the account
             // filter; local rows carry no provider, so only the server's
             // answer counts then.
-            if selectedProviderID != nil { return MoviesView.sortItems(vodStore.movieSearchResults, by: sortOrder) }
+            if selectedProviderID != nil { return MoviesView.sortItems(searchResults, by: sortOrder) }
             return searchHits
         }
-        var result = vodStore.movies
+        var result = libraryItems
         // Exclude movies belonging to hidden groups
         let hidden = effectiveHiddenGroups
         if !hidden.isEmpty {
             result = result.filter { item in
-                guard let cat = item.movie?.categoryName else { return true }
+                guard let cat = item.categoryName else { return true }
                 return !hidden.contains(cat)
             }
         }
@@ -389,11 +424,11 @@ struct MoviesView: View {
             ZStack {
                 Color.appBackground.ignoresSafeArea()
 
-                if vodStore.isLoadingMovies && vodStore.movies.isEmpty {
-                    LoadingView(message: "Loading movies…")
-                } else if let err = vodStore.moviesError, vodStore.movies.isEmpty {
+                if isLoadingLibrary && libraryItems.isEmpty {
+                    LoadingView(message: "Loading \(kindLower)…")
+                } else if let err = libraryError, libraryItems.isEmpty {
                     errorView(err)
-                } else if vodStore.movies.isEmpty {
+                } else if libraryItems.isEmpty {
                     emptyState
                 } else {
                     content
@@ -441,10 +476,10 @@ struct MoviesView: View {
             #if os(iOS)
             .searchable(text: $searchText,
                         placement: .navigationBarDrawer(displayMode: .always),
-                        prompt: "Search movies")
+                        prompt: "Search \(kindLower)")
             #endif
             .task(id: libraryKey) {
-                let movies = vodStore.movies
+                let movies = libraryItems
                 let hidden = effectiveHiddenGroups
                 let genre = selectedGenre
                 let sort = sortOrder
@@ -490,16 +525,16 @@ struct MoviesView: View {
                 let activeServerID = (servers.first(where: { $0.isActive }) ?? servers.first)?.id
                 let alreadyTriedThisServer = activeServerID != nil
                     && vodStore.currentMoviesServerID == activeServerID
-                if vodStore.movies.isEmpty
-                    && !vodStore.isLoadingMovies
+                if libraryItems.isEmpty
+                    && !isLoadingLibrary
                     && !alreadyTriedThisServer {
-                    vodStore.refreshMovies(servers: servers)
+                    refreshLibrary()
                 }
             }
             .sheet(isPresented: $showManageGroups) {
                 ManageGroupsSheet(
                     title: "Manage Groups",
-                    allGroups: vodStore.movieCategories.map(\.name),
+                    allGroups: libraryCategories.map(\.name),
                     storageKey: hiddenGroupsKey,
                     onDismiss: { updated in
                         hiddenGroups = updated
@@ -507,17 +542,17 @@ struct MoviesView: View {
                 )
             }
             .refreshable {
-                vodStore.refreshMovies(servers: servers)
+                refreshLibrary()
                 // Allow the task one tick to start so isLoadingMovies flips to true first.
                 try? await Task.sleep(for: .milliseconds(50))
-                while vodStore.isLoadingMovies {
+                while isLoadingLibrary {
                     try? await Task.sleep(for: .milliseconds(150))
                 }
             }
             .onChange(of: searchText) { _, query in
                 // Fire server-side search so items not yet locally fetched are found.
                 if query.isEmpty { selectedProviderID = nil }
-                vodStore.searchMovies(query: query, servers: servers, providerID: selectedProviderID)
+                searchLibrary(query, providerID: selectedProviderID)
                 searchPeople(query)
             }
             .task(id: activeServerIDString) { await loadProviderNames() }
@@ -541,14 +576,14 @@ struct MoviesView: View {
             // notification fires. Cold-launch path below (in onChange) catches
             // the case where movies arrive AFTER the deep link was received.
             .onReceive(NotificationCenter.default.publisher(for: .aerioOpenVOD)) { notif in
-                guard let vodType = notif.userInfo?["vodType"] as? String, vodType == "movie",
+                guard let vodType = notif.userInfo?["vodType"] as? String, vodType == kindString,
                       let vodID = notif.userInfo?["vodID"] as? String else { return }
-                tryHandleMovieDeepLink(id: vodID, from: vodStore.movies)
+                tryHandleMovieDeepLink(id: vodID, from: libraryItems)
             }
-            .onChange(of: vodStore.movies) { _, movies in
+            .onChange(of: libraryItems) { _, movies in
                 // Cold-launch path: deep link stored launchVODID in UserDefaults,
                 // and now the movies list just finished loading.
-                guard UserDefaults.standard.string(forKey: "launchVODType") == "movie",
+                guard UserDefaults.standard.string(forKey: "launchVODType") == kindString,
                       let pendingID = UserDefaults.standard.string(forKey: "launchVODID") else { return }
                 tryHandleMovieDeepLink(id: pendingID, from: movies)
             }
@@ -563,7 +598,7 @@ struct MoviesView: View {
                     vodID: resumeVodID,
                     vodPosterURL: resumePosterURL,
                     vodServerID: resumeServerID,
-                    vodType: "movie",
+                    vodType: progressType,
                     resumePositionMs: resumePositionMs,
                     vodVersionOptions: resumeVersionOptions,
                     vodSelectedVersionID: VODVersionSelectionStore
@@ -585,20 +620,22 @@ struct MoviesView: View {
         UserDefaults.standard.removeObject(forKey: "launchVODID")
         UserDefaults.standard.removeObject(forKey: "launchVODType")
         UserDefaults.standard.removeObject(forKey: "launchOnMovies")
+        UserDefaults.standard.removeObject(forKey: "launchOnSeries")
         debugLog("🔗 MoviesView: deep link → pushing \(item.name)")
         navPath = NavigationPath()
         navPath.append(item)
     }
     #endif
 
-    private func resumeFromContinueWatching(_ progress: WatchProgress) {
+    /// `startAt`: override the saved position (Play from Beginning).
+    private func resumeFromContinueWatching(_ progress: WatchProgress, startAt: Int32? = nil) {
         // If we have a stored stream URL, launch playback directly with the saved position
         if let urlStr = progress.streamURL, let url = URL(string: urlStr) {
             resumePlayingTitle = progress.title
             resumeVodID = progress.vodID
             resumePosterURL = progress.posterURL
             resumeServerID = progress.serverID
-            resumePositionMs = progress.positionMs
+            resumePositionMs = startAt ?? progress.positionMs
             let resumeServer: ServerConnection? = progress.serverID
                 .flatMap(UUID.init(uuidString:))
                 .flatMap { uuid in servers.first(where: { $0.id == uuid }) }
@@ -620,7 +657,7 @@ struct MoviesView: View {
                 .flatMap(UUID.init(uuidString:))
                 .map { uuid in
                     VODVersionSelectionStore.storageKey(serverID: uuid,
-                                                        itemType: "movie",
+                                                        itemType: kindString,
                                                         itemID: progress.vodID)
                 } ?? ""
             loadResumeVersionOptions(progress: progress, resumeURL: url, server: resumeServer)
@@ -633,8 +670,8 @@ struct MoviesView: View {
                 posterURL: progress.posterURL.flatMap { URL(string: $0) },
                 vodID: progress.vodID,
                 serverID: progress.serverID,
-                vodType: "movie",
-                resumePositionMs: progress.positionMs,
+                vodType: progressType,
+                resumePositionMs: startAt ?? progress.positionMs,
                 versionSelectionKey: resumeVersionSelectionKey.isEmpty ? nil : resumeVersionSelectionKey) {
                 isPlaying = true
                 return
@@ -643,8 +680,8 @@ struct MoviesView: View {
             isPlaying = true
             return
         }
-        // Fallback: find the movie in the store and push to its detail view
-        if let item = vodStore.movies.first(where: { $0.id == progress.vodID }) {
+        // Fallback: find the title in the store and push to its detail view
+        if let key = heroKey(progress), let item = libraryItems.first(where: { $0.id == key }) {
             navPath.append(item)
         }
     }
@@ -657,6 +694,8 @@ struct MoviesView: View {
     private func loadResumeVersionOptions(progress: WatchProgress,
                                           resumeURL: URL,
                                           server: ServerConnection?) {
+        // Movie copies only; episode versions are picked on the series page.
+        guard kind == .movie else { return }
         // Fall back to the active Dispatcharr server: a watch-progress row
         // synced from another device can carry a serverID this install does
         // not have, and the resume itself already falls back the same way.
@@ -670,7 +709,7 @@ struct MoviesView: View {
         }
         // Take the movie's Dispatcharr UUID straight out of the resume URL
         // (/proxy/vod/movie/<uuid>[/<session>]) rather than looking the title
-        // up in vodStore.movies. The first attempt did the catalog lookup and
+        // up in libraryItems. The first attempt did the catalog lookup and
         // silently found nothing on device (ATV retest 2026-08-17) - the row
         // may not be loaded yet during the 2.5-minute VOD sync, and a synced
         // progress row can name a title this device never fetched. The URL is
@@ -772,10 +811,17 @@ struct MoviesView: View {
     /// Movie progress rows scoped to the active playlist (rows with no
     /// serverID predate per-server progress and stay visible everywhere).
     private var movieProgress: [WatchProgress] {
-        allProgress.filter { p in
-            guard p.vodType == "movie" else { return false }
+        let rows = allProgress.filter { p in
+            guard p.vodType == progressType else { return false }
             guard let sid = activeServerIDString else { return true }
             return p.serverID == nil || p.serverID == sid
+        }
+        guard kind == .series else { return rows }
+        // One hero page per series: the newest episode row wins.
+        var seen = Set<String>()
+        return rows.filter { p in
+            guard let sid = p.seriesID else { return false }
+            return seen.insert(sid).inserted
         }
     }
 
@@ -784,13 +830,13 @@ struct MoviesView: View {
 
     /// Library minus hidden groups, before genre and sort.
     private var visibleMovies: [VODDisplayItem] {
-        MoviesView.visible(vodStore.movies, hidden: effectiveHiddenGroups)
+        MoviesView.visible(libraryItems, hidden: effectiveHiddenGroups)
     }
 
     nonisolated private static func visible(_ movies: [VODDisplayItem], hidden: Set<String>) -> [VODDisplayItem] {
         guard !hidden.isEmpty else { return movies }
         return movies.filter { item in
-            guard let cat = item.movie?.categoryName else { return true }
+            guard let cat = item.categoryName else { return true }
             return !hidden.contains(cat)
         }
     }
@@ -818,9 +864,9 @@ struct MoviesView: View {
         let sort: String
     }
     private var libraryKey: LibraryKey {
-        LibraryKey(count: vodStore.movies.count,
-                   firstID: vodStore.movies.first?.id,
-                   lastID: vodStore.movies.last?.id,
+        LibraryKey(count: libraryItems.count,
+                   firstID: libraryItems.first?.id,
+                   lastID: libraryItems.last?.id,
                    hidden: effectiveHiddenGroups, genre: selectedGenre, sort: sortOrderRaw)
     }
 
@@ -861,8 +907,8 @@ struct MoviesView: View {
             }
         case .recentlyAdded:
             library.sort {
-                let a = $0.movie?.addedAt ?? .distantPast
-                let b = $1.movie?.addedAt ?? .distantPast
+                let a = $0.addedAt ?? .distantPast
+                let b = $1.addedAt ?? .distantPast
                 if a != b { return a > b }
                 return byTitle($0, $1)
             }
@@ -874,16 +920,16 @@ struct MoviesView: View {
                                        genre: String?, sort: MoviesSortOrder) -> LibraryDerived {
         let visible = Self.visible(movies, hidden: hidden)
 
-        let dated = visible.filter { $0.movie?.addedAt != nil }
+        let dated = visible.filter { $0.addedAt != nil }
         let recent: [VODDisplayItem] = dated.isEmpty ? [] : Array(dated.sorted {
-            let a = $0.movie?.addedAt ?? .distantPast
-            let b = $1.movie?.addedAt ?? .distantPast
+            let a = $0.addedAt ?? .distantPast
+            let b = $1.addedAt ?? .distantPast
             if a != b { return a > b }
             return $0.id < $1.id
         }.prefix(20))
 
         var library = visible
-        if let g = genre { library = library.filter { $0.movie?.categoryName == g } }
+        if let g = genre { library = library.filter { $0.categoryName == g } }
         // Precomputed folded keys: one localized fold per title instead of
         // one localized compare per comparison.
         // Same stripped title the rail buckets on, so a rail jump lands on
@@ -914,18 +960,21 @@ struct MoviesView: View {
 
     private var heroPagesKey: String {
         let progress = movieProgress.prefix(12).map { "\($0.vodID)|\($0.positionMs)" }.joined(separator: ",")
-        return "\(progress)#\(vodStore.movies.count)#\(recentlyAdded.first?.id ?? "")#\(effectiveHiddenGroups.count)"
+        return "\(progress)#\(libraryItems.count)#\(recentlyAdded.first?.id ?? "")#\(effectiveHiddenGroups.count)"
     }
 
     private func refreshHeroPages() {
         let progress = Array(movieProgress.prefix(12))
         var byID: [String: VODDisplayItem] = [:]
         if !progress.isEmpty {
-            let wanted = Set(progress.map(\.vodID))
-            for m in vodStore.movies where wanted.contains(m.id) && byID[m.id] == nil { byID[m.id] = m }
+            let wanted = Set(progress.compactMap(heroKey))
+            for m in libraryItems where wanted.contains(m.id) && byID[m.id] == nil { byID[m.id] = m }
         }
         let resumes: [MoviesHeroPage] = progress.compactMap { p in
-            let item = byID[p.vodID] ?? MoviesView.syntheticItem(from: p)
+            guard let key = heroKey(p) else { return nil }
+            // Series rows have no synthetic fallback: the episode row does
+            // not carry the show's name or art.
+            let item = byID[key] ?? (kind == .movie ? MoviesView.syntheticItem(from: p) : nil)
             return item.map { MoviesHeroPage(item: $0, progress: p) }
         }
         if !resumes.isEmpty { heroPages = resumes; return }
@@ -939,7 +988,7 @@ struct MoviesView: View {
     /// Genre pills: the visible categories, in store order, "All" first.
     private var genrePills: [String] {
         let hidden = effectiveHiddenGroups
-        return vodStore.movieCategories.map(\.name).filter { !hidden.contains($0) }
+        return libraryCategories.map(\.name).filter { !hidden.contains($0) }
     }
 
     /// The library grid: visible movies, genre-filtered, sorted (cached).
@@ -963,25 +1012,34 @@ struct MoviesView: View {
 
     private var watchlistKey: String {
         let rows = watchlistEntries.map { "\($0.vodID)|\($0.serverID ?? "")" }.joined(separator: ",")
-        return "\(rows)#\(activeServerIDString ?? "")#\(vodStore.movies.count)"
+        return "\(rows)#\(activeServerIDString ?? "")#\(libraryItems.count)"
     }
 
     private func refreshWatchlistItems() {
         let sid = activeServerIDString
         let rows = watchlistEntries.filter { e in
-            guard e.vodType == "movie" else { return false }
+            guard e.vodType == kindString else { return false }
             guard let sid else { return true }
             return e.serverID == nil || e.serverID == sid
         }
         guard !rows.isEmpty else { watchlistItems = []; return }
         let wanted = Set(rows.map(\.vodID))
         var byID: [String: VODDisplayItem] = [:]
-        for m in vodStore.movies where wanted.contains(m.id) && byID[m.id] == nil { byID[m.id] = m }
+        for m in libraryItems where wanted.contains(m.id) && byID[m.id] == nil { byID[m.id] = m }
         watchlistItems = rows.compactMap { e in byID[e.vodID] ?? MoviesView.syntheticItem(from: e) }
     }
 
     private static func syntheticItem(from e: WatchlistEntry) -> VODDisplayItem? {
         guard let sid = e.serverID, let serverUUID = UUID(uuidString: sid) else { return nil }
+        if e.vodType == "series" {
+            let show = VODSeries(
+                id: e.vodID, name: e.title,
+                posterURL: e.posterURL.flatMap { URL(string: $0) }, backdropURL: nil,
+                rating: e.rating, plot: "", genre: "", releaseDate: e.releaseYear,
+                cast: "", director: "", categoryID: "", categoryName: "",
+                serverID: serverUUID, seasons: [], episodeCount: 0)
+            return VODDisplayItem(series: show)
+        }
         let movie = VODMovie(
             id: e.vodID, name: e.title,
             posterURL: e.posterURL.flatMap { URL(string: $0) }, backdropURL: nil,
@@ -1156,7 +1214,7 @@ struct MoviesView: View {
                                         #if os(tvOS)
                                         heroHasFocus = focused
                                         guard focused else { return }
-                                        tabBarOnScreen = TVFocusBridge.isTabBarOnScreen(preferredTitle: AppTab.movies.title)
+                                        tabBarOnScreen = TVFocusBridge.isTabBarOnScreen(preferredTitle: tab.title)
                                         // Any hero button gaining focus while the
                                         // page is scrolled brings the page back to
                                         // the top, focus staying on that button
@@ -1188,7 +1246,13 @@ struct MoviesView: View {
                                         #endif
                                     },
                                     onPrimary: { heroPrimary($0) },
-                                    onPlayFromStart: { playMovie($0.item, resumePositionMs: 0) },
+                                    onPlayFromStart: { page in
+                                        if kind == .series, let p = page.progress {
+                                            resumeFromContinueWatching(p, startAt: 0)
+                                        } else {
+                                            playMovie(page.item, resumePositionMs: 0)
+                                        }
+                                    },
                                     onDetails: { navPath.append($0.item) },
                                     onRemove: { page in
                                         guard let p = page.progress else { return }
@@ -1220,7 +1284,7 @@ struct MoviesView: View {
                             }
 
                             let gridItems = isSearching ? filteredMovies : libraryMovies
-                            libraryHeader(title: isSearching ? "Results" : "All Movies",
+                            libraryHeader(title: isSearching ? "Results" : "All \(kindTitle)",
                                           count: gridItems.count, showPills: !isSearching)
                                 .padding(.leading, contentLeadingInset)
                             if isSearching {
@@ -1233,7 +1297,7 @@ struct MoviesView: View {
                                 }
                                 providerPills
                                     .padding(.leading, contentLeadingInset)
-                                if vodStore.isSearchingMovies {
+                                if isSearchingLibrary {
                                     HStack(spacing: 10) {
                                         ProgressView().tint(.accentPrimary)
                                         Text("Searching server…")
@@ -1293,7 +1357,7 @@ struct MoviesView: View {
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .aerioTabScrollToTop)) { note in
                     // Tagged with the tab: both VOD tabs stay mounted.
-                    guard (note.userInfo?["tab"] as? String) == AppTab.movies.rawValue else { return }
+                    guard (note.userInfo?["tab"] as? String) == tab.rawValue else { return }
                     if showSearchField {
                         clearSearch()
                     } else if tvTabBarHidden || !heroHasFocus {
@@ -1627,7 +1691,7 @@ struct MoviesView: View {
             for _ in 0..<15 {
                 try? await Task.sleep(for: .milliseconds(100))
                 guard !Task.isCancelled else { return }
-                if TVFocusBridge.isTabBarOnScreen(preferredTitle: AppTab.movies.title) {
+                if TVFocusBridge.isTabBarOnScreen(preferredTitle: tab.title) {
                     tabBarOnScreen = true
                     break
                 }
@@ -1653,7 +1717,7 @@ struct MoviesView: View {
                 // the resting shape and the accent ring is the focus state.
                 DarkFocusTextFieldRepresentable(
                     text: $searchText,
-                    placeholder: "Search movies",
+                    placeholder: "Search \(kindLower)",
                     isSecure: false,
                     fontSize: 24,
                     verticalInset: 6,
@@ -1696,7 +1760,7 @@ struct MoviesView: View {
             }
         }
         // Native tvOS action list, same surface as the multiview tile menus.
-        .confirmationDialog("Sort Movies", isPresented: $showSortMenu, titleVisibility: .visible) {
+        .confirmationDialog("Sort \(kindTitle)", isPresented: $showSortMenu, titleVisibility: .visible) {
             ForEach(MoviesSortOrder.allCases, id: \.self) { order in
                 Button(order == sortOrder ? "\(order.label)  \u{2713}" : order.label) {
                     sortOrderRaw = order.rawValue
@@ -1742,7 +1806,7 @@ struct MoviesView: View {
     /// in the navigation bar drawer.
     private var iOSTitleRow: some View {
         HStack(alignment: .center) {
-            Text("Movies")
+            Text(kindTitle)
                 .font(.displayMedium)
                 .foregroundColor(.textPrimary)
             Spacer()
@@ -1878,12 +1942,12 @@ struct MoviesView: View {
                 return
             }
             // Library index once; every candidate's credits match against it.
-            let library = vodStore.movies
+            let library = libraryItems
             let matcher = await Task.detached(priority: .userInitiated) { LibraryMatcher(library) }.value
             var best: (name: String, hits: [VODDisplayItem])? = nil
             for person in people {
                 guard !Task.isCancelled else { return }
-                let credits = await TMDBService.personMovieCredits(personID: person.id, apiKey: apiKey)
+                let credits = await TMDBService.personCredits(personID: person.id, isMovie: kind == .movie, apiKey: apiKey)
                 var seen = Set<String>()
                 var hits: [VODDisplayItem] = []
                 for c in credits {
@@ -1901,7 +1965,7 @@ struct MoviesView: View {
     private func selectProvider(_ pid: Int?) {
         guard pid != selectedProviderID else { return }
         selectedProviderID = pid
-        vodStore.searchMovies(query: searchText, servers: servers, providerID: pid)
+        searchLibrary(searchText, providerID: pid)
     }
 
     /// Clears the search and collapses the field, landing on Search.
@@ -2060,22 +2124,22 @@ struct MoviesView: View {
     private var emptyState: some View {
         if servers.isEmpty {
             EmptyStateView(
-                icon: "film.stack",
-                title: "No Movies",
-                message: "Add an Xtream Codes or Dispatcharr server to browse movies."
+                icon: kindIcon,
+                title: "No \(kindTitle)",
+                message: "Add an Xtream Codes or Dispatcharr server to browse \(kindLower)."
             )
         } else if servers.first(where: { $0.isActive })?.supportsVOD == false {
             EmptyStateView(
-                icon: "film.stack",
-                title: "Movies Unavailable",
-                message: "M3U playlists do not include VOD content. Switch to an Xtream Codes or Dispatcharr API playlist in Settings > Playlists to browse movies."
+                icon: kindIcon,
+                title: "\(kindTitle) Unavailable",
+                message: "M3U playlists do not include VOD content. Switch to an Xtream Codes or Dispatcharr API playlist in Settings > Playlists to browse \(kindLower)."
             )
         } else {
             EmptyStateView(
-                icon: "film.stack",
-                title: "No Movies",
-                message: serverContext("No movies were returned by"),
-                action: { vodStore.refreshMovies(servers: servers) },
+                icon: kindIcon,
+                title: "No \(kindTitle)",
+                message: serverContext("No \(kindLower) were returned by"),
+                action: { refreshLibrary() },
                 actionTitle: "Retry"
             )
         }
@@ -2094,7 +2158,7 @@ struct MoviesView: View {
             Text(msg)
                 .font(.bodyMedium).foregroundColor(.textSecondary)
                 .multilineTextAlignment(.center)
-            PrimaryButton("Try Again") { vodStore.refreshMovies(servers: servers) }
+            PrimaryButton("Try Again") { refreshLibrary() }
                 .frame(maxWidth: 200)
         }
         .padding(32)
@@ -2405,17 +2469,20 @@ struct MoviesHero: View {
     @Environment(\.heroFocusBinding) private var heroFocusBinding
     #endif
 
-    private var movie: VODMovie? { item.movie }
-
     private var eyebrow: String {
-        progress != nil ? "Continue watching" : (movie?.addedAt != nil ? "Recently added" : "Featured")
+        progress != nil ? "Continue watching" : (item.addedAt != nil ? "Recently added" : "Featured")
     }
 
     private var metaParts: [String] {
         var parts: [String] = []
         if !item.releaseYear.isEmpty { parts.append(item.releaseYear) }
-        if let d = movie?.duration, !d.isEmpty { parts.append(d) }
-        if let g = movie?.genre.components(separatedBy: ",").first?
+        // Episode rows lead with where the viewer is in the show.
+        if let p = progress, p.seasonNumber > 0 {
+            parts.append("S\(p.seasonNumber) E\(p.episodeNumber)")
+        }
+        let d = item.durationText
+        if !d.isEmpty { parts.append(d) }
+        if let g = item.genreText.components(separatedBy: ",").first?
             .trimmingCharacters(in: .whitespaces), !g.isEmpty { parts.append(g) }
         return parts
     }
@@ -2432,7 +2499,7 @@ struct MoviesHero: View {
         return Double(p.positionMs) / Double(p.durationMs)
     }
 
-    private var artworkURL: URL? { movie?.backdropURL ?? item.posterURL }
+    private var artworkURL: URL? { item.backdropURL ?? item.posterURL }
 
     #if os(tvOS)
     private let heroHeight: CGFloat = 420
@@ -2543,7 +2610,7 @@ struct MoviesHero: View {
                 .foregroundColor(.textSecondary)
             }
             #if os(tvOS)
-            if let plot = movie?.plot, !plot.isEmpty {
+            if case let plot = item.plotText, !plot.isEmpty {
                 Text(plot)
                     .font(.bodySmall)
                     .foregroundColor(.textPrimary.opacity(0.85))
