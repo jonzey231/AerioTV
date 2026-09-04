@@ -932,7 +932,7 @@ struct MoviesView: View {
             }
             PlayerSession.shared.exit()
             if PlayerSession.shared.beginVOD(
-                title: item.name,
+                title: item.displayName,
                 streamURL: resolved,
                 headers: headers,
                 posterURL: item.posterURL,
@@ -1900,7 +1900,7 @@ struct VODPosterCard: View {
             VStack(alignment: .leading, spacing: 2) {
                 // Title: reserves exactly 2-line height via a fixed frame so all cards
                 // in the same grid row align regardless of actual title length.
-                Text(item.name)
+                Text(item.displayName)
                     .font(.labelSmall)
                     .foregroundColor(.textPrimary)
                     .lineLimit(2)
@@ -2257,7 +2257,7 @@ struct MoviesHero: View {
         VStack(alignment: .leading, spacing: copySpacing) {
             // No eyebrow (Logan 2026-09-03): the carousel is Continue
             // Watching, the label was redundant.
-            Text(item.name)
+            Text(item.displayName)
                 .font(titleFont)
                 .foregroundColor(.textPrimary)
                 .lineLimit(2)

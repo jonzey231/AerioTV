@@ -623,7 +623,7 @@ struct VODDetailView: View {
 
     private var tvHeroCopy: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(item.name)
+            Text(item.displayName)
                 .font(.displayLarge)
                 .foregroundColor(.textPrimary)
                 .lineLimit(2)
@@ -689,7 +689,7 @@ struct VODDetailView: View {
                 debugLog("[VOD-Play] pressed url=\(url?.absoluteString ?? "NIL") resolving=\(isResolvingURL)")
                 guard let url, let movie, !isResolvingURL else { return }
                 playFromStartRequested = false
-                Task { await resolveAndLaunch(url: url, title: movie.name) }
+                Task { await resolveAndLaunch(url: url, title: VODDisplayItem.strippingTrailingYears(movie.name)) }
             }
             .focused($playFocused)
             .prefersDefaultFocus(true, in: detailFocusNS)
@@ -697,7 +697,7 @@ struct VODDetailView: View {
                 MoviesHeroButton(title: "Play from Beginning", systemImage: "arrow.counterclockwise", isPrimary: false) {
                     guard let url, let movie, !isResolvingURL else { return }
                     playFromStartRequested = true
-                    Task { await resolveAndLaunch(url: url, title: movie.name) }
+                    Task { await resolveAndLaunch(url: url, title: VODDisplayItem.strippingTrailingYears(movie.name)) }
                 }
             }
             if versionProviders.count > 1 {
@@ -932,7 +932,7 @@ struct VODDetailView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(item.name)
+                    Text(item.displayName)
                         .font(.headlineLarge)
                         .foregroundColor(.textPrimary)
                         .lineLimit(2)

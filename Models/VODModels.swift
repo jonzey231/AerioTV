@@ -1142,6 +1142,22 @@ struct VODDisplayItem: Identifiable, Hashable {
     let movie: VODMovie?
     let series: VODSeries?
 
+    /// Name for display: provider names often carry one or more trailing
+    /// "(YYYY)" groups ("#Horror (2015) (2015)"), and the UI shows the year
+    /// on its own meta line, so every trailing year is dropped (Logan
+    /// 2026-09-04). The raw `name` stays for matching and search.
+    var displayName: String { VODDisplayItem.strippingTrailingYears(name) }
+
+    nonisolated static func strippingTrailingYears(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let r = s.range(of: #"\s*\((19|20)\d{2}\)\s*$"#, options: .regularExpression) {
+            let head = s[..<r.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !head.isEmpty else { break }
+            s = head
+        }
+        return s
+    }
+
     init(movie: VODMovie) {
         self.id = movie.id
         self.name = movie.name
