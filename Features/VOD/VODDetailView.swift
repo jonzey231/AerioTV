@@ -447,9 +447,15 @@ struct VODDetailView: View {
             await loadRelatedIfNeeded()
             #endif
         }
+        #if os(tvOS)
+        .fullScreenCover(item: $bioPerson) { person in
+            PersonBioSheet(person: person, resolve: resolveKnownFor)
+        }
+        #else
         .sheet(item: $bioPerson) { person in
             PersonBioSheet(person: person, resolve: resolveKnownFor)
         }
+        #endif
         .navigationDestination(item: $knownForPush) { pushed in
             VODDetailView(item: pushed, isPlaying: $isPlaying)
         }
@@ -783,7 +789,7 @@ struct VODDetailView: View {
     private var tvRelatedSection: some View {
         if !relatedItems.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Related")
+                Text("Available Related Titles")
                     .font(.headlineSmall)
                     .foregroundColor(.textPrimary)
                     .padding(.horizontal, 56)
@@ -2539,7 +2545,7 @@ private struct PersonBioSheet: View {
     @State private var missText: String?
 
     #if os(tvOS)
-    private let headshotWidth: CGFloat = 260
+    private let headshotWidth: CGFloat = 300
     private let tileWidth: CGFloat = 170
     #else
     private let headshotWidth: CGFloat = 140
@@ -2547,6 +2553,162 @@ private struct PersonBioSheet: View {
     #endif
 
     var body: some View {
+        #if os(tvOS)
+        tvBody
+        #else
+        phoneBody
+        #endif
+    }
+
+    #if os(tvOS)
+    @State private var tvQRLink: IdentifiableURL?
+
+    /// Apple TV person page (Movies tab redesign, 2026-09-04): full-screen
+    /// on the page background, headshot beside name / dates / biography,
+    /// TMDB as a button that opens the QR overlay, Known For as poster
+    /// cards in the Movies tab style, Close in the action row.
+    private var tvBody: some View {
+        ZStack {
+            Color.appBackground.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 28) {
+                    HStack(alignment: .top, spacing: 36) {
+                        headshot
+                        VStack(alignment: .leading, spacing: 14) {
+                            Text(bio?.name ?? person.name)
+                                .font(.displayMedium)
+                                .foregroundColor(.textPrimary)
+                                .lineLimit(2)
+                            tvLifeLine
+                            if !loaded {
+                                ProgressView()
+                            } else if let text = bio?.biography {
+                                Text(text)
+                                    .font(.bodySmall)
+                                    .foregroundColor(.textSecondary)
+                                    .lineLimit(9)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                Text("No biography available.")
+                                    .font(.bodyMedium)
+                                    .foregroundColor(.textTertiary)
+                            }
+                            HStack(spacing: 12) {
+                                MoviesHeroButton(title: "Close", systemImage: "xmark", isPrimary: true) { dismiss() }
+                                if let personURL = URL(string: "https://www.themoviedb.org/person/\(person.id)") {
+                                    MoviesHeroButton(title: "TMDB", systemImage: "info.circle.fill", isPrimary: false) {
+                                        tvQRLink = IdentifiableURL(url: personURL)
+                                    }
+                                }
+                                if let missText {
+                                    Text(missText)
+                                        .font(.bodyMedium)
+                                        .foregroundColor(.statusWarning)
+                                        .transition(.opacity)
+                                        .padding(.leading, 8)
+                                }
+                            }
+                            .padding(.top, 6)
+                            .focusSection()
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(.horizontal, 56)
+                    tvKnownForStrip
+                }
+                .padding(.top, 40)
+                .padding(.bottom, 60)
+            }
+        }
+        .onExitCommand { dismiss() }
+        .fullScreenCover(item: $tvQRLink) { wrapper in
+            QRLinkOverlay(title: bio?.name ?? person.name,
+                          subtitle: "Scan with your phone to view this person on TMDB.",
+                          icon: "info.circle.fill", url: wrapper.url)
+        }
+        .task(id: person.id) {
+            guard TMDBPosters.isEnabled, let key = TMDBPosters.apiKey else {
+                loaded = true
+                return
+            }
+            bio = await TMDBService.personBio(forID: person.id, apiKey: key)
+            loaded = true
+        }
+    }
+
+    /// "Born Jun 13, 1990 · London, UK" and, when present, "Died ...".
+    @ViewBuilder
+    private var tvLifeLine: some View {
+        let born = bio?.birthday.map(Self.formatBioDate) ?? ""
+        let place = bio?.placeOfBirth ?? ""
+        let died = bio?.deathday.map(Self.formatBioDate) ?? ""
+        if !born.isEmpty || !place.isEmpty || !died.isEmpty {
+            HStack(spacing: 10) {
+                if !born.isEmpty { Text("Born \(born)") }
+                if !born.isEmpty, !place.isEmpty { Text("·").foregroundColor(.textTertiary) }
+                if !place.isEmpty { Text(place) }
+                if !died.isEmpty {
+                    if !born.isEmpty || !place.isEmpty { Text("·").foregroundColor(.textTertiary) }
+                    Text("Died \(died)")
+                }
+            }
+            .font(.system(size: 22, weight: .medium))
+            .foregroundColor(.textSecondary)
+            .lineLimit(1)
+        }
+    }
+
+    @ViewBuilder
+    private var tvKnownForStrip: some View {
+        if let items = bio?.knownFor, !items.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Known For")
+                    .font(.headlineSmall)
+                    .foregroundColor(.textPrimary)
+                    .padding(.horizontal, 56)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 32) {
+                        ForEach(items) { item in
+                            Button { tapKnownFor(item) } label: {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    ZStack {
+                                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                            .fill(Color.elevatedBackground.opacity(0.55))
+                                        if let url = TMDBService.profileImageURL(path: item.posterPath, size: "w342") {
+                                            AsyncImage(url: url) { phase in
+                                                if let image = phase.image {
+                                                    image.resizable().aspectRatio(contentMode: .fill)
+                                                } else {
+                                                    Image(systemName: "film")
+                                                        .font(.system(size: 28))
+                                                        .foregroundColor(.textTertiary)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .frame(width: 200, height: 300)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    Text(item.title)
+                                        .font(.labelMedium)
+                                        .foregroundColor(.textSecondary)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.leading)
+                                }
+                                .frame(width: 200, alignment: .leading)
+                            }
+                            .buttonStyle(MoviesPosterFocusStyle())
+                        }
+                    }
+                    .padding(.horizontal, 56)
+                    .padding(.vertical, 36)
+                }
+            }
+            .focusSection()
+        }
+    }
+    #endif
+
+    private var phoneBody: some View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
@@ -2587,9 +2749,6 @@ private struct PersonBioSheet: View {
                             #endif
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        #if os(tvOS)
-                        personQR
-                        #endif
                     }
                     knownForStrip
                 }
@@ -2664,7 +2823,13 @@ private struct PersonBioSheet: View {
         parser.timeZone = TimeZone(identifier: "UTC")
         parser.dateFormat = "yyyy-MM-dd"
         guard let date = parser.date(from: raw) else { return raw }
-        return date.formatted(date: .abbreviated, time: .omitted)
+        // Format in UTC too: a local-time formatter shifted "1990-06-13"
+        // to Jun 12 west of Greenwich (Logan 2026-09-04).
+        let out = DateFormatter()
+        out.timeZone = TimeZone(identifier: "UTC")
+        out.dateStyle = .medium
+        out.timeStyle = .none
+        return out.string(from: date)
     }
 
     @ViewBuilder
