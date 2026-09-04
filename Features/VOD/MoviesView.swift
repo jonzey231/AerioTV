@@ -1060,44 +1060,32 @@ struct MoviesView: View {
                 // strip vanished mid-handoff (hero focus already nil), focus
                 // went to nil and tvOS re-seated it on the rail (trace
                 // 2026-09-04 14:10).
-                if heroHasFocus || topCatcherFocused {
-                    if tabBarOnScreen {
-                        TabBarFocusGuide(preferredTitle: "Movies")
-                            .frame(height: 8)
-                            .frame(maxWidth: .infinity)
-                            .ignoresSafeArea(.container, edges: .top)
-                    } else {
-                        // Bar slid off screen: nothing above can take focus
-                        // until the content is back at the top. Catch Up
-                        // here, bring the content up with the scroll view's
-                        // own animation, land on Resume; the next Up then
-                        // reaches the pill through the guide.
-                        Color.clear
-                            .frame(height: 8)
-                            .frame(maxWidth: .infinity)
-                            .ignoresSafeArea(.container, edges: .top)
-                            .focusable(true)
-                            .focused($topCatcherFocused)
-                            .onChange(of: topCatcherFocused) { _, focused in
-                                guard focused else { return }
-                                debugLog("[FOCUS] top catcher: bar off screen, scrolling to top")
-                                withAnimation(.easeInOut(duration: 0.4)) {
-                                    scrollPosition.scrollTo(y: 0)
-                                }
-                                tvTabBarHidden = false
-                                // Bar is back on screen once the scroll lands:
-                                // hand focus to the Movies pill; if tvOS
-                                // declines, land on Resume (one more Up then
-                                // reaches the pill through the guide).
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
-                                    if TVFocusBridge.focusTabBar(preferredTitle: "Movies") {
-                                        debugLog("[FOCUS] top catcher: pill took focus")
-                                    } else {
-                                        heroFocusRequest = true
-                                    }
-                                }
+                // Only while a hero button has focus AND the TabView has slid
+                // its bar off screen (content scrolled). With the bar on
+                // screen tvOS reaches it natively from every hero button
+                // (first test 2026-09-04); anything placed above the hero in
+                // that state broke the native hop (trace 14:21). Off screen,
+                // nothing above can take focus, so this strip catches Up,
+                // scrolls the page to the top and lands on Resume; the next
+                // Up is native. Stays mounted while it holds focus.
+                if (heroHasFocus && !tabBarOnScreen) || topCatcherFocused {
+                    Color.clear
+                        .frame(height: 8)
+                        .frame(maxWidth: .infinity)
+                        .ignoresSafeArea(.container, edges: .top)
+                        .focusable(true)
+                        .focused($topCatcherFocused)
+                        .onChange(of: topCatcherFocused) { _, focused in
+                            guard focused else { return }
+                            debugLog("[FOCUS] top catcher: bar off screen, scrolling to top")
+                            withAnimation(.easeInOut(duration: 0.4)) {
+                                scrollPosition.scrollTo(y: 0)
                             }
-                    }
+                            tvTabBarHidden = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                heroFocusRequest = true
+                            }
+                        }
                 }
                 #endif
 
