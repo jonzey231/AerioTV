@@ -1147,12 +1147,15 @@ struct MoviesView: View {
                     if showSearchField {
                         // Menu closes the search field (there was no way to
                         // dismiss it, Logan 2026-09-04) and lands on Search.
-                        withAnimation(.spring(response: 0.25)) {
-                            showSearchField = false
-                            searchText = ""
-                        }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                            searchCircleFocused = true
+                        // Focus the circle FIRST: removing the field while it
+                        // held focus parked focus on the hero's Resume, whose
+                        // scroll-to-top rule fired (trace 17:16:00, "page jumps").
+                        searchCircleFocused = true
+                        DispatchQueue.main.async {
+                            withAnimation(.spring(response: 0.25)) {
+                                showSearchField = false
+                                searchText = ""
+                            }
                         }
                     } else if tvTabBarHidden {
                         scrollMoviesToTop(proxy)
@@ -1161,8 +1164,21 @@ struct MoviesView: View {
                     }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .aerioTabScrollToTop)) { _ in
-                    guard tvTabBarHidden else { return }
-                    scrollMoviesToTop(proxy)
+                    if showSearchField {
+                        // Same as the direct Menu path above; the header
+                        // circles' presses arrive via HomeView instead.
+                        searchCircleFocused = true
+                        DispatchQueue.main.async {
+                            withAnimation(.spring(response: 0.25)) {
+                                showSearchField = false
+                                searchText = ""
+                            }
+                        }
+                    } else if tvTabBarHidden {
+                        scrollMoviesToTop(proxy)
+                    } else if !heroHasFocus {
+                        heroFocusRequest = true
+                    }
                 }
                 // The Watchlist shelf appearing above the grid pushed the
                 // page content down under a fixed offset, which read as an
