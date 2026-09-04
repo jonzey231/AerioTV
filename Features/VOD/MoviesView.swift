@@ -1056,7 +1056,11 @@ struct MoviesView: View {
                 // button has focus: Up from ANY hero button, at any scroll
                 // position, hits this guide and is redirected to the Movies
                 // pill (tvOS expands the collapsed bar as it takes focus).
-                if heroHasFocus {
+                // Stays mounted while the catcher itself holds focus: the
+                // strip vanished mid-handoff (hero focus already nil), focus
+                // went to nil and tvOS re-seated it on the rail (trace
+                // 2026-09-04 14:10).
+                if heroHasFocus || topCatcherFocused {
                     if tabBarOnScreen {
                         TabBarFocusGuide(preferredTitle: "Movies")
                             .frame(height: 8)
@@ -1081,8 +1085,16 @@ struct MoviesView: View {
                                     scrollPosition.scrollTo(y: 0)
                                 }
                                 tvTabBarHidden = false
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-                                    heroFocusRequest = true
+                                // Bar is back on screen once the scroll lands:
+                                // hand focus to the Movies pill; if tvOS
+                                // declines, land on Resume (one more Up then
+                                // reaches the pill through the guide).
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+                                    if TVFocusBridge.focusTabBar(preferredTitle: "Movies") {
+                                        debugLog("[FOCUS] top catcher: pill took focus")
+                                    } else {
+                                        heroFocusRequest = true
+                                    }
                                 }
                             }
                     }
