@@ -235,9 +235,12 @@ struct MoviesView: View {
 
     #if os(tvOS)
     private var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: 200, maximum: 240), spacing: 32)]
+        // Seven columns, tiles flex to fill (Logan 2026-09-04).
+        Array(repeating: GridItem(.flexible(), spacing: tvGridColumnSpacing), count: tvGridColumns)
     }
     private let gridRowSpacing: CGFloat = 48
+    private let tvGridColumns = 7
+    private let tvGridColumnSpacing: CGFloat = 24
     #else
     private var columns: [GridItem] {
         // On iPhone the phone-sized minimum is always used. On iPad / Mac the
@@ -965,7 +968,7 @@ struct MoviesView: View {
             // field) stays put here so it does not vanish under the spinner.
             if !searchText.isEmpty && vodStore.isSearchingMovies && filteredMovies.isEmpty {
                 libraryHeader(title: "Results", count: 0, showPills: false)
-                    .padding(.leading, railWidth)
+                    .padding(.leading, contentLeadingInset)
             }
             #endif
 
@@ -1019,9 +1022,9 @@ struct MoviesView: View {
                         // Search: results grid only, no hero or shelves.
                         VStack(alignment: .leading, spacing: sectionSpacing) {
                             libraryHeader(title: "Results", count: filteredMovies.count, showPills: false)
-                                .padding(.leading, railWidth)
+                                .padding(.leading, contentLeadingInset)
                             posterGrid(filteredMovies)
-                                .padding(.leading, railWidth)
+                                .padding(.leading, contentLeadingInset)
                         }
                     } else {
                         VStack(alignment: .leading, spacing: sectionSpacing) {
@@ -1090,7 +1093,7 @@ struct MoviesView: View {
                             let watchlist = watchlistItems
                             if !watchlist.isEmpty {
                                 posterShelf(title: "Watchlist", items: watchlist)
-                                    .padding(.leading, railWidth)
+                                    .padding(.leading, contentLeadingInset)
                                     .background(GeometryReader { g in
                                         Color.clear.onAppear { geometryBox.watchlistShelfHeight = g.size.height }
                                             .onChange(of: g.size.height) { _, h in geometryBox.watchlistShelfHeight = h }
@@ -1098,11 +1101,11 @@ struct MoviesView: View {
                             }
                             if !recentlyAdded.isEmpty {
                                 posterShelf(title: "Recently Added", items: recentlyAdded)
-                                    .padding(.leading, railWidth)
+                                    .padding(.leading, contentLeadingInset)
                             }
 
                             libraryHeader(title: "All Movies", count: libraryMovies.count, showPills: true)
-                                .padding(.leading, railWidth)
+                                .padding(.leading, contentLeadingInset)
                             railCatcherAndGrid(libraryMovies)
                                 .background(GeometryReader { g in
                                     Color.clear.preference(
@@ -1350,7 +1353,7 @@ struct MoviesView: View {
                             if let index = libraryMovies.firstIndex(where: { $0.id == itemID }),
                                geometryBox.rowPitch > 0, geometryBox.gridWidth > 0 {
                                 // Adaptive columns: floor((W + spacing) / (min + spacing)).
-                                let cols = max(1, Int((geometryBox.gridWidth + 32) / (200 + 32)))
+                                let cols = tvGridColumns
                                 let row = index / cols
                                 let gridTopContent = geometryBox.gridTopVisible + geometryBox.contentOffsetY
                                 let y = gridTopContent + 16 + CGFloat(row) * geometryBox.rowPitch - 24
@@ -1375,7 +1378,11 @@ struct MoviesView: View {
                         .frame(width: railWidth)
                         .padding(.top, railTop)
                     }
+                    #if os(tvOS)
+                    .ignoresSafeArea(.container, edges: [.top, .leading])
+                    #else
                     .ignoresSafeArea(.container, edges: .top)
+                    #endif
                 }
                 }
                 }
@@ -1427,6 +1434,20 @@ struct MoviesView: View {
         return 72
         #else
         return 34
+        #endif
+    }
+
+    /// Leading inset for shelves, header and grid. tvOS: 0, the rail lives
+    /// in the 80 pt safe-area margin so the content lines up with the hero
+    /// card's left edge (Logan 2026-09-04). iOS keeps the rail's width.
+    private var contentLeadingInset: CGFloat {
+        #if os(tvOS)
+        // Lines the shelves, header and grid up with the hero COPY (Resume
+        // button), not the faded card edge: hero inset 16 + copy inset 44,
+        // minus the 16 each section already pads (Logan 2026-09-04).
+        return 44
+        #else
+        return railWidth
         #endif
     }
 
@@ -1573,14 +1594,14 @@ struct MoviesView: View {
     }
 
     private func railCatcherAndGrid(_ items: [VODDisplayItem]) -> some View {
-        posterGrid(items).padding(.leading, railWidth)
+        posterGrid(items).padding(.leading, contentLeadingInset)
     }
     #else
     private var railFocusRequestBinding: Binding<String?> { .constant(nil) }
     private var heroFocusRequestBinding: Binding<Bool> { .constant(false) }
 
     private func railCatcherAndGrid(_ items: [VODDisplayItem]) -> some View {
-        posterGrid(items).padding(.leading, railWidth)
+        posterGrid(items).padding(.leading, contentLeadingInset)
     }
     #endif
 
@@ -1742,7 +1763,7 @@ struct MoviesView: View {
     }
     private var shelfCardSpacing: CGFloat {
         #if os(tvOS)
-        return 32
+        return tvGridColumnSpacing
         #else
         return 12
         #endif
@@ -1753,8 +1774,7 @@ struct MoviesView: View {
         // shelf posters line up with the library columns (Logan 2026-09-04).
         let w = geometryBox.gridWidth
         guard w > 0 else { return 200 }
-        let cols = max(1, Int((w + 32) / (200 + 32)))
-        return min(240, (w - CGFloat(cols - 1) * 32) / CGFloat(cols))
+        return (w - CGFloat(tvGridColumns - 1) * tvGridColumnSpacing) / CGFloat(tvGridColumns)
         #else
         return 120
         #endif
@@ -1874,7 +1894,10 @@ struct VODPosterCard: View {
                 }
             }
             #if os(tvOS)
-            .frame(width: 200, height: 300)
+            // Fill the cell: a fixed 200x300 poster left every wider grid
+            // cell as empty gap (Logan 2026-09-04, "too spread out").
+            .aspectRatio(2/3, contentMode: .fit)
+            .frame(maxWidth: .infinity)
             #endif
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             #if os(tvOS)
