@@ -2062,8 +2062,20 @@ struct DispatcharrAPI {
     /// Fetches the EPG grid from `/api/epg/grid/` — returns -1h to +24h of programs.
     /// The response is `{"data": [...]}` with program objects containing tvg_id, title,
     /// start_time, end_time, etc. One request replaces the multi-step approach.
-    func getEPGGrid() async throws -> [DispatcharrCurrentProgram] {
-        let url = try buildURL(path: "/api/epg/grid/")
+    func getEPGGrid(start: Date? = nil, end: Date? = nil) async throws -> [DispatcharrCurrentProgram] {
+        // Dispatcharr 0.30 (PR #1643): `start` / `end` select an absolute
+        // ISO 8601 window (either may be omitted; max 395 days). Older
+        // servers ignore the parameters and answer the default -1h..+24h.
+        var path = "/api/epg/grid/"
+        if start != nil || end != nil {
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime]
+            var items: [String] = []
+            if let start { items.append("start=\(f.string(from: start))") }
+            if let end { items.append("end=\(f.string(from: end))") }
+            path += "?" + items.joined(separator: "&")
+        }
+        let url = try buildURL(path: path)
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         // v1.6.22: bumped 60s → 180s for the request, 180s → 600s
