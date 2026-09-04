@@ -1415,7 +1415,7 @@ struct MoviesView: View {
                                 .frame(width: shelfCardWidth)
                         }
                         #if os(tvOS)
-                        .buttonStyle(TVCardButtonStyle())
+                        .buttonStyle(MoviesPosterFocusStyle())
                         #else
                         .buttonStyle(.plain)
                         #endif
@@ -1462,7 +1462,7 @@ struct MoviesView: View {
                     VODPosterCard(item: item, headers: dispatcharrHeaders)
                 }
                 #if os(tvOS)
-                .buttonStyle(TVCardButtonStyle())
+                .buttonStyle(MoviesPosterFocusStyle())
                 .focused($gridFocus, equals: item.id)
                 #else
                 .buttonStyle(.plain)
@@ -1669,15 +1669,16 @@ struct MoviesHeroCarousel: View {
     /// a hero button goes straight to the tab bar.
     @State private var currentID: String?
     #if os(tvOS)
+    /// "<page id>|primary|start|details" of the focused hero button.
     @FocusState private var heroFocus: String?
     @FocusState private var catcherFocused: Bool
-    @FocusState private var heroHasFocus: Bool
+    private var primaryFocusID: String { "\(currentID ?? pages.first?.id ?? "")|primary" }
     #endif
 
     var body: some View {
         VStack(spacing: 0) {
             #if os(tvOS)
-            if !heroHasFocus {
+            if heroFocus == nil {
                 Color.clear
                     .frame(height: 1)
                     .frame(maxWidth: .infinity)
@@ -1685,16 +1686,15 @@ struct MoviesHeroCarousel: View {
                     .focused($catcherFocused)
                     .onChange(of: catcherFocused) { _, focused in
                         guard focused else { return }
-                        heroFocus = currentID ?? pages.first?.id
+                        heroFocus = primaryFocusID
                     }
             }
             #endif
             carousel
                 #if os(tvOS)
-                .focused($heroHasFocus)
                 .onChange(of: focusRequest.wrappedValue) { _, wanted in
                     guard wanted else { return }
-                    heroFocus = currentID ?? pages.first?.id
+                    heroFocus = primaryFocusID
                     focusRequest.wrappedValue = false
                 }
                 #endif
@@ -1775,7 +1775,8 @@ struct MoviesHero: View {
     /// Long press on Resume: Remove from Continue Watching. nil when the
     /// page is not a resume row.
     var onRemove: (() -> Void)? = nil
-    /// tvOS: id the carousel uses to focus this page's Resume.
+    /// tvOS: base id the carousel uses to focus this page's buttons
+    /// ("<id>|primary", "<id>|start", "<id>|details").
     var primaryFocusID: String? = nil
     #if os(tvOS)
     @Environment(\.heroFocusBinding) private var heroFocusBinding
@@ -1950,11 +1951,11 @@ struct MoviesHero: View {
                 }
             #if os(tvOS)
             if progress != nil {
-                MoviesHeroButton(title: "Play from Beginning", systemImage: "gobackward",
-                                 isPrimary: false, action: onPlayFromStart)
+                heroFocusable(MoviesHeroButton(title: "Play from Beginning", systemImage: "gobackward",
+                                               isPrimary: false, action: onPlayFromStart), role: "start")
             }
-            MoviesHeroButton(title: "Details", systemImage: "info.circle",
-                             isPrimary: false, action: onDetails)
+            heroFocusable(MoviesHeroButton(title: "Details", systemImage: "info.circle",
+                                           isPrimary: false, action: onDetails), role: "details")
             #else
             if progress != nil {
                 MoviesHeroButton(title: "", systemImage: "gobackward",
@@ -1974,17 +1975,25 @@ struct MoviesHero: View {
 
     @ViewBuilder
     private var primaryButton: some View {
-        let button = MoviesHeroButton(
+        heroFocusable(MoviesHeroButton(
             title: progress != nil ? "Resume" : "Play",
-            systemImage: "play.fill", isPrimary: true, action: onPrimary)
+            systemImage: "play.fill", isPrimary: true, action: onPrimary), role: "primary")
+    }
+
+    /// tvOS: binds a hero button to the carousel's focus state under
+    /// "<page id>|<role>" so the carousel knows when ANY hero button has
+    /// focus (its Up catcher must not exist then; tracking only Resume
+    /// left Up from Details bouncing back to Resume, Logan 2026-09-03).
+    @ViewBuilder
+    private func heroFocusable<V: View>(_ view: V, role: String) -> some View {
         #if os(tvOS)
         if let binding = heroFocusBinding, let primaryFocusID {
-            button.focused(binding, equals: primaryFocusID)
+            view.focused(binding, equals: "\(primaryFocusID)|\(role)")
         } else {
-            button
+            view
         }
         #else
-        button
+        view
         #endif
     }
 
@@ -2262,3 +2271,23 @@ extension Notification.Name {
     /// away: the tab scrolls back to the top and shows the bar.
     static let aerioTabScrollToTop = Notification.Name("aerioTabScrollToTop")
 }
+
+#if os(tvOS)
+/// Poster focus for the Movies tab: scale only. TVCardButtonStyle adds a
+/// 12pt drop shadow on focus, which re-rasterizes the whole scaling card
+/// every frame of the focus animation; with the scroll animating at the
+/// same time (pills -> first tile row) that was the remaining stutter
+/// (Time Profiler 2026-09-03: main thread idle, so rendering cost). The
+/// accent ring on the poster itself is the focus indicator.
+struct MoviesPosterFocusStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(8)
+            .scaleEffect(isFocused ? 1.08 : 1.0)
+            .opacity(configuration.isPressed ? 0.8 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+#endif
