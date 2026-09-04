@@ -886,10 +886,15 @@ struct MoviesView: View {
                 ScrollView {
                     Color.clear.frame(height: 0).id("movies-top")
                     #if os(tvOS)
-                    // The tab bar's reserved top inset, owned here so it can
-                    // collapse when the bar hides and the grid gets the whole
-                    // screen (the ScrollView ignores the top safe area).
-                    Color.clear.frame(height: tvTabBarHidden ? 0 : outer.safeAreaInsets.top)
+                    // The tab bar's reserved top inset as plain content (the
+                    // ScrollView ignores the top safe area). FIXED height:
+                    // animating it to zero when the bar hid shifted the whole
+                    // content and re-laid out the grid on every frame of that
+                    // animation, exactly while the focus engine was scrolling
+                    // from the carousel to the tiles (Logan 2026-09-03:
+                    // "that small section stutters"). Content scrolls under
+                    // the bar region regardless, so nothing is lost.
+                    Color.clear.frame(height: outer.safeAreaInsets.top)
                     #endif
                     if !searchText.isEmpty {
                         // Search: results grid only, no hero or shelves.
@@ -995,7 +1000,9 @@ struct MoviesView: View {
                     // (Logan 2026-09-03: the circles lagged behind the bar).
                     let hide = y > 40
                     if hide != tvTabBarHidden {
-                        withAnimation(.easeInOut(duration: 0.2)) { tvTabBarHidden = hide }
+                        // No explicit animation: the toolbar transition is the
+                        // system's; nothing in the content moves any more.
+                        tvTabBarHidden = hide
                     }
                 }
                 .ignoresSafeArea(.container, edges: .top)
