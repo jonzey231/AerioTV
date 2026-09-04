@@ -121,6 +121,25 @@ struct MoviesView: View {
     /// 2026-09-04). Declared unguarded: the carousel binding is built in
     /// shared code.
     @State private var heroRestoreRequest = false
+    /// tvOS grid: seven columns, 24 pt gutters (shelf width + rail math use it too).
+    private let tvGridColumns = 7
+    private let tvGridColumnSpacing: CGFloat = 24
+
+    // Search / filter state. Declared unguarded: the search, provider and
+    // people helpers are shared code even though only tvOS shows the
+    // inline field (iOS build broke when these sat under #if os(tvOS)).
+    @State private var showSearchField = false
+    /// Dispatcharr Direct Connect: M3U account id -> name, for the provider
+    /// filter on search results. Empty for other server types.
+    @State private var providerNames: [Int: String] = [:]
+    @State private var selectedProviderID: Int?
+    /// Cast & crew search: the TMDB person the query resolved to and their
+    /// films found in the library.
+    @State private var personMatchName: String?
+    @State private var personMatches: [VODDisplayItem] = []
+    @State private var personSearchTask: Task<Void, Never>?
+    /// Search circle focus: Menu collapses the field and lands here.
+    @FocusState private var searchCircleFocused: Bool
 
     @State private var searchText = ""
     @State private var hiddenGroups: Set<String> = []
@@ -135,18 +154,6 @@ struct MoviesView: View {
     #endif
     @State private var navPath = NavigationPath()
     #if os(tvOS)
-    @State private var showSearchField = false
-    /// Dispatcharr Direct Connect: M3U account id -> name, for the provider
-    /// filter on search results. Empty for other server types.
-    @State private var providerNames: [Int: String] = [:]
-    @State private var selectedProviderID: Int?
-    /// Cast & crew search: the TMDB person the query resolved to and their
-    /// films found in the library.
-    @State private var personMatchName: String?
-    @State private var personMatches: [VODDisplayItem] = []
-    @State private var personSearchTask: Task<Void, Never>?
-    /// Search circle focus: Menu collapses the field and lands here.
-    @FocusState private var searchCircleFocused: Bool
     @State private var showSortMenu = false
     @State private var showFilterMenu = false
     @State private var searchFieldFocused = false
@@ -285,8 +292,6 @@ struct MoviesView: View {
         Array(repeating: GridItem(.flexible(), spacing: tvGridColumnSpacing), count: tvGridColumns)
     }
     private let gridRowSpacing: CGFloat = 48
-    private let tvGridColumns = 7
-    private let tvGridColumnSpacing: CGFloat = 24
     #else
     private var columns: [GridItem] {
         // On iPhone the phone-sized minimum is always used. On iPad / Mac the
@@ -2846,7 +2851,7 @@ private extension View {
     /// Liquid Glass panel on tvOS 26+, material fallback before that.
     @ViewBuilder
     func glassPanel() -> some View {
-        if #available(tvOS 26, *) {
+        if #available(iOS 26, tvOS 26, *) {
             self.glassEffect(.regular, in: .rect(cornerRadius: 36))
         } else {
             self.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 36, style: .continuous))
