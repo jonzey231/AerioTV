@@ -116,6 +116,12 @@ struct MoviesView: View {
     @Binding var isPlaying: Bool
     @Binding var isDetailPushed: Bool
     @Binding var popRequested: Bool
+    /// False while another tab is selected: both VOD tabs stay mounted in
+    /// the TabView, so observers that move focus are gated on this.
+    var isSelected: Bool = true
+    /// Nested-push router for pushed details (identity-stable, see
+    /// VODPushRouter).
+    @State private var pushRouter = VODPushRouter()
     /// tvOS: like heroFocusRequest, but lands on the hero button that had
     /// focus last (Up from Play from Beginning returned to Resume, Logan
     /// 2026-09-04). Declared unguarded: the carousel binding is built in
@@ -157,10 +163,8 @@ struct MoviesView: View {
     @State private var showSortMenu = false
     @State private var showFilterMenu = false
     @State private var searchFieldFocused = false
-    /// Rail handoff (same catcher pattern as the hero carousel): a thin
-    /// focusable strip on the grid's left edge takes Left from the first
-    /// column and forwards focus to the rail; Right from the rail lands on
-    /// it and goes back to the last focused poster.
+    /// Focused poster id; the rail's Right returns to the last one that is
+    /// still in the grid.
     @FocusState private var gridFocus: String?
     /// Set to move focus onto the hero's Resume (scroll-to-top landing).
     @State private var heroFocusRequest = false
@@ -175,12 +179,13 @@ struct MoviesView: View {
     @FocusState private var topCatcherFocused: Bool
     #endif
     @State private var lastGridFocus: String?
-    @State private var railHadFocus = false
     @State private var railFocusRequest: String?
     #endif
     /// Re-sorted library waiting until the user is back at the top: applying
     /// it mid-scroll reordered the grid under the focused poster.
-    @State private var pendingDerived: LibraryDerived?
+    /// Result held while the grid must not rebuild, with the key it was
+    /// computed for (a newer key drops it rather than applying stale order).
+    @State private var pendingDerived: (key: LibraryKey, value: LibraryDerived)?
     /// Rail top edge. Written only while the rail rides with the grid; once
     /// parked the value stops changing, so scrolling the grid costs no
     /// body re-evaluation. nil until the grid is first measured.
@@ -196,6 +201,7 @@ struct MoviesView: View {
         var rowPitch: CGFloat = 0
         var gridWidth: CGFloat = 0
     var watchlistShelfHeight: CGFloat = 0
+    var viewportHeight: CGFloat = 0
     }
     @State private var geometryBox = ScrollGeometryBox()
     @State private var scrollPosition = ScrollPosition()
@@ -277,6 +283,18 @@ struct MoviesView: View {
     /// trace 2026-09-04 15:39), so while it is in flight the top strip is
     /// unmounted and further hero-focus scroll requests are ignored.
     @State private var scrollToTopInFlight = false
+    @State private var barPollTask: Task<Void, Never>?
+    /// Content offset past which the tab bar hides: top inset (60) + hero
+    /// (420) + carousel catcher and spacing. Below it the hero is still on
+    /// screen and Up from any hero button reaches the pill natively.
+    private let heroHideThreshold: CGFloat = 560
+    /// Offsets beyond roughly one screen use the position scroll (an
+    /// animated reader scroll crawled through every row from deep in the
+    /// grid); shorter hops use the reader scroll, which animates in step
+    /// with the focus engine.
+    private var deepJumpThreshold: CGFloat {
+        geometryBox.viewportHeight > 0 ? geometryBox.viewportHeight + 300 : 1400
+    }
     @State private var scrollIsIdle = true
     #endif
 
@@ -387,7 +405,7 @@ struct MoviesView: View {
                     // A detail's own navigationDestination(item:) pushing a
                     // value already in the path wedged the stack (Logan
                     // 2026-09-04 16:11/16:14: A -> Related B -> Related A hung).
-                    .environment(\.vodPushHandler) { pushed in navPath.append(pushed) }
+                    .environment(\.vodPushHandler, pushRouter)
             }
             #if os(iOS)
             // No .navigationTitle on iOS — OnDemandView hosts the
@@ -440,7 +458,7 @@ struct MoviesView: View {
                 // multi-thousand-item grid mid-scroll read as stutter (Time
                 // Profiler + log 2026-09-04 15:18, test ran during the sweep).
                 if (tvTabBarHidden || !scrollIsIdle) && !derived.library.isEmpty {
-                    pendingDerived = result
+                    pendingDerived = (libraryKey, result)
                 } else {
                     derived = result
                     pendingDerived = nil
@@ -449,7 +467,10 @@ struct MoviesView: View {
                 derived = result
                 #endif
             }
-            .onAppear { refreshDispatcharrHeaders(); refreshHeroPages(); refreshWatchlistItems() }
+            .onAppear {
+                pushRouter.push = { navPath.append($0) }
+                refreshDispatcharrHeaders(); refreshHeroPages(); refreshWatchlistItems()
+            }
             .onChange(of: heroPagesKey) { _, _ in refreshHeroPages() }
             .onChange(of: watchlistKey) { _, _ in refreshWatchlistItems() }
             .onChange(of: dispatcharrHeadersKey) { _, _ in refreshDispatcharrHeaders() }
@@ -1110,6 +1131,7 @@ struct MoviesView: View {
                     // "that small section stutters"). Content scrolls under
                     // the bar region regardless, so nothing is lost.
                     Color.clear.frame(height: outer.safeAreaInsets.top)
+                        .onAppear { geometryBox.viewportHeight = outer.size.height }
                     #endif
                     // Search replaces only the library grid (Logan
                     // 2026-09-04); the hero and shelves stay put and the
@@ -1130,16 +1152,11 @@ struct MoviesView: View {
                                     focusRequest: heroFocusRequestBinding,
                                     restoreRequest: Binding(get: { heroRestoreRequest },
                                                             set: { heroRestoreRequest = $0 }),
-                                    onUpWhileScrolled: {
-                                        #if os(tvOS)
-                                        if tvTabBarHidden { scrollMoviesToTop(proxy) }
-                                        #endif
-                                    },
                                     onHeroFocusChange: { focused in
                                         #if os(tvOS)
                                         heroHasFocus = focused
                                         guard focused else { return }
-                                        tabBarOnScreen = TVFocusBridge.isTabBarOnScreen(preferredTitle: "Movies")
+                                        tabBarOnScreen = TVFocusBridge.isTabBarOnScreen(preferredTitle: AppTab.movies.title)
                                         // Any hero button gaining focus while the
                                         // page is scrolled brings the page back to
                                         // the top, focus staying on that button
@@ -1148,7 +1165,7 @@ struct MoviesView: View {
                                         if !tabBarOnScreen, !scrollToTopInFlight {
                                             let y = geometryBox.contentOffsetY
                                             scrollToTopInFlight = true
-                                            if y < 1400 {
+                                            if y < deepJumpThreshold {
                                                 // Short hop (shelf -> hero): the reader
                                                 // scroll animates in step with the focus
                                                 // engine's own scroll; the position scroll
@@ -1166,7 +1183,7 @@ struct MoviesView: View {
                                             // quick second Up was swallowed by the
                                             // top strip (trace 2026-09-04 15:12).
                                             tvTabBarHidden = false
-                                            focusTabBarWhenOnScreen(attempt: 0)
+                                            waitForTabBarOnScreen()
                                         }
                                         #endif
                                     },
@@ -1262,27 +1279,26 @@ struct MoviesView: View {
                 // is nothing to scroll, the press is forwarded to the
                 // tab-level routing by notification.
                 .onExitCommand {
+                    // The open search field is this view's own overlay:
+                    // close it (focus the circle FIRST; removing the field
+                    // while it held focus parked focus on the hero, whose
+                    // scroll-to-top rule fired). Everything else is routed
+                    // by HomeView.handleMenuPress, which sees every press
+                    // regardless of which handler UIKit delivers it to.
                     if showSearchField {
-                        // Menu closes the search field (there was no way to
-                        // dismiss it, Logan 2026-09-04) and lands on Search.
-                        // Focus the circle FIRST: removing the field while it
-                        // held focus parked focus on the hero's Resume, whose
-                        // scroll-to-top rule fired (trace 17:16:00, "page jumps").
                         clearSearch()
-                    } else if tvTabBarHidden {
-                        scrollMoviesToTop(proxy)
                     } else {
                         NotificationCenter.default.post(name: .aerioTabMenuPassthrough, object: nil)
                     }
                 }
-                .onReceive(NotificationCenter.default.publisher(for: .aerioTabScrollToTop)) { _ in
+                .onReceive(NotificationCenter.default.publisher(for: .aerioTabScrollToTop)) { note in
+                    // Tagged with the tab: both VOD tabs stay mounted.
+                    guard (note.userInfo?["tab"] as? String) == AppTab.movies.rawValue else { return }
                     if showSearchField {
-                        // Same as the direct Menu path above; the header
-                        // circles' presses arrive via HomeView instead.
                         clearSearch()
-                    } else if tvTabBarHidden {
-                        scrollMoviesToTop(proxy)
-                    } else if !heroHasFocus {
+                    } else if tvTabBarHidden || !heroHasFocus {
+                        // Focus the hero; its focus-gain handler scrolls the
+                        // page to the top when scrolled (one scroll path).
                         heroFocusRequest = true
                     }
                 }
@@ -1297,14 +1313,15 @@ struct MoviesView: View {
                         guard h > 0 else { return }
                         var t = Transaction(); t.disablesAnimations = true
                         withTransaction(t) {
-                            scrollPosition.scrollTo(y: geometryBox.contentOffsetY + h)
+                            // Shelf height plus the VStack gap it adds.
+                            scrollPosition.scrollTo(y: geometryBox.contentOffsetY + h + sectionSpacing)
                         }
                     }
                 }
                 // Player dismissed at the top of the tab: tvOS was re-seating
                 // focus on the rail's # with no way out. Put it on the hero.
                 .onChange(of: isPlaying) { _, playing in
-                    guard !playing, !tvTabBarHidden, navPath.isEmpty else { return }
+                    guard isSelected, !playing, !tvTabBarHidden, navPath.isEmpty else { return }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                         heroFocusRequest = true
                     }
@@ -1326,7 +1343,7 @@ struct MoviesView: View {
                     // (Logan 2026-09-04), so the hide waits for the scroll
                     // to settle. Showing is immediate (the top strip and
                     // hero focus handle their own sequencing).
-                    let hide = y > 560
+                    let hide = y > heroHideThreshold
                     wantsTabBarHidden = hide
                     // Flag the intent at once: HomeView's parked-bar heal
                     // (2.5 s after a tab switch) remounted the TabView
@@ -1353,10 +1370,7 @@ struct MoviesView: View {
                     if phase == .idle, wantsTabBarHidden, !tvTabBarHidden {
                         tvTabBarHidden = true
                     }
-                    if phase == .idle, !tvTabBarHidden, let p = pendingDerived {
-                        derived = p
-                        pendingDerived = nil
-                    }
+                    if phase == .idle, !tvTabBarHidden { applyPendingDerived() }
                 }
                 .ignoresSafeArea(.container, edges: .top)
                 .onChange(of: tvTabBarHidden) { _, hidden in
@@ -1364,16 +1378,17 @@ struct MoviesView: View {
                     if TVTabBarScrollState.shared.isHidden != wantHidden {
                         TVTabBarScrollState.shared.isHidden = wantHidden
                     }
-                    if !hidden, let p = pendingDerived {
-                        derived = p
-                        pendingDerived = nil
-                    }
+                    if !hidden { applyPendingDerived() }
                 }
                 .onChange(of: gridFocus) { _, id in
                     if let id { lastGridFocus = id }
                 }
 
-                .onDisappear { TVTabBarScrollState.shared.isHidden = false }
+                .onDisappear {
+                    TVTabBarScrollState.shared.isHidden = false
+                    barPollTask?.cancel()
+                    scrollToTopInFlight = false
+                }
                 #endif
 
                 #if os(tvOS)
@@ -1407,17 +1422,11 @@ struct MoviesView: View {
                                 scrollPosition.scrollTo(y: 0)
                             }
                             tvTabBarHidden = false
-                            focusTabBarWhenOnScreen(attempt: 0)
-                            // Restore at once: holding focus here for
-                            // 0.5 s while the bar slid in read as the
-                            // Movies pill taking focus and losing it again
-                            // (Logan 2026-09-04).
+                            // Restore at once: holding focus here while the
+                            // bar slid in read as the Movies pill taking
+                            // focus and losing it again (Logan 2026-09-04).
                             heroRestoreRequest = true
-                            // Once the bar has slid back on screen, hand
-                            // focus to the Movies pill; the earlier
-                            // requestFocusUpdate attempts ran while the bar
-                            // was still off screen.
-                            focusTabBarWhenOnScreen(attempt: 0)
+                            waitForTabBarOnScreen()
                         }
                 }
                 #endif
@@ -1452,20 +1461,19 @@ struct MoviesView: View {
                         AlphabetRail(
                             available: railLetters,
                             focusRequest: railFocusRequestBinding,
-                            onFocusChange: { hasFocus in
-                                #if os(tvOS)
-                                if hasFocus { railHadFocus = true }
-                                #endif
-                            },
+                            onFocusChange: { _ in },
                             onExitRight: {
                                 #if os(tvOS)
-                                railHadFocus = false
-                                // A lazy row that is not built cannot take
-                                // focus (stuck-on-# after playback, Logan
-                                // 2026-09-03), so with no poster to return
-                                // to, land on the hero instead.
-                                if let last = lastGridFocus {
+                                // Return to the last focused poster only if
+                                // it is still in the grid (search / genre /
+                                // sort can drop it; a stale id is a silent
+                                // no-op that strands focus on the rail),
+                                // else the first row, which is always built.
+                                let items = isSearching ? filteredMovies : libraryMovies
+                                if let last = lastGridFocus, items.contains(where: { $0.id == last }) {
                                     gridFocus = last
+                                } else if let first = items.first?.id {
+                                    gridFocus = first
                                 } else {
                                     heroFocusRequest = true
                                 }
@@ -1473,7 +1481,6 @@ struct MoviesView: View {
                             },
                             onExitUp: {
                                 #if os(tvOS)
-                                railHadFocus = false
                                 heroFocusRequest = true
                                 #endif
                             }
@@ -1483,7 +1490,6 @@ struct MoviesView: View {
                             let itemID = String(id.dropFirst("grid-".count))
                             if let index = libraryMovies.firstIndex(where: { $0.id == itemID }),
                                geometryBox.rowPitch > 0, geometryBox.gridWidth > 0 {
-                                // Adaptive columns: floor((W + spacing) / (min + spacing)).
                                 let cols = tvGridColumns
                                 let row = index / cols
                                 let gridTopContent = geometryBox.gridTopVisible + geometryBox.contentOffsetY
@@ -1500,7 +1506,6 @@ struct MoviesView: View {
                             // Once the row is on screen, put focus on that
                             // title so the click lands the user in the grid.
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-                                railHadFocus = false
                                 gridFocus = itemID
                             }
                             #endif
@@ -1605,45 +1610,32 @@ struct MoviesView: View {
         Binding(get: { heroFocusRequest }, set: { heroFocusRequest = $0 })
     }
 
-    private func focusTabBarWhenOnScreen(attempt: Int) {
-        guard attempt < 15 else {
-            scrollToTopInFlight = false
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            if TVFocusBridge.isTabBarOnScreen(preferredTitle: "Movies") {
-                // requestFocusUpdate(to: pill) returns moved=false even
-                // with the bar on screen (trace 2026-09-04 14:46), so the
-                // pill is reached natively: drop the catcher strip and let
-                // the next Up travel from the hero button to the bar.
-                tabBarOnScreen = true
-                scrollToTopInFlight = false
-            } else {
-                focusTabBarWhenOnScreen(attempt: attempt + 1)
+    /// Clears the catcher-strip state once the tab bar is back on screen
+    /// after a scroll-to-top (the bar slides in over a few frames). One
+    /// cancellable task; cancelled on disappear so it never outlives the
+    /// view. Focus is NOT moved here: requestFocusUpdate(to: UITabBarButton)
+    /// never took, the next Up reaches the pill natively once the strip is
+    /// gone.
+    private func waitForTabBarOnScreen() {
+        barPollTask?.cancel()
+        barPollTask = Task { @MainActor in
+            for _ in 0..<15 {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled else { return }
+                if TVFocusBridge.isTabBarOnScreen(preferredTitle: AppTab.movies.title) {
+                    tabBarOnScreen = true
+                    break
+                }
             }
+            scrollToTopInFlight = false
         }
     }
 
-    private func scrollMoviesToTop(_ proxy: ScrollViewProxy) {
-        // Near the top (hero / header): ease up so it reads as a scroll.
-        // Deep in the grid: jump, because an animated scroll crawled up
-        // through every row (Logan 2026-09-03, both directions of that ask).
-        var noAnimation = Transaction()
-        noAnimation.disablesAnimations = true
-        withTransaction(noAnimation) {
-            proxy.scrollTo("movies-top", anchor: .top)
-        }
-        withAnimation(.easeInOut(duration: 0.2)) {
-            tvTabBarHidden = false
-        }
-        // Device log 2026-09-03 18:28:48: a press was routed here and the
-        // grid stayed put (the next press two seconds later found the bar
-        // still hidden). tvOS keeps the focused poster on screen, so the
-        // scroll to top was undone. Move focus onto the hero once the
-        // top is in view so nothing off-screen pulls the scroll back.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            heroFocusRequest = true
-        }
+    private func applyPendingDerived() {
+        guard let p = pendingDerived else { return }
+        pendingDerived = nil
+        // Only if nothing newer has been requested since it was computed.
+        if p.key == libraryKey { derived = p.value }
     }
 
     /// Search field (when open) and the Search, Sort, Manage Groups circles.
@@ -2241,7 +2233,7 @@ struct MoviesHeroCarousel: View {
     /// tvOS: set true to put focus back on the hero button that held it
     /// last (falls back to Resume).
     var restoreRequest: Binding<Bool> = .constant(false)
-    var onUpWhileScrolled: (() -> Void)? = nil
+
     /// tvOS: true while any hero button has focus (owner shows the fixed
     /// tab-bar focus guide).
     var onHeroFocusChange: ((Bool) -> Void)? = nil
@@ -2262,9 +2254,7 @@ struct MoviesHeroCarousel: View {
     /// "<page id>|primary|start|details" of the focused hero button.
     @FocusState private var heroFocus: String?
     @FocusState private var catcherFocused: Bool
-    @State private var heroWasFocused = false
     @State private var lastHeroButton: String?
-    @ObservedObject private var barState = TVTabBarScrollState.shared
     private var primaryFocusID: String { "\(currentID ?? pages.first?.id ?? "")|primary" }
     #endif
 
@@ -2302,7 +2292,7 @@ struct MoviesHeroCarousel: View {
             carousel
                 #if os(tvOS)
                 .onChange(of: heroFocus) { _, id in
-                    if id != nil { heroWasFocused = true; lastHeroButton = id }
+                    if id != nil { lastHeroButton = id }
                     onHeroFocusChange?(id != nil)
                 }
                 .onChange(of: focusRequest.wrappedValue) { _, wanted in
@@ -2312,7 +2302,13 @@ struct MoviesHeroCarousel: View {
                 }
                 .onChange(of: restoreRequest.wrappedValue) { _, wanted in
                     guard wanted else { return }
-                    heroFocus = lastHeroButton ?? primaryFocusID
+                    // Only a button that still exists: a stale id is a
+                    // silent no-op that leaves the top strip holding focus.
+                    if let last = lastHeroButton, pages.contains(where: { last.hasPrefix($0.id + "|") }) {
+                        heroFocus = last
+                    } else {
+                        heroFocus = primaryFocusID
+                    }
                     restoreRequest.wrappedValue = false
                 }
                 #endif

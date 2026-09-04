@@ -282,7 +282,7 @@ struct VODDetailView: View {
     @Environment(\.vodPushHandler) private var vodPushHandler
 
     private func pushDetail(_ pushed: VODDisplayItem) {
-        if let vodPushHandler { vodPushHandler(pushed) } else { knownForPush = pushed }
+        if let vodPushHandler { vodPushHandler.push(pushed) } else { knownForPush = pushed }
     }
     #if os(tvOS)
     /// Anchors initial focus to the movie Play button. When the async TMDB
@@ -2378,12 +2378,21 @@ private struct QRLinkOverlay: View {
 #endif
 
 /// Root NavigationStack push for nested VOD detail pushes (see pushDetail).
+/// Stable handle for nested pushes. A class so its identity never changes:
+/// injecting a fresh closure on every owner body pass invalidated the whole
+/// pushed detail subtree (review 2026-09-04).
+@MainActor
+final class VODPushRouter {
+    var push: (VODDisplayItem) -> Void = { _ in }
+    nonisolated init() {}
+}
+
 struct VODPushHandlerKey: EnvironmentKey {
-    nonisolated(unsafe) static let defaultValue: ((VODDisplayItem) -> Void)? = nil
+    nonisolated(unsafe) static let defaultValue: VODPushRouter? = nil
 }
 
 extension EnvironmentValues {
-    var vodPushHandler: ((VODDisplayItem) -> Void)? {
+    var vodPushHandler: VODPushRouter? {
         get { self[VODPushHandlerKey.self] }
         set { self[VODPushHandlerKey.self] = newValue }
     }

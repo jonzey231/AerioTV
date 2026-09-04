@@ -5184,7 +5184,8 @@ struct MainTabView: View {
             // behaviour of Favorites and DVR.
             if showVODTab {
                 MoviesView(vodStore: vodStore, isPlaying: $isPlaying,
-                           isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
+                           isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested,
+                           isSelected: selectedTab == .movies)
                     .tabItem { Label(AppTab.movies.title, systemImage: AppTab.movies.icon) }
                     .tag(AppTab.movies)
 
@@ -6370,13 +6371,15 @@ struct MainTabView: View {
             // received the press the first time, so the decision lives
             // here, where every press arrives.
             debugLog("🎮 Menu pressed: " + selectedTab.rawValue + " tab scrolled → scroll to top")
-            NotificationCenter.default.post(name: .aerioTabScrollToTop, object: nil)
+            NotificationCenter.default.post(name: .aerioTabScrollToTop, object: nil,
+                                            userInfo: ["tab": selectedTab.rawValue])
         } else if selectedTab.isVOD {
             // Movies & TV: Menu with the bar visible is "back to the top of
             // this tab" (close search, focus the hero), never a tab switch
             // (Logan 2026-09-04: Menu on the Search circle jumped to Live TV).
             debugLog("🎮 Menu pressed: " + selectedTab.rawValue + " tab at top → hero")
-            NotificationCenter.default.post(name: .aerioTabScrollToTop, object: nil)
+            NotificationCenter.default.post(name: .aerioTabScrollToTop, object: nil,
+                                            userInfo: ["tab": selectedTab.rawValue])
         } else {
             let tabName = selectedTab.rawValue
             debugLog("🎮 Menu pressed: " + tabName + " tab → switch to Live TV")
