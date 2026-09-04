@@ -1696,20 +1696,29 @@ struct MoviesHeroCarousel: View {
     var body: some View {
         VStack(spacing: 0) {
             #if os(tvOS)
-            // Present while no hero button has focus (Down from above lands
-            // here and is forwarded to Resume) and ALSO while the bar is
-            // hidden (Up from any hero button lands here and snaps to top).
-            if heroFocus == nil {
-                Color.clear
-                    .frame(height: 1)
-                    .frame(maxWidth: .infinity)
-                    .focusable(true)
-                    .focused($catcherFocused)
-                    .onChange(of: catcherFocused) { _, focused in
-                        guard focused else { return }
+            // Always present. Down from the bar lands here and is forwarded
+            // to Resume. Up from ANY hero button lands here and is handed
+            // to the tab bar through UIKit's focus system: the SwiftUI
+            // engine only found the (collapsed) bar from Resume, never
+            // from Play from Beginning or Details (Logan 2026-09-03).
+            Color.clear
+                .frame(height: 1)
+                .frame(maxWidth: .infinity)
+                .focusable(true)
+                .focused($catcherFocused)
+                .onChange(of: catcherFocused) { _, focused in
+                    guard focused else { return }
+                    if heroWasFocused {
+                        heroWasFocused = false
+                        if !TVFocusBridge.focusTabBar() {
+                            // No bar found: fall back to the owner's scroll.
+                            onUpWhileScrolled?()
+                            heroFocus = primaryFocusID
+                        }
+                    } else {
                         heroFocus = primaryFocusID
                     }
-            }
+                }
             #endif
             carousel
                 #if os(tvOS)
@@ -2319,6 +2328,40 @@ struct MoviesPosterFocusStyle: ButtonStyle {
             .scaleEffect(isFocused ? 1.08 : 1.0)
             .opacity(configuration.isPressed ? 0.8 : 1.0)
             .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+#endif
+
+#if os(tvOS)
+/// Programmatic focus moves the SwiftUI focus engine cannot express.
+enum TVFocusBridge {
+    /// Asks UIKit to focus the TabView's bar container (expanding it when
+    /// collapsed). Returns false when no bar view is in the window.
+    @MainActor
+    static func focusTabBar() -> Bool {
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
+            .first else { return false }
+        var found: UIView?
+        func walk(_ v: UIView) {
+            if found != nil { return }
+            let name = String(describing: type(of: v))
+            if name.contains("TabBarContainerView") || v is UITabBar {
+                found = v
+                return
+            }
+            for s in v.subviews { walk(s) }
+        }
+        walk(window)
+        guard let bar = found else {
+            debugLog("[HERO-FOCUS] tab bar view not found in window")
+            return false
+        }
+        guard let system = UIFocusSystem.focusSystem(for: bar) else { return false }
+        system.requestFocusUpdate(to: bar)
+        system.updateFocusIfNeeded()
+        debugLog("[HERO-FOCUS] requested focus on \(String(describing: type(of: bar)))")
+        return true
     }
 }
 #endif
