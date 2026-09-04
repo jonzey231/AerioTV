@@ -1301,6 +1301,11 @@ struct MoviesView: View {
                         // page to the top when scrolled (one scroll path).
                         heroFocusRequest = true
                     }
+                    // On the hero with the bar visible: nothing. Focus cannot
+                    // be moved into the TabView's bar programmatically on
+                    // tvOS 27 (pill, its container, the UITabBar and the
+                    // UITabBarController all refuse requestFocusUpdate,
+                    // verified 2026-09-04); Up reaches the pill natively.
                 }
                 // The Watchlist shelf appearing above the grid pushed the
                 // page content down under a fixed offset, which read as an
