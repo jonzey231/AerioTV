@@ -1995,6 +1995,13 @@ struct MoviesHero: View {
             #endif
         }
         .padding(.top, 4)
+        #if os(tvOS)
+        // One focus section for the row: Up from ANY button is resolved
+        // from the row's frame, the frame Resume already reaches the
+        // (system-collapsed) tab bar from (Logan 2026-09-03: Up from Play
+        // from Beginning went nowhere at that scroll position).
+        .focusSection()
+        #endif
     }
 
     @ViewBuilder
