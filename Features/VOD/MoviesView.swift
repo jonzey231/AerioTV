@@ -2599,16 +2599,25 @@ struct TabBarFocusGuide: UIViewRepresentable {
         func refreshTarget() {
             guard let window else { return }
             var buttons: [UIView] = []
+            var container: UIView?
             func walk(_ v: UIView) {
-                if String(describing: type(of: v)) == "UITabBarButton" { buttons.append(v) }
+                let n = String(describing: type(of: v))
+                if n == "UITabBarButton" { buttons.append(v) }
+                if container == nil, n.contains("TabBarContainerView") || v is UITabBar { container = v }
                 for s in v.subviews { walk(s) }
             }
             walk(window)
-            let target = buttons.first { ($0.accessibilityLabel ?? "") == preferredTitle } ?? buttons.first
-            let envs: [UIFocusEnvironment] = target.map { [$0] } ?? []
-            if guide.preferredFocusEnvironments.first !== target {
+            let pill = buttons.first { ($0.accessibilityLabel ?? "") == preferredTitle } ?? buttons.first
+            // The bar's CONTAINER environment first: a pill refuses focus
+            // arriving from outside its bar (trace 2026-09-04 14:15, the
+            // guide's redirect to the pill failed and tvOS re-seated focus
+            // on the rail); the container resolves its own preferred pill.
+            var envs: [UIFocusEnvironment] = []
+            if let container { envs.append(container) }
+            if let pill { envs.append(pill) }
+            if guide.preferredFocusEnvironments.first !== envs.first {
                 guide.preferredFocusEnvironments = envs
-                debugLog("[HERO-FOCUS] focus guide -> \(target.map { "UITabBarButton(\($0.accessibilityLabel ?? "?"))" } ?? "none")")
+                debugLog("[HERO-FOCUS] focus guide -> \(envs.map { String(describing: type(of: $0)) })")
             }
         }
     }
