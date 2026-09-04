@@ -214,6 +214,11 @@ struct MoviesView: View {
     /// the grid gets the whole screen; it returns near the top.
     @State private var tvTabBarHidden = false
     @State private var wantsTabBarHidden = false
+    /// True from a scroll-to-top request until the bar is back on screen.
+    /// Rapid Up presses during the animation each restarted it (video +
+    /// trace 2026-09-04 15:39), so while it is in flight the top strip is
+    /// unmounted and further hero-focus scroll requests are ignored.
+    @State private var scrollToTopInFlight = false
     @State private var scrollIsIdle = true
     #endif
 
@@ -989,8 +994,9 @@ struct MoviesView: View {
                                         // the top, focus staying on that button
                                         // (Logan 2026-09-04: Up from Search should
                                         // scroll up AND land on the hero button).
-                                        if !tabBarOnScreen {
+                                        if !tabBarOnScreen, !scrollToTopInFlight {
                                             debugLog("[FOCUS] hero focused while scrolled: scrolling to top")
+                                            scrollToTopInFlight = true
                                             withAnimation(.smooth(duration: 0.45)) {
                                                 scrollPosition.scrollTo(y: 0)
                                             }
@@ -1099,7 +1105,16 @@ struct MoviesView: View {
                     // (2.5 s after a tab switch) remounted the TabView
                     // while the hide was still deferred (trace 2026-09-04
                     // 15:16, "forced back up to the Movies tab").
-                    TVTabBarScrollState.shared.isHidden = hide || tvTabBarHidden
+                    // Assign only on change: a @Published write fires
+                    // objectWillChange even for an equal value, and this
+                    // ran per scroll frame, re-rendering HomeView's TabView
+                    // and every guide cell (Time Profiler 2026-09-04 15:48:
+                    // main thread saturated by GuideProgramButton.body
+                    // while scrolling posters).
+                    let wantHidden = hide || tvTabBarHidden
+                    if TVTabBarScrollState.shared.isHidden != wantHidden {
+                        TVTabBarScrollState.shared.isHidden = wantHidden
+                    }
                     if !hide, tvTabBarHidden {
                         tvTabBarHidden = false
                     } else if hide, !tvTabBarHidden, scrollIsIdle {
@@ -1118,7 +1133,10 @@ struct MoviesView: View {
                 }
                 .ignoresSafeArea(.container, edges: .top)
                 .onChange(of: tvTabBarHidden) { _, hidden in
-                    TVTabBarScrollState.shared.isHidden = hidden || wantsTabBarHidden
+                    let wantHidden = hidden || wantsTabBarHidden
+                    if TVTabBarScrollState.shared.isHidden != wantHidden {
+                        TVTabBarScrollState.shared.isHidden = wantHidden
+                    }
                     if !hidden, let p = pendingDerived {
                         derived = p
                         pendingDerived = nil
@@ -1149,7 +1167,7 @@ struct MoviesView: View {
                 // nothing above can take focus, so this strip catches Up,
                 // scrolls the page to the top and lands on Resume; the next
                 // Up is native. Stays mounted while it holds focus.
-                if (heroHasFocus && !tabBarOnScreen) || topCatcherFocused {
+                if (heroHasFocus && !tabBarOnScreen && !scrollToTopInFlight) || topCatcherFocused {
                     Color.clear
                         .frame(height: 8)
                         .frame(maxWidth: .infinity)
@@ -1159,10 +1177,12 @@ struct MoviesView: View {
                         .onChange(of: topCatcherFocused) { _, focused in
                             guard focused else { return }
                             debugLog("[FOCUS] top catcher: bar off screen, scrolling to top")
+                            scrollToTopInFlight = true
                             withAnimation(.smooth(duration: 0.45)) {
                                 scrollPosition.scrollTo(y: 0)
                             }
                             tvTabBarHidden = false
+                            focusTabBarWhenOnScreen(attempt: 0)
                             // Restore at once: holding focus here for
                             // 0.5 s while the bar slid in read as the
                             // Movies pill taking focus and losing it again
@@ -1348,6 +1368,7 @@ struct MoviesView: View {
     private func focusTabBarWhenOnScreen(attempt: Int) {
         guard attempt < 15 else {
             debugLog("[HERO-FOCUS] bar never came on screen; focus stays on hero")
+            scrollToTopInFlight = false
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -1357,6 +1378,7 @@ struct MoviesView: View {
                 // pill is reached natively: drop the catcher strip and let
                 // the next Up travel from the hero button to the bar.
                 tabBarOnScreen = true
+                scrollToTopInFlight = false
                 debugLog("[HERO-FOCUS] bar on screen after \(attempt + 1) polls; catcher unmounted")
             } else {
                 focusTabBarWhenOnScreen(attempt: attempt + 1)

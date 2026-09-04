@@ -5123,6 +5123,12 @@ struct MainTabView: View {
         // purpose; remounting the TabView here tore down every tab, the
         // 5k-title grid included (device log 2026-09-03, "froze up").
         guard !tabBarScrollState.isHidden else { return }
+        // The VOD tabs own their bar (hide on scroll, restore on hero
+        // focus). tvOS also collapses the bar for ANY content scroll, so a
+        // first step into the poster grid (below Movies' hide threshold)
+        // looked parked and this remounted the TabView 2.5 s after the
+        // tab switch (trace 2026-09-04 15:41, "jumped back to the tab").
+        guard !selectedTab.isVOD else { return }
         guard let window = UIApplication.shared.connectedScenes
             .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
             .first else { return }
