@@ -1716,8 +1716,10 @@ struct MoviesHeroCarousel: View {
                     guard focused else { return }
                     if heroWasFocused {
                         heroWasFocused = false
-                        if !TVFocusBridge.focusTabBar() {
-                            // No bar found: fall back to the owner's scroll.
+                        if !TVFocusBridge.focusTabBar(preferredTitle: "Movies") {
+                            // Could not reach the pill: never leave focus on
+                            // this invisible strip; back to Resume (and to the
+                            // top if scrolled).
                             onUpWhileScrolled?()
                             heroFocus = primaryFocusID
                         }
@@ -2345,32 +2347,33 @@ struct MoviesPosterFocusStyle: ButtonStyle {
 enum TVFocusBridge {
     /// Asks UIKit to focus the TabView's bar container (expanding it when
     /// collapsed). Returns false when no bar view is in the window.
+    /// Device log 2026-09-04 13:36: asking for the CONTAINER did nothing
+    /// (it is not a focus item; focus stayed on the catcher, i.e. on
+    /// nothing visible). The tab pill itself (UITabBarButton) is the
+    /// item. Prefer the pill titled `preferredTitle` (the current tab),
+    /// else any pill. Returns true only when focus actually moved.
     @MainActor
-    static func focusTabBar() -> Bool {
+    static func focusTabBar(preferredTitle: String) -> Bool {
         guard let window = UIApplication.shared.connectedScenes
             .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
             .first else { return false }
-        var found: UIView?
+        var buttons: [UIView] = []
         func walk(_ v: UIView) {
-            if found != nil { return }
-            let name = String(describing: type(of: v))
-            if name.contains("TabBarContainerView") || v is UITabBar {
-                found = v
-                return
-            }
+            if String(describing: type(of: v)) == "UITabBarButton" { buttons.append(v) }
             for s in v.subviews { walk(s) }
         }
         walk(window)
-        guard let bar = found else {
-            debugLog("[HERO-FOCUS] tab bar view not found in window")
+        let target = buttons.first { ($0.accessibilityLabel ?? "") == preferredTitle } ?? buttons.first
+        guard let target else {
+            debugLog("[HERO-FOCUS] no UITabBarButton in window")
             return false
         }
-        guard let system = UIFocusSystem.focusSystem(for: bar) else { return false }
-        system.requestFocusUpdate(to: bar)
+        guard let system = UIFocusSystem.focusSystem(for: target) else { return false }
+        system.requestFocusUpdate(to: target)
         system.updateFocusIfNeeded()
-        let focusedNow = system.focusedItem.map { String(describing: type(of: $0)) } ?? "nil"
-        debugLog("[HERO-FOCUS] requested focus on \(String(describing: type(of: bar))) frame=\(bar.frame) hidden=\(bar.isHidden) alpha=\(bar.alpha); focused now=\(focusedNow)")
-        return true
+        let moved = system.focusedItem === target
+        debugLog("[HERO-FOCUS] requested focus on UITabBarButton(\(target.accessibilityLabel ?? "?")) frame=\(target.frame); moved=\(moved)")
+        return moved
     }
 }
 #endif
