@@ -1701,32 +1701,30 @@ struct MoviesHeroCarousel: View {
     var body: some View {
         VStack(spacing: 0) {
             #if os(tvOS)
-            // Always present. Down from the bar lands here and is forwarded
-            // to Resume. Up from ANY hero button lands here and is handed
-            // to the tab bar through UIKit's focus system: the SwiftUI
-            // engine only found the (collapsed) bar from Resume, never
-            // from Play from Beginning or Details (Logan 2026-09-03).
-            Color.clear
-                .frame(height: 1)
-                .frame(maxWidth: .infinity)
-                .focusable(true)
-                .focused($catcherFocused)
-                .onChange(of: catcherFocused) { _, focused in
-                    debugLog("[FOCUS] hero catcher focused=\(focused) heroWasFocused=\(heroWasFocused) barHidden=\(barState.isHidden)")
-                    guard focused else { return }
-                    if heroWasFocused {
-                        heroWasFocused = false
-                        if !TVFocusBridge.focusTabBar(preferredTitle: "Movies") {
-                            // Could not reach the pill: never leave focus on
-                            // this invisible strip; back to Resume (and to the
-                            // top if scrolled).
-                            onUpWhileScrolled?()
-                            heroFocus = primaryFocusID
-                        }
-                    } else {
+            // Two different strips share the slot above the hero:
+            // - no hero button focused: a SwiftUI catcher, so Down from the
+            //   bar lands here and is forwarded to Resume;
+            // - a hero button focused: a UIKit focus guide preferring the
+            //   Movies tab pill, so Up from ANY hero button is redirected by
+            //   the engine itself onto the pill. Device log 2026-09-04: the
+            //   engine found the pill only from Resume, and
+            //   requestFocusUpdate(to: pill) from a catcher never moved.
+            if heroFocus == nil {
+                Color.clear
+                    .frame(height: 8)
+                    .frame(maxWidth: .infinity)
+                    .focusable(true)
+                    .focused($catcherFocused)
+                    .onChange(of: catcherFocused) { _, focused in
+                        debugLog("[FOCUS] hero catcher focused=\(focused) barHidden=\(barState.isHidden)")
+                        guard focused else { return }
                         heroFocus = primaryFocusID
                     }
-                }
+            } else {
+                TabBarFocusGuide(preferredTitle: "Movies")
+                    .frame(height: 8)
+                    .frame(maxWidth: .infinity)
+            }
             #endif
             carousel
                 #if os(tvOS)
@@ -2422,6 +2420,58 @@ final class MoviesFocusTracer {
         if let token { NotificationCenter.default.removeObserver(token) }
         token = nil
         debugLog("[FOCUS] tracer off")
+    }
+}
+#endif
+
+#if os(tvOS)
+/// A UIFocusGuide hosted in SwiftUI: a region the tvOS focus engine treats
+/// as a target and then redirects to `preferredFocusEnvironments`. Here it
+/// sits above the hero and prefers the tab pill titled `preferredTitle`,
+/// re-resolved on every layout pass (the pill view is recreated by the
+/// TabView).
+struct TabBarFocusGuide: UIViewRepresentable {
+    let preferredTitle: String
+
+    func makeUIView(context: Context) -> GuideHostView { GuideHostView(preferredTitle: preferredTitle) }
+    func updateUIView(_ uiView: GuideHostView, context: Context) { uiView.refreshTarget() }
+
+    final class GuideHostView: UIView {
+        private let guide = UIFocusGuide()
+        private let preferredTitle: String
+
+        init(preferredTitle: String) {
+            self.preferredTitle = preferredTitle
+            super.init(frame: .zero)
+            isUserInteractionEnabled = false
+            addLayoutGuide(guide)
+            NSLayoutConstraint.activate([
+                guide.leadingAnchor.constraint(equalTo: leadingAnchor),
+                guide.trailingAnchor.constraint(equalTo: trailingAnchor),
+                guide.topAnchor.constraint(equalTo: topAnchor),
+                guide.bottomAnchor.constraint(equalTo: bottomAnchor),
+            ])
+        }
+        required init?(coder: NSCoder) { fatalError() }
+
+        override func didMoveToWindow() { super.didMoveToWindow(); refreshTarget() }
+        override func layoutSubviews() { super.layoutSubviews(); refreshTarget() }
+
+        func refreshTarget() {
+            guard let window else { return }
+            var buttons: [UIView] = []
+            func walk(_ v: UIView) {
+                if String(describing: type(of: v)) == "UITabBarButton" { buttons.append(v) }
+                for s in v.subviews { walk(s) }
+            }
+            walk(window)
+            let target = buttons.first { ($0.accessibilityLabel ?? "") == preferredTitle } ?? buttons.first
+            let envs: [UIFocusEnvironment] = target.map { [$0] } ?? []
+            if guide.preferredFocusEnvironments.first !== target {
+                guide.preferredFocusEnvironments = envs
+                debugLog("[HERO-FOCUS] focus guide -> \(target.map { "UITabBarButton(\($0.accessibilityLabel ?? "?"))" } ?? "none")")
+            }
+        }
     }
 }
 #endif
