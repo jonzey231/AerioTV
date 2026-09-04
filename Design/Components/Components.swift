@@ -42,6 +42,29 @@ final class DarkFocusTextField: UITextField {
         overrideUserInterfaceStyle = .dark
     }
 
+    /// tvOS wraps the field in its own 75 pt floating capsule: a black
+    /// UIView plus a UIVisualEffectView (blur + 32% white), which showed as
+    /// a second pill around the caller's 60 pt box (hierarchy dump, Movies
+    /// search, Logan 2026-09-04). Strip that chrome on every layout pass and
+    /// keep only the text and placeholder labels.
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        stripSystemChrome(self)
+    }
+
+    private func stripSystemChrome(_ view: UIView) {
+        for v in view.subviews {
+            if v is UIVisualEffectView {
+                v.isHidden = true
+                continue
+            }
+            if !(v is UILabel), v.backgroundColor != nil, v.backgroundColor != .clear {
+                v.backgroundColor = .clear
+            }
+            stripSystemChrome(v)
+        }
+    }
+
     // Deliberately does NOT call super: that is what suppresses the system
     // white/gray focus platter. We only report focus and keep the interior
     // transparent.

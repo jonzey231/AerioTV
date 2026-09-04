@@ -125,6 +125,8 @@ struct MoviesView: View {
     @State private var navPath = NavigationPath()
     #if os(tvOS)
     @State private var showSearchField = false
+    /// Search circle focus: Menu collapses the field and lands here.
+    @FocusState private var searchCircleFocused: Bool
     @State private var showSortMenu = false
     @State private var showFilterMenu = false
     @State private var searchFieldFocused = false
@@ -1141,8 +1143,18 @@ struct MoviesView: View {
                 // is nothing to scroll, the press is forwarded to the
                 // tab-level routing by notification.
                 .onExitCommand {
-                    debugLog("[MOVIES-EXIT] hidden=\(tvTabBarHidden)")
-                    if tvTabBarHidden {
+                    debugLog("[MOVIES-EXIT] hidden=\(tvTabBarHidden) search=\(showSearchField)")
+                    if showSearchField {
+                        // Menu closes the search field (there was no way to
+                        // dismiss it, Logan 2026-09-04) and lands on Search.
+                        withAnimation(.spring(response: 0.25)) {
+                            showSearchField = false
+                            searchText = ""
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            searchCircleFocused = true
+                        }
+                    } else if tvTabBarHidden {
                         scrollMoviesToTop(proxy)
                     } else {
                         NotificationCenter.default.post(name: .aerioTabMenuPassthrough, object: nil)
@@ -1532,15 +1544,15 @@ struct MoviesView: View {
                     placeholder: "Search movies",
                     isSecure: false,
                     fontSize: 24,
+                    verticalInset: 6,
                     onFocusChange: { searchFieldFocused = $0 }
                 )
                 .frame(width: 380, height: 60)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.elevatedBackground)
-                )
+                .clipShape(Capsule())
+                // Capsule, same height as the action circles beside it.
+                .background(Capsule().fill(Color.elevatedBackground))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    Capsule()
                         .stroke(Color.accentPrimary, lineWidth: searchFieldFocused ? 3 : 0)
                         .animation(.easeInOut(duration: 0.15), value: searchFieldFocused)
                 )
@@ -1554,6 +1566,7 @@ struct MoviesView: View {
                     if !showSearchField { searchText = "" }
                 }
             }
+            .focused($searchCircleFocused)
             TVNavActionCircle(systemImage: "arrow.up.arrow.down", label: "Sort") {
                 showSortMenu = true
             }
