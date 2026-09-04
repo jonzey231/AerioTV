@@ -213,6 +213,8 @@ struct MoviesView: View {
     /// tvOS: the tab bar hides once the library scrolls past the top so
     /// the grid gets the whole screen; it returns near the top.
     @State private var tvTabBarHidden = false
+    @State private var wantsTabBarHidden = false
+    @State private var scrollIsIdle = true
     #endif
 
     /// User-tunable UI scale (0.85–1.25). Only consumed on iPad / Mac Catalyst
@@ -240,11 +242,21 @@ struct MoviesView: View {
     #endif
 
     /// Auth headers for the active Dispatcharr server — used by AuthPosterImage.
-    private var dispatcharrHeaders: [String: String] {
+    /// Cached: `authHeaders` reads the Keychain (API key) and sysctl
+    /// (default User-Agent) every call, and every poster cell asked for it
+    /// on every layout pass (Time Profiler 2026-09-04: a third of main
+    /// thread time during the scroll).
+    @State private var dispatcharrHeaders: [String: String] = [:]
+
+    private var dispatcharrHeadersKey: String {
+        servers.map { "\($0.id)|\($0.isActive)|\($0.supportsVOD)|\($0.type)" }.joined(separator: ",")
+    }
+
+    private func refreshDispatcharrHeaders() {
         guard let s = servers.first(where: { $0.supportsVOD && $0.type == .dispatcharrAPI && $0.isActive })
                    ?? servers.first(where: { $0.supportsVOD && $0.type == .dispatcharrAPI })
-        else { return [:] }
-        return s.authHeaders
+        else { dispatcharrHeaders = [:]; return }
+        dispatcharrHeaders = s.authHeaders
     }
 
     private var filteredMovies: [VODDisplayItem] {
@@ -329,7 +341,11 @@ struct MoviesView: View {
                 }.value
                 guard !Task.isCancelled else { return }
                 #if os(tvOS)
-                if tvTabBarHidden && !derived.library.isEmpty {
+                // Held while the bar is hidden OR the scroll is moving: the
+                // library sweep republishes every 5 s and each rebuild of a
+                // multi-thousand-item grid mid-scroll read as stutter (Time
+                // Profiler + log 2026-09-04 15:18, test ran during the sweep).
+                if (tvTabBarHidden || !scrollIsIdle) && !derived.library.isEmpty {
                     pendingDerived = result
                 } else {
                     derived = result
@@ -343,6 +359,9 @@ struct MoviesView: View {
             .onAppear { MoviesFocusTracer.shared.start() }
             .onDisappear { MoviesFocusTracer.shared.stop() }
             #endif
+            .onAppear { refreshDispatcharrHeaders(); refreshHeroPages() }
+            .onChange(of: heroPagesKey) { _, _ in refreshHeroPages() }
+            .onChange(of: dispatcharrHeadersKey) { _, _ in refreshDispatcharrHeaders() }
             .onAppear {
                 hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                 // v1.6.22: same guard as TVShowsView.onAppear. The
@@ -748,17 +767,34 @@ struct MoviesView: View {
 
     /// Hero pages: every Continue Watching title (newest first, up to 12),
     /// or, with nothing in progress, the newest addition or first title.
-    private var heroPages: [MoviesHeroPage] {
-        let resumes: [MoviesHeroPage] = movieProgress.prefix(12).compactMap { p in
-            let item = vodStore.movies.first(where: { $0.id == p.vodID })
-                ?? MoviesView.syntheticItem(from: p)
+    /// Cached hero pages. The old computed form ran a linear search over
+    /// the whole library for each resume row on EVERY body pass, and a
+    /// tvOS focus move re-evaluates the body (Time Profiler 2026-09-04
+    /// 15:24: a third of main thread time while stepping rows).
+    @State private var heroPages: [MoviesHeroPage] = []
+
+    private var heroPagesKey: String {
+        let progress = movieProgress.prefix(12).map { "\($0.vodID)|\($0.positionMs)" }.joined(separator: ",")
+        return "\(progress)#\(vodStore.movies.count)#\(recentlyAdded.first?.id ?? "")#\(hiddenGroups.count)"
+    }
+
+    private func refreshHeroPages() {
+        let progress = Array(movieProgress.prefix(12))
+        var byID: [String: VODDisplayItem] = [:]
+        if !progress.isEmpty {
+            let wanted = Set(progress.map(\.vodID))
+            for m in vodStore.movies where wanted.contains(m.id) && byID[m.id] == nil { byID[m.id] = m }
+        }
+        let resumes: [MoviesHeroPage] = progress.compactMap { p in
+            let item = byID[p.vodID] ?? MoviesView.syntheticItem(from: p)
             return item.map { MoviesHeroPage(item: $0, progress: p) }
         }
-        if !resumes.isEmpty { return resumes }
+        if !resumes.isEmpty { heroPages = resumes; return }
         if let single = recentlyAdded.first ?? visibleMovies.first {
-            return [MoviesHeroPage(item: single, progress: nil)]
+            heroPages = [MoviesHeroPage(item: single, progress: nil)]
+        } else {
+            heroPages = []
         }
-        return []
     }
 
     /// Genre pills: the visible categories, in store order, "All" first.
@@ -955,9 +991,13 @@ struct MoviesView: View {
                                         // scroll up AND land on the hero button).
                                         if !tabBarOnScreen {
                                             debugLog("[FOCUS] hero focused while scrolled: scrolling to top")
-                                            withAnimation(.easeInOut(duration: 0.4)) {
+                                            withAnimation(.smooth(duration: 0.45)) {
                                                 scrollPosition.scrollTo(y: 0)
                                             }
+                                            // Bar back at once: waiting for the
+                                            // scroll left a 0.6 s window where a
+                                            // quick second Up was swallowed by the
+                                            // top strip (trace 2026-09-04 15:12).
                                             tvTabBarHidden = false
                                             focusTabBarWhenOnScreen(attempt: 0)
                                         }
@@ -1048,16 +1088,37 @@ struct MoviesView: View {
                     // from any hero button reaches the Movies pill directly
                     // (a hidden bar was unreachable from two of the three
                     // buttons, Logan 2026-09-03). 560 = top inset + hero.
+                    // Hiding re-lays out the TabView; doing that while the
+                    // focus-driven scroll is still moving read as jitter
+                    // (Logan 2026-09-04), so the hide waits for the scroll
+                    // to settle. Showing is immediate (the top strip and
+                    // hero focus handle their own sequencing).
                     let hide = y > 560
-                    if hide != tvTabBarHidden {
-                        // No explicit animation: the toolbar transition is the
-                        // system's; nothing in the content moves any more.
-                        tvTabBarHidden = hide
+                    wantsTabBarHidden = hide
+                    // Flag the intent at once: HomeView's parked-bar heal
+                    // (2.5 s after a tab switch) remounted the TabView
+                    // while the hide was still deferred (trace 2026-09-04
+                    // 15:16, "forced back up to the Movies tab").
+                    TVTabBarScrollState.shared.isHidden = hide || tvTabBarHidden
+                    if !hide, tvTabBarHidden {
+                        tvTabBarHidden = false
+                    } else if hide, !tvTabBarHidden, scrollIsIdle {
+                        tvTabBarHidden = true
+                    }
+                }
+                .onScrollPhaseChange { _, phase in
+                    scrollIsIdle = phase == .idle
+                    if phase == .idle, wantsTabBarHidden, !tvTabBarHidden {
+                        tvTabBarHidden = true
+                    }
+                    if phase == .idle, !tvTabBarHidden, let p = pendingDerived {
+                        derived = p
+                        pendingDerived = nil
                     }
                 }
                 .ignoresSafeArea(.container, edges: .top)
                 .onChange(of: tvTabBarHidden) { _, hidden in
-                    TVTabBarScrollState.shared.isHidden = hidden
+                    TVTabBarScrollState.shared.isHidden = hidden || wantsTabBarHidden
                     if !hidden, let p = pendingDerived {
                         derived = p
                         pendingDerived = nil
@@ -1098,7 +1159,7 @@ struct MoviesView: View {
                         .onChange(of: topCatcherFocused) { _, focused in
                             guard focused else { return }
                             debugLog("[FOCUS] top catcher: bar off screen, scrolling to top")
-                            withAnimation(.easeInOut(duration: 0.4)) {
+                            withAnimation(.smooth(duration: 0.45)) {
                                 scrollPosition.scrollTo(y: 0)
                             }
                             tvTabBarHidden = false
