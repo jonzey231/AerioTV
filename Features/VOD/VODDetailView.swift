@@ -276,6 +276,14 @@ struct VODDetailView: View {
     /// Non-nil pushes that title's detail (Known For deep-link). A plain
     /// push, so Back returns to THIS title with the bio sheet closed.
     @State private var knownForPush: VODDisplayItem?
+    /// Root-path push handler (Movies tab). When present, nested pushes go
+    /// through the owning NavigationStack's path instead of this view's
+    /// navigationDestination(item:), which hangs on duplicate values.
+    @Environment(\.vodPushHandler) private var vodPushHandler
+
+    private func pushDetail(_ pushed: VODDisplayItem) {
+        if let vodPushHandler { vodPushHandler(pushed) } else { knownForPush = pushed }
+    }
     #if os(tvOS)
     /// Anchors initial focus to the movie Play button. When the async TMDB
     /// cast strip realises a beat after open, its `.card` buttons (the
@@ -351,6 +359,7 @@ struct VODDetailView: View {
                     if usesTVMovieLayout {
                         #if os(tvOS)
                         tvDetailsBlock
+                        tvRelatedSection
                         #endif
                     }
                     if item.type == .series {
@@ -433,6 +442,9 @@ struct VODDetailView: View {
             await loadTMDBDetailsIfNeeded()
             await loadTMDBCreditsIfNeeded()
             await loadTMDBPosterIfNeeded()
+            #if os(tvOS)
+            await loadRelatedIfNeeded()
+            #endif
         }
         .sheet(item: $bioPerson) { person in
             PersonBioSheet(person: person, resolve: resolveKnownFor)
@@ -506,6 +518,8 @@ struct VODDetailView: View {
     }
     @State private var qrLink: QRLink?
     @State private var tvVersionPickerPresented = false
+    /// "Related" strip: TMDB recommendations narrowed to the library.
+    @State private var relatedItems: [VODDisplayItem] = []
 
     private var tvHeroURL: URL? {
         (fullMovie?.backdropURL ?? fullSeries?.backdropURL) ?? item.posterURL ?? tmdbPosterURL
@@ -702,6 +716,77 @@ struct VODDetailView: View {
             }
         }
         .focusSection()
+    }
+
+    /// Related titles (TMDB recommendations, library only). Matching runs
+    /// off the main thread over a snapshot: the first version walked all
+    /// ~5k titles per suggestion on the main actor and froze the page
+    /// (Logan 2026-09-04 16:11).
+    @MainActor
+    private func loadRelatedIfNeeded() async {
+        guard usesTVMovieLayout, relatedItems.isEmpty,
+              TMDBPosters.isEnabled, let apiKey = TMDBPosters.apiKey else { return }
+        let stored = [fullMovie?.tmdbID, item.movie?.tmdbID].compactMap { $0 }.first { !$0.isEmpty }
+        let tmdbID: String?
+        if let stored { tmdbID = stored } else {
+            tmdbID = await TMDBService.resolveID(forTitle: item.name, isMovie: true, apiKey: apiKey)
+        }
+        guard let tmdbID else { return }
+        let recs = await TMDBService.recommendations(forTMDBID: tmdbID, isMovie: true, apiKey: apiKey)
+        guard !recs.isEmpty else { return }
+        let library = VODStore.shared.movies + VODStore.shared.movieSearchResults
+        let selfID = item.id
+        let hits = await Task.detached(priority: .userInitiated) { () -> [VODDisplayItem] in
+            var byTMDB: [String: VODDisplayItem] = [:]
+            var byTitle: [String: VODDisplayItem] = [:]
+            for m in library {
+                let id = m.movie?.tmdbID ?? ""
+                if !id.isEmpty {
+                    if byTMDB[id] == nil { byTMDB[id] = m }
+                } else {
+                    let key = TMDBService.splitTitleYear(m.name).title.lowercased()
+                    if byTitle[key] == nil { byTitle[key] = m }
+                }
+            }
+            var seen: Set<String> = [selfID]
+            var out: [VODDisplayItem] = []
+            for rec in recs {
+                let hit = byTMDB[rec.id] ?? byTitle[TMDBService.splitTitleYear(rec.title).title.lowercased()]
+                guard let hit, seen.insert(hit.id).inserted else { continue }
+                out.append(hit)
+                if out.count >= 12 { break }
+            }
+            return out
+        }.value
+        debugLog("🎬 Related: \(recs.count) TMDB recommendations -> \(hits.count) in library")
+        relatedItems = hits
+    }
+
+    @ViewBuilder
+    private var tvRelatedSection: some View {
+        if !relatedItems.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Related")
+                    .font(.headlineSmall)
+                    .foregroundColor(.textPrimary)
+                    .padding(.horizontal, 56)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 32) {
+                        ForEach(relatedItems) { related in
+                            Button { pushDetail(related) } label: {
+                                VODPosterCard(item: related, headers: serverHeaders())
+                                    .frame(width: 200)
+                            }
+                            .buttonStyle(MoviesPosterFocusStyle())
+                        }
+                    }
+                    .padding(.horizontal, 56)
+                    .padding(.vertical, 36)
+                }
+            }
+            .padding(.top, 16)
+            .focusSection()
+        }
     }
 
     /// Two-column facts block under the cast strip.
@@ -1889,14 +1974,14 @@ struct VODDetailView: View {
                 Text("Cast & Crew")
                     .font(.headlineSmall)
                     .foregroundColor(.textPrimary)
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, usesTVMovieLayout ? 56 : 16)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 12) {
                         ForEach(castCrewPeople) { person in
                             PersonCard(person: person) { bioPerson = person }
                         }
                     }
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, usesTVMovieLayout ? 56 : 16)
                     // Headroom for the tvOS focus scale so the focused card is
                     // not clipped by the scroll view. 12 was measured too small:
                     // .card grows a ~366pt card by roughly a tenth, which is
@@ -1941,7 +2026,7 @@ struct VODDetailView: View {
         // Let the sheet dismissal settle before pushing, so the navigation
         // transition does not race the modal teardown.
         try? await Task.sleep(for: .milliseconds(350))
-        knownForPush = hit
+        pushDetail(hit)
         return true
     }
 
@@ -2260,6 +2345,18 @@ private struct QRLinkOverlay: View {
     }
 }
 #endif
+
+/// Root NavigationStack push for nested VOD detail pushes (see pushDetail).
+struct VODPushHandlerKey: EnvironmentKey {
+    nonisolated(unsafe) static let defaultValue: ((VODDisplayItem) -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var vodPushHandler: ((VODDisplayItem) -> Void)? {
+        get { self[VODPushHandlerKey.self] }
+        set { self[VODPushHandlerKey.self] = newValue }
+    }
+}
 
 private struct TVPlayButton: View {
     let isResolvingURL: Bool

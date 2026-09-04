@@ -303,6 +303,11 @@ struct MoviesView: View {
             }
             .navigationDestination(for: VODDisplayItem.self) { item in
                 VODDetailView(item: item, isPlaying: $isPlaying)
+                    // Nested pushes (Related, Known For) append to THIS path.
+                    // A detail's own navigationDestination(item:) pushing a
+                    // value already in the path wedged the stack (Logan
+                    // 2026-09-04 16:11/16:14: A -> Related B -> Related A hung).
+                    .environment(\.vodPushHandler) { pushed in navPath.append(pushed) }
             }
             #if os(iOS)
             // No .navigationTitle on iOS — OnDemandView hosts the
@@ -2293,6 +2298,8 @@ struct MoviesHeroButton: View {
                 if !title.isEmpty {
                     Text(title)
                         .font(.system(size: textSize, weight: .semibold))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
             }
             .foregroundColor(isPrimary ? .appBackground : .textPrimary)

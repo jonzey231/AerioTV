@@ -1532,6 +1532,50 @@ extension TMDBService {
         return await credits(forTMDBID: id, isMovie: isMovie, apiKey: apiKey)
     }
 
+    // MARK: Recommendations (detail page "Related")
+
+    private struct RecommendationsResponse: Decodable {
+        struct Entry: Decodable {
+            let id: FlexID?
+            let title: String?
+            let name: String?
+            let posterPath: String?
+            enum CodingKeys: String, CodingKey {
+                case id, title, name
+                case posterPath = "poster_path"
+            }
+        }
+        let results: [Entry]?
+    }
+
+    /// TMDB's recommendations for a title, falling back to "similar" when
+    /// the recommendations list is empty (common for new or niche titles).
+    /// Poster-less rows are dropped. Capped at 20; the caller narrows to
+    /// what exists in the user's library.
+    static func recommendations(forTMDBID id: String, isMovie: Bool, apiKey: String) async -> [TMDBKnownForItem] {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let kind = isMovie ? "movie" : "tv"
+        for endpoint in ["recommendations", "similar"] {
+            guard let req = makeRequest(path: "/\(kind)/\(trimmed)/\(endpoint)", key: apiKey) else { continue }
+            guard let (data, resp) = try? await session.data(for: req),
+                  let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                  let decoded = try? JSONDecoder().decode(RecommendationsResponse.self, from: data)
+            else { continue }
+            let items: [TMDBKnownForItem] = (decoded.results ?? []).compactMap { e in
+                guard let rid = e.id?.value, !rid.isEmpty,
+                      let title = nonBlank(e.title ?? e.name),
+                      let poster = nonBlank(e.posterPath) else { return nil }
+                return TMDBKnownForItem(id: rid, title: title, posterPath: poster, isMovie: isMovie)
+            }
+            if !items.isEmpty {
+                debugLog("🎬 TMDB \(endpoint) id \(trimmed) (\(kind)) -> \(items.count)")
+                return Array(items.prefix(20))
+            }
+        }
+        return []
+    }
+
     // MARK: Person bio + Known For
 
     /// Known For cameo filter (mirrors the Android heuristic, which itself
