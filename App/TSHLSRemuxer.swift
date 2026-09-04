@@ -1512,12 +1512,13 @@ struct AVPlayerMultiviewTile: View {
     /// The display manager our criteria landed on, for teardown. Mirrors
     /// the mpv path's clearDisplayCriteria bookkeeping.
     @State private var appliedDisplayManager: AVDisplayManager?
+    #endif
     /// Set by stop(). Device log 2026-09-03 18:33: Menu two seconds into
     /// an MKV movie tore the tile down, then the still-running prepare
     /// finished and applied HDR display criteria with no tile left to
     /// clear them (the panel stayed in HDR). Late applies are dropped.
+    /// Declared on every platform (start/stop touch it unconditionally).
     @State private var tileStopped = false
-    #endif
 
     var body: some View {
         ZStack {
