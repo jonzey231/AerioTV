@@ -130,6 +130,8 @@ struct MoviesView: View {
     @FocusState private var gridFocus: String?
     /// Set to move focus onto the hero's Resume (scroll-to-top landing).
     @State private var heroFocusRequest = false
+    /// True while a hero button has focus: shows the fixed tab-bar guide.
+    @State private var heroHasFocus = false
     @State private var lastGridFocus: String?
     @State private var railHadFocus = false
     @State private var railFocusRequest: String?
@@ -927,6 +929,11 @@ struct MoviesView: View {
                                         if tvTabBarHidden { scrollMoviesToTop(proxy) }
                                         #endif
                                     },
+                                    onHeroFocusChange: { focused in
+                                        #if os(tvOS)
+                                        heroHasFocus = focused
+                                        #endif
+                                    },
                                     onPrimary: { heroPrimary($0) },
                                     onPlayFromStart: { playMovie($0.item, resumePositionMs: 0) },
                                     onDetails: { navPath.append($0.item) },
@@ -1033,6 +1040,19 @@ struct MoviesView: View {
                 }
 
                 .onDisappear { TVTabBarScrollState.shared.isHidden = false }
+                #endif
+
+                #if os(tvOS)
+                // Fixed strip at the very top of the screen while a hero
+                // button has focus: Up from ANY hero button, at any scroll
+                // position, hits this guide and is redirected to the Movies
+                // pill (tvOS expands the collapsed bar as it takes focus).
+                if heroHasFocus {
+                    TabBarFocusGuide(preferredTitle: "Movies")
+                        .frame(height: 8)
+                        .frame(maxWidth: .infinity)
+                        .ignoresSafeArea(.container, edges: .top)
+                }
                 #endif
 
                 // Rail: a sibling of the ScrollView, not an overlay on it and
@@ -1679,6 +1699,9 @@ struct MoviesHeroCarousel: View {
     /// Up then reaches the bar normally. The focus engine found the hidden
     /// bar from Resume but not from the other buttons (Logan 2026-09-03).
     var onUpWhileScrolled: (() -> Void)? = nil
+    /// tvOS: true while any hero button has focus (owner shows the fixed
+    /// tab-bar focus guide).
+    var onHeroFocusChange: ((Bool) -> Void)? = nil
     let onPrimary: (MoviesHeroPage) -> Void
     let onPlayFromStart: (MoviesHeroPage) -> Void
     let onDetails: (MoviesHeroPage) -> Void
@@ -1709,6 +1732,12 @@ struct MoviesHeroCarousel: View {
             //   the engine itself onto the pill. Device log 2026-09-04: the
             //   engine found the pill only from Resume, and
             //   requestFocusUpdate(to: pill) from a catcher never moved.
+            // No hero button focused: a catcher so Down from the bar lands
+            // here and is forwarded to Resume. While a hero button HAS
+            // focus, the owner shows a fixed focus guide at the top of the
+            // screen (outside the scroll content: in the scrolled state the
+            // hero's top edge is above the screen, so anything placed here
+            // is off screen and Up has no target; screenshots 2026-09-04).
             if heroFocus == nil {
                 Color.clear
                     .frame(height: 8)
@@ -1721,16 +1750,20 @@ struct MoviesHeroCarousel: View {
                         heroFocus = primaryFocusID
                     }
             } else {
-                TabBarFocusGuide(preferredTitle: "Movies")
-                    .frame(height: 8)
-                    .frame(maxWidth: .infinity)
+                Color.clear.frame(height: 8)
             }
             #endif
             carousel
                 #if os(tvOS)
                 .onChange(of: heroFocus) { _, id in
                     if id != nil { heroWasFocused = true }
+                    onHeroFocusChange?(id != nil)
                     debugLog("[FOCUS] hero button focus -> \(id ?? "nil")")
+                    if id != nil {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            TVFocusBridge.logFocusability(preferredTitle: "Movies")
+                        }
+                    }
                 }
                 .onChange(of: focusRequest.wrappedValue) { _, wanted in
                     guard wanted else { return }
@@ -2345,6 +2378,37 @@ struct MoviesPosterFocusStyle: ButtonStyle {
 enum TVFocusBridge {
     /// Asks UIKit to focus the TabView's bar container (expanding it when
     /// collapsed). Returns false when no bar view is in the window.
+    /// Diagnostic: what the focus system thinks of the tab pill and of the
+    /// currently focused item (UIFocusDebugger, tvOS 15+).
+    @MainActor
+    static func logFocusability(preferredTitle: String) {
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
+            .first else { return }
+        var buttons: [UIView] = []
+        var guides: [UIView] = []
+        func walk(_ v: UIView) {
+            let n = String(describing: type(of: v))
+            if n == "UITabBarButton" { buttons.append(v) }
+            if n.contains("GuideHostView") { guides.append(v) }
+            for s in v.subviews { walk(s) }
+        }
+        walk(window)
+        if let pill = buttons.first(where: { ($0.accessibilityLabel ?? "") == preferredTitle }) {
+            // No UIFocusDebugger calls here: status() raises when invoked
+            // from the app (crash 2026-09-04 14:00).
+            debugLog("[FOCUS-DBG] pill \(preferredTitle) window=\(pill.convert(pill.bounds, to: nil)) hidden=\(pill.isHidden) alpha=\(pill.alpha) canBecomeFocused=\(pill.canBecomeFocused) userInteraction=\(pill.isUserInteractionEnabled)")
+        } else {
+            debugLog("[FOCUS-DBG] pill \(preferredTitle) not in window")
+        }
+        for g in guides {
+            debugLog("[FOCUS-DBG] guide host frame=\(g.convert(g.bounds, to: nil)) hidden=\(g.isHidden) alpha=\(g.alpha) layoutGuides=\(g.layoutGuides.count)")
+        }
+        if let item = UIFocusSystem.focusSystem(for: window)?.focusedItem as? UIView {
+            debugLog("[FOCUS-DBG] focused item frame(window)=\(item.convert(item.bounds, to: nil)) type=\(String(describing: type(of: item)))")
+        }
+    }
+
     /// Device log 2026-09-04 13:36: asking for the CONTAINER did nothing
     /// (it is not a focus item; focus stayed on the catcher, i.e. on
     /// nothing visible). The tab pill itself (UITabBarButton) is the
