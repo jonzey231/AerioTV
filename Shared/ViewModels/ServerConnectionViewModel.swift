@@ -100,6 +100,22 @@ final class ServerConnectionViewModel {
     /// path filters channels down to the union of those profiles'
     /// memberships - a child-safety filter (e.g. a "Kids" profile).
     var discoveredChannelProfileIDs: String = ""
+    /// Dispatcharr 0.30 permissions captured with the level (see
+    /// ServerConnection.dispatcharrDVRAccess etc.).
+    var discoveredDVRAccess: String = ""
+    var discoveredCatchupEnabled: Bool = true
+    var discoveredVODMoviesEnabled: Bool = true
+    var discoveredVODSeriesEnabled: Bool = true
+    var discoveredServerVersion: String = ""
+
+    /// Dispatcharr 0.30 permissions from /users/me/ (raw dvr_access so the
+    /// model can keep "unknown" separate from an explicit value).
+    func capturePermissions(from user: DispatcharrUser) {
+        discoveredDVRAccess = user.dvrAccessRaw ?? ""
+        discoveredCatchupEnabled = user.catchupEnabled
+        discoveredVODMoviesEnabled = user.vodMoviesEnabled
+        discoveredVODSeriesEnabled = user.vodSeriesEnabled
+    }
 
     var isFormValid: Bool {
         validationErrors().isEmpty
@@ -232,6 +248,11 @@ final class ServerConnectionViewModel {
         discoveredDispatcharrAuthMode = nil
         discoveredUserLevel = 10
         discoveredChannelProfileIDs = ""
+        discoveredDVRAccess = ""
+        discoveredCatchupEnabled = true
+        discoveredVODMoviesEnabled = true
+        discoveredVODSeriesEnabled = true
+        discoveredServerVersion = ""
 
         // Silent one-shot retry. Some reverse-proxy / LB setups (Cloudflare
         // Tunnel, Traefik with cold upstreams, nginx with slow_start) return
@@ -367,7 +388,9 @@ final class ServerConnectionViewModel {
                         // profile = show all channels.
                         self.discoveredChannelProfileIDs =
                             user.channelProfiles.map(String.init).joined(separator: ",")
+                        self.capturePermissions(from: user)
                     }
+                    self.discoveredServerVersion = info.version ?? ""
                 }
 
             case .usernamePassword:
@@ -424,6 +447,7 @@ final class ServerConnectionViewModel {
                     // child-safety filter). Empty = no profile = show all.
                     self.discoveredChannelProfileIDs =
                         user.channelProfiles.map(String.init).joined(separator: ",")
+                    self.capturePermissions(from: user)
 
                     // Now run the standard API-key verify so we get the
                     // same `discoveredDispatcharrAuthMode` discovery the
@@ -597,6 +621,13 @@ final class ServerConnectionViewModel {
         // (a child-safety filter).
         if serverType == .dispatcharrAPI {
             server.dispatcharrChannelProfileIDs = discoveredChannelProfileIDs
+            server.dispatcharrDVRAccess = discoveredDVRAccess
+            server.dispatcharrCatchupEnabled = discoveredCatchupEnabled
+            server.dispatcharrVODMoviesEnabled = discoveredVODMoviesEnabled
+            server.dispatcharrVODSeriesEnabled = discoveredVODSeriesEnabled
+            if !discoveredServerVersion.isEmpty {
+                server.dispatcharrServerVersion = discoveredServerVersion
+            }
         }
         // v1.7 Direct Connect: persist the credential type on the
         // SwiftData record. For `.apiKey` we leave the raw value at
@@ -643,6 +674,11 @@ final class ServerConnectionViewModel {
         discoveredDispatcharrAuthMode = nil
         discoveredUserLevel = 10
         discoveredChannelProfileIDs = ""
+        discoveredDVRAccess = ""
+        discoveredCatchupEnabled = true
+        discoveredVODMoviesEnabled = true
+        discoveredVODSeriesEnabled = true
+        discoveredServerVersion = ""
         // v1.7.x: matches the property default above. Back-button
         // out of the Configure screen and re-entering should land
         // on the same Direct Connect username + password starting

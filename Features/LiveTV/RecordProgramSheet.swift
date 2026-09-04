@@ -271,9 +271,9 @@ struct RecordProgramSheet: View {
                 Section {
                     Label {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Recording requires a Dispatcharr admin account")
+                            Text("Recording requires DVR access on Dispatcharr")
                                 .font(.footnote.bold())
-                            Text("Scheduling a recording on the Dispatcharr server needs an admin account. Your account can watch and record live programs to this device, but not schedule server recordings. Ask your Dispatcharr administrator for access, or wait until the program is airing to record it on this device.")
+                            Text("Scheduling a recording on the Dispatcharr server needs an account with DVR access set to Manage. Your account can watch and record live programs to this device, but not schedule server recordings. Ask your Dispatcharr administrator for access, or wait until the program is airing to record it on this device.")
                                 .font(.footnote)
                         }
                     } icon: {
@@ -293,7 +293,7 @@ struct RecordProgramSheet: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Saving to this device")
                                 .font(.footnote.bold())
-                            Text("Your account can record live programs to this device. Recording to the Dispatcharr server requires a Dispatcharr admin account.")
+                            Text("Your account can record live programs to this device. Recording to the Dispatcharr server requires DVR access set to Manage.")
                                 .font(.footnote)
                         }
                     } icon: {
@@ -595,9 +595,9 @@ struct RecordProgramSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Label {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Recording requires a Dispatcharr admin account")
+                    Text("Recording requires DVR access on Dispatcharr")
                         .font(.system(size: 22, weight: .bold))
-                    Text("Scheduling a recording on the Dispatcharr server needs an admin account. Your account can watch and record live programs to this device, but not schedule server recordings. Ask your Dispatcharr administrator for access, or wait until the program is airing to record it on this device.")
+                    Text("Scheduling a recording on the Dispatcharr server needs an account with DVR access set to Manage. Your account can watch and record live programs to this device, but not schedule server recordings. Ask your Dispatcharr administrator for access, or wait until the program is airing to record it on this device.")
                         .font(.system(size: 20))
                 }
             } icon: {

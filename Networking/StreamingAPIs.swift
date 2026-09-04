@@ -2381,6 +2381,20 @@ struct DispatcharrAPI {
         try await fetchAllPages(DispatcharrEPGSource.self, firstPath: "/api/epg/sources/")
     }
 
+    /// `/api/core/version/` -> "0.30.0". Gates features that only newer
+    /// servers have (the multi-day EPG grid window). nil when the server
+    /// predates the endpoint or answers with something else.
+    func fetchVersion() async throws -> String? {
+        struct VersionBody: Decodable { let version: String? }
+        let url = try buildURL(path: "/api/core/version/")
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 10
+        let (data, response) = try await dataWithJWTRetry(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return try? JSONDecoder().decode(VersionBody.self, from: data).version
+    }
+
     /// value here is only used cosmetically to render the stage's
     /// "Loaded N movies" detail line.
     func getVODMovieCount() async throws -> Int {

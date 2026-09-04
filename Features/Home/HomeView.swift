@@ -430,6 +430,15 @@ final class VODStore: ObservableObject {
             lastMoviesServerName = nil; currentMoviesServerID = nil
             return
         }
+        // Dispatcharr 0.30: the account's vod_movies_enabled is off. The
+        // server would answer with empty lists anyway; skip the sweep.
+        if let active = activeServer, active.type == .dispatcharrAPI, !active.dispatcharrVODMoviesEnabled {
+            debugLog("🎬 VODStore.loadMovies: movies disabled for this Dispatcharr account, clearing")
+            movies = []; movieCategories = []
+            isLoadingMovies = false; moviesError = nil
+            lastMoviesServerName = nil; currentMoviesServerID = active.id
+            return
+        }
         // v1.6.12: also filter by per-server `vodEnabled`. Users with
         // a "main + sandbox" Dispatcharr setup can disable VOD on the
         // sandbox to avoid duplicate fetches and the multi-minute
@@ -680,6 +689,14 @@ final class VODStore: ObservableObject {
             series = []; seriesCategories = []
             isLoadingSeries = false; seriesError = nil
             lastSeriesServerName = nil; currentSeriesServerID = nil
+            return
+        }
+        // Dispatcharr 0.30: the account's vod_series_enabled is off.
+        if let active = activeServer, active.type == .dispatcharrAPI, !active.dispatcharrVODSeriesEnabled {
+            debugLog("📺 VODStore.loadSeries: series disabled for this Dispatcharr account, clearing")
+            series = []; seriesCategories = []
+            isLoadingSeries = false; seriesError = nil
+            lastSeriesServerName = nil; currentSeriesServerID = active.id
             return
         }
         // v1.6.12: per-server VOD toggle — see `loadMovies` for the
@@ -2621,7 +2638,9 @@ final class ChannelStore: ObservableObject {
             item.dispatcharrEPGDataID = ch.effectiveEpgDataID ?? ch.epgDataID
             // Catch-up: server-side rollup of the channel's provider
             // streams (is_catchup + MAX catchup_days, Dispatcharr dev).
-            if ch.isCatchup, ch.catchupDays > 0 {
+            // Dispatcharr 0.30: catchup_enabled off for this account
+            // hides every catch-up affordance (the server 403s them).
+            if ch.isCatchup, ch.catchupDays > 0, activeServer?.dispatcharrCanUseCatchup ?? true {
                 item.catchupDays = ch.catchupDays
             }
             return item
@@ -3730,8 +3749,41 @@ struct MainTabView: View {
     /// tab-bar-level .task so the DVR tab can light up even when the
     /// user hasn't navigated to it yet — `hasRecordings` reads
     /// SwiftData, which the reconciler writes into.
+    /// Dispatcharr 0.30 granular permissions: re-read /users/me/ (and the
+    /// server version) on every launch so a permission change made on
+    /// the server applies without re-adding the playlist. Off the
+    /// critical path; a failure leaves the persisted values as they are.
+    private func refreshDispatcharrPermissions() {
+        guard let server = allServers.first(where: { $0.isActive }) ?? allServers.first,
+              server.type == .dispatcharrAPI else { return }
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode,
+                                 serverID: server.id,
+                                 savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                                     ? server.username : nil)
+        Task { @MainActor in
+            guard let user = try? await api.fetchCurrentUser() else {
+                debugLog("[PERMS] users/me unavailable; keeping persisted permissions for \(server.name)")
+                return
+            }
+            let version = try? await api.fetchVersion()
+            var level = user.effectiveUserLevel
+            if level < 10, level != server.dispatcharrUserLevel, await api.probeAdminAccess() { level = 10 }
+            var changed = false
+            if level != server.dispatcharrUserLevel {
+                server.dispatcharrUserLevel = level
+                changed = true
+            }
+            if server.applyDispatcharrPermissions(from: user, version: version ?? nil) { changed = true }
+            debugLog("[PERMS] \(server.name): level=\(server.dispatcharrUserLevel) dvr=\(server.dispatcharrEffectiveDVRAccess.rawValue) catchup=\(server.dispatcharrCatchupEnabled) movies=\(server.dispatcharrVODMoviesEnabled) series=\(server.dispatcharrVODSeriesEnabled) version=\(server.dispatcharrServerVersion.isEmpty ? "?" : server.dispatcharrServerVersion)\(changed ? " (changed)" : "")")
+        }
+    }
+
     private func reconcileAllDispatcharrRecordings() async {
-        let dispatcharrServers = allServers.filter { $0.type == .dispatcharrAPI }
+        // DVR access "none": the recordings endpoints answer 403; skip.
+        let dispatcharrServers = allServers.filter { $0.type == .dispatcharrAPI && $0.dispatcharrCanViewDVR }
         guard !dispatcharrServers.isEmpty else { return }
         for server in dispatcharrServers {
             let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
@@ -4925,6 +4977,11 @@ struct MainTabView: View {
             return false
         }
         let sid = active.id.uuidString
+        // DVR access "none" (Dispatcharr 0.30): server recordings are not
+        // listable; only this device's own local recordings count.
+        if !active.dispatcharrCanViewDVR {
+            return allRecordings.contains { $0.serverID == sid && $0.destination == .local }
+        }
         return allRecordings.contains { $0.serverID == sid }
     }
     /// True when the active server has advertised ANY VOD content, OR
@@ -5595,6 +5652,7 @@ struct MainTabView: View {
         let cacheIsFresh = await cacheLoadHandle.value
 
         debugLog("🟢 [Orchestrator] phase 1 done (channels), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, channels=\(channelStore.channels.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
+        refreshDispatcharrPermissions()
         if !channelStore.channels.isEmpty {
             // Try to short-circuit the expensive `loadAllEPG`
             // path by checking the SwiftData EPG cache first. On

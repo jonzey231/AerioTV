@@ -93,6 +93,26 @@ struct DispatcharrUser: Decodable {
     /// configured; catch-up then surfaces an explanatory error.
     let xcPassword: String?
 
+    /// Dispatcharr 0.30 granular permissions (custom_properties). Absent
+    /// keys keep the server defaults: DVR "view" for standard users,
+    /// "manage" for admins, "none" for streamers; VOD and catch-up on.
+    /// Raw `dvr_access` string, or nil when the server did not send one.
+    let dvrAccessRaw: String?
+    let vodMoviesEnabled: Bool
+    let vodSeriesEnabled: Bool
+    let catchupEnabled: Bool
+
+    /// Effective DVR access, mirroring apps/channels/dvr_access.py.
+    var dvrAccess: DispatcharrDVRAccess {
+        if effectiveUserLevel >= 10 { return .manage }
+        if effectiveUserLevel < 1 { return .none }
+        switch dvrAccessRaw {
+        case "none": return .none
+        case "manage": return .manage
+        default: return .view
+        }
+    }
+
     /// The permission tier the app should GATE on. A Django superuser /
     /// staff account is a functional admin even when its custom
     /// user_level is still 0 (STREAMER) or 1 (STANDARD) - legacy
@@ -118,7 +138,27 @@ struct DispatcharrUser: Decodable {
 
     private struct CustomProps: Decodable {
         let xcPassword: String?
-        enum CodingKeys: String, CodingKey { case xcPassword = "xc_password" }
+        let dvrAccess: String?
+        let vodMoviesEnabled: Bool?
+        let vodSeriesEnabled: Bool?
+        let catchupEnabled: Bool?
+        enum CodingKeys: String, CodingKey {
+            case xcPassword = "xc_password"
+            case dvrAccess = "dvr_access"
+            case vodMoviesEnabled = "vod_movies_enabled"
+            case vodSeriesEnabled = "vod_series_enabled"
+            case catchupEnabled = "catchup_enabled"
+        }
+        init(from decoder: Decoder) throws {
+            // Every key permissive: the blob is free-form and a wrong
+            // type on any one key must not fail the whole user decode.
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            xcPassword = try? c.decodeIfPresent(String.self, forKey: .xcPassword)
+            dvrAccess = try? c.decodeIfPresent(String.self, forKey: .dvrAccess)
+            vodMoviesEnabled = try? c.decodeIfPresent(Bool.self, forKey: .vodMoviesEnabled)
+            vodSeriesEnabled = try? c.decodeIfPresent(Bool.self, forKey: .vodSeriesEnabled)
+            catchupEnabled = try? c.decodeIfPresent(Bool.self, forKey: .catchupEnabled)
+        }
     }
 
     init(from decoder: Decoder) throws {
@@ -154,7 +194,18 @@ struct DispatcharrUser: Decodable {
         let props = try? c.decodeIfPresent(CustomProps.self, forKey: .customProperties)
         let raw = (props ?? nil)?.xcPassword?.trimmingCharacters(in: .whitespaces)
         xcPassword = (raw?.isEmpty == false) ? raw : nil
+        let p = props ?? nil
+        dvrAccessRaw = p?.dvrAccess?.lowercased()
+        // Server semantics: only an explicit `false` disables.
+        vodMoviesEnabled = p?.vodMoviesEnabled != false
+        vodSeriesEnabled = p?.vodSeriesEnabled != false
+        catchupEnabled = p?.catchupEnabled != false
     }
+}
+
+/// DVR access level of the connected Dispatcharr account (0.30+).
+enum DispatcharrDVRAccess: String {
+    case none, view, manage
 }
 
 // MARK: - Token store
