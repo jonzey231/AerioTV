@@ -130,6 +130,10 @@ struct MoviesView: View {
     @FocusState private var gridFocus: String?
     /// Set to move focus onto the hero's Resume (scroll-to-top landing).
     @State private var heroFocusRequest = false
+    /// tvOS: like heroFocusRequest, but lands on the hero button that had
+    /// focus last (Up from Play from Beginning returned to Resume, Logan
+    /// 2026-09-04).
+    @State private var heroRestoreRequest = false
     /// True while a hero button has focus: shows the fixed tab-bar guide.
     @State private var heroHasFocus = false
     /// Whether the Movies pill is currently on screen. The TabView slides
@@ -932,6 +936,8 @@ struct MoviesView: View {
                                     pages: pages,
                                     headers: dispatcharrHeaders,
                                     focusRequest: heroFocusRequestBinding,
+                                    restoreRequest: Binding(get: { heroRestoreRequest },
+                                                            set: { heroRestoreRequest = $0 }),
                                     onUpWhileScrolled: {
                                         #if os(tvOS)
                                         if tvTabBarHidden { scrollMoviesToTop(proxy) }
@@ -1082,9 +1088,16 @@ struct MoviesView: View {
                                 scrollPosition.scrollTo(y: 0)
                             }
                             tvTabBarHidden = false
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                                heroFocusRequest = true
-                            }
+                            // Restore at once: holding focus here for
+                            // 0.5 s while the bar slid in read as the
+                            // Movies pill taking focus and losing it again
+                            // (Logan 2026-09-04).
+                            heroRestoreRequest = true
+                            // Once the bar has slid back on screen, hand
+                            // focus to the Movies pill; the earlier
+                            // requestFocusUpdate attempts ran while the bar
+                            // was still off screen.
+                            focusTabBarWhenOnScreen(attempt: 0)
                         }
                 }
                 #endif
@@ -1102,15 +1115,19 @@ struct MoviesView: View {
                         // forwarded it back to # (trace 2026-09-04 14:11,
                         // an endless loop). Up from # now finds nothing and
                         // the rail's own exit takes focus to the hero.
+                        // Padding goes OUTSIDE the focusable: with it
+                        // inside, the focus item's frame started at the
+                        // screen top (trace 2026-09-04 14:39, @80,0 72x1020)
+                        // and Up from any hero button landed here.
                         Color.clear
                             .frame(width: railWidth,
                                    height: max(0, outer.size.height + outer.safeAreaInsets.top - railTop))
-                            .padding(.top, railTop)
                             .focusable(true)
                             .focused($railCatcherFocused)
                             .onChange(of: railCatcherFocused) { _, focused in
                                 if focused { railFocusRequest = "#" }
                             }
+                            .padding(.top, railTop)
                         #endif
                         AlphabetRail(
                             available: railLetters,
@@ -1251,6 +1268,25 @@ struct MoviesView: View {
 
     private var heroFocusRequestBinding: Binding<Bool> {
         Binding(get: { heroFocusRequest }, set: { heroFocusRequest = $0 })
+    }
+
+    private func focusTabBarWhenOnScreen(attempt: Int) {
+        guard attempt < 15 else {
+            debugLog("[HERO-FOCUS] bar never came on screen; focus stays on hero")
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            if TVFocusBridge.isTabBarOnScreen(preferredTitle: "Movies") {
+                // requestFocusUpdate(to: pill) returns moved=false even
+                // with the bar on screen (trace 2026-09-04 14:46), so the
+                // pill is reached natively: drop the catcher strip and let
+                // the next Up travel from the hero button to the bar.
+                tabBarOnScreen = true
+                debugLog("[HERO-FOCUS] bar on screen after \(attempt + 1) polls; catcher unmounted")
+            } else {
+                focusTabBarWhenOnScreen(attempt: attempt + 1)
+            }
+        }
     }
 
     private func scrollMoviesToTop(_ proxy: ScrollViewProxy) {
@@ -1739,6 +1775,9 @@ struct MoviesHeroCarousel: View {
     /// scrolled). The owner snaps to the top and shows the bar; the next
     /// Up then reaches the bar normally. The focus engine found the hidden
     /// bar from Resume but not from the other buttons (Logan 2026-09-03).
+    /// tvOS: set true to put focus back on the hero button that held it
+    /// last (falls back to Resume).
+    var restoreRequest: Binding<Bool> = .constant(false)
     var onUpWhileScrolled: (() -> Void)? = nil
     /// tvOS: true while any hero button has focus (owner shows the fixed
     /// tab-bar focus guide).
@@ -1758,6 +1797,7 @@ struct MoviesHeroCarousel: View {
     @FocusState private var heroFocus: String?
     @FocusState private var catcherFocused: Bool
     @State private var heroWasFocused = false
+    @State private var lastHeroButton: String?
     @ObservedObject private var barState = TVTabBarScrollState.shared
     private var primaryFocusID: String { "\(currentID ?? pages.first?.id ?? "")|primary" }
     #endif
@@ -1797,7 +1837,7 @@ struct MoviesHeroCarousel: View {
             carousel
                 #if os(tvOS)
                 .onChange(of: heroFocus) { _, id in
-                    if id != nil { heroWasFocused = true }
+                    if id != nil { heroWasFocused = true; lastHeroButton = id }
                     onHeroFocusChange?(id != nil)
                     debugLog("[FOCUS] hero button focus -> \(id ?? "nil")")
                     if id != nil {
@@ -1810,6 +1850,11 @@ struct MoviesHeroCarousel: View {
                     guard wanted else { return }
                     heroFocus = primaryFocusID
                     focusRequest.wrappedValue = false
+                }
+                .onChange(of: restoreRequest.wrappedValue) { _, wanted in
+                    guard wanted else { return }
+                    heroFocus = lastHeroButton ?? primaryFocusID
+                    restoreRequest.wrappedValue = false
                 }
                 #endif
         }
@@ -2521,12 +2566,17 @@ final class MoviesFocusTracer {
             func desc(_ item: UIFocusItem?) -> String {
                 guard let item else { return "nil" }
                 let name = String(describing: type(of: item))
+                // Every focus item has a frame in its container's space;
+                // convert to window space when it is a view.
+                var f = item.frame
+                var label = ""
                 if let v = item as? UIView {
-                    let f = v.frame
-                    let label = v.accessibilityLabel ?? (v as? UIButton)?.currentTitle ?? ""
-                    return "\(name)\(label.isEmpty ? "" : "(\(label))") @\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))"
+                    f = v.convert(v.bounds, to: nil)
+                    label = v.accessibilityLabel ?? (v as? UIButton)?.currentTitle ?? ""
+                } else if let container = item.parentFocusEnvironment as? UIView {
+                    f = container.convert(item.frame, to: nil)
                 }
-                return name
+                return "\(name)\(label.isEmpty ? "" : "(\(label))") @\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))"
             }
             let heading: String
             switch ctx.focusHeading {
