@@ -448,8 +448,9 @@ struct MoviesView: View {
             .onAppear { MoviesFocusTracer.shared.start() }
             .onDisappear { MoviesFocusTracer.shared.stop() }
             #endif
-            .onAppear { refreshDispatcharrHeaders(); refreshHeroPages() }
+            .onAppear { refreshDispatcharrHeaders(); refreshHeroPages(); refreshWatchlistItems() }
             .onChange(of: heroPagesKey) { _, _ in refreshHeroPages() }
+            .onChange(of: watchlistKey) { _, _ in refreshWatchlistItems() }
             .onChange(of: dispatcharrHeadersKey) { _, _ in refreshDispatcharrHeaders() }
             .onAppear {
                 hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
@@ -933,18 +934,28 @@ struct MoviesView: View {
     /// Watchlist rows for the active playlist, resolved against the loaded
     /// library (so the card carries the full movie) with a synthetic
     /// fallback so a saved title still shows before the sweep reaches it.
-    private var watchlistItems: [VODDisplayItem] {
+    /// Cached: as a computed property it walked all ~5k rows on every body
+    /// pass of the focus scroll (Time Profiler 2026-09-04 18:50, ~80 ms per
+    /// Up from the shelf to the hero).
+    @State private var watchlistItems: [VODDisplayItem] = []
+
+    private var watchlistKey: String {
+        let rows = watchlistEntries.map { "\($0.vodID)|\($0.serverID ?? "")" }.joined(separator: ",")
+        return "\(rows)#\(activeServerIDString ?? "")#\(vodStore.movies.count)"
+    }
+
+    private func refreshWatchlistItems() {
         let sid = activeServerIDString
         let rows = watchlistEntries.filter { e in
             guard e.vodType == "movie" else { return false }
             guard let sid else { return true }
             return e.serverID == nil || e.serverID == sid
         }
-        guard !rows.isEmpty else { return [] }
+        guard !rows.isEmpty else { watchlistItems = []; return }
         let wanted = Set(rows.map(\.vodID))
         var byID: [String: VODDisplayItem] = [:]
         for m in vodStore.movies where wanted.contains(m.id) && byID[m.id] == nil { byID[m.id] = m }
-        return rows.compactMap { e in byID[e.vodID] ?? MoviesView.syntheticItem(from: e) }
+        watchlistItems = rows.compactMap { e in byID[e.vodID] ?? MoviesView.syntheticItem(from: e) }
     }
 
     private static func syntheticItem(from e: WatchlistEntry) -> VODDisplayItem? {
@@ -1134,10 +1145,21 @@ struct MoviesView: View {
                                         // (Logan 2026-09-04: Up from Search should
                                         // scroll up AND land on the hero button).
                                         if !tabBarOnScreen, !scrollToTopInFlight {
-                                            debugLog("[FOCUS] hero focused while scrolled: scrolling to top")
+                                            let y = geometryBox.contentOffsetY
+                                            debugLog("[FOCUS] hero focused while scrolled: scrolling to top from y=\(Int(y))")
                                             scrollToTopInFlight = true
-                                            withAnimation(.smooth(duration: 0.45)) {
-                                                scrollPosition.scrollTo(y: 0)
+                                            if y < 1400 {
+                                                // Short hop (shelf -> hero): the reader
+                                                // scroll animates in step with the focus
+                                                // engine's own scroll; the position scroll
+                                                // snapped here (Logan 2026-09-04).
+                                                withAnimation(.easeInOut(duration: 0.35)) {
+                                                    proxy.scrollTo("movies-top", anchor: .top)
+                                                }
+                                            } else {
+                                                withAnimation(.smooth(duration: 0.45)) {
+                                                    scrollPosition.scrollTo(y: 0)
+                                                }
                                             }
                                             // Bar back at once: waiting for the
                                             // scroll left a 0.6 s window where a
