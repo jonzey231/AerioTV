@@ -529,7 +529,10 @@ final class VODStore: ObservableObject {
             // Show the category list in Manage Groups immediately so the
             // user sees the real, accurate group list even before movie
             // streaming finishes.
-            movieCategories = enabledMovieCats.map { VODCategory(id: String($0.id), name: $0.name) }
+            movieCategories = enabledMovieCats.map {
+                VODCategory(id: String($0.id), name: $0.name,
+                            providerIDs: $0.m3uAccounts.filter(\.enabled).map(\.m3uAccount))
+            }
 
             // If the user has no movie categories enabled anywhere, the
             // library is empty by construction. Don't fall back to a

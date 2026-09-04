@@ -204,6 +204,30 @@ struct MoviesView: View {
     @State private var resumeVersionSelectionKey: String = ""
 
     private let hiddenGroupsKey = "hiddenMovieGroups"
+    /// Filter page, Providers tab: M3U account ids the user switched off.
+    private let disabledProvidersKey = "disabledMovieProviders"
+    @State private var disabledProviders: Set<String> = []
+
+    /// Groups the user hid PLUS every group that only lives on disabled
+    /// providers. This is what the library, pills and shelves filter by.
+    private var effectiveHiddenGroups: Set<String> {
+        guard !disabledProviders.isEmpty else { return hiddenGroups }
+        var out = hiddenGroups
+        for cat in vodStore.movieCategories where !cat.providerIDs.isEmpty {
+            if cat.providerIDs.allSatisfy({ disabledProviders.contains(String($0)) }) {
+                out.insert(cat.name)
+            }
+        }
+        return out
+    }
+
+    /// Groups offered on the Filter page's Groups tab: only those on an
+    /// enabled provider (categories with no provider info always show).
+    private var groupsForEnabledProviders: [String] {
+        vodStore.movieCategories.filter { cat in
+            cat.providerIDs.isEmpty || cat.providerIDs.contains { !disabledProviders.contains(String($0)) }
+        }.map(\.name)
+    }
 
     // Movies tab redesign (2026-09): hero + shelves + library grid.
     /// Unfinished watch progress, newest first; filtered to movies on the
@@ -309,10 +333,11 @@ struct MoviesView: View {
         }
         var result = vodStore.movies
         // Exclude movies belonging to hidden groups
-        if !hiddenGroups.isEmpty {
+        let hidden = effectiveHiddenGroups
+        if !hidden.isEmpty {
             result = result.filter { item in
                 guard let cat = item.movie?.categoryName else { return true }
-                return !hiddenGroups.contains(cat)
+                return !hidden.contains(cat)
             }
         }
         return result
@@ -382,7 +407,7 @@ struct MoviesView: View {
             #endif
             .task(id: libraryKey) {
                 let movies = vodStore.movies
-                let hidden = hiddenGroups
+                let hidden = effectiveHiddenGroups
                 let genre = selectedGenre
                 let sort = sortOrder
                 let result = await Task.detached(priority: .userInitiated) {
@@ -413,6 +438,7 @@ struct MoviesView: View {
             .onChange(of: dispatcharrHeadersKey) { _, _ in refreshDispatcharrHeaders() }
             .onAppear {
                 hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
+                disabledProviders = HiddenGroupsStore.load(forKey: disabledProvidersKey)
                 // v1.6.22: same guard as TVShowsView.onAppear. The
                 // previous `movies.isEmpty && !isLoadingMovies`
                 // check re-fired refreshMovies every time SwiftUI
@@ -468,6 +494,7 @@ struct MoviesView: View {
             .onReceive(NotificationCenter.default.publisher(for: .syncManagerDidApplyPreferences)) { _ in
                 // Reload hidden groups from UserDefaults after an iCloud sync applies remote prefs.
                 hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
+                disabledProviders = HiddenGroupsStore.load(forKey: disabledProvidersKey)
             }
             #if os(tvOS)
             // Top Shelf deep link for a movie → navigate to its detail view.
@@ -718,7 +745,7 @@ struct MoviesView: View {
 
     /// Library minus hidden groups, before genre and sort.
     private var visibleMovies: [VODDisplayItem] {
-        MoviesView.visible(vodStore.movies, hidden: hiddenGroups)
+        MoviesView.visible(vodStore.movies, hidden: effectiveHiddenGroups)
     }
 
     nonisolated private static func visible(_ movies: [VODDisplayItem], hidden: Set<String>) -> [VODDisplayItem] {
@@ -755,7 +782,7 @@ struct MoviesView: View {
         LibraryKey(count: vodStore.movies.count,
                    firstID: vodStore.movies.first?.id,
                    lastID: vodStore.movies.last?.id,
-                   hidden: hiddenGroups, genre: selectedGenre, sort: sortOrderRaw)
+                   hidden: effectiveHiddenGroups, genre: selectedGenre, sort: sortOrderRaw)
     }
 
     nonisolated private static func computeDerived(movies: [VODDisplayItem], hidden: Set<String>,
@@ -826,7 +853,7 @@ struct MoviesView: View {
 
     private var heroPagesKey: String {
         let progress = movieProgress.prefix(12).map { "\($0.vodID)|\($0.positionMs)" }.joined(separator: ",")
-        return "\(progress)#\(vodStore.movies.count)#\(recentlyAdded.first?.id ?? "")#\(hiddenGroups.count)"
+        return "\(progress)#\(vodStore.movies.count)#\(recentlyAdded.first?.id ?? "")#\(effectiveHiddenGroups.count)"
     }
 
     private func refreshHeroPages() {
@@ -850,7 +877,8 @@ struct MoviesView: View {
 
     /// Genre pills: the visible categories, in store order, "All" first.
     private var genrePills: [String] {
-        vodStore.movieCategories.map(\.name).filter { !hiddenGroups.contains($0) }
+        let hidden = effectiveHiddenGroups
+        return vodStore.movieCategories.map(\.name).filter { !hidden.contains($0) }
     }
 
     /// The library grid: visible movies, genre-filtered, sorted (cached).
@@ -1606,7 +1634,7 @@ struct MoviesView: View {
             }
             TVNavActionCircle(systemImage: "line.3.horizontal.decrease",
                               label: "Manage Groups",
-                              isSelected: !hiddenGroups.isEmpty) {
+                              isSelected: !hiddenGroups.isEmpty || !disabledProviders.isEmpty) {
                 showFilterMenu = true
             }
         }
@@ -1619,24 +1647,26 @@ struct MoviesView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
-        // Filter: same native action list as Sort. Each group toggles
-        // between shown (check) and hidden; the list closes on each pick.
-        .confirmationDialog("Show Groups", isPresented: $showFilterMenu, titleVisibility: .visible) {
-            if !hiddenGroups.isEmpty {
-                Button("Show All Groups") {
-                    hiddenGroups.removeAll()
+        // Filter page: Providers (Dispatcharr Direct Connect) + Groups tabs
+        // (Logan 2026-09-04); replaced the single-list action sheet.
+        .fullScreenCover(isPresented: $showFilterMenu) {
+            // Popup, not a page (Logan 2026-09-04): the cover keeps focus
+            // inside the panel; its background is cleared so the tab shows
+            // through under a dim, and the panel itself is glass.
+            MoviesFilterPage(
+                providerNames: providerNames,
+                disabledProviders: $disabledProviders,
+                groups: groupsForEnabledProviders,
+                hiddenGroups: $hiddenGroups,
+                onChange: {
                     HiddenGroupsStore.save(hiddenGroups, forKey: hiddenGroupsKey)
+                    HiddenGroupsStore.save(disabledProviders, forKey: disabledProvidersKey)
+                    if let g = selectedGenre, effectiveHiddenGroups.contains(g) { selectedGenre = nil }
+                    logFilterState("change")
                 }
-            }
-            ForEach(vodStore.movieCategories.map(\.name), id: \.self) { name in
-                let visible = !hiddenGroups.contains(name)
-                Button(visible ? "\(name)  \u{2713}" : name) {
-                    if visible { hiddenGroups.insert(name) } else { hiddenGroups.remove(name) }
-                    HiddenGroupsStore.save(hiddenGroups, forKey: hiddenGroupsKey)
-                    if visible, selectedGenre == name { selectedGenre = nil }
-                }
-            }
-            Button("Cancel", role: .cancel) {}
+            )
+            .onAppear { logFilterState("open") }
+            .presentationBackground(.clear)
         }
     }
 
@@ -1771,6 +1801,12 @@ struct MoviesView: View {
             .focusSection()
             #endif
         }
+    }
+
+    private func logFilterState(_ why: String) {
+        let enabled = providerNames.keys.filter { !disabledProviders.contains(String($0)) }
+            .map { providerNames[$0] ?? "\($0)" }.sorted()
+        debugLog("[FILTER] \(why): providers on=\(enabled) groups tab=\(groupsForEnabledProviders.count) of \(vodStore.movieCategories.count), user-hidden=\(hiddenGroups.count), effective hidden=\(effectiveHiddenGroups.count), library=\(libraryMovies.count)")
     }
 
     private func selectProvider(_ pid: Int?) {
@@ -2589,6 +2625,149 @@ private struct MoviesHeroButtonStyle: ButtonStyle {
         configuration.label
             .opacity(configuration.isPressed ? 0.7 : 1.0)
         #endif
+    }
+}
+
+// MARK: - Filter page (Providers + Groups)
+
+#if os(tvOS)
+/// Full-screen Filter for the Movies tab: tab column on the left
+/// (Providers only for Dispatcharr Direct Connect, where the account list
+/// is known), toggle rows on the right, Done below. Groups listed are the
+/// ones on enabled providers; switching a provider off hides its groups
+/// from the library too (see MoviesView.effectiveHiddenGroups).
+struct MoviesFilterPage: View {
+    let providerNames: [Int: String]
+    @Binding var disabledProviders: Set<String>
+    let groups: [String]
+    @Binding var hiddenGroups: Set<String>
+    let onChange: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    private enum Tab: String, CaseIterable { case providers = "Providers", groups = "Groups" }
+    @State private var tab: Tab = .groups
+
+    private var hasProviders: Bool { providerNames.count >= 2 }
+    private var visibleRowCount: Int {
+        if tab == .providers && hasProviders { return providerNames.count }
+        return groups.count + (hiddenGroups.isEmpty ? 0 : 1)
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.45).ignoresSafeArea()
+            VStack(spacing: 18) {
+                Text("Filter")
+                    .font(.system(size: 31, weight: .semibold))
+                    .foregroundColor(.textPrimary)
+                    .padding(.top, 6)
+                if hasProviders {
+                    HStack(spacing: 10) {
+                        ForEach(Tab.allCases, id: \.self) { t in
+                            Button { tab = t } label: {
+                                Text(t.rawValue)
+                                    .font(.system(size: 24, weight: .semibold))
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(NativeSheetRowStyle(isSelected: tab == t))
+                        }
+                    }
+                    .focusSection()
+                }
+                ScrollView {
+                    VStack(spacing: 12) {
+                        if tab == .providers && hasProviders {
+                            ForEach(providerNames.keys.sorted(), id: \.self) { pid in
+                                let on = !disabledProviders.contains(String(pid))
+                                filterRow(providerNames[pid] ?? "Provider \(pid)", on: on) {
+                                    if on {
+                                        // Keep at least one provider on.
+                                        guard disabledProviders.count < providerNames.count - 1 else { return }
+                                        disabledProviders.insert(String(pid))
+                                    } else {
+                                        disabledProviders.remove(String(pid))
+                                    }
+                                    onChange()
+                                }
+                            }
+                        } else {
+                            if !hiddenGroups.isEmpty {
+                                filterRow("Show All Groups", on: false, accent: true) {
+                                    hiddenGroups.removeAll()
+                                    onChange()
+                                }
+                            }
+                            ForEach(groups, id: \.self) { name in
+                                let on = !hiddenGroups.contains(name)
+                                filterRow(name, on: on) {
+                                    if on { hiddenGroups.insert(name) } else { hiddenGroups.remove(name) }
+                                    onChange()
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, 6)
+                }
+                .focusSection()
+                // Hug the rows (a fixed height left a blank band under a
+                // short list); cap so long group lists scroll.
+                .frame(height: min(720, CGFloat(visibleRowCount) * 78 + 24))
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 22)
+            .frame(width: 470)
+            .glassPanel()
+        }
+        .onAppear { tab = hasProviders ? .providers : .groups }
+        .onExitCommand { dismiss() }
+    }
+
+    /// Native action-sheet row: centred label, check suffix when on.
+    private func filterRow(_ title: String, on: Bool, accent: Bool = false,
+                           action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(on && !accent ? "\(title)  \u{2713}" : title)
+                .font(.system(size: 26, weight: .medium))
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(NativeSheetRowStyle(isSelected: false))
+    }
+}
+#endif
+
+/// tvOS action-sheet row look: translucent capsule at rest, white with
+/// accent text when focused; a selected tab is accent-filled.
+private struct NativeSheetRowStyle: ButtonStyle {
+    let isSelected: Bool
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(isFocused ? .accentPrimary : (isSelected ? .appBackground : .accentPrimary))
+            .padding(.horizontal, 22)
+            .frame(height: 66)
+            .background(
+                Capsule().fill(isFocused ? Color.white
+                               : (isSelected ? Color.accentPrimary : Color.white.opacity(0.10)))
+            )
+            .scaleEffect(isFocused ? 1.03 : 1.0)
+            .opacity(configuration.isPressed ? 0.8 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+private extension View {
+    /// Liquid Glass panel on tvOS 26+, material fallback before that.
+    @ViewBuilder
+    func glassPanel() -> some View {
+        if #available(tvOS 26, *) {
+            self.glassEffect(.regular, in: .rect(cornerRadius: 36))
+        } else {
+            self.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 36, style: .continuous))
+        }
     }
 }
 

@@ -1127,6 +1127,10 @@ struct VODCategory: Identifiable, Hashable {
     let id: String
     let name: String
     var itemCount: Int = 0
+    /// Dispatcharr: M3U account ids this category is enabled on (from
+    /// `/api/vod/categories/` m3u_accounts[]). Empty for other sources.
+    /// Drives the Filter page's provider tab (Logan 2026-09-04).
+    var providerIDs: [Int] = []
 }
 
 // MARK: - VOD Display Item (unified for search/grid)
