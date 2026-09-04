@@ -1003,7 +1003,12 @@ struct MoviesView: View {
                     // Hide as soon as the content moves so the bar, its
                     // reserved inset, and the nav circles leave together
                     // (Logan 2026-09-03: the circles lagged behind the bar).
-                    let hide = y > 40
+                    // Hide only once the hero has scrolled away (header and
+                    // grid): while the hero is on screen the bar stays, so Up
+                    // from any hero button reaches the Movies pill directly
+                    // (a hidden bar was unreachable from two of the three
+                    // buttons, Logan 2026-09-03). 560 = top inset + hero.
+                    let hide = y > 560
                     if hide != tvTabBarHidden {
                         // No explicit animation: the toolbar transition is the
                         // system's; nothing in the content moves any more.
@@ -1186,16 +1191,10 @@ struct MoviesView: View {
         // Near the top (hero / header): ease up so it reads as a scroll.
         // Deep in the grid: jump, because an animated scroll crawled up
         // through every row (Logan 2026-09-03, both directions of that ask).
-        if geometryBox.contentOffsetY < 1600 {
-            withAnimation(.easeOut(duration: 0.3)) {
-                proxy.scrollTo("movies-top", anchor: .top)
-            }
-        } else {
-            var noAnimation = Transaction()
-            noAnimation.disablesAnimations = true
-            withTransaction(noAnimation) {
-                proxy.scrollTo("movies-top", anchor: .top)
-            }
+        var noAnimation = Transaction()
+        noAnimation.disablesAnimations = true
+        withTransaction(noAnimation) {
+            proxy.scrollTo("movies-top", anchor: .top)
         }
         withAnimation(.easeInOut(duration: 0.2)) {
             tvTabBarHidden = false
@@ -1700,7 +1699,7 @@ struct MoviesHeroCarousel: View {
             // Present while no hero button has focus (Down from above lands
             // here and is forwarded to Resume) and ALSO while the bar is
             // hidden (Up from any hero button lands here and snaps to top).
-            if heroFocus == nil || barState.isHidden {
+            if heroFocus == nil {
                 Color.clear
                     .frame(height: 1)
                     .frame(maxWidth: .infinity)
@@ -1708,10 +1707,6 @@ struct MoviesHeroCarousel: View {
                     .focused($catcherFocused)
                     .onChange(of: catcherFocused) { _, focused in
                         guard focused else { return }
-                        if heroWasFocused, barState.isHidden {
-                            heroWasFocused = false
-                            onUpWhileScrolled?()
-                        }
                         heroFocus = primaryFocusID
                     }
             }
