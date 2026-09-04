@@ -325,6 +325,10 @@ struct MoviesView: View {
                 derived = result
                 #endif
             }
+            #if os(tvOS)
+            .onAppear { MoviesFocusTracer.shared.start() }
+            .onDisappear { MoviesFocusTracer.shared.stop() }
+            #endif
             .onAppear {
                 hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                 // v1.6.22: same guard as TVShowsView.onAppear. The
@@ -1025,6 +1029,7 @@ struct MoviesView: View {
                 }
                 .onChange(of: gridFocus) { _, id in
                     if let id { lastGridFocus = id }
+                    debugLog("[FOCUS] grid title focus -> \(id ?? "nil")")
                 }
 
                 .onDisappear { TVTabBarScrollState.shared.isHidden = false }
@@ -1707,6 +1712,7 @@ struct MoviesHeroCarousel: View {
                 .focusable(true)
                 .focused($catcherFocused)
                 .onChange(of: catcherFocused) { _, focused in
+                    debugLog("[FOCUS] hero catcher focused=\(focused) heroWasFocused=\(heroWasFocused) barHidden=\(barState.isHidden)")
                     guard focused else { return }
                     if heroWasFocused {
                         heroWasFocused = false
@@ -1724,6 +1730,7 @@ struct MoviesHeroCarousel: View {
                 #if os(tvOS)
                 .onChange(of: heroFocus) { _, id in
                     if id != nil { heroWasFocused = true }
+                    debugLog("[FOCUS] hero button focus -> \(id ?? "nil")")
                 }
                 .onChange(of: focusRequest.wrappedValue) { _, wanted in
                     guard wanted else { return }
@@ -2224,6 +2231,7 @@ struct AlphabetRail: View {
         #if os(tvOS)
         .focusSection()
         .onChange(of: focused) { old, letter in
+            debugLog("[FOCUS] rail letter focus \(old ?? "nil") -> \(letter ?? "nil")")
             onFocusChange?(letter != nil)
             // Entering from outside lands on # (Logan 2026-09-03); moving
             // within the rail is left alone. Focus alone never moves the
@@ -2360,8 +2368,57 @@ enum TVFocusBridge {
         guard let system = UIFocusSystem.focusSystem(for: bar) else { return false }
         system.requestFocusUpdate(to: bar)
         system.updateFocusIfNeeded()
-        debugLog("[HERO-FOCUS] requested focus on \(String(describing: type(of: bar)))")
+        let focusedNow = system.focusedItem.map { String(describing: type(of: $0)) } ?? "nil"
+        debugLog("[HERO-FOCUS] requested focus on \(String(describing: type(of: bar))) frame=\(bar.frame) hidden=\(bar.isHidden) alpha=\(bar.alpha); focused now=\(focusedNow)")
         return true
+    }
+}
+#endif
+
+#if os(tvOS)
+/// Debug: logs every tvOS focus move while the Movies tab is on screen, with
+/// the previous item, the next item, and the heading, so a "focus vanished"
+/// report can be read from the device log instead of guessed at.
+@MainActor
+final class MoviesFocusTracer {
+    static let shared = MoviesFocusTracer()
+    private var token: NSObjectProtocol?
+
+    func start() {
+        guard token == nil else { return }
+        token = NotificationCenter.default.addObserver(
+            forName: UIFocusSystem.didUpdateNotification, object: nil, queue: .main
+        ) { note in
+            guard let ctx = note.userInfo?[UIFocusSystem.focusUpdateContextUserInfoKey] as? UIFocusUpdateContext else { return }
+            func desc(_ item: UIFocusItem?) -> String {
+                guard let item else { return "nil" }
+                let name = String(describing: type(of: item))
+                if let v = item as? UIView {
+                    let f = v.frame
+                    let label = v.accessibilityLabel ?? (v as? UIButton)?.currentTitle ?? ""
+                    return "\(name)\(label.isEmpty ? "" : "(\(label))") @\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))"
+                }
+                return name
+            }
+            let heading: String
+            switch ctx.focusHeading {
+            case .up: heading = "UP"
+            case .down: heading = "DOWN"
+            case .left: heading = "LEFT"
+            case .right: heading = "RIGHT"
+            case .next: heading = "NEXT"
+            case .previous: heading = "PREV"
+            default: heading = "none"
+            }
+            debugLog("[FOCUS] \(heading): \(desc(ctx.previouslyFocusedItem)) -> \(desc(ctx.nextFocusedItem))")
+        }
+        debugLog("[FOCUS] tracer on")
+    }
+
+    func stop() {
+        if let token { NotificationCenter.default.removeObserver(token) }
+        token = nil
+        debugLog("[FOCUS] tracer off")
     }
 }
 #endif
