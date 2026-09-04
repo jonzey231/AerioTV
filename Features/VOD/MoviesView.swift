@@ -132,6 +132,14 @@ struct MoviesView: View {
     @State private var heroFocusRequest = false
     /// True while a hero button has focus: shows the fixed tab-bar guide.
     @State private var heroHasFocus = false
+    /// Whether the Movies pill is currently on screen. The TabView slides
+    /// the whole bar above the top edge once content scrolls; a focus
+    /// guide whose target is off screen is ignored by the engine (trace
+    /// 2026-09-04 14:06: pill at y -301, guide at y 0, Up did nothing).
+    @State private var tabBarOnScreen = true
+    #if os(tvOS)
+    @FocusState private var topCatcherFocused: Bool
+    #endif
     @State private var lastGridFocus: String?
     @State private var railHadFocus = false
     @State private var railFocusRequest: String?
@@ -932,6 +940,7 @@ struct MoviesView: View {
                                     onHeroFocusChange: { focused in
                                         #if os(tvOS)
                                         heroHasFocus = focused
+                                        if focused { tabBarOnScreen = TVFocusBridge.isTabBarOnScreen(preferredTitle: "Movies") }
                                         #endif
                                     },
                                     onPrimary: { heroPrimary($0) },
@@ -1048,10 +1057,35 @@ struct MoviesView: View {
                 // position, hits this guide and is redirected to the Movies
                 // pill (tvOS expands the collapsed bar as it takes focus).
                 if heroHasFocus {
-                    TabBarFocusGuide(preferredTitle: "Movies")
-                        .frame(height: 8)
-                        .frame(maxWidth: .infinity)
-                        .ignoresSafeArea(.container, edges: .top)
+                    if tabBarOnScreen {
+                        TabBarFocusGuide(preferredTitle: "Movies")
+                            .frame(height: 8)
+                            .frame(maxWidth: .infinity)
+                            .ignoresSafeArea(.container, edges: .top)
+                    } else {
+                        // Bar slid off screen: nothing above can take focus
+                        // until the content is back at the top. Catch Up
+                        // here, bring the content up with the scroll view's
+                        // own animation, land on Resume; the next Up then
+                        // reaches the pill through the guide.
+                        Color.clear
+                            .frame(height: 8)
+                            .frame(maxWidth: .infinity)
+                            .ignoresSafeArea(.container, edges: .top)
+                            .focusable(true)
+                            .focused($topCatcherFocused)
+                            .onChange(of: topCatcherFocused) { _, focused in
+                                guard focused else { return }
+                                debugLog("[FOCUS] top catcher: bar off screen, scrolling to top")
+                                withAnimation(.easeInOut(duration: 0.4)) {
+                                    scrollPosition.scrollTo(y: 0)
+                                }
+                                tvTabBarHidden = false
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                                    heroFocusRequest = true
+                                }
+                            }
+                    }
                 }
                 #endif
 
@@ -2378,6 +2412,28 @@ struct MoviesPosterFocusStyle: ButtonStyle {
 enum TVFocusBridge {
     /// Asks UIKit to focus the TabView's bar container (expanding it when
     /// collapsed). Returns false when no bar view is in the window.
+    /// True when the tab pill titled `preferredTitle` is within the window
+    /// (the TabView slides the bar above the top edge once content scrolls).
+    @MainActor
+    static func isTabBarOnScreen(preferredTitle: String) -> Bool {
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
+            .first else { return true }
+        var pill: UIView?
+        func walk(_ v: UIView) {
+            if pill != nil { return }
+            if String(describing: type(of: v)) == "UITabBarButton",
+               (v.accessibilityLabel ?? "") == preferredTitle { pill = v; return }
+            for s in v.subviews { walk(s) }
+        }
+        walk(window)
+        guard let pill else { return true }
+        let f = pill.convert(pill.bounds, to: nil)
+        let on = f.minY >= 0 && !pill.isHidden && pill.alpha > 0
+        debugLog("[HERO-FOCUS] pill on screen=\(on) y=\(Int(f.minY))")
+        return on
+    }
+
     /// Diagnostic: what the focus system thinks of the tab pill and of the
     /// currently focused item (UIFocusDebugger, tvOS 15+).
     @MainActor
