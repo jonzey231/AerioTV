@@ -918,6 +918,11 @@ struct MoviesView: View {
                                     pages: pages,
                                     headers: dispatcharrHeaders,
                                     focusRequest: heroFocusRequestBinding,
+                                    onUpWhileScrolled: {
+                                        #if os(tvOS)
+                                        if tvTabBarHidden { scrollMoviesToTop(proxy) }
+                                        #endif
+                                    },
                                     onPrimary: { heroPrimary($0) },
                                     onPlayFromStart: { playMovie($0.item, resumePositionMs: 0) },
                                     onDetails: { navPath.append($0.item) },
@@ -1658,6 +1663,11 @@ struct MoviesHeroCarousel: View {
     var headers: [String: String] = [:]
     /// Owner sets true to put focus on the aligned page's Resume; reset here.
     var focusRequest: Binding<Bool> = .constant(false)
+    /// tvOS: Up from a hero button while the tab bar is hidden (page
+    /// scrolled). The owner snaps to the top and shows the bar; the next
+    /// Up then reaches the bar normally. The focus engine found the hidden
+    /// bar from Resume but not from the other buttons (Logan 2026-09-03).
+    var onUpWhileScrolled: (() -> Void)? = nil
     let onPrimary: (MoviesHeroPage) -> Void
     let onPlayFromStart: (MoviesHeroPage) -> Void
     let onDetails: (MoviesHeroPage) -> Void
@@ -1672,13 +1682,18 @@ struct MoviesHeroCarousel: View {
     /// "<page id>|primary|start|details" of the focused hero button.
     @FocusState private var heroFocus: String?
     @FocusState private var catcherFocused: Bool
+    @State private var heroWasFocused = false
+    @ObservedObject private var barState = TVTabBarScrollState.shared
     private var primaryFocusID: String { "\(currentID ?? pages.first?.id ?? "")|primary" }
     #endif
 
     var body: some View {
         VStack(spacing: 0) {
             #if os(tvOS)
-            if heroFocus == nil {
+            // Present while no hero button has focus (Down from above lands
+            // here and is forwarded to Resume) and ALSO while the bar is
+            // hidden (Up from any hero button lands here and snaps to top).
+            if heroFocus == nil || barState.isHidden {
                 Color.clear
                     .frame(height: 1)
                     .frame(maxWidth: .infinity)
@@ -1686,12 +1701,19 @@ struct MoviesHeroCarousel: View {
                     .focused($catcherFocused)
                     .onChange(of: catcherFocused) { _, focused in
                         guard focused else { return }
+                        if heroWasFocused, barState.isHidden {
+                            heroWasFocused = false
+                            onUpWhileScrolled?()
+                        }
                         heroFocus = primaryFocusID
                     }
             }
             #endif
             carousel
                 #if os(tvOS)
+                .onChange(of: heroFocus) { _, id in
+                    if id != nil { heroWasFocused = true }
+                }
                 .onChange(of: focusRequest.wrappedValue) { _, wanted in
                     guard wanted else { return }
                     heroFocus = primaryFocusID
