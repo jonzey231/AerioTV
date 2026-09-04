@@ -1417,6 +1417,12 @@ struct AVPlayerMultiviewTile: View {
     @State private var player: AVPlayer?
     @State private var driver: AVPlayerProgressDriver?
     @State private var remuxer: TSHLSRemuxer?
+    /// Live direct-HLS tile that failed on the server's redirect target
+    /// (field 2026-09-03: a Redirect stream profile 302s to raw upstream
+    /// TS, AVPlayer -11850): the same channel re-tuned once through the
+    /// on-device TS remux, on the URL without the HLS upgrade.
+    @State private var directHLSFallbackURL: URL?
+    private var liveSourceURL: URL { directHLSFallbackURL ?? streamURL }
     @State private var mkvServer: MKVVODServer?
     @State private var statusText: String?
     /// Terminal playback failure shown when mpv is disabled: a plain
@@ -1843,6 +1849,28 @@ struct AVPlayerMultiviewTile: View {
                 return
             }
         }
+        // Direct-HLS live tile whose upgrade URL did not play: the host's
+        // 302 went somewhere that is not HLS (Redirect stream profile ->
+        // raw upstream TS; field 2026-09-03, iPhone on a LAN Dispatcharr:
+        // -11850 "server is not correctly configured"). Drop the host's
+        // capability and re-tune ONCE through the TS remux arm on the
+        // plain URL. Ahead of the mpv fallback: the remux is the engine
+        // every other Dispatcharr channel already plays through.
+        if !isVOD, !isDVR, catchup == nil, directHLSFallbackURL == nil,
+           tileError == nil,
+           classifyStreamURL(streamURL) == .hls,
+           (streamURL.query ?? "").contains("output_format=hls") {
+            HLSCapabilityStore.shared.markNotCapable(streamURL)
+            let plain = removingHLSOutputFormat(streamURL)
+            debugLog("[AVP-MV] direct HLS failed (\(reason)); re-tuning via TS remux channel=\(channelName)")
+            directHLSFallbackURL = plain
+            stop()
+            statusText = "Retrying..."
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                start()
+            }
+            return
+        }
         if PlaybackFeatureFlags.mpvEngineEnabled {
             onEngineFallback(reason)
             return
@@ -2053,12 +2081,13 @@ struct AVPlayerMultiviewTile: View {
             startVOD()
             return
         }
-        switch classifyStreamURL(streamURL) {
+        let sourceURL = liveSourceURL
+        switch classifyStreamURL(sourceURL) {
         case .hls:
             // Full headers, not just UA: server-side HLS upgrades hit the
             // same Dispatcharr endpoints as the TS path and expect the
             // same auth.
-            startPlayer(url: streamURL, requestHeaders: headers)
+            startPlayer(url: sourceURL, requestHeaders: headers)
             debugLog("[AVP-MV] tile playing direct HLS channel=\(channelName)")
         default:
             statusText = "Preparing..."
@@ -2073,7 +2102,7 @@ struct AVPlayerMultiviewTile: View {
                 return Double(mins > 0 ? mins : 30) * 60
             }()
             liveRewindArmed = rewindSeconds > 0
-            sessionRetainKey = streamURL.absoluteString
+            sessionRetainKey = sourceURL.absoluteString
             sessionRetainChannelID = channelID
             sessionRetainName = channelName
             if liveRewindArmed {
@@ -2081,7 +2110,7 @@ struct AVPlayerMultiviewTile: View {
                 // Channel retention: if this channel's remuxer is still
                 // ingesting from a recent flip, adopt it - the rewind
                 // window (including the time away) comes back intact.
-                if let entry = LiveChannelRetention.shared.adopt(key: streamURL.absoluteString,
+                if let entry = LiveChannelRetention.shared.adopt(key: sourceURL.absoluteString,
                                                                  channelID: channelID) {
                     let mux = entry.remuxer
                     mux.onError = { error in
@@ -2109,7 +2138,7 @@ struct AVPlayerMultiviewTile: View {
                 // Fresh live session takes one of the N retention slots.
                 LiveChannelRetention.shared.evictForNewActive(activeChannelID: channelID)
             }
-            let mux = TSHLSRemuxer(sourceURL: streamURL, headers: headers,
+            let mux = TSHLSRemuxer(sourceURL: sourceURL, headers: headers,
                                    rewindWindowSeconds: rewindSeconds)
             mux.onReady = { url in
                 // @State write only; the fresh-struct onChange handler

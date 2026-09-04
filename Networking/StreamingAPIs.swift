@@ -40,6 +40,14 @@ func classifyStreamURL(_ url: URL) -> StreamFormat {
 /// `?output_format=mpegts` into Dispatcharr stream URLs for the mpv
 /// path, and an earlier defer-to-existing guard here made the probe
 /// ask for TS, caching "no native HLS" against capable servers.
+/// Inverse of `appendingHLSOutputFormat`: the raw TS URL again.
+func removingHLSOutputFormat(_ url: URL) -> URL {
+    guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+    let items = (components.queryItems ?? []).filter { $0.name != "output_format" }
+    components.queryItems = items.isEmpty ? nil : items
+    return components.url ?? url
+}
+
 func appendingHLSOutputFormat(_ url: URL) -> URL {
     guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
         return url
@@ -91,6 +99,29 @@ final class HLSCapabilityStore: NSObject {
         return capable.contains(key)
     }
 
+    /// Playback proved the host does NOT serve HLS for the upgrade URL
+    /// (AVPlayer -11850 on the redirect target). Drop it so the next tune
+    /// takes the remux path; a later session re-probes.
+    func markNotCapable(_ url: URL) {
+        guard let key = hostKey(url), capable.contains(key) else { return }
+        capable.remove(key)
+        UserDefaults.standard.set(Array(capable), forKey: Self.defaultsKey)
+        debugLog("[HLS-CAP] \(key) -> no native HLS (playback proved the redirect target is not HLS)")
+    }
+
+    /// A redirect only counts as native HLS when it points at a playlist.
+    /// Field log 2026-09-03 (iPhone, Dispatcharr on LAN): a channel on a
+    /// Redirect stream profile also answers 302, straight to the raw
+    /// upstream TS; treating any 302 as capable handed that TS to
+    /// AVPlayer as direct HLS (-11850 "server not correctly configured").
+    nonisolated static func redirectLooksLikeHLS(_ location: URL?) -> Bool {
+        guard let location else { return false }
+        let path = location.path.lowercased()
+        let query = (location.query ?? "").lowercased()
+        return path.hasSuffix(".m3u8") || path.contains("/hls/")
+            || query.contains("output_format=hls")
+    }
+
     /// Fire-and-forget probe using the channel URL the user just played.
     /// Cheap on the server: the connection is cancelled at the response
     /// HEADERS (a non-capable server would otherwise stream endless TS),
@@ -106,9 +137,10 @@ final class HLSCapabilityStore: NSObject {
         request.timeoutInterval = 6
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
 
-        let delegate = ProbeDelegate { [weak self] status in
+        let delegate = ProbeDelegate { [weak self] status, location in
+            let hls = Self.redirectLooksLikeHLS(location)
             Task { @MainActor [weak self] in
-                self?.record(status: status, for: key)
+                self?.record(status: status, redirectIsHLS: hls, for: key)
             }
         }
         let session = URLSession(configuration: .ephemeral,
@@ -124,8 +156,9 @@ final class HLSCapabilityStore: NSObject {
     private final class ProbeStatusBox: @unchecked Sendable {
         private let lock = NSLock()
         private var value = 0
-        func store(_ v: Int) { lock.lock(); value = v; lock.unlock() }
-        func load() -> Int { lock.lock(); defer { lock.unlock() }; return value }
+        private var hls = false
+        func store(_ v: Int, hls h: Bool) { lock.lock(); value = v; hls = h; lock.unlock() }
+        func load() -> (status: Int, hls: Bool) { lock.lock(); defer { lock.unlock() }; return (value, hls) }
     }
 
     /// Synchronous, time-boxed capability probe for the engine-lock path.
@@ -158,8 +191,8 @@ final class HLSCapabilityStore: NSObject {
 
         let sem = DispatchSemaphore(value: 0)
         let box = ProbeStatusBox()
-        let delegate = ProbeDelegate { status in
-            box.store(status)
+        let delegate = ProbeDelegate { status, location in
+            box.store(status, hls: Self.redirectLooksLikeHLS(location))
             sem.signal()
         }
         let session = URLSession(configuration: .ephemeral,
@@ -169,9 +202,9 @@ final class HLSCapabilityStore: NSObject {
         session.finishTasksAndInvalidate()
 
         let waited = sem.wait(timeout: .now() + timeout)
-        let status = box.load()
+        let (status, hls) = box.load()
         if waited == .success, status != 0 {
-            record(status: status, for: key)   // real answer: cache + persist
+            record(status: status, redirectIsHLS: hls, for: key)   // real answer: cache + persist
         } else {
             // Timed out / no answer: do not poison the session; allow a
             // later play to retry. A late delegate callback only touches
@@ -181,12 +214,13 @@ final class HLSCapabilityStore: NSObject {
         return capable.contains(key)
     }
 
-    private func record(status: Int, for key: String) {
+    private func record(status: Int, redirectIsHLS: Bool, for key: String) {
         inFlight.remove(key)
         probedThisSession.insert(key)
         let wasCapable = capable.contains(key)
         if status == 302 || status == 301 {
-            capable.insert(key)
+            // Only a redirect INTO a playlist is the native-HLS contract.
+            if redirectIsHLS { capable.insert(key) } else { capable.remove(key) }
         } else if status != 0 {
             // Definitive non-redirect answer: not capable.
             capable.remove(key)
@@ -207,21 +241,21 @@ final class HLSCapabilityStore: NSObject {
     /// current SDKs; `reported` is only touched from the session's
     /// serial delegate queue, so access is serialized by construction.
     private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-        private let onStatus: @Sendable (Int) -> Void
+        private let onStatus: @Sendable (Int, URL?) -> Void
         private var reported = false
-        init(onStatus: @escaping @Sendable (Int) -> Void) { self.onStatus = onStatus }
+        init(onStatus: @escaping @Sendable (Int, URL?) -> Void) { self.onStatus = onStatus }
 
-        private func report(_ status: Int) {
+        private func report(_ status: Int, location: URL? = nil) {
             guard !reported else { return }
             reported = true
-            onStatus(status)
+            onStatus(status, location)
         }
 
         func urlSession(_ session: URLSession, task: URLSessionTask,
                         willPerformHTTPRedirection response: HTTPURLResponse,
                         newRequest request: URLRequest,
                         completionHandler: @escaping (URLRequest?) -> Void) {
-            report(response.statusCode)
+            report(response.statusCode, location: request.url)
             completionHandler(nil)
         }
 
