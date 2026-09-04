@@ -444,10 +444,6 @@ struct MoviesView: View {
                 derived = result
                 #endif
             }
-            #if os(tvOS)
-            .onAppear { MoviesFocusTracer.shared.start() }
-            .onDisappear { MoviesFocusTracer.shared.stop() }
-            #endif
             .onAppear { refreshDispatcharrHeaders(); refreshHeroPages(); refreshWatchlistItems() }
             .onChange(of: heroPagesKey) { _, _ in refreshHeroPages() }
             .onChange(of: watchlistKey) { _, _ in refreshWatchlistItems() }
@@ -1146,7 +1142,6 @@ struct MoviesView: View {
                                         // scroll up AND land on the hero button).
                                         if !tabBarOnScreen, !scrollToTopInFlight {
                                             let y = geometryBox.contentOffsetY
-                                            debugLog("[FOCUS] hero focused while scrolled: scrolling to top from y=\(Int(y))")
                                             scrollToTopInFlight = true
                                             if y < 1400 {
                                                 // Short hop (shelf -> hero): the reader
@@ -1262,7 +1257,6 @@ struct MoviesView: View {
                 // is nothing to scroll, the press is forwarded to the
                 // tab-level routing by notification.
                 .onExitCommand {
-                    debugLog("[MOVIES-EXIT] hidden=\(tvTabBarHidden) search=\(showSearchField)")
                     if showSearchField {
                         // Menu closes the search field (there was no way to
                         // dismiss it, Logan 2026-09-04) and lands on Search.
@@ -1372,7 +1366,6 @@ struct MoviesView: View {
                 }
                 .onChange(of: gridFocus) { _, id in
                     if let id { lastGridFocus = id }
-                    debugLog("[FOCUS] grid title focus -> \(id ?? "nil")")
                 }
 
                 .onDisappear { TVTabBarScrollState.shared.isHidden = false }
@@ -1404,7 +1397,6 @@ struct MoviesView: View {
                         .focused($topCatcherFocused)
                         .onChange(of: topCatcherFocused) { _, focused in
                             guard focused else { return }
-                            debugLog("[FOCUS] top catcher: bar off screen, scrolling to top")
                             scrollToTopInFlight = true
                             withAnimation(.smooth(duration: 0.45)) {
                                 scrollPosition.scrollTo(y: 0)
@@ -1482,7 +1474,6 @@ struct MoviesView: View {
                             }
                         ) { letter in
                             let found = firstGridID(for: letter)
-                            debugLog("[RAIL] click \(letter) -> \(found ?? "nil") (letters=\(railLetters.count), library=\(libraryMovies.count))")
                             guard let id = found else { return }
                             let itemID = String(id.dropFirst("grid-".count))
                             if let index = libraryMovies.firstIndex(where: { $0.id == itemID }),
@@ -1492,7 +1483,6 @@ struct MoviesView: View {
                                 let row = index / cols
                                 let gridTopContent = geometryBox.gridTopVisible + geometryBox.contentOffsetY
                                 let y = gridTopContent + 16 + CGFloat(row) * geometryBox.rowPitch - 24
-                                debugLog("[RAIL] jump row=\(row) cols=\(cols) y=\(y) pitch=\(geometryBox.rowPitch)")
                                 withAnimation(.easeInOut(duration: 0.25)) {
                                     scrollPosition.scrollTo(y: max(0, y))
                                 }
@@ -1612,7 +1602,6 @@ struct MoviesView: View {
 
     private func focusTabBarWhenOnScreen(attempt: Int) {
         guard attempt < 15 else {
-            debugLog("[HERO-FOCUS] bar never came on screen; focus stays on hero")
             scrollToTopInFlight = false
             return
         }
@@ -1624,7 +1613,6 @@ struct MoviesView: View {
                 // the next Up travel from the hero button to the bar.
                 tabBarOnScreen = true
                 scrollToTopInFlight = false
-                debugLog("[HERO-FOCUS] bar on screen after \(attempt + 1) polls; catcher unmounted")
             } else {
                 focusTabBarWhenOnScreen(attempt: attempt + 1)
             }
@@ -1729,10 +1717,8 @@ struct MoviesView: View {
                     HiddenGroupsStore.save(hiddenGroups, forKey: hiddenGroupsKey)
                     HiddenGroupsStore.save(disabledProviders, forKey: disabledProvidersKey)
                     if let g = selectedGenre, effectiveHiddenGroups.contains(g) { selectedGenre = nil }
-                    logFilterState("change")
                 }
             )
-            .onAppear { logFilterState("open") }
             .presentationBackground(.clear)
         }
     }
@@ -1870,12 +1856,6 @@ struct MoviesView: View {
         }
     }
 
-    private func logFilterState(_ why: String) {
-        let enabled = providerNames.keys.filter { !disabledProviders.contains(String($0)) }
-            .map { providerNames[$0] ?? "\($0)" }.sorted()
-        debugLog("[FILTER] \(why): providers on=\(enabled) groups tab=\(groupsForEnabledProviders.count) of \(vodStore.movieCategories.count), user-hidden=\(hiddenGroups.count), effective hidden=\(effectiveHiddenGroups.count), library=\(libraryMovies.count)")
-    }
-
     /// Cast & crew: resolve the query to a TMDB person (debounced), pull
     /// their film credits, keep the ones in the library. The server search
     /// only covers title/description/genre and list rows carry no cast.
@@ -1908,7 +1888,6 @@ struct MoviesView: View {
                     guard let hit = matcher.match(tmdbID: c.id, title: c.title), seen.insert(hit.id).inserted else { continue }
                     hits.append(hit)
                 }
-                debugLog("[SEARCH] person \(person.name): \(credits.count) credits -> \(hits.count) in library (\(library.count) rows, \(matcher.idCount) with tmdb id)")
                 if hits.count > (best?.hits.count ?? 0) { best = (person.name, hits) }
             }
             guard !Task.isCancelled else { return }
@@ -1957,7 +1936,6 @@ struct MoviesView: View {
             map[a.id] = (a.name?.isEmpty == false) ? a.name! : "Provider \(a.id)"
         }
         providerNames = map
-        debugLog("[PROVIDERS] \(map.count) M3U accounts for the search filter")
     }
 
     private var pillSpacing: CGFloat {
@@ -2309,7 +2287,6 @@ struct MoviesHeroCarousel: View {
                     .focusable(true)
                     .focused($catcherFocused)
                     .onChange(of: catcherFocused) { _, focused in
-                        debugLog("[FOCUS] hero catcher focused=\(focused) barHidden=\(barState.isHidden)")
                         guard focused else { return }
                         heroFocus = primaryFocusID
                     }
@@ -2322,12 +2299,6 @@ struct MoviesHeroCarousel: View {
                 .onChange(of: heroFocus) { _, id in
                     if id != nil { heroWasFocused = true; lastHeroButton = id }
                     onHeroFocusChange?(id != nil)
-                    debugLog("[FOCUS] hero button focus -> \(id ?? "nil")")
-                    if id != nil {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                            TVFocusBridge.logFocusability(preferredTitle: "Movies")
-                        }
-                    }
                 }
                 .onChange(of: focusRequest.wrappedValue) { _, wanted in
                     guard wanted else { return }
@@ -2988,7 +2959,6 @@ struct AlphabetRail: View {
         #if os(tvOS)
         .focusSection()
         .onChange(of: focused) { old, letter in
-            debugLog("[FOCUS] rail letter focus \(old ?? "nil") -> \(letter ?? "nil")")
             onFocusChange?(letter != nil)
             // Entering from outside lands on # (Logan 2026-09-03); moving
             // within the rail is left alone. Focus alone never moves the
@@ -3098,10 +3068,8 @@ struct MoviesPosterFocusStyle: ButtonStyle {
 #endif
 
 #if os(tvOS)
-/// Programmatic focus moves the SwiftUI focus engine cannot express.
+/// UIKit-side facts the SwiftUI focus engine cannot report.
 enum TVFocusBridge {
-    /// Asks UIKit to focus the TabView's bar container (expanding it when
-    /// collapsed). Returns false when no bar view is in the window.
     /// True when the tab pill titled `preferredTitle` is within the window
     /// (the TabView slides the bar above the top edge once content scrolls).
     @MainActor
@@ -3119,224 +3087,8 @@ enum TVFocusBridge {
         walk(window)
         guard let pill else { return true }
         let f = pill.convert(pill.bounds, to: nil)
-        let on = f.minY >= 0 && !pill.isHidden && pill.alpha > 0
-        debugLog("[HERO-FOCUS] pill on screen=\(on) y=\(Int(f.minY))")
-        return on
-    }
-
-    /// Diagnostic: what the focus system thinks of the tab pill and of the
-    /// currently focused item (UIFocusDebugger, tvOS 15+).
-    @MainActor
-    static func logFocusability(preferredTitle: String) {
-        guard let window = UIApplication.shared.connectedScenes
-            .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
-            .first else { return }
-        var buttons: [UIView] = []
-        var guides: [UIView] = []
-        func walk(_ v: UIView) {
-            let n = String(describing: type(of: v))
-            if n == "UITabBarButton" { buttons.append(v) }
-            if n.contains("GuideHostView") { guides.append(v) }
-            for s in v.subviews { walk(s) }
-        }
-        walk(window)
-        if let pill = buttons.first(where: { ($0.accessibilityLabel ?? "") == preferredTitle }) {
-            // No UIFocusDebugger calls here: status() raises when invoked
-            // from the app (crash 2026-09-04 14:00).
-            debugLog("[FOCUS-DBG] pill \(preferredTitle) window=\(pill.convert(pill.bounds, to: nil)) hidden=\(pill.isHidden) alpha=\(pill.alpha) canBecomeFocused=\(pill.canBecomeFocused) userInteraction=\(pill.isUserInteractionEnabled)")
-        } else {
-            debugLog("[FOCUS-DBG] pill \(preferredTitle) not in window")
-        }
-        for g in guides {
-            debugLog("[FOCUS-DBG] guide host frame=\(g.convert(g.bounds, to: nil)) hidden=\(g.isHidden) alpha=\(g.alpha) layoutGuides=\(g.layoutGuides.count)")
-        }
-        if let item = UIFocusSystem.focusSystem(for: window)?.focusedItem as? UIView {
-            debugLog("[FOCUS-DBG] focused item frame(window)=\(item.convert(item.bounds, to: nil)) type=\(String(describing: type(of: item)))")
-        }
-    }
-
-    /// Device log 2026-09-04 13:36: asking for the CONTAINER did nothing
-    /// (it is not a focus item; focus stayed on the catcher, i.e. on
-    /// nothing visible). The tab pill itself (UITabBarButton) is the
-    /// item. Prefer the pill titled `preferredTitle` (the current tab),
-    /// else any pill. Returns true only when focus actually moved.
-    @MainActor
-    static func focusTabBar(preferredTitle: String) -> Bool {
-        guard let window = UIApplication.shared.connectedScenes
-            .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
-            .first else { return false }
-        var buttons: [UIView] = []
-        func walk(_ v: UIView) {
-            if String(describing: type(of: v)) == "UITabBarButton" { buttons.append(v) }
-            for s in v.subviews { walk(s) }
-        }
-        walk(window)
-        let target = buttons.first { ($0.accessibilityLabel ?? "") == preferredTitle } ?? buttons.first
-        guard let target else {
-            debugLog("[HERO-FOCUS] no UITabBarButton in window")
-            return false
-        }
-        guard let system = UIFocusSystem.focusSystem(for: target) else { return false }
-        system.requestFocusUpdate(to: target)
-        system.updateFocusIfNeeded()
-        let moved = system.focusedItem === target
-        debugLog("[HERO-FOCUS] requested focus on UITabBarButton(\(target.accessibilityLabel ?? "?")) frame=\(target.frame); moved=\(moved)")
-        return moved
+        return f.minY >= 0 && !pill.isHidden && pill.alpha > 0
     }
 }
 #endif
 
-#if os(tvOS)
-/// Debug: logs every tvOS focus move while the Movies tab is on screen, with
-/// the previous item, the next item, and the heading, so a "focus vanished"
-/// report can be read from the device log instead of guessed at.
-@MainActor
-final class MoviesFocusTracer {
-    static let shared = MoviesFocusTracer()
-    private var token: NSObjectProtocol?
-
-    func start() {
-        guard token == nil else { return }
-        Self.installPressLogging()
-        token = NotificationCenter.default.addObserver(
-            forName: UIFocusSystem.didUpdateNotification, object: nil, queue: .main
-        ) { note in
-            guard let ctx = note.userInfo?[UIFocusSystem.focusUpdateContextUserInfoKey] as? UIFocusUpdateContext else { return }
-            func desc(_ item: UIFocusItem?) -> String {
-                guard let item else { return "nil" }
-                let name = String(describing: type(of: item))
-                // Every focus item has a frame in its container's space;
-                // convert to window space when it is a view.
-                var f = item.frame
-                var label = ""
-                if let v = item as? UIView {
-                    f = v.convert(v.bounds, to: nil)
-                    label = v.accessibilityLabel ?? (v as? UIButton)?.currentTitle ?? ""
-                } else if let container = item.parentFocusEnvironment as? UIView {
-                    f = container.convert(item.frame, to: nil)
-                }
-                return "\(name)\(label.isEmpty ? "" : "(\(label))") @\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))"
-            }
-            let heading: String
-            switch ctx.focusHeading {
-            case .up: heading = "UP"
-            case .down: heading = "DOWN"
-            case .left: heading = "LEFT"
-            case .right: heading = "RIGHT"
-            case .next: heading = "NEXT"
-            case .previous: heading = "PREV"
-            default: heading = "none"
-            }
-            debugLog("[FOCUS] \(heading): \(desc(ctx.previouslyFocusedItem)) -> \(desc(ctx.nextFocusedItem))")
-        }
-        debugLog("[FOCUS] tracer on")
-    }
-
-    func stop() {
-        if let token { NotificationCenter.default.removeObserver(token) }
-        token = nil
-        debugLog("[FOCUS] tracer off")
-    }
-
-    /// Logs every remote press the app receives (swizzled
-    /// UIApplication.sendEvent), so a press that moved no focus still
-    /// shows up. Installed once; only logs while the tracer is on.
-    static var pressLoggingInstalled = false
-    static func installPressLogging() {
-        guard !pressLoggingInstalled else { return }
-        pressLoggingInstalled = true
-        let cls: AnyClass = UIApplication.self
-        guard let original = class_getInstanceMethod(cls, #selector(UIApplication.sendEvent(_:))),
-              let swizzled = class_getInstanceMethod(cls, #selector(UIApplication.aerio_sendEvent(_:))) else { return }
-        method_exchangeImplementations(original, swizzled)
-    }
-    var isOn: Bool { token != nil }
-}
-
-extension UIApplication {
-    @objc func aerio_sendEvent(_ event: UIEvent) {
-        if event.type == .presses, let presses = (event as? UIPressesEvent)?.allPresses, MoviesFocusTracer.shared.isOn {
-            for press in presses where press.phase == .began || press.phase == .ended {
-                let name: String
-                switch press.type {
-                case .upArrow: name = "UP"
-                case .downArrow: name = "DOWN"
-                case .leftArrow: name = "LEFT"
-                case .rightArrow: name = "RIGHT"
-                case .select: name = "SELECT"
-                case .menu: name = "MENU"
-                case .playPause: name = "PLAY/PAUSE"
-                default: name = "type=\(press.type.rawValue)"
-                }
-                let env = UIApplication.shared.connectedScenes
-                    .compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
-                let focused = env.flatMap { UIFocusSystem.focusSystem(for: $0)?.focusedItem }
-                let f = focused.map { String(describing: type(of: $0)) } ?? "nil"
-                debugLog("[PRESS] \(name) \(press.phase == .began ? "began" : "ended") focused=\(f)")
-            }
-        }
-        aerio_sendEvent(event)
-    }
-}
-#endif
-
-#if os(tvOS)
-/// A UIFocusGuide hosted in SwiftUI: a region the tvOS focus engine treats
-/// as a target and then redirects to `preferredFocusEnvironments`. Here it
-/// sits above the hero and prefers the tab pill titled `preferredTitle`,
-/// re-resolved on every layout pass (the pill view is recreated by the
-/// TabView).
-struct TabBarFocusGuide: UIViewRepresentable {
-    let preferredTitle: String
-
-    func makeUIView(context: Context) -> GuideHostView { GuideHostView(preferredTitle: preferredTitle) }
-    func updateUIView(_ uiView: GuideHostView, context: Context) { uiView.refreshTarget() }
-
-    final class GuideHostView: UIView {
-        private let guide = UIFocusGuide()
-        private let preferredTitle: String
-
-        init(preferredTitle: String) {
-            self.preferredTitle = preferredTitle
-            super.init(frame: .zero)
-            isUserInteractionEnabled = false
-            addLayoutGuide(guide)
-            NSLayoutConstraint.activate([
-                guide.leadingAnchor.constraint(equalTo: leadingAnchor),
-                guide.trailingAnchor.constraint(equalTo: trailingAnchor),
-                guide.topAnchor.constraint(equalTo: topAnchor),
-                guide.bottomAnchor.constraint(equalTo: bottomAnchor),
-            ])
-        }
-        required init?(coder: NSCoder) { fatalError() }
-
-        override func didMoveToWindow() { super.didMoveToWindow(); refreshTarget() }
-        override func layoutSubviews() { super.layoutSubviews(); refreshTarget() }
-
-        func refreshTarget() {
-            guard let window else { return }
-            var buttons: [UIView] = []
-            var container: UIView?
-            func walk(_ v: UIView) {
-                let n = String(describing: type(of: v))
-                if n == "UITabBarButton" { buttons.append(v) }
-                if container == nil, n.contains("TabBarContainerView") || v is UITabBar { container = v }
-                for s in v.subviews { walk(s) }
-            }
-            walk(window)
-            let pill = buttons.first { ($0.accessibilityLabel ?? "") == preferredTitle } ?? buttons.first
-            // The bar's CONTAINER environment first: a pill refuses focus
-            // arriving from outside its bar (trace 2026-09-04 14:15, the
-            // guide's redirect to the pill failed and tvOS re-seated focus
-            // on the rail); the container resolves its own preferred pill.
-            var envs: [UIFocusEnvironment] = []
-            if let container { envs.append(container) }
-            if let pill { envs.append(pill) }
-            if guide.preferredFocusEnvironments.first !== envs.first {
-                guide.preferredFocusEnvironments = envs
-                debugLog("[HERO-FOCUS] focus guide -> \(envs.map { String(describing: type(of: $0)) })")
-            }
-        }
-    }
-}
-#endif
