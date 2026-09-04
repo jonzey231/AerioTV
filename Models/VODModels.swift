@@ -82,6 +82,77 @@ struct UpNextEntry: Codable {
 
 // MARK: - Watch Progress Manager
 
+// MARK: - Watchlist
+
+/// A title the user saved for later (Movies tab redesign, 2026-09-04).
+/// One row per (vodID, serverID); uniqueness enforced in code by
+/// `WatchlistManager`, same as WatchProgress.
+@Model
+final class WatchlistEntry {
+    var vodID: String
+    var title: String
+    var posterURL: String?
+    var vodType: String          // "movie" or "series"
+    var serverID: String?
+    var releaseYear: String
+    var rating: String
+    var addedAt: Date
+
+    init(vodID: String, title: String, posterURL: String? = nil, vodType: String = "movie",
+         serverID: String? = nil, releaseYear: String = "", rating: String = "", addedAt: Date = Date()) {
+        self.vodID = vodID
+        self.title = title
+        self.posterURL = posterURL
+        self.vodType = vodType
+        self.serverID = serverID
+        self.releaseYear = releaseYear
+        self.rating = rating
+        self.addedAt = addedAt
+    }
+}
+
+@MainActor
+enum WatchlistManager {
+    /// Shared model context, set alongside WatchProgressManager's.
+    static var modelContext: ModelContext?
+
+    static func entry(vodID: String, serverID: String?) -> WatchlistEntry? {
+        guard let context = modelContext else { return nil }
+        let id = vodID
+        let descriptor = FetchDescriptor<WatchlistEntry>(predicate: #Predicate { $0.vodID == id })
+        let rows = (try? context.fetch(descriptor)) ?? []
+        return rows.first { $0.serverID == serverID } ?? rows.first { $0.serverID == nil }
+    }
+
+    static func contains(_ item: VODDisplayItem) -> Bool {
+        entry(vodID: item.id, serverID: item.serverID.uuidString) != nil
+    }
+
+    static func add(_ item: VODDisplayItem) {
+        guard let context = modelContext,
+              entry(vodID: item.id, serverID: item.serverID.uuidString) == nil else { return }
+        context.insert(WatchlistEntry(
+            vodID: item.id, title: item.name, posterURL: item.posterURL?.absoluteString,
+            vodType: item.type == .series ? "series" : "movie",
+            serverID: item.serverID.uuidString, releaseYear: item.releaseYear, rating: item.rating))
+        try? context.save()
+    }
+
+    static func remove(vodID: String, serverID: String?) {
+        guard let context = modelContext, let row = entry(vodID: vodID, serverID: serverID) else { return }
+        context.delete(row)
+        try? context.save()
+    }
+
+    static func toggle(_ item: VODDisplayItem) {
+        if contains(item) {
+            remove(vodID: item.id, serverID: item.serverID.uuidString)
+        } else {
+            add(item)
+        }
+    }
+}
+
 @MainActor
 enum WatchProgressManager {
     /// Shared model context — set by the app on launch from the SwiftUI model container.

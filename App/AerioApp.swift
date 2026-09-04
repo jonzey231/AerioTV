@@ -318,6 +318,7 @@ struct AerioApp: App {
             M3UPlaylist.self,
             EPGSource.self,
             WatchProgress.self,
+            WatchlistEntry.self,
             Recording.self
         ])
         do {
@@ -1175,6 +1176,7 @@ struct RootView: View {
 
                 // Share model context with WatchProgressManager for VOD resume tracking
                 WatchProgressManager.modelContext = modelContext
+                WatchlistManager.modelContext = modelContext
                 if !hasCompletedOnboarding && !hasAnySource {
                     showOnboarding = true
                 }

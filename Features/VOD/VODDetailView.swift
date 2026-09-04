@@ -383,6 +383,9 @@ struct VODDetailView: View {
                 .focusScope(detailFocusNS)
                 #endif
             }
+            // Movie layout: the hidden tab bar's inset is dead space; let
+            // the hero take it (Logan 2026-09-04).
+            .ignoresSafeArea(.container, edges: usesTVMovieLayout ? .top : [])
         }
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -612,7 +615,7 @@ struct VODDetailView: View {
         .frame(height: 620)
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 16)
-        .padding(.top, 24)
+        .padding(.top, 40)
         .fullScreenCover(item: $qrLink) { link in
             QRLinkOverlay(title: link.title, subtitle: link.subtitle, icon: link.icon, url: link.url)
         }
@@ -801,6 +804,14 @@ struct VODDetailView: View {
                                     .frame(width: 200)
                             }
                             .buttonStyle(MoviesPosterFocusStyle())
+                            .contextMenu {
+                                Button {
+                                    WatchlistManager.toggle(related)
+                                } label: {
+                                    Label(WatchlistManager.contains(related) ? "Remove from Watchlist" : "Add to Watchlist",
+                                          systemImage: WatchlistManager.contains(related) ? "bookmark.slash" : "bookmark")
+                                }
+                            }
                         }
                     }
                     .padding(.horizontal, 56)

@@ -166,6 +166,7 @@ struct MoviesView: View {
         var gridTopVisible: CGFloat = 0
         var rowPitch: CGFloat = 0
         var gridWidth: CGFloat = 0
+    var watchlistShelfHeight: CGFloat = 0
     }
     @State private var geometryBox = ScrollGeometryBox()
     @State private var scrollPosition = ScrollPosition()
@@ -195,6 +196,9 @@ struct MoviesView: View {
         filter: #Predicate<WatchProgress> { !$0.isFinished },
         sort: \WatchProgress.updatedAt, order: .reverse
     ) private var allProgress: [WatchProgress]
+    /// Watchlist, newest first; scoped to the active playlist below.
+    @Query(sort: \WatchlistEntry.addedAt, order: .reverse)
+    private var watchlistEntries: [WatchlistEntry]
     @AppStorage("moviesSortOrder") private var sortOrderRaw = MoviesSortOrder.titleAZ.rawValue
     /// Genre pill selection; nil = All. Not persisted: a filter that
     /// silently survives a relaunch reads as "my movies vanished".
@@ -322,7 +326,10 @@ struct MoviesView: View {
             // VODDetailView (which hides it) restores it on tvOS 27. Hidden
             // while the library is scrolled down (Logan 2026-09-03: the grid
             // gets the whole screen); scrolling back near the top restores it.
-            .toolbar(tvTabBarHidden ? .hidden : .visible, for: .tabBar)
+            // Also hidden while a detail is pushed: the detail's own
+            // .toolbar(.hidden) did not win over this root assertion on
+            // tvOS 27 (bar stayed on the movie page, Logan 2026-09-04).
+            .toolbar((tvTabBarHidden || !navPath.isEmpty) ? .hidden : .visible, for: .tabBar)
             #endif
             #if os(iOS)
             .toolbar {
@@ -824,6 +831,53 @@ struct MoviesView: View {
 
     /// Minimal item for a resume row whose catalog entry is not loaded
     /// (same shape ContinueWatchingSection synthesizes for View Movie).
+    /// Watchlist rows for the active playlist, resolved against the loaded
+    /// library (so the card carries the full movie) with a synthetic
+    /// fallback so a saved title still shows before the sweep reaches it.
+    private var watchlistItems: [VODDisplayItem] {
+        let sid = activeServerIDString
+        let rows = watchlistEntries.filter { e in
+            guard e.vodType == "movie" else { return false }
+            guard let sid else { return true }
+            return e.serverID == nil || e.serverID == sid
+        }
+        guard !rows.isEmpty else { return [] }
+        let wanted = Set(rows.map(\.vodID))
+        var byID: [String: VODDisplayItem] = [:]
+        for m in vodStore.movies where wanted.contains(m.id) && byID[m.id] == nil { byID[m.id] = m }
+        return rows.compactMap { e in byID[e.vodID] ?? MoviesView.syntheticItem(from: e) }
+    }
+
+    private static func syntheticItem(from e: WatchlistEntry) -> VODDisplayItem? {
+        guard let sid = e.serverID, let serverUUID = UUID(uuidString: sid) else { return nil }
+        let movie = VODMovie(
+            id: e.vodID, name: e.title,
+            posterURL: e.posterURL.flatMap { URL(string: $0) }, backdropURL: nil,
+            rating: e.rating, plot: "", genre: "", releaseDate: e.releaseYear, duration: "",
+            cast: "", director: "", imdbID: "", categoryID: "", categoryName: "",
+            streamURL: nil, containerExtension: "", serverID: serverUUID)
+        return VODDisplayItem(movie: movie)
+    }
+
+    /// Long-press menu on a poster: Details, then Add to / Remove from
+    /// Watchlist.
+    @ViewBuilder
+    private func watchlistMenuButton(_ item: VODDisplayItem) -> some View {
+        let saved = watchlistEntries.contains { $0.vodID == item.id
+            && ($0.serverID == nil || $0.serverID == item.serverID.uuidString) }
+        Button {
+            navPath.append(item)
+        } label: {
+            Label("Details", systemImage: "info.circle")
+        }
+        Button {
+            WatchlistManager.toggle(item)
+        } label: {
+            Label(saved ? "Remove from Watchlist" : "Add to Watchlist",
+                  systemImage: saved ? "bookmark.slash" : "bookmark")
+        }
+    }
+
     private static func syntheticItem(from p: WatchProgress) -> VODDisplayItem? {
         guard let sid = p.serverID, let serverUUID = UUID(uuidString: sid) else { return nil }
         let movie = VODMovie(
@@ -1021,15 +1075,30 @@ struct MoviesView: View {
                                     onRemove: { page in
                                         guard let p = page.progress else { return }
                                         WatchProgressManager.delete(vodID: p.vodID, serverID: p.serverID)
-                                    }
+                                    },
+                                    isOnWatchlist: { page in
+                                        watchlistEntries.contains { $0.vodID == page.item.id
+                                            && ($0.serverID == nil || $0.serverID == page.item.serverID.uuidString) }
+                                    },
+                                    onToggleWatchlist: { page in WatchlistManager.toggle(page.item) }
                                 )
                                 #if os(tvOS)
                                 .focusSection()
                                 #endif
                             }
 
+                            let watchlist = watchlistItems
+                            if !watchlist.isEmpty {
+                                posterShelf(title: "Watchlist", items: watchlist)
+                                    .padding(.leading, railWidth)
+                                    .background(GeometryReader { g in
+                                        Color.clear.onAppear { geometryBox.watchlistShelfHeight = g.size.height }
+                                            .onChange(of: g.size.height) { _, h in geometryBox.watchlistShelfHeight = h }
+                                    })
+                            }
                             if !recentlyAdded.isEmpty {
                                 posterShelf(title: "Recently Added", items: recentlyAdded)
+                                    .padding(.leading, railWidth)
                             }
 
                             libraryHeader(title: "All Movies", count: libraryMovies.count, showPills: true)
@@ -1079,6 +1148,21 @@ struct MoviesView: View {
                 .onReceive(NotificationCenter.default.publisher(for: .aerioTabScrollToTop)) { _ in
                     guard tvTabBarHidden else { return }
                     scrollMoviesToTop(proxy)
+                }
+                // The Watchlist shelf appearing above the grid pushed the
+                // page content down under a fixed offset, which read as an
+                // auto-scroll up (Logan 2026-09-04). Offset by the shelf's
+                // height so the focused poster stays put.
+                .onChange(of: watchlistItems.isEmpty) { wasEmpty, isEmpty in
+                    guard wasEmpty, !isEmpty, geometryBox.contentOffsetY > 0 else { return }
+                    DispatchQueue.main.async {
+                        let h = geometryBox.watchlistShelfHeight
+                        guard h > 0 else { return }
+                        var t = Transaction(); t.disablesAnimations = true
+                        withTransaction(t) {
+                            scrollPosition.scrollTo(y: geometryBox.contentOffsetY + h)
+                        }
+                    }
                 }
                 // Player dismissed at the top of the tab: tvOS was re-seating
                 // focus on the rail's # with no way out. Put it on the hero.
@@ -1635,6 +1719,7 @@ struct MoviesView: View {
                         #else
                         .buttonStyle(.plain)
                         #endif
+                        .contextMenu { watchlistMenuButton(item) }
                     }
                 }
                 .padding(.horizontal, 16)
@@ -1657,14 +1742,19 @@ struct MoviesView: View {
     }
     private var shelfCardSpacing: CGFloat {
         #if os(tvOS)
-        return 24
+        return 32
         #else
         return 12
         #endif
     }
     private var shelfCardWidth: CGFloat {
         #if os(tvOS)
-        return 200
+        // Match the grid's adaptive tile width (min 200, spacing 32) so
+        // shelf posters line up with the library columns (Logan 2026-09-04).
+        let w = geometryBox.gridWidth
+        guard w > 0 else { return 200 }
+        let cols = max(1, Int((w + 32) / (200 + 32)))
+        return min(240, (w - CGFloat(cols - 1) * 32) / CGFloat(cols))
         #else
         return 120
         #endif
@@ -1683,6 +1773,7 @@ struct MoviesView: View {
                 #else
                 .buttonStyle(.plain)
                 #endif
+                .contextMenu { watchlistMenuButton(item) }
                 .id("grid-\(item.id)")
                 .background(GeometryReader { g in
                     Color.clear.onAppear {
@@ -1889,6 +1980,9 @@ struct MoviesHeroCarousel: View {
     let onPlayFromStart: (MoviesHeroPage) -> Void
     let onDetails: (MoviesHeroPage) -> Void
     let onRemove: (MoviesHeroPage) -> Void
+    /// Long press on the primary button: Add to / Remove from Watchlist.
+    var isOnWatchlist: ((MoviesHeroPage) -> Bool)? = nil
+    var onToggleWatchlist: ((MoviesHeroPage) -> Void)? = nil
 
     /// tvOS: focus arriving from above is forwarded to the aligned page's
     /// Resume (geometry alone landed on the page peeking in on the right).
@@ -1980,6 +2074,8 @@ struct MoviesHeroCarousel: View {
                             onPlayFromStart: { onPlayFromStart(page) },
                             onDetails: { onDetails(page) },
                             onRemove: page.progress != nil ? { onRemove(page) } : nil,
+                            isOnWatchlist: isOnWatchlist?(page) ?? false,
+                            onToggleWatchlist: onToggleWatchlist.map { toggle in { toggle(page) } },
                             primaryFocusID: page.id
                         )
                         .frame(width: pageWidth)
@@ -2037,6 +2133,8 @@ struct MoviesHero: View {
     /// Long press on Resume: Remove from Continue Watching. nil when the
     /// page is not a resume row.
     var onRemove: (() -> Void)? = nil
+    var isOnWatchlist: Bool = false
+    var onToggleWatchlist: (() -> Void)? = nil
     /// tvOS: base id the carousel uses to focus this page's buttons
     /// ("<id>|primary", "<id>|start", "<id>|details").
     var primaryFocusID: String? = nil
@@ -2205,6 +2303,12 @@ struct MoviesHero: View {
         HStack(spacing: 12) {
             primaryButton
                 .contextMenu {
+                    if let onToggleWatchlist {
+                        Button(action: onToggleWatchlist) {
+                            Label(isOnWatchlist ? "Remove from Watchlist" : "Add to Watchlist",
+                                  systemImage: isOnWatchlist ? "bookmark.slash" : "bookmark")
+                        }
+                    }
                     if let onRemove {
                         Button(role: .destructive, action: onRemove) {
                             Label("Remove from Continue Watching", systemImage: "trash")
