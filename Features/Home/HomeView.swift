@@ -3578,6 +3578,10 @@ struct MainTabView: View {
     @State private var tabShowRecordings = false
     @State private var tabShowVOD = false
     @ObservedObject private var tabBarScrollState = TVTabBarScrollState.shared
+    #endif
+    @ObservedObject private var nowPlaying = NowPlayingManager.shared
+    @ObservedObject private var favoritesStore = FavoritesStore.shared
+    @ObservedObject private var vodStore = VODStore.shared
     private var isTVOS: Bool {
         #if os(tvOS)
         return true
@@ -3585,10 +3589,6 @@ struct MainTabView: View {
         return false
         #endif
     }
-    #endif
-    @ObservedObject private var nowPlaying = NowPlayingManager.shared
-    @ObservedObject private var favoritesStore = FavoritesStore.shared
-    @ObservedObject private var vodStore = VODStore.shared
     @ObservedObject private var channelStore = ChannelStore.shared
     /// Watched purely so `hasRecordings` recomputes the moment a capture
     /// starts or stops — the DVR tab has to stay up for an in-flight

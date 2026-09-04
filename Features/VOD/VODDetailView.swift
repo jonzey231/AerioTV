@@ -339,9 +339,20 @@ struct VODDetailView: View {
                 // the first letter off every plot/genre/cast line
                 // in the v1.6.12 enrichment work.
                 VStack(alignment: .leading, spacing: 0) {
-                    heroSection
-                    infoSection
+                    if usesTVMovieLayout {
+                        #if os(tvOS)
+                        tvMovieHero
+                        #endif
+                    } else {
+                        heroSection
+                        infoSection
+                    }
                     castCrewSection
+                    if usesTVMovieLayout {
+                        #if os(tvOS)
+                        tvDetailsBlock
+                        #endif
+                    }
                     if item.type == .series {
                         episodeSection
                     }
@@ -462,6 +473,292 @@ struct VODDetailView: View {
             }
         }
     }
+
+    // MARK: - tvOS movie layout (Movies tab redesign, 2026-09-04)
+    //
+    // Full-bleed backdrop hero in the Movies tab style: art clipped to the
+    // rounded shape, opaque leading band and bottom fade into the page,
+    // title / meta / plot / action row drawn over it. Trailer and TMDB are
+    // buttons that open a QR overlay instead of two static QR blocks.
+    // Movies only for now; series get their own pass with the TV Shows tab.
+
+    /// tvOS movie detail uses the redesigned layout.
+    private var usesTVMovieLayout: Bool {
+        #if os(tvOS)
+        return item.type == .movie
+        #else
+        return false
+        #endif
+    }
+
+    /// Set by Play from Beginning so the launch ignores the saved resume
+    /// point. Cleared once playback has been started.
+    @State private var playFromStartRequested = false
+
+    #if os(tvOS)
+    /// Trailer / TMDB link shown as a scannable QR overlay.
+    private struct QRLink: Identifiable {
+        let id: String
+        let title: String
+        let subtitle: String
+        let icon: String
+        let url: URL
+    }
+    @State private var qrLink: QRLink?
+    @State private var tvVersionPickerPresented = false
+
+    private var tvHeroURL: URL? {
+        (fullMovie?.backdropURL ?? fullSeries?.backdropURL) ?? item.posterURL ?? tmdbPosterURL
+    }
+
+    // Server-wins merges (provider value first, TMDB backfill for blanks),
+    // mirroring heroSection / infoSection.
+    private var mergedYear: String {
+        let detailYear = (fullMovie?.releaseYear ?? fullSeries?.releaseYear) ?? ""
+        let serverYear = detailYear.isEmpty ? item.releaseYear : detailYear
+        return serverYear.isEmpty ? (tmdbDetails?.year ?? "") : serverYear
+    }
+    private var mergedRating: String {
+        let infoRating = (fullMovie?.rating ?? fullSeries?.rating) ?? ""
+        let raw = (infoRating.isEmpty ? item.rating : infoRating).trimmingCharacters(in: .whitespaces)
+        let server = (raw == "0" || raw == "0.0") ? "" : raw
+        return server.isEmpty ? (tmdbDetails?.voteAverage ?? "") : server
+    }
+    private var mergedPlot: String {
+        let server = fullMovie?.plot ?? fullSeries?.plot ?? ""
+        return server.isEmpty ? (tmdbDetails?.overview ?? "") : server
+    }
+    private var mergedGenre: String {
+        let server = fullMovie?.genre ?? fullSeries?.genre ?? ""
+        return server.isEmpty ? (tmdbDetails?.genres ?? "") : server
+    }
+    private var mergedCast: String {
+        let server = fullMovie?.cast ?? fullSeries?.cast ?? ""
+        return server.isEmpty ? (tmdbDetails?.castTop ?? "") : server
+    }
+    private var mergedDirector: String {
+        let server = fullMovie?.director ?? fullSeries?.director ?? ""
+        return server.isEmpty ? (tmdbDetails?.director ?? "") : server
+    }
+    private var tvResumeMs: Int32 {
+        WatchProgressManager.getResumePosition(vodID: item.id, serverID: item.serverID.uuidString) ?? 0
+    }
+    private var tvTrailerURL: URL? {
+        trailerURL(from: fullMovie?.youtubeTrailer ?? fullSeries?.youtubeTrailer ?? "")
+    }
+    private var tvTMDBURL: URL? {
+        let rawID = fullMovie?.tmdbID ?? fullSeries?.tmdbID
+            ?? item.movie?.tmdbID ?? item.series?.tmdbID ?? ""
+        return rawID.isEmpty ? nil : tmdbURL(from: rawID, type: item.type)
+    }
+
+    private var tvMovieHero: some View {
+        ZStack(alignment: .leading) {
+            GeometryReader { geo in
+                if let url = tvHeroURL {
+                    AuthPosterImage(url: url, headers: serverHeaders(), placeholder: .clear, maxPixel: 1920)
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                } else {
+                    Color.clear
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            LinearGradient(
+                stops: [
+                    .init(color: Color.appBackground, location: 0),
+                    .init(color: Color.appBackground, location: 0.12),
+                    .init(color: Color.appBackground.opacity(0.92), location: 0.38),
+                    .init(color: Color.appBackground.opacity(0.35), location: 0.7),
+                    .init(color: Color.appBackground.opacity(0.05), location: 1)
+                ],
+                startPoint: .leading, endPoint: .trailing)
+            LinearGradient(
+                stops: [
+                    .init(color: Color.appBackground.opacity(0), location: 0.55),
+                    .init(color: Color.appBackground, location: 1)
+                ],
+                startPoint: .top, endPoint: .bottom)
+            tvHeroCopy
+        }
+        .frame(height: 620)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 16)
+        .padding(.top, 24)
+        .fullScreenCover(item: $qrLink) { link in
+            QRLinkOverlay(title: link.title, subtitle: link.subtitle, icon: link.icon, url: link.url)
+        }
+    }
+
+    private var tvHeroCopy: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(item.name)
+                .font(.displayLarge)
+                .foregroundColor(.textPrimary)
+                .lineLimit(2)
+            tvMetaLine
+            let plot = mergedPlot
+            if !plot.isEmpty {
+                Text(plot)
+                    .font(.bodySmall)
+                    .foregroundColor(.textPrimary.opacity(0.85))
+                    .lineLimit(4)
+                    .frame(maxWidth: 760, alignment: .leading)
+            }
+            tvActionRow
+        }
+        .padding(40)
+        .frame(maxWidth: 960, alignment: .leading)
+        .frame(maxHeight: .infinity, alignment: .bottom)
+    }
+
+    private var tvMetaParts: [String] {
+        var parts: [String] = []
+        let year = mergedYear
+        if !year.isEmpty { parts.append(year) }
+        if let d = fullMovie?.duration, !d.isEmpty { parts.append(d) }
+        if let g = mergedGenre.components(separatedBy: ",").first?
+            .trimmingCharacters(in: .whitespaces), !g.isEmpty { parts.append(g) }
+        return parts
+    }
+
+    @ViewBuilder
+    private var tvMetaLine: some View {
+        let parts = tvMetaParts
+        let rating = mergedRating
+        if !parts.isEmpty || !rating.isEmpty {
+            HStack(spacing: 10) {
+                ForEach(Array(parts.enumerated()), id: \.offset) { idx, part in
+                    if idx > 0 { Text("·").foregroundColor(.textTertiary) }
+                    Text(part)
+                }
+                if !rating.isEmpty {
+                    if !parts.isEmpty { Text("·").foregroundColor(.textTertiary) }
+                    HStack(spacing: 4) {
+                        Image(systemName: "star.fill").font(.system(size: 18))
+                        Text(rating)
+                    }
+                    .foregroundColor(.accentPrimary)
+                }
+            }
+            .font(.system(size: 22, weight: .medium))
+            .foregroundColor(.textSecondary)
+        }
+    }
+
+    private var tvActionRow: some View {
+        HStack(spacing: 12) {
+            let movie = fullMovie ?? item.movie
+            let url = movie.flatMap { versionedMovieURL($0) ?? $0.streamURL }
+            let resume = tvResumeMs
+            MoviesHeroButton(
+                title: isResolvingURL ? "Loading…" : (resume > 0 ? "Resume" : "Play"),
+                systemImage: "play.fill", isPrimary: true
+            ) {
+                debugLog("[VOD-Play] pressed url=\(url?.absoluteString ?? "NIL") resolving=\(isResolvingURL)")
+                guard let url, let movie, !isResolvingURL else { return }
+                playFromStartRequested = false
+                Task { await resolveAndLaunch(url: url, title: movie.name) }
+            }
+            .focused($playFocused)
+            .prefersDefaultFocus(true, in: detailFocusNS)
+            if resume > 0 {
+                MoviesHeroButton(title: "Play from Beginning", systemImage: "arrow.counterclockwise", isPrimary: false) {
+                    guard let url, let movie, !isResolvingURL else { return }
+                    playFromStartRequested = true
+                    Task { await resolveAndLaunch(url: url, title: movie.name) }
+                }
+            }
+            if versionProviders.count > 1 {
+                let currentLabel = selectedVersion.map { label(for: $0) } ?? "Auto"
+                MoviesHeroButton(title: "Version: \(currentLabel)", systemImage: "square.stack.3d.up", isPrimary: false) {
+                    tvVersionPickerPresented = true
+                }
+                .confirmationDialog("Version", isPresented: $tvVersionPickerPresented, titleVisibility: .visible) {
+                    Button(selectedVersion == nil ? "✓ Auto (recommended)" : "Auto (recommended)") {
+                        rememberVersion(nil)
+                    }
+                    ForEach(versionProviders) { rel in
+                        Button(selectedVersion?.id == rel.id ? "✓ \(label(for: rel))" : label(for: rel)) {
+                            rememberVersion(rel)
+                        }
+                    }
+                }
+            }
+            if let trailer = tvTrailerURL {
+                MoviesHeroButton(title: "Trailer", systemImage: "play.rectangle.fill", isPrimary: false) {
+                    qrLink = QRLink(id: "trailer", title: "Trailer",
+                                    subtitle: "Scan with your phone to watch the trailer on YouTube.",
+                                    icon: "play.rectangle.fill", url: trailer)
+                }
+            }
+            if let tmdb = tvTMDBURL {
+                MoviesHeroButton(title: "TMDB", systemImage: "info.circle.fill", isPrimary: false) {
+                    qrLink = QRLink(id: "tmdb", title: "View on TMDB",
+                                    subtitle: "Scan with your phone to view this title on TMDB.",
+                                    icon: "info.circle.fill", url: tmdb)
+                }
+            }
+        }
+        .focusSection()
+    }
+
+    /// Two-column facts block under the cast strip.
+    private var tvFacts: [(String, String)] {
+        var facts: [(String, String)] = []
+        let genre = mergedGenre
+        if !genre.isEmpty { facts.append(("Genre", genre)) }
+        let released = fullMovie?.releaseDate ?? fullSeries?.releaseDate ?? ""
+        if released.count > 4 { facts.append(("Released", released)) }
+        if let d = fullMovie?.duration, !d.isEmpty { facts.append(("Runtime", d)) }
+        let director = mergedDirector
+        if !director.isEmpty { facts.append(("Director", director)) }
+        if castCrewPeople.isEmpty {
+            let cast = mergedCast
+            if !cast.isEmpty { facts.append(("Cast", cast)) }
+        }
+        let country = fullMovie?.country ?? fullSeries?.country ?? ""
+        if !country.isEmpty { facts.append(("Country", country)) }
+        return facts
+    }
+
+    @ViewBuilder
+    private var tvDetailsBlock: some View {
+        let facts = tvFacts
+        if !facts.isEmpty {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Details")
+                    .font(.headlineSmall)
+                    .foregroundColor(.textPrimary)
+                LazyVGrid(columns: [GridItem(.flexible(), alignment: .topLeading),
+                                    GridItem(.flexible(), alignment: .topLeading)],
+                          alignment: .leading, spacing: 18) {
+                    ForEach(Array(facts.enumerated()), id: \.offset) { _, fact in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(fact.0.uppercased())
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(.textTertiary)
+                                .tracking(1)
+                            Text(fact.1)
+                                .font(.bodyMedium)
+                                .foregroundColor(.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.trailing, 40)
+                    }
+                }
+                tmdbSourceNote
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 56)
+            .padding(.top, 8)
+        } else {
+            tmdbSourceNote
+                .padding(.horizontal, 56)
+        }
+    }
+    #endif
 
     // MARK: - Hero
     private var heroSection: some View {
@@ -1452,8 +1749,9 @@ struct VODDetailView: View {
             vodID: playingVodID,
             serverID: item.serverID.uuidString,
             vodType: playingVodType,
-            resumePositionMs: WatchProgressManager.getResumePosition(vodID: playingVodID,
-                                                              serverID: item.serverID.uuidString),
+            resumePositionMs: playFromStartRequested ? 0
+                : WatchProgressManager.getResumePosition(vodID: playingVodID,
+                                                         serverID: item.serverID.uuidString),
             versionOptions: playingVersionOptions,
             selectedVersionID: playingVersionOptionID,
             versionSelectionKey: versionSelectionKey) {
@@ -1922,6 +2220,47 @@ private struct TVEpisodeRowButton: View {
 // MARK: - Play Button with tvOS Focus
 
 /// Extracted so it can own a @FocusState for clear focus highlighting on the Play CTA.
+#if os(tvOS)
+/// Full-screen QR overlay for a Trailer / TMDB link on Apple TV (no
+/// browser; see tvOSTrailerQR for why a QR beats a YouTube deep link).
+private struct QRLinkOverlay: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            Color.appBackground.ignoresSafeArea()
+            VStack(spacing: 28) {
+                HStack(spacing: 12) {
+                    Image(systemName: icon)
+                    Text(title)
+                }
+                .font(.displayMedium)
+                .foregroundStyle(Color.accentPrimary)
+                if let qr = VODDetailView.qrCodeImage(from: url.absoluteString) {
+                    Image(uiImage: qr)
+                        .interpolation(.none)
+                        .resizable()
+                        .frame(width: 360, height: 360)
+                        .padding(24)
+                        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color.white))
+                }
+                Text(subtitle)
+                    .font(.bodyMedium)
+                    .foregroundColor(.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 700)
+                MoviesHeroButton(title: "Done", systemImage: "xmark", isPrimary: false) { dismiss() }
+            }
+        }
+        .onExitCommand { dismiss() }
+    }
+}
+#endif
+
 private struct TVPlayButton: View {
     let isResolvingURL: Bool
     let action: () -> Void

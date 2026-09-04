@@ -105,6 +105,11 @@ struct MoviesView: View {
     @Binding var isPlaying: Bool
     @Binding var isDetailPushed: Bool
     @Binding var popRequested: Bool
+    /// tvOS: like heroFocusRequest, but lands on the hero button that had
+    /// focus last (Up from Play from Beginning returned to Resume, Logan
+    /// 2026-09-04). Declared unguarded: the carousel binding is built in
+    /// shared code.
+    @State private var heroRestoreRequest = false
 
     @State private var searchText = ""
     @State private var hiddenGroups: Set<String> = []
@@ -130,10 +135,6 @@ struct MoviesView: View {
     @FocusState private var gridFocus: String?
     /// Set to move focus onto the hero's Resume (scroll-to-top landing).
     @State private var heroFocusRequest = false
-    /// tvOS: like heroFocusRequest, but lands on the hero button that had
-    /// focus last (Up from Play from Beginning returned to Resume, Logan
-    /// 2026-09-04).
-    @State private var heroRestoreRequest = false
     /// True while a hero button has focus: shows the fixed tab-bar guide.
     @State private var heroHasFocus = false
     /// Whether the Movies pill is currently on screen. The TabView slides
