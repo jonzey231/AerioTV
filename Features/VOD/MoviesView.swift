@@ -1097,8 +1097,15 @@ struct MoviesView: View {
                         // Invisible catcher under the letters: if the focus
                         // engine reaches this instead of a letter, focus is
                         // forwarded to #.
+                        // Starts at the rail's top, not the screen top: a
+                        // catcher above the letters caught Up from # and
+                        // forwarded it back to # (trace 2026-09-04 14:11,
+                        // an endless loop). Up from # now finds nothing and
+                        // the rail's own exit takes focus to the hero.
                         Color.clear
-                            .frame(width: railWidth, height: outer.size.height + outer.safeAreaInsets.top)
+                            .frame(width: railWidth,
+                                   height: max(0, outer.size.height + outer.safeAreaInsets.top - railTop))
+                            .padding(.top, railTop)
                             .focusable(true)
                             .focused($railCatcherFocused)
                             .onChange(of: railCatcherFocused) { _, focused in
