@@ -228,17 +228,18 @@ struct ServerSyncView: View {
                 .padding(.horizontal, 40)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             } else {
+                #if os(tvOS)
+                TVSkipButton {
+                    syncTask?.cancel()
+                    dismiss()
+                }
+                #else
                 Button("Skip") {
                     syncTask?.cancel()
                     dismiss()
                 }
                 .font(.bodyMedium)
                 .foregroundColor(.textSecondary)
-                #if os(tvOS)
-                // v1.6.21: themed focus visual instead of the system
-                // default white pill. Matches the rest of AerioTV's
-                // focus styling.
-                .buttonStyle(TVNoHighlightButtonStyle())
                 #endif
             }
 
@@ -260,15 +261,14 @@ struct ServerSyncView: View {
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
                 }
 
+                #if os(tvOS)
+                TVSkipButton { onContinueAnyway() }
+                #else
                 Button("Skip") {
                     onContinueAnyway()
                 }
                 .font(.bodyMedium)
                 .foregroundColor(.textSecondary)
-                #if os(tvOS)
-                // v1.6.21: themed focus visual, matching the other
-                // Skip button on the same screen.
-                .buttonStyle(TVNoHighlightButtonStyle())
                 #endif
             }
             .animation(.easeInOut(duration: 0.25), value: isTakingTooLong)
@@ -566,3 +566,37 @@ struct ServerSyncView: View {
         return "Synced"
     }
 }
+
+#if os(tvOS)
+/// Skip on the Setting Up screen. Owns its focus platter (Logan
+/// 2026-09-05: the default ring hugged the bare text and the button was
+/// too small to read from the couch); same shape as Settings' compact
+/// buttons.
+private struct TVSkipButton: View {
+    let action: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            Text("Skip")
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundColor(isFocused ? .textPrimary : .textSecondary)
+                .padding(.horizontal, 40)
+                .padding(.vertical, 14)
+                .frame(minWidth: 180)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(isFocused ? Color.accentPrimary.opacity(0.20) : Color.elevatedBackground.opacity(0.6))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.accentPrimary, lineWidth: isFocused ? 3 : 0)
+                )
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($isFocused)
+        .scaleEffect(isFocused ? 1.05 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+#endif
