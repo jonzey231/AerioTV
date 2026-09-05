@@ -246,9 +246,10 @@ struct ChannelListView: View {
         #if os(tvOS)
         return remoteStore.useGroupSidebar
         #else
-        // Phone (Logan 2026-09-05): the same Group Selection setting picks
-        // the group drawer over the pill row.
-        return UIDevice.current.userInterfaceIdiom == .phone && remoteStore.useGroupSidebar
+        // Phone (Logan 2026-09-05): its own Group Selection setting, sidebar
+        // by default (the pill row is crowded on a phone); the Apple TV
+        // keeps its own choice.
+        return UIDevice.current.userInterfaceIdiom == .phone && phoneGroupSelector != "pills"
         #endif
     }
 
@@ -363,6 +364,7 @@ struct ChannelListView: View {
     private let defaultChannelGroupKey = "defaultChannelGroup"
     @State private var defaultGroupApplied = false
     #if os(iOS)
+    @AppStorage(phoneGroupSelectorKey) private var phoneGroupSelector = "sidebar"
     @State private var phoneSearchPresented = false
     /// Phone sidebar mode: the group drawer over the list / guide.
     @State private var phoneDrawerOpen = false
@@ -776,8 +778,9 @@ struct ChannelListView: View {
                 }
                 .accessibilityLabel("Manage Groups")
                 if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty) && !compactChromeHidesFilterBar {
+                    // Clipped: the strip must not run under the icons.
                     groupFilterBar
-                        .padding(.horizontal, -16)
+                        .clipped()
                 } else {
                     Spacer(minLength: 4)
                 }
@@ -4599,4 +4602,10 @@ struct PhoneGroupDrawer: View {
         .onChange(of: tokens) { _, t in if t != order { order = t } }
     }
 }
+#endif
+
+#if os(iOS)
+/// Phone Group Selection: "sidebar" (default) or "pills". Separate from the
+/// Apple TV's `useGroupSidebar` so each device keeps its own choice.
+let phoneGroupSelectorKey = "phoneGroupSelector"
 #endif

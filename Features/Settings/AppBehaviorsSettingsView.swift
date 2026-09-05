@@ -17,7 +17,9 @@ import SwiftUI
 /// existing users carry their preferences forward unchanged.
 struct AppBehaviorsSettingsView: View {
     @ObservedObject private var theme = ThemeManager.shared
-    @ObservedObject private var remoteStore = RemoteControlStore.shared
+    #if os(iOS)
+    @AppStorage(phoneGroupSelectorKey) private var phoneGroupSelector = "sidebar"
+    #endif
 
     // MARK: - Toggles
 
@@ -465,9 +467,9 @@ struct AppBehaviorsSettingsView: View {
             // (Logan 2026-09-05, phone pass).
             if UIDevice.current.userInterfaceIdiom == .phone {
                 Section {
-                    ForEach([false, true], id: \.self) { sidebar in
+                    ForEach([true, false], id: \.self) { sidebar in
                         Button {
-                            remoteStore.useGroupSidebar = sidebar
+                            phoneGroupSelector = sidebar ? "sidebar" : "pills"
                         } label: {
                             HStack {
                                 Image(systemName: sidebar ? "sidebar.leading" : "capsule.lefthalf.filled")
@@ -478,7 +480,7 @@ struct AppBehaviorsSettingsView: View {
                                     .font(.bodyMedium)
                                     .foregroundColor(.textPrimary)
                                 Spacer()
-                                if remoteStore.useGroupSidebar == sidebar {
+                                if (phoneGroupSelector != "pills") == sidebar {
                                     Image(systemName: "checkmark")
                                         .font(.system(size: 14, weight: .semibold))
                                         .foregroundColor(theme.accent)
@@ -490,7 +492,7 @@ struct AppBehaviorsSettingsView: View {
                 } header: {
                     Text("Group Selection").sectionHeaderStyle()
                 } footer: {
-                    Text("How channel groups are picked in Live TV. Top Group Pills keep the group row at the top; Sidebar Menu replaces it with a drawer opened from the header, where a long press also reorders groups.")
+                    Text("How channel groups are picked in Live TV. Sidebar Menu opens a drawer from the header, where a long press also reorders groups. Top Group Pills put the group row at the top instead.")
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)

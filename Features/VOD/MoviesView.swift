@@ -2221,6 +2221,11 @@ struct MoviesView: View {
             }
         }
         .padding(16)
+        #if os(iOS)
+        // Phone: a right gutter is the alphabet rail's lane, so the letters
+        // never sit on the third column's rating badges (Logan 2026-09-05).
+        .padding(.trailing, UIDevice.current.userInterfaceIdiom == .phone ? 18 : 0)
+        #endif
         .background(GeometryReader { g in
             Color.clear.onAppear { geometryBox.gridWidth = g.size.width - 32 }
                 .onChange(of: g.size.width) { _, w in geometryBox.gridWidth = w - 32 }
@@ -2801,6 +2806,11 @@ struct MoviesHero: View {
                 }
                 .font(.system(size: metaSize, weight: .medium))
                 .foregroundColor(.textSecondary)
+                #if os(iOS)
+                // One line on the phone card; a long genre list wrapped to three.
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                #endif
             }
             #if os(tvOS)
             if case let plot = (art.overview(for: item) ?? item.plotText), !plot.isEmpty {
@@ -3146,7 +3156,7 @@ struct AlphabetRail: View {
         #if os(tvOS)
         return 27 * 32
         #else
-        return 27 * 15
+        return 27 * 21
         #endif
     }
 
@@ -3275,9 +3285,10 @@ struct AlphabetRail: View {
     private let cell: CGFloat = 32
     private let leadingInset: CGFloat = 20
     #else
+    // Phone: taller cells make the letters easier to hit (Logan 2026-09-05).
     private let spacing: CGFloat = 0
-    private let fontSize: CGFloat = 10
-    private let cell: CGFloat = 15
+    private let fontSize: CGFloat = 12
+    private let cell: CGFloat = 21
     private let leadingInset: CGFloat = 6
     #endif
 }
