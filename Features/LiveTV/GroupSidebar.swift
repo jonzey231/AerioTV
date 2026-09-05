@@ -51,6 +51,8 @@ func groupSidebarLabel(_ token: String) -> String {
 /// white wash + an inset accent border, the active row an accent tint +
 /// semibold, and the border is drawn with `strokeBorder` (inset) so the ring
 /// stays inside the row's footprint.
+/// Plain text rows (Logan 2026-09-05: not pills): a quiet wash on focus,
+/// accent text + tint for the active group, inset accent border on focus.
 private struct GroupSidebarRowButtonStyle: ButtonStyle {
     let isActive: Bool
     @Environment(\.isFocused) private var isFocused
@@ -125,7 +127,9 @@ struct GroupSidebarPanel: View {
          onDismiss: @escaping () -> Void,
          onRowFocused: ((String) -> Void)? = nil,
          onManageGroups: (() -> Void)? = nil,
-         hiddenGroupCount: Int = 0) {
+         hiddenGroupCount: Int = 0,
+         fixedWidth: CGFloat? = nil) {
+        self.fixedWidth = fixedWidth
         self.groups = groups
         self.selectedToken = selectedToken
         self.onSelect = onSelect
@@ -147,7 +151,12 @@ struct GroupSidebarPanel: View {
     /// Fit the panel to the widest label at the row's type scale, then clamp.
     /// A LazyVStack can't be intrinsic-measured, so text-measuring the labels
     /// is the reliable way to size the rail.
+    /// Fixed width. Set by the guide pane so the rail sits over the channel
+    /// column without moving the grid (Logan 2026-09-05).
+    var fixedWidth: CGFloat? = nil
+
     private var panelWidth: CGFloat {
+        if let fixedWidth { return fixedWidth }
         let font = UIFont.systemFont(ofSize: groupSidebarRowFontSize, weight: .semibold)
         let widest = groups.reduce(CGFloat(0)) { acc, token in
             let w = (groupSidebarLabel(token) as NSString)
@@ -211,16 +220,28 @@ struct GroupSidebarPanel: View {
         }
         .frame(width: panelWidth)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(Color.appBackground)
+        // Slightly see-through over the channel rail (Logan 2026-09-05);
+        // the pane wrapper paints the same tint.
+        .background(fixedWidth == nil ? Color.appBackground : Color.clear)
     }
 
     @ViewBuilder
     private func groupRow(_ token: String) -> some View {
+        let defaultToken = UserDefaults.standard.string(forKey: "defaultChannelGroup") ?? ""
+        let isDefault = defaultToken == token || (token == groupSidebarAllToken && defaultToken.isEmpty)
         Button {
             onSelect(token)
         } label: {
-            Text(groupSidebarLabel(token))
-                .lineLimit(1)
+            HStack(spacing: 8) {
+                if token == ChannelListView.favoritesToken {
+                    Image(systemName: "star.fill").font(.system(size: 22, weight: .medium))
+                }
+                Text(groupSidebarLabel(token))
+                    .lineLimit(1)
+                if isDefault {
+                    Image(systemName: "pin.fill").font(.system(size: 14, weight: .semibold)).opacity(0.7)
+                }
+            }
         }
         .buttonStyle(GroupSidebarRowButtonStyle(isActive: token == selectedToken))
         .focused($focusedToken, equals: token)
@@ -297,20 +318,15 @@ struct GuideGroupSidebarPane: View {
                 onDismiss: onDismiss,
                 onRowFocused: onPreview,
                 onManageGroups: onManageGroups,
-                hiddenGroupCount: hiddenGroupCount
+                hiddenGroupCount: hiddenGroupCount,
+                fixedWidth: 360 - 40
             )
-            .padding(.vertical, 24)
-            .padding(.leading, 20)
-            .padding(.trailing, 12)
+            .padding(.top, 4)
+            .padding(.horizontal, 20)
             .frame(maxHeight: .infinity)
+            // Drawer (Logan 2026-09-05): solid; the rail behind it was noise.
             .background(Color.appBackground)
             .focusScope(sidebarFocusNS)
-
-            // Hairline separating the menu from the shifted guide.
-            Rectangle()
-                .fill(Color.accentPrimary.opacity(0.25))
-                .frame(width: 1)
-                .frame(maxHeight: .infinity)
         }
         .frame(maxHeight: .infinity)
         // Right has no focusable target inside the vertical rail, so the move

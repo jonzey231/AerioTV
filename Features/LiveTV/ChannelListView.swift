@@ -333,6 +333,10 @@ struct ChannelListView: View {
     @State private var previewProgram: GuideProgram?
     @State private var previewChannel: ChannelDisplayItem?
     @State private var bannerInfoTarget: ProgramInfoTarget?
+    /// Global tops of the guide host and the guide itself: the sidebar pane
+    /// is padded by the difference so it starts at the time row.
+    @State private var guideHostTopAbs: CGFloat = 0
+    @State private var guideTopAbs: CGFloat = 0
     /// When the banner description last lost focus: a pill gaining focus
     /// right after it on a Down press is redirected to the first pill
     /// (Logan 2026-09-05: Down from the description lands on the first
@@ -777,11 +781,22 @@ struct ChannelListView: View {
                         capturedNaturalTop = newValue
                     }
 
-                HStack(spacing: 0) {
+                // Overlay, not a docked column (Logan 2026-09-05): the pane
+                // sits over the guide's channel column, below the banner and
+                // pill row, and nothing else moves.
+                ZStack(alignment: .topLeading) {
                     #if os(tvOS)
-                    // Docked group sidebar (Group Selection: Sidebar Menu). The
-                    // guide shifts right beside it; Right/Back close it.
+                    Color.clear.frame(height: 0)
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { guideHostTopAbs = $0 }
+                    // Group sidebar (Group Selection: Sidebar Menu); Right/Back close it.
                     if guideSidebarOpen {
+                        // Drawer with a scrim (Logan 2026-09-05): the rest of the
+                        // tab dims so covering it is the point, not a compromise.
+                        Color.black.opacity(0.45)
+                            .ignoresSafeArea()
+                            .allowsHitTesting(false)
+                            .transition(.opacity)
+                            .zIndex(0.5)
                         // #196 Android-parity semantics: focusing a row
                         // PREVIEWS its group live behind the pane (90ms
                         // debounce); OK or Right COMMITS and closes; Back
@@ -834,6 +849,11 @@ struct ChannelListView: View {
                         )
                         .transition(.move(edge: .leading))
                         .focusSection()
+                        // Top edge on the first channel row: the guide's top
+                        // plus its 50pt time header (Logan 2026-09-05).
+                        .padding(.top, max(0, guideTopAbs - guideHostTopAbs + 50))
+                        .ignoresSafeArea(.container, edges: [.leading, .bottom])
+                        .zIndex(1)
                     }
                     #endif
                     VStack(spacing: 0) {
@@ -914,6 +934,7 @@ struct ChannelListView: View {
                                 withAnimation(.easeOut(duration: 0.28)) { guideSidebarOpen = true }
                             }
                         )
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { guideTopAbs = $0 }
                         // GH #72: the guide itself stays mounted (it owns the
                         // hold-Left / sidebar receivers), the notice just
                         // covers its empty grid.
