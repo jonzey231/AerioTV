@@ -17,6 +17,7 @@ import SwiftUI
 /// existing users carry their preferences forward unchanged.
 struct AppBehaviorsSettingsView: View {
     @ObservedObject private var theme = ThemeManager.shared
+    @ObservedObject private var remoteStore = RemoteControlStore.shared
 
     // MARK: - Toggles
 
@@ -457,6 +458,43 @@ struct AppBehaviorsSettingsView: View {
                     .font(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
+
+            // MARK: Group Selection (phone)
+            // The same choice the Apple TV offers under Remote Control:
+            // pills above the list, or a drawer opened from the header row
+            // (Logan 2026-09-05, phone pass).
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                Section {
+                    ForEach([false, true], id: \.self) { sidebar in
+                        Button {
+                            remoteStore.useGroupSidebar = sidebar
+                        } label: {
+                            HStack {
+                                Image(systemName: sidebar ? "sidebar.leading" : "capsule.lefthalf.filled")
+                                    .font(.system(size: 15))
+                                    .foregroundColor(theme.accent)
+                                    .frame(width: 24)
+                                Text(sidebar ? "Sidebar Menu" : "Top Group Pills")
+                                    .font(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                                Spacer()
+                                if remoteStore.useGroupSidebar == sidebar {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(theme.accent)
+                                }
+                            }
+                        }
+                        .listRowBackground(Color.cardBackground)
+                    }
+                } header: {
+                    Text("Group Selection").sectionHeaderStyle()
+                } footer: {
+                    Text("How channel groups are picked in Live TV. Top Group Pills keep the group row at the top; Sidebar Menu replaces it with a drawer opened from the header, where a long press also reorders groups.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
+                .listSectionSeparator(.hidden)
+            }
 
             // MARK: Guide badges
             Section {

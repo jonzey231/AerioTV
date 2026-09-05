@@ -191,32 +191,9 @@ struct DVRView: View {
             #if os(tvOS)
             .toolbar(tvTabBarHidden ? .hidden : .visible, for: .tabBar)
             #else
-            // No title (the tab bar says where we are); sort lives in the
-            // navigation bar row like Movies and TV Shows (Logan 2026-09-05).
-            .navigationTitle("")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Color.appBackground, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Menu {
-                        ForEach(SortOrder.allCases, id: \.self) { order in
-                            Button {
-                                sortOrderRaw = order.rawValue
-                            } label: {
-                                if order == sortOrder {
-                                    Label(order.label, systemImage: "checkmark")
-                                } else {
-                                    Text(order.label)
-                                }
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "arrow.up.arrow.down")
-                            .foregroundColor(.accentPrimary)
-                    }
-                    .accessibilityLabel("Sort")
-                }
-            }
+            // Phone pass (Logan 2026-09-05): no navigation bar; the hero
+            // starts under the status bar, sort sits in the library header.
+            .toolbar(.hidden, for: .navigationBar)
             #endif
         }
         .confirmationDialog("Sort Recordings", isPresented: $showSortMenu, titleVisibility: .visible) {
@@ -469,7 +446,15 @@ struct DVRView: View {
                 }
                 if !library.isEmpty {
                     libraryHeader
+                    #if os(iOS)
+                    if isPhone {
+                        recordingList
+                    } else {
+                        grid
+                    }
+                    #else
                     grid
+                    #endif
                 }
             }
             .padding(.bottom, 80)
@@ -609,7 +594,15 @@ struct DVRView: View {
         #if os(tvOS)
         return 340
         #else
-        return 220
+        return isPhone ? 150 : 220
+        #endif
+    }
+
+    private var isPhone: Bool {
+        #if os(iOS)
+        return UIDevice.current.userInterfaceIdiom == .phone
+        #else
+        return false
         #endif
     }
 
@@ -618,7 +611,7 @@ struct DVRView: View {
     private var libraryHeader: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 10) {
-                Text("All Recordings")
+                Text(isPhone ? "Recordings" : "All Recordings")
                     .font(.headlineSmall)
                     .foregroundColor(.textPrimary)
                 Text("\(filteredLibrary.count)")
@@ -630,9 +623,26 @@ struct DVRView: View {
                 Spacer()
                 #else
                 Spacer()
-                Text(sortOrder.label)
-                    .font(.labelSmall)
-                    .foregroundColor(.textTertiary)
+                Menu {
+                    ForEach(SortOrder.allCases, id: \.self) { order in
+                        Button {
+                            sortOrderRaw = order.rawValue
+                        } label: {
+                            if order == sortOrder {
+                                Label(order.label, systemImage: "checkmark")
+                            } else {
+                                Text(order.label)
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.textPrimary)
+                        .frame(width: 30, height: 30)
+                        .background(Circle().fill(Color.textPrimary.opacity(0.08)))
+                }
+                .accessibilityLabel("Sort")
                 #endif
             }
             .padding(.horizontal, sectionInset)
@@ -707,6 +717,24 @@ struct DVRView: View {
         .focusSection()
         #endif
     }
+
+    #if os(iOS)
+    /// Phone library: one recording per row (thumbnail, title, when and
+    /// length, chevron), like the mockup (Logan 2026-09-05).
+    private var recordingList: some View {
+        LazyVStack(spacing: 0) {
+            ForEach(filteredLibrary, id: \.id) { rec in
+                Button { select(rec) } label: {
+                    DVRRecordingRow(recording: rec, headers: headers, progress: progressFraction(rec))
+                }
+                .buttonStyle(.plain)
+                .contextMenu { menuItems(for: rec) }
+                .id(rec.id)
+            }
+        }
+        .padding(.horizontal, sectionInset)
+    }
+    #endif
 
     private var gridRowSpacing: CGFloat {
         #if os(tvOS)
@@ -1084,6 +1112,103 @@ extension View {
 
 /// 16:9 recording card: art (server, EPG, TMDB or TheSportsDB; channel
 /// logo when none), REC / Scheduled badge, channel logo bottom-left,
+#if os(iOS)
+/// Phone library row: 16:9 thumbnail with the channel logo and progress,
+/// title, "Today · 1 h 02 min", chevron.
+struct DVRRecordingRow: View {
+    let recording: Recording
+    var headers: [String: String] = [:]
+    var progress: Double = 0
+    @ObservedObject private var art = DVRArtResolver.shared
+
+    private var artworkURL: URL? { (recording.backdropURL ?? recording.posterURL).flatMap { URL(string: $0) } }
+    private var logoURL: URL? { recording.channelLogoURL.flatMap { URL(string: $0) } }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            thumb
+                .frame(width: 116, height: 65)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(recording.programTitle.isEmpty ? "Recording" : recording.programTitle)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.textPrimary)
+                    .lineLimit(1)
+                Text(meta)
+                    .font(.system(size: 12))
+                    .foregroundColor(.textSecondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.textTertiary)
+        }
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+    }
+
+    private var meta: String {
+        var parts = [DVRFormat.day(recording.scheduledStart)]
+        if recording.isInProgress {
+            parts.append("Recording")
+        } else if recording.isUpcoming {
+            parts.append(DVRFormat.time(recording.scheduledStart))
+        } else {
+            parts.append(DVRFormat.duration(seconds: recording.effectiveEnd.timeIntervalSince(recording.effectiveStart)))
+        }
+        if let se = recording.displaySeasonEpisode { parts.append("S\(se.season) E\(se.episode)") }
+        return parts.joined(separator: " · ")
+    }
+
+    private var thumb: some View {
+        ZStack(alignment: .bottomLeading) {
+            Color.cardBackground
+            if let url = artworkURL {
+                AuthPosterImage(url: url, headers: headers, placeholder: .cardBackground, maxPixel: 400)
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 116, height: 65)
+                    .clipped()
+                if let logoURL {
+                    AuthPosterImage(url: logoURL, headers: headers, placeholder: .clear, maxPixel: 120)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 30, height: 16)
+                        .padding(4)
+                        .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.9)))
+                        .padding(5)
+                }
+            } else if let logoURL {
+                AuthPosterImage(url: logoURL, headers: headers, placeholder: .clear, maxPixel: 200)
+                    .aspectRatio(contentMode: .fit)
+                    .padding(12)
+                    .frame(width: 116, height: 65)
+            }
+            if recording.isInProgress {
+                HStack(spacing: 3) {
+                    Circle().fill(Color.red).frame(width: 5, height: 5)
+                    Text("REC").font(.system(size: 9, weight: .heavy))
+                }
+                .foregroundColor(.red)
+                .padding(.horizontal, 5).padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.7)))
+                .padding(5)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            if progress > 0 {
+                GeometryReader { g in
+                    ZStack(alignment: .leading) {
+                        Rectangle().fill(Color.black.opacity(0.45))
+                        Rectangle().fill(Color.accentPrimary).frame(width: g.size.width * progress)
+                    }
+                }
+                .frame(height: 3)
+                .frame(maxHeight: .infinity, alignment: .bottom)
+            }
+        }
+    }
+}
+#endif
+
 /// duration bottom-right, progress bar, centred title and meta below.
 struct DVRRecordingCard: View {
     let recording: Recording

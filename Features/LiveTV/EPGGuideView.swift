@@ -3178,7 +3178,9 @@ struct EPGGuideView: View {
     /// so compact width narrows it to 78pt. Regular width (iPad, unfolded
     /// foldable) keeps 100pt. Both still scale with guideScale.
     private var channelColumnWidth: CGFloat { (horizontalSizeClass == .compact ? 78 : 100) * guideScale }
-    private var rowHeight: CGFloat { 72 * guideScale }
+    /// Phone cells carry the subtitle and two description lines (Logan
+    /// 2026-09-05), so they are taller.
+    private var rowHeight: CGFloat { (UIDevice.current.userInterfaceIdiom == .phone ? 98 : 72) * guideScale }
     private var timeHeaderHeight: CGFloat { 32 * guideScale }
     private var pixelsPerHour: CGFloat { 360 * guideScale }
     private let cellGap: CGFloat = 1
@@ -5319,8 +5321,17 @@ private struct GuideProgramButton: View {
             }
             .layoutPriority(1)
             if compact {
-                // Channel Preview: the banner shows subtitle, time and
-                // description; the cell keeps only the feed tags.
+                // Channel Preview: the banner shows time and description; the
+                // cell keeps the subtitle line and the feed tags (Logan
+                // 2026-09-05: the subtitle stays even in the hero layout).
+                if showProgramSubtitles, let sub = prog.subTitle,
+                   !EPGText.subtitleIsRedundant(sub, title: prog.title, description: prog.description) {
+                    Text(sub)
+                        .font(.system(size: 20))
+                        .italic()
+                        .foregroundColor(.textSecondary)
+                        .lineLimit(1)
+                }
                 if showEpgBadges {
                     EPGFlagsRow(isLiveBroadcast: prog.isLiveBroadcast, isNew: prog.isNew,
                                 isPremiere: prog.isPremiere, isFinale: prog.isFinale,
@@ -5413,7 +5424,16 @@ private struct GuideProgramButton: View {
             // channels with REPEAT + sub-title). Same rule as the Android
             // cell: the description is the line that gives way. It remains in
             // Program Info.
-            if !prog.description.isEmpty, !(subShown && compactBadgeRowVisible) {
+            // Phone: always two lines of description (the taller cell has
+            // the room; Logan 2026-09-05). Other idioms keep the give-way rule.
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                if !prog.description.isEmpty {
+                    Text(prog.description)
+                        .font(.system(size: 10 * guideScale))
+                        .foregroundColor(.textSecondary)
+                        .lineLimit(2)
+                }
+            } else if !prog.description.isEmpty, !(subShown && compactBadgeRowVisible) {
                 Text(prog.description)
                     .font(.system(size: 10 * guideScale))
                     .foregroundColor(.textSecondary)

@@ -196,6 +196,8 @@ struct MoviesView: View {
     /// keeps its bar.
     @State private var gridTabBarHidden = false
     @State private var tabBarTracker = TabBarScrollTracker()
+    /// System search presented (the header's search icon opens it).
+    @State private var searchPresented = false
     #endif
     @State private var navPath = NavigationPath()
     #if os(tvOS)
@@ -233,7 +235,7 @@ struct MoviesView: View {
     #if os(tvOS)
     @State private var railVisible = false
     #else
-    @State private var railVisible = true   // touch: always shown
+    @State private var railVisible = false  // touch: only while the grid fills the display
     #endif
     @State private var railFocused = false
     @State private var railHideTask: Task<Void, Never>?
@@ -368,8 +370,10 @@ struct MoviesView: View {
         // user's uiScale slider stretches the minimum so posters read larger.
         let clamped = max(0.85, min(1.25, uiScale))
         let isRegular = UIDevice.current.userInterfaceIdiom != .phone
-        let minimum: CGFloat = isRegular ? 120 * clamped : 120
-        let maximum: CGFloat = isRegular ? 160 * clamped : 160
+        // Phone: three across, like the mockup (Logan 2026-09-05).
+        if !isRegular { return Array(repeating: GridItem(.flexible(), spacing: 10), count: 3) }
+        let minimum: CGFloat = 120 * clamped
+        let maximum: CGFloat = 160 * clamped
         return [GridItem(.adaptive(minimum: minimum, maximum: maximum), spacing: 12)]
     }
     private let gridRowSpacing: CGFloat = 16
@@ -481,38 +485,11 @@ struct MoviesView: View {
             .toolbar((tvTabBarHidden || !navPath.isEmpty) ? .hidden : .visible, for: .tabBar)
             #endif
             #if os(iOS)
-            // Sort and filter live in the navigation bar row, above the
-            // system search field (Logan 2026-09-05: no title, no separate
-            // row of controls).
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Menu {
-                        ForEach(MoviesSortOrder.allCases, id: \.self) { order in
-                            Button {
-                                sortOrderRaw = order.rawValue
-                            } label: {
-                                if order == sortOrder {
-                                    Label(order.label, systemImage: "checkmark")
-                                } else {
-                                    Text(order.label)
-                                }
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "arrow.up.arrow.down")
-                            .foregroundColor(.accentPrimary)
-                    }
-                    .accessibilityLabel("Sort")
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button { showManageGroups = true } label: {
-                        Image(systemName: "line.3.horizontal.decrease")
-                            .foregroundColor(.accentPrimary)
-                    }
-                    .accessibilityLabel("Manage Groups")
-                }
-            }
-            .searchable(text: $searchText,
+            // Phone pass (Logan 2026-09-05): no navigation bar; the hero
+            // starts under the status bar. The bar appears only while the
+            // system search is up, opened from the library header's icon.
+            .toolbar(searchPresented || isSearching ? .visible : .hidden, for: .navigationBar)
+            .searchable(text: $searchText, isPresented: $searchPresented,
                         placement: .navigationBarDrawer(displayMode: .always),
                         prompt: "Search \(kindLower)")
             #endif
@@ -1404,9 +1381,22 @@ struct MoviesView: View {
                 .onPreferenceChange(GridTopKey.self) { gridTopY in
                     guard let gridTopY else { return }
                     geometryBox.gridTopVisible = gridTopY
+                    #if os(tvOS)
                     let top = max(railCenteredTop(in: outer.size.height + outer.safeAreaInsets.top),
                                   gridTopY + railGridOffset)
                     if railTop != top { railTop = top }
+                    #else
+                    // Phone: parked at the vertical centre of the right edge,
+                    // shown only once the library header has scrolled past
+                    // the top so the grid owns the display (Logan 2026-09-05),
+                    // fading out again when the hero or shelves come back.
+                    let top = railCenteredTop(in: outer.size.height)
+                    if railTop != top { railTop = top }
+                    let want = gridTopY <= 110 && searchText.isEmpty
+                    if want != railVisible {
+                        withAnimation(.easeInOut(duration: 0.25)) { railVisible = want }
+                    }
+                    #endif
                 }
                 #if os(tvOS)
                 // Menu while the tab bar is hidden: back to the top and
@@ -1643,7 +1633,12 @@ struct MoviesView: View {
                             let itemID = String(id.dropFirst("grid-".count))
                             if let index = libraryMovies.firstIndex(where: { $0.id == itemID }),
                                geometryBox.rowPitch > 0, geometryBox.gridWidth > 0 {
+                                #if os(tvOS)
                                 let cols = tvGridColumns
+                                #else
+                                let cols = UIDevice.current.userInterfaceIdiom == .phone
+                                    ? 3 : max(1, Int(geometryBox.gridWidth / 132))
+                                #endif
                                 let row = index / cols
                                 let gridTopContent = geometryBox.gridTopVisible + geometryBox.contentOffsetY
                                 let y = gridTopContent + 16 + CGFloat(row) * geometryBox.rowPitch - 24
@@ -1676,6 +1671,9 @@ struct MoviesView: View {
                         // flipping 350 / 514 every frame).
                         .frame(maxHeight: .infinity, alignment: .top)
                         .offset(y: railTop)
+                        .padding(.trailing, 2)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
                         #endif
                     }
                     #if os(tvOS)
@@ -1771,7 +1769,9 @@ struct MoviesView: View {
         // minus the 16 each section already pads (Logan 2026-09-04).
         return 44
         #else
-        return railWidth
+        // The phone rail overlays the right edge and only while the grid
+        // fills the display, so the content reserves nothing for it.
+        return 0
         #endif
     }
 
@@ -1941,9 +1941,7 @@ struct MoviesView: View {
                 Spacer()
                 #else
                 Spacer()
-                Text(sortOrder.label)
-                    .font(.labelSmall)
-                    .foregroundColor(.textTertiary)
+                iOSHeaderControls
                 #endif
             }
             .padding(.horizontal, 16)
@@ -1972,6 +1970,41 @@ struct MoviesView: View {
             }
         }
     }
+
+    #if os(iOS)
+    /// Search, sort and filter beside the library title, where they act
+    /// (Logan 2026-09-05: no separate row at the top).
+    private var iOSHeaderControls: some View {
+        HStack(spacing: 8) {
+            Button { searchPresented = true } label: { iOSCircle("magnifyingglass") }
+                .accessibilityLabel("Search")
+            Menu {
+                ForEach(MoviesSortOrder.allCases, id: \.self) { order in
+                    Button {
+                        sortOrderRaw = order.rawValue
+                    } label: {
+                        if order == sortOrder {
+                            Label(order.label, systemImage: "checkmark")
+                        } else {
+                            Text(order.label)
+                        }
+                    }
+                }
+            } label: { iOSCircle("arrow.up.arrow.down") }
+            .accessibilityLabel("Sort")
+            Button { showManageGroups = true } label: { iOSCircle("line.3.horizontal.decrease") }
+                .accessibilityLabel("Manage Groups")
+        }
+    }
+
+    private func iOSCircle(_ systemImage: String) -> some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundColor(.textPrimary)
+            .frame(width: 30, height: 30)
+            .background(Circle().fill(Color.textPrimary.opacity(0.08)))
+    }
+    #endif
 
     /// Provider filter for search results. Dispatcharr Direct Connect only
     /// (the only source that says which account carries a copy); shown when
@@ -2159,7 +2192,7 @@ struct MoviesView: View {
         guard w > 0 else { return 200 }
         return (w - CGFloat(tvGridColumns - 1) * tvGridColumnSpacing) / CGFloat(tvGridColumns)
         #else
-        return 120
+        return UIDevice.current.userInterfaceIdiom == .phone ? 96 : 120
         #endif
     }
 
@@ -2565,6 +2598,11 @@ struct MoviesHeroCarousel: View {
             }
         }
         .frame(height: heroHeight)
+        #if os(iOS)
+        // Room for the dots hung below the card; without it they sat on
+        // the next section's header (screenshot 2026-09-05 16:27).
+        .padding(.bottom, 24)
+        #endif
     }
 
     #if os(tvOS)
@@ -2578,8 +2616,9 @@ struct MoviesHeroCarousel: View {
     private let heroHeight: CGFloat = 220
     private let dot: CGFloat = 6
     private let dotInset: CGFloat = 28
-    private let pageFraction: CGFloat = 0.86
-    private let pageSpacing: CGFloat = 4
+    /// Narrower page so the next title peeks in (Logan 2026-09-05).
+    private let pageFraction: CGFloat = 0.78
+    private let pageSpacing: CGFloat = 8
     #endif
 }
 

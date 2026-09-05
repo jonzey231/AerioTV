@@ -246,7 +246,9 @@ struct ChannelListView: View {
         #if os(tvOS)
         return remoteStore.useGroupSidebar
         #else
-        return false
+        // Phone (Logan 2026-09-05): the same Group Selection setting picks
+        // the group drawer over the pill row.
+        return UIDevice.current.userInterfaceIdiom == .phone && remoteStore.useGroupSidebar
         #endif
     }
 
@@ -261,7 +263,7 @@ struct ChannelListView: View {
         return (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
             && !guideSidebarSelectorActive
         #else
-        return true
+        return !guideSidebarSelectorActive
         #endif
     }
 
@@ -360,6 +362,11 @@ struct ChannelListView: View {
     /// Empty = All. Applied once per playlist load.
     private let defaultChannelGroupKey = "defaultChannelGroup"
     @State private var defaultGroupApplied = false
+    #if os(iOS)
+    @State private var phoneSearchPresented = false
+    /// Phone sidebar mode: the group drawer over the list / guide.
+    @State private var phoneDrawerOpen = false
+    #endif
     /// User-defined Live TV group display order + sort mode (Manage Groups).
     /// Order is a native [String] array (order-preserving iCloud path);
     /// mode is "default" / "alphabetical" / "manual". Empty order + default
@@ -374,9 +381,13 @@ struct ChannelListView: View {
             mainContent
                 #if os(iOS)
                 // No title: the tab bar already says where we are (Logan
-                // 2026-09-05); the bar stays for the sort / view controls.
+                // 2026-09-05). Phone: no bar at all, the header row above the
+                // list carries the controls; the bar shows only while the
+                // system search is up. iPad keeps its bar.
                 .navigationTitle("")
                 .navigationBarTitleDisplayMode(.inline)
+                .toolbar(isPhoneIdiom && !(phoneSearchPresented || !searchText.isEmpty) ? .hidden : .visible,
+                         for: .navigationBar)
                 #endif
                 .toolbarBackground(Color.appBackground, for: .navigationBar)
                 #if os(tvOS)
@@ -472,7 +483,8 @@ struct ChannelListView: View {
                 .modifier(
                     PerIdiomSearchableModifier(
                         text: $searchText,
-                        iPhoneDisplayMode: (isCompactChrome && hideSearchBarCompact) ? .automatic : .always
+                        presented: $phoneSearchPresented,
+                        iPhoneDisplayMode: .always
                     )
                 )
                 #endif
@@ -704,6 +716,15 @@ struct ChannelListView: View {
             VStack(spacing: 0) {
                 bodyContent
             }
+            #if os(iOS)
+            .overlay {
+                if phoneDrawerOpen {
+                    phoneGroupDrawer
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeOut(duration: 0.22), value: phoneDrawerOpen)
+            #endif
             // GH #20 follow-up (user report 2026-07-12): this VStack consumed
             // the bottom safe area BEFORE the List inside could reach it, so
             // the scroll frame ended at the tab bar line - rows hard-clipped
@@ -717,6 +738,126 @@ struct ChannelListView: View {
             #endif
         }
     }
+
+    #if os(iOS)
+    private var isPhoneIdiom: Bool { UIDevice.current.userInterfaceIdiom == .phone }
+
+    /// Phone header row (Logan 2026-09-05, mockup "Phone · Live TV"): the
+    /// groups control at the left, the pills (pills mode) or the active group
+    /// name and count (sidebar mode), then search, sort and the list / guide
+    /// toggle. No navigation bar above it.
+    private var phoneHeaderRow: some View {
+        HStack(spacing: 8) {
+            if guideSidebarSelectorActive {
+                Button { phoneDrawerOpen = true } label: { phoneCircle("sidebar.leading") }
+                    .accessibilityLabel("Channel Groups")
+                Text(Self.groupTitle(selectedGroup))
+                    .font(.labelMedium)
+                    .foregroundColor(.textPrimary)
+                    .lineLimit(1)
+                Text("\(filteredChannels.count)")
+                    .font(.labelSmall)
+                    .foregroundColor(.textTertiary)
+                Spacer(minLength: 4)
+            } else {
+                Button { showManageGroups = true } label: {
+                    ZStack(alignment: .topTrailing) {
+                        phoneCircle("line.3.horizontal.decrease.circle")
+                        if hiddenGroups.count > 0 {
+                            Text("\(hiddenGroups.count)")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 4).padding(.vertical, 1)
+                                .background(Color.statusWarning)
+                                .clipShape(Capsule())
+                                .offset(x: 4, y: -4)
+                        }
+                    }
+                }
+                .accessibilityLabel("Manage Groups")
+                if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty) && !compactChromeHidesFilterBar {
+                    groupFilterBar
+                        .padding(.horizontal, -16)
+                } else {
+                    Spacer(minLength: 4)
+                }
+            }
+            Button { phoneSearchPresented = true } label: { phoneCircle("magnifyingglass") }
+                .accessibilityLabel("Search")
+            Menu {
+                Button {
+                    sortModeRaw = "number"
+                } label: {
+                    if sortModeRaw == "number" { Label("By Number", systemImage: "checkmark") } else { Text("By Number") }
+                }
+                Button {
+                    sortModeRaw = "name"
+                } label: {
+                    if sortModeRaw == "name" { Label("By Name", systemImage: "checkmark") } else { Text("By Name") }
+                }
+                Button {
+                    sortModeRaw = "favorites"
+                } label: {
+                    if sortModeRaw == "favorites" { Label("Favorites First", systemImage: "checkmark") } else { Text("Favorites First") }
+                }
+            } label: { phoneCircle("arrow.up.arrow.down") }
+            .accessibilityLabel("Sort")
+            Button {
+                userDidToggleView = true
+                withAnimation(.spring(response: 0.25)) { showGuideView.toggle() }
+                LiveTVViewSession.showGuideView = showGuideView
+            } label: { phoneCircle(showGuideView ? "list.bullet" : "calendar") }
+            .accessibilityLabel(showGuideView ? "Show List" : "Show Guide")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+    }
+
+    private func phoneCircle(_ systemImage: String) -> some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundColor(.textPrimary)
+            .frame(width: 30, height: 30)
+            .background(Circle().fill(Color.textPrimary.opacity(0.08)))
+    }
+
+    /// Sidebar mode's drawer: Favorites first, All, then the visible groups;
+    /// the default group is pinned; a long press lifts a row to reorder
+    /// (the new order is the pill order too); Manage Groups sits beside
+    /// the heading (Logan 2026-09-05).
+    private var phoneGroupDrawer: some View {
+        ZStack(alignment: .leading) {
+            Color.black.opacity(0.45)
+                .ignoresSafeArea()
+                .onTapGesture { phoneDrawerOpen = false }
+            PhoneGroupDrawer(
+                tokens: groupTokens,
+                selected: selectedGroup,
+                favoritesToken: favoritesToken,
+                defaultToken: UserDefaults.standard.string(forKey: defaultChannelGroupKey) ?? "",
+                onSelect: { token in
+                    withAnimation(.spring(response: 0.25)) { selectedGroup = token }
+                    phoneDrawerOpen = false
+                },
+                onReorder: { order in
+                    groupSortMode = GroupSortMode.manual.rawValue
+                    groupOrder = order
+                    GroupOrderStore.save(order, forKey: channelGroupOrderKey)
+                    GroupOrderStore.saveMode(GroupSortMode.manual.rawValue, forKey: channelGroupSortModeKey)
+                    filterChannels()
+                },
+                onManage: {
+                    phoneDrawerOpen = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showManageGroups = true }
+                }
+            )
+            .frame(width: 272)
+            .background(Color.appBackground.ignoresSafeArea())
+            .shadow(color: .black.opacity(0.45), radius: 24, x: 8, y: 0)
+            .transition(.move(edge: .leading))
+        }
+    }
+    #endif
 
     /// GH #72 (ochaos, 1.8.16): a group with no channels rendered a blank
     /// guide / list containing nothing focusable. In sidebar mode the group
@@ -901,7 +1042,9 @@ struct ChannelListView: View {
                         // Compact-chrome honors the user's hide-filter preference even
                         // in the iPad Guide layout (iPad itself is gated by the flag,
                         // so this only activates on actual iPhones in landscape).
-                        if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
+                        if isPhoneIdiom {
+                            phoneHeaderRow
+                        } else if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
                             && !compactChromeHidesFilterBar {
                             groupFilterBar
                                 .padding(.vertical, 10)
@@ -1360,12 +1503,8 @@ struct ChannelListView: View {
             // form. iPad / tvOS still render the pills above the
             // List in the VStack at the top of `channelListContent`.
             .safeAreaInset(edge: .top, spacing: 0) {
-                if UIDevice.current.userInterfaceIdiom == .phone
-                    && !isChromeCollapsed
-                    && (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
-                    && !compactChromeHidesFilterBar {
-                    groupFilterBar
-                        .padding(.vertical, 10)
+                if UIDevice.current.userInterfaceIdiom == .phone && !isChromeCollapsed {
+                    phoneHeaderRow
                         .background(Color.appBackground)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
@@ -1455,7 +1594,7 @@ struct ChannelListView: View {
                 // row here to avoid a duplicate button. Classic layout
                 // keeps the inline button exactly where it was.
                 #if os(iOS)
-                if !isCompactChrome {
+                if !isCompactChrome && !isPhoneIdiom {
                     ManageGroupsButton(
                         action: { showManageGroups = true },
                         hiddenCount: hiddenGroups.count
@@ -3046,6 +3185,9 @@ struct ChannelRow: View {
     @ViewBuilder
     private var cardMenuButtons: some View {
         let isFav = favoritesStore.isFavorite(item.id)
+        #if os(iOS)
+        Button("Watch") { onTap() }
+        #endif
         Button(isFav ? "Remove from Favorites" : "Add to Favorites") {
             favoritesStore.toggle(item)
         }
@@ -3303,6 +3445,46 @@ struct ChannelRow: View {
     /// menu without relying on the system-provided one. Dismissed by
     /// tapping any action (which sets `activePopoverEntryID = nil`)
     /// or by tapping outside the popover (SwiftUI default).
+    @ViewBuilder
+    /// Action sheet items for an expanded programme row: Watch (catch-up)
+    /// for aired ones, Program Info, reminder, Record.
+    private func programActionSheetButtons(for entry: EPGEntry) -> some View {
+        if let start = entry.startTime, let end = entry.endTime,
+           end <= Date(), item.canReplay(start: start, end: end) {
+            Button("Watch") { watchCatchup(entry) }
+        }
+        Button("Program Info") {
+            let start = entry.startTime ?? Date()
+            let end = entry.endTime ?? start.addingTimeInterval(3600)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                activeSheet = .programInfo(
+                    ProgramInfoTarget(
+                        channelName: item.name, title: entry.title, start: start, end: end,
+                        description: entry.description, category: entry.category,
+                        programID: entry.programID, subTitle: entry.subTitle,
+                        season: entry.season, episode: entry.episode,
+                        isNew: entry.isNew, isLiveBroadcast: entry.isLiveBroadcast,
+                        isPremiere: entry.isPremiere, isFinale: entry.isFinale, isRepeat: entry.isRepeat)
+                )
+            }
+        }
+        if let start = entry.startTime, start > Date() {
+            let key = ReminderManager.programKey(channelName: item.name, title: entry.title, start: start)
+            if ReminderManager.shared.hasReminder(forKey: key) {
+                Button("Cancel Reminder", role: .destructive) { ReminderManager.shared.cancelReminder(forKey: key) }
+            } else {
+                Button("Set Reminder") {
+                    ReminderManager.shared.scheduleReminder(programTitle: entry.title, channelName: item.name, startTime: start)
+                }
+            }
+        }
+        if let end = entry.endTime, end > Date() {
+            Button(entry.startTime.map { $0 <= Date() } ?? false ? "Record from Now" : "Record") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { activeSheet = .record(entry) }
+            }
+        }
+    }
+
     @ViewBuilder
     private func programActionPopover(for entry: EPGEntry) -> some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -3660,15 +3842,17 @@ struct ChannelRow: View {
                                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                                 activePopoverEntryID = rowEntry.id
                             }
-                            .popover(
+                            // Native action sheet (Logan 2026-09-05), the
+                            // same items the tvOS long press offers.
+                            .confirmationDialog(
+                                rowEntry.title,
                                 isPresented: Binding(
                                     get: { activePopoverEntryID == rowEntry.id },
                                     set: { if !$0 { activePopoverEntryID = nil } }
                                 ),
-                                attachmentAnchor: .rect(.bounds)
+                                titleVisibility: .visible
                             ) {
-                                programActionPopover(for: rowEntry)
-                                    .presentationCompactAdaptation(.popover)
+                                programActionSheetButtons(for: rowEntry)
                             }
                     }
                 }
@@ -4323,6 +4507,8 @@ private struct NaturalTopPreference: PreferenceKey {
 /// modifier overloads.
 private struct PerIdiomSearchableModifier: ViewModifier {
     @Binding var text: String
+    /// Phone: the header row's search icon presents the field.
+    var presented: Binding<Bool> = .constant(false)
     let iPhoneDisplayMode: SearchFieldPlacement.NavigationBarDrawerDisplayMode
 
     func body(content: Content) -> some View {
@@ -4335,10 +4521,82 @@ private struct PerIdiomSearchableModifier: ViewModifier {
         } else {
             content.searchable(
                 text: $text,
+                isPresented: presented,
                 placement: .navigationBarDrawer(displayMode: iPhoneDisplayMode),
                 prompt: "Search channels"
             )
         }
+    }
+}
+#endif
+
+#if os(iOS)
+/// Phone group drawer (sidebar mode). A long press lifts a row to reorder.
+struct PhoneGroupDrawer: View {
+    let tokens: [String]
+    let selected: String
+    let favoritesToken: String
+    let defaultToken: String
+    let onSelect: (String) -> Void
+    /// New order of the REAL groups (favorites / All excluded).
+    let onReorder: ([String]) -> Void
+    let onManage: () -> Void
+    @State private var order: [String] = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("CHANNEL GROUPS")
+                    .font(.system(size: 12, weight: .bold))
+                    .tracking(1.2)
+                    .foregroundColor(.textTertiary)
+                Spacer()
+                Button(action: onManage) {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.textPrimary)
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(Color.textPrimary.opacity(0.08)))
+                }
+                .accessibilityLabel("Manage Groups")
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+            List {
+                ForEach(order, id: \.self) { token in
+                    Button { onSelect(token) } label: {
+                        HStack(spacing: 8) {
+                            if token == favoritesToken {
+                                Image(systemName: "star.fill").font(.system(size: 13))
+                            }
+                            Text(ChannelListView.groupTitle(token))
+                                .font(.system(size: 16, weight: token == selected ? .bold : .medium))
+                                .lineLimit(1)
+                            Spacer()
+                            if token == defaultToken || (token == "All" && defaultToken.isEmpty) {
+                                Image(systemName: "pin.fill").font(.system(size: 11)).foregroundColor(.textTertiary)
+                            }
+                        }
+                        .foregroundColor(token == selected ? .accentPrimary : .textPrimary)
+                        .padding(.vertical, 4)
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .moveDisabled(token == favoritesToken || token == "All")
+                }
+                .onMove { from, to in
+                    order.move(fromOffsets: from, toOffset: to)
+                    onReorder(order.filter { $0 != favoritesToken && $0 != "All" && !$0.hasPrefix("collection:") })
+                }
+                Color.clear.frame(height: 90).listRowBackground(Color.clear).listRowSeparator(.hidden)
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+        }
+        .padding(.top, 44)
+        .onAppear { order = tokens }
+        .onChange(of: tokens) { _, t in if t != order { order = t } }
     }
 }
 #endif
