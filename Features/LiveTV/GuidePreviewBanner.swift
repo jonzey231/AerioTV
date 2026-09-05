@@ -62,6 +62,18 @@ struct GuidePreviewBanner: View {
         .frame(maxWidth: .infinity)
         .background(Color.appBackground)
         .clipped()
+        // Consumed here, not on the description button: a programme with no
+        // description would otherwise leave the host's flag latched true.
+        .onChange(of: focusRequest.wrappedValue) { _, wanted in
+            guard wanted else { return }
+            focusRequest.wrappedValue = false
+            guard let program, !program.description.isEmpty else { return }
+            // A beat: written in the same pass as the requesting catcher
+            // taking focus, the write was dropped.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+                descriptionFocused = true
+            }
+        }
     }
 
     private var leadingBlock: some View {
@@ -147,16 +159,6 @@ struct GuidePreviewBanner: View {
                 .buttonStyle(BannerTextButtonStyle())
                 .focused($descriptionFocused)
                 .onChange(of: descriptionFocused) { _, f in onDescriptionFocusChange?(f) }
-                .onChange(of: focusRequest.wrappedValue) { _, wanted in
-                    guard wanted else { return }
-                    focusRequest.wrappedValue = false
-                    // A beat: written in the same pass as the requesting
-                    // catcher taking focus, the write was dropped.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
-                        descriptionFocused = true
-                    }
-                }
-
             }
         }
     }
@@ -223,12 +225,16 @@ final class GuidePreviewArtCache: ObservableObject {
             switch detailEntries[pid] {
             case .some(.some(let u)): return .art(u)
             case .some(.none): break          // detail had no icon: fall through to TMDB
-            case .none: fetchDetail(pid: pid, title: title); return .pending
+            case .none:
+                // Only a lookup that actually started is worth waiting for;
+                // no Dispatcharr server means the miss is known right now.
+                if fetchDetail(pid: pid, title: title) { return .pending }
             }
         }
         let key = LibraryMatcher.cleanTitle(title)
         guard TMDBPosters.isEnabled, !key.isEmpty else { return .none }
         if let cached = entries[key] { return cached.map(ArtState.art) ?? .none }
+        if let failedAt = failedAt[key], Date().timeIntervalSince(failedAt) < Self.retryAfter { return .none }
         _ = url(title: title, category: category)
         return .pending
     }
@@ -236,11 +242,13 @@ final class GuidePreviewArtCache: ObservableObject {
     private var detailEntries: [Int: URL?] = [:]
     private var detailInFlight: Set<Int> = []
 
-    private func fetchDetail(pid: Int, title: String) {
-        guard !detailInFlight.contains(pid),
-              let server = ChannelStore.shared.activeServer, server.type == .dispatcharrAPI else {
-            if !detailInFlight.contains(pid) { detailEntries[pid] = .some(nil) }
-            return
+    /// Returns true when a lookup is open for `pid` (started now or earlier).
+    @discardableResult
+    private func fetchDetail(pid: Int, title: String) -> Bool {
+        if detailInFlight.contains(pid) { return true }
+        guard let server = ChannelStore.shared.activeServer, server.type == .dispatcharrAPI else {
+            detailEntries[pid] = .some(nil)
+            return false
         }
         detailInFlight.insert(pid)
         let baseURL = server.effectiveBaseURL
@@ -261,7 +269,14 @@ final class GuidePreviewArtCache: ObservableObject {
             debugLog("[PREVIEW-ART] \(title): Dispatcharr detail \(found == nil ? "no icon" : "icon")")
             version += 1
         }
+        return true
     }
+
+    /// Failed TMDB lookups (transport, 429) by title: retried after a pause
+    /// rather than on the very next render, which the failure's own
+    /// `version` bump would otherwise trigger in a loop.
+    private var failedAt: [String: Date] = [:]
+    private static let retryAfter: TimeInterval = 60
 
     func url(title: String, category: String) -> URL? {
         let key = LibraryMatcher.cleanTitle(title)
@@ -276,10 +291,12 @@ final class GuidePreviewArtCache: ObservableObject {
             if let b = entry?.backdrop, !b.isEmpty { found = TMDBService.imageURL(path: b, size: "w780") }
             else if let p = entry?.poster, !p.isEmpty { found = TMDBService.imageURL(path: p, size: "w500") }
             if entry == nil {
-                // Transport failure or 429: leave it uncached so the next
-                // focus retries instead of pinning a miss for the session.
-                debugLog("[PREVIEW-ART] \(title): lookup failed (retry on next focus)")
+                // Transport failure or 429: not pinned as a miss for the
+                // session, but not retried for a minute either.
+                failedAt[key] = Date()
+                debugLog("[PREVIEW-ART] \(title): lookup failed (retry in \(Int(Self.retryAfter)) s)")
             } else {
+                failedAt[key] = nil
                 entries[key] = found
                 debugLog("[PREVIEW-ART] \(title): \(found == nil ? "no art on TMDB" : "art") id=\(entry?.tmdbID ?? "")")
             }

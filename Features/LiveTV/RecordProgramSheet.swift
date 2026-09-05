@@ -350,8 +350,8 @@ struct RecordProgramSheet: View {
     #endif
 
     // MARK: - tvOS Form
-    // Presented inside a .fullScreenCover so the content has real estate.
-    // Form was dropped entirely because:
+    // Presented as a .sheet card (Logan 2026-09-05). Form was dropped
+    // entirely because:
     //   1. Its default scroll-content background is translucent on tvOS,
     //      which left the EPG grid bleeding through the record sheet.
     //   2. Focused Form rows paint a screen-wide white halo that hides
@@ -461,20 +461,6 @@ struct RecordProgramSheet: View {
     }
 
     // MARK: - tvOS Row Builders
-
-    private func tvInfoRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .top, spacing: 24) {
-            Text(label)
-                .font(.system(size: 22, weight: .medium))
-                .foregroundColor(.textSecondary)
-                .frame(width: 160, alignment: .leading)
-            Text(value)
-                .font(.system(size: 22))
-                .foregroundColor(.primary)
-                .multilineTextAlignment(.leading)
-            Spacer(minLength: 0)
-        }
-    }
 
     private func optionRow(title: String,
                            options: [Int],

@@ -3576,7 +3576,6 @@ struct EPGGuideView: View {
             // column, snap to the cell that does. Same-channel changes (our
             // own snaps/restores/pans) are ignored so this can never loop.
             .onChange(of: focusedProgramID) { oldValue, newValue in
-                debugLog("[GuideFocus] binding \(oldValue ?? "nil") -> \(newValue ?? "nil")")
                 guard let pid = newValue else { lastFocusedChannelForSnap = nil; return }
                 let chID = channelID(ofProgram: pid)
                 #if os(tvOS)
@@ -4089,12 +4088,16 @@ struct EPGGuideView: View {
             // while the pans had walked the now line to the right (Logan
             // 2026-09-05). Only when this press MOVED focus, so a Left that
             // stays on the live cell still pans into the past for catch-up.
+            // Exact, not the half-hour Menu slop: a long live programme
+            // reached from the future left the now line 20 minutes adrift
+            // (video 2026-09-05 15:36).
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 90_000_000)
                 guard let pid = focusedProgramID, pid != pidBeforeLeft,
                       let chID = channelID(ofProgram: pid),
                       let prog = guideStore.programs[chID]?.first(where: { $0.id == pid }),
-                      prog.isLive, timelineIsAwayFromNow() else { return }
+                      prog.isLive,
+                      abs(horizontalOffset - nowAnchorOffset()) > pixelsPerHour * 0.05 else { return }
                 debugLog("[GuideFocus] back on the live programme: re-anchoring to now")
                 reAnchorTimelineToNow()
             }
@@ -4211,9 +4214,14 @@ struct EPGGuideView: View {
     /// "now left-aligned" anchor position (the same slop the Android guide
     /// uses, so a Menu press near now doesn't burn on a micro-correction).
     private func timelineIsAwayFromNow() -> Bool {
+        abs(horizontalOffset - nowAnchorOffset()) > pixelsPerHour * 0.5
+    }
+
+    /// The offset that puts "now" a 15-minute lead right of the channel
+    /// column, clamped to the composed window.
+    private func nowAnchorOffset() -> CGFloat {
         let lead = pixelsPerHour * 0.25
-        let target = min(0, max(maxHorizontalOffset, -xOffset(for: Date()) + lead))
-        return abs(horizontalOffset - target) > pixelsPerHour * 0.5
+        return min(0, max(maxHorizontalOffset, -xOffset(for: Date()) + lead))
     }
 
     /// Snap the timeline so "now" sits just right of the channel column
@@ -4222,8 +4230,7 @@ struct EPGGuideView: View {
     /// initial offset went stale as the guide view outlived its build time
     /// (the "opens two hours in the past" launches).
     private func reAnchorTimelineToNow(animated: Bool = true) {
-        let lead = pixelsPerHour * 0.25
-        let target = min(0, max(maxHorizontalOffset, -xOffset(for: Date()) + lead))
+        let target = nowAnchorOffset()
         if animated {
             withAnimation(.easeOut(duration: 0.3)) { horizontalOffset = target }
         } else {
@@ -4556,8 +4563,7 @@ struct EPGGuideView: View {
             onWatchCatchup: { ch, gp in handleWatchCatchup(channel: ch, prog: gp) },
             focusedProgramID: $focusedProgramID,
             sidebarOpen: sidebarOpen,
-            compact: previewMode,
-            onFocused: nil
+            compact: previewMode
         )
         .offset(x: x, y: 0)
         #else
@@ -5161,7 +5167,6 @@ private struct GuideProgramButton: View {
     /// Channel Preview layout: title + tags only (the banner carries the rest).
     var compact: Bool = false
     /// Fires the moment this cell takes focus (Channel Preview banner).
-    var onFocused: ((GuideProgram, ChannelDisplayItem) -> Void)? = nil
     #endif
     // Access ReminderManager directly — @ObservedObject on a singleton
     // would invalidate every program cell whenever any reminder changes.
@@ -5591,9 +5596,6 @@ private struct GuideProgramButton: View {
             .focusable(!sidebarOpen)
             .focused($isFocused)
             .focused(focusedProgramID, equals: prog.id)
-            .onChange(of: isFocused) { _, focused in
-                if focused { onFocused?(prog, channelItem) }
-            }
             .onTapGesture {
                 if multiviewStore.isStagingFromGuide {
                     onMultiviewIntent(channelItem)

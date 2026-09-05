@@ -151,7 +151,9 @@ struct DVRView: View {
         for rec in visibleRecordings {
             guard let id = rec.watchProgressID ?? (rec.destination == .local ? "local-\(rec.id.uuidString)" : nil),
                   let ms = WatchProgressManager.getResumePosition(vodID: id, serverID: rec.serverID), ms > 0 else { continue }
-            let total = rec.effectiveEnd.timeIntervalSince(rec.effectiveStart) * 1000
+            // A capture still running has only recorded up to now.
+            let end = rec.status == .recording ? min(Date(), rec.effectiveEnd) : rec.effectiveEnd
+            let total = end.timeIntervalSince(rec.effectiveStart) * 1000
             guard total > 0 else { continue }
             out[rec.id] = min(1, Double(ms) / total)
         }
@@ -439,6 +441,9 @@ struct DVRView: View {
                 if recent.count > 1 {
                     shelf(title: "Recent Recordings", items: recent)
                 }
+                if coordinator.isApproachingQuotaLimit {
+                    quotaWarning
+                }
                 if !library.isEmpty {
                     libraryHeader
                     grid
@@ -454,13 +459,8 @@ struct DVRView: View {
         .coordinateSpace(name: "dvrScroll")
         #if os(tvOS)
         .scrollPosition($scrollPosition)
-        .onScrollGeometryChange(for: ScrollProbe.self) { geo in
-            ScrollProbe(y: geo.contentOffset.y, inset: geo.contentInsets.top, height: geo.containerSize.height)
-        } action: { old, probe in
-            let y = probe.y
-            if old.inset != probe.inset || old.height != probe.height {
-                debugLog("[DVR-SCROLL] inset \(Int(old.inset)) -> \(Int(probe.inset)) height \(Int(old.height)) -> \(Int(probe.height)) y=\(Int(y)) barHidden=\(tvTabBarHidden)")
-            }
+        .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in
+            lastScrollY = y
             // Same rule as Movies: hide the bar once the hero has scrolled
             // away and the scroll has settled; show it at once on the way up.
             let hide = y > heroHideThreshold
@@ -499,20 +499,21 @@ struct DVRView: View {
             wantsTabBarHidden = false
             if TVTabBarScrollState.shared.isHidden { TVTabBarScrollState.shared.isHidden = false }
         }
-        .onChange(of: tvTabBarHidden) { _, hidden in
-            debugLog("[FOCUS] dvr tab bar hidden -> \(hidden) y=\(Int(lastScrollY))")
-        }
-        .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in lastScrollY = y }
         #endif
     }
 
-    #if os(tvOS)
-    private struct ScrollProbe: Equatable {
-        var y: CGFloat = 0
-        var inset: CGFloat = 0
-        var height: CGFloat = 0
+    /// Same warning My Recordings shows on iOS: local storage near its cap.
+    private var quotaWarning: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
+            Text("Storage is approaching the limit. New recordings may not finish.")
+                .font(.labelMedium)
+                .foregroundColor(.textPrimary)
+        }
+        .padding(.horizontal, 20).padding(.vertical, 12)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.yellow.opacity(0.15)))
+        .padding(.horizontal, sectionInset)
     }
-    #endif
 
     private var heroHideThreshold: CGFloat { heroRecording != nil ? 620 : 260 }
 
@@ -661,14 +662,18 @@ struct DVRView: View {
 
     private var grid: some View {
         let columns = Array(repeating: GridItem(.flexible(), spacing: gridSpacing), count: gridColumns)
+        let items = filteredLibrary
+        let firstID = items.first?.id
         return LazyVGrid(columns: columns, alignment: .leading, spacing: gridRowSpacing) {
-            ForEach(filteredLibrary, id: \.id) { rec in
+            ForEach(items, id: \.id) { rec in
                 card(rec, inGrid: true)
+                    #if os(tvOS)
                     .background(GeometryReader { g in
                         Color.clear.onAppear {
-                            if rec.id == filteredLibrary.first?.id { rowPitch = g.size.height + gridRowSpacing }
+                            if rec.id == firstID { rowPitch = g.size.height + gridRowSpacing }
                         }
                     })
+                    #endif
             }
         }
         .background(GeometryReader { g in
@@ -1245,11 +1250,9 @@ enum DVRFormat {
         return "\(max(1, minutes)) min"
     }
 
+    /// Honours the app's 12/24-hour setting like every other clock.
     static func time(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.timeStyle = .short
-        f.dateStyle = .none
-        return f.string(from: date)
+        ClockFormat.short().string(from: date)
     }
 
     /// "Today", "Tomorrow", "Yesterday", else "Sep 5".

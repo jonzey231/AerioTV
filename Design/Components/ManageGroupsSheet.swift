@@ -336,7 +336,13 @@ struct ManageGroupsSheet: View {
                         if favoritesAvailable { Text("Favorites").tag(favoritesToken) }
                         ForEach(displayList, id: \.self) { g in Text(g).tag(g) }
                     }
-                    .onChange(of: defaultGroup) { _, v in setDefault(v) }
+                    .onChange(of: defaultGroup) { _, v in
+                        // The onAppear load also lands here; only a real
+                        // change is worth a write and a sync push.
+                        guard let dKey = defaultGroupKey,
+                              v != (UserDefaults.standard.string(forKey: dKey) ?? "") else { return }
+                        setDefault(v)
+                    }
                     .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("Default Group")

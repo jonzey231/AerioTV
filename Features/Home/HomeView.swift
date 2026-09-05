@@ -3675,7 +3675,6 @@ struct MainTabView: View {
     /// syncTabVisibility() copies the live values in only when it is safe to
     /// mutate the tab set, so the set never changes underneath an active
     /// Settings navigation; deferred changes apply when the user leaves it.
-    @State private var tabShowFavorites = false
     @State private var tabShowRecordings = false
     @State private var tabShowVOD = false
     @ObservedObject private var tabBarScrollState = TVTabBarScrollState.shared
@@ -4467,11 +4466,10 @@ struct MainTabView: View {
                 && !tabBarScrollState.isHidden
                 && (!nowPlaying.isActive || nowPlaying.isMinimized) {
                 GeometryReader { geo in
-                    // Same centered-bar estimate guideHintWidthBudget uses:
-                    // ~230pt per tab, deliberately WIDE so the circles sit
-                    // shy of the bar's real edge rather than under it.
+                    // Centered-bar estimate: ~230pt per tab, deliberately
+                    // WIDE so the circles sit shy of the bar's real edge
+                    // rather than under it.
                     let visibleTabs = 2
-                        + (showFavoritesTab ? 1 : 0)
                         + (showRecordingsTab ? 1 : 0)
                         + (showVODTab ? 2 : 0)
                     let barLeading = (geo.size.width - CGFloat(visibleTabs) * 230) / 2
@@ -5095,11 +5093,9 @@ struct MainTabView: View {
     /// live values directly (iOS NavigationStacks are not torn down by a
     /// sibling-tab insertion the way tvOS's are).
     #if os(tvOS)
-    private var showFavoritesTab: Bool { false }
     private var showRecordingsTab: Bool { tabShowRecordings }
     private var showVODTab: Bool { tabShowVOD }
     #else
-    private var showFavoritesTab: Bool { false }
     private var showRecordingsTab: Bool { hasRecordings }
     private var showVODTab: Bool { hasVOD }
     #endif
@@ -5165,20 +5161,18 @@ struct MainTabView: View {
             // Diagnostic for the sticky blank-Settings bug: confirm the latch is
             // deferring while in Settings/nav. If a blank ever coincides with a
             // DEFER-less tab-set mutation below, this + the APPLYING line pinpoint it.
-            debugLog("🔶 syncTabVisibility DEFER (settingsPushed=\(isSettingsSubviewPushed) vodPushed=\(isVODDetailPushed) tab=\(selectedTab.rawValue)) live[fav=\(hasFavorites) rec=\(hasRecordings) vod=\(hasVOD)] latched[fav=\(tabShowFavorites) rec=\(tabShowRecordings) vod=\(tabShowVOD)]")
+            debugLog("🔶 syncTabVisibility DEFER (settingsPushed=\(isSettingsSubviewPushed) vodPushed=\(isVODDetailPushed) tab=\(selectedTab.rawValue)) live[rec=\(hasRecordings) vod=\(hasVOD)] latched[rec=\(tabShowRecordings) vod=\(tabShowVOD)]")
             return
         }
-        let favChange = tabShowFavorites != hasFavorites
         let recChange = tabShowRecordings != hasRecordings
         let vodChange = tabShowVOD != hasVOD
-        if favChange || recChange || vodChange {
+        if recChange || vodChange {
             // A tab APPEARING/DISAPPEARING mutates the TabView child set — the
             // exact action that can tear down a fragile Settings NavigationStack.
             // If the blank recurs, the last such line before it (with tab context)
             // is the culprit trigger.
-            debugLog("🔶 syncTabVisibility APPLYING tab-set change (tab=\(selectedTab.rawValue) settingsPushed=\(isSettingsSubviewPushed) vodPushed=\(isVODDetailPushed)): fav \(tabShowFavorites)→\(hasFavorites) rec \(tabShowRecordings)→\(hasRecordings) vod \(tabShowVOD)→\(hasVOD)")
+            debugLog("🔶 syncTabVisibility APPLYING tab-set change (tab=\(selectedTab.rawValue) settingsPushed=\(isSettingsSubviewPushed) vodPushed=\(isVODDetailPushed)): rec \(tabShowRecordings)→\(hasRecordings) vod \(tabShowVOD)→\(hasVOD)")
         }
-        if favChange { tabShowFavorites = hasFavorites }
         if recChange { tabShowRecordings = hasRecordings }
         if vodChange { tabShowVOD = hasVOD }
         #endif
@@ -5340,15 +5334,6 @@ struct MainTabView: View {
         // deliberate scroll down, full bar back on any scroll up
         // (TabBarScrollTracker).
         .aerioTabBarAutoMinimize()
-        // If the user removes their last favorite while on the Favorites tab, redirect home.
-        .onChange(of: hasFavorites) { _, nowHasFavorites in
-            syncTabVisibility()
-            if !nowHasFavorites && selectedTab == .favorites {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                    selectedTab = .liveTV
-                }
-            }
-        }
         // If the user deletes their last recording while on the DVR tab, redirect home.
         .onChange(of: hasRecordings) { _, nowHasRecordings in
             syncTabVisibility()
@@ -5398,23 +5383,13 @@ struct MainTabView: View {
             configureTabBarAppearance()
             tryShowInitialLoading()
             #if os(tvOS)
+            // The circles mount once a tab bar button HOLDS focus (seen by
+            // the focus-update observer below); mounting them the instant
+            // the bar existed handed them the launch focus (trace 2026-09-05
+            // 13:13). Backstop so they are never hidden for good.
             Task { @MainActor in
-                // Wait for a tab bar button to actually HOLD focus, not just
-                // for the bar to exist: mounting the circles the instant the
-                // bar was detected handed them the launch focus (trace
-                // 2026-09-05 13:13, Search focused at launch).
-                for _ in 0..<60 where !tvTabBarSeen {
-                    let window = UIApplication.shared.connectedScenes
-                        .compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
-                    let focused = window.flatMap { UIFocusSystem.focusSystem(for: $0)?.focusedItem }
-                    if let focused, String(describing: type(of: focused)) == "UITabBarButton" {
-                        tvTabBarSeen = true
-                        debugLog("[FOCUS] nav circles mounted (tab bar holds focus)")
-                        break
-                    }
-                    try? await Task.sleep(for: .milliseconds(100))
-                }
-                if !tvTabBarSeen { tvTabBarSeen = true }   // never hide the circles for good
+                try? await Task.sleep(for: .seconds(6))
+                if !tvTabBarSeen { tvTabBarSeen = true }
             }
             #endif
             debugLog("🔶 MainTabView.onAppear: done")
@@ -5649,8 +5624,12 @@ struct MainTabView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIFocusSystem.didUpdateNotification)) { note in
             guard let ctx = note.userInfo?[UIFocusSystem.focusUpdateContextUserInfoKey] as? UIFocusUpdateContext,
                   let view = ctx.nextFocusedItem as? UIView,
-                  String(describing: type(of: view)) == "UITabBarButton",
-                  let label = view.accessibilityLabel,
+                  String(describing: type(of: view)) == "UITabBarButton" else { return }
+            if !tvTabBarSeen {
+                tvTabBarSeen = true
+                debugLog("[FOCUS] nav circles mounted (tab bar holds focus)")
+            }
+            guard let label = view.accessibilityLabel,
                   let tab = AppTab.allCases.first(where: { $0.title == label }) else { return }
             tabFocusSelectTask?.cancel()
             tabFocusSelectTask = Task { @MainActor in
@@ -6331,64 +6310,6 @@ struct MainTabView: View {
     /// tab-state additions. A plain method has its own scope so the
     /// budget resets cleanly.
     #if os(tvOS)
-    /// #42 Part 3: a small muted hint badge for the top-left of the Live TV guide.
-    ///
-    /// [budget] is a HARD width cap, not a guess - see `guideHintWidthBudget`.
-    /// Overflow wraps to a second line rather than truncating: there is ample
-    /// empty height between the nav bar and the guide's time axis, so wrapping
-    /// keeps the whole hint readable where an ellipsis would eat it.
-    @ViewBuilder
-    private func guideMenuHint(_ text: String, budget: CGFloat) -> some View {
-        Text(text)
-            .font(.system(size: 15, weight: .medium))
-            .foregroundColor(.white.opacity(0.55))
-            .lineLimit(2)
-            .multilineTextAlignment(.leading)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: budget, alignment: .leading)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(Color.black.opacity(0.4).clipShape(Capsule()))
-    }
-
-    /// Width the corner hints may occupy, so they can never slide under the
-    /// tab bar (Logan 2026-08-10: the pill grew into it).
-    ///
-    /// The tvOS tab bar is a system-drawn `TabView` bar - unlike Android's own
-    /// bar it cannot be measured with a PreferenceKey - but it IS centered, so
-    /// the gutter is `(container - barWidth) / 2` and we only need an upper
-    /// bound on `barWidth`. Measured on the ATV (1920pt screen, 1760pt
-    /// container after the 80pt tvOS safe area) the 4-tab bar is ~835pt, so
-    /// ~210pt per item; 230 is used here so the estimate always runs WIDE and
-    /// the budget errs small. Deriving it from the live tab count also means
-    /// the common 4-tab layout gets the room a fixed worst-case cap would have
-    /// thrown away. Anything still too long wraps inside the budget.
-    private func guideHintWidthBudget(_ containerWidth: CGFloat) -> CGFloat {
-        // Live TV + Settings are always present; the rest are conditional.
-        let visibleTabs = 2
-            + (showFavoritesTab ? 1 : 0)
-            + (showRecordingsTab ? 1 : 0)
-            + (showVODTab ? 2 : 0)
-        let barWidthCeiling = CGFloat(visibleTabs) * 230
-        let gutter = (containerWidth - barWidthCeiling) / 2
-        // Subtract the leading inset (16), the capsule's own horizontal
-        // padding (10 + 10), a visible 24pt gap — and the Refresh + Search
-        // action circles that now sit at the bar's leading edge (2×60 + 16
-        // spacing + 16 gap = 152), so the hint pill can never grow under them.
-        return max(240, gutter - 16 - 20 - 24 - 152)
-    }
-
-    /// The guide's always-on nav hint, one compressed line. Hold-Left copy
-    /// DERIVED from the effective guide map. Sidebar mode says plain
-    /// "Left = groups": short Left opens the sidebar there too, so spelling
-    /// out "Left / Hold Left" only made the pill longer.
-    private var guideNavHintLine: String {
-        var parts = ["Double Back = top channel"]
-        if let short = RemoteControlHints.guideHoldLeftShort(RemoteControlStore.shared.map) {
-            parts.append(short)
-        }
-        return parts.joined(separator: " · ")
-    }
     #endif
 
     /// Play/Pause handler, pulled out of the `.onPlayPauseCommand` closure for

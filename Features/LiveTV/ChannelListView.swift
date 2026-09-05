@@ -33,10 +33,6 @@ struct ChannelListView: View {
     // #45: collection filter pills live in the group-pill row; observe the
     // store so the row updates when collections are created / deleted.
     @ObservedObject private var collectionsStore = ChannelCollectionsStore.shared
-    // #45: collection whose pill is being managed (long-press → move / delete).
-    // Drives the tvOS manage confirmationDialog; nil = none.
-    @State private var managePillCollection: ChannelCollection?
-
     @Query private var servers: [ServerConnection]
 
     @State private var filteredChannels: [ChannelDisplayItem] = []
@@ -337,11 +333,6 @@ struct ChannelListView: View {
     /// is padded by the difference so it starts at the time row.
     @State private var guideHostTopAbs: CGFloat = 0
     @State private var guideTopAbs: CGFloat = 0
-    /// When the banner description last lost focus: a pill gaining focus
-    /// right after it on a Down press is redirected to the first pill
-    /// (Logan 2026-09-05: Down from the description lands on the first
-    /// channel group pill, not whichever sits under the text).
-    @State private var bannerDescriptionLostFocusAt: Date = .distantPast
     @State private var bannerDescriptionFocused = false
     @FocusState private var pillEntryCatcherFocused: Bool
     /// Set by the nav circles' Down catcher: focus the banner description
@@ -488,9 +479,6 @@ struct ChannelListView: View {
                     favoritesDidChange()
                 }
                 #if os(tvOS)
-                .onChange(of: groupPillFocused) { old, new in
-                    redirectPillEntryFromBanner(old: old, new: new)
-                }
                 // Down from the nav circles (Logan 2026-09-05): the banner
                 // description in Channel Preview, else the first channel. On
                 // the shared chain: a first attempt sat on the List view's
@@ -866,10 +854,7 @@ struct ChannelListView: View {
                             GuidePreviewBanner(program: previewProgram, channel: previewChannel,
                                                shortTimeFormatter: ClockFormat.guideShort(),
                                                onSelectDescription: { openBannerInfo() },
-                                               onDescriptionFocusChange: { focused in
-                                                   bannerDescriptionFocused = focused
-                                                   if !focused { bannerDescriptionLostFocusAt = Date() }
-                                               },
+                                               onDescriptionFocusChange: { bannerDescriptionFocused = $0 },
                                                focusRequest: $bannerFocusRequest)
                                 .transaction { $0.animation = nil }
                                 .sheet(item: $bannerInfoTarget) { ProgramInfoView(target: $0) }
@@ -922,10 +907,7 @@ struct ChannelListView: View {
                                 startPlayback(item)
                             },
                             sidebarOpen: guideSidebarOpen,
-                            onPreviewProgramChange: { prog, ch in
-                                previewProgram = prog
-                                previewChannel = ch
-                            },
+                            onPreviewProgramChange: previewProgramHandler,
                             onRequestGroupSidebar: { programID in
                                 guideSidebarReturnProgramID = programID
                                 // #196: remember the group for the Back-revert
@@ -934,7 +916,9 @@ struct ChannelListView: View {
                                 withAnimation(.easeOut(duration: 0.28)) { guideSidebarOpen = true }
                             }
                         )
+                        #if os(tvOS)
                         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { guideTopAbs = $0 }
+                        #endif
                         // GH #72: the guide itself stays mounted (it owns the
                         // hold-Left / sidebar receivers), the notice just
                         // covers its empty grid.
@@ -1609,22 +1593,6 @@ struct ChannelListView: View {
             .padding(.vertical, 6)
             #endif
         }
-        // #45: manage a collection's pill (tvOS long-press → move / delete).
-        // iOS uses .contextMenu on the pill instead (see collectionPill).
-        #if os(tvOS)
-        .confirmationDialog(
-            managePillCollection?.name ?? "Collection",
-            isPresented: Binding(
-                get: { managePillCollection != nil },
-                set: { if !$0 { managePillCollection = nil } }
-            ),
-            titleVisibility: .visible,
-            presenting: managePillCollection
-        ) { c in
-            collectionManageActions(c)
-            Button("Cancel", role: .cancel) { }
-        }
-        #endif
         .onChange(of: selectedGroup) { _, newValue in
             withAnimation(.spring(response: 0.3)) {
                 pillProxy.scrollTo("pill_\(newValue)", anchor: .center)
@@ -1648,6 +1616,9 @@ struct ChannelListView: View {
             title: c.name
         )
         .focused($groupPillFocused, equals: token)
+        // #42 Part 1: not focusable while a guide hold-Left pins focus to
+        // the first pill, so the hold cannot land on a beginning collection.
+        .focusable(canFocus)
         .contextMenu { collectionManageActions(c) }
         #else
         Button {
@@ -1773,18 +1744,19 @@ struct ChannelListView: View {
         )
     }
 
-    #if os(tvOS)
-    private func redirectPillEntryFromBanner(old: String?, new: String?) {
-        // The description's focus-lost and the pill's focus-gained arrive in
-        // either order, so accept the flag OR a fresh timestamp.
-        let fromBanner = bannerDescriptionFocused
-            || Date().timeIntervalSince(bannerDescriptionLostFocusAt) < 0.4
-        guard old == nil, let new, TVFocusTracer.lastArrowPress == .down, fromBanner,
-              let first = groupTokens.first, new != first else { return }
-        debugLog("[FOCUS] pill row entered from the banner on \(new) -> \(first)")
-        groupPillFocused = first
+    /// tvOS Channel Preview only; nil elsewhere so the guide skips the report.
+    private var previewProgramHandler: ((GuideProgram?, ChannelDisplayItem?) -> Void)? {
+        #if os(tvOS)
+        return { prog, ch in
+            previewProgram = prog
+            previewChannel = ch
+        }
+        #else
+        return nil
+        #endif
     }
 
+    #if os(tvOS)
     private func openBannerInfo() {
         guard let prog = previewProgram, let ch = previewChannel else { return }
         bannerInfoTarget = ProgramInfoTarget(
@@ -1821,13 +1793,15 @@ struct ChannelListView: View {
 
     /// Applies the user's default group the first time the playlist's groups
     /// are known. A default that is not present (other playlist, hidden,
-    /// no favorites yet) is skipped, not forced.
+    /// no favorites yet) is skipped, not forced: the decision is made once
+    /// per playlist load, so a later favorites edit or channel refresh never
+    /// yanks the user off the group they picked.
     private func applyDefaultGroupIfNeeded() {
         guard !defaultGroupApplied else { return }
+        defaultGroupApplied = true
         guard let wanted = UserDefaults.standard.string(forKey: defaultChannelGroupKey),
               !wanted.isEmpty, wanted != selectedGroup else { return }
         if groupTokens.contains(wanted) || wanted.hasPrefix("collection:") {
-            defaultGroupApplied = true
             selectedGroup = wanted
             debugLog("[GROUPS] default group applied: \(wanted)")
         }
@@ -4045,149 +4019,6 @@ private struct PressableEPGRow<Row: View>: View {
 }
 #endif
 
-// MARK: - Favorites View
-struct FavoritesView: View {
-    @EnvironmentObject private var nowPlaying: NowPlayingManager
-    @EnvironmentObject private var favoritesStore: FavoritesStore
-    @EnvironmentObject private var channelStore: ChannelStore
-    @Query private var servers: [ServerConnection]
-
-    var body: some View {
-        NavigationStack {
-            ZStack {
-                Color.appBackground.ignoresSafeArea()
-                if favoritesStore.favoriteItems.isEmpty {
-                    EmptyStateView(
-                        icon: "star",
-                        title: "No Favorites",
-                        message: "Tap the star on a channel in the guide, or a channel's actions button in the list, to add it here."
-                    )
-                } else {
-                    #if os(tvOS)
-                    // Apple TV: Favorites is the GUIDE filtered to the starred
-                    // channels in favorites order (Logan 2026-09-02), matching
-                    // the Android TV tab. No group pills or sidebar here.
-                    EPGGuideView(
-                        channels: favoritesStore.favoriteItems,
-                        servers: Array(servers),
-                        onSelectChannel: { item in
-                            startPlayback(item)
-                        }
-                    )
-                    #else
-                    List {
-                        // Keyed by the unique stream URL (see rowKey) so two
-                        // favorited channels sharing a tvg-id stay distinct rows.
-                        ForEach(favoritesStore.favoriteItems, id: \.rowKey) { item in
-                            ChannelRow(item: item) {
-                                startPlayback(item)
-                            }
-                            .listRowBackground(Color.clear)
-                            .listRowInsets(EdgeInsets(top: 3, leading: 16, bottom: 3, trailing: 16))
-                            #if os(iOS)
-                            .listRowSeparator(.hidden)
-                            // Remove from within the Favorites tab itself —
-                            // swipe-left reveals a red Remove action. Users
-                            // previously had to hunt for the channel in Live
-                            // TV list view to un-star it.
-                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                Button(role: .destructive) {
-                                    favoritesStore.toggle(item)
-                                } label: {
-                                    Label("Remove", systemImage: "star.slash")
-                                }
-                            }
-                            // Mirrors the swipe action for discoverability —
-                            // iPhone users often long-press before swiping.
-                            .contextMenu {
-                                Button(role: .destructive) {
-                                    favoritesStore.toggle(item)
-                                } label: {
-                                    Label("Remove from Favorites", systemImage: "star.slash")
-                                }
-                            }
-                            #endif
-                        }
-                        // tvOS Siri Remote can't drag-reorder, so the .onMove
-                        // hook is iOS-only. The Edit-mode toolbar button below
-                        // is also gated to iOS.
-                        #if os(iOS)
-                        .onMove { source, destination in
-                            favoritesStore.move(fromOffsets: source, toOffset: destination)
-                        }
-                        #endif
-                    }
-                    .listStyle(.plain)
-                    .background(Color.appBackground)
-                    #if os(iOS)
-                    .scrollContentBackground(.hidden)
-                    #endif
-                    #endif
-                }
-            }
-            .navigationTitle("Favorites")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.large)
-            .toolbar {
-                // EditButton flips the List into Edit mode so the drag
-                // handles appear. Hidden when there are no favorites.
-                if !favoritesStore.favoriteItems.isEmpty {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        EditButton()
-                    }
-                }
-            }
-            #endif
-            .toolbarBackground(Color.appBackground, for: .navigationBar)
-            // #45: Favorites is not a collection view — clear the active
-            // collection so the channel long-press menu offers "Remove from
-            // All Collections" here rather than a stale "Remove from <name>".
-            .onAppear { ChannelCollectionsStore.shared.activeFilterCollectionID = nil }
-        }
-    }
-
-    private func playerHeaders() -> [String: String] {
-        guard let server = channelStore.activeServer ?? servers.first(where: { $0.isActive }) ?? servers.first else {
-            return ["Accept": "*/*"]
-        }
-        return server.authHeaders
-    }
-
-    /// Same `startPlayback(_:)` helper as on `ChannelListView` — see
-    /// its doc comment for rationale. Duplicated here because
-    /// `FavoritesView` is a separate struct with its own
-    /// `playerHeaders()` / `nowPlaying` / `channelStore` environment
-    /// objects; a shared extension would require relocating these
-    /// properties into a protocol.
-    private func startPlayback(_ item: ChannelDisplayItem) {
-        guard !item.streamURLs.isEmpty else { return }
-        // "Play Channels In: Mini Player" (Remote Control settings, tvOS-only,
-        // default off; Android #226 twin, AerioTV-Android 8cfddab). First
-        // Select on a browse tune mounts the session ALREADY minimized (the
-        // old begin-fullscreen-then-minimize-400ms flow flashed the full
-        // player over the guide). A second Select on the channel already
-        // playing in the corner promotes it to fullscreen instead of
-        // re-tuning the same stream. Resume / deep-link / cast paths don't
-        // route through here, so they stay fullscreen.
-        #if os(tvOS)
-        if RemoteControlStore.shared.tuneInMini {
-            if nowPlaying.isMinimized, nowPlaying.playingItem?.id == item.id {
-                nowPlaying.expand()
-                return
-            }
-            nowPlaying.requestStartMinimized()
-        }
-        #endif
-        if PlaybackFeatureFlags.useUnifiedPlayback {
-            let server = channelStore.activeServer
-                ?? servers.first(where: { $0.isActive })
-                ?? servers.first
-            _ = PlayerSession.shared.begin(item: item, server: server)
-        } else {
-            nowPlaying.startPlaying(item, headers: playerHeaders())
-        }
-    }
-}
 
 // MARK: - Marquee Text
 struct MarqueeText: View {

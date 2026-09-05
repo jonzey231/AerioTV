@@ -199,9 +199,10 @@ struct GroupSidebarPanel: View {
 
             ScrollViewReader { proxy in
                 ScrollView {
+                    let defaultToken = UserDefaults.standard.string(forKey: "defaultChannelGroup") ?? ""
                     LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(groups, id: \.self) { token in
-                            groupRow(token)
+                            groupRow(token, defaultToken: defaultToken)
                                 .id(token)
                         }
                     }
@@ -226,8 +227,7 @@ struct GroupSidebarPanel: View {
     }
 
     @ViewBuilder
-    private func groupRow(_ token: String) -> some View {
-        let defaultToken = UserDefaults.standard.string(forKey: "defaultChannelGroup") ?? ""
+    private func groupRow(_ token: String, defaultToken: String) -> some View {
         let isDefault = defaultToken == token || (token == groupSidebarAllToken && defaultToken.isEmpty)
         Button {
             onSelect(token)

@@ -5164,10 +5164,17 @@ struct NativeHLSPlayerScreen: View {
         }
         // Record sheet over the native player. Same RecordProgramSheet
         // the mpv chrome's Record pill presents, fed from the same
-        // ChannelDisplayItem EPG fields.
+        // ChannelDisplayItem EPG fields. tvOS: a sheet card like every
+        // other presenter (the form is sized for one).
+        #if os(tvOS)
+        .sheet(isPresented: $showRecordSheet) {
+            recordSheet
+        }
+        #else
         .fullScreenCover(isPresented: $showRecordSheet) {
             recordSheet
         }
+        #endif
         // Direct playback failure (e.g. a stale capability cache sent a
         // server-side HLS request to a server that no longer answers it):
         // fall back to mpv, same as the tile path. The per-session

@@ -40,11 +40,25 @@ enum DVRClassifier {
         "mystery", "variety"
     ]
 
+    /// Memoised per recording and inputs: the tab classifies every row on
+    /// each render, and the newscast regex is the expensive part.
+    nonisolated(unsafe) private static var memo: [String: DVRContentKind] = [:]
+
     static func kind(for rec: Recording) -> DVRContentKind {
         let category = (rec.epgCategory ?? "").lowercased()
         let title = rec.programTitle.lowercased()
         let sub = (rec.subTitle ?? "").lowercased()
         let desc = rec.programDescription.lowercased()
+        let key = "\(rec.id)|\(category)|\(title)|\(sub)|\(desc.hashValue)|\(rec.seasonNumber ?? -1)|\(rec.episodeNumber ?? -1)"
+        if let k = memo[key] { return k }
+        let k = classify(category: category, title: title, sub: sub, desc: desc, rec: rec)
+        if memo.count > 2000 { memo.removeAll() }
+        memo[key] = k
+        return k
+    }
+
+    private static func classify(category: String, title: String, sub: String, desc: String,
+                                 rec: Recording) -> DVRContentKind {
         if sportsWords.contains(where: { category.contains($0) }) { return .sports }
         if newsWords.contains(where: { category.contains($0) }) { return .news }
         if kidsWords.contains(where: { category.contains($0) }) { return .kids }
@@ -151,18 +165,19 @@ final class DVRArtResolver: ObservableObject {
             for rec in todo {
                 guard !Task.isCancelled else { return }
                 let hadArt = !(rec.posterURL ?? "").isEmpty
-                if !hadArt, let url = await resolveOne(rec, modelContext: modelContext) {
-                    rec.posterURL = url
-                    resolved += 1
-                } else if hadArt {
+                let url = hadArt ? nil : await resolveOne(rec, modelContext: modelContext)
+                if hadArt {
                     // Episode identity only (the art is already there).
                     _ = await epgProgram(for: rec, modelContext: modelContext)
                 }
                 // Landscape art for the hero and cards: a portrait poster
                 // crops badly in 16:9 (Suits, Aquaman; Logan 2026-09-05).
-                if (rec.backdropURL ?? "").isEmpty, let b = await backdrop(for: rec) {
-                    rec.backdropURL = b
-                }
+                let b = (rec.backdropURL ?? "").isEmpty ? await backdrop(for: rec) : nil
+                // The row may have been deleted by the 30 s reconcile while
+                // the lookups ran; a write to a deleted model traps.
+                guard rec.modelContext != nil, !rec.isDeleted else { continue }
+                if let url { rec.posterURL = url; resolved += 1 }
+                if let b { rec.backdropURL = b }
                 if modelContext.hasChanges { try? modelContext.save(); changed = true }
                 try? await Task.sleep(for: .milliseconds(120))
             }
@@ -194,9 +209,21 @@ final class DVRArtResolver: ObservableObject {
         return await tmdbArt(title: rec.programTitle, isMovie: kind == .movie, size: "w780")
     }
 
-    private func tmdbArt(title: String, isMovie: Bool, size: String) async -> String? {
+    /// One TMDB search per title and kind for the session: the poster and
+    /// the backdrop steps both ask for the same entry.
+    private var tmdbEntries: [String: TMDBArtCache.Entry?] = [:]
+
+    private func tmdbEntry(title: String, isMovie: Bool) async -> TMDBArtCache.Entry? {
         guard TMDBPosters.isEnabled, let apiKey = TMDBPosters.apiKey else { return nil }
+        let key = "\(isMovie ? "m" : "t"):\(LibraryMatcher.cleanTitle(title))"
+        if let cached = tmdbEntries[key] { return cached }
         let entry = await TMDBService.lookupArt(title: title, isMovie: isMovie, apiKey: apiKey)
+        if entry != nil { tmdbEntries[key] = entry }   // a failed call retries next pass
+        return entry
+    }
+
+    private func tmdbArt(title: String, isMovie: Bool, size: String) async -> String? {
+        let entry = await tmdbEntry(title: title, isMovie: isMovie)
         // 16:9 cards and the hero: landscape art first.
         if let b = entry?.backdrop, !b.isEmpty { return TMDBService.imageURL(path: b, size: size)?.absoluteString }
         if let p = entry?.poster, !p.isEmpty { return TMDBService.imageURL(path: p, size: "w500")?.absoluteString }
@@ -205,8 +232,7 @@ final class DVRArtResolver: ObservableObject {
 
     private func backdrop(for rec: Recording) async -> String? {
         let kind = DVRClassifier.kind(for: rec)
-        guard TMDBPosters.isEnabled, let apiKey = TMDBPosters.apiKey else { return nil }
-        let entry = await TMDBService.lookupArt(title: rec.programTitle, isMovie: kind == .movie, apiKey: apiKey)
+        let entry = await tmdbEntry(title: rec.programTitle, isMovie: kind == .movie)
         guard let b = entry?.backdrop, !b.isEmpty else { return nil }
         return TMDBService.imageURL(path: b, size: "w1280")?.absoluteString
     }

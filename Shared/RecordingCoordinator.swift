@@ -398,15 +398,11 @@ final class RecordingCoordinator: ObservableObject {
     private func applyRemoteMetadata(_ r: DispatcharrAPI.Recording, to local: Recording,
                                      api: DispatcharrAPI) -> Bool {
         var changed = false
-        if let raw = r.posterURL?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
-            let absolute: String
-            if let u = URL(string: raw), u.scheme != nil {
-                absolute = raw
-            } else if let base = URL(string: api.baseURL), let u = URL(string: raw, relativeTo: base) {
-                absolute = u.absoluteURL.absoluteString
-            } else {
-                absolute = raw
-            }
+        // Same resolver as every other server image: keeps a path-prefixed
+        // base URL for root-relative paths and validates absolute ones.
+        if let raw = r.posterURL?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty,
+           let u = VODService.resolveImageURL(raw, base: api.baseURL, size: "w780") {
+            let absolute = u.absoluteString
             if local.posterURL != absolute { local.posterURL = absolute; changed = true }
         }
         if (local.subTitle ?? "").isEmpty, let s = r.subTitle, !s.isEmpty { local.subTitle = s; changed = true }

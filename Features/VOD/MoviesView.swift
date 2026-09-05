@@ -3320,9 +3320,6 @@ struct MoviesPosterFocusStyle: ButtonStyle {
 /// or nav complaint, read this trace before changing code.
 @MainActor
 final class TVFocusTracer {
-    /// Direction of the most recent arrow press (set on press began, before
-    /// the focus engine moves, so a focus onChange can read it).
-    nonisolated(unsafe) static var lastArrowPress: UIFocusHeading = .down
     static let shared = TVFocusTracer()
     private var token: NSObjectProtocol?
 
@@ -3387,17 +3384,6 @@ final class TVFocusTracer {
 extension UIApplication {
     @objc func aerio_sendEvent(_ event: UIEvent) {
         if event.type == .presses, let presses = (event as? UIPressesEvent)?.allPresses {
-            // Last arrow press, for views that need to know which way focus
-            // arrived (the guide's pill row redirects Up to the first pill).
-            for press in presses where press.phase == .began {
-                switch press.type {
-                case .upArrow: TVFocusTracer.lastArrowPress = .up
-                case .downArrow: TVFocusTracer.lastArrowPress = .down
-                case .leftArrow: TVFocusTracer.lastArrowPress = .left
-                case .rightArrow: TVFocusTracer.lastArrowPress = .right
-                default: break
-                }
-            }
         }
         if event.type == .presses, let presses = (event as? UIPressesEvent)?.allPresses, TVFocusTracer.shared.isOn {
             for press in presses where press.phase == .began || press.phase == .ended {
