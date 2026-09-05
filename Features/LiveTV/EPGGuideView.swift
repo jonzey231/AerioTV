@@ -5023,19 +5023,15 @@ private struct GuideChannelButton: View {
                 // every channel collided with the catch-up clock; the long
                 // press menu adds favorites now). Sits left of the clock when
                 // both show.
+                // Display only: favorites are added and removed from the
+                // long-press menu (Logan 2026-09-05).
                 if favoritesStore.isFavorite(channel.id) {
-                    Button {
-                        favoritesStore.toggle(channel)
-                    } label: {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.statusWarning)
-                            .padding(6)
-                            .padding(.trailing, channel.hasCatchup ? 12 : 0)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Remove \(channel.name) from Favorites")
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.statusWarning)
+                        .padding(6)
+                        .padding(.trailing, channel.hasCatchup ? 12 : 0)
+                        .allowsHitTesting(false)
                 }
             }
         #endif
