@@ -5019,17 +5019,24 @@ private struct GuideChannelButton: View {
                 // favorited, filled gold when favorited. The contextMenu is
                 // dropped on purpose: a parent .contextMenu steals a child
                 // Button's tap (see feedback_context_menu_limitation).
-                Button {
-                    favoritesStore.toggle(channel)
-                } label: {
-                    Image(systemName: favoritesStore.isFavorite(channel.id) ? "star.fill" : "star")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(favoritesStore.isFavorite(channel.id) ? .statusWarning : .textTertiary.opacity(0.55))
-                        .padding(6)
-                        .contentShape(Rectangle())
+                // Star only on favorites (Logan 2026-09-05: the outline on
+                // every channel collided with the catch-up clock; the long
+                // press menu adds favorites now). Sits left of the clock when
+                // both show.
+                if favoritesStore.isFavorite(channel.id) {
+                    Button {
+                        favoritesStore.toggle(channel)
+                    } label: {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.statusWarning)
+                            .padding(6)
+                            .padding(.trailing, channel.hasCatchup ? 12 : 0)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Remove \(channel.name) from Favorites")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(favoritesStore.isFavorite(channel.id) ? "Remove \(channel.name) from Favorites" : "Add \(channel.name) to Favorites")
             }
         #endif
     }
