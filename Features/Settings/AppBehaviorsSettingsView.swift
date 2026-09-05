@@ -559,6 +559,12 @@ struct AppBehaviorsSettingsView: View {
                 .listRowBackground(Color.cardBackground)
 
                 if tmdbPostersEnabled {
+                    Image("TMDBLogoShort")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 44)
+                        .accessibilityLabel("The Movie Database")
+                        .listRowBackground(Color.cardBackground)
                     HStack(spacing: 8) {
                         Group {
                             if tmdbKeyVisible {
