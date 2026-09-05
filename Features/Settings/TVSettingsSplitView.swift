@@ -49,6 +49,7 @@ struct TVSettingsSplitView<Detail: View>: View {
     private enum Pane: Hashable { case rail, detail }
     @FocusState private var focusedPane: Pane?
     @FocusState private var focusedRow: String?
+    @FocusState private var entryCatcherFocused: Bool
     @State private var pendingSelection: SettingsRoute?
     @State private var debounceTask: Task<Void, Never>?
 
@@ -63,6 +64,27 @@ struct TVSettingsSplitView<Detail: View>: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .focusSection()
                 .focused($focusedPane, equals: .detail)
+                // Entry catcher: mounted only while focus is outside both
+                // panes (tab bar). Down from the far-right Settings pill
+                // otherwise lands on the first detail row and bounces to
+                // the rail 70 ms later (trace 2026-09-05 00:28:00). The
+                // strip is the nearest thing below the pill, takes the hop
+                // invisibly and forwards to the rail; it unmounts as soon
+                // as a pane has focus so Up from the detail pane still
+                // reaches the tab bar. Outside the pane's `.focused` so
+                // taking it never flips focusedPane.
+                .overlay(alignment: .top) {
+                    if focusedPane == nil {
+                        Color.clear
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 1)
+                            .focusable(true)
+                            .focused($entryCatcherFocused)
+                    }
+                }
+        }
+        .onChange(of: entryCatcherFocused) { _, on in
+            if on { assertRailFocus() }
         }
         .onChange(of: focusedPane) { _, pane in
             if pane == .detail { flushPendingSelection() }
@@ -79,8 +101,28 @@ struct TVSettingsSplitView<Detail: View>: View {
         .onChange(of: railReturnToken) { _, _ in
             assertRailFocus()
         }
+        // Down from the Settings pill lands geometrically in the detail
+        // pane (the pill is far right; the nearest row below it is a
+        // playlist, trace 2026-09-05 00:25:57) and defaultFocus does not
+        // override that. Redirect only that hop: a move whose previous
+        // item was a tab bar pill. Focus returning from a pushed page or
+        // moving right off the rail is left alone.
+        .onReceive(NotificationCenter.default.publisher(for: UIFocusSystem.didUpdateNotification)) { note in
+            guard let ctx = note.userInfo?[UIFocusSystem.focusUpdateContextUserInfoKey] as? UIFocusUpdateContext,
+                  let prev = ctx.previouslyFocusedItem,
+                  String(describing: type(of: prev)) == "UITabBarButton" else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                if focusedPane == .detail { assertRailFocus() }
+            }
+        }
         .onAppear {
-            assertRailFocus()
+            // Only when focus is already inside the panes. tvOS selects a
+            // tab as soon as its pill is focused, which mounts this view;
+            // asserting here then pulled focus off the Settings pill onto
+            // the Playlists row 0.6 s later with no press (trace
+            // 2026-09-05 00:22:14, "Settings auto-selects Playlists").
+            // Down from the pill still lands on the rail via defaultFocus.
+            if focusedPane != nil { assertRailFocus() }
         }
     }
 

@@ -3516,7 +3516,9 @@ enum AppTab: String, CaseIterable {
         case .favorites: return "star.fill"
         case .dvr:       return "record.circle"
         case .movies:    return "film.stack"
-        case .tvShows:   return "tv"
+        // "tv" has a separate screen layer that keeps its own colour in the
+        // selected pill (Logan 2026-09-05); the filled glyph is one layer.
+        case .tvShows:   return "tv.fill"
         case .settings:  return "gearshape.fill"
         }
     }
@@ -5270,7 +5272,10 @@ struct MainTabView: View {
                 MoviesView(vodStore: vodStore, isPlaying: $isPlaying,
                            isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested,
                            isSelected: selectedTab == .tvShows, kind: .series)
-                    .tabItem { Label(AppTab.tvShows.title, systemImage: AppTab.tvShows.icon) }
+                    .tabItem {
+                        Label(AppTab.tvShows.title, systemImage: AppTab.tvShows.icon)
+                            .symbolRenderingMode(.monochrome)
+                    }
                     .tag(AppTab.tvShows)
             }
 
