@@ -541,6 +541,11 @@ struct VODDetailView: View {
     @State private var seriesTMDBID: String?
     @State private var seasonInfo: [Int: [Int: TMDBService.EpisodeInfo]] = [:]
     @FocusState private var focusedEpisodeID: String?
+    /// Last episode card that held focus. The people strip keys off this,
+    /// not the live focus: keyed off focus it unmounted the instant focus
+    /// left the card, so Down from a card had nowhere to land (Logan
+    /// 2026-09-04: could not reach Cast & Crew).
+    @State private var peopleEpisodeID: String?
     @State private var relatedMatchedCount = -1
     @ObservedObject private var relatedLibrary = VODStore.shared
 
@@ -764,11 +769,32 @@ struct VODDetailView: View {
         return info(for: ep)?.name ?? "Episode \(ep.episodeNumber)"
     }
 
+    /// Series page row: main cast, then the highlighted episode's guest
+    /// stars, then crew (creators, director, writers) last, the way Emby
+    /// and Plex order it (Logan 2026-09-04). One row, not two.
+    private var rowPeople: (title: String, people: [TMDBPerson]) {
+        let crewRoles: Set<String> = ["Creator", "Director", "Writer", "Teleplay", "Story"]
+        let mainCast = castCrewPeople.filter { !crewRoles.contains($0.role ?? "") }
+        let mainCrew = castCrewPeople.filter { crewRoles.contains($0.role ?? "") }
+        var title = "Cast & Crew"
+        var ordered: [TMDBPerson] = mainCast + mainCrew
+        if usesTVMovieLayout, item.type == .series,
+           let series = fullSeries, selectedSeason < series.seasons.count,
+           let id = peopleEpisodeID,
+           let ep = series.seasons[selectedSeason].episodes.first(where: { $0.id == id }),
+           let info = info(for: ep) {
+            title = "Cast & Crew · Episode \(ep.episodeNumber)"
+            ordered = mainCast + info.guestStars + info.crew + mainCrew
+        }
+        var seen = Set<String>()
+        return (title, ordered.filter { seen.insert($0.id).inserted })
+    }
+
     /// Guest stars and key crew for the focused episode.
     @ViewBuilder
     private var tvEpisodePeopleStrip: some View {
         if let series = fullSeries, selectedSeason < series.seasons.count,
-           let id = focusedEpisodeID,
+           let id = peopleEpisodeID,
            let ep = series.seasons[selectedSeason].episodes.first(where: { $0.id == id }),
            let info = info(for: ep) {
             let people = info.crew + info.guestStars
@@ -855,12 +881,13 @@ struct VODDetailView: View {
                         .padding(.vertical, 36)
                     }
                     .focusSection()
-                    tvEpisodePeopleStrip
                 }
             }
             .padding(.top, 4)
             .onAppear { seatSelectedSeason() }
             .onChange(of: fullSeries?.seasons.count ?? 0) { _, _ in seatSelectedSeason() }
+            .onChange(of: focusedEpisodeID) { _, id in if let id { peopleEpisodeID = id } }
+            .onChange(of: selectedSeason) { _, _ in peopleEpisodeID = nil }
             .task(id: "\(seriesTMDBID ?? "")|\(selectedSeason)|\(fullSeries?.seasons.count ?? 0)") {
                 await loadSeasonInfoIfNeeded()
             }
@@ -2241,15 +2268,16 @@ struct VODDetailView: View {
     // MARK: - Cast & Crew strip
     @ViewBuilder
     private var castCrewSection: some View {
-        if !castCrewPeople.isEmpty {
+        let row = rowPeople
+        if !row.people.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Cast & Crew")
+                Text(row.title)
                     .font(.headlineSmall)
                     .foregroundColor(.textPrimary)
                     .padding(.horizontal, usesTVMovieLayout ? 56 : 16)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 12) {
-                        ForEach(castCrewPeople) { person in
+                        ForEach(row.people) { person in
                             PersonCard(person: person) { bioPerson = person }
                         }
                     }
