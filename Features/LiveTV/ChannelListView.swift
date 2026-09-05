@@ -272,6 +272,9 @@ struct ChannelListView: View {
     private func closeGuideSidebar(rebind: Bool) {
         withAnimation(.easeOut(duration: 0.28)) { guideSidebarOpen = false }
         #if os(tvOS)
+        TVGuideSidebarState.shared.isOpen = false
+        #endif
+        #if os(tvOS)
         NotificationCenter.default.post(
             name: .guideGroupSidebarDismissed,
             object: nil,
@@ -281,6 +284,15 @@ struct ChannelListView: View {
     }
 
     #if os(tvOS)
+    /// Back in the drawer: revert a previewed group and close.
+    private func dismissGuideSidebar() {
+        guideSidebarPreviewTask?.cancel()
+        if let origin = guideSidebarOriginalGroup, origin != selectedGroup {
+            selectedGroup = origin
+        }
+        closeGuideSidebar(rebind: false)
+    }
+
     /// tvOS guide focus target. Normally `nil` so the focus engine
     /// handles D-pad navigation naturally; programmatically set to
     /// a channel id in response to `.forceGuideFocus` (posted when
@@ -799,14 +811,7 @@ struct ChannelListView: View {
                                     rebind: token != guideSidebarOriginalGroup
                                 )
                             },
-                            onDismiss: {
-                                guideSidebarPreviewTask?.cancel()
-                                if let origin = guideSidebarOriginalGroup,
-                                   origin != selectedGroup {
-                                    selectedGroup = origin
-                                }
-                                closeGuideSidebar(rebind: false)
-                            },
+                            onDismiss: { dismissGuideSidebar() },
                             onPreview: { token in
                                 guideSidebarPreviewTask?.cancel()
                                 // Huge playlists (Xtream panels, tens of thousands
@@ -932,9 +937,21 @@ struct ChannelListView: View {
                         .focusSection()
                         #endif
                     }
+                    #if os(tvOS)
+                    // While the drawer is open nothing under the scrim takes
+                    // focus: Right from a row walked onto the pill row or the
+                    // banner (a trap, Logan 2026-09-05) instead of bubbling to
+                    // the pane's commit-and-close handler.
+                    .disabled(guideSidebarOpen)
+                    #endif
                 }
                 #if os(tvOS)
                 .animation(.easeOut(duration: 0.28), value: guideSidebarOpen)
+                .onChange(of: guideSidebarOpen) { _, open in TVGuideSidebarState.shared.isOpen = open }
+                .onDisappear { TVGuideSidebarState.shared.isOpen = false }
+                .onReceive(NotificationCenter.default.publisher(for: .guideCloseGroupSidebar)) { _ in
+                    if guideSidebarOpen { dismissGuideSidebar() }
+                }
                 #endif
                 .padding(.top, miniPlayerTopInset(naturalTopAbsolute: capturedNaturalTop))
                 .animation(.spring(response: 0.35), value: capturedNaturalTop)

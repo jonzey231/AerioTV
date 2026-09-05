@@ -3559,6 +3559,16 @@ final class TVSearchOverlayState: ObservableObject {
     private init() {}
 }
 
+/// Whether the guide's group drawer is open, for the Menu handler: Back
+/// closes the drawer before anything else (it expanded the mini player
+/// instead, Logan 2026-09-05).
+@MainActor
+final class TVGuideSidebarState {
+    static let shared = TVGuideSidebarState()
+    var isOpen = false
+    private init() {}
+}
+
 /// One of the round action buttons beside the tvOS tab bar (Refresh /
 /// Search). Sized to read as a sibling of the system tab pills; the focus
 /// visual is a white platter with dark glyph to match how the system bar
@@ -6351,6 +6361,13 @@ struct MainTabView: View {
             return
         }
         #if os(tvOS)
+        // The group drawer is the topmost surface while open: Back closes
+        // it (reverting a previewed group), never the mini or a tab hop.
+        if TVGuideSidebarState.shared.isOpen {
+            debugLog("\u{1F3AE} [HMP]   \u{2192} branch: group drawer open \u{2192} closing it")
+            NotificationCenter.default.post(name: .guideCloseGroupSidebar, object: nil)
+            return
+        }
         // In-place search is the topmost surface when up; Menu leaves it and
         // returns to the tab content, like Android's Back from Search.
         if showSearch {

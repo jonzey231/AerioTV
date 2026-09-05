@@ -1562,6 +1562,8 @@ extension Notification.Name {
     /// posted by ChannelListView's hold handler; EPGGuideView answers with
     /// the focused programme id via its onRequestGroupSidebar callback.
     static let guideOpenGroupSidebar = Notification.Name("guideOpenGroupSidebar")
+    /// Menu while the drawer is open closes it (HomeView owns the press).
+    static let guideCloseGroupSidebar = Notification.Name("guideCloseGroupSidebar")
     /// Posted by `ChannelStore.primeXMLTVFromURL` after it has
     /// finished the XMLTV parse AND written category-enriched
     /// entries into EPGCache via `GuideStore.seedEPGCache`. Any
