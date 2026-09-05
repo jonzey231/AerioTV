@@ -579,21 +579,23 @@ struct VODDetailView: View {
         let server = (raw == "0" || raw == "0.0") ? "" : raw
         return server.isEmpty ? (tmdbDetails?.voteAverage ?? "") : server
     }
+    // TMDB first when it answered, provider otherwise (Logan 2026-09-04).
+    private func tmdbFirst(_ tmdb: String?, _ server: String) -> String {
+        if let t = tmdb, !t.isEmpty { return t }
+        return server
+    }
     private var mergedPlot: String {
-        let server = fullMovie?.plot ?? fullSeries?.plot ?? ""
-        return server.isEmpty ? (tmdbDetails?.overview ?? "") : server
+        tmdbFirst(tmdbDetails?.overview ?? TMDBArtCache.shared.overview(for: item),
+                  fullMovie?.plot ?? fullSeries?.plot ?? "")
     }
     private var mergedGenre: String {
-        let server = fullMovie?.genre ?? fullSeries?.genre ?? ""
-        return server.isEmpty ? (tmdbDetails?.genres ?? "") : server
+        tmdbFirst(tmdbDetails?.genres, fullMovie?.genre ?? fullSeries?.genre ?? "")
     }
     private var mergedCast: String {
-        let server = fullMovie?.cast ?? fullSeries?.cast ?? ""
-        return server.isEmpty ? (tmdbDetails?.castTop ?? "") : server
+        tmdbFirst(tmdbDetails?.castTop, fullMovie?.cast ?? fullSeries?.cast ?? "")
     }
     private var mergedDirector: String {
-        let server = fullMovie?.director ?? fullSeries?.director ?? ""
-        return server.isEmpty ? (tmdbDetails?.director ?? "") : server
+        tmdbFirst(tmdbDetails?.director, fullMovie?.director ?? fullSeries?.director ?? "")
     }
     private var tvResumeMs: Int32 {
         WatchProgressManager.getResumePosition(vodID: item.id, serverID: item.serverID.uuidString) ?? 0
@@ -2207,7 +2209,9 @@ struct VODDetailView: View {
         let cast = fullMovie?.cast ?? fullSeries?.cast ?? ""
         let director = fullMovie?.director ?? fullSeries?.director ?? ""
         let missingMeta = plot.isEmpty || genre.isEmpty || cast.isEmpty || director.isEmpty
-        guard missingMeta else { return }
+        // With a key TMDB is the priority (Logan 2026-09-04), so fetch on
+        // the redesigned pages regardless; elsewhere only fill blanks.
+        guard missingMeta || usesTVMovieLayout else { return }
 
         let isMovie = item.type == .movie
         // fullMovie/fullSeries already merged provider-info over the list

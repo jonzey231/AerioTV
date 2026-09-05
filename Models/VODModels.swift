@@ -1086,16 +1086,22 @@ struct VODEpisode: Identifiable, Hashable {
     /// name, season/episode markers and tags; empty when nothing is left,
     /// so the caller can fall back to TMDB's episode name.
     func cleanedTitle(showName: String) -> String {
-        var t = VODDisplayItem.cleanDisplayName(title)
+        var t = VODDisplayItem.strippingQualityPrefix(title)
         let show = VODDisplayItem.cleanDisplayName(showName)
         if !show.isEmpty, t.lowercased().hasPrefix(show.lowercased()) {
             t = String(t.dropFirst(show.count))
         }
-        for pattern in [#"(?i)^\s*[-:·|]+\s*"#, #"(?i)\bS\d{1,2}\s*E\d{1,3}\b"#, #"(?i)\b\d{1,2}x\d{1,3}\b"#,
-                        #"(?i)\bepisode\s*\d{1,3}\b"#, #"(?i)\bseason\s*\d{1,2}\b"#, #"(?i)^\s*[-:·|]+\s*"#] {
-            t = t.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        // Whatever follows the show name: "(2026) - S01E01 - Title",
+        // "1x01 Title", "- Episode 3: Title". Strip year groups, season /
+        // episode markers and separators wherever they sit, then tidy.
+        for pattern in [#"\((19|20)\d{2}\)"#, #"(?i)\bS\d{1,2}\s*E\d{1,3}\b"#, #"(?i)\b\d{1,2}x\d{1,3}\b"#,
+                        #"(?i)\bepisode\s*\d{1,3}\b"#, #"(?i)\bseason\s*\d{1,2}\b"#] {
+            t = t.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
         }
-        return t.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+        t = t.replacingOccurrences(of: #"^[\s\-:·|)(\[\]]+"#, with: "", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"[\s\-:·|(\[]+$"#, with: "", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+        return VODDisplayItem.strippingTrailingYears(t).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// "8.0" / "" for nil-or-zero. Same convention as VODMovie /

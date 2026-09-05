@@ -68,9 +68,11 @@ struct AuthPosterImage: View {
             VODService.registerOwnHosts(allowedHosts)
             if let host = url.host?.lowercased(), allowedHosts.contains(host) {
                 headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
-            } else if !headers.isEmpty {
+            } else if !headers.isEmpty, url.host?.lowercased() != "image.tmdb.org" {
                 // Diagnostics for the next covers report: one grep-able line
-                // that says exactly why credentials were withheld.
+                // that says exactly why credentials were withheld. TMDB's
+                // CDN is expected and skipped: with TMDB-first art it wrote
+                // a line per poster and flooded the log (2026-09-04).
                 debugLog("🖼️ AuthPosterImage: headers WITHHELD host=\(url.host?.lowercased() ?? "nil") trusted=\(allowedHosts.sorted().joined(separator: ","))")
             }
             let data: Data
@@ -2514,6 +2516,9 @@ struct MoviesHero: View {
     let progress: WatchProgress?
     var backdropOverride: URL? = nil
     var headers: [String: String] = [:]
+    /// TMDB synopsis first when cached (Logan 2026-09-04: the provider's
+    /// plot arrived in Polish), provider plot otherwise.
+    @ObservedObject private var art = TMDBArtCache.shared
     let onPrimary: () -> Void
     let onPlayFromStart: () -> Void
     let onDetails: () -> Void
@@ -2672,7 +2677,7 @@ struct MoviesHero: View {
                 .foregroundColor(.textSecondary)
             }
             #if os(tvOS)
-            if case let plot = item.plotText, !plot.isEmpty {
+            if case let plot = (art.overview(for: item) ?? item.plotText), !plot.isEmpty {
                 Text(plot)
                     .font(.bodySmall)
                     .foregroundColor(.textPrimary.opacity(0.85))

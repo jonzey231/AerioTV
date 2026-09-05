@@ -1164,8 +1164,9 @@ enum TMDBService {
             let releaseDate: String?
             let firstAirDate: String?
             let popularity: Double?
+            let overview: String?
             enum CodingKeys: String, CodingKey {
-                case id, popularity
+                case id, popularity, overview
                 case posterPath = "poster_path"
                 case backdropPath = "backdrop_path"
                 case releaseDate = "release_date"
@@ -1180,7 +1181,7 @@ enum TMDBService {
     /// entry with empty paths on a confirmed miss.
     static func lookupArt(title: String, isMovie: Bool, apiKey: String) async -> TMDBArtCache.Entry? {
         let (cleaned, year) = splitTitleYear(title)
-        guard !cleaned.isEmpty else { return TMDBArtCache.Entry(tmdbID: "", poster: "", backdrop: "", at: Date()) }
+        guard !cleaned.isEmpty else { return TMDBArtCache.Entry(tmdbID: "", poster: "", backdrop: "", at: Date(), overview: "") }
         let path = isMovie ? "/search/movie" : "/search/tv"
         var items = [URLQueryItem(name: "query", value: cleaned), URLQueryItem(name: "include_adult", value: "false")]
         if let y = year { items.append(URLQueryItem(name: isMovie ? "year" : "first_air_date_year", value: y)) }
@@ -1194,7 +1195,8 @@ enum TMDBService {
         let hit = results.first(where: { $0.posterPath?.isEmpty == false })
             ?? results.first
         return TMDBArtCache.Entry(tmdbID: hit?.id.map(String.init) ?? "",
-                                  poster: hit?.posterPath ?? "", backdrop: hit?.backdropPath ?? "", at: Date())
+                                  poster: hit?.posterPath ?? "", backdrop: hit?.backdropPath ?? "",
+                                  at: Date(), overview: hit?.overview ?? "")
     }
 
     static func imageURL(path: String, size: String) -> URL? {
@@ -1935,6 +1937,8 @@ final class TMDBArtCache: ObservableObject {
         var poster: String
         var backdrop: String
         var at: Date
+        /// TMDB's synopsis (the provider's can be in another language).
+        var overview: String? = nil
     }
 
     /// Bumped (throttled) as entries land so poster cards re-read.
@@ -1976,6 +1980,11 @@ final class TMDBArtCache: ObservableObject {
     func backdropURL(for item: VODDisplayItem, size: String = "w1280") -> URL? {
         guard let e = entry(for: item), !e.backdrop.isEmpty else { return nil }
         return TMDBService.imageURL(path: e.backdrop, size: size)
+    }
+
+    func overview(for item: VODDisplayItem) -> String? {
+        guard let o = entry(for: item)?.overview, !o.isEmpty else { return nil }
+        return o
     }
 
     func tmdbID(for item: VODDisplayItem) -> String? {
