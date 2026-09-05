@@ -41,7 +41,6 @@ struct DVRView: View {
     @State private var showDeleteConfirmation = false
     @State private var showDeleteFromServerAlert = false
     @State private var showDownloadConfirmation = false
-    @State private var progressVersion = 0
 
     #if os(tvOS)
     /// "primary" | "secondary" | "stop" while a hero button has focus.
@@ -137,16 +136,26 @@ struct DVRView: View {
         Array(completed.sorted { $0.scheduledStart > $1.scheduledStart }.prefix(20))
     }
 
-    private func resumeMs(_ rec: Recording) -> Int32? {
-        guard let id = rec.watchProgressID ?? (rec.destination == .local ? "local-\(rec.id.uuidString)" : nil) else { return nil }
-        return WatchProgressManager.getResumePosition(vodID: id, serverID: rec.serverID)
-    }
+    /// Resume fractions by recording id, refreshed on appear, when the set of
+    /// recordings changes, and after playback. Reading WatchProgress inside
+    /// the body ran a SwiftData fetch per card per render (dozens per
+    /// switch to this tab; the switch visibly lagged, Logan 2026-09-05).
+    @State private var progressByID: [UUID: Double] = [:]
 
     private func progressFraction(_ rec: Recording) -> Double {
-        guard let ms = resumeMs(rec), ms > 0 else { return 0 }
-        let total = rec.effectiveEnd.timeIntervalSince(rec.effectiveStart) * 1000
-        guard total > 0 else { return 0 }
-        return min(1, Double(ms) / total)
+        progressByID[rec.id] ?? 0
+    }
+
+    private func refreshProgress() {
+        var out: [UUID: Double] = [:]
+        for rec in visibleRecordings {
+            guard let id = rec.watchProgressID ?? (rec.destination == .local ? "local-\(rec.id.uuidString)" : nil),
+                  let ms = WatchProgressManager.getResumePosition(vodID: id, serverID: rec.serverID), ms > 0 else { continue }
+            let total = rec.effectiveEnd.timeIntervalSince(rec.effectiveStart) * 1000
+            guard total > 0 else { continue }
+            out[rec.id] = min(1, Double(ms) / total)
+        }
+        if out != progressByID { progressByID = out }
     }
 
     /// Recording in progress first, else the newest recording with saved
@@ -227,11 +236,11 @@ struct DVRView: View {
                 vodType: "recording",
                 resumePositionMs: item.resumePositionMs
             )
-            .onDisappear { progressVersion += 1 }
+            .onDisappear { refreshProgress() }
         }
         .onChange(of: playerSession.mode) { _, mode in
             // Progress bars refresh after the container player closes.
-            if mode == .idle { progressVersion += 1 }
+            if mode == .idle { refreshProgress() }
         }
         .task {
             await reconcile()
@@ -241,8 +250,14 @@ struct DVRView: View {
                 await reconcile()
             }
         }
-        .onAppear { art.resolve(visibleRecordings, modelContext: modelContext) }
-        .onChange(of: visibleRecordings.count) { _, _ in art.resolve(visibleRecordings, modelContext: modelContext) }
+        .onAppear {
+            refreshProgress()
+            art.resolve(visibleRecordings, modelContext: modelContext)
+        }
+        .onChange(of: visibleRecordings.count) { _, _ in
+            refreshProgress()
+            art.resolve(visibleRecordings, modelContext: modelContext)
+        }
     }
 
     private func deleteMessage(device: Bool) -> String {

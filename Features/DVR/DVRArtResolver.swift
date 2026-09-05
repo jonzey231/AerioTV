@@ -147,6 +147,7 @@ final class DVRArtResolver: ObservableObject {
         task = Task { @MainActor in
             await previous?.value
             var resolved = 0
+            var changed = false
             for rec in todo {
                 guard !Task.isCancelled else { return }
                 let hadArt = !(rec.posterURL ?? "").isEmpty
@@ -155,17 +156,20 @@ final class DVRArtResolver: ObservableObject {
                     resolved += 1
                 } else if hadArt {
                     // Episode identity only (the art is already there).
-                    _ = epgProgram(for: rec, modelContext: modelContext)
+                    _ = await epgProgram(for: rec, modelContext: modelContext)
                 }
                 // Landscape art for the hero and cards: a portrait poster
                 // crops badly in 16:9 (Suits, Aquaman; Logan 2026-09-05).
                 if (rec.backdropURL ?? "").isEmpty, let b = await backdrop(for: rec) {
                     rec.backdropURL = b
                 }
-                if modelContext.hasChanges { try? modelContext.save() }
-                version += 1
+                if modelContext.hasChanges { try? modelContext.save(); changed = true }
                 try? await Task.sleep(for: .milliseconds(120))
             }
+            // One re-render per pass, and only when something landed: a bump
+            // per recording re-rendered the tab eight times while it was
+            // fading in (DVR-PERF trace 2026-09-05 15:05).
+            if changed { version += 1 }
             debugLog("[DVR-ART] done, \(resolved) of \(todo.count) resolved")
         }
     }
@@ -173,7 +177,7 @@ final class DVRArtResolver: ObservableObject {
     private func resolveOne(_ rec: Recording, modelContext: ModelContext) async -> String? {
         // 1. EPG programme poster + category, matched by title and air window
         //    (the recording's channelID and the feed's tvg-id differ).
-        if let program = epgProgram(for: rec, modelContext: modelContext), !program.posterURL.isEmpty {
+        if let program = await epgProgram(for: rec, modelContext: modelContext), !program.posterURL.isEmpty {
             return program.posterURL
         }
         let kind = DVRClassifier.kind(for: rec)
@@ -207,25 +211,44 @@ final class DVRArtResolver: ObservableObject {
         return TMDBService.imageURL(path: b, size: "w1280")?.absoluteString
     }
 
-    private func epgProgram(for rec: Recording, modelContext: ModelContext) -> EPGProgram? {
+    /// Plain values from the matching EPG programme, fetched on a background
+    /// context: the programme table is hundreds of thousands of rows and the
+    /// fetch ran on the main actor per recording (the DVR tab switch lagged,
+    /// Logan 2026-09-05).
+    private struct EPGMatch: Sendable {
+        let posterURL: String
+        let category: String
+        let subTitle: String?
+        let season: Int?
+        let episode: Int?
+    }
+
+    private func epgProgram(for rec: Recording, modelContext: ModelContext) async -> EPGMatch? {
         let title = rec.programTitle
         let sid = rec.serverID
         let start = rec.scheduledStart
         let end = rec.scheduledEnd
-        var descriptor = FetchDescriptor<EPGProgram>(
-            predicate: #Predicate<EPGProgram> { p in
-                p.serverID == sid && p.title == title && p.startTime < end && p.endTime > start
-            }
-        )
-        descriptor.fetchLimit = 1
-        guard let program = try? modelContext.fetch(descriptor).first else { return nil }
+        let container = modelContext.container
+        let match: EPGMatch? = await Task.detached(priority: .utility) {
+            let ctx = ModelContext(container)
+            var descriptor = FetchDescriptor<EPGProgram>(
+                predicate: #Predicate<EPGProgram> { p in
+                    p.serverID == sid && p.title == title && p.startTime < end && p.endTime > start
+                }
+            )
+            descriptor.fetchLimit = 1
+            guard let p = try? ctx.fetch(descriptor).first else { return nil }
+            return EPGMatch(posterURL: p.posterURL, category: p.category, subTitle: p.subTitle,
+                            season: p.season, episode: p.episode)
+        }.value
+        guard let match else { return nil }
         // Episode identity and category from the guide, when the row has
         // none (local and XC recordings never get them from a server).
-        if (rec.epgCategory ?? "").isEmpty, !program.category.isEmpty { rec.epgCategory = program.category }
-        if (rec.subTitle ?? "").isEmpty, let sub = program.subTitle, !sub.isEmpty { rec.subTitle = sub }
-        if rec.seasonNumber == nil, let s = program.season { rec.seasonNumber = s }
-        if rec.episodeNumber == nil, let e = program.episode { rec.episodeNumber = e }
-        return program
+        if (rec.epgCategory ?? "").isEmpty, !match.category.isEmpty { rec.epgCategory = match.category }
+        if (rec.subTitle ?? "").isEmpty, let sub = match.subTitle, !sub.isEmpty { rec.subTitle = sub }
+        if rec.seasonNumber == nil, let s = match.season { rec.seasonNumber = s }
+        if rec.episodeNumber == nil, let e = match.episode { rec.episodeNumber = e }
+        return match
     }
 }
 
