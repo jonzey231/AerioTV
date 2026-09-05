@@ -648,8 +648,8 @@ struct VODDetailView: View {
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 16)
         .padding(.top, 40)
-        .fullScreenCover(item: $qrLink) { link in
-            QRLinkOverlay(title: link.title, subtitle: link.subtitle, icon: link.icon, url: link.url)
+        .sheet(item: $qrLink) { link in
+            TVQRLinkSheet(link: TVQRLink(title: link.title, url: link.url.absoluteString), subtitle: link.subtitle)
         }
     }
 
@@ -1295,10 +1295,7 @@ struct VODDetailView: View {
             // either today). Hidden entirely on tvOS — the system
             // has no browser, and there's no in-app trailer player
             // yet, so the buttons would be no-ops on Apple TV.
-            #if os(tvOS)
-            tvOSTrailerQR
-            tvOSTMDBQR
-            #else
+            #if !os(tvOS)
             externalLinks
             #endif
 
@@ -1523,84 +1520,6 @@ struct VODDetailView: View {
     #if os(tvOS)
     // MARK: - tvOS trailer QR
 
-    /// Apple TV has no browser and the YouTube tvOS app cannot open a
-    /// SPECIFIC video: probed on-device 2026-06-11 (tvOS 27.0, YouTube
-    /// installed, LSApplicationQueriesSchemes declared) via the DEBUG
-    /// -debugYouTubeProbe hook. canOpenURL("youtube://") = true and
-    /// open() returns true, but the app lands on its HOME feed with the
-    /// watch?v= parameter dropped (screenshot-verified); the https
-    /// universal link returns false outright. A "Play in YouTube" row
-    /// would therefore dump the user on YouTube's home screen, worse
-    /// than the QR. So we render the watch URL as a QR code the user
-    /// scans with their phone (where the iOS universal link opens the
-    /// video). Re-probe on future tvOS/YouTube releases via the hook.
-    @ViewBuilder
-    private var tvOSTrailerQR: some View {
-        let rawTrailer = fullMovie?.youtubeTrailer ?? fullSeries?.youtubeTrailer ?? ""
-        if let url = trailerURL(from: rawTrailer),
-           let qr = Self.qrCodeImage(from: url.absoluteString) {
-            HStack(alignment: .center, spacing: 24) {
-                Image(uiImage: qr)
-                    .interpolation(.none)
-                    .resizable()
-                    .frame(width: 150, height: 150)
-                    .padding(14)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color.white)
-                    )
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "play.rectangle.fill")
-                        Text("Trailer").font(.headlineSmall)
-                    }
-                    .foregroundStyle(Color.accentPrimary)
-                    Text("Scan with your phone to watch the trailer on YouTube.")
-                        .font(.bodyMedium)
-                        .foregroundColor(.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-            }
-        }
-    }
-
-    /// "View on TMDB" as a scannable QR (Android parity P2): the iOS
-    /// phone build shows a tappable Link pill, but tvOS compiled the whole
-    /// externalLinks row out, silently dropping the TMDB link on TV. Same
-    /// card styling as the trailer QR above.
-    @ViewBuilder
-    private var tvOSTMDBQR: some View {
-        let rawID = fullMovie?.tmdbID ?? fullSeries?.tmdbID
-            ?? item.movie?.tmdbID ?? item.series?.tmdbID ?? ""
-        if !rawID.isEmpty,
-           let url = tmdbURL(from: rawID, type: item.type),
-           let qr = Self.qrCodeImage(from: url.absoluteString) {
-            HStack(alignment: .center, spacing: 24) {
-                Image(uiImage: qr)
-                    .interpolation(.none)
-                    .resizable()
-                    .frame(width: 150, height: 150)
-                    .padding(14)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color.white)
-                    )
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "info.circle.fill")
-                        Text("View on TMDB").font(.headlineSmall)
-                    }
-                    .foregroundStyle(Color.accentPrimary)
-                    Text("Scan with your phone to view this title on TMDB.")
-                        .font(.bodyMedium)
-                        .foregroundColor(.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-            }
-        }
-    }
 
     /// Render a string as a QR-code image via CoreImage, scaled up with
     /// a nearest-neighbor transform so the modules stay crisp. Returns
@@ -2630,46 +2549,6 @@ private struct TVEpisodeRowButton: View {
 // MARK: - Play Button with tvOS Focus
 
 /// Extracted so it can own a @FocusState for clear focus highlighting on the Play CTA.
-#if os(tvOS)
-/// Full-screen QR overlay for a Trailer / TMDB link on Apple TV (no
-/// browser; see tvOSTrailerQR for why a QR beats a YouTube deep link).
-private struct QRLinkOverlay: View {
-    let title: String
-    let subtitle: String
-    let icon: String
-    let url: URL
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        ZStack {
-            Color.appBackground.ignoresSafeArea()
-            VStack(spacing: 28) {
-                HStack(spacing: 12) {
-                    Image(systemName: icon)
-                    Text(title)
-                }
-                .font(.displayMedium)
-                .foregroundStyle(Color.accentPrimary)
-                if let qr = VODDetailView.qrCodeImage(from: url.absoluteString) {
-                    Image(uiImage: qr)
-                        .interpolation(.none)
-                        .resizable()
-                        .frame(width: 360, height: 360)
-                        .padding(24)
-                        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color.white))
-                }
-                Text(subtitle)
-                    .font(.bodyMedium)
-                    .foregroundColor(.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 700)
-                MoviesHeroButton(title: "Done", systemImage: "xmark", isPrimary: false) { dismiss() }
-            }
-        }
-        .onExitCommand { dismiss() }
-    }
-}
-#endif
 
 /// Root NavigationStack push for nested VOD detail pushes (see pushDetail).
 /// Stable handle for nested pushes. A class so its identity never changes:
@@ -2833,7 +2712,9 @@ private struct PersonCard: View {
         // Emby-style (Logan 2026-09-04): the photo is the focusable card and
         // the labels sit centered beneath it, outside the card, so text is
         // never clipped against the card edge.
-        VStack(spacing: 10) {
+        // 28, not 10: .card focus scales the 300pt photo by about a tenth,
+        // so its bottom edge grew ~15pt plus lift over the name line.
+        VStack(spacing: 28) {
             Button(action: onSelect) {
                 photo
             }
@@ -3009,10 +2890,9 @@ private struct PersonBioSheet: View {
             }
         }
         .onExitCommand { dismiss() }
-        .fullScreenCover(item: $tvQRLink) { wrapper in
-            QRLinkOverlay(title: bio?.name ?? person.name,
-                          subtitle: "Scan with your phone to view this person on TMDB.",
-                          icon: "info.circle.fill", url: wrapper.url)
+        .sheet(item: $tvQRLink) { wrapper in
+            TVQRLinkSheet(link: TVQRLink(title: bio?.name ?? person.name, url: wrapper.url.absoluteString),
+                          subtitle: "Scan with your phone to view this person on TMDB.")
         }
         .task(id: person.id) {
             guard TMDBPosters.isEnabled, let key = TMDBPosters.apiKey else {
@@ -3292,27 +3172,6 @@ private struct PersonBioSheet: View {
     }
 
     #if os(tvOS)
-    /// Mini person QR in the sheet's corner: Apple TV has no browser, so
-    /// the user scans with a phone to open the full filmography on TMDB.
-    @ViewBuilder
-    private var personQR: some View {
-        if let qr = VODDetailView.qrCodeImage(from: "https://www.themoviedb.org/person/\(person.id)") {
-            VStack(spacing: 4) {
-                Image(uiImage: qr)
-                    .interpolation(.none)
-                    .resizable()
-                    .frame(width: 120, height: 120)
-                    .padding(8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.white)
-                    )
-                Text("View on TMDB")
-                    .font(.labelSmall)
-                    .foregroundColor(.textSecondary)
-            }
-        }
-    }
     #endif
 }
 
