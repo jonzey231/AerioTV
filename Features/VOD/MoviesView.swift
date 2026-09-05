@@ -2673,16 +2673,16 @@ struct MoviesHero: View {
         // are drawn unclipped over it. Clipping the whole stack rasterized
         // it as its own layer and left a faint seam along the corner even
         // where the fade matched the page background (Logan 2026-09-03).
+        // The fades are alpha MASKS on the art, not page-coloured paint over
+        // it. Painted fades were invisible only at full opacity on this
+        // page; during a tab switch the incoming tab composites at partial
+        // alpha and the painted rectangle showed as a lighter hard-edged box
+        // for ~0.5 s (recording 2026-09-05 01:07, "left edge flickering").
         ZStack(alignment: .leading) {
             artwork
                 .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
-            gradient
-            LinearGradient(
-                stops: [
-                    .init(color: Color.appBackground.opacity(0), location: 0.55),
-                    .init(color: Color.appBackground, location: 1)
-                ],
-                startPoint: .top, endPoint: .bottom)
+                .mask(leadingFadeMask)
+                .mask(bottomFadeMask)
             copy
         }
         .frame(height: heroHeight)
@@ -2715,19 +2715,34 @@ struct MoviesHero: View {
         }
     }
 
-    private var gradient: some View {
-        #if os(tvOS)
+    #if os(tvOS)
+    /// Inverse of the old painted gradient: fully transparent through the
+    /// leading band so the rounded corners never show an edge.
+    private var leadingFadeMask: some View {
         LinearGradient(
             stops: [
-                // Fully opaque through the leading band so the rounded
-                // corners on that side never show an edge against the page.
-                .init(color: Color.appBackground, location: 0),
-                .init(color: Color.appBackground, location: 0.12),
-                .init(color: Color.appBackground.opacity(0.92), location: 0.38),
-                .init(color: Color.appBackground.opacity(0.35), location: 0.7),
-                .init(color: Color.appBackground.opacity(0.05), location: 1)
+                .init(color: .white.opacity(0), location: 0),
+                .init(color: .white.opacity(0), location: 0.12),
+                .init(color: .white.opacity(0.08), location: 0.38),
+                .init(color: .white.opacity(0.65), location: 0.7),
+                .init(color: .white.opacity(0.95), location: 1)
             ],
             startPoint: .leading, endPoint: .trailing)
+    }
+
+    private var bottomFadeMask: some View {
+        LinearGradient(
+            stops: [
+                .init(color: .white, location: 0.55),
+                .init(color: .white.opacity(0), location: 1)
+            ],
+            startPoint: .top, endPoint: .bottom)
+    }
+    #endif
+
+    private var gradient: some View {
+        #if os(tvOS)
+        EmptyView()
         #else
         LinearGradient(
             stops: [
