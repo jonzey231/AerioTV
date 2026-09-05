@@ -3641,6 +3641,7 @@ struct MainTabView: View {
     /// launch); the nav circles mount only then so they never take the
     /// launch focus away from the Live TV pill.
     @State private var tvTabBarSeen = false
+    @State private var tabFocusSelectTask: Task<Void, Never>?
     @FocusState private var liveTVEntryCatcherFocused: Bool
     /// Any nav circle focused. The Down catcher below the circles exists
     /// only then, so Up from the guide never finds it (trace 13:09).
@@ -5640,6 +5641,26 @@ struct MainTabView: View {
         #endif
         // Leaving the current tab closes search, like Android's pill
         // selection does.
+        #if os(tvOS)
+        // Faster tab switch (Logan 2026-09-05): the system bar commits a
+        // selection ~330 ms after a pill takes focus. The focus event itself
+        // is immediate, so select from it after a 100 ms debounce (scrubbing
+        // across pills must not mount every tab on the way).
+        .onReceive(NotificationCenter.default.publisher(for: UIFocusSystem.didUpdateNotification)) { note in
+            guard let ctx = note.userInfo?[UIFocusSystem.focusUpdateContextUserInfoKey] as? UIFocusUpdateContext,
+                  let view = ctx.nextFocusedItem as? UIView,
+                  String(describing: type(of: view)) == "UITabBarButton",
+                  let label = view.accessibilityLabel,
+                  let tab = AppTab.allCases.first(where: { $0.title == label }) else { return }
+            tabFocusSelectTask?.cancel()
+            tabFocusSelectTask = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled, selectedTab != tab else { return }
+                debugLog("[TAB] focus-select -> \(tab.rawValue)")
+                selectedTab = tab
+            }
+        }
+        #endif
         .onChange(of: selectedTab) { _, _ in
             if showSearch { showSearch = false }
         }
