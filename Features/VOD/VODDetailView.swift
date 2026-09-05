@@ -836,6 +836,8 @@ struct VODDetailView: View {
         }
         let country = fullMovie?.country ?? fullSeries?.country ?? ""
         if !country.isEmpty { facts.append(("Country", country)) }
+        let langs = item.languageTags
+        if !langs.isEmpty { facts.append(("Languages", langs.joined(separator: ", "))) }
         return facts
     }
 

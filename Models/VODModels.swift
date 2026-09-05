@@ -1203,9 +1203,56 @@ struct VODDisplayItem: Identifiable, Hashable {
     /// "(YYYY)" groups ("#Horror (2015) (2015)"), and the UI shows the year
     /// on its own meta line, so every trailing year is dropped (Logan
     /// 2026-09-04). The raw `name` stays for matching and search.
-    var displayName: String {
-        VODDisplayItem.strippingTrailingYears(VODDisplayItem.strippingQualityPrefix(name))
+    var displayName: String { VODDisplayItem.cleanDisplayName(name) }
+
+    /// Provider names carry a leading language code ("EN - Title"), trailing
+    /// "(YYYY)", region/language groups "(GB)", "(ES)", "(DUAL/ES)",
+    /// "(MULTI)" and quality brackets "[1080p]" (Logan 2026-09-04). All of
+    /// it is dropped for display; the language tags surface on Details.
+    nonisolated static func cleanDisplayName(_ raw: String) -> String {
+        var s = strippingQualityPrefix(raw)
+        // "EN - ", "EN: ", "EN | " (2-3 uppercase letters, then a separator).
+        if let r = s.range(of: #"^[A-Z]{2,3}\s*[-:|]\s+"#, options: .regularExpression) {
+            let rest = String(s[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+            if !rest.isEmpty { s = rest }
+        }
+        // Trailing tag groups, repeated: (2026) (GB) (DUAL/ES) (MULTI) [1080p] [4K].
+        while let r = s.range(of: #"\s*(\((19|20)\d{2}\)|\([A-Z]{2,3}(/[A-Z]{2,3})*\)|\((DUAL|MULTI)(/[A-Z]{2,3})*\)|\[[^\]]{1,12}\])\s*$"#,
+                                options: .regularExpression) {
+            let head = s[..<r.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !head.isEmpty else { break }
+            s = head
+        }
+        return s
     }
+
+    /// Language names from the provider name's tags: the leading code and
+    /// the trailing "(XX)" / "(DUAL/XX)" groups. Region-looking codes that
+    /// are not languages ("GB") are kept as given. Empty when the name has
+    /// no tags.
+    var languageTags: [String] {
+        var codes: [String] = []
+        let raw = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let r = raw.range(of: #"^[A-Z]{2,3}(?=\s*[-:|]\s+)"#, options: .regularExpression) {
+            codes.append(String(raw[r]))
+        }
+        for m in VODDisplayItem.tagRegex.matches(in: raw, range: NSRange(raw.startIndex..., in: raw)) {
+            guard let g = Range(m.range(at: 1), in: raw) else { continue }
+            for part in raw[g].split(separator: "/") {
+                let c = String(part)
+                if c == "DUAL" || c == "MULTI" { codes.append("Multiple") } else { codes.append(c) }
+            }
+        }
+        var seen = Set<String>()
+        return codes.compactMap { c -> String? in
+            guard seen.insert(c).inserted else { return nil }
+            if c == "Multiple" { return "Multiple audio tracks" }
+            let named = Locale.current.localizedString(forLanguageCode: c.lowercased())
+            return (named?.isEmpty == false && named!.lowercased() != c.lowercased()) ? named! : c
+        }
+    }
+
+    nonisolated private static let tagRegex = try! NSRegularExpression(pattern: #"\(([A-Z]{2,5}(?:/[A-Z]{2,5})*)\)"#)
 
     // Kind-neutral accessors so one library view serves movies and series.
     var categoryName: String? { movie?.categoryName ?? series?.categoryName }

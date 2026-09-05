@@ -1278,10 +1278,9 @@ struct MoviesView: View {
                                             .onChange(of: g.size.height) { _, h in geometryBox.watchlistShelfHeight = h }
                                     })
                             }
-                            if !recentlyAdded.isEmpty {
-                                posterShelf(title: "Recently Added", items: recentlyAdded)
-                                    .padding(.leading, contentLeadingInset)
-                            }
+                            // No Recently Added shelf (Logan 2026-09-04): the Watchlist
+                            // is the one shelf under the hero. recentlyAdded still
+                            // feeds the hero's fallback page.
 
                             let gridItems = isSearching ? filteredMovies : libraryMovies
                             libraryHeader(title: isSearching ? "Results" : "All \(kindTitle)",
