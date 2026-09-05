@@ -4574,7 +4574,7 @@ struct PhoneGroupDrawer: View {
                                 Image(systemName: "star.fill").font(.system(size: 13))
                             }
                             Text(ChannelListView.groupTitle(token))
-                                .font(.system(size: 16, weight: token == selected ? .bold : .medium))
+                                .font(.system(size: 15, weight: token == selected ? .bold : .medium))
                                 .lineLimit(1)
                             Spacer()
                             if token == defaultToken || (token == "All" && defaultToken.isEmpty) {
@@ -4582,8 +4582,13 @@ struct PhoneGroupDrawer: View {
                             }
                         }
                         .foregroundColor(token == selected ? .accentPrimary : .textPrimary)
-                        .padding(.vertical, 4)
+                        .frame(minHeight: 34)
+                        .contentShape(Rectangle())
                     }
+                    // Tight rows (Logan 2026-09-05): provider playlists carry
+                    // hundreds of groups, the default List spacing was a
+                    // lot of scrolling.
+                    .listRowInsets(EdgeInsets(top: 0, leading: 18, bottom: 0, trailing: 14))
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                     .moveDisabled(token == favoritesToken || token == "All")
@@ -4596,8 +4601,9 @@ struct PhoneGroupDrawer: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
+            .environment(\.defaultMinListRowHeight, 34)
         }
-        .padding(.top, 44)
+        .padding(.top, 2)
         .onAppear { order = tokens }
         .onChange(of: tokens) { _, t in if t != order { order = t } }
     }
