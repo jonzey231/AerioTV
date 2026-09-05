@@ -1277,7 +1277,8 @@ struct MultiviewContainerView: View {
                 // generic "<channel> live recording" string).
                 isLive: true,
                 dispatcharrChannelID: audio.item.dispatcharrChannelID,
-                streamURL: audio.item.streamURL
+                streamURL: audio.item.streamURL,
+                channelLogoURL: audio.item.logoURL
             )
         } else {
             EmptyView()

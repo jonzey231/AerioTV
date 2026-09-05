@@ -390,6 +390,33 @@ final class RecordingCoordinator: ObservableObject {
     /// - Failures: network errors are swallowed with a debug log; this is
     ///   called on every MyRecordingsView appear + refresh tick, so we
     ///   don't want to surface transient connectivity hiccups as errors.
+    /// Copies the server's DVR metadata (poster, episode identity, rating,
+    /// category) onto the local row. Server art wins over anything we
+    /// resolved ourselves; the other fields fill in only when empty so a
+    /// value captured at schedule time is never blanked by a sparse poll.
+    /// Returns true when anything changed.
+    private func applyRemoteMetadata(_ r: DispatcharrAPI.Recording, to local: Recording,
+                                     api: DispatcharrAPI) -> Bool {
+        var changed = false
+        if let raw = r.posterURL?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            let absolute: String
+            if let u = URL(string: raw), u.scheme != nil {
+                absolute = raw
+            } else if let base = URL(string: api.baseURL), let u = URL(string: raw, relativeTo: base) {
+                absolute = u.absoluteURL.absoluteString
+            } else {
+                absolute = raw
+            }
+            if local.posterURL != absolute { local.posterURL = absolute; changed = true }
+        }
+        if (local.subTitle ?? "").isEmpty, let s = r.subTitle, !s.isEmpty { local.subTitle = s; changed = true }
+        if local.seasonNumber == nil, let s = r.season { local.seasonNumber = s; changed = true }
+        if local.episodeNumber == nil, let e = r.episode { local.episodeNumber = e; changed = true }
+        if (local.contentRating ?? "").isEmpty, let c = r.rating, !c.isEmpty { local.contentRating = c; changed = true }
+        if (local.epgCategory ?? "").isEmpty, let c = r.category, !c.isEmpty { local.epgCategory = c; changed = true }
+        return changed
+    }
+
     @discardableResult
     func reconcileDispatcharrRecordings(api: DispatcharrAPI,
                                         serverID: String,
@@ -439,6 +466,7 @@ final class RecordingCoordinator: ObservableObject {
                     local.dispatcharrFileURL = r.fileURL
                     didMutate = true
                 }
+                if applyRemoteMetadata(r, to: local, api: api) { didMutate = true }
             } else {
                 debugLog("🧹 DVR reconcile: server \(serverID) dropped remoteID \(rid) — deleting local row")
                 modelContext.delete(local)
@@ -466,6 +494,7 @@ final class RecordingCoordinator: ObservableObject {
                 dispatcharrFileURL: r.fileURL,
                 serverID: serverID
             )
+            _ = applyRemoteMetadata(r, to: rec, api: api)
             modelContext.insert(rec)
             didMutate = true
             debugLog("📥 DVR reconcile: imported remote recording \(r.id) (\(r.programTitle ?? "—")) from server \(serverID)")

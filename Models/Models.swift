@@ -815,6 +815,32 @@ final class Recording {
     var createdAt: Date
     /// Populated when `status == .failed` for user-visible diagnostics.
     var failureReason: String?
+    /// Media-center metadata (DVR tab redesign, 2026-09-05). All optional
+    /// with defaults so existing stores migrate in place.
+    /// Artwork: Dispatcharr `custom_properties.poster_url`, the EPG
+    /// programme poster, or a TMDB / TheSportsDB lookup resolved by
+    /// `DVRArtResolver`. Absolute URL string.
+    var posterURL: String? = nil
+    /// Landscape art (TMDB backdrop) for the hero and 16:9 cards; the
+    /// poster is the fallback when none was found.
+    var backdropURL: String? = nil
+    /// Episode name (Dispatcharr `program.sub_title`).
+    var subTitle: String? = nil
+    var seasonNumber: Int? = nil
+    var episodeNumber: Int? = nil
+    /// Season and episode as shown. Some feeds encode the air date as
+    /// "S2026 E905"; those are not episode identity and are hidden.
+    var displaySeasonEpisode: (season: Int, episode: Int)? {
+        guard let s = seasonNumber, let e = episodeNumber, s < 1900 else { return nil }
+        return (s, e)
+    }
+    /// EPG genre/category text, used to classify the recording
+    /// (movie / series / sports) for the DVR pills and art lookups.
+    var epgCategory: String? = nil
+    var contentRating: String? = nil
+    /// Channel logo captured at schedule / import time (the recording's
+    /// `channelID` is not resolvable back to a Channel row on every source).
+    var channelLogoURL: String? = nil
 
     init(channelID: String,
          channelName: String,

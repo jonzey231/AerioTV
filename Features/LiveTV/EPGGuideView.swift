@@ -5596,7 +5596,11 @@ private struct GuideProgramButton: View {
                         scheduledEnd: prog.end,
                         isLive: prog.isLive,
                         dispatcharrChannelID: channelItem.dispatcharrChannelID,
-                        streamURL: channelItem.streamURL
+                        streamURL: channelItem.streamURL,
+                        channelLogoURL: channelItem.logoURL,
+                        programSubTitle: prog.subTitle,
+                        programSeason: prog.season,
+                        programEpisode: prog.episode
                     )
                 case .programInfo(let target):
                     ProgramInfoView(target: target)
@@ -5640,7 +5644,11 @@ private struct GuideProgramButton: View {
                         scheduledEnd: prog.end,
                         isLive: prog.isLive,
                         dispatcharrChannelID: channelItem.dispatcharrChannelID,
-                        streamURL: channelItem.streamURL
+                        streamURL: channelItem.streamURL,
+                        channelLogoURL: channelItem.logoURL,
+                        programSubTitle: prog.subTitle,
+                        programSeason: prog.season,
+                        programEpisode: prog.episode
                     )
                 case .programInfo(let target):
                     ProgramInfoView(target: target)

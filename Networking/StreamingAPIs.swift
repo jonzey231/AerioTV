@@ -3152,6 +3152,15 @@ struct DispatcharrAPI {
         let programTitle: String?
         let programDescription: String?
         let comskip: Bool
+        /// DVR tab metadata (Dispatcharr 0.30 DVR pipeline). `posterURL`
+        /// may be relative to the server (`/media/...`) or absolute (TMDB).
+        let posterURL: String?
+        let subTitle: String?
+        let season: Int?
+        let episode: Int?
+        let rating: String?
+        /// First EPG category carried on `custom_properties.program`, if any.
+        let category: String?
 
         /// Parses a single recording out of an already-deserialized JSON
         /// object. Returns nil if required fields are missing.
@@ -3190,7 +3199,8 @@ struct DispatcharrAPI {
             // `file_url`, also fine.
             self.fileURL = (props["output_file_url"] as? String)
                 ?? (props["file_url"] as? String)
-            if let program = props["program"] as? [String: Any] {
+            let program = props["program"] as? [String: Any]
+            if let program {
                 self.programTitle = program["title"] as? String
                 self.programDescription = program["description"] as? String
             } else {
@@ -3198,6 +3208,18 @@ struct DispatcharrAPI {
                 self.programDescription = props["description"] as? String
             }
             self.comskip = (props["comskip"] as? Bool) ?? false
+            self.posterURL = props["poster_url"] as? String
+            self.subTitle = (program?["sub_title"] as? String) ?? (props["sub_title"] as? String)
+            func intValue(_ any: Any?) -> Int? {
+                if let i = any as? Int { return i }
+                if let s = any as? String { return Int(s) }
+                return nil
+            }
+            self.season = intValue(props["season"]) ?? intValue(program?["season"])
+            self.episode = intValue(props["episode"]) ?? intValue(program?["episode"])
+            self.rating = props["rating"] as? String
+            let cats = (program?["categories"] as? [String]) ?? (props["categories"] as? [String])
+            self.category = cats?.first ?? (program?["category"] as? String)
         }
     }
 

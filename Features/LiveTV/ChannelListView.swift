@@ -2447,7 +2447,8 @@ struct ChannelRow: View {
                     scheduledEnd: entry.endTime ?? Date().addingTimeInterval(3600),
                     isLive: (entry.startTime ?? Date()) <= Date(),
                     dispatcharrChannelID: item.dispatcharrChannelID,
-                    streamURL: item.streamURL
+                    streamURL: item.streamURL,
+                    channelLogoURL: item.logoURL
                 )
             case .programInfo(let target):
                 ProgramInfoView(target: target)
@@ -2471,7 +2472,8 @@ struct ChannelRow: View {
                     scheduledEnd: entry.endTime ?? Date().addingTimeInterval(3600),
                     isLive: (entry.startTime ?? Date()) <= Date(),
                     dispatcharrChannelID: item.dispatcharrChannelID,
-                    streamURL: item.streamURL
+                    streamURL: item.streamURL,
+                    channelLogoURL: item.logoURL
                 )
             case .programInfo(let target):
                 ProgramInfoView(target: target)

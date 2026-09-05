@@ -35,6 +35,14 @@ struct RecordProgramSheet: View {
     /// but every UI surface that presents this sheet now passes
     /// `ChannelDisplayItem.streamURL` through.
     var streamURL: URL? = nil
+    /// DVR tab art (2026-09-05): the channel logo and any EPG metadata the
+    /// caller already has, frozen onto the recording at schedule time.
+    var channelLogoURL: URL? = nil
+    var programCategory: String? = nil
+    var programPosterURL: String? = nil
+    var programSubTitle: String? = nil
+    var programSeason: Int? = nil
+    var programEpisode: Int? = nil
 
     @AppStorage("dvrDefaultPreRollMins") private var defaultPreRoll = 0
     @AppStorage("dvrDefaultPostRollMins") private var defaultPostRoll = 0
@@ -812,6 +820,12 @@ struct RecordProgramSheet: View {
             destination: effectiveDestination,
             serverID: activeServer?.id.uuidString ?? "unknown"
         )
+        rec.channelLogoURL = channelLogoURL?.absoluteString
+        if let c = programCategory, !c.isEmpty { rec.epgCategory = c }
+        if let p = programPosterURL, !p.isEmpty { rec.posterURL = p }
+        if let sub = programSubTitle, !sub.isEmpty { rec.subTitle = sub }
+        rec.seasonNumber = programSeason
+        rec.episodeNumber = programEpisode
         modelContext.insert(rec)
         try? modelContext.save()
 

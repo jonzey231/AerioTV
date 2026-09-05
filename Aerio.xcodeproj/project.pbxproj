@@ -51,6 +51,9 @@
 		1D11DF914E50BF1810089A1E /* XtreamSeriesAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F9F2E0DF2867ED959950125 /* XtreamSeriesAPI.swift */; };
 		1EB4A645E88DDFE6F211ADA4 /* Pods-Aerio_iOS-acknowledgements.markdown in Resources */ = {isa = PBXBuildFile; fileRef = 8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Aerio_iOS-acknowledgements.markdown */; };
 		1FF8FD4B1DD11EAE3F154767 /* MoviesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF6E46AD7A6F742E358FBB43 /* MoviesView.swift */; };
+		B48FFF1CCE32418C749A56D5 /* DVRView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A49B182BABBBD69F564903 /* DVRView.swift */; };
+		EF0A0507929D52B20126EBDB /* DVRArtResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43C00B0A074DF5B79B493571 /* DVRArtResolver.swift */; };
+		8EC20C6A2D535793E6EBA3B1 /* RecordingActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B49D3D628E066566A26EEA9 /* RecordingActions.swift */; };
 		23CF3BDA1A62692EC1141F06 /* AerioTopShelf.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 980F01E6377A91F10236C4D5 /* AerioTopShelf.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		240BCCC86B210B13A95FB87C /* RemoteControlSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4EDC8A716508CF4B4F1D2DA /* RemoteControlSettingsView.swift */; };
 		2527936283FB11BD5201E1DA /* Pods.xcodeproj in Resources */ = {isa = PBXBuildFile; fileRef = 2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */; };
@@ -221,6 +224,9 @@
 		D707545F75A250B3657868F5 /* VODService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C548BC428D32F3966A46C27 /* VODService.swift */; };
 		D9B2C4CC2563512B2741AF83 /* TVShowsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D833EF1D35443BFAEE1480B5 /* TVShowsView.swift */; };
 		DA8D78550B95A889171982BC /* MoviesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF6E46AD7A6F742E358FBB43 /* MoviesView.swift */; };
+		7AA2C488BA2252BB6003C40E /* DVRView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A49B182BABBBD69F564903 /* DVRView.swift */; };
+		47124970CDB0AF253294C1D7 /* DVRArtResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43C00B0A074DF5B79B493571 /* DVRArtResolver.swift */; };
+		EFA00AF67E8EE3B9D8BFC892 /* RecordingActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B49D3D628E066566A26EEA9 /* RecordingActions.swift */; };
 		DB7474780DADD2D4B35AE071 /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F4EE98C1564A7E3A5DD86B /* SearchView.swift */; };
 		DBFAE2F87043F12BE1728B6D /* Manifest.lock in Resources */ = {isa = PBXBuildFile; fileRef = C8918F8C279C6028AA7BC86D /* Manifest.lock */; };
 		DC1BFBCAE3EEC76BDFD08C51 /* RemoteControlStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 344E207916F518E489F82832 /* RemoteControlStore.swift */; };
@@ -426,6 +432,9 @@
 		BD9D88342F84B8870005EA3D /* CarPlay.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CarPlay.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.4.sdk/System/Library/Frameworks/CarPlay.framework; sourceTree = DEVELOPER_DIR; };
 		BDB64C242F6C5895008EF9EF /* Aerio_tvOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Aerio_tvOS.entitlements; sourceTree = "<group>"; };
 		BF6E46AD7A6F742E358FBB43 /* MoviesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoviesView.swift; sourceTree = "<group>"; };
+		B1A49B182BABBBD69F564903 /* DVRView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DVRView.swift; sourceTree = "<group>"; };
+		43C00B0A074DF5B79B493571 /* DVRArtResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DVRArtResolver.swift; sourceTree = "<group>"; };
+		1B49D3D628E066566A26EEA9 /* RecordingActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingActions.swift; sourceTree = "<group>"; };
 		C384E19782307C7D03F8F60B /* Colors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Colors.swift; sourceTree = "<group>"; };
 		C41DDA8474CA1A75D88D9E3C /* MobileVLCKit-xcframeworks-output-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "MobileVLCKit-xcframeworks-output-files.xcfilelist"; sourceTree = "<group>"; };
 		C8918F8C279C6028AA7BC86D /* Manifest.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Manifest.lock; sourceTree = "<group>"; };
@@ -582,6 +591,7 @@
 		4432D1DEAD99D32286CFADCA /* Features */ = {
 			isa = PBXGroup;
 			children = (
+				1D44B2A9B6CE86B60388ED7C /* DVR */,
 				D790E242FC19FAB9A2C4F61C /* Home */,
 				2E9487FE5F10365DAD5FCB23 /* LiveTV */,
 				B1C2D3E4F5A67890ACE00010 /* Multiview */,
@@ -843,6 +853,16 @@
 			children = (
 			);
 			path = "Local Podspecs";
+			sourceTree = "<group>";
+		};
+		1D44B2A9B6CE86B60388ED7C /* DVR */ = {
+			isa = PBXGroup;
+			children = (
+				B1A49B182BABBBD69F564903 /* DVRView.swift */,
+				43C00B0A074DF5B79B493571 /* DVRArtResolver.swift */,
+				1B49D3D628E066566A26EEA9 /* RecordingActions.swift */,
+			);
+			path = DVR;
 			sourceTree = "<group>";
 		};
 		C7AB555D4575EAB521484607 /* VOD */ = {
@@ -1246,6 +1266,9 @@
 				5DC1FF775CB2D3D2917F5D4A /* MediaServerAPIs.swift in Sources */,
 				1083DB8B620ABAC3ECAB3823 /* Models.swift in Sources */,
 				1FF8FD4B1DD11EAE3F154767 /* MoviesView.swift in Sources */,
+				B48FFF1CCE32418C749A56D5 /* DVRView.swift in Sources */,
+				EF0A0507929D52B20126EBDB /* DVRArtResolver.swift in Sources */,
+				8EC20C6A2D535793E6EBA3B1 /* RecordingActions.swift in Sources */,
 				134BBEA37092BE9ED06DE967 /* PlayerView.swift in Sources */,
 				ACAEB60B5118B283BF99CF16 /* PlaylistImportViews.swift in Sources */,
 				61F895DEB15DE1F7C3EACD17 /* PlaylistModels.swift in Sources */,
@@ -1368,6 +1391,9 @@
 				AD422FFDD689840F76B8A238 /* MediaServerAPIs.swift in Sources */,
 				30FA1CA916C8DDE2001C592F /* Models.swift in Sources */,
 				DA8D78550B95A889171982BC /* MoviesView.swift in Sources */,
+				7AA2C488BA2252BB6003C40E /* DVRView.swift in Sources */,
+				47124970CDB0AF253294C1D7 /* DVRArtResolver.swift in Sources */,
+				EFA00AF67E8EE3B9D8BFC892 /* RecordingActions.swift in Sources */,
 				F00D3696D62D7C9EF6E05244 /* PlayerView.swift in Sources */,
 				7CFFD573C287B60F267445BD /* PlaylistImportViews.swift in Sources */,
 				84D478A2A84F9A8A2FEE8EA4 /* PlaylistModels.swift in Sources */,

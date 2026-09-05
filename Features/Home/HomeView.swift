@@ -3525,6 +3525,10 @@ enum AppTab: String, CaseIterable {
 
     /// Either half of the former On Demand tab.
     var isVOD: Bool { self == .movies || self == .tvShows }
+    /// Tabs built on the media-center scaffold (hero, shelves, grid): Menu
+    /// scrolls to the top instead of switching tabs, and the parked-bar
+    /// heal stays out of their scroll-driven bar hiding.
+    var isMediaCenter: Bool { isVOD || self == .dvr }
 }
 
 // MARK: - Main Tab View
@@ -5211,7 +5215,7 @@ struct MainTabView: View {
         // first step into the poster grid (below Movies' hide threshold)
         // looked parked and this remounted the TabView 2.5 s after the
         // tab switch (trace 2026-09-04 15:41, "jumped back to the tab").
-        guard !selectedTab.isVOD else { return }
+        guard !selectedTab.isMediaCenter else { return }
         guard let window = UIApplication.shared.connectedScenes
             .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
             .first else { return }
@@ -5249,11 +5253,17 @@ struct MainTabView: View {
             // DVR tab only exists while the user has at least one recording
             // (local or server-side). Animates in/out as recordings are added/removed.
             if showRecordingsTab {
+                #if os(tvOS)
+                DVRView(isPlaying: $isPlaying, isSelected: selectedTab == .dvr)
+                    .tabItem { Label(AppTab.dvr.title, systemImage: AppTab.dvr.icon) }
+                    .tag(AppTab.dvr)
+                #else
                 NavigationStack {
                     MyRecordingsView()
                 }
                 .tabItem { Label(AppTab.dvr.title, systemImage: AppTab.dvr.icon) }
                 .tag(AppTab.dvr)
+                #endif
             }
 
             // On Demand tab only exists while the active server exposes
@@ -6457,8 +6467,8 @@ struct MainTabView: View {
             debugLog("🎮 Menu pressed: " + selectedTab.rawValue + " tab scrolled → scroll to top")
             NotificationCenter.default.post(name: .aerioTabScrollToTop, object: nil,
                                             userInfo: ["tab": selectedTab.rawValue])
-        } else if selectedTab.isVOD {
-            // Movies & TV: Menu with the bar visible is "back to the top of
+        } else if selectedTab.isMediaCenter {
+            // Movies, TV Shows, DVR: Menu with the bar visible is "back to the top of
             // this tab" (close search, focus the hero), never a tab switch
             // (Logan 2026-09-04: Menu on the Search circle jumped to Live TV).
             debugLog("🎮 Menu pressed: " + selectedTab.rawValue + " tab at top → hero")
