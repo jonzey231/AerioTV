@@ -849,9 +849,10 @@ struct VODDetailView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(alignment: .top, spacing: 32) {
                             ForEach(episodes) { ep in
+                                // TMDB still first (Logan 2026-09-04), provider thumbnail as fallback.
                                 TVEpisodeCard(episode: ep, title: episodeTitle(ep),
-                                              stillURL: ep.posterURL ?? info(for: ep)?.stillPath.flatMap {
-                                                  TMDBService.profileImageURL(path: $0, size: "w780") },
+                                              stillURL: info(for: ep)?.stillPath.flatMap {
+                                                  TMDBService.profileImageURL(path: $0, size: "w780") } ?? ep.posterURL,
                                               headers: serverHeaders(),
                                               progress: progressByEpisodeID[ep.id]) {
                                     playFromStartRequested = false
