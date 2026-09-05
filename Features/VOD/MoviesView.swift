@@ -135,6 +135,7 @@ struct MoviesView: View {
     private var isSearchingLibrary: Bool { kind == .series ? vodStore.isSearchingSeries : vodStore.isSearchingMovies }
     private var isLoadingLibrary: Bool { kind == .series ? vodStore.isLoadingSeries : vodStore.isLoadingMovies }
     private var libraryError: String? { kind == .series ? vodStore.seriesError : vodStore.moviesError }
+    private var hasLoadedLibrary: Bool { kind == .series ? vodStore.hasLoadedSeries : vodStore.hasLoadedMovies }
     private func searchLibrary(_ query: String, providerID: Int?) {
         if kind == .series {
             vodStore.searchSeries(query: query, servers: servers, providerID: providerID)
@@ -424,7 +425,10 @@ struct MoviesView: View {
             ZStack {
                 Color.appBackground.ignoresSafeArea()
 
-                if isLoadingLibrary && libraryItems.isEmpty {
+                if libraryItems.isEmpty && (isLoadingLibrary || (!hasLoadedLibrary && libraryError == nil)) {
+                    // Before the first sweep of this session has run (the
+                    // series sweep starts after the movie one), this is
+                    // "loading", not "No TV Shows" (Logan 2026-09-04).
                     LoadingView(message: "Loading \(kindLower)…")
                 } else if let err = libraryError, libraryItems.isEmpty {
                     errorView(err)
@@ -960,7 +964,7 @@ struct MoviesView: View {
 
     private var heroPagesKey: String {
         let progress = movieProgress.prefix(12).map { "\($0.vodID)|\($0.positionMs)" }.joined(separator: ",")
-        return "\(progress)#\(libraryItems.count)#\(recentlyAdded.first?.id ?? "")#\(effectiveHiddenGroups.count)"
+        return "\(progress)#\(libraryItems.count)#\(recentlyAdded.first?.id ?? "")#\(effectiveHiddenGroups.count)#\(isLoadingLibrary)"
     }
 
     private func refreshHeroPages() {
@@ -978,6 +982,11 @@ struct MoviesView: View {
             return item.map { MoviesHeroPage(item: $0, progress: p) }
         }
         if !resumes.isEmpty { heroPages = resumes; return }
+        // Progress rows exist but their titles are not loaded yet (the
+        // sweep is still running): keep what is showing rather than
+        // swapping in a random featured card (Logan 2026-09-04: "carousel
+        // replaced by a static single card" mid-sweep on TV Shows).
+        if !progress.isEmpty, isLoadingLibrary { return }
         if let single = recentlyAdded.first ?? visibleMovies.first {
             heroPages = [MoviesHeroPage(item: single, progress: nil)]
         } else {

@@ -536,6 +536,11 @@ struct VODDetailView: View {
     /// sweep publishes more titles (a page opened 20 s after launch matched
     /// against a near-empty library: 40 candidates -> 0, Logan 2026-09-04).
     @State private var relatedCandidates: [TMDBKnownForItem] = []
+    /// Series page: TMDB id once known, per-season episode info, and the
+    /// episode card that holds focus (drives "In this episode").
+    @State private var seriesTMDBID: String?
+    @State private var seasonInfo: [Int: [Int: TMDBService.EpisodeInfo]] = [:]
+    @FocusState private var focusedEpisodeID: String?
     @State private var relatedMatchedCount = -1
     @ObservedObject private var relatedLibrary = VODStore.shared
 
@@ -738,6 +743,56 @@ struct VODDetailView: View {
         .focusSection()
     }
 
+    private func loadSeasonInfoIfNeeded() async {
+        guard let tv = seriesTMDBID, let series = fullSeries, selectedSeason < series.seasons.count,
+              TMDBPosters.isEnabled, let apiKey = TMDBPosters.apiKey else { return }
+        let n = series.seasons[selectedSeason].seasonNumber
+        guard seasonInfo[n] == nil else { return }
+        let eps = await TMDBService.seasonEpisodes(tvID: tv, season: n, apiKey: apiKey)
+        seasonInfo[n] = Dictionary(uniqueKeysWithValues: eps.map { ($0.episodeNumber, $0) })
+    }
+
+    private func info(for ep: VODEpisode) -> TMDBService.EpisodeInfo? {
+        seasonInfo[ep.seasonNumber]?[ep.episodeNumber]
+    }
+
+    /// Card title: the provider's own episode title when it says more than
+    /// the show's name, else TMDB's, else "Episode N".
+    private func episodeTitle(_ ep: VODEpisode) -> String {
+        let own = ep.cleanedTitle(showName: item.name)
+        if own.count > 2 { return own }
+        return info(for: ep)?.name ?? "Episode \(ep.episodeNumber)"
+    }
+
+    /// Guest stars and key crew for the focused episode.
+    @ViewBuilder
+    private var tvEpisodePeopleStrip: some View {
+        if let series = fullSeries, selectedSeason < series.seasons.count,
+           let id = focusedEpisodeID,
+           let ep = series.seasons[selectedSeason].episodes.first(where: { $0.id == id }),
+           let info = info(for: ep) {
+            let people = info.crew + info.guestStars
+            if !people.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("In Episode \(ep.episodeNumber)")
+                        .font(.headlineSmall)
+                        .foregroundColor(.textPrimary)
+                        .padding(.horizontal, 56)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(alignment: .top, spacing: 12) {
+                            ForEach(people) { person in
+                                PersonCard(person: person) { bioPerson = person }
+                            }
+                        }
+                        .padding(.horizontal, 56)
+                        .padding(.vertical, 36)
+                    }
+                }
+                .focusSection()
+            }
+        }
+    }
+
     /// Season pills and the selected season's episodes as 16:9 cards.
     @ViewBuilder
     private var tvSeasonsSection: some View {
@@ -776,11 +831,15 @@ struct VODDetailView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(alignment: .top, spacing: 32) {
                             ForEach(episodes) { ep in
-                                TVEpisodeCard(episode: ep, headers: serverHeaders(),
+                                TVEpisodeCard(episode: ep, title: episodeTitle(ep),
+                                              stillURL: ep.posterURL ?? info(for: ep)?.stillPath.flatMap {
+                                                  TMDBService.profileImageURL(path: $0, size: "w780") },
+                                              headers: serverHeaders(),
                                               progress: progressByEpisodeID[ep.id]) {
                                     playFromStartRequested = false
                                     playEpisode(ep)
                                 }
+                                .focused($focusedEpisodeID, equals: ep.id)
                                 .contextMenu {
                                     let watched = progressByEpisodeID[ep.id]?.isFinished == true
                                     Button {
@@ -796,11 +855,15 @@ struct VODDetailView: View {
                         .padding(.vertical, 36)
                     }
                     .focusSection()
+                    tvEpisodePeopleStrip
                 }
             }
             .padding(.top, 4)
             .onAppear { seatSelectedSeason() }
             .onChange(of: fullSeries?.seasons.count ?? 0) { _, _ in seatSelectedSeason() }
+            .task(id: "\(seriesTMDBID ?? "")|\(selectedSeason)|\(fullSeries?.seasons.count ?? 0)") {
+                await loadSeasonInfoIfNeeded()
+            }
         }
     }
 
@@ -916,6 +979,7 @@ struct VODDetailView: View {
             tmdbID = await TMDBService.resolveID(forTitle: item.displayName, isMovie: isMovie, apiKey: apiKey)
         }
         guard let tmdbID else { return }
+        if !isMovie { seriesTMDBID = tmdbID }
         relatedCandidates = await TMDBService.recommendations(forTMDBID: tmdbID, isMovie: isMovie, apiKey: apiKey)
         await matchRelatedAgainstLibrary()
     }
@@ -1000,7 +1064,8 @@ struct VODDetailView: View {
         if let d = fullMovie?.duration, !d.isEmpty { facts.append(("Runtime", d)) }
         if let series = fullSeries, !series.seasons.isEmpty {
             let eps = series.seasons.reduce(0) { $0 + $1.episodes.count }
-            facts.append(("Seasons", "\(series.seasons.count) seasons, \(eps) episodes"))
+            let sN = series.seasons.count
+            facts.append(("Seasons", "\(sN) season\(sN == 1 ? "" : "s"), \(eps) episode\(eps == 1 ? "" : "s")"))
         }
         let director = mergedDirector
         if !director.isEmpty { facts.append(("Director", director)) }
@@ -2579,6 +2644,8 @@ extension EnvironmentValues {
 /// a progress bar and a watched check, title and duration underneath.
 private struct TVEpisodeCard: View {
     let episode: VODEpisode
+    let title: String
+    let stillURL: URL?
     let headers: [String: String]
     let progress: WatchProgress?
     let action: () -> Void
@@ -2592,7 +2659,7 @@ private struct TVEpisodeCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 8) {
                 ZStack(alignment: .bottomLeading) {
-                    AuthPosterImage(url: episode.posterURL, headers: headers, placeholder: .elevatedBackground)
+                    AuthPosterImage(url: stillURL, headers: headers, placeholder: .elevatedBackground)
                         .aspectRatio(contentMode: .fill)
                         .frame(width: 360, height: 203)
                         .clipped()
@@ -2623,7 +2690,7 @@ private struct TVEpisodeCard: View {
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                Text(episode.title)
+                Text(title)
                     .font(.labelMedium)
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)

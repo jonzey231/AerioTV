@@ -240,6 +240,21 @@ struct AppCard<Content: View>: View {
     }
 }
 
+#if os(tvOS)
+/// Focus treatment for the empty state's capsule action: white capsule
+/// ring and a slight lift, no system platter.
+struct EmptyStateActionStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .overlay(Capsule().stroke(Color.white, lineWidth: isFocused ? 3 : 0))
+            .scaleEffect(isFocused ? 1.06 : 1.0)
+            .opacity(configuration.isPressed ? 0.7 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+#endif
+
 // MARK: - Primary Button
 struct PrimaryButton: View {
     let title: String
@@ -682,7 +697,9 @@ struct EmptyStateView: View {
                         .clipShape(Capsule())
                 }
                 #if os(tvOS)
-                .buttonStyle(TVNoHighlightButtonStyle())
+                // Capsule ring + scale on focus; the shared style drew a
+                // squared ring around this capsule (Logan 2026-09-04).
+                .buttonStyle(EmptyStateActionStyle())
                 #else
                 .buttonStyle(.plain)
                 #endif

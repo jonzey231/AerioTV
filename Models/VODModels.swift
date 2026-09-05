@@ -1081,6 +1081,23 @@ struct VODEpisode: Identifiable, Hashable {
     // /proxy/vod/episode/<uuid>?m3u_account_id=N. Empty for XC sources.
     var dispatcharrUUID: String = ""
 
+    /// Provider episode titles are usually the show's name plus tags
+    /// ("A Knight of the Seven Kingdoms (2026) S01E01"). Strips the show
+    /// name, season/episode markers and tags; empty when nothing is left,
+    /// so the caller can fall back to TMDB's episode name.
+    func cleanedTitle(showName: String) -> String {
+        var t = VODDisplayItem.cleanDisplayName(title)
+        let show = VODDisplayItem.cleanDisplayName(showName)
+        if !show.isEmpty, t.lowercased().hasPrefix(show.lowercased()) {
+            t = String(t.dropFirst(show.count))
+        }
+        for pattern in [#"(?i)^\s*[-:·|]+\s*"#, #"(?i)\bS\d{1,2}\s*E\d{1,3}\b"#, #"(?i)\b\d{1,2}x\d{1,3}\b"#,
+                        #"(?i)\bepisode\s*\d{1,3}\b"#, #"(?i)\bseason\s*\d{1,2}\b"#, #"(?i)^\s*[-:·|]+\s*"#] {
+            t = t.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        return t.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+    }
+
     /// "8.0" / "" for nil-or-zero. Same convention as VODMovie /
     /// VODSeries — the UI's empty-rating skip logic stays portable
     /// across all three.

@@ -1614,6 +1614,77 @@ extension TMDBService {
         return out
     }
 
+    // MARK: Season episodes (series page: titles, stills, per-episode cast)
+
+    struct EpisodeInfo: Sendable {
+        let episodeNumber: Int
+        let name: String?
+        let overview: String?
+        let stillPath: String?
+        let guestStars: [TMDBPerson]
+        let crew: [TMDBPerson]
+    }
+
+    private struct SeasonResponse: Decodable {
+        struct Episode: Decodable {
+            let episodeNumber: Int?
+            let name: String?
+            let overview: String?
+            let stillPath: String?
+            let guestStars: [Member]?
+            let crew: [Member]?
+            struct Member: Decodable {
+                let id: FlexID?
+                let name: String?
+                let character: String?
+                let job: String?
+                let profilePath: String?
+                enum CodingKeys: String, CodingKey {
+                    case id, name, character, job
+                    case profilePath = "profile_path"
+                }
+            }
+            enum CodingKeys: String, CodingKey {
+                case name, overview, crew
+                case episodeNumber = "episode_number"
+                case stillPath = "still_path"
+                case guestStars = "guest_stars"
+            }
+        }
+        let episodes: [Episode]?
+    }
+
+    nonisolated(unsafe) private static let seasonCache = NSCache<NSString, Box<[EpisodeInfo]>>()
+
+    /// One request per season: every episode's TMDB name, overview, still
+    /// and its guest stars + crew (director / writer first). Cached.
+    static func seasonEpisodes(tvID: String, season: Int, apiKey: String) async -> [EpisodeInfo] {
+        let key = "season:\(tvID):\(season)" as NSString
+        if let boxed = seasonCache.object(forKey: key) { return boxed.value }
+        guard let req = makeRequest(path: "/tv/\(tvID)/season/\(season)", key: apiKey) else { return [] }
+        guard let (data, resp) = try? await session.data(for: req),
+              let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let decoded = try? JSONDecoder().decode(SeasonResponse.self, from: data)
+        else { return [] }
+        let jobOrder = ["Director": 0, "Writer": 1, "Teleplay": 1, "Story": 2]
+        let out: [EpisodeInfo] = (decoded.episodes ?? []).compactMap { e in
+            guard let n = e.episodeNumber else { return nil }
+            let guests = (e.guestStars ?? []).compactMap {
+                parsePerson(id: $0.id, name: $0.name, role: $0.character, profilePath: $0.profilePath)
+            }
+            var seenCrew = Set<String>()
+            let crew = (e.crew ?? [])
+                .filter { jobOrder[$0.job ?? ""] != nil }
+                .sorted { (jobOrder[$0.job ?? ""] ?? 9) < (jobOrder[$1.job ?? ""] ?? 9) }
+                .compactMap { parsePerson(id: $0.id, name: $0.name, role: $0.job, profilePath: $0.profilePath) }
+                .filter { seenCrew.insert($0.id).inserted }
+            return EpisodeInfo(episodeNumber: n, name: nonBlank(e.name), overview: nonBlank(e.overview),
+                               stillPath: nonBlank(e.stillPath), guestStars: Array(guests.prefix(12)), crew: crew)
+        }
+        seasonCache.setObject(Box(out), forKey: key)
+        return out
+    }
+
     // MARK: Recommendations (detail page "Related")
 
     private struct RecommendationsResponse: Decodable {

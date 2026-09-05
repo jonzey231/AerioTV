@@ -37,6 +37,10 @@ final class VODStore: ObservableObject {
     @Published private(set) var series: [VODDisplayItem] = []
     @Published private(set) var seriesCategories: [VODCategory] = []
     @Published private(set) var isLoadingSeries = false
+    /// True once a sweep has finished at least once this session. The VOD
+    /// tabs show a loading state, not "No TV Shows", before the first one.
+    @Published private(set) var hasLoadedMovies = false
+    @Published private(set) var hasLoadedSeries = false
     /// Series equivalent of `isRefillingMovies` — true for the whole
     /// `loadSeries` run.
     @Published private(set) var isRefillingSeries = false
@@ -613,11 +617,17 @@ final class VODStore: ObservableObject {
                         // publishes once after the sweep. Two publishes
                         // total preserves the tvOS AttributeGraph-crash
                         // mitigation (no progressive per-batch churn).
+                        // Never publish a partial list over a fuller one: a
+                        // background refill starts from zero and its first
+                        // batches replaced the full library (Logan
+                        // 2026-09-04: "All TV Shows 62" then 3,062; the
+                        // Continue Watching hero fell back meanwhile).
+                        let growing = accumulated.count >= movies.count
                         if isLoadingMovies {
-                            movies = accumulated
+                            if growing { movies = accumulated }
                             isLoadingMovies = false
                             lastProgressivePublish = Date()
-                        } else if Date().timeIntervalSince(lastProgressivePublish) >= 5 {
+                        } else if growing, Date().timeIntervalSince(lastProgressivePublish) >= 5 {
                             // Movies tab (Logan 2026-09-03): a large panel
                             // sat at the first 100 titles for minutes until
                             // the sweep finished. Publish at most every 5 s,
@@ -659,6 +669,7 @@ final class VODStore: ObservableObject {
             }
             movies = accumulated
             isLoadingMovies = false
+            hasLoadedMovies = true
             debugLog("🎬 VODStore.loadMovies: done, \(accumulated.count) movies across \(enabledMovieCats.count) categories")
             return
         }
@@ -684,6 +695,7 @@ final class VODStore: ObservableObject {
             moviesError = error.localizedDescription
         }
         isLoadingMovies = false
+        hasLoadedMovies = true
     }
 
     private func loadSeries(servers: [ServerConnection]) async {
@@ -729,6 +741,7 @@ final class VODStore: ObservableObject {
         // guarantees we return to false on every exit path.
         isRefillingSeries = true
         defer { isRefillingSeries = false }
+        var lastSeriesProgressivePublish = Date()
         seriesError = nil
         DebugLogger.shared.log("VODStore loadSeries — \(server.name) (\(server.type.rawValue)) url=\(server.effectiveBaseURL)",
                                category: "TVShows", level: .info)
@@ -817,9 +830,14 @@ final class VODStore: ObservableObject {
                             show.addedAt = s.createdAt.flatMap(VODService.parseISODate)
                             accumulated.append(VODDisplayItem(series: show))
                         }
+                        // Same partial-over-full guard as the movie sweep.
                         if isLoadingSeries {
-                            series = accumulated
+                            if accumulated.count >= series.count { series = accumulated }
                             isLoadingSeries = false
+                        } else if accumulated.count >= series.count,
+                                  Date().timeIntervalSince(lastSeriesProgressivePublish) >= 5 {
+                            series = accumulated
+                            lastSeriesProgressivePublish = Date()
                         }
                         if accumulated.count >= totalCap { break }
                     }
@@ -850,6 +868,7 @@ final class VODStore: ObservableObject {
             }
             series = accumulated
             isLoadingSeries = false
+            hasLoadedSeries = true
             debugLog("📺 VODStore.loadSeries: done, \(accumulated.count) series across \(enabledSeriesCats.count) enabled categories")
             return
         }
@@ -873,6 +892,7 @@ final class VODStore: ObservableObject {
             seriesError = error.localizedDescription
         }
         isLoadingSeries = false
+        hasLoadedSeries = true
     }
 
     // MARK: - Helpers
