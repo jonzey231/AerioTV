@@ -2768,13 +2768,10 @@ private struct PersonCard: View {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(Color.elevatedBackground.opacity(0.55))
                     if let url = TMDBService.profileImageURL(path: person.profilePath, size: "w342") {
-                        AsyncImage(url: url) { phase in
-                            if let image = phase.image {
-                                image.resizable().aspectRatio(contentMode: .fill)
-                            } else {
-                                personGlyph
-                            }
-                        }
+                        // Downsampled off the main thread (AsyncImage decoded
+                        // each full file on main: cast strip stutter 2026-09-05).
+                        AuthPosterImage(url: url, placeholder: .clear, maxPixel: 640)
+                            .aspectRatio(contentMode: .fill)
                     } else {
                         personGlyph
                     }
@@ -2943,15 +2940,8 @@ private struct PersonBioSheet: View {
                                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                                             .fill(Color.elevatedBackground.opacity(0.55))
                                         if let url = TMDBService.profileImageURL(path: item.posterPath, size: "w342") {
-                                            AsyncImage(url: url) { phase in
-                                                if let image = phase.image {
-                                                    image.resizable().aspectRatio(contentMode: .fill)
-                                                } else {
-                                                    Image(systemName: "film")
-                                                        .font(.system(size: 28))
-                                                        .foregroundColor(.textTertiary)
-                                                }
-                                            }
+                                            AuthPosterImage(url: url, placeholder: .clear, maxPixel: 640)
+                                                .aspectRatio(contentMode: .fill)
                                         }
                                     }
                                     .frame(width: 200, height: 300)
@@ -3054,15 +3044,8 @@ private struct PersonBioSheet: View {
             // w342: the sheet photo renders about 2x the strip card; the
             // w185 thumb would upscale soft on a TV.
             if let url = TMDBService.profileImageURL(path: bio?.profilePath ?? person.profilePath, size: "w342") {
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image {
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    } else {
-                        Image(systemName: "person.fill")
-                            .font(.system(size: 48))
-                            .foregroundColor(.textTertiary)
-                    }
-                }
+                AuthPosterImage(url: url, placeholder: .clear, maxPixel: 800)
+                    .aspectRatio(contentMode: .fill)
             } else {
                 Image(systemName: "person.fill")
                     .font(.system(size: 48))
@@ -3128,15 +3111,8 @@ private struct PersonBioSheet: View {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(Color.elevatedBackground.opacity(0.55))
                     if let url = TMDBService.profileImageURL(path: item.posterPath, size: "w185") {
-                        AsyncImage(url: url) { phase in
-                            if let image = phase.image {
-                                image.resizable().aspectRatio(contentMode: .fill)
-                            } else {
-                                Image(systemName: "film")
-                                    .font(.system(size: 28))
-                                    .foregroundColor(.textTertiary)
-                            }
-                        }
+                        AuthPosterImage(url: url, placeholder: .clear, maxPixel: 400)
+                            .aspectRatio(contentMode: .fill)
                     }
                 }
                 .frame(width: tileWidth, height: tileWidth * 1.5)
