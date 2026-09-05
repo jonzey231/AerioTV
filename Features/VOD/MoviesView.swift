@@ -229,6 +229,14 @@ struct MoviesView: View {
     /// parked the value stops changing, so scrolling the grid costs no
     /// body re-evaluation. nil until the grid is first measured.
     @State private var railTop: CGFloat?
+    /// Rail slides in while a grid poster or a rail letter has focus.
+    #if os(tvOS)
+    @State private var railVisible = false
+    #else
+    @State private var railVisible = true   // touch: always shown
+    #endif
+    @State private var railFocused = false
+    @State private var railHideTask: Task<Void, Never>?
     /// Scroll geometry for the rail jump, kept OUT of view state so the
     /// per-frame writes never re-evaluate the body. Row pitch and the
     /// grid's content-space top let a click scroll to an absolute offset:
@@ -1505,6 +1513,7 @@ struct MoviesView: View {
                 }
                 .onChange(of: gridFocus) { _, id in
                     if let id { lastGridFocus = id }
+                    updateRailVisibility()
                 }
 
                 .onDisappear {
@@ -1556,7 +1565,10 @@ struct MoviesView: View {
 
                 // Rail: a sibling of the ScrollView, not an overlay on it and
                 // not in its content, so focusing it never scrolls the grid.
-                if searchText.isEmpty, let railTop {
+                // Shown only while focus is in the grid or on the rail itself:
+                // it slides in from the left edge on the first poster focus and
+                // stays out of the way of the hero and shelves (Logan 2026-09-05).
+                if searchText.isEmpty, let railTop, railVisible {
                     ZStack(alignment: .topLeading) {
                         #if os(tvOS)
                         // Invisible catcher under the letters: if the focus
@@ -1584,7 +1596,10 @@ struct MoviesView: View {
                         AlphabetRail(
                             available: railLetters,
                             focusRequest: railFocusRequestBinding,
-                            onFocusChange: { _ in },
+                            onFocusChange: { focused in
+                                railFocused = focused
+                                updateRailVisibility()
+                            },
                             onExitRight: {
                                 #if os(tvOS)
                                 // Return to the last focused poster only if
@@ -1643,6 +1658,7 @@ struct MoviesView: View {
                     // own 16 pt, so this follows the safe area on any display.
                     .padding(.leading, max(0, (outer.safeAreaInsets.leading + contentLeadingInset + 16 - railWidth) / 2))
                     .ignoresSafeArea(.container, edges: [.top, .leading])
+                    .transition(.move(edge: .leading).combined(with: .opacity))
                     #else
                     .ignoresSafeArea(.container, edges: .top)
                     #endif
@@ -1683,6 +1699,25 @@ struct MoviesView: View {
 
     /// Grid padding (16) plus the card style's own inset so the first
     /// letter lines up with the first poster's top edge.
+    /// Show at once when focus enters the grid or rail; hide after a short
+    /// grace so the grid -> rail handoff (gridFocus nil, then the letter
+    /// focuses) does not unmount the rail mid-hop.
+    private func updateRailVisibility() {
+        #if os(tvOS)
+        let want = gridFocus != nil || railFocused
+        railHideTask?.cancel()
+        if want {
+            if !railVisible { withAnimation(.easeOut(duration: 0.3)) { railVisible = true } }
+        } else if railVisible {
+            railHideTask = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled, gridFocus == nil, !railFocused else { return }
+                withAnimation(.easeIn(duration: 0.2)) { railVisible = false }
+            }
+        }
+        #endif
+    }
+
     private var railGridOffset: CGFloat {
         #if os(tvOS)
         return 24
