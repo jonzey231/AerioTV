@@ -488,6 +488,30 @@ final class VODStore: ObservableObject {
         DebugLogger.shared.log("VODStore loadMovies — \(server.name) (\(server.type.rawValue)) url=\(server.effectiveBaseURL)",
                                category: "Movies", level: .info)
 
+        // Restore the last finished sweep for this playlist so the tab is
+        // populated at once; the sweep below refreshes it in the background.
+        let cacheIdentity = VODLibraryCache.identity(for: server)
+        if movies.isEmpty, let snap = await VODLibraryCache.load(kind: .movie, identity: cacheIdentity) {
+            guard !Task.isCancelled else { isLoadingMovies = false; return }
+            movies = snap.items
+            movieCategories = snap.categories
+            isLoadingMovies = false
+            hasLoadedMovies = true
+            debugLog("[VOD-CACHE] restored \(snap.items.count) movies from \(Int(Date().timeIntervalSince(snap.at)))s ago")
+        }
+        // The launch orchestrator runs the series sweep only after the
+        // movie sweep ends (a minute or more), so restore the series
+        // snapshot here too; loadSeries then finds `series` populated and
+        // skips its own restore.
+        if series.isEmpty, let snap = await VODLibraryCache.load(kind: .series, identity: cacheIdentity) {
+            guard !Task.isCancelled else { isLoadingMovies = false; return }
+            series = snap.items
+            seriesCategories = snap.categories
+            isLoadingSeries = false
+            hasLoadedSeries = true
+            debugLog("[VOD-CACHE] restored \(snap.items.count) series from \(Int(Date().timeIntervalSince(snap.at)))s ago (with movies)")
+        }
+
         // Dispatcharr libraries can be enormous (20 000+ items across 40+ pages).
         // Stream page-by-page so the grid appears after the first 500 items land
         // rather than after the entire library downloads.
@@ -679,6 +703,7 @@ final class VODStore: ObservableObject {
             isLoadingMovies = false
             hasLoadedMovies = true
             debugLog("🎬 VODStore.loadMovies: done, \(accumulated.count) movies across \(enabledMovieCats.count) categories")
+            VODLibraryCache.save(kind: .movie, identity: cacheIdentity, items: accumulated, categories: movieCategories)
             // TMDB art pass from the store, not the tab: tvOS builds a tab's
             // content on first selection, so a view-driven trigger only ran
             // once the user visited the tab (log 2026-09-04 22:48).
@@ -698,6 +723,7 @@ final class VODStore: ObservableObject {
             movieCategories = apiCats.isEmpty
                 ? Self.buildCategories(from: items, using: \.movie?.categoryName)
                 : apiCats
+            VODLibraryCache.save(kind: .movie, identity: cacheIdentity, items: items, categories: movieCategories)
         } catch let err as APIError {
             guard !Task.isCancelled else { isLoadingMovies = false; return }
             moviesError = err.errorDescription
@@ -757,6 +783,16 @@ final class VODStore: ObservableObject {
         seriesError = nil
         DebugLogger.shared.log("VODStore loadSeries — \(server.name) (\(server.type.rawValue)) url=\(server.effectiveBaseURL)",
                                category: "TVShows", level: .info)
+
+        let cacheIdentity = VODLibraryCache.identity(for: server)
+        if series.isEmpty, let snap = await VODLibraryCache.load(kind: .series, identity: cacheIdentity) {
+            guard !Task.isCancelled else { isLoadingSeries = false; return }
+            series = snap.items
+            seriesCategories = snap.categories
+            isLoadingSeries = false
+            hasLoadedSeries = true
+            debugLog("[VOD-CACHE] restored \(snap.items.count) series from \(Int(Date().timeIntervalSince(snap.at)))s ago")
+        }
 
         if server.type == .dispatcharrAPI {
             let baseURL = server.effectiveBaseURL
@@ -884,6 +920,7 @@ final class VODStore: ObservableObject {
             isLoadingSeries = false
             hasLoadedSeries = true
             debugLog("📺 VODStore.loadSeries: done, \(accumulated.count) series across \(enabledSeriesCats.count) enabled categories")
+            VODLibraryCache.save(kind: .series, identity: cacheIdentity, items: accumulated, categories: seriesCategories)
             TMDBArtCache.shared.enrich(accumulated, isMovie: false)
             return
         }
@@ -898,6 +935,7 @@ final class VODStore: ObservableObject {
             seriesCategories = apiCats.isEmpty
                 ? Self.buildCategories(from: items, using: \.series?.categoryName)
                 : apiCats
+            VODLibraryCache.save(kind: .series, identity: cacheIdentity, items: items, categories: seriesCategories)
         } catch let err as APIError {
             guard !Task.isCancelled else { isLoadingSeries = false; return }
             seriesError = err.errorDescription

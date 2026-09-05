@@ -1928,6 +1928,91 @@ extension VODService {
 /// the background after a sweep, throttled under TMDB's rate limit;
 /// confirmed misses are kept (retried after 30 days) so a title is never
 /// searched twice per month.
+// MARK: - Rebuildable on-disk caches
+
+/// Where the app keeps caches it can rebuild from the network. tvOS has no
+/// writable Application Support ("You don't have permission to save the
+/// file 'Application Support'", device log 2026-09-04 23:46), so the
+/// library snapshot and the TMDB art cache live in Caches there. The
+/// system may purge Caches under pressure; both files are rebuilt by the
+/// next sweep, so that is acceptable.
+enum AppCacheDirectory {
+    static var url: URL {
+        #if os(tvOS)
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        #else
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        #endif
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }
+}
+
+// MARK: - Library snapshot (movies / series lists on disk)
+
+/// Persists the last complete library sweep per playlist so a relaunch
+/// shows Movies and TV Shows at once instead of spinning through a
+/// multi-minute server sweep (Logan 2026-09-04: "Loading TV shows every
+/// time the app relaunches"). The sweep still runs afterwards and
+/// replaces the snapshot when it finishes; the store's partial-over-full
+/// guard keeps early batches from collapsing the restored list.
+enum VODLibraryCache {
+    /// Bump when the encoded models change shape; a mismatch is a miss.
+    private static let schema = 1
+
+    struct Snapshot: Codable, Sendable {
+        var identity: String
+        var items: [VODDisplayItem]
+        var categories: [VODCategory]
+        var at: Date
+    }
+
+    private static func fileURL(kind: VODItemType) -> URL {
+        AppCacheDirectory.url.appendingPathComponent(kind == .movie ? "vod-library-movies.json" : "vod-library-series.json")
+    }
+
+    /// Playlist identity the snapshot is valid for (same shape as
+    /// VODStore.beginDisplaying): another server, URL or account is a
+    /// different library and must not be served from this file.
+    static func identity(for server: ServerConnection) -> String {
+        "v\(schema)|\(server.id.uuidString)|\(server.effectiveBaseURL)|\(server.username)"
+    }
+
+    /// Decodes off the main actor. nil when there is no file, it belongs to
+    /// another playlist, or it does not decode.
+    static func load(kind: VODItemType, identity: String) async -> Snapshot? {
+        let url = fileURL(kind: kind)
+        return await Task.detached(priority: .userInitiated) { () -> Snapshot? in
+            guard let data = try? Data(contentsOf: url),
+                  let snap = try? JSONDecoder().decode(Snapshot.self, from: data),
+                  snap.identity == identity, !snap.items.isEmpty else { return nil }
+            return snap
+        }.value
+    }
+
+    static func save(kind: VODItemType, identity: String, items: [VODDisplayItem], categories: [VODCategory]) {
+        guard !items.isEmpty else { return }
+        let url = fileURL(kind: kind)
+        let snap = Snapshot(identity: identity, items: items, categories: categories, at: Date())
+        Task.detached(priority: .utility) {
+            do {
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let data = try JSONEncoder().encode(snap)
+                try data.write(to: url, options: .atomic)
+                debugLog("[VOD-CACHE] saved \(items.count) \(kind == .movie ? "movies" : "series") (\(data.count / 1024) KB)")
+            } catch {
+                debugLog("[VOD-CACHE] save failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    static func clear() {
+        for kind in [VODItemType.movie, .series] {
+            try? FileManager.default.removeItem(at: fileURL(kind: kind))
+        }
+    }
+}
+
 @MainActor
 final class TMDBArtCache: ObservableObject {
     static let shared = TMDBArtCache()
@@ -1950,8 +2035,7 @@ final class TMDBArtCache: ObservableObject {
     private var enrichTasks: [String: Task<Void, Never>] = [:]
 
     private static var fileURL: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return dir.appendingPathComponent("tmdb-art-cache.json")
+        AppCacheDirectory.url.appendingPathComponent("tmdb-art-cache.json")
     }
 
     static func key(for item: VODDisplayItem) -> String {
@@ -2009,7 +2093,12 @@ final class TMDBArtCache: ObservableObject {
             let snapshot = entries
             let url = Self.fileURL
             Task.detached(priority: .utility) {
-                if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: url, options: .atomic) }
+                do {
+                    let data = try JSONEncoder().encode(snapshot)
+                    try data.write(to: url, options: .atomic)
+                } catch {
+                    debugLog("[TMDB-ART] save failed: \(error.localizedDescription)")
+                }
             }
         }
     }

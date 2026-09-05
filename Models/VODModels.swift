@@ -659,7 +659,7 @@ private struct ContinueWatchingCard: View {
 }
 
 // MARK: - VOD Item Type
-enum VODItemType {
+enum VODItemType: Codable {
     case movie
     case series
     case episode
@@ -954,7 +954,7 @@ enum VODVersionLabeler {
 }
 
 // MARK: - VOD Movie (display model — not persisted, fetched on demand)
-struct VODMovie: Identifiable, Hashable {
+struct VODMovie: Identifiable, Hashable, Codable {
     let id: String
     let name: String
     let posterURL: URL?
@@ -1005,7 +1005,7 @@ struct VODMovie: Identifiable, Hashable {
 }
 
 // MARK: - VOD Series (display model)
-struct VODSeries: Identifiable, Hashable {
+struct VODSeries: Identifiable, Hashable, Codable {
     let id: String
     let name: String
     let posterURL: URL?
@@ -1046,14 +1046,14 @@ struct VODSeries: Identifiable, Hashable {
 }
 
 // MARK: - VOD Season
-struct VODSeason: Identifiable, Hashable {
+struct VODSeason: Identifiable, Hashable, Codable {
     let id: String
     let seasonNumber: Int
     var episodes: [VODEpisode]
 }
 
 // MARK: - VOD Episode
-struct VODEpisode: Identifiable, Hashable {
+struct VODEpisode: Identifiable, Hashable, Codable {
     let id: String
     let seriesID: String
     let title: String
@@ -1148,7 +1148,7 @@ struct VODEpisode: Identifiable, Hashable {
 }
 
 // MARK: - VOD Category
-struct VODCategory: Identifiable, Hashable {
+struct VODCategory: Identifiable, Hashable, Codable {
     let id: String
     let name: String
     var itemCount: Int = 0
@@ -1210,7 +1210,7 @@ struct LibraryMatcher: Sendable {
 }
 
 // MARK: - VOD Display Item (unified for search/grid)
-struct VODDisplayItem: Identifiable, Hashable {
+struct VODDisplayItem: Identifiable, Hashable, Codable {
     let id: String
     let name: String
     let posterURL: URL?

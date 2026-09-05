@@ -2301,7 +2301,7 @@ struct VODDetailView: View {
                     .foregroundColor(.textPrimary)
                     .padding(.horizontal, usesTVMovieLayout ? 56 : 16)
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(alignment: .top, spacing: 12) {
+                    HStack(alignment: .top, spacing: usesTVMovieLayout ? 24 : 12) {
                         ForEach(row.people) { person in
                             PersonCard(person: person) { bioPerson = person }
                         }
@@ -2823,38 +2823,43 @@ private struct PersonCard: View {
     let onSelect: () -> Void
 
     #if os(tvOS)
-    private let cardWidth: CGFloat = 180
+    private let cardWidth: CGFloat = 200
     #else
     private let cardWidth: CGFloat = 90
     #endif
 
     var body: some View {
+        #if os(tvOS)
+        // Emby-style (Logan 2026-09-04): the photo is the focusable card and
+        // the labels sit centered beneath it, outside the card, so text is
+        // never clipped against the card edge.
+        VStack(spacing: 10) {
+            Button(action: onSelect) {
+                photo
+            }
+            .buttonStyle(.card)
+            VStack(spacing: 2) {
+                Text(person.name)
+                    .font(.labelMedium)
+                    .foregroundColor(.textPrimary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                if let role = person.role {
+                    Text(role)
+                        .font(.labelSmall)
+                        .foregroundColor(.textSecondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(width: cardWidth, height: 86, alignment: .top)
+        }
+        .frame(width: cardWidth)
+        #else
         Button(action: onSelect) {
             VStack(alignment: .leading, spacing: 6) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.elevatedBackground.opacity(0.55))
-                    if let url = TMDBService.profileImageURL(path: person.profilePath, size: "w185") {
-                        AsyncImage(url: url) { phase in
-                            if let image = phase.image {
-                                image.resizable().aspectRatio(contentMode: .fill)
-                            } else {
-                                personGlyph
-                            }
-                        }
-                    } else {
-                        personGlyph
-                    }
-                }
-                .frame(width: cardWidth, height: cardWidth * 1.5)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-
-                // Reserved, uniform height for the two labels. Without it the
-                // card's clip shape ended partway through the role line and
-                // sliced it horizontally on EVERY card (Logan, 2026-08-15,
-                // Apple TV), and a two-line name made its card taller than its
-                // neighbours. Sized for the worst case the line limits allow:
-                // two lines of name plus two of role.
+                photo
                 VStack(alignment: .leading, spacing: 2) {
                     Text(person.name)
                         .font(.labelMedium)
@@ -2870,21 +2875,31 @@ private struct PersonCard: View {
                     }
                     Spacer(minLength: 0)
                 }
-                #if os(tvOS)
-                .frame(height: 86, alignment: .topLeading)
-                #endif
             }
             .frame(width: cardWidth, alignment: .leading)
-            #if os(tvOS)
-            // Keep the labels clear of the card's bottom edge.
-            .padding(.bottom, 6)
-            #endif
         }
-        #if os(tvOS)
-        .buttonStyle(.card)
-        #else
         .buttonStyle(.plain)
         #endif
+    }
+
+    private var photo: some View {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.elevatedBackground.opacity(0.55))
+                    if let url = TMDBService.profileImageURL(path: person.profilePath, size: "w342") {
+                        AsyncImage(url: url) { phase in
+                            if let image = phase.image {
+                                image.resizable().aspectRatio(contentMode: .fill)
+                            } else {
+                                personGlyph
+                            }
+                        }
+                    } else {
+                        personGlyph
+                    }
+                }
+                .frame(width: cardWidth, height: cardWidth * 1.5)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private var personGlyph: some View {
