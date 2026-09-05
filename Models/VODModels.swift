@@ -1305,6 +1305,13 @@ struct VODDisplayItem: Identifiable, Hashable, Codable {
         return s
     }
 
+    /// The year a provider appends to a title ("2 Fast 2 Furious (2003)"),
+    /// used when the row carries no release date of its own.
+    nonisolated static func trailingYear(in raw: String) -> String {
+        guard let r = raw.range(of: #"\((19|20)\d{2}\)"#, options: .regularExpression) else { return "" }
+        return String(raw[r].dropFirst().dropLast())
+    }
+
     nonisolated static func strippingTrailingYears(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         while let r = s.range(of: #"\s*\((19|20)\d{2}\)\s*$"#, options: .regularExpression) {
@@ -1320,7 +1327,8 @@ struct VODDisplayItem: Identifiable, Hashable, Codable {
         self.name = movie.name
         self.posterURL = movie.posterURL
         self.rating = movie.displayRating
-        self.releaseYear = movie.releaseYear
+        self.releaseYear = movie.releaseYear.isEmpty
+            ? VODDisplayItem.trailingYear(in: movie.name) : movie.releaseYear
         self.type = .movie
         self.serverID = movie.serverID
         self.movie = movie
@@ -1332,7 +1340,8 @@ struct VODDisplayItem: Identifiable, Hashable, Codable {
         self.name = series.name
         self.posterURL = series.posterURL
         self.rating = series.displayRating
-        self.releaseYear = series.releaseYear
+        self.releaseYear = series.releaseYear.isEmpty
+            ? VODDisplayItem.trailingYear(in: series.name) : series.releaseYear
         self.type = .series
         self.serverID = series.serverID
         self.movie = nil

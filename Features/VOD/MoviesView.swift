@@ -1637,6 +1637,11 @@ struct MoviesView: View {
                         .padding(.top, railTop)
                     }
                     #if os(tvOS)
+                    // Centre the rail between the display edge and the grid's
+                    // first poster column (Logan 2026-09-05). The grid edge is
+                    // the leading safe area + contentLeadingInset + the grid's
+                    // own 16 pt, so this follows the safe area on any display.
+                    .padding(.leading, max(0, (outer.safeAreaInsets.leading + contentLeadingInset + 16 - railWidth) / 2))
                     .ignoresSafeArea(.container, edges: [.top, .leading])
                     #else
                     .ignoresSafeArea(.container, edges: .top)
@@ -2284,15 +2289,17 @@ struct VODPosterCard: View {
 
             // Text footer — fixed height so every card in the grid row is the same total
             // height regardless of title length or whether a year is present.
-            VStack(alignment: .leading, spacing: 2) {
+            // tvOS centres the title and year under the poster, like the
+            // cast cards (Logan 2026-09-05); iOS keeps leading.
+            VStack(alignment: textAlignment, spacing: 2) {
                 // Title: reserves exactly 2-line height via a fixed frame so all cards
                 // in the same grid row align regardless of actual title length.
                 Text(item.displayName)
                     .font(.labelSmall)
                     .foregroundColor(.textPrimary)
                     .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .multilineTextAlignment(textAlignment == .center ? .center : .leading)
+                    .frame(maxWidth: .infinity, alignment: textAlignment == .center ? .top : .topLeading)
                     #if os(tvOS)
                     .frame(height: 44) // 2 lines at labelSmall (18pt) on tvOS
                     #else
@@ -2312,6 +2319,14 @@ struct VODPosterCard: View {
             }
             .padding(.bottom, 4)
         }
+    }
+
+    private var textAlignment: HorizontalAlignment {
+        #if os(tvOS)
+        return .center
+        #else
+        return .leading
+        #endif
     }
 }
 

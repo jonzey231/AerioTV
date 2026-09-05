@@ -2935,7 +2935,7 @@ private struct PersonBioSheet: View {
                     HStack(alignment: .top, spacing: 32) {
                         ForEach(items) { item in
                             Button { tapKnownFor(item) } label: {
-                                VStack(alignment: .leading, spacing: 8) {
+                                VStack(spacing: 8) {
                                     ZStack {
                                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                                             .fill(Color.elevatedBackground.opacity(0.55))
@@ -2950,9 +2950,10 @@ private struct PersonBioSheet: View {
                                         .font(.labelMedium)
                                         .foregroundColor(.textSecondary)
                                         .lineLimit(2)
-                                        .multilineTextAlignment(.leading)
+                                        .multilineTextAlignment(.center)
+                                        .frame(maxWidth: .infinity)
                                 }
-                                .frame(width: 200, alignment: .leading)
+                                .frame(width: 200)
                             }
                             .buttonStyle(MoviesPosterFocusStyle())
                         }

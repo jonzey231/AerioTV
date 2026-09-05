@@ -260,7 +260,7 @@ final class VODStore: ObservableObject {
                             backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
                                 .flatMap { VODService.resolveImageURL($0, base: baseURL) },
                             rating: m.rating ?? "", plot: m.plot ?? "",
-                            genre: m.genre ?? "", releaseDate: "", duration: "",
+                            genre: m.genre ?? "", releaseDate: m.year.map(String.init) ?? "", duration: "",
                             cast: cp?.cast ?? "", director: cp?.director ?? "", imdbID: "",
                             categoryID: "", categoryName: "Movies",
                             streamURL: api.proxyMovieURL(uuid: m.uuid,
@@ -340,7 +340,7 @@ final class VODStore: ObservableObject {
                             backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
                                 .flatMap { VODService.resolveImageURL($0, base: baseURL) },
                             rating: s.rating ?? "", plot: s.plot ?? "",
-                            genre: s.genre ?? "", releaseDate: "",
+                            genre: s.genre ?? "", releaseDate: s.year.map(String.init) ?? "",
                             cast: cp?.cast ?? "", director: cp?.director ?? "",
                             categoryID: "", categoryName: "Series",
                             serverID: sID, seasons: [], episodeCount: 0
@@ -399,7 +399,7 @@ final class VODStore: ObservableObject {
             posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
             backdropURL: nil,
             rating: m.rating ?? "", plot: m.plot ?? "",
-            genre: m.genre ?? "", releaseDate: "", duration: "",
+            genre: m.genre ?? "", releaseDate: m.year.map(String.init) ?? "", duration: "",
             cast: "", director: "", imdbID: "",
             categoryID: "", categoryName: "Movies",
             streamURL: api.proxyMovieURL(uuid: m.uuid,
@@ -420,7 +420,7 @@ final class VODStore: ObservableObject {
             backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
                 .flatMap { VODService.resolveImageURL($0, base: baseURL) },
             rating: s.rating ?? "", plot: s.plot ?? "",
-            genre: s.genre ?? "", releaseDate: "",
+            genre: s.genre ?? "", releaseDate: s.year.map(String.init) ?? "",
             cast: cp?.cast ?? "", director: cp?.director ?? "",
             categoryID: "", categoryName: "Series",
             serverID: serverID, seasons: [], episodeCount: 0
@@ -634,7 +634,7 @@ final class VODStore: ObservableObject {
                                 backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
                                     .flatMap { VODService.resolveImageURL($0, base: baseURL) },
                                 rating: m.rating ?? "", plot: m.plot ?? "",
-                                genre: m.genre ?? "", releaseDate: "", duration: "",
+                                genre: m.genre ?? "", releaseDate: m.year.map(String.init) ?? "", duration: "",
                                 cast: cp?.cast ?? "", director: cp?.director ?? "", imdbID: "",
                                 categoryID: category.id,
                                 categoryName: category.name,
@@ -870,7 +870,7 @@ final class VODStore: ObservableObject {
                                 backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
                                     .flatMap { VODService.resolveImageURL($0, base: baseURL) },
                                 rating: s.rating ?? "", plot: s.plot ?? "",
-                                genre: s.genre ?? "", releaseDate: "",
+                                genre: s.genre ?? "", releaseDate: s.year.map(String.init) ?? "",
                                 cast: cp?.cast ?? "", director: cp?.director ?? "",
                                 categoryID: category.id,
                                 categoryName: category.name,

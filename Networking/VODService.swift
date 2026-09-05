@@ -1958,7 +1958,7 @@ enum AppCacheDirectory {
 /// guard keeps early batches from collapsing the restored list.
 enum VODLibraryCache {
     /// Bump when the encoded models change shape; a mismatch is a miss.
-    private static let schema = 1
+    private static let schema = 2
 
     struct Snapshot: Codable, Sendable {
         var identity: String
