@@ -515,6 +515,9 @@ struct MoviesView: View {
                 #endif
             }
             .onAppear {
+                #if os(tvOS)
+                MoviesFocusTracer.shared.start()
+                #endif
                 pushRouter.push = { navPath.append($0) }
                 refreshDispatcharrHeaders(); refreshHeroPages(); refreshWatchlistItems()
                 enrichArt()
@@ -1496,6 +1499,7 @@ struct MoviesView: View {
                 }
                 .ignoresSafeArea(.container, edges: .top)
                 .onChange(of: tvTabBarHidden) { _, hidden in
+                    debugLog("[FOCUS] \(kindTitle) tab bar hidden -> \(hidden) y=\(Int(geometryBox.contentOffsetY)) wants=\(wantsTabBarHidden) idle=\(scrollIsIdle)")
                     let wantHidden = hidden || wantsTabBarHidden
                     if TVTabBarScrollState.shared.isHidden != wantHidden {
                         TVTabBarScrollState.shared.isHidden = wantHidden
@@ -3208,6 +3212,98 @@ struct MoviesPosterFocusStyle: ButtonStyle {
 #endif
 
 #if os(tvOS)
+/// Diagnostic tracer: logs every focus move and every remote press while a
+/// library tab is on screen. Standing rule: on any tvOS focus or nav
+/// complaint, read this trace before changing code.
+@MainActor
+final class MoviesFocusTracer {
+    static let shared = MoviesFocusTracer()
+    private var token: NSObjectProtocol?
+
+    func start() {
+        guard token == nil else { return }
+        Self.installPressLogging()
+        token = NotificationCenter.default.addObserver(
+            forName: UIFocusSystem.didUpdateNotification, object: nil, queue: .main
+        ) { note in
+            guard let ctx = note.userInfo?[UIFocusSystem.focusUpdateContextUserInfoKey] as? UIFocusUpdateContext else { return }
+            func desc(_ item: UIFocusItem?) -> String {
+                guard let item else { return "nil" }
+                let name = String(describing: type(of: item))
+                // Every focus item has a frame in its container's space;
+                // convert to window space when it is a view.
+                var f = item.frame
+                var label = ""
+                if let v = item as? UIView {
+                    f = v.convert(v.bounds, to: nil)
+                    label = v.accessibilityLabel ?? (v as? UIButton)?.currentTitle ?? ""
+                } else if let container = item.parentFocusEnvironment as? UIView {
+                    f = container.convert(item.frame, to: nil)
+                }
+                return "\(name)\(label.isEmpty ? "" : "(\(label))") @\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))"
+            }
+            let heading: String
+            switch ctx.focusHeading {
+            case .up: heading = "UP"
+            case .down: heading = "DOWN"
+            case .left: heading = "LEFT"
+            case .right: heading = "RIGHT"
+            case .next: heading = "NEXT"
+            case .previous: heading = "PREV"
+            default: heading = "none"
+            }
+            debugLog("[FOCUS] \(heading): \(desc(ctx.previouslyFocusedItem)) -> \(desc(ctx.nextFocusedItem))")
+        }
+        debugLog("[FOCUS] tracer on")
+    }
+
+    func stop() {
+        if let token { NotificationCenter.default.removeObserver(token) }
+        token = nil
+        debugLog("[FOCUS] tracer off")
+    }
+
+    /// Logs every remote press the app receives (swizzled
+    /// UIApplication.sendEvent), so a press that moved no focus still
+    /// shows up. Installed once; only logs while the tracer is on.
+    static var pressLoggingInstalled = false
+    static func installPressLogging() {
+        guard !pressLoggingInstalled else { return }
+        pressLoggingInstalled = true
+        let cls: AnyClass = UIApplication.self
+        guard let original = class_getInstanceMethod(cls, #selector(UIApplication.sendEvent(_:))),
+              let swizzled = class_getInstanceMethod(cls, #selector(UIApplication.aerio_sendEvent(_:))) else { return }
+        method_exchangeImplementations(original, swizzled)
+    }
+    var isOn: Bool { token != nil }
+}
+
+extension UIApplication {
+    @objc func aerio_sendEvent(_ event: UIEvent) {
+        if event.type == .presses, let presses = (event as? UIPressesEvent)?.allPresses, MoviesFocusTracer.shared.isOn {
+            for press in presses where press.phase == .began || press.phase == .ended {
+                let name: String
+                switch press.type {
+                case .upArrow: name = "UP"
+                case .downArrow: name = "DOWN"
+                case .leftArrow: name = "LEFT"
+                case .rightArrow: name = "RIGHT"
+                case .select: name = "SELECT"
+                case .menu: name = "MENU"
+                case .playPause: name = "PLAY/PAUSE"
+                default: name = "type=\(press.type.rawValue)"
+                }
+                let env = UIApplication.shared.connectedScenes
+                    .compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+                let focused = env.flatMap { UIFocusSystem.focusSystem(for: $0)?.focusedItem }
+                let f = focused.map { String(describing: type(of: $0)) } ?? "nil"
+                debugLog("[PRESS] \(name) \(press.phase == .began ? "began" : "ended") focused=\(f)")
+            }
+        }
+        aerio_sendEvent(event)
+    }
+}
+
 /// UIKit-side facts the SwiftUI focus engine cannot report.
 enum TVFocusBridge {
     /// True when the tab pill titled `preferredTitle` is within the window
