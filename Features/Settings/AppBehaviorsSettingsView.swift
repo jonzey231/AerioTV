@@ -858,6 +858,14 @@ struct AppBehaviorsSettingsView: View {
                     ) { _ in }
 
                     if tmdbPostersEnabled {
+                        Image("TMDBLogoShort")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(height: 44)
+                            .accessibilityLabel("The Movie Database")
+                            .padding(.horizontal, 20)
+                            .padding(.top, 8)
+
                         // Same field component as the onboarding password
                         // field (AddServerView) - types correctly on tvOS.
                         // revealWhenFocused shows the key in plaintext while
@@ -893,12 +901,16 @@ struct AppBehaviorsSettingsView: View {
                             Spacer()
                         }
 
-                        Text("If iCloud Sync is enabled, your key is saved to your iCloud Keychain and syncs to your other devices. Get a free key at themoviedb.org; paste either the API Key or the Read Access Token. Posters appear in Program Info and on VOD with no provider art.")
+                        Text("If iCloud Sync is enabled, your key is saved to your iCloud Keychain and syncs to your other devices. Get a free key at themoviedb.org; paste either the API Key or the Read Access Token. With a key, artwork and details for Movies and TV Shows come from TMDB first and your provider fills any gaps.")
                             .font(.system(size: 22))
                             .foregroundColor(.textTertiary)
                             .padding(.horizontal, 20)
                             .padding(.top, 4)
                     }
+
+                    TMDBAttributionView(style: .long)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 12)
                 }
             }
             .padding(.horizontal, 80)
