@@ -2277,6 +2277,16 @@ struct VODPosterCard: View {
             #endif
             .overlay(alignment: .bottomTrailing) {
                 if !item.rating.isEmpty {
+                    #if os(tvOS)
+                    // Readable from the couch (Logan 2026-09-05).
+                    Text(item.rating)
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(Color.black.opacity(0.7))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .padding(6)
+                    #else
                     Text(item.rating)
                         .font(.system(size: 9, weight: .bold))
                         .foregroundColor(.white)
@@ -2284,6 +2294,7 @@ struct VODPosterCard: View {
                         .background(Color.black.opacity(0.7))
                         .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                         .padding(4)
+                    #endif
                 }
             }
 
