@@ -389,7 +389,7 @@ struct AppBehaviorsSettingsView: View {
 
             // MARK: Default Tab
             Section {
-                ForEach(AppTab.allCases, id: \.self) { tab in
+                ForEach(AppTab.selectable, id: \.self) { tab in
                     Button {
                         defaultTabRaw = tab.rawValue
                     } label: {
@@ -691,7 +691,7 @@ struct AppBehaviorsSettingsView: View {
 
                 // Default Tab
                 SettingsSection("Default Landing Tab", style: .card) {
-                    ForEach(AppTab.allCases, id: \.self) { tab in
+                    ForEach(AppTab.selectable, id: \.self) { tab in
                         TVSettingsSelectionRow(
                             icon: tab.icon,
                             iconColor: theme.accent,

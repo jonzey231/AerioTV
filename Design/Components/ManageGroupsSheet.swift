@@ -104,6 +104,14 @@ struct ManageGroupsSheet: View {
     /// Reports (modeRawValue, manualOrder) whenever the order config
     /// changes so the host can re-render its group pills.
     var onConfigChanged: ((String, [String]) -> Void)? = nil
+    /// Live TV only: UserDefaults key holding the group the guide opens on
+    /// ("" = All Channels, "favorites", or a group name). Nil hides the
+    /// default-group controls (VOD callers).
+    var defaultGroupKey: String? = nil
+    /// Whether the Favorites group exists right now (pinned row + default option).
+    var favoritesAvailable: Bool = false
+    @State private var defaultGroup: String = ""
+    private let favoritesToken = "favorites"
 
     @Environment(\.dismiss) private var dismiss
     @State private var hiddenGroups: Set<String> = []
@@ -189,6 +197,9 @@ struct ManageGroupsSheet: View {
         }
         .onAppear {
             hiddenGroups = HiddenGroupsStore.load(forKey: storageKey)
+            if let dKey = defaultGroupKey {
+                defaultGroup = UserDefaults.standard.string(forKey: dKey) ?? ""
+            }
             if let key = orderStorageKey, let mKey = modeKey {
                 sortMode = GroupSortMode(rawValue: GroupOrderStore.loadMode(forKey: mKey)) ?? .default
                 manualOrder = GroupOrderStore.apply(allGroups, order: GroupOrderStore.load(forKey: key))
@@ -208,6 +219,19 @@ struct ManageGroupsSheet: View {
     }
 
     // MARK: - Mutations
+
+    private func setDefault(_ token: String) {
+        guard let dKey = defaultGroupKey else { return }
+        defaultGroup = token
+        UserDefaults.standard.set(token, forKey: dKey)
+        SyncManager.shared.pushPreferencesImmediate()
+    }
+
+    private func defaultTitle(_ token: String) -> String {
+        if token.isEmpty || token == allChannelsToken { return "All Channels" }
+        if token == favoritesToken { return "Favorites" }
+        return token
+    }
 
     private func toggleHidden(_ group: String) {
         if hiddenGroups.contains(group) { hiddenGroups.remove(group) }
@@ -305,9 +329,48 @@ struct ManageGroupsSheet: View {
                 }
             }
 
+            if defaultGroupKey != nil {
+                Section {
+                    Picker("Opens On", selection: $defaultGroup) {
+                        Text("All Channels").tag("")
+                        if favoritesAvailable { Text("Favorites").tag(favoritesToken) }
+                        ForEach(displayList, id: \.self) { g in Text(g).tag(g) }
+                    }
+                    .onChange(of: defaultGroup) { _, v in setDefault(v) }
+                    .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Default Group")
+                        .font(.labelSmall)
+                        .foregroundColor(.textSecondary)
+                        .textCase(nil)
+                } footer: {
+                    Text("The group Live TV shows when the app opens.")
+                        .font(.labelSmall)
+                        .foregroundColor(.textTertiary)
+                        .textCase(nil)
+                }
+            }
+
             // GH #80: the All Channels pill is hideable too; pinned in its own
             // section so the reorderable list's indices stay intact.
             Section {
+                if favoritesAvailable {
+                    Button {
+                        toggleHidden(favoritesToken)
+                    } label: {
+                        HStack {
+                            Image(systemName: hiddenGroups.contains(favoritesToken) ? "square" : "checkmark.square.fill")
+                                .font(.system(size: 20))
+                                .foregroundColor(hiddenGroups.contains(favoritesToken) ? .textTertiary : .accentPrimary)
+                                .frame(width: 28)
+                            Text("Favorites")
+                                .font(.bodyMedium.weight(.semibold))
+                                .foregroundColor(hiddenGroups.contains(favoritesToken) ? .textTertiary : .textPrimary)
+                            Spacer()
+                        }
+                    }
+                    .listRowBackground(Color.cardBackground)
+                }
                 Button {
                     toggleHidden(allChannelsToken)
                 } label: {
@@ -405,11 +468,33 @@ struct ManageGroupsSheet: View {
                     .disabled(grabbedGroup != nil)
                 }
 
+                if defaultGroupKey != nil {
+                    Text("Opens on \(defaultTitle(defaultGroup)). Long press a group to make it the default.")
+                        .font(.labelSmall)
+                        .foregroundColor(.textTertiary)
+                        .padding(.horizontal, 48)
+                        .padding(.bottom, 12)
+                }
+
+                // Favorites group (Logan 2026-09-05): pinned first, hideable,
+                // never reordered.
+                if favoritesAvailable {
+                    TVGroupToggleRow(
+                        group: "Favorites",
+                        isOn: !hiddenGroups.contains(favoritesToken),
+                        onToggle: { toggleHidden(favoritesToken) },
+                        isDefault: defaultGroup == favoritesToken,
+                        onSetDefault: defaultGroupKey == nil ? nil : { setDefault(favoritesToken) }
+                    )
+                }
+
                 // GH #80: pinned All Channels toggle, never reordered.
                 TVGroupToggleRow(
                     group: "All Channels",
                     isOn: !hiddenGroups.contains(allChannelsToken),
-                    onToggle: { toggleHidden(allChannelsToken) }
+                    onToggle: { toggleHidden(allChannelsToken) },
+                    isDefault: defaultGroup.isEmpty || defaultGroup == allChannelsToken,
+                    onSetDefault: defaultGroupKey == nil ? nil : { setDefault("") }
                 )
 
                 ForEach(displayList, id: \.self) { group in
@@ -432,7 +517,9 @@ struct ManageGroupsSheet: View {
                         TVGroupToggleRow(
                             group: group,
                             isOn: !hiddenGroups.contains(group),
-                            onToggle: { toggleHidden(group) }
+                            onToggle: { toggleHidden(group) },
+                            isDefault: defaultGroup == group,
+                            onSetDefault: defaultGroupKey == nil ? nil : { setDefault(group) }
                         )
                     }
                 }
@@ -551,6 +638,9 @@ struct TVGroupToggleRow: View {
     let group: String
     let isOn: Bool
     let onToggle: () -> Void
+    /// Live TV: this group is the one the guide opens on; long press sets it.
+    var isDefault: Bool = false
+    var onSetDefault: (() -> Void)? = nil
 
     // @State (not @FocusState): the UIKit-backed TVPressOverlay owns focus
     // and reports it here. A plain SwiftUI Button draws the squared system
@@ -564,7 +654,7 @@ struct TVGroupToggleRow: View {
                 minimumPressDuration: 0.35,
                 isFocused: $isFocused,
                 onTap: onToggle,
-                onLongPress: {}
+                onLongPress: { onSetDefault?() }
             )
         )
     }
@@ -575,6 +665,15 @@ struct TVGroupToggleRow: View {
                 .font(.system(size: 28, weight: .medium))
                 .foregroundColor(isFocused ? .white : .textPrimary)
                 .lineLimit(1)
+
+            if isDefault {
+                Text("Default")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(isFocused ? .white : .accentPrimary)
+                    .padding(.horizontal, 10).padding(.vertical, 3)
+                    .overlay(Capsule().stroke(isFocused ? Color.white : Color.accentPrimary, lineWidth: 1.5))
+                    .padding(.leading, 10)
+            }
 
             Spacer()
 

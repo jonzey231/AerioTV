@@ -4876,13 +4876,17 @@ private struct GuideChannelButton: View {
         // This prevents focus from jumping to the channel column when scrolling down.
         // tvOS long-press overlay lets users still manage favorites from here
         // without having to switch to List view.
+        // Star directly left of the catch-up clock in the top-right corner,
+        // alone in the corner when the channel has no archive (Logan
+        // 2026-09-05: the two badges sat on top of each other).
         channelLabel
             .overlay(alignment: .topTrailing) {
                 if favoritesStore.isFavorite(channel.id) {
                     Image(systemName: "star.fill")
                         .font(.system(size: 14))
                         .foregroundColor(.statusWarning)
-                        .padding(6)
+                        .padding(.top, 6)
+                        .padding(.trailing, channel.hasCatchup ? 30 : 8)
                 }
             }
         #else

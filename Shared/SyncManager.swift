@@ -78,6 +78,8 @@ final class SyncManager: ObservableObject {
         // List), so a single synced value let an iPhone's "list" clobber the
         // Apple TV's Guide default across devices. Kept per-device (@AppStorage).
         "defaultTab", "streamBufferSize",
+        // Live TV group the guide opens on (Manage Groups). "" = All.
+        "defaultChannelGroup",
         // Time Format (Settings > Appearance): "system" | "12" | "24".
         ClockFormat.defaultsKey,
         "bgRefreshType",

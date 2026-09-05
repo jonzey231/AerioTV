@@ -3499,6 +3499,9 @@ enum AppTab: String, CaseIterable {
     case tvShows   = "tvshows"
     case settings  = "settings"
 
+    /// Tabs a user can pick as the default. Favorites is a channel group now.
+    static var selectable: [AppTab] { allCases.filter { $0 != .favorites } }
+
     var title: String {
         switch self {
         case .liveTV:    return "Live TV"
@@ -5084,11 +5087,11 @@ struct MainTabView: View {
     /// live values directly (iOS NavigationStacks are not torn down by a
     /// sibling-tab insertion the way tvOS's are).
     #if os(tvOS)
-    private var showFavoritesTab: Bool { tabShowFavorites }
+    private var showFavoritesTab: Bool { false }
     private var showRecordingsTab: Bool { tabShowRecordings }
     private var showVODTab: Bool { tabShowVOD }
     #else
-    private var showFavoritesTab: Bool { hasFavorites }
+    private var showFavoritesTab: Bool { false }
     private var showRecordingsTab: Bool { hasRecordings }
     private var showVODTab: Bool { hasVOD }
     #endif
@@ -5242,13 +5245,9 @@ struct MainTabView: View {
                 .tabItem { Label(AppTab.liveTV.title, systemImage: AppTab.liveTV.icon) }
                 .tag(AppTab.liveTV)
 
-            // Favorites tab only exists while the user has at least one favorite.
-            // The tab bar animates it in/out automatically when the count crosses zero.
-            if showFavoritesTab {
-                FavoritesView()
-                    .tabItem { Label(AppTab.favorites.title, systemImage: AppTab.favorites.icon) }
-                    .tag(AppTab.favorites)
-            }
+            // Favorites is a pinned channel group inside Live TV now
+            // (Logan 2026-09-05); the tab is gone. `AppTab.favorites` stays
+            // so a persisted default tab from an older build decodes.
 
             // DVR tab only exists while the user has at least one recording
             // (local or server-side). Animates in/out as recordings are added/removed.
@@ -5374,7 +5373,8 @@ struct MainTabView: View {
                 UserDefaults.standard.removeObject(forKey: "launchOnLiveTV")
                 debugLog("🔶 MainTabView.onAppear: launchOnLiveTV=true, set selectedTab=.liveTV")
             } else {
-                selectedTab = AppTab(rawValue: defaultTabRaw) ?? .liveTV
+                let restored = AppTab(rawValue: defaultTabRaw) ?? .liveTV
+                selectedTab = restored == .favorites ? .liveTV : restored
             }
             configureTabBarAppearance()
             tryShowInitialLoading()

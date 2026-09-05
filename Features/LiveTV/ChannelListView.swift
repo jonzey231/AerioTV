@@ -322,6 +322,14 @@ struct ChannelListView: View {
     #endif
 
     private let hiddenGroupsKey = "hiddenChannelGroups"
+    /// Favorites is a channel group now, always first (Logan 2026-09-05; the
+    /// Favorites tab is gone). Same sentinel shape as "collection:<id>".
+    static let favoritesToken = "favorites"
+    private var favoritesToken: String { Self.favoritesToken }
+    /// Group the guide opens on (Manage Groups > long press / Default Group).
+    /// Empty = All. Applied once per playlist load.
+    private let defaultChannelGroupKey = "defaultChannelGroup"
+    @State private var defaultGroupApplied = false
     /// User-defined Live TV group display order + sort mode (Manage Groups).
     /// Order is a native [String] array (order-preserving iCloud path);
     /// mode is "default" / "alphabetical" / "manual". Empty order + default
@@ -450,7 +458,7 @@ struct ChannelListView: View {
                 // inside the Favorites tab (which doesn't affect this
                 // view's sort) leaves it unchanged.
                 .onChange(of: favoritesStore.favoriteItems.count) { _, _ in
-                    filterChannels()
+                    favoritesDidChange()
                 }
                 // Sync filtered list whenever the store delivers new data.
                 .onChange(of: channelStore.channels) { _, items in
@@ -461,12 +469,7 @@ struct ChannelListView: View {
                     // clears to [] and a same-playlist reload must not clobber a
                     // valid selection. Collection tokens are cross-playlist and
                     // have their own deleted-collection cleanup.
-                    if selectedGroup != "All",
-                       !selectedGroup.hasPrefix("collection:"),
-                       !channelStore.orderedGroups.isEmpty,
-                       !channelStore.orderedGroups.contains(selectedGroup) {
-                        selectedGroup = fallbackGroup
-                    }
+                    reconcileSelectedGroupWithPlaylist()
                     filterChannels()
                     favoritesStore.register(items: items)
                     #if os(tvOS)
@@ -564,25 +567,7 @@ struct ChannelListView: View {
                     prefetchTask = nil
                 }
                 .sheet(isPresented: $showManageGroups) {
-                    ManageGroupsSheet(
-                        title: "Manage Groups",
-                        allGroups: channelStore.orderedGroups,
-                        storageKey: hiddenGroupsKey,
-                        onDismiss: { updated in
-                            hiddenGroups = updated
-                            // Reset selection if the current group was hidden
-                            if !selectedGroup.hasPrefix("collection:") && !groupTokens.contains(selectedGroup) {
-                                selectedGroup = fallbackGroup
-                            }
-                            filterChannels()
-                        },
-                        orderStorageKey: channelGroupOrderKey,
-                        onConfigChanged: { mode, newOrder in
-                            groupSortMode = mode
-                            groupOrder = newOrder
-                            filterChannels()
-                        }
-                    )
+                    manageGroupsSheet
                 }
                 .onChange(of: servers.count) { _, _ in
                     // Re-evaluate guide view default when servers arrive (e.g., fresh install + iCloud sync)
@@ -823,6 +808,11 @@ struct ChannelListView: View {
                         // group pills appear inside it.
                         groupFilterBar
                             .padding(.vertical, 10)
+                            // The guide ignores the leading safe area; the pill
+                            // row does too so the first pill (Favorites) sits
+                            // right above the channel column and Up from the
+                            // top channel lands on it (Logan 2026-09-05).
+                            .ignoresSafeArea(.container, edges: .leading)
                             .focusSection()
                         #else
                         // Compact-chrome honors the user's hide-filter preference even
@@ -1463,7 +1453,9 @@ struct ChannelListView: View {
                     TVGroupPill(
                         group: group,
                         isSelected: selectedGroup == group,
-                        action: { withAnimation(.spring(response: 0.25)) { selectedGroup = group } }
+                        action: { withAnimation(.spring(response: 0.25)) { selectedGroup = group } },
+                        systemImage: pillIcon(for: group),
+                        title: Self.groupTitle(group)
                     )
                     // #42 Part 1: make the pills programmatic focus targets so a
                     // guide long-press Left can land focus on the "All" pill.
@@ -1472,7 +1464,7 @@ struct ChannelListView: View {
                     Button {
                         withAnimation(.spring(response: 0.25)) { selectedGroup = group }
                     } label: {
-                        Text(group)
+                        Text(Self.groupTitle(group))
                             .font(.labelMedium)
                             .foregroundColor(selectedGroup == group ? .appBackground : .textSecondary)
                             .padding(.horizontal, 14)
@@ -1510,6 +1502,8 @@ struct ChannelListView: View {
             }
             .padding(.horizontal, 16)
             #if os(tvOS)
+            // First pill over the channel column (the row runs edge to edge).
+            .padding(.leading, 12)
             // Vertical headroom so a focused pill's 1.05 scale + focus stroke
             // is not clipped by the horizontal ScrollView (which sizes its
             // height to the row). Previously the taller Manage Groups button
@@ -1635,8 +1629,85 @@ struct ChannelListView: View {
     /// else would be left so the list never goes unfilterable.
     private var groupTokens: [String] {
         let visible = visibleGroups
-        if hiddenGroups.contains("All") && !visible.isEmpty { return visible }
-        return ["All"] + visible
+        var tokens: [String] = []
+        if favoritesStore.hasFavorites && !hiddenGroups.contains(favoritesToken) {
+            tokens.append(favoritesToken)
+        }
+        if !(hiddenGroups.contains("All") && !visible.isEmpty) { tokens.append("All") }
+        return tokens + visible
+    }
+
+    private func pillIcon(for token: String) -> String? {
+        token == favoritesToken ? "star.fill" : nil
+    }
+
+    /// Pill / row title for a group token.
+    static func groupTitle(_ token: String) -> String {
+        token == favoritesToken ? "Favorites" : token
+    }
+
+    /// Manage Groups (hide / order / default group). Its own property: the
+    /// call inline in the body's modifier chain pushed the type checker over
+    /// its budget once the default-group arguments were added.
+    private var manageGroupsSheet: some View {
+        ManageGroupsSheet(
+            title: "Manage Groups",
+            allGroups: channelStore.orderedGroups,
+            storageKey: hiddenGroupsKey,
+            onDismiss: { updated in
+                hiddenGroups = updated
+                // Reset selection if the current group was hidden
+                if !selectedGroup.hasPrefix("collection:") && !groupTokens.contains(selectedGroup) {
+                    selectedGroup = fallbackGroup
+                }
+                filterChannels()
+            },
+            orderStorageKey: channelGroupOrderKey,
+            onConfigChanged: { mode, newOrder in
+                groupSortMode = mode
+                groupOrder = newOrder
+                filterChannels()
+            },
+            defaultGroupKey: defaultChannelGroupKey,
+            favoritesAvailable: favoritesStore.hasFavorites
+        )
+    }
+
+    private func favoritesDidChange() {
+        if selectedGroup == favoritesToken && !favoritesStore.hasFavorites {
+            selectedGroup = fallbackGroup
+        }
+        applyDefaultGroupIfNeeded()
+        filterChannels()
+    }
+
+    /// A group selected under the previous playlist may not exist in the one
+    /// just activated; only reset once the new group list is non-empty.
+    /// Favorites and collection tokens are cross-playlist.
+    private func reconcileSelectedGroupWithPlaylist() {
+        if selectedGroup != "All",
+           selectedGroup != favoritesToken,
+           !selectedGroup.hasPrefix("collection:"),
+           !channelStore.orderedGroups.isEmpty,
+           !channelStore.orderedGroups.contains(selectedGroup) {
+            selectedGroup = fallbackGroup
+            defaultGroupApplied = false
+        }
+        if !channelStore.orderedGroups.isEmpty { applyDefaultGroupIfNeeded() }
+    }
+
+    /// Applies the user's default group the first time the playlist's groups
+    /// are known. A default that is not present (other playlist, hidden,
+    /// no favorites yet) is skipped, not forced.
+    private func applyDefaultGroupIfNeeded() {
+        guard !defaultGroupApplied else { return }
+        guard let wanted = UserDefaults.standard.string(forKey: defaultChannelGroupKey),
+              !wanted.isEmpty, wanted != selectedGroup else { return }
+        if groupTokens.contains(wanted) || wanted.hasPrefix("collection:") {
+            defaultGroupApplied = true
+            selectedGroup = wanted
+            debugLog("[GROUPS] default group applied: \(wanted)")
+        }
     }
 
     /// Where a reset lands: All when shown, else the first visible group.
@@ -1671,7 +1742,12 @@ struct ChannelListView: View {
 
     private func filterChannels() {
         var result = channelStore.channels
-        if selectedGroup.hasPrefix("collection:") {
+        if selectedGroup == favoritesToken {
+            // Favorites group: the user's own list, in their order; hidden
+            // groups do not apply to an explicit pick.
+            ChannelCollectionsStore.shared.activeFilterCollectionID = nil
+            result = favoritesStore.favoriteItems
+        } else if selectedGroup.hasPrefix("collection:") {
             // #45: collection filter — show exactly the curated members. The
             // user explicitly chose them, so hidden-group exclusion is bypassed.
             // If the collection was deleted, fall through to showing everything.
@@ -4030,6 +4106,8 @@ private struct TVGroupPill: View {
     let isSelected: Bool
     let action: () -> Void
     var systemImage: String? = nil
+    /// Display title when the token is a sentinel ("favorites").
+    var title: String? = nil
 
     var body: some View {
         Button(action: action) {
@@ -4038,7 +4116,7 @@ private struct TVGroupPill: View {
                     Image(systemName: img)
                         .font(.system(size: 18, weight: .medium))
                 }
-                Text(group)
+                Text(title ?? group)
                     .font(.system(size: 22, weight: .medium))
             }
         }

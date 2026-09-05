@@ -38,7 +38,9 @@ private let groupSidebarManageButtonWidth: CGFloat = 52
 /// Maps a group token to its sidebar display label: the "All" sentinel becomes
 /// "All Channels", every other token renders as-is.
 func groupSidebarLabel(_ token: String) -> String {
-    token == groupSidebarAllToken ? "All Channels" : token
+    if token == groupSidebarAllToken { return "All Channels" }
+    if token == ChannelListView.favoritesToken { return "Favorites" }
+    return token
 }
 
 // MARK: - Row button style (owns the focus visual, no system platter)
