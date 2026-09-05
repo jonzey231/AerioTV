@@ -277,7 +277,7 @@ struct TMDBAttributionView: View {
                 .scaledToFit()
                 .frame(height: logoHeight)
                 .accessibilityLabel("The Movie Database")
-            Text("This product uses the TMDB API but is not endorsed or certified by TMDB.")
+            Text("TMDB data is used only after you add your own TMDB API key. This product uses the TMDB API but is not endorsed or certified by TMDB.")
                 .font(font)
                 .foregroundColor(.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
