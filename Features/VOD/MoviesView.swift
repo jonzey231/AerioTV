@@ -3380,7 +3380,7 @@ enum TVFocusBridge {
 
 #if os(tvOS)
 /// Group and season pills on the library tabs and series page: the guide's
-/// pill shape, plus a white ring whenever focused, selected or not (Logan
+/// pill shape; on focus a white ring when selected, accent when not (Logan
 /// 2026-09-05). The guide keeps TVGroupPillButtonStyle and its own ruling.
 struct MoviesPillStyle: ButtonStyle {
     let isSelected: Bool
@@ -3392,7 +3392,8 @@ struct MoviesPillStyle: ButtonStyle {
             .padding(.horizontal, 26)
             .padding(.vertical, 13)
             .background(Capsule().fill(isSelected ? Color.accentPrimary : Color.elevatedBackground))
-            .overlay(Capsule().stroke(Color.white, lineWidth: isFocused ? 3 : 0))
+            // Selected: white ring. Unselected: accent ring (Logan 2026-09-05).
+            .overlay(Capsule().stroke(isSelected ? Color.white : Color.accentPrimary, lineWidth: isFocused ? 3 : 0))
             .scaleEffect(isFocused ? 1.05 : 1.0)
             .opacity(isFocused || isSelected ? 1.0 : 0.85)
             .animation(.easeInOut(duration: 0.15), value: isFocused)
