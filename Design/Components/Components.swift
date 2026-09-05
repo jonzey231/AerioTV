@@ -282,7 +282,7 @@ struct TMDBAttributionView: View {
                 .font(font)
                 .foregroundColor(.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("TMDB data is used only after you add your own TMDB API key.")
+            Text("TMDB data is used only after configuring a TMDB API key in Settings > App Behaviors.")
                 .font(font)
                 .foregroundColor(.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
