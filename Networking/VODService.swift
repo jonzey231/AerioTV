@@ -1010,12 +1010,14 @@ enum TMDBService {
         let results: [Item]
         struct Item: Decodable {
             let posterPath: String?
+            let backdropPath: String?
             let mediaType: String?
             let popularity: Double?
             let releaseDate: String?
             let firstAirDate: String?
             enum CodingKeys: String, CodingKey {
                 case posterPath = "poster_path"
+                case backdropPath = "backdrop_path"
                 case mediaType = "media_type"
                 case popularity
                 case releaseDate = "release_date"
@@ -1113,6 +1115,90 @@ enum TMDBService {
         // the ProgramInfo-only hit log, and this also covers the VOD path.
         debugLog("🎬 TMDB search '\(title)' -> \(posterURL?.absoluteString ?? "no match")")
         return posterURL
+    }
+
+    nonisolated(unsafe) private static let backdropCache = NSCache<NSString, NSString>()
+
+    /// Landscape art for a title (hero fallback when the provider row has
+    /// none): /search/multi, year-preferred, w1280. Cached per title.
+    static func backdropURL(forTitle title: String, isMovie: Bool, apiKey: String, size: String = "w1280") async -> URL? {
+        let cacheKey = "\(isMovie ? "m" : "t"):" + title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let cached = backdropCache.object(forKey: cacheKey as NSString) {
+            let path = cached as String
+            return path.isEmpty ? nil : URL(string: imageBase + "/\(size)" + path)
+        }
+        let (cleaned, year) = splitTitleYear(title)
+        guard !cleaned.isEmpty else { return nil }
+        let wantType = isMovie ? "movie" : "tv"
+        var path: String?
+        var sawResponse = false
+        for attempt in searchAttempts(for: cleaned) {
+            guard let req = makeRequest(path: "/search/multi", queryItems: [
+                URLQueryItem(name: "query", value: attempt),
+                URLQueryItem(name: "include_adult", value: "false")
+            ], key: apiKey) else { continue }
+            guard let (data, resp) = try? await session.data(for: req),
+                  let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                  let decoded = try? JSONDecoder().decode(SearchResponse.self, from: data)
+            else { continue }
+            sawResponse = true
+            let hits = decoded.results.filter { ($0.backdropPath?.isEmpty == false) && $0.mediaType == wantType }
+            if let y = year, let hit = hits.first(where: { ($0.releaseDate ?? $0.firstAirDate ?? "").hasPrefix(y) }) {
+                path = hit.backdropPath
+            } else if let hit = hits.first {
+                path = hit.backdropPath
+            }
+            if path != nil { break }
+        }
+        if sawResponse { backdropCache.setObject((path ?? "") as NSString, forKey: cacheKey as NSString) }
+        return (path?.isEmpty == false) ? URL(string: imageBase + "/\(size)" + path!) : nil
+    }
+
+    // MARK: Per-title search (art cache enrichment)
+
+    private struct TitleSearchResponse: Decodable {
+        struct Item: Decodable {
+            let id: Int?
+            let posterPath: String?
+            let backdropPath: String?
+            let releaseDate: String?
+            let firstAirDate: String?
+            let popularity: Double?
+            enum CodingKeys: String, CodingKey {
+                case id, popularity
+                case posterPath = "poster_path"
+                case backdropPath = "backdrop_path"
+                case releaseDate = "release_date"
+                case firstAirDate = "first_air_date"
+            }
+        }
+        let results: [Item]?
+    }
+
+    /// One typed search (movie or tv) with a year filter when the title
+    /// carries one. Returns nil on transport failure (retryable) and an
+    /// entry with empty paths on a confirmed miss.
+    static func lookupArt(title: String, isMovie: Bool, apiKey: String) async -> TMDBArtCache.Entry? {
+        let (cleaned, year) = splitTitleYear(title)
+        guard !cleaned.isEmpty else { return TMDBArtCache.Entry(tmdbID: "", poster: "", backdrop: "", at: Date()) }
+        let path = isMovie ? "/search/movie" : "/search/tv"
+        var items = [URLQueryItem(name: "query", value: cleaned), URLQueryItem(name: "include_adult", value: "false")]
+        if let y = year { items.append(URLQueryItem(name: isMovie ? "year" : "first_air_date_year", value: y)) }
+        guard let req = makeRequest(path: path, queryItems: items, key: apiKey) else { return nil }
+        guard let (data, resp) = try? await session.data(for: req),
+              let http = resp as? HTTPURLResponse else { return nil }
+        if http.statusCode == 429 { return nil }
+        guard http.statusCode == 200,
+              let decoded = try? JSONDecoder().decode(TitleSearchResponse.self, from: data) else { return nil }
+        let results = decoded.results ?? []
+        let hit = results.first(where: { $0.posterPath?.isEmpty == false })
+            ?? results.first
+        return TMDBArtCache.Entry(tmdbID: hit?.id.map(String.init) ?? "",
+                                  poster: hit?.posterPath ?? "", backdrop: hit?.backdropPath ?? "", at: Date())
+    }
+
+    static func imageURL(path: String, size: String) -> URL? {
+        path.isEmpty ? nil : URL(string: imageBase + "/\(size)" + path)
     }
 
     private struct DetailResponse: Decodable {
@@ -1827,5 +1913,133 @@ extension VODService {
         let f2 = ISO8601DateFormatter()
         f2.formatOptions = [.withInternetDateTime]
         return f2.date(from: raw)
+    }
+}
+
+
+// MARK: - TMDB art cache (Emby-style: resolve once, keep the paths)
+
+/// Persistent title -> TMDB id / poster / backdrop map (Logan 2026-09-04:
+/// TMDB art is the priority when a key is set; provider art the fallback).
+/// Stores PATHS, not pixels: ~100 bytes a title, so a 5k library is about
+/// half a megabyte of JSON in Application Support. Filled by `enrich` in
+/// the background after a sweep, throttled under TMDB's rate limit;
+/// confirmed misses are kept (retried after 30 days) so a title is never
+/// searched twice per month.
+@MainActor
+final class TMDBArtCache: ObservableObject {
+    static let shared = TMDBArtCache()
+
+    struct Entry: Codable, Sendable {
+        var tmdbID: String
+        var poster: String
+        var backdrop: String
+        var at: Date
+    }
+
+    /// Bumped (throttled) as entries land so poster cards re-read.
+    @Published private(set) var version = 0
+    private var entries: [String: Entry] = [:]
+    private var loaded = false
+    private var dirty = false
+    private var saveTask: Task<Void, Never>?
+    private var enrichTasks: [String: Task<Void, Never>] = [:]
+
+    private static var fileURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return dir.appendingPathComponent("tmdb-art-cache.json")
+    }
+
+    static func key(for item: VODDisplayItem) -> String {
+        (item.type == .movie ? "m:" : "t:") + LibraryMatcher.cleanTitle(item.name)
+    }
+
+    func loadIfNeeded() {
+        guard !loaded else { return }
+        loaded = true
+        if let data = try? Data(contentsOf: Self.fileURL),
+           let map = try? JSONDecoder().decode([String: Entry].self, from: data) {
+            entries = map
+        }
+    }
+
+    func entry(for item: VODDisplayItem) -> Entry? {
+        loadIfNeeded()
+        return entries[Self.key(for: item)]
+    }
+
+    func posterURL(for item: VODDisplayItem, size: String = "w500") -> URL? {
+        guard let e = entry(for: item), !e.poster.isEmpty else { return nil }
+        return TMDBService.imageURL(path: e.poster, size: size)
+    }
+
+    func backdropURL(for item: VODDisplayItem, size: String = "w1280") -> URL? {
+        guard let e = entry(for: item), !e.backdrop.isEmpty else { return nil }
+        return TMDBService.imageURL(path: e.backdrop, size: size)
+    }
+
+    func tmdbID(for item: VODDisplayItem) -> String? {
+        guard let e = entry(for: item), !e.tmdbID.isEmpty else { return nil }
+        return e.tmdbID
+    }
+
+    private func store(_ e: Entry, key: String) {
+        entries[key] = e
+        dirty = true
+        scheduleSave()
+    }
+
+    private func scheduleSave() {
+        guard saveTask == nil else { return }
+        saveTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            saveTask = nil
+            guard dirty else { return }
+            dirty = false
+            version += 1
+            let snapshot = entries
+            let url = Self.fileURL
+            Task.detached(priority: .utility) {
+                if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: url, options: .atomic) }
+            }
+        }
+    }
+
+    /// Resolves every title not yet cached (or whose miss is older than
+    /// 30 days). One pass per library kind at a time; a new call replaces
+    /// a running pass (the library republished). About 12 requests per
+    /// second, well under TMDB's limit, so a 5k library takes ~7 minutes
+    /// once and nothing on later launches.
+    func enrich(_ items: [VODDisplayItem], isMovie: Bool, priority: [VODDisplayItem] = []) {
+        guard TMDBPosters.isEnabled, let apiKey = TMDBPosters.apiKey else { return }
+        loadIfNeeded()
+        let kindKey = isMovie ? "movie" : "series"
+        enrichTasks[kindKey]?.cancel()
+        let cutoff = Date().addingTimeInterval(-30 * 86_400)
+        let ordered = priority + items
+        var seen = Set<String>()
+        let todo: [(key: String, title: String)] = ordered.compactMap { item in
+            let k = Self.key(for: item)
+            guard seen.insert(k).inserted else { return nil }
+            if let e = entries[k], !(e.poster.isEmpty && e.at < cutoff) { return nil }
+            return (k, item.displayName)
+        }
+        guard !todo.isEmpty else { return }
+        debugLog("[TMDB-ART] enrich \(kindKey): \(todo.count) of \(ordered.count) titles to resolve")
+        enrichTasks[kindKey] = Task { @MainActor in
+            var resolved = 0
+            for (k, title) in todo {
+                guard !Task.isCancelled else { return }
+                if let e = await TMDBService.lookupArt(title: title, isMovie: isMovie, apiKey: apiKey) {
+                    store(e, key: k)
+                    resolved += 1
+                } else {
+                    // Transport failure or 429: back off and keep going.
+                    try? await Task.sleep(for: .seconds(2))
+                }
+                try? await Task.sleep(for: .milliseconds(80))
+            }
+            debugLog("[TMDB-ART] enrich \(kindKey): done, \(resolved) resolved")
+        }
     }
 }

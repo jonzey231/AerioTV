@@ -612,7 +612,7 @@ struct AppBehaviorsSettingsView: View {
             } header: {
                 Text("Program Posters").sectionHeaderStyle()
             } footer: {
-                Text("If iCloud Sync is enabled, your key is saved to your iCloud Keychain and syncs to your other devices. Get a free key at themoviedb.org under Settings, then API; paste either the API Key or the Read Access Token. Posters appear in Program Info and on VOD with no provider art.")
+                Text("If iCloud Sync is enabled, your key is saved to your iCloud Keychain and syncs to your other devices. Get a free key at themoviedb.org under Settings, then API; paste either the API Key or the Read Access Token. With a key, artwork and details for Movies and TV Shows come from TMDB first and your provider fills any gaps.\n\nThis product uses the TMDB API but is not endorsed or certified by TMDB.")
                     .font(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)

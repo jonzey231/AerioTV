@@ -448,6 +448,7 @@ struct VODDetailView: View {
             await loadTMDBCreditsIfNeeded()
             await loadTMDBPosterIfNeeded()
             #if os(tvOS)
+            await loadTMDBBackdropIfNeeded()
             await loadRelatedIfNeeded()
             #endif
         }
@@ -549,8 +550,20 @@ struct VODDetailView: View {
     @State private var relatedMatchedCount = -1
     @ObservedObject private var relatedLibrary = VODStore.shared
 
+    /// TMDB backdrop first when a key is set, then the provider's, then a
+    /// poster (Logan 2026-09-04: TMDB is the priority, provider the fallback).
+    @State private var tmdbBackdropURL: URL?
     private var tvHeroURL: URL? {
-        (fullMovie?.backdropURL ?? fullSeries?.backdropURL) ?? item.posterURL ?? tmdbPosterURL
+        TMDBArtCache.shared.backdropURL(for: item) ?? tmdbBackdropURL
+            ?? (fullMovie?.backdropURL ?? fullSeries?.backdropURL) ?? item.posterURL ?? tmdbPosterURL
+    }
+
+    @MainActor
+    private func loadTMDBBackdropIfNeeded() async {
+        guard usesTVMovieLayout, tmdbBackdropURL == nil,
+              TMDBArtCache.shared.backdropURL(for: item) == nil,
+              TMDBPosters.isEnabled, let apiKey = TMDBPosters.apiKey else { return }
+        tmdbBackdropURL = await TMDBService.backdropURL(forTitle: item.displayName, isMovie: item.type == .movie, apiKey: apiKey)
     }
 
     // Server-wins merges (provider value first, TMDB backfill for blanks),
@@ -767,27 +780,6 @@ struct VODDetailView: View {
         let own = ep.cleanedTitle(showName: item.name)
         if own.count > 2 { return own }
         return info(for: ep)?.name ?? "Episode \(ep.episodeNumber)"
-    }
-
-    /// Series page row: main cast, then the highlighted episode's guest
-    /// stars, then crew (creators, director, writers) last, the way Emby
-    /// and Plex order it (Logan 2026-09-04). One row, not two.
-    private var rowPeople: (title: String, people: [TMDBPerson]) {
-        let crewRoles: Set<String> = ["Creator", "Director", "Writer", "Teleplay", "Story"]
-        let mainCast = castCrewPeople.filter { !crewRoles.contains($0.role ?? "") }
-        let mainCrew = castCrewPeople.filter { crewRoles.contains($0.role ?? "") }
-        var title = "Cast & Crew"
-        var ordered: [TMDBPerson] = mainCast + mainCrew
-        if usesTVMovieLayout, item.type == .series,
-           let series = fullSeries, selectedSeason < series.seasons.count,
-           let id = peopleEpisodeID,
-           let ep = series.seasons[selectedSeason].episodes.first(where: { $0.id == id }),
-           let info = info(for: ep) {
-            title = "Cast & Crew · Episode \(ep.episodeNumber)"
-            ordered = mainCast + info.guestStars + info.crew + mainCrew
-        }
-        var seen = Set<String>()
-        return (title, ordered.filter { seen.insert($0.id).inserted })
     }
 
     /// Guest stars and key crew for the focused episode.
@@ -2266,6 +2258,29 @@ struct VODDetailView: View {
     }
 
     // MARK: - Cast & Crew strip
+    /// Series page row: main cast, then the highlighted episode's guest
+    /// stars, then crew (creators, director, writers) last, the way Emby
+    /// and Plex order it (Logan 2026-09-04). One row, not two.
+    private var rowPeople: (title: String, people: [TMDBPerson]) {
+        let crewRoles: Set<String> = ["Creator", "Director", "Writer", "Teleplay", "Story"]
+        let mainCast = castCrewPeople.filter { !crewRoles.contains($0.role ?? "") }
+        let mainCrew = castCrewPeople.filter { crewRoles.contains($0.role ?? "") }
+        var title = "Cast & Crew"
+        var ordered: [TMDBPerson] = mainCast + mainCrew
+        #if os(tvOS)
+        if usesTVMovieLayout, item.type == .series,
+           let series = fullSeries, selectedSeason < series.seasons.count,
+           let id = peopleEpisodeID,
+           let ep = series.seasons[selectedSeason].episodes.first(where: { $0.id == id }),
+           let info = info(for: ep) {
+            title = "Cast & Crew · Episode \(ep.episodeNumber)"
+            ordered = mainCast + info.guestStars + info.crew + mainCrew
+        }
+        #endif
+        var seen = Set<String>()
+        return (title, ordered.filter { seen.insert($0.id).inserted })
+    }
+
     @ViewBuilder
     private var castCrewSection: some View {
         let row = rowPeople

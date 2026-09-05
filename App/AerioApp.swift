@@ -299,6 +299,14 @@ struct AerioApp: App {
         }
         #endif
 
+        // Artwork comes from CDNs that send long cache lifetimes (TMDB,
+        // provider poster hosts); the system default HTTP cache is a few
+        // megabytes and evicts within one scroll, so every launch re-pulled
+        // every poster. A bounded disk cache (purgeable by the OS) keeps a
+        // second launch to almost no image traffic (Logan 2026-09-04).
+        URLCache.shared = URLCache(memoryCapacity: 64 * 1024 * 1024,
+                                   diskCapacity: 400 * 1024 * 1024)
+
         // Ensure the Application Support directory exists before SwiftData/CoreData
         // tries to create the SQLite store there. On a fresh install the directory
         // may not exist, causing noisy (but auto-recovered) CoreData errors.

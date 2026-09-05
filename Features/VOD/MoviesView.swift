@@ -136,6 +136,12 @@ struct MoviesView: View {
     private var isLoadingLibrary: Bool { kind == .series ? vodStore.isLoadingSeries : vodStore.isLoadingMovies }
     private var libraryError: String? { kind == .series ? vodStore.seriesError : vodStore.moviesError }
     private var hasLoadedLibrary: Bool { kind == .series ? vodStore.hasLoadedSeries : vodStore.hasLoadedMovies }
+    /// Background TMDB art pass over the library once a sweep completes
+    /// (hero titles first so the carousel gets its art immediately).
+    private func enrichArt() {
+        guard hasLoadedLibrary else { return }
+        TMDBArtCache.shared.enrich(libraryItems, isMovie: kind == .movie, priority: heroPages.map(\.item))
+    }
     private func searchLibrary(_ query: String, providerID: Int?) {
         if kind == .series {
             vodStore.searchSeries(query: query, servers: servers, providerID: providerID)
@@ -509,8 +515,11 @@ struct MoviesView: View {
             .onAppear {
                 pushRouter.push = { navPath.append($0) }
                 refreshDispatcharrHeaders(); refreshHeroPages(); refreshWatchlistItems()
+                enrichArt()
             }
             .onChange(of: heroPagesKey) { _, _ in refreshHeroPages() }
+            .onChange(of: hasLoadedLibrary) { _, loaded in if loaded { enrichArt() } }
+            .onChange(of: TMDBArtCache.shared.version) { _, _ in heroPages = heroPages.map { applyBackdrop($0) } }
             .onChange(of: watchlistKey) { _, _ in refreshWatchlistItems() }
             .onChange(of: dispatcharrHeadersKey) { _, _ in refreshDispatcharrHeaders() }
             .onAppear {
@@ -961,6 +970,10 @@ struct MoviesView: View {
     /// tvOS focus move re-evaluates the body (Time Profiler 2026-09-04
     /// 15:24: a third of main thread time while stepping rows).
     @State private var heroPages: [MoviesHeroPage] = []
+    /// TMDB landscape art per hero item id, for rows without a backdrop
+    /// (a portrait poster cropped to the hero frame read as badly scaled,
+    /// Logan 2026-09-04).
+    @State private var heroBackdrops: [String: URL] = [:]
 
     private var heroPagesKey: String {
         let progress = movieProgress.prefix(12).map { "\($0.vodID)|\($0.positionMs)" }.joined(separator: ",")
@@ -981,16 +994,46 @@ struct MoviesView: View {
             let item = byID[key] ?? (kind == .movie ? MoviesView.syntheticItem(from: p) : nil)
             return item.map { MoviesHeroPage(item: $0, progress: p) }
         }
-        if !resumes.isEmpty { heroPages = resumes; return }
+        if !resumes.isEmpty {
+            heroPages = resumes.map { applyBackdrop($0) }
+            fetchHeroBackdrops(for: resumes)
+            return
+        }
         // Progress rows exist but their titles are not loaded yet (the
         // sweep is still running): keep what is showing rather than
         // swapping in a random featured card (Logan 2026-09-04: "carousel
         // replaced by a static single card" mid-sweep on TV Shows).
         if !progress.isEmpty, isLoadingLibrary { return }
         if let single = recentlyAdded.first ?? visibleMovies.first {
-            heroPages = [MoviesHeroPage(item: single, progress: nil)]
+            let page = MoviesHeroPage(item: single, progress: nil)
+            heroPages = [applyBackdrop(page)]
+            fetchHeroBackdrops(for: [page])
         } else {
             heroPages = []
+        }
+    }
+
+    private func applyBackdrop(_ page: MoviesHeroPage) -> MoviesHeroPage {
+        var p = page
+        p.backdropOverride = TMDBArtCache.shared.backdropURL(for: page.item) ?? heroBackdrops[page.item.id]
+        return p
+    }
+
+    /// Fills heroBackdrops from TMDB for every hero page (TMDB is the
+    /// priority when a key is set; the provider's art is the fallback);
+    /// re-applies to the pages once fetched.
+    private func fetchHeroBackdrops(for pages: [MoviesHeroPage]) {
+        guard TMDBPosters.isEnabled, let apiKey = TMDBPosters.apiKey else { return }
+        let missing = pages.filter { heroBackdrops[$0.item.id] == nil && TMDBArtCache.shared.backdropURL(for: $0.item) == nil }
+        guard !missing.isEmpty else { return }
+        let isMovie = kind == .movie
+        Task { @MainActor in
+            for page in missing {
+                if let url = await TMDBService.backdropURL(forTitle: page.item.displayName, isMovie: isMovie, apiKey: apiKey) {
+                    heroBackdrops[page.item.id] = url
+                }
+            }
+            heroPages = heroPages.map { applyBackdrop($0) }
         }
     }
 
@@ -2184,6 +2227,11 @@ struct MoviesView: View {
 struct VODPosterCard: View {
     let item: VODDisplayItem
     var headers: [String: String] = [:]
+    /// TMDB art first when the cache has it (key set), provider poster
+    /// otherwise. The card observes the cache so art lands as the
+    /// background pass resolves titles.
+    @ObservedObject private var art = TMDBArtCache.shared
+    private var posterURL: URL? { art.posterURL(for: item) ?? item.posterURL }
 
     #if os(tvOS)
     @Environment(\.isFocused) private var isFocused
@@ -2193,8 +2241,8 @@ struct VODPosterCard: View {
         VStack(alignment: .leading, spacing: 6) {
             // Poster image — uses authenticated fetch so Dispatcharr /media/ images load correctly
             ZStack {
-                if item.posterURL != nil {
-                    AuthPosterImage(url: item.posterURL, headers: headers)
+                if posterURL != nil {
+                    AuthPosterImage(url: posterURL, headers: headers)
                         .aspectRatio(2/3, contentMode: .fill)
                         .clipped()
                 } else {
@@ -2292,6 +2340,8 @@ enum MoviesSortOrder: String, CaseIterable {
 struct MoviesHeroPage: Identifiable {
     let item: VODDisplayItem
     let progress: WatchProgress?
+    /// TMDB landscape art fetched by the owner when the row has none.
+    var backdropOverride: URL? = nil
     var id: String { item.id }
 }
 
@@ -2404,6 +2454,7 @@ struct MoviesHeroCarousel: View {
                         MoviesHero(
                             item: page.item,
                             progress: page.progress,
+                            backdropOverride: page.backdropOverride,
                             headers: headers,
                             onPrimary: { onPrimary(page) },
                             onPlayFromStart: { onPlayFromStart(page) },
@@ -2461,6 +2512,7 @@ struct MoviesHeroCarousel: View {
 struct MoviesHero: View {
     let item: VODDisplayItem
     let progress: WatchProgress?
+    var backdropOverride: URL? = nil
     var headers: [String: String] = [:]
     let onPrimary: () -> Void
     let onPlayFromStart: () -> Void
@@ -2507,7 +2559,9 @@ struct MoviesHero: View {
         return Double(p.positionMs) / Double(p.durationMs)
     }
 
-    private var artworkURL: URL? { item.backdropURL ?? item.posterURL }
+    /// TMDB art first when a key is set, then the provider's (Logan
+    /// 2026-09-04), then the poster.
+    private var artworkURL: URL? { backdropOverride ?? item.backdropURL ?? item.posterURL }
 
     #if os(tvOS)
     private let heroHeight: CGFloat = 420

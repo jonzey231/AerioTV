@@ -253,13 +253,15 @@ final class VODStore: ObservableObject {
                 for try await batch in api.searchVODMoviesStream(query: query, m3uAccountID: providerID) {
                     guard !Task.isCancelled else { break }
                     let items = batch.map { m -> VODDisplayItem in
+                        let cp = m.customProperties
                         var movie = VODMovie(
                             id: String(m.id), name: m.title,
                             posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
-                            backdropURL: nil,
+                            backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
+                                .flatMap { VODService.resolveImageURL($0, base: baseURL) },
                             rating: m.rating ?? "", plot: m.plot ?? "",
                             genre: m.genre ?? "", releaseDate: "", duration: "",
-                            cast: "", director: "", imdbID: "",
+                            cast: cp?.cast ?? "", director: cp?.director ?? "", imdbID: "",
                             categoryID: "", categoryName: "Movies",
                             streamURL: api.proxyMovieURL(uuid: m.uuid,
                                                          preferredStreamID: m.streams?.first?.streamID),
@@ -331,13 +333,15 @@ final class VODStore: ObservableObject {
                 for try await batch in api.searchVODSeriesStream(query: query, m3uAccountID: providerID) {
                     guard !Task.isCancelled else { break }
                     let items = batch.map { s -> VODDisplayItem in
+                        let cp = s.customProperties
                         var show = VODSeries(
                             id: String(s.id), name: s.name,
                             posterURL: s.posterURL.flatMap { resolveURL($0, base: baseURL) },
-                            backdropURL: nil,
+                            backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
+                                .flatMap { VODService.resolveImageURL($0, base: baseURL) },
                             rating: s.rating ?? "", plot: s.plot ?? "",
                             genre: s.genre ?? "", releaseDate: "",
-                            cast: "", director: "",
+                            cast: cp?.cast ?? "", director: cp?.director ?? "",
                             categoryID: "", categoryName: "Series",
                             serverID: sID, seasons: [], episodeCount: 0
                         )
@@ -409,13 +413,15 @@ final class VODStore: ObservableObject {
     }
 
     func makeSearchSeriesItem(_ s: DispatcharrVODSeries, baseURL: String, serverID: UUID) -> VODDisplayItem {
+        let cp = s.customProperties
         var show = VODSeries(
             id: String(s.id), name: s.name,
             posterURL: s.posterURL.flatMap { resolveURL($0, base: baseURL) },
-            backdropURL: nil,
+            backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
+                .flatMap { VODService.resolveImageURL($0, base: baseURL) },
             rating: s.rating ?? "", plot: s.plot ?? "",
             genre: s.genre ?? "", releaseDate: "",
-            cast: "", director: "",
+            cast: cp?.cast ?? "", director: cp?.director ?? "",
             categoryID: "", categoryName: "Series",
             serverID: serverID, seasons: [], episodeCount: 0
         )
@@ -597,13 +603,15 @@ final class VODStore: ObservableObject {
                                 uuid: m.uuid,
                                 preferredStreamID: m.streams?.first?.streamID
                             )
+                            let cp = m.customProperties
                             var movie = VODMovie(
                                 id: String(m.id), name: m.title,
                                 posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
-                                backdropURL: nil,
+                                backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
+                                    .flatMap { VODService.resolveImageURL($0, base: baseURL) },
                                 rating: m.rating ?? "", plot: m.plot ?? "",
                                 genre: m.genre ?? "", releaseDate: "", duration: "",
-                                cast: "", director: "", imdbID: "",
+                                cast: cp?.cast ?? "", director: cp?.director ?? "", imdbID: "",
                                 categoryID: category.id,
                                 categoryName: category.name,
                                 streamURL: streamURL, containerExtension: "mp4",
@@ -815,13 +823,15 @@ final class VODStore: ObservableObject {
                         guard !Task.isCancelled else { isLoadingSeries = false; return }
                         for s in batch {
                             guard seenUUIDs.insert(s.uuid).inserted else { continue }
+                            let cp = s.customProperties
                             var show = VODSeries(
                                 id: String(s.id), name: s.name,
                                 posterURL: s.posterURL.flatMap { resolveURL($0, base: baseURL) },
-                                backdropURL: nil,
+                                backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
+                                    .flatMap { VODService.resolveImageURL($0, base: baseURL) },
                                 rating: s.rating ?? "", plot: s.plot ?? "",
                                 genre: s.genre ?? "", releaseDate: "",
-                                cast: "", director: "",
+                                cast: cp?.cast ?? "", director: cp?.director ?? "",
                                 categoryID: category.id,
                                 categoryName: category.name,
                                 serverID: sID, seasons: [], episodeCount: 0
