@@ -2833,8 +2833,9 @@ struct MoviesHeroButton: View {
             .foregroundColor(isPrimary ? .appBackground : .textPrimary)
             .padding(.horizontal, title.isEmpty ? 14 : hPad)
             .frame(height: height)
+            // Pills, like the rest of the app (Logan 2026-09-05).
             .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                Capsule()
                     .fill(isPrimary ? Color.accentPrimary : Color.elevatedBackground)
             )
         }
@@ -2864,7 +2865,7 @@ private struct MoviesHeroButtonStyle: ButtonStyle {
         #if os(tvOS)
         configuration.label
             .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                Capsule()
                     .stroke(isPrimary ? Color.white : Color.accentPrimary,
                             lineWidth: isFocused ? 3 : 0)
             )
