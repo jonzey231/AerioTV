@@ -244,7 +244,9 @@
 		F3D3906F995E10786B3C924D /* Pods_Aerio_tvOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BB5A3862C25D699CA7931AE8 /* Pods_Aerio_tvOS.framework */; };
 		F564DDA103FF386C57BADEDE /* SwiftDraw in Frameworks */ = {isa = PBXBuildFile; productRef = 7DA561DBA031A892F41D5EDE /* SwiftDraw */; };
 		F6DA0B63B6CE27A4CE6FED9F /* GroupSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9D05502DABB3026FDA895C1 /* GroupSidebar.swift */; };
+		5EC13B0FAB0F82A309E38E02 /* GuidePreviewBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33064DC410FCAA08C5AFD943 /* GuidePreviewBanner.swift */; };
 		F7D895407ADC7A76C1959955 /* GroupSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9D05502DABB3026FDA895C1 /* GroupSidebar.swift */; };
+		300FEAF5ADB7BB2149BF00A3 /* GuidePreviewBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33064DC410FCAA08C5AFD943 /* GuidePreviewBanner.swift */; };
 		F7E00AC7791418818CC81D52 /* RemoteControlHints.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7548A26AF128BE1520EA3FFA /* RemoteControlHints.swift */; };
 		FA1AC2C2B4E0577B5456A002 /* ManageGroupsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1DD47CBF4B1FE912B0A001 /* ManageGroupsSheet.swift */; };
 		FA5005705700000000000002 /* FavoritesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA5005705700000000000001 /* FavoritesStore.swift */; };
@@ -427,6 +429,7 @@
 		B1C2D3E4F5A67890ACE0A001 /* RemoteInputLogger.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemoteInputLogger.swift; sourceTree = "<group>"; };
 		B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistImportViews.swift; sourceTree = "<group>"; };
 		B9D05502DABB3026FDA895C1 /* GroupSidebar.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GroupSidebar.swift; sourceTree = "<group>"; };
+		33064DC410FCAA08C5AFD943 /* GuidePreviewBanner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GuidePreviewBanner.swift; sourceTree = "<group>"; };
 		BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeveloperSettingsView.swift; sourceTree = "<group>"; };
 		BB5A3862C25D699CA7931AE8 /* Pods_Aerio_tvOS.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Aerio_tvOS.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		BD9D88342F84B8870005EA3D /* CarPlay.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CarPlay.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.4.sdk/System/Library/Frameworks/CarPlay.framework; sourceTree = DEVELOPER_DIR; };
@@ -546,6 +549,7 @@
 				7DA867EB45CC3896632152B6 /* RecordProgramSheet.swift */,
 				65319FCB313930453DF8EFCA /* SwitchStreamView.swift */,
 				B9D05502DABB3026FDA895C1 /* GroupSidebar.swift */,
+				33064DC410FCAA08C5AFD943 /* GuidePreviewBanner.swift */,
 			);
 			path = LiveTV;
 			sourceTree = "<group>";
@@ -1351,6 +1355,7 @@
 				DC1BFBCAE3EEC76BDFD08C51 /* RemoteControlStore.swift in Sources */,
 				5C8D82B12B1996C98C0B301B /* RemoteControlHints.swift in Sources */,
 				F7D895407ADC7A76C1959955 /* GroupSidebar.swift in Sources */,
+				300FEAF5ADB7BB2149BF00A3 /* GuidePreviewBanner.swift in Sources */,
 				E84F424529D2C704578CE146 /* ChannelListOverlay.swift in Sources */,
 				11498F007DA11FFB20B44A68 /* RecentChannelsOverlay.swift in Sources */,
 				5EE3763D926BD2529786F56B /* RemoteControlSettingsView.swift in Sources */,
@@ -1476,6 +1481,7 @@
 				E242B7EE7D858C8653991D1D /* RemoteControlStore.swift in Sources */,
 				F7E00AC7791418818CC81D52 /* RemoteControlHints.swift in Sources */,
 				F6DA0B63B6CE27A4CE6FED9F /* GroupSidebar.swift in Sources */,
+				5EC13B0FAB0F82A309E38E02 /* GuidePreviewBanner.swift in Sources */,
 				15A7DCA00E6B561C88FEAB27 /* ChannelListOverlay.swift in Sources */,
 				B4833CE00C0F5847BBC5F2A8 /* RecentChannelsOverlay.swift in Sources */,
 				240BCCC86B210B13A95FB87C /* RemoteControlSettingsView.swift in Sources */,

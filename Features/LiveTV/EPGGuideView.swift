@@ -36,6 +36,10 @@ struct GuideProgram: Identifiable, Equatable {
     let isPremiere: Bool
     let isFinale: Bool
     let isRepeat: Bool
+    /// Programme art from the EPG feed (XMLTV <icon>, Dispatcharr icon when
+    /// the grid carries one). Defaulted last so every existing constructor
+    /// call keeps compiling; the cache-load path fills it.
+    var posterURL: String? = nil
 
     /// Computed: the program is currently airing.
     var isLive: Bool {
@@ -51,7 +55,8 @@ struct GuideProgram: Identifiable, Equatable {
          start: Date, end: Date, category: String, programID: Int? = nil,
          subTitle: String? = nil, season: Int? = nil, episode: Int? = nil,
          isNew: Bool = false, isLiveBroadcast: Bool = false,
-         isPremiere: Bool = false, isFinale: Bool = false, isRepeat: Bool = false) {
+         isPremiere: Bool = false, isFinale: Bool = false, isRepeat: Bool = false,
+         posterURL: String? = nil) {
         self.channelID = channelID
         self.title = title
         self.description = description
@@ -67,6 +72,7 @@ struct GuideProgram: Identifiable, Equatable {
         self.isPremiere = isPremiere
         self.isFinale = isFinale
         self.isRepeat = isRepeat
+        self.posterURL = posterURL
     }
 }
 
@@ -555,7 +561,8 @@ final class GuideStore: ObservableObject {
                                               episode: ep.episode, isNew: ep.isNew,
                                               isLiveBroadcast: ep.isLiveBroadcast,
                                               isPremiere: ep.isPremiere, isFinale: ep.isFinale,
-                                              isRepeat: ep.isRepeat)
+                                              isRepeat: ep.isRepeat,
+                                              posterURL: ep.posterURL.isEmpty ? nil : ep.posterURL)
                         dict[ep.channelID, default: []].append(gp)
                         if ep.fetchedAt > newestFetch { newestFetch = ep.fetchedAt }
                     }
@@ -3144,7 +3151,14 @@ struct EPGGuideView: View {
     // Layout constants
     #if os(tvOS)
     private let channelColumnWidth: CGFloat = 240
-    private let rowHeight: CGFloat = 110
+    /// Channel Preview layout (Logan 2026-09-05): a banner above the grid
+    /// shows the focused programme, and the cells keep only the title and
+    /// the LIVE / NEW / REPEAT tags, so rows are shorter.
+    @AppStorage("liveTVLayout") private var liveTVLayout = "basic"
+    private var previewMode: Bool { liveTVLayout == "preview" }
+    @State private var previewProgram: GuideProgram?
+    @State private var previewChannel: ChannelDisplayItem?
+    private var rowHeight: CGFloat { previewMode ? 84 : 110 }
     private let timeHeaderHeight: CGFloat = 50
     private let pixelsPerHour: CGFloat = 600
     private let cellGap: CGFloat = 1        // hairline gap between program cells (Emby style)
@@ -3191,6 +3205,10 @@ struct EPGGuideView: View {
         #if os(tvOS)
             .ignoresSafeArea(.all, edges: [.leading, .trailing, .bottom])
         #endif
+            #if os(tvOS)
+            .onChange(of: guideStore.programs.count) { _, _ in seedPreviewIfNeeded() }
+            .onAppear { seedPreviewIfNeeded() }
+            #endif
             .task(id: channels.count) {
                 guard !channels.isEmpty else { return }
                 // Reset the rolling-prefetch "already fetched" set
@@ -3374,6 +3392,18 @@ struct EPGGuideView: View {
             // is exactly where the first channel row belongs.
             ScrollViewReader { proxy in
             VStack(spacing: 0) {
+                #if os(tvOS)
+                if previewMode {
+                    // No crossfade: old and new copy overlapped while stepping
+                    // channels quickly (recording 2026-09-05 11:20). Cut.
+                    GuidePreviewBanner(program: previewProgram, channel: previewChannel,
+                                       shortTimeFormatter: shortTimeFormatter)
+                        .transaction { $0.animation = nil }
+                        // Tucks under the (empty in sidebar mode) pill row's
+                        // padding so eight rows fit below (Logan 2026-09-05).
+                        .padding(.top, -40)
+                }
+                #endif
                 // ── Fixed time header ──
                 // Lifted OUT of the LazyVStack's pinned `Section` header.
                 // tvOS 27's AttributeGraph aborts (precondition_failure,
@@ -4462,7 +4492,9 @@ struct EPGGuideView: View {
             onMultiviewIntent: { handleMultiviewIntent(channel: $0) },
             onWatchCatchup: { ch, gp in handleWatchCatchup(channel: ch, prog: gp) },
             focusedProgramID: $focusedProgramID,
-            sidebarOpen: sidebarOpen
+            sidebarOpen: sidebarOpen,
+            compact: previewMode,
+            onFocused: previewMode ? { p, c in previewProgram = p; previewChannel = c } : nil
         )
         .offset(x: x, y: 0)
         #else
@@ -4477,6 +4509,17 @@ struct EPGGuideView: View {
         .offset(x: x, y: 0)
         #endif
     }
+
+    #if os(tvOS)
+    /// Before any cell has focus, the banner shows what is on the first
+    /// channel now (never an empty banner over a full guide).
+    private func seedPreviewIfNeeded() {
+        guard previewMode, previewProgram == nil, let ch = channels.first,
+              let live = guideStore.programs[ch.id]?.first(where: { $0.isLive }) else { return }
+        previewProgram = live
+        previewChannel = ch
+    }
+    #endif
 
     // MARK: - Time Indicator Line
     private func timeIndicatorLine(screenWidth: CGFloat, now: Date = Date()) -> some View {
@@ -5052,6 +5095,10 @@ private struct GuideProgramButton: View {
     /// non-focusable so the sidebar owns focus and a Right press can't 2D-move
     /// back into the guide (the tvOS analog of Android consuming Right).
     var sidebarOpen: Bool = false
+    /// Channel Preview layout: title + tags only (the banner carries the rest).
+    var compact: Bool = false
+    /// Fires the moment this cell takes focus (Channel Preview banner).
+    var onFocused: ((GuideProgram, ChannelDisplayItem) -> Void)? = nil
     #endif
     // Access ReminderManager directly — @ObservedObject on a singleton
     // would invalidate every program cell whenever any reminder changes.
@@ -5203,6 +5250,15 @@ private struct GuideProgramButton: View {
                 }
             }
             .layoutPriority(1)
+            if compact {
+                // Channel Preview: the banner shows subtitle, time and
+                // description; the cell keeps only the feed tags.
+                if showEpgBadges {
+                    EPGFlagsRow(isLiveBroadcast: prog.isLiveBroadcast, isNew: prog.isNew,
+                                isPremiere: prog.isPremiere, isFinale: prog.isFinale,
+                                isRepeat: prog.isRepeat, compact: true)
+                }
+            } else {
             // GH #34: the XMLTV <sub-title> (episode / sports-match name) is what
             // distinguishes same-title back-to-back programmes. Guarded against
             // the Dispatcharr paths that promote subTitle into description when
@@ -5241,6 +5297,7 @@ private struct GuideProgramButton: View {
                 }
             }
             .layoutPriority(1)
+            }   // compact
             #else
             HStack(spacing: 4) {
                 // Catch-up badge: aired + replayable from the archive.
@@ -5454,6 +5511,9 @@ private struct GuideProgramButton: View {
             .focusable(!sidebarOpen)
             .focused($isFocused)
             .focused(focusedProgramID, equals: prog.id)
+            .onChange(of: isFocused) { _, focused in
+                if focused { onFocused?(prog, channelItem) }
+            }
             .onTapGesture {
                 if multiviewStore.isStagingFromGuide {
                     onMultiviewIntent(channelItem)

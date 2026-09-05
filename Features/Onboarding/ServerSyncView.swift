@@ -585,11 +585,11 @@ private struct TVSkipButton: View {
                 .padding(.vertical, 14)
                 .frame(minWidth: 180)
                 .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    Capsule()
                         .fill(isFocused ? Color.accentPrimary.opacity(0.20) : Color.elevatedBackground.opacity(0.6))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    Capsule()
                         .stroke(Color.accentPrimary, lineWidth: isFocused ? 3 : 0)
                 )
         }

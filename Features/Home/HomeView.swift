@@ -4622,32 +4622,7 @@ struct MainTabView: View {
             }
             #endif
 
-            // #42 Part 3: tvOS Menu/Back hints, top-left of the Live TV guide,
-            // below the syncing toast. Compressed to at most TWO combined
-            // "gesture = result" lines (Logan 2026-08-07: the old stack of
-            // up to five sentence pills grew down over the guide's corner
-            // clock when the mini-player lines were showing).
-            #if os(tvOS)
-            if selectedTab == .liveTV && !showSearch && (!nowPlaying.isActive || nowPlaying.isMinimized) {
-                // GeometryReader so the width budget tracks the real container
-                // rather than a hard-coded point value that goes stale.
-                GeometryReader { geo in
-                    let budget = guideHintWidthBudget(geo.size.width)
-                    VStack(alignment: .leading, spacing: 6) {
-                        if nowPlaying.isActive && nowPlaying.isMinimized {
-                            guideMenuHint("Play/Pause = resume · Hold Right = close mini",
-                                          budget: budget)
-                        }
-                        guideMenuHint(guideNavHintLine, budget: budget)
-                    }
-                    .padding(.leading, 16)
-                    .padding(.top, isAnyBackgroundWork ? 52 : 12)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
-                .zIndex(1)
-                .allowsHitTesting(false)
-            }
-            #endif
+            // The tvOS Menu/Back hint pills were removed (Logan 2026-09-05).
 
             // Mode branch:
             //   .multiview → MultiviewContainerView (grid + transport)
@@ -4732,8 +4707,8 @@ struct MainTabView: View {
                 let isSoleStream = multiviewStore.tiles.count == 1
                 let minimized = isSoleStream && nowPlaying.isMinimized
                 GeometryReader { geo in
-                    let miniW: CGFloat = 400
-                    let miniH: CGFloat = 225
+                    let miniW: CGFloat = 410
+                    let miniH: CGFloat = 231
                     ZStack(alignment: .topTrailing) {
                         MultiviewContainerView()
                             .frame(
@@ -4785,7 +4760,7 @@ struct MainTabView: View {
                             .disabled(minimized)
                             .allowsHitTesting(!minimized)
                             .padding(.trailing, minimized ? 40 : 0)
-                            .padding(.top, minimized ? 40 : 0)
+                            .padding(.top, minimized ? 119 : 0)
                             // v1.6.13.x: capture mini's actual
                             // bottom for ChannelListView's chip-row
                             // push-down (tvOS branch).
@@ -4836,8 +4811,8 @@ struct MainTabView: View {
                 // recreating the player (avoids 1s+ hang and stream restart).
                 GeometryReader { geo in
                     let minimized = nowPlaying.isMinimized
-                    let miniW: CGFloat = 400
-                    let miniH: CGFloat = 225
+                    let miniW: CGFloat = 410
+                    let miniH: CGFloat = 231
 
                     ZStack(alignment: .topTrailing) {
                         PlayerView(
@@ -4861,7 +4836,9 @@ struct MainTabView: View {
                         .shadow(color: minimized ? .black.opacity(0.6) : .clear, radius: 20, y: 8)
                         .allowsHitTesting(!minimized) // Full-screen: interactive; mini: not
                         .padding(.trailing, minimized ? 40 : 0)
-                        .padding(.top, minimized ? 40 : 0)
+                        // Sits a little lower so it clears the tab bar
+                        // and the Channel Preview banner (Logan 2026-09-05).
+                        .padding(.top, minimized ? 119 : 0)
                         // v1.6.13.x: capture mini's actual bottom
                         // for ChannelListView's chip-row push-down
                         // (tvOS legacy-path branch).
@@ -5112,25 +5089,36 @@ struct MainTabView: View {
     /// alpha. The nav-bar-vanishes bug leaves SwiftUI state healthy, so the
     /// truth has to come from the UIKit layer.
     private func dumpBarHierarchy(_ tag: String) {
-        guard let window = UIApplication.shared.connectedScenes
-            .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
-            .first else {
-            debugLog("[BARDUMP \(tag)] no key window")
+        let windows = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+        guard !windows.isEmpty else {
+            debugLog("[BARDUMP \(tag)] no windows")
             return
         }
         var lines = 0
-        func walk(_ v: UIView, _ depth: Int) {
+        // Every window (the tvOS 27 tab bar was never found under the key
+        // window), and the FULL subtree under any UITabBar so its layout
+        // (stack view spacing, item frames) can be read.
+        func walk(_ v: UIView, _ depth: Int, insideBar: Bool) {
             let name = String(describing: type(of: v))
-            if name.range(of: "tab", options: .caseInsensitive) != nil
+            let isBar = v is UITabBar
+            if isBar || insideBar
+                || name.range(of: "tab", options: .caseInsensitive) != nil
                 || name.range(of: "toolbar", options: .caseInsensitive) != nil
                 || name.range(of: "navigationbar", options: .caseInsensitive) != nil {
-                debugLog("[BARDUMP \(tag)] d\(depth) \(name) frame=\(v.frame) hidden=\(v.isHidden) alpha=\(v.alpha) sub=\(v.subviews.count)")
+                var extra = ""
+                if let st = v as? UIStackView { extra = " spacing=\(st.spacing) axis=\(st.axis.rawValue)" }
+                debugLog("[BARDUMP \(tag)] d\(depth) \(name) frame=\(v.frame) hidden=\(v.isHidden) alpha=\(v.alpha) sub=\(v.subviews.count)\(extra)")
                 lines += 1
             }
-            for s in v.subviews { walk(s, depth + 1) }
+            for s in v.subviews { walk(s, depth + 1, insideBar: isBar || insideBar) }
         }
-        walk(window, 0)
-        debugLog("[BARDUMP \(tag)] done, matches=\(lines), windowSubviews=\(window.subviews.count)")
+        for (i, w) in windows.enumerated() {
+            debugLog("[BARDUMP \(tag)] window \(i) \(String(describing: type(of: w))) key=\(w.isKeyWindow) level=\(w.windowLevel.rawValue)")
+            walk(w, 0, insideBar: false)
+        }
+        debugLog("[BARDUMP \(tag)] done, matches=\(lines), windows=\(windows.count)")
     }
     #endif
 

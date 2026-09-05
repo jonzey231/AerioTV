@@ -185,6 +185,11 @@ struct ChannelListView: View {
     /// mini's bottom edge actually is, on any device + size class.
     private func miniPlayerTopInset(naturalTopAbsolute: CGFloat) -> CGFloat {
         guard nowPlaying.isActive, nowPlaying.isMinimized else { return 0 }
+        #if os(tvOS)
+        // Channel Preview: the banner reserves the mini's column instead of
+        // the whole guide dropping below it (Logan 2026-09-05).
+        if liveTVLayout == "preview" { return 0 }
+        #endif
         guard naturalTopAbsolute > 0 else { return 0 }
         #if os(iOS)
         guard UIDevice.current.userInterfaceIdiom == .pad else { return 0 }
@@ -322,6 +327,7 @@ struct ChannelListView: View {
     #endif
 
     private let hiddenGroupsKey = "hiddenChannelGroups"
+    @AppStorage("liveTVLayout") private var liveTVLayout = "basic"
     /// Favorites is a channel group now, always first (Logan 2026-09-05; the
     /// Favorites tab is gone). Same sentinel shape as "collection:<id>".
     static let favoritesToken = "favorites"

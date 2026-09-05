@@ -36,6 +36,9 @@ struct AppBehaviorsSettingsView: View {
     // session only and never persists here, so an explicit choice on one
     // device no longer clobbers another form factor's default.
     @AppStorage("defaultLiveTVView") private var defaultLiveTVView = ""
+    /// tvOS Live TV layout: "basic" (full cells) or "preview" (focused
+    /// programme banner above the guide, slim cells). Per device.
+    @AppStorage("liveTVLayout") private var liveTVLayout = "basic"
 
     // Live Rewind settings (redesigned 2026-07-11 per user directive
     // from the Z Fold field pass): depth + retention are SLIDER
@@ -717,6 +720,25 @@ struct AppBehaviorsSettingsView: View {
                             action: { defaultLiveTVView = option }
                         )
                     }
+                }
+
+                SettingsSection("Live TV Layout", style: .card) {
+                    TVSettingsSelectionRow(
+                        icon: "rectangle.grid.1x2",
+                        iconColor: theme.accent,
+                        label: "Basic",
+                        subtitle: "Full program details in every guide cell",
+                        isSelected: liveTVLayout != "preview",
+                        action: { liveTVLayout = "basic" }
+                    )
+                    TVSettingsSelectionRow(
+                        icon: "rectangle.topthird.inset.filled",
+                        iconColor: theme.accent,
+                        label: "Channel Preview",
+                        subtitle: "A banner shows the highlighted program; cells keep the title and tags",
+                        isSelected: liveTVLayout == "preview",
+                        action: { liveTVLayout = "preview" }
+                    )
                 }
 
                 SettingsSection("Guide", style: .card) {
