@@ -559,12 +559,6 @@ struct AppBehaviorsSettingsView: View {
                 .listRowBackground(Color.cardBackground)
 
                 if tmdbPostersEnabled {
-                    Image("TMDBLogoShort")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(height: 44)
-                        .accessibilityLabel("The Movie Database")
-                        .listRowBackground(Color.cardBackground)
                     HStack(spacing: 8) {
                         Group {
                             if tmdbKeyVisible {
@@ -858,14 +852,6 @@ struct AppBehaviorsSettingsView: View {
                     ) { _ in }
 
                     if tmdbPostersEnabled {
-                        Image("TMDBLogoShort")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(height: 44)
-                            .accessibilityLabel("The Movie Database")
-                            .padding(.horizontal, 20)
-                            .padding(.top, 8)
-
                         // Same field component as the onboarding password
                         // field (AddServerView) - types correctly on tvOS.
                         // revealWhenFocused shows the key in plaintext while
