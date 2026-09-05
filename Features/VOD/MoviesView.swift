@@ -2079,7 +2079,7 @@ struct MoviesView: View {
         Button(action: action) {
             Text(label).font(.system(size: 22, weight: .medium))
         }
-        .buttonStyle(TVGroupPillButtonStyle(isSelected: isSelected))
+        .buttonStyle(MoviesPillStyle(isSelected: isSelected))
         #else
         DVRSegmentPill(label: label, isSelected: isSelected, action: action)
         #endif
@@ -2406,12 +2406,6 @@ struct MoviesHeroCarousel: View {
     /// The catcher exists only while focus is outside the hero, so Up from
     /// a hero button goes straight to the tab bar.
     @State private var currentID: String?
-    #if os(tvOS)
-    /// "<page id>|primary|start|details" of the focused hero button.
-    @FocusState private var heroFocus: String?
-    @FocusState private var catcherFocused: Bool
-    @State private var lastHeroButton: String?
-    private var primaryFocusID: String { "\(currentID ?? pages.first?.id ?? "")|primary" }
 
     /// Page the dots mark. While a hero button has focus that button's page
     /// wins: the scroll view nudges to keep a focused button visible, which
@@ -2426,6 +2420,13 @@ struct MoviesHeroCarousel: View {
         #endif
         return currentID ?? pages.first?.id
     }
+    #if os(tvOS)
+    /// "<page id>|primary|start|details" of the focused hero button.
+    @FocusState private var heroFocus: String?
+    @FocusState private var catcherFocused: Bool
+    @State private var lastHeroButton: String?
+    private var primaryFocusID: String { "\(currentID ?? pages.first?.id ?? "")|primary" }
+
     #endif
 
     var body: some View {
@@ -3377,3 +3378,24 @@ enum TVFocusBridge {
 }
 #endif
 
+#if os(tvOS)
+/// Group and season pills on the library tabs and series page: the guide's
+/// pill shape, plus a white ring whenever focused, selected or not (Logan
+/// 2026-09-05). The guide keeps TVGroupPillButtonStyle and its own ruling.
+struct MoviesPillStyle: ButtonStyle {
+    let isSelected: Bool
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(isSelected ? .appBackground : (isFocused ? .white : .textSecondary))
+            .padding(.horizontal, 26)
+            .padding(.vertical, 13)
+            .background(Capsule().fill(isSelected ? Color.accentPrimary : Color.elevatedBackground))
+            .overlay(Capsule().stroke(Color.white, lineWidth: isFocused ? 3 : 0))
+            .scaleEffect(isFocused ? 1.05 : 1.0)
+            .opacity(isFocused || isSelected ? 1.0 : 0.85)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+#endif

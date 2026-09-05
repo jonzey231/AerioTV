@@ -838,7 +838,7 @@ struct VODDetailView: View {
                                     Text("Season \(season.seasonNumber)")
                                         .font(.system(size: 22, weight: .medium))
                                 }
-                                .buttonStyle(TVSeasonPillStyle(isSelected: selectedSeason == idx))
+                                .buttonStyle(MoviesPillStyle(isSelected: selectedSeason == idx))
                             }
                         }
                         .padding(.horizontal, 56)
@@ -3224,24 +3224,3 @@ extension VODStore {
         return hit
     }
 }
-
-#if os(tvOS)
-/// Season pill on the series page: the guide's group pill, plus a white
-/// ring whenever focused, selected or not (Logan 2026-09-05).
-private struct TVSeasonPillStyle: ButtonStyle {
-    let isSelected: Bool
-    @Environment(\.isFocused) private var isFocused
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundColor(isSelected ? .appBackground : (isFocused ? .white : .textSecondary))
-            .padding(.horizontal, 26)
-            .padding(.vertical, 13)
-            .background(Capsule().fill(isSelected ? Color.accentPrimary : Color.elevatedBackground))
-            .overlay(Capsule().stroke(Color.white, lineWidth: isFocused ? 3 : 0))
-            .scaleEffect(isFocused ? 1.05 : 1.0)
-            .opacity(isFocused || isSelected ? 1.0 : 0.85)
-            .animation(.easeInOut(duration: 0.15), value: isFocused)
-    }
-}
-#endif
