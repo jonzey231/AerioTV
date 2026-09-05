@@ -679,6 +679,10 @@ final class VODStore: ObservableObject {
             isLoadingMovies = false
             hasLoadedMovies = true
             debugLog("🎬 VODStore.loadMovies: done, \(accumulated.count) movies across \(enabledMovieCats.count) categories")
+            // TMDB art pass from the store, not the tab: tvOS builds a tab's
+            // content on first selection, so a view-driven trigger only ran
+            // once the user visited the tab (log 2026-09-04 22:48).
+            TMDBArtCache.shared.enrich(accumulated, isMovie: true)
             return
         }
 
@@ -880,6 +884,7 @@ final class VODStore: ObservableObject {
             isLoadingSeries = false
             hasLoadedSeries = true
             debugLog("📺 VODStore.loadSeries: done, \(accumulated.count) series across \(enabledSeriesCats.count) enabled categories")
+            TMDBArtCache.shared.enrich(accumulated, isMovie: false)
             return
         }
 
