@@ -328,6 +328,23 @@ struct ChannelListView: View {
 
     private let hiddenGroupsKey = "hiddenChannelGroups"
     @AppStorage("liveTVLayout") private var liveTVLayout = "basic"
+    #if os(tvOS)
+    /// Channel Preview banner state, reported by the guide (focused cell).
+    @State private var previewProgram: GuideProgram?
+    @State private var previewChannel: ChannelDisplayItem?
+    @State private var bannerInfoTarget: ProgramInfoTarget?
+    /// When the banner description last lost focus: a pill gaining focus
+    /// right after it on a Down press is redirected to the first pill
+    /// (Logan 2026-09-05: Down from the description lands on the first
+    /// channel group pill, not whichever sits under the text).
+    @State private var bannerDescriptionLostFocusAt: Date = .distantPast
+    @State private var bannerDescriptionFocused = false
+    @FocusState private var pillEntryCatcherFocused: Bool
+    /// Set by the nav circles' Down catcher: focus the banner description
+    /// (Channel Preview) or the first channel (Basic).
+    @State private var bannerFocusRequest = false
+    private var previewMode: Bool { liveTVLayout == "preview" }
+    #endif
     /// Favorites is a channel group now, always first (Logan 2026-09-05; the
     /// Favorites tab is gone). Same sentinel shape as "collection:<id>".
     static let favoritesToken = "favorites"
@@ -466,6 +483,22 @@ struct ChannelListView: View {
                 .onChange(of: favoritesStore.favoriteItems.count) { _, _ in
                     favoritesDidChange()
                 }
+                #if os(tvOS)
+                .onChange(of: groupPillFocused) { old, new in
+                    redirectPillEntryFromBanner(old: old, new: new)
+                }
+                // Down from the nav circles (Logan 2026-09-05): the banner
+                // description in Channel Preview, else the first channel. On
+                // the shared chain: a first attempt sat on the List view's
+                // chain, which the Guide never renders (trace 13:13).
+                .onReceive(NotificationCenter.default.publisher(for: .aerioLiveTVEntryFromTop)) { _ in
+                    if previewMode, previewProgram != nil {
+                        bannerFocusRequest = true
+                    } else {
+                        NotificationCenter.default.post(name: .guideScrollToTop, object: nil)
+                    }
+                }
+                #endif
 
                 // Sync filtered list whenever the store delivers new data.
                 .onChange(of: channelStore.channels) { _, items in
@@ -805,17 +838,53 @@ struct ChannelListView: View {
                     #endif
                     VStack(spacing: 0) {
                         #if os(tvOS)
-                        // The row ALWAYS renders on tvOS. It carries the
-                        // Guide/List toggle, Search and Refresh, none of which
-                        // are group selectors, so hiding it with the groups
-                        // took them out too: sidebar mode (mutually exclusive
-                        // with the pills) and single-group playlists both left
-                        // the Apple TV guide with no search and no refresh at
-                        // all. `groupFilterBar` decides internally whether the
-                        // group pills appear inside it.
-                        groupFilterBar
-                            .padding(.vertical, 10)
-                            .focusSection()
+                        // Channel Preview banner ABOVE the pill row so Up from
+                        // the guide reads rows, pills, banner, tab bar (Logan
+                        // 2026-09-05). No crossfade: old and new copy overlapped
+                        // while stepping channels (recording 11:20).
+                        if previewMode {
+                            GuidePreviewBanner(program: previewProgram, channel: previewChannel,
+                                               shortTimeFormatter: ClockFormat.guideShort(),
+                                               onSelectDescription: { openBannerInfo() },
+                                               onDescriptionFocusChange: { focused in
+                                                   bannerDescriptionFocused = focused
+                                                   if !focused { bannerDescriptionLostFocusAt = Date() }
+                                               },
+                                               focusRequest: $bannerFocusRequest)
+                                .transaction { $0.animation = nil }
+                                .sheet(item: $bannerInfoTarget) { ProgramInfoView(target: $0) }
+                                .focusSection()
+                                // Edge to edge like the guide: the banner's own 40pt
+                                // margins, not 80 + 40. Pulled up under the tab bar
+                                // so eight rows still fit (Logan 2026-09-05).
+                                .ignoresSafeArea(.container, edges: .horizontal)
+                                .padding(.top, -28)
+                        }
+                        // The pill row. Its leading controls moved to the nav
+                        // circles, so in sidebar mode (no pills) there is
+                        // nothing to draw and the empty row only added a gap.
+                        if showsGroupPills {
+                            // Down from the banner description: a full-width
+                            // catcher above the pills takes the hop and hands
+                            // focus to the first pill; without it the engine
+                            // landed on whichever pill sat under the text first
+                            // (Logan 2026-09-05). Exists only while the
+                            // description (or the catcher itself) has focus.
+                            if previewMode && (bannerDescriptionFocused || pillEntryCatcherFocused) {
+                                Color.clear
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 6)
+                                    .focusable(true)
+                                    .focused($pillEntryCatcherFocused)
+                                    .onChange(of: pillEntryCatcherFocused) { _, focused in
+                                        guard focused, let first = groupTokens.first else { return }
+                                        groupPillFocused = first
+                                    }
+                            }
+                            groupFilterBar
+                                .padding(.vertical, previewMode ? 4 : 10)
+                                .focusSection()
+                        }
                         #else
                         // Compact-chrome honors the user's hide-filter preference even
                         // in the iPad Guide layout (iPad itself is gated by the flag,
@@ -833,6 +902,10 @@ struct ChannelListView: View {
                                 startPlayback(item)
                             },
                             sidebarOpen: guideSidebarOpen,
+                            onPreviewProgramChange: { prog, ch in
+                                previewProgram = prog
+                                previewChannel = ch
+                            },
                             onRequestGroupSidebar: { programID in
                                 guideSidebarReturnProgramID = programID
                                 // #196: remember the group for the Back-revert
@@ -935,7 +1008,7 @@ struct ChannelListView: View {
                     // needs the focus pin.
                     if action == .focusGroupPills {
                         leftHoldPinningAll = true
-                        groupPillFocused = "All"
+                        groupPillFocused = groupTokens.first ?? "All"
                         leftHoldSafetyTask?.cancel()
                         leftHoldSafetyTask = Task { @MainActor in
                             // Backstop in case the release event is missed, so focus
@@ -1546,13 +1619,15 @@ struct ChannelListView: View {
     private func collectionPill(_ c: ChannelCollection, canFocus: Bool = true) -> some View {
         let token = "collection:\(c.id)"
         #if os(tvOS)
-        CollectionPillTV(
-            name: c.name,
+        // Same pill as every group (Logan 2026-09-05); long press = manage.
+        TVGroupPill(
+            group: token,
             isSelected: selectedGroup == token,
-            canFocus: canFocus,
-            onTap: { withAnimation(.spring(response: 0.25)) { selectedGroup = token } },
-            onLongPress: { managePillCollection = c }
+            action: { withAnimation(.spring(response: 0.25)) { selectedGroup = token } },
+            title: c.name
         )
+        .focused($groupPillFocused, equals: token)
+        .contextMenu { collectionManageActions(c) }
         #else
         Button {
             withAnimation(.spring(response: 0.25)) { selectedGroup = token }
@@ -1676,6 +1751,29 @@ struct ChannelListView: View {
             favoritesAvailable: favoritesStore.hasFavorites
         )
     }
+
+    #if os(tvOS)
+    private func redirectPillEntryFromBanner(old: String?, new: String?) {
+        // The description's focus-lost and the pill's focus-gained arrive in
+        // either order, so accept the flag OR a fresh timestamp.
+        let fromBanner = bannerDescriptionFocused
+            || Date().timeIntervalSince(bannerDescriptionLostFocusAt) < 0.4
+        guard old == nil, let new, TVFocusTracer.lastArrowPress == .down, fromBanner,
+              let first = groupTokens.first, new != first else { return }
+        debugLog("[FOCUS] pill row entered from the banner on \(new) -> \(first)")
+        groupPillFocused = first
+    }
+
+    private func openBannerInfo() {
+        guard let prog = previewProgram, let ch = previewChannel else { return }
+        bannerInfoTarget = ProgramInfoTarget(
+            channelName: ch.name, title: prog.title, start: prog.start, end: prog.end,
+            description: prog.description, category: prog.category, programID: prog.programID,
+            subTitle: prog.subTitle, season: prog.season, episode: prog.episode,
+            isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
+            isPremiere: prog.isPremiere, isFinale: prog.isFinale, isRepeat: prog.isRepeat)
+    }
+    #endif
 
     private func favoritesDidChange() {
         if selectedGroup == favoritesToken && !favoritesStore.hasFavorites {
@@ -2353,6 +2451,23 @@ struct ChannelRow: View {
         }
     }
     @State private var activeSheet: ChannelRowSheet? = nil
+    /// tvOS: Program Info as its own binding (native sheet); Record keeps
+    /// the full-screen cover.
+    private var programInfoTarget: Binding<ProgramInfoTarget?> {
+        Binding(
+            get: { if case .programInfo(let t) = activeSheet { return t } else { return nil } },
+            set: { if $0 == nil, case .programInfo = activeSheet { activeSheet = nil } }
+        )
+    }
+    /// tvOS: the Record case only, so the full-screen cover never presents
+    /// (empty) for Program Info and blocks the sheet (trace 2026-09-05 12:32:
+    /// focus went to nil with nothing on screen).
+    private var recordSheet: Binding<ChannelRowSheet?> {
+        Binding(
+            get: { if case .record = activeSheet { return activeSheet } else { return nil } },
+            set: { if $0 == nil, case .record = activeSheet { activeSheet = nil } }
+        )
+    }
     /// Catch-up: the resolved timeshift playback presented full screen
     /// (recordings-pattern), or nil. Row-local: only the expanded row
     /// that launched a replay ever sets it.
@@ -2515,7 +2630,7 @@ struct ChannelRow: View {
         // tvOS: single .fullScreenCover(item:) — see `ChannelRowSheet`
         // doc for why we consolidated away from the dual-modifier
         // setup.
-        .fullScreenCover(item: $activeSheet) { sheet in
+        .fullScreenCover(item: recordSheet) { sheet in
             switch sheet {
             case .record(let entry):
                 RecordProgramSheet(
@@ -2530,9 +2645,12 @@ struct ChannelRow: View {
                     streamURL: item.streamURL,
                     channelLogoURL: item.logoURL
                 )
-            case .programInfo(let target):
-                ProgramInfoView(target: target)
+            case .programInfo:
+                EmptyView()   // presented by the .sheet below
             }
+        }
+        .sheet(item: programInfoTarget) { target in
+            ProgramInfoView(target: target)
         }
         #else
         // iOS: attached at the outer body so this works whether the
@@ -2959,25 +3077,30 @@ struct ChannelRow: View {
                 // itself doesn't carry these flags.
                 let nowAiring = guideStore.programs[item.id]?
                     .first(where: { $0.start <= Date() && $0.end > Date() })
-                activeSheet = .programInfo(
-                    ProgramInfoTarget(
-                        channelName: item.name,
-                        title: program,
-                        start: start,
-                        end: end,
-                        description: item.currentProgramDescription ?? "",
-                        category: item.currentProgramCategory ?? "",
-                        programID: nowAiring?.programID,
-                        subTitle: nowAiring?.subTitle,
-                        season: nowAiring?.season,
-                        episode: nowAiring?.episode,
-                        isNew: nowAiring?.isNew ?? false,
-                        isLiveBroadcast: nowAiring?.isLiveBroadcast ?? false,
-                        isPremiere: nowAiring?.isPremiere ?? false,
-                        isFinale: nowAiring?.isFinale ?? false,
-                        isRepeat: nowAiring?.isRepeat ?? false
+                // tvOS swallowed the sheet when it was asked to present while the
+                // long-press dialog was still dismissing (trace 2026-09-05 12:32):
+                // let the dialog finish first.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    activeSheet = .programInfo(
+                        ProgramInfoTarget(
+                            channelName: item.name,
+                            title: program,
+                            start: start,
+                            end: end,
+                            description: item.currentProgramDescription ?? "",
+                            category: item.currentProgramCategory ?? "",
+                            programID: nowAiring?.programID,
+                            subTitle: nowAiring?.subTitle,
+                            season: nowAiring?.season,
+                            episode: nowAiring?.episode,
+                            isNew: nowAiring?.isNew ?? false,
+                            isLiveBroadcast: nowAiring?.isLiveBroadcast ?? false,
+                            isPremiere: nowAiring?.isPremiere ?? false,
+                            isFinale: nowAiring?.isFinale ?? false,
+                            isRepeat: nowAiring?.isRepeat ?? false
+                        )
                     )
-                )
+                }
             }
         }
 
@@ -3579,25 +3702,30 @@ struct ChannelRow: View {
                         Button("Program Info") {
                             let start = entry.startTime ?? Date()
                             let end = entry.endTime ?? start.addingTimeInterval(3600)
-                            activeSheet = .programInfo(
-                                ProgramInfoTarget(
-                                    channelName: item.name,
-                                    title: entry.title,
-                                    start: start,
-                                    end: end,
-                                    description: entry.description,
-                                    category: entry.category,
-                                    programID: entry.programID,
-                                    subTitle: entry.subTitle,
-                                    season: entry.season,
-                                    episode: entry.episode,
-                                    isNew: entry.isNew,
-                                    isLiveBroadcast: entry.isLiveBroadcast,
-                                    isPremiere: entry.isPremiere,
-                                    isFinale: entry.isFinale,
-                                    isRepeat: entry.isRepeat
+                            // tvOS swallowed the sheet when it was asked to present while the
+                            // long-press dialog was still dismissing (trace 2026-09-05 12:32):
+                            // let the dialog finish first.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                activeSheet = .programInfo(
+                                    ProgramInfoTarget(
+                                        channelName: item.name,
+                                        title: entry.title,
+                                        start: start,
+                                        end: end,
+                                        description: entry.description,
+                                        category: entry.category,
+                                        programID: entry.programID,
+                                        subTitle: entry.subTitle,
+                                        season: entry.season,
+                                        episode: entry.episode,
+                                        isNew: entry.isNew,
+                                        isLiveBroadcast: entry.isLiveBroadcast,
+                                        isPremiere: entry.isPremiere,
+                                        isFinale: entry.isFinale,
+                                        isRepeat: entry.isRepeat
+                                    )
                                 )
-                            )
+                            }
                         }
                         if let end = entry.endTime, end > Date() {
                             let isLive = (entry.startTime ?? Date()) <= Date()
@@ -4142,9 +4270,11 @@ struct TVGroupPillButtonStyle: ButtonStyle {
                 Capsule()
                     .fill(isSelected ? Color.accentPrimary : Color.elevatedBackground)
             )
+            // Selected: white ring when focused. Unselected: accent ring. The
+            // app-wide pill rule (Logan 2026-09-05), same as MoviesPillStyle.
             .overlay(
                 Capsule()
-                    .stroke(focused && !isSelected ? Color.accentPrimary : Color.clear, lineWidth: 2)
+                    .stroke(isSelected ? Color.white : Color.accentPrimary, lineWidth: focused ? 3 : 0)
             )
             .scaleEffect(focused ? 1.05 : 1.0)
             .opacity(focused ? 1.0 : (isSelected ? 1.0 : 0.85))
@@ -4152,45 +4282,6 @@ struct TVGroupPillButtonStyle: ButtonStyle {
     }
 }
 
-/// #45: a collection filter pill that supports BOTH tap (filter) and a
-/// reliable long-press (manage). TVGroupPill is a Button, and a Button's
-/// long-press on tvOS fires on release; so this renders the pill visual as a
-/// plain (non-focusable) view styled to match TVGroupPillButtonStyle and lets
-/// a TVPressOverlay own focus + dispatch tap vs long-press.
-private struct CollectionPillTV: View {
-    let name: String
-    let isSelected: Bool
-    var canFocus: Bool = true
-    let onTap: () -> Void
-    let onLongPress: () -> Void
-    @State private var isFocused = false
-
-    var body: some View {
-        Text(name)
-            .font(.system(size: 22, weight: .medium))
-            .foregroundColor(isSelected ? .appBackground : (isFocused ? .white : .textSecondary))
-            .padding(.horizontal, 26)
-            .padding(.vertical, 13)
-            .background(
-                Capsule().fill(isSelected ? Color.accentPrimary : Color.elevatedBackground)
-            )
-            .overlay(
-                Capsule().stroke(isFocused && !isSelected ? Color.accentPrimary : Color.clear, lineWidth: 2)
-            )
-            .scaleEffect(isFocused ? 1.05 : 1.0)
-            .opacity(isFocused ? 1.0 : (isSelected ? 1.0 : 0.85))
-            .animation(.easeInOut(duration: 0.15), value: isFocused)
-            .overlay(
-                TVPressOverlay(
-                    minimumPressDuration: 0.5,
-                    isFocused: $isFocused,
-                    canFocus: canFocus,
-                    onTap: onTap,
-                    onLongPress: onLongPress
-                )
-            )
-    }
-}
 
 // MARK: - tvOS No-Ring Button Style
 #endif

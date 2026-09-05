@@ -3636,6 +3636,16 @@ struct MainTabView: View {
     /// Tracks whether a VOD detail view is pushed (Movies or Series).
     /// When true, Menu button should pop the navigation, not switch tabs.
     @State private var isVODDetailPushed = false
+    #if os(tvOS)
+    /// True once the system tab bar has been seen on screen (polled at
+    /// launch); the nav circles mount only then so they never take the
+    /// launch focus away from the Live TV pill.
+    @State private var tvTabBarSeen = false
+    @FocusState private var liveTVEntryCatcherFocused: Bool
+    /// Any nav circle focused. The Down catcher below the circles exists
+    /// only then, so Up from the guide never finds it (trace 13:09).
+    @FocusState private var navCirclesFocused: Bool
+    #endif
     /// Signal to VOD views to pop their navigation stack.
     @State private var vodNavPopRequested = false
     #if os(tvOS)
@@ -4464,10 +4474,14 @@ struct MainTabView: View {
                         + (showRecordingsTab ? 1 : 0)
                         + (showVODTab ? 2 : 0)
                     let barLeading = (geo.size.width - CGFloat(visibleTabs) * 230) / 2
+                    VStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: 16) {
                         // Refresh and Search are Live TV only (Logan
                         // 2026-09-03): the other tabs carry their own.
-                        if selectedTab == .liveTV {
+                        // Not before the tab bar exists: at launch the
+                        // circles were the only focusable thing and took
+                        // the default focus (Logan 2026-09-05).
+                        if selectedTab == .liveTV && tvTabBarSeen {
                             TVNavActionCircle(
                                 systemImage: "arrow.clockwise",
                                 label: "Refresh channels and guide",
@@ -4506,6 +4520,22 @@ struct MainTabView: View {
                                 }
                             }
                         }
+                    }
+                    .focused($navCirclesFocused)
+                    // Down from the circles: the guide's entry point (banner
+                    // description or first channel), not the Live TV pill
+                    // beside them (Logan 2026-09-05).
+                    if selectedTab == .liveTV && tvTabBarSeen
+                        && (navCirclesFocused || liveTVEntryCatcherFocused) {
+                        Color.clear
+                            .frame(width: 140, height: 10)
+                            .focusable(true)
+                            .focused($liveTVEntryCatcherFocused)
+                            .onChange(of: liveTVEntryCatcherFocused) { _, focused in
+                                guard focused else { return }
+                                NotificationCenter.default.post(name: .aerioLiveTVEntryFromTop, object: nil)
+                            }
+                    }
                     }
                     .confirmationDialog(
                         "Channels Live in Background",
@@ -4760,7 +4790,7 @@ struct MainTabView: View {
                             .disabled(minimized)
                             .allowsHitTesting(!minimized)
                             .padding(.trailing, minimized ? 40 : 0)
-                            .padding(.top, minimized ? 119 : 0)
+                            .padding(.top, minimized ? 87 : 0)
                             // v1.6.13.x: capture mini's actual
                             // bottom for ChannelListView's chip-row
                             // push-down (tvOS branch).
@@ -4838,7 +4868,7 @@ struct MainTabView: View {
                         .padding(.trailing, minimized ? 40 : 0)
                         // Sits a little lower so it clears the tab bar
                         // and the Channel Preview banner (Logan 2026-09-05).
-                        .padding(.top, minimized ? 119 : 0)
+                        .padding(.top, minimized ? 87 : 0)
                         // v1.6.13.x: capture mini's actual bottom
                         // for ChannelListView's chip-row push-down
                         // (tvOS legacy-path branch).
@@ -5366,6 +5396,26 @@ struct MainTabView: View {
             }
             configureTabBarAppearance()
             tryShowInitialLoading()
+            #if os(tvOS)
+            Task { @MainActor in
+                // Wait for a tab bar button to actually HOLD focus, not just
+                // for the bar to exist: mounting the circles the instant the
+                // bar was detected handed them the launch focus (trace
+                // 2026-09-05 13:13, Search focused at launch).
+                for _ in 0..<60 where !tvTabBarSeen {
+                    let window = UIApplication.shared.connectedScenes
+                        .compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+                    let focused = window.flatMap { UIFocusSystem.focusSystem(for: $0)?.focusedItem }
+                    if let focused, String(describing: type(of: focused)) == "UITabBarButton" {
+                        tvTabBarSeen = true
+                        debugLog("[FOCUS] nav circles mounted (tab bar holds focus)")
+                        break
+                    }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                if !tvTabBarSeen { tvTabBarSeen = true }   // never hide the circles for good
+            }
+            #endif
             debugLog("🔶 MainTabView.onAppear: done")
         }
         // Also re-evaluate the loading screen whenever the server list

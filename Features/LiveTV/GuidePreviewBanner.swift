@@ -12,6 +12,14 @@ struct GuidePreviewBanner: View {
     let program: GuideProgram?
     let channel: ChannelDisplayItem?
     let shortTimeFormatter: DateFormatter
+    /// Click on the description opens Program Info (Logan 2026-09-05).
+    var onSelectDescription: (() -> Void)? = nil
+    /// Focus on the description, for the host's Down-to-first-pill redirect.
+    var onDescriptionFocusChange: ((Bool) -> Void)? = nil
+    /// Host sets true to put focus on the description; reset here.
+    var focusRequest: Binding<Bool> = .constant(false)
+
+    @FocusState private var descriptionFocused: Bool
     @ObservedObject private var artCache = GuidePreviewArtCache.shared
     @EnvironmentObject private var nowPlaying: NowPlayingManager
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
@@ -21,12 +29,15 @@ struct GuidePreviewBanner: View {
         nowPlaying.isActive && nowPlaying.isMinimized ? 422 : 0
     }
 
-    static let height: CGFloat = 216
+    static let height: CGFloat = 212
 
     var body: some View {
         // Bottom-aligned: logo, copy and the corner mini share one baseline
         // (Logan 2026-09-05).
-        HStack(alignment: .bottom, spacing: 32) {
+        // 44 between logo and copy: the copy's focus frame must not overlap
+        // the nav circles above (a 1pt overlap made Up from the description
+        // pick Search over the Live TV pill, trace 2026-09-05 13:09).
+        HStack(alignment: .bottom, spacing: 44) {
             // Programme art where the channel logo used to be (Logan
             // 2026-09-05); the channel name stays underneath, the logo is
             // the fallback until art lands or when there is none.
@@ -46,7 +57,7 @@ struct GuidePreviewBanner: View {
         // 40pt each side: the logo sits as far from the left edge as the
         // mini does from the right (Logan 2026-09-05).
         .padding(.horizontal, 40)
-        .padding(.bottom, 12)
+        .padding(.bottom, 8)
         .frame(height: Self.height)
         .frame(maxWidth: .infinity)
         .background(Color.appBackground)
@@ -122,11 +133,30 @@ struct GuidePreviewBanner: View {
             .font(.system(size: 20, weight: .medium))
             .foregroundColor(.textSecondary)
             if !program.description.isEmpty {
-                Text(program.description)
-                    .font(.system(size: 23))
-                    .foregroundColor(.textPrimary.opacity(0.85))
-                    .lineLimit(3)
-                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    onSelectDescription?()
+                } label: {
+                    Text(program.description)
+                        .font(.system(size: 23))
+                        .foregroundColor(.textPrimary.opacity(0.85))
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(BannerTextButtonStyle())
+                .focused($descriptionFocused)
+                .onChange(of: descriptionFocused) { _, f in onDescriptionFocusChange?(f) }
+                .onChange(of: focusRequest.wrappedValue) { _, wanted in
+                    guard wanted else { return }
+                    focusRequest.wrappedValue = false
+                    // A beat: written in the same pass as the requesting
+                    // catcher taking focus, the write was dropped.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+                        descriptionFocused = true
+                    }
+                }
+
             }
         }
     }
@@ -136,6 +166,26 @@ struct GuidePreviewBanner: View {
         guard p.start <= now, now < p.end else { return nil }
         let left = max(1, Int(p.end.timeIntervalSince(now) / 60))
         return left >= 60 ? "\(left / 60) h \(left % 60) min left" : "\(left) min left"
+    }
+}
+
+/// Focusable description: a faint platter on focus, no system halo, no
+/// scale (the banner must not move while stepping channels).
+private struct BannerTextButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+    func makeBody(configuration: Configuration) -> some View {
+        // Tight vertical inset: a 12pt platter spilled over the time row
+        // above and the pills below (Logan 2026-09-05).
+        configuration.label
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isFocused ? Color.white.opacity(0.08) : Color.clear)
+            )
+            .padding(.horizontal, -12)
+            .padding(.vertical, -4)
+            .opacity(configuration.isPressed ? 0.7 : 1)
     }
 }
 

@@ -2983,6 +2983,9 @@ struct EPGGuideView: View {
     /// Optional programme id = the cell to restore focus to when the sidebar
     /// closes. nil when nothing is focused (GH #72: an empty group has no
     /// cells, and the hold must still open the sidebar).
+    /// tvOS Channel Preview: fires when the focused programme changes (and
+    /// on the first seed) so the host can draw the banner.
+    var onPreviewProgramChange: ((GuideProgram?, ChannelDisplayItem?) -> Void)? = nil
     var onRequestGroupSidebar: ((String?) -> Void)? = nil
     /// Single-flight guard for the return-from-player focus restore: the
     /// notification arrives more than once per minimize (log 2026-08-28:
@@ -3158,7 +3161,7 @@ struct EPGGuideView: View {
     private var previewMode: Bool { liveTVLayout == "preview" }
     @State private var previewProgram: GuideProgram?
     @State private var previewChannel: ChannelDisplayItem?
-    private var rowHeight: CGFloat { previewMode ? 84 : 110 }
+    private var rowHeight: CGFloat { previewMode ? 80 : 110 }
     private let timeHeaderHeight: CGFloat = 50
     private let pixelsPerHour: CGFloat = 600
     private let cellGap: CGFloat = 1        // hairline gap between program cells (Emby style)
@@ -3208,6 +3211,12 @@ struct EPGGuideView: View {
             #if os(tvOS)
             .onChange(of: guideStore.programs.count) { _, _ in seedPreviewIfNeeded() }
             .onAppear { seedPreviewIfNeeded() }
+            // The Channel Preview banner is drawn by ChannelListView above the
+            // pill row (focus order: rows, pills, banner, tab bar; Logan
+            // 2026-09-05). The guide only reports the focused programme.
+            .onChange(of: previewProgram?.id) { _, _ in
+                onPreviewProgramChange?(previewProgram, previewChannel)
+            }
             #endif
             .task(id: channels.count) {
                 guard !channels.isEmpty else { return }
@@ -3392,18 +3401,6 @@ struct EPGGuideView: View {
             // is exactly where the first channel row belongs.
             ScrollViewReader { proxy in
             VStack(spacing: 0) {
-                #if os(tvOS)
-                if previewMode {
-                    // No crossfade: old and new copy overlapped while stepping
-                    // channels quickly (recording 2026-09-05 11:20). Cut.
-                    GuidePreviewBanner(program: previewProgram, channel: previewChannel,
-                                       shortTimeFormatter: shortTimeFormatter)
-                        .transaction { $0.animation = nil }
-                        // Tucks under the (empty in sidebar mode) pill row's
-                        // padding so eight rows fit below (Logan 2026-09-05).
-                        .padding(.top, -40)
-                }
-                #endif
                 // ── Fixed time header ──
                 // Lifted OUT of the LazyVStack's pinned `Section` header.
                 // tvOS 27's AttributeGraph aborts (precondition_failure,
@@ -5459,6 +5456,23 @@ private struct GuideProgramButton: View {
         }
     }
     @State private var activeSheet: GuideCellSheet? = nil
+    /// tvOS: the Program Info case of `activeSheet` as its own binding so it
+    /// can present through `.sheet` while Record keeps the full-screen cover.
+    private var programInfoTarget: Binding<ProgramInfoTarget?> {
+        Binding(
+            get: { if case .programInfo(let t) = activeSheet { return t } else { return nil } },
+            set: { if $0 == nil, case .programInfo = activeSheet { activeSheet = nil } }
+        )
+    }
+    /// tvOS: the Record case only, so the full-screen cover never presents
+    /// (empty) for Program Info and blocks the sheet (trace 2026-09-05 12:32:
+    /// focus went to nil with nothing on screen).
+    private var recordSheet: Binding<GuideCellSheet?> {
+        Binding(
+            get: { if case .record = activeSheet { return activeSheet } else { return nil } },
+            set: { if $0 == nil, case .record = activeSheet { activeSheet = nil } }
+        )
+    }
     #if os(tvOS)
     // tvOS uses a confirmationDialog instead of .contextMenu because SwiftUI's
     // .contextMenu on tvOS rebuilds its UIMenu items every time the backing
@@ -5579,25 +5593,30 @@ private struct GuideProgramButton: View {
                     }
                 }
                 Button("Program Info") {
-                    activeSheet = .programInfo(
-                        ProgramInfoTarget(
-                            channelName: channelItem.name,
-                            title: prog.title,
-                            start: prog.start,
-                            end: prog.end,
-                            description: prog.description,
-                            category: prog.category,
-                            programID: prog.programID,
-                            subTitle: prog.subTitle,
-                            season: prog.season,
-                            episode: prog.episode,
-                            isNew: prog.isNew,
-                            isLiveBroadcast: prog.isLiveBroadcast,
-                            isPremiere: prog.isPremiere,
-                            isFinale: prog.isFinale,
-                            isRepeat: prog.isRepeat
+                    // tvOS swallowed the sheet when it was asked to present while the
+                    // long-press dialog was still dismissing (trace 2026-09-05 12:32):
+                    // let the dialog finish first.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        activeSheet = .programInfo(
+                            ProgramInfoTarget(
+                                channelName: channelItem.name,
+                                title: prog.title,
+                                start: prog.start,
+                                end: prog.end,
+                                description: prog.description,
+                                category: prog.category,
+                                programID: prog.programID,
+                                subTitle: prog.subTitle,
+                                season: prog.season,
+                                episode: prog.episode,
+                                isNew: prog.isNew,
+                                isLiveBroadcast: prog.isLiveBroadcast,
+                                isPremiere: prog.isPremiere,
+                                isFinale: prog.isFinale,
+                                isRepeat: prog.isRepeat
+                            )
                         )
-                    )
+                    }
                 }
                 if canOfferRecord {
                     Button(prog.isLive ? "Record from Now" : "Record") {
@@ -5648,7 +5667,7 @@ private struct GuideProgramButton: View {
             }
             // tvOS: .fullScreenCover (single, item-driven) — see
             // `GuideCellSheet` doc for why we consolidated.
-            .fullScreenCover(item: $activeSheet) { sheet in
+            .fullScreenCover(item: recordSheet) { sheet in
                 switch sheet {
                 case .record:
                     RecordProgramSheet(
@@ -5666,9 +5685,14 @@ private struct GuideProgramButton: View {
                         programSeason: prog.season,
                         programEpisode: prog.episode
                     )
-                case .programInfo(let target):
-                    ProgramInfoView(target: target)
+                case .programInfo:
+                    // Presented by the .sheet below (Logan 2026-09-05: Program
+                    // Info is an Apple sheet, not a full-screen page).
+                    EmptyView()
                 }
+            }
+            .sheet(item: programInfoTarget) { target in
+                ProgramInfoView(target: target)
             }
         #else
         cellContent

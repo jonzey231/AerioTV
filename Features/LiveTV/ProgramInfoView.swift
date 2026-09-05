@@ -546,57 +546,44 @@ struct ProgramInfoView: View {
     // MARK: - tvOS Layout
 
     #if os(tvOS)
+    /// Apple sheet card (Logan 2026-09-05): art beside the copy, the same
+    /// facts as before at sheet scale. Menu closes it as every sheet does.
     @ViewBuilder
-    private var tvBody: some View {
-        ZStack(alignment: .topTrailing) {
-            Color.appBackground.ignoresSafeArea()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 36) {
-                    if let posterURL {
-                        // GH #53: frame follows the REAL image ratio (see
-                        // the iOS twin above).
-                        AuthPosterImage(url: posterURL, headers: posterAuthHeaders,
-                                        onImageLoaded: { updatePosterRatio($0) })
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: 220, height: 220 / posterRatio)
-                            .clipped()
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    }
-                    // Header - channel + title + feed badges + episode sub-title.
-                    // Title gets its OWN full-width line (soft-wraps, so long
-                    // single-word titles never mid-word-break); the feed badges
-                    // wrap in a flow layout beneath instead of a horizontal run
-                    // that squeezes the title.
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text(target.channelName.uppercased())
-                            .font(.system(size: 24, weight: .semibold))
+    private var tvCard: some View {
+        VStack(alignment: .leading, spacing: 28) {
+            HStack(alignment: .top, spacing: 36) {
+                if let posterURL {
+                    AuthPosterImage(url: posterURL, headers: posterAuthHeaders,
+                                    onImageLoaded: { updatePosterRatio($0) })
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 240, height: 240 / posterRatio)
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(target.channelName.uppercased())
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(.textSecondary)
+                        .tracking(1.5)
+                    Text(target.title)
+                        .font(.system(size: 38, weight: .bold))
+                        .foregroundColor(.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let sub = target.subTitle,
+                       !EPGText.subtitleIsRedundant(sub, title: target.title, description: target.description) {
+                        Text(sub)
+                            .font(.system(size: 24))
                             .foregroundColor(.textSecondary)
-                            .tracking(1.5)
-                        Text(target.title)
-                            .font(.system(size: 44, weight: .bold))
-                            .foregroundColor(.textPrimary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                        // Feed flags + "ON NOW" (gated to avoid a double LIVE).
-                        if !titleBadges.isEmpty {
-                            CategoryPillsLayout(spacing: 10) {
-                                ForEach(titleBadges.indices, id: \.self) { i in
-                                    EPGFlagBadge(flag: titleBadges[i])
-                                }
+                            .italic()
+                    }
+                    if !titleBadges.isEmpty {
+                        CategoryPillsLayout(spacing: 10) {
+                            ForEach(titleBadges.indices, id: \.self) { i in
+                                EPGFlagBadge(flag: titleBadges[i])
                             }
                         }
-                        if let sub = target.subTitle,
-                           !EPGText.subtitleIsRedundant(sub, title: target.title, description: target.description) {
-                            Text(sub)
-                                .font(.system(size: 26))
-                                .foregroundColor(.textSecondary)
-                                .italic()
-                        }
                     }
-
-                    // Time row - date + range + duration + episode
-                    HStack(spacing: 40) {
+                    HStack(spacing: 36) {
                         infoColumn(title: "Airs", value: timeRangeLabel)
                         infoColumn(title: "Date", value: dateLabel)
                         infoColumn(title: "Duration", value: durationLabel)
@@ -604,63 +591,62 @@ struct ProgramInfoView: View {
                             infoColumn(title: "Episode", value: episodeLabel)
                         }
                     }
-
-                    // Description
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Description")
-                            .font(.system(size: 22, weight: .semibold))
-                            .foregroundColor(.textSecondary)
-                        descriptionText
-                    }
-
-                    // Metadata pills (XMLTV format indicators — neutral
-                    // grey, not palette-tinted).
-                    if !metadataPills.isEmpty {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Metadata")
-                                .font(.system(size: 22, weight: .semibold))
-                                .foregroundColor(.textSecondary)
-                            CategoryPillsLayout(spacing: 10) {
-                                ForEach(metadataPills, id: \.self) { token in
-                                    CategoryPill(rawToken: token, forceNeutral: true)
-                                }
-                            }
-                        }
-                    }
-
-                    // Genre pills (palette-tinted where the token
-                    // matches a bucket / custom entry).
-                    if !genrePills.isEmpty {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Categories")
-                                .font(.system(size: 22, weight: .semibold))
-                                .foregroundColor(.textSecondary)
-                            CategoryPillsLayout(spacing: 10) {
-                                ForEach(genrePills, id: \.self) { token in
-                                    CategoryPill(rawToken: token)
-                                }
-                            }
-                        }
-                    }
-
-                    Spacer(minLength: 0)
+                    .padding(.top, 6)
                 }
-                .padding(.horizontal, 80)
-                .padding(.vertical, 72)
-                .frame(maxWidth: 1200, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            Button("Close") { dismiss() }
-                .padding(.top, 48)
-                .padding(.trailing, 64)
+            // A tvOS ScrollView only moves to follow focus, so the
+            // description is a focusable block (the sheet's only focus
+            // target; Menu closes it, no Close button, Logan 2026-09-05).
+            TVFocusableBlock {
+                descriptionText
+            }
+            if !metadataPills.isEmpty {
+                CategoryPillsLayout(spacing: 10) {
+                    ForEach(metadataPills, id: \.self) { token in
+                        CategoryPill(rawToken: token, forceNeutral: true)
+                    }
+                }
+            }
+            if !genrePills.isEmpty {
+                CategoryPillsLayout(spacing: 10) {
+                    ForEach(genrePills, id: \.self) { token in
+                        CategoryPill(rawToken: token)
+                    }
+                }
+            }
         }
-        // tvOS Menu button defaults to dismissing the fullScreenCover,
-        // but being explicit keeps the behaviour intentional. The
-        // .onExitCommand handler runs even when the Close button
-        // doesn't have focus, which matches users' Menu-to-back
-        // expectation throughout the app.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(48)
+    }
+
+    @ViewBuilder
+    private var tvBody: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            tvCard
+        }
+        .frame(width: 1400, height: 780)
         .onExitCommand { dismiss() }
+    }
+
+    /// Focusable text block for tvOS sheets: a faint platter when focused so
+    /// the user can see where Down landed, nothing otherwise.
+    private struct TVFocusableBlock<Content: View>: View {
+        @ViewBuilder let content: () -> Content
+        @FocusState private var focused: Bool
+        var body: some View {
+            content()
+                .padding(16)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(focused ? Color.white.opacity(0.08) : Color.clear)
+                )
+                .padding(-16)
+                .focusable(true)
+                .focused($focused)
+                .animation(.easeInOut(duration: 0.15), value: focused)
+        }
     }
 
     private func infoColumn(title: String, value: String) -> some View {

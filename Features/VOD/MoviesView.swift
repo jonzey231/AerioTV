@@ -3289,6 +3289,9 @@ extension Notification.Name {
     /// MainTabView got Menu while the current tab had scrolled its bar
     /// away: the tab scrolls back to the top and shows the bar.
     static let aerioTabScrollToTop = Notification.Name("aerioTabScrollToTop")
+    /// tvOS: Down from the nav circles on Live TV; the tab focuses its entry
+    /// point (Channel Preview description or the first channel).
+    static let aerioLiveTVEntryFromTop = Notification.Name("aerioLiveTVEntryFromTop")
 }
 
 #if os(tvOS)

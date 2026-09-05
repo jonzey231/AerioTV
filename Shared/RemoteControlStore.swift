@@ -41,6 +41,10 @@ final class RemoteControlStore: ObservableObject {
             guard oldValue != useGroupSidebar else { return }
             UserDefaults.standard.set((useGroupSidebar ? GroupSelectorMode.sidebar : .pills).rawValue,
                                       forKey: Self.groupSelectorKey)
+            // Push at once (as FavoritesStore does): a synced key written only
+            // locally could be handed back its old value by the next pull, so
+            // the first change looked like it never applied (Logan 2026-09-05).
+            SyncManager.shared.pushPreferencesImmediate()
         }
     }
 
@@ -50,6 +54,7 @@ final class RemoteControlStore: ObservableObject {
         didSet {
             guard oldValue != tuneInMini else { return }
             UserDefaults.standard.set(tuneInMini, forKey: Self.tuneInMiniKey)
+            SyncManager.shared.pushPreferencesImmediate()
         }
     }
 
