@@ -2412,6 +2412,20 @@ struct MoviesHeroCarousel: View {
     @FocusState private var catcherFocused: Bool
     @State private var lastHeroButton: String?
     private var primaryFocusID: String { "\(currentID ?? pages.first?.id ?? "")|primary" }
+
+    /// Page the dots mark. While a hero button has focus that button's page
+    /// wins: the scroll view nudges to keep a focused button visible, which
+    /// can flip the view-aligned position id to the neighbour while the
+    /// user is still on the same card (Logan 2026-09-05, Resume to Play
+    /// from Beginning on page 2).
+    private var activePageID: String? {
+        #if os(tvOS)
+        if let f = heroFocus, let page = pages.first(where: { f.hasPrefix($0.id + "|") }) {
+            return page.id
+        }
+        #endif
+        return currentID ?? pages.first?.id
+    }
     #endif
 
     var body: some View {
@@ -2521,7 +2535,7 @@ struct MoviesHeroCarousel: View {
                     HStack(spacing: 8) {
                         ForEach(pages) { page in
                             Circle()
-                                .fill(page.id == (currentID ?? pages.first?.id)
+                                .fill(page.id == activePageID
                                       ? Color.accentPrimary : Color.textTertiary.opacity(0.5))
                                 .frame(width: dot, height: dot)
                         }
