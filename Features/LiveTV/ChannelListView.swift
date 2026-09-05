@@ -3060,7 +3060,7 @@ struct ChannelRow: View {
         // #45: add/remove this channel from a user collection. Deferred so
         // this dialog fully dismisses before the picker presents (chained
         // confirmationDialogs race on tvOS otherwise).
-        Button("Add to Collection…") {
+        Button("Add to Collection") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
         }
 
@@ -3162,7 +3162,7 @@ struct ChannelRow: View {
                 ChannelCollectionsStore.shared.toggleMember(channelID: item.id, in: c.id)
             }
         }
-        Button("New Collection…") {
+        Button("New Collection") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showNewCollectionAlert = true }
         }
     }
@@ -3663,7 +3663,7 @@ struct ChannelRow: View {
                             )
                             .contentShape(Rectangle())
                             .onTapGesture { /* no-op; prevents accidental parent-scroll triggers */ }
-                            .onLongPressGesture(minimumDuration: 0.4) {
+                            .onLongPressGesture(minimumDuration: 0.25) {
                                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                                 activePopoverEntryID = rowEntry.id
                             }
@@ -3701,7 +3701,7 @@ struct ChannelRow: View {
                             epgEntryRow(entry: entry, isLast: entry.id == futurePrograms.last?.id)
                                 .overlay(
                                     TVPressOverlay(
-                                        minimumPressDuration: 0.35,
+                                        minimumPressDuration: 0.25,
                                         onLongPress: { ctxDialogEntry = entry }
                                     )
                                 )
@@ -3786,7 +3786,7 @@ struct ChannelRow: View {
                                 }
                             }
                         }
-                        Button("Cancel", role: .cancel) {}
+                        // No Cancel: Menu/Back closes the dialog (Logan 2026-09-05).
                     }
                 }
                 #endif

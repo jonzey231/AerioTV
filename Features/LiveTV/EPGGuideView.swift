@@ -5578,7 +5578,7 @@ private struct GuideProgramButton: View {
                     onSelect(channelItem)
                 }
             }
-            .onLongPressGesture(minimumDuration: 0.35) {
+            .onLongPressGesture(minimumDuration: 0.25) {
                 // Guide "Select (hold)" slot, dispatched BY ACTION VALUE
                 // (#196). The confirmationDialog below IS the program menu
                 // (okLong = .programInfo by default); any other mapped
@@ -5618,7 +5618,7 @@ private struct GuideProgramButton: View {
                     onMultiviewIntent(channelItem)
                 }
                 // #45: add/remove this channel from a user collection.
-                Button("Add to Collection…") {
+                Button("Add to Collection") {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
                 }
                 // #45: contextual remove (viewing a collection -> that one;
@@ -5690,7 +5690,7 @@ private struct GuideProgramButton: View {
                         ChannelCollectionsStore.shared.toggleMember(channelID: channelItem.id, in: c.id)
                     }
                 }
-                Button("New Collection…") {
+                Button("New Collection") {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showNewCollectionAlert = true }
                 }
             }

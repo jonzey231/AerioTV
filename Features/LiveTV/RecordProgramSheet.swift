@@ -504,7 +504,7 @@ struct RecordProgramSheet: View {
                 if let onCustom {
                     RecordOptionPill(
                         label: options.contains(selection.wrappedValue)
-                            ? "Custom…"
+                            ? "Custom"
                             : (selection.wrappedValue < 0
                                 ? "Custom (\(-selection.wrappedValue) min after start)"
                                 : "Custom (\(selection.wrappedValue) min)"),
@@ -663,7 +663,7 @@ struct RecordProgramSheet: View {
             }
             .foregroundColor(.primary)
         }
-        Button("Custom…", action: customAction)
+        Button("Custom", action: customAction)
     }
 
     @ViewBuilder
