@@ -255,6 +255,36 @@ struct EmptyStateActionStyle: ButtonStyle {
 }
 #endif
 
+// MARK: - TMDB attribution
+
+/// TMDB's logo plus the wording its terms require wherever TMDB data or
+/// images are shown (https://www.themoviedb.org/about/logos-attribution).
+struct TMDBAttributionView: View {
+    enum Style { case short, long }
+    var style: Style = .long
+
+    var body: some View {
+        #if os(tvOS)
+        let logoHeight: CGFloat = style == .long ? 20 : 44
+        let font = Font.system(size: 20)
+        #else
+        let logoHeight: CGFloat = style == .long ? 12 : 28
+        let font = Font.footnote
+        #endif
+        VStack(alignment: .leading, spacing: 8) {
+            Image(style == .long ? "TMDBLogoLong" : "TMDBLogoShort")
+                .resizable()
+                .scaledToFit()
+                .frame(height: logoHeight)
+                .accessibilityLabel("The Movie Database")
+            Text("This product uses the TMDB API but is not endorsed or certified by TMDB.")
+                .font(font)
+                .foregroundColor(.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 // MARK: - Primary Button
 struct PrimaryButton: View {
     let title: String

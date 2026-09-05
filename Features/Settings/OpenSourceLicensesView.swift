@@ -993,6 +993,12 @@ struct OpenSourceLicensesView: View {
                 Text("License").sectionHeaderStyle()
             }
             Section {
+                TMDBAttributionView(style: .long)
+                    .listRowBackground(Color.cardBackground)
+            } header: {
+                Text("Data Sources").sectionHeaderStyle()
+            }
+            Section {
                 ForEach(OSSCatalog.components) { c in
                     NavigationLink {
                         OSSDetailView(component: c)
@@ -1040,6 +1046,7 @@ struct OpenSourceLicensesView: View {
                         Text(OSSCatalog.appSummary)
                             .font(.system(size: 24))
                             .foregroundColor(.textSecondary)
+                        TMDBAttributionView(style: .long)
                         VStack(spacing: 12) {
                             ForEach(OSSCatalog.components) { c in
                                 Button {

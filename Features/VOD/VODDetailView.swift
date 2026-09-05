@@ -367,6 +367,11 @@ struct VODDetailView: View {
                     if item.type == .series, !usesTVMovieLayout {
                         episodeSection
                     }
+                    if TMDBPosters.isEnabled {
+                        TMDBAttributionView(style: .long)
+                            .padding(.horizontal, usesTVMovieLayout ? 56 : 16)
+                            .padding(.top, 24)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 #if os(tvOS)
