@@ -460,6 +460,7 @@ struct ChannelListView: View {
                 .onChange(of: favoritesStore.favoriteItems.count) { _, _ in
                     favoritesDidChange()
                 }
+
                 // Sync filtered list whenever the store delivers new data.
                 .onChange(of: channelStore.channels) { _, items in
                     // A group selected under the previous playlist may not exist
@@ -808,11 +809,6 @@ struct ChannelListView: View {
                         // group pills appear inside it.
                         groupFilterBar
                             .padding(.vertical, 10)
-                            // The guide ignores the leading safe area; the pill
-                            // row does too so the first pill (Favorites) sits
-                            // right above the channel column and Up from the
-                            // top channel lands on it (Logan 2026-09-05).
-                            .ignoresSafeArea(.container, edges: .leading)
                             .focusSection()
                         #else
                         // Compact-chrome honors the user's hide-filter preference even
@@ -1502,8 +1498,10 @@ struct ChannelListView: View {
             }
             .padding(.horizontal, 16)
             #if os(tvOS)
-            // First pill over the channel column (the row runs edge to edge).
-            .padding(.leading, 12)
+            // First pill's left edge on the programme column: the guide's
+            // channel column is 240pt from the display edge and the row
+            // starts at the 80pt safe area + 16 (Logan 2026-09-05).
+            .padding(.leading, 144)
             // Vertical headroom so a focused pill's 1.05 scale + focus stroke
             // is not clipped by the horizontal ScrollView (which sizes its
             // height to the row). Previously the taller Manage Groups button
