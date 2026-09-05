@@ -3575,9 +3575,23 @@ struct EPGGuideView: View {
             // channel and the landed cell does not contain the viewport anchor
             // column, snap to the cell that does. Same-channel changes (our
             // own snaps/restores/pans) are ignored so this can never loop.
-            .onChange(of: focusedProgramID) { _, newValue in
+            .onChange(of: focusedProgramID) { oldValue, newValue in
+                debugLog("[GuideFocus] binding \(oldValue ?? "nil") -> \(newValue ?? "nil")")
                 guard let pid = newValue else { lastFocusedChannelForSnap = nil; return }
                 let chID = channelID(ofProgram: pid)
+                #if os(tvOS)
+                // Channel Preview: report from the guide's own focus binding,
+                // which changes only after the engine has settled. Reporting
+                // from the cell's isFocused re-rendered the guide mid-move and
+                // SwiftUI re-applied the stale focus id: every Right in a wide
+                // cell bounced back 200 ms later (trace 2026-09-05 13:45).
+                if previewMode, let chID,
+                   let prog = guideStore.programs[chID]?.first(where: { $0.id == pid }),
+                   let ch = channels.first(where: { $0.id == chID }) {
+                    previewProgram = prog
+                    previewChannel = ch
+                }
+                #endif
                 defer { lastFocusedChannelForSnap = chID }
                 guard let chID,
                       let previous = lastFocusedChannelForSnap,
@@ -4038,6 +4052,7 @@ struct EPGGuideView: View {
             // .guideOpenGroupSidebar) and a single Left is ALWAYS
             // plain navigation, because the tap-opens scheme made the
             // EPG history left of "now" unreachable in sidebar mode.
+            let pidBeforeLeft = focusedProgramID
             withAnimation(.easeOut(duration: 0.3)) {
                 horizontalOffset = min(0, horizontalOffset + pixelsPerHour * 0.5)
             }
@@ -4046,6 +4061,20 @@ struct EPGGuideView: View {
             // still holding focus, so the ring vanished and OK acted
             // on an invisible programme.
             retargetFocusToViewportColumn()
+            // Stepping back onto the programme airing now re-anchors the
+            // timeline to now: a wide live cell was reached in one press
+            // while the pans had walked the now line to the right (Logan
+            // 2026-09-05). Only when this press MOVED focus, so a Left that
+            // stays on the live cell still pans into the past for catch-up.
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 90_000_000)
+                guard let pid = focusedProgramID, pid != pidBeforeLeft,
+                      let chID = channelID(ofProgram: pid),
+                      let prog = guideStore.programs[chID]?.first(where: { $0.id == pid }),
+                      prog.isLive, timelineIsAwayFromNow() else { return }
+                debugLog("[GuideFocus] back on the live programme: re-anchoring to now")
+                reAnchorTimelineToNow()
+            }
         case .right:
             // #42: a hold-Right (close corner mini) freezes the timeline so
             // the still-held Right does not scroll the EPG forward after the
@@ -4184,11 +4213,25 @@ struct EPGGuideView: View {
     /// viewport anchor column on the same channel row, so the ring rides
     /// the visible window instead of sliding off-screen with the old cell.
     private func retargetFocusToViewportColumn() {
-        guard let pid = focusedProgramID, let chID = channelID(ofProgram: pid) else { return }
-        let anchor = viewportAnchorTime
-        guard let target = programID(forChannel: chID, containing: anchor),
-              target != pid else { return }
         Task { @MainActor in
+            // Runs after the engine has resolved the same press (trace
+            // 2026-09-05 13:54: onMoveCommand fires with focus already on the
+            // next cell). The ring only needs rescuing when the focused cell
+            // has left the viewport; re-anchoring a cell that is still on
+            // screen dragged focus back into the wide cell the user had just
+            // stepped out of. Let the pan animation start, then check.
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            guard let pid = focusedProgramID, let chID = channelID(ofProgram: pid) else { return }
+            let left = timeAtViewportLeft
+            let right = left.addingTimeInterval(TimeInterval((1920 - channelColumnWidth) / pixelsPerHour) * 3600)
+            if let focused = guideStore.programs[chID]?.first(where: { $0.id == pid }),
+               focused.start < right, focused.end > left {
+                return   // still visible: leave the user's target alone
+            }
+            let anchor = viewportAnchorTime
+            guard let target = programID(forChannel: chID, containing: anchor),
+                  target != pid else { return }
+            debugLog("[GuideFocus] retarget off-screen \(pid) -> \(target)")
             for _ in 0..<4 {
                 focusedProgramID = target
                 try? await Task.sleep(nanoseconds: 60_000_000)
@@ -4491,7 +4534,7 @@ struct EPGGuideView: View {
             focusedProgramID: $focusedProgramID,
             sidebarOpen: sidebarOpen,
             compact: previewMode,
-            onFocused: previewMode ? { p, c in previewProgram = p; previewChannel = c } : nil
+            onFocused: nil
         )
         .offset(x: x, y: 0)
         #else
