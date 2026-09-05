@@ -5275,17 +5275,11 @@ struct MainTabView: View {
             // DVR tab only exists while the user has at least one recording
             // (local or server-side). Animates in/out as recordings are added/removed.
             if showRecordingsTab {
-                #if os(tvOS)
+                // Media-center DVR tab on every platform (iPhone 2026-09-05);
+                // the old My Recordings list stays reachable from Settings.
                 DVRView(isPlaying: $isPlaying, isSelected: selectedTab == .dvr)
                     .tabItem { Label(AppTab.dvr.title, systemImage: AppTab.dvr.icon) }
                     .tag(AppTab.dvr)
-                #else
-                NavigationStack {
-                    MyRecordingsView()
-                }
-                .tabItem { Label(AppTab.dvr.title, systemImage: AppTab.dvr.icon) }
-                .tag(AppTab.dvr)
-                #endif
             }
 
             // On Demand tab only exists while the active server exposes
@@ -7345,22 +7339,43 @@ extension View {
 final class TabBarScrollTracker {
     private var hideDistance: CGFloat = 0
     private var showDistance: CGFloat = 0
+    private var lastFlip = Date.distantPast
 
     /// Feed consecutive scroll offsets from onScrollGeometryChange.
     /// Returns the new hidden state when it should change, nil otherwise.
+    ///
+    /// Hiding or showing the bar changes the scroll view's insets, which
+    /// moves contentOffset by itself; read as a scroll in the opposite
+    /// direction that flipped the bar straight back, and with the phone's
+    /// navigation bar gone the two toggles fed each other every frame
+    /// (Movies froze, profiler 2026-09-05 16:44). Offsets are ignored while
+    /// a toggle settles, and a jump far larger than a finger moves in one
+    /// frame is treated as programmatic.
     func update(oldY: CGFloat, newY: CGFloat, hidden: Bool) -> Bool? {
+        let now = Date()
+        if now.timeIntervalSince(lastFlip) < 0.45 { return nil }
         let dy = newY - oldY
+        if abs(dy) > 120 {
+            hideDistance = 0; showDistance = 0
+            return nil
+        }
+        var result: Bool? = nil
         if dy > 0.5 {
             hideDistance += dy
             showDistance = 0
-            if !hidden && hideDistance > 48 && newY > 48 { return true }
+            if !hidden && hideDistance > 48 && newY > 48 { result = true }
         } else if dy < -0.5 {
             showDistance += -dy
             hideDistance = 0
-            if hidden && showDistance > 12 { return false }
+            if hidden && showDistance > 12 { result = false }
         }
-        if hidden && newY < 20 { return false }
-        return nil
+        if result == nil, hidden, newY < 20 { result = false }
+        if let result {
+            lastFlip = now
+            hideDistance = 0; showDistance = 0
+            debugLog("[TABBAR] auto-hide -> \(result ? "hidden" : "shown") y=\(Int(newY)) dy=\(Int(dy))")
+        }
+        return result
     }
 }
 #endif

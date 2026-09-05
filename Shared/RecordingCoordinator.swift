@@ -405,6 +405,16 @@ final class RecordingCoordinator: ObservableObject {
             let absolute = u.absoluteString
             if local.posterURL != absolute { local.posterURL = absolute; changed = true }
         }
+        // Channel identity for rows scheduled elsewhere (web UI, another
+        // device): the card's logo fallback and the hero's channel name
+        // come from the active playlist's channel with this Dispatcharr id.
+        if local.channelName.isEmpty || (local.channelLogoURL ?? "").isEmpty,
+           let ch = ChannelStore.shared.channels.first(where: { $0.dispatcharrChannelID == r.channel }) {
+            if local.channelName.isEmpty { local.channelName = ch.name; changed = true }
+            if (local.channelLogoURL ?? "").isEmpty, let logo = ch.logoURL {
+                local.channelLogoURL = logo.absoluteString; changed = true
+            }
+        }
         if (local.subTitle ?? "").isEmpty, let s = r.subTitle, !s.isEmpty { local.subTitle = s; changed = true }
         if local.seasonNumber == nil, let s = r.season { local.seasonNumber = s; changed = true }
         if local.episodeNumber == nil, let e = r.episode { local.episodeNumber = e; changed = true }

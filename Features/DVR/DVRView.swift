@@ -191,9 +191,32 @@ struct DVRView: View {
             #if os(tvOS)
             .toolbar(tvTabBarHidden ? .hidden : .visible, for: .tabBar)
             #else
-            .navigationTitle("DVR")
+            // No title (the tab bar says where we are); sort lives in the
+            // navigation bar row like Movies and TV Shows (Logan 2026-09-05).
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(Color.appBackground, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Menu {
+                        ForEach(SortOrder.allCases, id: \.self) { order in
+                            Button {
+                                sortOrderRaw = order.rawValue
+                            } label: {
+                                if order == sortOrder {
+                                    Label(order.label, systemImage: "checkmark")
+                                } else {
+                                    Text(order.label)
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down")
+                            .foregroundColor(.accentPrimary)
+                    }
+                    .accessibilityLabel("Sort")
+                }
+            }
             #endif
         }
         .confirmationDialog("Sort Recordings", isPresented: $showSortMenu, titleVisibility: .visible) {
@@ -607,11 +630,9 @@ struct DVRView: View {
                 Spacer()
                 #else
                 Spacer()
-                Button { showSortMenu = true } label: {
-                    Text(sortOrder.label)
-                        .font(.labelSmall)
-                        .foregroundColor(.accentPrimary)
-                }
+                Text(sortOrder.label)
+                    .font(.labelSmall)
+                    .foregroundColor(.textTertiary)
                 #endif
             }
             .padding(.horizontal, sectionInset)
@@ -947,6 +968,7 @@ struct DVRHero<Menu: View>: View {
                     .foregroundColor(.textPrimary.opacity(0.9))
                     .lineLimit(1)
             }
+            #if os(tvOS)
             HStack(spacing: 10) {
                 ForEach(Array(metaParts.enumerated()), id: \.offset) { idx, part in
                     if idx > 0 { Text("·").foregroundColor(.textTertiary) }
@@ -955,6 +977,20 @@ struct DVRHero<Menu: View>: View {
             }
             .font(.system(size: metaSize, weight: .medium))
             .foregroundColor(.textSecondary)
+            #else
+            // Phone: the channel on its own line, the rest on one line
+            // (one HStack wrapped the date mid-range, 2026-09-05).
+            VStack(alignment: .leading, spacing: 2) {
+                if !recording.channelName.isEmpty {
+                    Text(recording.channelName).lineLimit(1)
+                }
+                Text(metaParts.filter { $0 != recording.channelName }.joined(separator: " · "))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+            }
+            .font(.system(size: metaSize, weight: .medium))
+            .foregroundColor(.textSecondary)
+            #endif
             #if os(tvOS)
             if !recording.programDescription.isEmpty {
                 Text(recording.programDescription)

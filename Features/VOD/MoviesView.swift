@@ -481,19 +481,37 @@ struct MoviesView: View {
             .toolbar((tvTabBarHidden || !navPath.isEmpty) ? .hidden : .visible, for: .tabBar)
             #endif
             #if os(iOS)
+            // Sort and filter live in the navigation bar row, above the
+            // system search field (Logan 2026-09-05: no title, no separate
+            // row of controls).
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        showManageGroups = true
+                    Menu {
+                        ForEach(MoviesSortOrder.allCases, id: \.self) { order in
+                            Button {
+                                sortOrderRaw = order.rawValue
+                            } label: {
+                                if order == sortOrder {
+                                    Label(order.label, systemImage: "checkmark")
+                                } else {
+                                    Text(order.label)
+                                }
+                            }
+                        }
                     } label: {
-                        Text("Filter")
-                            .font(.headlineSmall)
+                        Image(systemName: "arrow.up.arrow.down")
                             .foregroundColor(.accentPrimary)
                     }
+                    .accessibilityLabel("Sort")
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button { showManageGroups = true } label: {
+                        Image(systemName: "line.3.horizontal.decrease")
+                            .foregroundColor(.accentPrimary)
+                    }
+                    .accessibilityLabel("Manage Groups")
                 }
             }
-            #endif
-            #if os(iOS)
             .searchable(text: $searchText,
                         placement: .navigationBarDrawer(displayMode: .always),
                         prompt: "Search \(kindLower)")
@@ -1258,9 +1276,6 @@ struct MoviesView: View {
                     // header with the field is never re-created mid-typing.
                     Group {
                         VStack(alignment: .leading, spacing: sectionSpacing) {
-                            #if os(iOS)
-                            iOSTitleRow
-                            #endif
                             // Continue Watching IS the hero: one page per title
                             // in progress (Logan 2026-09-03), so the separate
                             // poster row is gone from this tab.
@@ -1649,7 +1664,19 @@ struct MoviesView: View {
                             #endif
                         }
                         .frame(width: railWidth)
+                        #if os(tvOS)
                         .padding(.top, railTop)
+                        #else
+                        // Offset, not padding: padding made the rail column
+                        // taller than the scroll area, which shifted the
+                        // scroll view's coordinate space by the top safe
+                        // area, which moved the grid-top preference, which
+                        // moved railTop again: an infinite layout loop that
+                        // froze the phone (log 2026-09-05 18:13, gridTopY
+                        // flipping 350 / 514 every frame).
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .offset(y: railTop)
+                        #endif
                     }
                     #if os(tvOS)
                     // Centre the rail between the display edge and the grid's
@@ -1892,49 +1919,6 @@ struct MoviesView: View {
 
     private func railCatcherAndGrid(_ items: [VODDisplayItem]) -> some View {
         posterGrid(items).padding(.leading, contentLeadingInset)
-    }
-    #endif
-
-    #if os(iOS)
-    /// Large title with the sort menu and filter beside it. Search stays
-    /// in the navigation bar drawer.
-    private var iOSTitleRow: some View {
-        HStack(alignment: .center) {
-            Text(kindTitle)
-                .font(.displayMedium)
-                .foregroundColor(.textPrimary)
-            Spacer()
-            Menu {
-                ForEach(MoviesSortOrder.allCases, id: \.self) { order in
-                    Button {
-                        sortOrderRaw = order.rawValue
-                    } label: {
-                        if order == sortOrder {
-                            Label(order.label, systemImage: "checkmark")
-                        } else {
-                            Text(order.label)
-                        }
-                    }
-                }
-            } label: {
-                iOSCircle("arrow.up.arrow.down")
-            }
-            .accessibilityLabel("Sort")
-            Button { showManageGroups = true } label: {
-                iOSCircle("line.3.horizontal.decrease")
-            }
-            .accessibilityLabel("Manage Groups")
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-    }
-
-    private func iOSCircle(_ systemImage: String) -> some View {
-        Image(systemName: systemImage)
-            .font(.system(size: 16, weight: .semibold))
-            .foregroundColor(.accentPrimary)
-            .frame(width: 36, height: 36)
-            .background(Circle().fill(Color.elevatedBackground))
     }
     #endif
 

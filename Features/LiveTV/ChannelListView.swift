@@ -373,7 +373,9 @@ struct ChannelListView: View {
         NavigationStack {
             mainContent
                 #if os(iOS)
-                .navigationTitle("Live TV")
+                // No title: the tab bar already says where we are (Logan
+                // 2026-09-05); the bar stays for the sort / view controls.
+                .navigationTitle("")
                 .navigationBarTitleDisplayMode(.inline)
                 #endif
                 .toolbarBackground(Color.appBackground, for: .navigationBar)
