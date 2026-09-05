@@ -2450,6 +2450,15 @@ struct MoviesHeroCarousel: View {
                 .onChange(of: heroFocus) { _, id in
                     if id != nil { lastHeroButton = id }
                     onHeroFocusChange?(id != nil)
+                    // Moving focus onto the next page's button reveals it
+                    // without a paging scroll (the next card is already
+                    // partly on screen), so the position id and the dots
+                    // stayed on the old page (Logan 2026-09-05). Page the
+                    // carousel to the focused card.
+                    if let id, let page = pages.first(where: { id.hasPrefix($0.id + "|") }),
+                       page.id != currentID {
+                        withAnimation(.smooth(duration: 0.35)) { currentID = page.id }
+                    }
                 }
                 .onChange(of: focusRequest.wrappedValue) { _, wanted in
                     guard wanted else { return }
@@ -2505,9 +2514,11 @@ struct MoviesHeroCarousel: View {
             #if os(tvOS)
             .focusedHeroPage($heroFocus)
             #endif
-            .overlay(alignment: .bottomTrailing) {
+            // Page dots centred just beneath the carousel (Logan 2026-09-05),
+            // hung off the bottom edge so the hero's height is unchanged.
+            .overlay(alignment: .bottom) {
                 if pages.count > 1 {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 8) {
                         ForEach(pages) { page in
                             Circle()
                                 .fill(page.id == (currentID ?? pages.first?.id)
@@ -2515,8 +2526,7 @@ struct MoviesHeroCarousel: View {
                                 .frame(width: dot, height: dot)
                         }
                     }
-                    .padding(.trailing, dotInset)
-                    .padding(.bottom, dotInset)
+                    .offset(y: dotInset)
                 }
             }
         }
@@ -2526,7 +2536,8 @@ struct MoviesHeroCarousel: View {
     #if os(tvOS)
     private let heroHeight: CGFloat = 420
     private let dot: CGFloat = 10
-    private let dotInset: CGFloat = 40
+    /// Distance the dots hang below the carousel's bottom edge.
+    private let dotInset: CGFloat = 22
     private let pageFraction: CGFloat = 0.62
     private let pageSpacing: CGFloat = 8
     #else
