@@ -515,9 +515,6 @@ struct MoviesView: View {
                 #endif
             }
             .onAppear {
-                #if os(tvOS)
-                MoviesFocusTracer.shared.start()
-                #endif
                 pushRouter.push = { navPath.append($0) }
                 refreshDispatcharrHeaders(); refreshHeroPages(); refreshWatchlistItems()
                 enrichArt()
@@ -3212,12 +3209,12 @@ struct MoviesPosterFocusStyle: ButtonStyle {
 #endif
 
 #if os(tvOS)
-/// Diagnostic tracer: logs every focus move and every remote press while a
-/// library tab is on screen. Standing rule: on any tvOS focus or nav
-/// complaint, read this trace before changing code.
+/// App-wide diagnostic tracer (started once in AerioApp): logs every focus
+/// move and every remote press on tvOS. Standing rule: on any tvOS focus
+/// or nav complaint, read this trace before changing code.
 @MainActor
-final class MoviesFocusTracer {
-    static let shared = MoviesFocusTracer()
+final class TVFocusTracer {
+    static let shared = TVFocusTracer()
     private var token: NSObjectProtocol?
 
     func start() {
@@ -3280,7 +3277,7 @@ final class MoviesFocusTracer {
 
 extension UIApplication {
     @objc func aerio_sendEvent(_ event: UIEvent) {
-        if event.type == .presses, let presses = (event as? UIPressesEvent)?.allPresses, MoviesFocusTracer.shared.isOn {
+        if event.type == .presses, let presses = (event as? UIPressesEvent)?.allPresses, TVFocusTracer.shared.isOn {
             for press in presses where press.phase == .began || press.phase == .ended {
                 let name: String
                 switch press.type {

@@ -374,6 +374,13 @@ struct AerioApp: App {
                 #endif
                 .onAppear {
                     DebugLogger.shared.logLifecycle("App launched")
+                    #if os(tvOS)
+                    // App-wide focus + remote press trace (Logan 2026-09-04:
+                    // "have the tracer everywhere"). Stays on for the
+                    // process lifetime; every screen's [FOCUS]/[PRESS]
+                    // hops land in the debug log.
+                    TVFocusTracer.shared.start()
+                    #endif
                     // Every session opens with the device/build/connection
                     // block, not just the one where logging was enabled.
                     DebugLogger.shared.logSessionStart()
