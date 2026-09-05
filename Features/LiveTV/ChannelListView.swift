@@ -3053,6 +3053,13 @@ struct ChannelRow: View {
                         .font(.system(size: (isWide ? 17 : 15) * s, weight: .medium))
                         .foregroundColor(.textPrimary)
                         .lineLimit(1)
+                    // Favorite star, like the guide's channel column
+                    // (Logan 2026-09-05).
+                    if favoritesStore.isFavorite(item.id) {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: (isWide ? 12 : 10) * s, weight: .semibold))
+                            .foregroundColor(.statusWarning)
+                    }
                     // Catch-up badge (see tvOS row above).
                     if item.hasCatchup {
                         Image(systemName: "clock.arrow.circlepath")
