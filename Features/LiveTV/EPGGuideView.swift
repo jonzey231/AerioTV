@@ -3585,9 +3585,14 @@ struct EPGGuideView: View {
                 // from the cell's isFocused re-rendered the guide mid-move and
                 // SwiftUI re-applied the stale focus id: every Right in a wide
                 // cell bounced back 200 ms later (trace 2026-09-05 13:45).
-                if previewMode, let chID,
-                   let prog = guideStore.programs[chID]?.first(where: { $0.id == pid }),
-                   let ch = channels.first(where: { $0.id == chID }) {
+                // Reported for the cell focus will SETTLE on: when the column
+                // snap below is about to move focus, the banner goes straight
+                // to the snap target instead of flashing the off-screen cell
+                // the engine landed on (recording 2026-09-05 15:18).
+                let reportPreview: @MainActor (String) -> Void = { id in
+                    guard previewMode, let chID,
+                          let prog = guideStore.programs[chID]?.first(where: { $0.id == id }),
+                          let ch = channels.first(where: { $0.id == chID }) else { return }
                     previewProgram = prog
                     previewChannel = ch
                 }
@@ -3596,14 +3601,32 @@ struct EPGGuideView: View {
                 guard let chID,
                       let previous = lastFocusedChannelForSnap,
                       previous != chID,
-                      !verticalSnapInFlight else { return }
+                      !verticalSnapInFlight else {
+                    #if os(tvOS)
+                    reportPreview(pid)
+                    #endif
+                    return
+                }
                 let anchor = viewportAnchorTime
                 let progs = guideStore.programs[chID] ?? []
                 guard let landed = progs.first(where: { $0.id == pid }) else { return }
                 // Engine already picked the anchor-column cell: nothing to do.
-                if landed.start <= anchor && anchor < landed.end { return }
+                if landed.start <= anchor && anchor < landed.end {
+                    #if os(tvOS)
+                    reportPreview(pid)
+                    #endif
+                    return
+                }
                 guard let target = programID(forChannel: chID, containing: anchor),
-                      target != pid else { return }
+                      target != pid else {
+                    #if os(tvOS)
+                    reportPreview(pid)
+                    #endif
+                    return
+                }
+                #if os(tvOS)
+                reportPreview(target)
+                #endif
                 verticalSnapInFlight = true
                 debugLog("🧭 [GuideFocus] column snap ch=\(chID) landed=\(landed.start) -> anchor cell")
                 Task { @MainActor in

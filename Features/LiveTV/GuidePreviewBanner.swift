@@ -42,7 +42,7 @@ struct GuidePreviewBanner: View {
             // 2026-09-05); the channel name stays underneath, the logo is
             // the fallback until art lands or when there is none.
             leadingBlock
-                .frame(width: 296)
+                .frame(width: 360)
             if let program {
                 copy(for: program)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -70,22 +70,22 @@ struct GuidePreviewBanner: View {
             case .art(let url):
                 AuthPosterImage(url: url, placeholder: .clear, maxPixel: 800)
                     .aspectRatio(contentMode: .fill)
-                    .frame(width: 296, height: 166)
+                    .frame(width: 360, height: 203)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             case .none:
                 // Every source came back empty (static team channels and the
                 // like): the channel logo stands in (Logan 2026-09-05).
                 if let channel, channel.logoURL != nil {
-                    CachedLogoImage(url: channel.logoURL, width: 230, height: 130)
-                        .frame(width: 296, height: 166)
+                    CachedLogoImage(url: channel.logoURL, width: 270, height: 152)
+                        .frame(width: 360, height: 203)
                 } else {
-                    Color.clear.frame(width: 296, height: 166)
+                    Color.clear.frame(width: 360, height: 203)
                 }
             case .pending:
                 // No placeholder while a lookup is open: the channel logo
                 // flashed before every programme logo while stepping through
                 // channels. Empty space keeps the copy from shifting.
-                Color.clear.frame(width: 296, height: 166)
+                Color.clear.frame(width: 360, height: 203)
             }
         }
     }
