@@ -2630,7 +2630,7 @@ struct ChannelRow: View {
         // tvOS: single .fullScreenCover(item:) — see `ChannelRowSheet`
         // doc for why we consolidated away from the dual-modifier
         // setup.
-        .fullScreenCover(item: recordSheet) { sheet in
+        .sheet(item: recordSheet) { sheet in
             switch sheet {
             case .record(let entry):
                 RecordProgramSheet(

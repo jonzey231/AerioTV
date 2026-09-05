@@ -1081,7 +1081,7 @@ struct MultiviewContainerView: View {
             recordSheetContent
         }
         #else
-        .fullScreenCover(isPresented: $showRecordSheet) {
+        .sheet(isPresented: $showRecordSheet) {
             recordSheetContent
         }
         #endif

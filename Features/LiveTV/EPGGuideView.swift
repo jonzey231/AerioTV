@@ -5667,7 +5667,7 @@ private struct GuideProgramButton: View {
             }
             // tvOS: .fullScreenCover (single, item-driven) — see
             // `GuideCellSheet` doc for why we consolidated.
-            .fullScreenCover(item: recordSheet) { sheet in
+            .sheet(item: recordSheet) { sheet in
                 switch sheet {
                 case .record:
                     RecordProgramSheet(
@@ -5683,7 +5683,8 @@ private struct GuideProgramButton: View {
                         channelLogoURL: channelItem.logoURL,
                         programSubTitle: prog.subTitle,
                         programSeason: prog.season,
-                        programEpisode: prog.episode
+                        programEpisode: prog.episode,
+                        programID: prog.programID
                     )
                 case .programInfo:
                     // Presented by the .sheet below (Logan 2026-09-05: Program
@@ -5736,7 +5737,8 @@ private struct GuideProgramButton: View {
                         channelLogoURL: channelItem.logoURL,
                         programSubTitle: prog.subTitle,
                         programSeason: prog.season,
-                        programEpisode: prog.episode
+                        programEpisode: prog.episode,
+                        programID: prog.programID
                     )
                 case .programInfo(let target):
                     ProgramInfoView(target: target)

@@ -43,6 +43,12 @@ struct RecordProgramSheet: View {
     var programSubTitle: String? = nil
     var programSeason: Int? = nil
     var programEpisode: Int? = nil
+    /// Dispatcharr programme id: the sheet's art follows the banner's lookup
+    /// order (feed icon, programme detail, TMDB) instead of TMDB alone.
+    var programID: Int? = nil
+    #if os(tvOS)
+    @ObservedObject private var artCache = GuidePreviewArtCache.shared
+    #endif
 
     @AppStorage("dvrDefaultPreRollMins") private var defaultPreRoll = 0
     @AppStorage("dvrDefaultPostRollMins") private var defaultPostRoll = 0
@@ -96,16 +102,15 @@ struct RecordProgramSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
+        Group {
             #if os(tvOS)
+            // Apple sheet card (Logan 2026-09-05), no NavigationStack.
             tvOSForm
             #else
-            iOSForm
+            NavigationStack { iOSForm }
+                .presentationDetents([.medium, .large])
             #endif
         }
-        #if os(iOS)
-        .presentationDetents([.medium, .large])
-        #endif
         .onAppear {
             preRoll = isLive ? 0 : defaultPreRoll
             postRoll = defaultPostRoll
@@ -354,124 +359,108 @@ struct RecordProgramSheet: View {
     // Replaced with a hand-rolled layout using RecordOptionPill /
     // RecordActionPill — same focus pattern as the Live TV group bar.
     #if os(tvOS)
+    /// Sheet card: title, the programme line, option rows, Record. Menu
+    /// closes the sheet (no Cancel pill, Logan 2026-09-05).
     private var tvOSForm: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text(isLive ? "Record from Now" : "Record Program")
-                    .font(.system(size: 42, weight: .bold))
-                Spacer()
-            }
-            .padding(.horizontal, 80)
-            .padding(.top, 60)
-            .padding(.bottom, 32)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 36) {
-                    programInfoCard
-
-                    if !isLive {
-                        optionRow(
-                            title: "Start Early",
-                            options: [0, 5, 10, 15, 30],
-                            selection: $preRoll,
-                            label: { $0 == 0 ? "None" : "\($0) min" },
-                            onCustom: {
-                                customValue = preRoll != 0 ? preRoll : 5
-                                showCustomPreRoll = true
-                            }
-                        )
+        VStack(alignment: .leading, spacing: 30) {
+                HStack(alignment: .center, spacing: 28) {
+                    if case .art(let art) = artCache.state(title: programTitle, category: "", programID: programID) {
+                        AuthPosterImage(url: art, placeholder: .clear, maxPixel: 600)
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 200, height: 112)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(isLive ? "Record from Now" : "Record Program")
+                            .font(.system(size: 38, weight: .bold))
+                            .foregroundColor(.textPrimary)
+                        Text(programTitle)
+                            .font(.system(size: 26, weight: .semibold))
+                            .foregroundColor(.textPrimary)
+                            .lineLimit(2)
+                        Text("\(channelName) · \(timeLabel)")
+                            .font(.system(size: 22))
+                            .foregroundColor(.textSecondary)
+                    }
+                }
 
+                if !isLive {
                     optionRow(
-                        title: "End Late",
-                        options: [0, 5, 10, 15, 30, 60],
-                        selection: $postRoll,
+                        title: "Start Early",
+                        options: [0, 5, 10, 15, 30],
+                        selection: $preRoll,
                         label: { $0 == 0 ? "None" : "\($0) min" },
                         onCustom: {
-                            customValue = postRoll > 0 ? postRoll : 5
-                            showCustomPostRoll = true
+                            customValue = preRoll != 0 ? preRoll : 5
+                            showCustomPreRoll = true
                         }
                     )
-
-                    // Destination row only for live recordings on
-                    // Dispatcharr playlists; future Dispatcharr
-                    // recordings are forced to `.dispatcharrServer`
-                    // (no path to start a future local recording on
-                    // iOS without background tasks). Comskip row
-                    // still shown for any Dispatcharr context; it
-                    // disables itself with an explainer when
-                    // destination == .local. v1.6.22 (Codex finding 1).
-                    // v1.7.x: destination choice also requires admin
-                    // (a non-admin account is forced to local in
-                    // `.onAppear`, so there's nothing to choose).
-                    if isDispatcharr && isLive && canRecordToServer {
-                        destinationRow
-                    }
-                    if isDispatcharr {
-                        comskipRow
-                    }
-
-                    if destination == .local {
-                        warningsBox
-                    }
-
-                    // v1.7.x: explain the no-path case (future program
-                    // on a Dispatcharr server the account can't write
-                    // to). Mirrors the iOS orange info section; the
-                    // Record pill is also hidden below.
-                    if hasNoRecordingPath && isDispatcharr {
-                        adminRequiredBox
-                    }
                 }
-                .padding(.horizontal, 80)
-                .padding(.bottom, 40)
-            }
 
-            // .focusSection() so pressing down from the last option row
-            // (e.g. Destination) lands on the action bar even though
-            // nothing sits directly below the currently-focused pill.
-            HStack(spacing: 32) {
-                Spacer()
-                RecordActionPill(
-                    label: "Cancel",
-                    systemImage: "xmark",
-                    tintColor: .textSecondary,
-                    action: { dismiss() }
+                optionRow(
+                    title: "End Late",
+                    options: [0, 5, 10, 15, 30, 60],
+                    selection: $postRoll,
+                    label: { $0 == 0 ? "None" : "\($0) min" },
+                    onCustom: {
+                        customValue = postRoll > 0 ? postRoll : 5
+                        showCustomPostRoll = true
+                    }
                 )
-                // No-recording-path cases: future program on a
-                // non-Dispatcharr playlist, or future program on a
-                // Dispatcharr server the account can't write to
-                // (non-admin). The info card above explains; hide
-                // Record so the user can't tap into a no-op / 403.
-                if !hasNoRecordingPath {
-                    RecordActionPill(
-                        label: "Record",
-                        systemImage: "record.circle",
-                        tintColor: .red,
-                        action: { scheduleRecording() }
-                    )
+
+                // Destination only for live recordings on Dispatcharr with an
+                // admin account (future recordings are forced to the server;
+                // non-admin is forced local). Comskip for any Dispatcharr
+                // context, disabling itself when the destination is local.
+                if isDispatcharr && isLive && canRecordToServer {
+                    destinationRow
                 }
-            }
-            .padding(.horizontal, 80)
-            .padding(.vertical, 32)
-            .focusSection()
+                if isDispatcharr {
+                    comskipRow
+                }
+                if destination == .local {
+                    warningsBox
+                }
+                if hasNoRecordingPath && isDispatcharr {
+                    adminRequiredBox
+                }
+
+                if !hasNoRecordingPath {
+                    VStack(spacing: 18) {
+                        // What the buffers add up to, updated as pills change.
+                        Text(recordingWindowSummary)
+                            .font(.system(size: 22))
+                            .foregroundColor(.textSecondary)
+                        RecordActionPill(
+                            label: "Record",
+                            systemImage: "record.circle",
+                            tintColor: .red,
+                            action: { scheduleRecording() }
+                        )
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 6)
+                    .focusSection()
+                }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.appBackground.ignoresSafeArea())
+        .frame(width: 940, alignment: .leading)
+        .padding(48)
+        // Sized to its rows (the fixed 820pt box left a third of it empty,
+        // Logan 2026-09-05); the pill rows are bounded so nothing clips.
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// "Records 12:00 PM to 3:35 PM · 3 h 35 min" for the current buffers.
+    private var recordingWindowSummary: String {
+        let start = isLive ? Date() : scheduledStart.addingTimeInterval(TimeInterval(-preRoll * 60))
+        let end = scheduledEnd.addingTimeInterval(TimeInterval(postRoll * 60))
+        let f = DateFormatter(); f.timeStyle = .short; f.dateStyle = .none
+        let minutes = max(1, Int(end.timeIntervalSince(start) / 60))
+        let length = minutes >= 60 ? "\(minutes / 60) h \(minutes % 60) min" : "\(minutes) min"
+        return "Records \(f.string(from: start)) to \(f.string(from: end)) · \(length)"
     }
 
     // MARK: - tvOS Row Builders
-
-    private var programInfoCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            tvInfoRow("Program", programTitle)
-            tvInfoRow("Channel", channelName)
-            tvInfoRow("Time", timeLabel)
-        }
-        .padding(24)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.elevatedBackground, in: RoundedRectangle(cornerRadius: 16))
-    }
 
     private func tvInfoRow(_ label: String, _ value: String) -> some View {
         HStack(alignment: .top, spacing: 24) {
@@ -585,7 +574,7 @@ struct RecordProgramSheet: View {
             Text(
                 isDisabled
                     ? "Comskip runs server-side. Switch the destination to Dispatcharr server to enable."
-                    : "Server-side: detects and removes commercial breaks after the recording completes."
+                    : "Server-side: detects and removes commercial breaks after the recording completes, when Comskip is configured on the Dispatcharr server."
             )
                 .font(.system(size: 18))
                 .foregroundColor(.textSecondary)
@@ -942,9 +931,11 @@ private struct RecordOptionPillButtonStyle: ButtonStyle {
                 Capsule()
                     .fill(isSelected ? Color.accentPrimary : Color.elevatedBackground)
             )
+            // Selected: white ring when focused. Unselected: accent ring
+            // (app-wide pill rule, Logan 2026-09-05).
             .overlay(
                 Capsule()
-                    .stroke(focused && !isSelected ? Color.accentPrimary : Color.clear, lineWidth: 2)
+                    .stroke(isSelected ? Color.white : Color.accentPrimary, lineWidth: focused ? 3 : 0)
             )
             .scaleEffect(focused ? 1.05 : 1.0)
             .opacity(focused ? 1.0 : (isSelected ? 1.0 : 0.85))

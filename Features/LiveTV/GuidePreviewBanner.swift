@@ -212,18 +212,24 @@ final class GuidePreviewArtCache: ObservableObject {
     /// Feed art first (instant), then the Dispatcharr programme detail
     /// (the icon Program Info shows; the bulk grid strips it), then TMDB.
     func state(for program: GuideProgram) -> ArtState {
-        if let raw = program.posterURL, let u = URL(string: raw), u.scheme != nil { return .art(u) }
-        if let pid = program.programID {
+        state(title: program.title, category: program.category,
+              programID: program.programID, posterURL: program.posterURL)
+    }
+
+    /// Same order for callers without a GuideProgram (the Record sheet).
+    func state(title: String, category: String, programID: Int?, posterURL: String? = nil) -> ArtState {
+        if let raw = posterURL, let u = URL(string: raw), u.scheme != nil { return .art(u) }
+        if let pid = programID {
             switch detailEntries[pid] {
             case .some(.some(let u)): return .art(u)
             case .some(.none): break          // detail had no icon: fall through to TMDB
-            case .none: fetchDetail(pid: pid, title: program.title); return .pending
+            case .none: fetchDetail(pid: pid, title: title); return .pending
             }
         }
-        let key = LibraryMatcher.cleanTitle(program.title)
+        let key = LibraryMatcher.cleanTitle(title)
         guard TMDBPosters.isEnabled, !key.isEmpty else { return .none }
         if let cached = entries[key] { return cached.map(ArtState.art) ?? .none }
-        _ = url(title: program.title, category: program.category)
+        _ = url(title: title, category: category)
         return .pending
     }
 
