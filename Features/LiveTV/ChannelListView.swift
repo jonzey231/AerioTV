@@ -2777,6 +2777,14 @@ struct ChannelRow: View {
                 }
             #endif
         }
+        #if os(iOS)
+        // The system context menu on the whole card, previewed as the card
+        // itself in its own rounded shape (Logan 2026-09-06): attached to
+        // the inner row it was snapshotted without the card chrome, so the
+        // lifted copy changed shape.
+        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .contextMenu { cardMenuButtons }
+        #endif
         #if os(tvOS)
         .conditionalExitCommand(isActive: isExpanded) {
             debugLog("🎮 Back pressed: collapsing expanded card for \(item.name)")
@@ -3162,9 +3170,6 @@ struct ChannelRow: View {
         .padding(.horizontal, (isWide ? 18 : 14) * s)
         .contentShape(Rectangle())
         .onTapGesture { onTap() }
-        // The system context menu (Logan 2026-09-06), same option set as
-        // the guide cell's menu.
-        .contextMenu { cardMenuButtons }
         // #45: per-channel "Add to Collection" — toggle membership in any
         // existing collection (a checkmark marks current members) or create a
         // new one with this channel already in it.

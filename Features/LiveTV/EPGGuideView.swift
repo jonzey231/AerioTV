@@ -5921,7 +5921,13 @@ private struct GuideProgramButton: View {
             }
             // The system context menu (Logan 2026-09-06): the same option
             // set as the channel row's menu and the tvOS guide menu.
-            .contextMenu { guideMenuButtons }
+            // Preview = the cell itself, capped to the screen so a cell that
+            // spans hours is not shrunk to fit (Logan 2026-09-06).
+            .contextMenu(menuItems: { guideMenuButtons }, preview: {
+                cellContent
+                    .frame(width: min(width, UIScreen.main.bounds.width - 32), alignment: .leading)
+                    .clipped()
+            })
             .confirmationDialog("Add to Collection", isPresented: $showCollectionPicker, titleVisibility: .visible) {
                 ForEach(ChannelCollectionsStore.shared.collections) { c in
                     Button((ChannelCollectionsStore.shared.contains(channelID: channelItem.id, in: c.id) ? "\u{2713} " : "") + c.name) {
