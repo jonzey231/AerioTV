@@ -57,6 +57,22 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.29",
+            title: "What's new in 1.8.29",
+            bullets: [
+                "DVR, Movies and TV Shows redesigned on Apple TV and iPhone",
+                "iPhone: swipeable card decks and poster grids with an alphabet rail",
+                "iPhone Live TV: one control row, groups in a sidebar drawer",
+                "Record a series: every episode or new episodes only",
+                "Guide: tap the clock for now, hold it to jump to a day and time",
+                "Manage Groups: move any group to the very top",
+                "Program Info on recordings and on channel long press",
+                "Catch-up: seek controls and a clear archive-unavailable message",
+                "Faster tab switches and smoother scrolling on iPhone"
+            ],
+            releaseURL: nil
+        ),
+        WhatsNewRelease(
             version: "1.8.9",
             title: "What's new in 1.8.9",
             bullets: [

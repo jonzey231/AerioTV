@@ -1,5 +1,68 @@
 # Changelog
 
+## v1.8.29 - 2026-09-06
+
+Media-center redesign beta for the AVPlayer TestFlight testers: new DVR,
+Movies and TV Shows tabs on Apple TV and iPhone, a reworked Live TV list
+and guide on iPhone, series recording rules, and a guide jump-to-day.
+
+### Added
+
+- Apple TV: DVR, Movies and TV Shows tabs rebuilt as a media center with
+  a hero, Continue Watching and Recent shelves, poster grids and an
+  alphabet rail. The tvOS guide's Channel Preview layout shows a banner
+  for the focused program and keeps the subtitle line in the cells.
+- iPhone: the same three tabs as a mobile layout. Continue Watching,
+  Watchlist and Recent Recordings are a swipeable card deck; the library
+  is a poster grid with an alphabet rail on the right; the "All Movies",
+  "All TV Shows" and "All Recordings" titles scroll the library to the top.
+- iPhone Live TV: tab titles are gone, the search, sort, group and view
+  controls sit in one row, and channel groups open from a sidebar drawer
+  by default (Settings > App Behaviors > Group Selection switches back to
+  pills). The drawer reorders groups by drag.
+- Series recording rules on the Record sheet (Apple TV and iPhone):
+  Just this one, Every episode, New episodes only, plus Customize rule
+  for the Dispatcharr match options. Rules are evaluated on save so the
+  matching episodes appear in the DVR at once.
+- Guide jump-to-day: tap or click the clock cell to snap to now; long
+  press for a Jump To sheet with day and time-of-day choices. The clock
+  shows the target while away from now, and scrolling back to the
+  present ends the jump on its own.
+- Manage Groups: Favorites and All Channels are ordinary rows in Manual
+  order, so any group can be moved to the very top.
+- Program Info on every recording (tap a card, or long press for the
+  menu), and on channel long press in the Live TV list even when the
+  channel has not been enriched yet.
+- Recording posters for studio shows and news come from the Dispatcharr
+  program detail when the guide feed carries artwork; portrait sizes are
+  used in the grid.
+- Catch-up playback has seek controls, and a program the provider no
+  longer holds shows "Not Available in the Archive" instead of failing.
+- Dates on aired and upcoming programs that are not today.
+
+### Changed
+
+- All Recordings sorts Title A to Z by default.
+- Long-press menus on iPhone channel rows and guide cells are the
+  system menu with one option set, and open without lifting the item.
+- Program Info on iPhone uses the same sheet style as Record, with the
+  card layout from Apple TV.
+- Guide history goes back 30 days on Dispatcharr 0.30 and forward days
+  load on demand when jumped to.
+
+### Fixed
+
+- iPhone froze when the Movies or TV Shows grid scrolled under the
+  alphabet rail.
+- Tab switches away from Live TV hung on iPhone: every channel row was
+  rebuilt on each guide update, and the guide published on every history
+  chunk. Rows are lazy now and history publishes in batches.
+- Stacked cards on iPhone dragged with stutter and sometimes opened a
+  card by accident.
+- Apple TV: moving a group up in Manage Groups did nothing.
+- Sports matchup lookups no longer treat talk-show blurbs as games.
+- "program" spelling throughout.
+
 ## v1.8.28 - 2026-09-03
 
 Playback fix release for the AVPlayer engine.
