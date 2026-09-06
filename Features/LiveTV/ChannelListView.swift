@@ -3224,25 +3224,18 @@ struct ChannelRow: View {
             }
         }
 
-        // Program Info — surface the current program's full
-        // description + category metadata in a modal. Only shown
-        // when we actually have a current program to describe;
-        // otherwise this button would be misleading (it would
-        // open an info sheet with a blank title).
-        if let program = item.currentProgram,
-           let start = item.currentProgramStart,
-           let end = item.currentProgramEnd {
+        // Program Info for the now-airing program. `ChannelDisplayItem` only
+        // carries a current program once the guide has enriched it, which
+        // never happens on the Dispatcharr load path; the guide store's
+        // now-airing row is the reliable source (the list row already draws
+        // from it), so the button no longer vanished on those channels
+        // (Logan 2026-09-05).
+        let nowAiring = guideStore.programs[item.id]?
+            .first(where: { $0.start <= Date() && $0.end > Date() })
+        if let title = item.currentProgram ?? nowAiring?.title,
+           let start = item.currentProgramStart ?? nowAiring?.start,
+           let end = item.currentProgramEnd ?? nowAiring?.end {
             Button("Program Info") {
-                // v1.7.x: pull programID from GuideStore if we
-                // have it cached — lets the modal lazy-load any
-                // category data the bulk enrichment hadn't reached
-                // yet (rare for now-airing, common for all others).
-                // Grab the whole now-airing GuideProgram (not just its
-                // programID) so the modal carries the feed badges + episode
-                // metadata for the currently-airing show. ChannelDisplayItem
-                // itself doesn't carry these flags.
-                let nowAiring = guideStore.programs[item.id]?
-                    .first(where: { $0.start <= Date() && $0.end > Date() })
                 // tvOS swallowed the sheet when it was asked to present while the
                 // long-press dialog was still dismissing (trace 2026-09-05 12:32):
                 // let the dialog finish first.
@@ -3250,11 +3243,11 @@ struct ChannelRow: View {
                     activeSheet = .programInfo(
                         ProgramInfoTarget(
                             channelName: item.name,
-                            title: program,
+                            title: title,
                             start: start,
                             end: end,
-                            description: item.currentProgramDescription ?? "",
-                            category: item.currentProgramCategory ?? "",
+                            description: item.currentProgramDescription ?? nowAiring?.description ?? "",
+                            category: item.currentProgramCategory ?? nowAiring?.category ?? "",
                             programID: nowAiring?.programID,
                             subTitle: nowAiring?.subTitle,
                             season: nowAiring?.season,
@@ -3281,17 +3274,18 @@ struct ChannelRow: View {
         // title + a 60-minute default duration that the user can
         // override in `RecordProgramSheet`.
         if item.streamURL != nil {
-            let hasEPG = (item.currentProgram?.isEmpty == false)
+            let airingTitle = item.currentProgram ?? nowAiring?.title
+            let hasEPG = (airingTitle?.isEmpty == false)
             Button(hasEPG ? "Record from Now" : "Record") {
                 let now = Date()
-                let title = item.currentProgram ?? "\(item.name) live recording"
-                let start = item.currentProgramStart ?? now
-                let end = (item.currentProgramEnd.flatMap { $0 > now ? $0 : nil })
+                let title = airingTitle ?? "\(item.name) live recording"
+                let start = item.currentProgramStart ?? nowAiring?.start ?? now
+                let end = ((item.currentProgramEnd ?? nowAiring?.end).flatMap { $0 > now ? $0 : nil })
                     ?? now.addingTimeInterval(3600)
                 activeSheet = .record(
                     EPGEntry(
                         title: title,
-                        description: item.currentProgramDescription ?? "",
+                        description: item.currentProgramDescription ?? nowAiring?.description ?? "",
                         startTime: start,
                         endTime: end
                     )
