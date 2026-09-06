@@ -1718,10 +1718,10 @@ struct MoviesView: View {
                         // moved railTop again: an infinite layout loop that
                         // froze the phone (log 2026-09-05 18:13, gridTopY
                         // flipping 350 / 514 every frame).
-                        .frame(maxHeight: .infinity, alignment: .top)
-                        .offset(y: railTop)
+                        // Centered by frame alignment (Logan 2026-09-05), not
+                        // by an offset from the top.
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
                         .padding(.trailing, 2)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                         #endif
                     }
@@ -2617,109 +2617,24 @@ struct MoviesHeroCarousel: View {
     }
 
     #if os(iOS)
-    /// Phone hero: a horizontal card deck (Logan's wife, 2026-09-05).
-    /// Cards sit along one track: the current title in front at the left
-    /// margin, the following ones peeking out to its right, the ones
-    /// already passed parked off the left edge. A
-    /// drag slides the deck continuously and snaps to the nearest card,
-    /// so the user can go back and forth. Same pages and actions as the
-    /// carousel.
-    @State private var stackIndex: Int = 0
-    @State private var stackDragX: CGFloat = 0
-    private let stackPeek: CGFloat = 9
-    /// Passed cards park at the left edge with a sliver showing (Logan
-    /// 2026-09-05); a swipe right brings them back.
-    private let parkedSliver: CGFloat = 14
-
+    /// Phone hero: the shared card deck (Logan's wife, 2026-09-05); same
+    /// pages and actions as the carousel.
     private var cardStack: some View {
-        GeometryReader { geo in
-            // Wide card (Logan 2026-09-05): 10pt margins, two 9pt peeks.
-            let w = geo.size.width - 20 - stackPeek * 2
-            let count = max(pages.count, 1)
-            // Fractional deck position while dragging. The deck is endless
-            // (Logan 2026-09-05): positions wrap modulo the page count, so
-            // past the last card the first one comes round again and the
-            // previous card is always the one parked at the left.
-            let p = CGFloat(stackIndex) - stackDragX / w
-            ZStack(alignment: .leading) {
-                ForEach(Array(pages.enumerated()), id: \.element.id) { i, page in
-                    let raw = (CGFloat(i) - p).truncatingRemainder(dividingBy: CGFloat(count))
-                    let wrapped = raw < 0 ? raw + CGFloat(count) : raw
-                    // The previous card (cyclically) is the parked one; with
-                    // three cards that leaves one peek on the right.
-                    let rel = (count > 1 && wrapped >= CGFloat(count) - 1 - 0.0001) ? wrapped - CGFloat(count) : wrapped
-                    let x: CGFloat = rel >= 0
-                        ? 10 + rel * stackPeek
-                        : 10 + max(rel, -1) * (w - parkedSliver + 10) - max(0, -rel - 1) * 4
-                    let scale: CGFloat = rel >= 0 ? 1 - min(rel, 3) * 0.03 : 1
-                    let alpha: Double = rel >= 0 ? Double(1 - min(rel, 3) * 0.2) : Double(0.9 + max(rel, -1) * 0.3)
-                    MoviesHero(
-                        item: page.item,
-                        progress: page.progress,
-                        backdropOverride: page.backdropOverride,
-                        headers: headers,
-                        onPrimary: { onPrimary(page) },
-                        onPlayFromStart: { onPlayFromStart(page) },
-                        onDetails: { onDetails(page) },
-                        onRemove: page.progress != nil ? { onRemove(page) } : nil,
-                        isOnWatchlist: isOnWatchlist?(page) ?? false,
-                        onToggleWatchlist: onToggleWatchlist.map { toggle in { toggle(page) } },
-                        primaryFocusID: page.id
-                    )
-                    .frame(width: w, height: heroHeight)
-                    .scaleEffect(scale, anchor: .trailing)
-                    .offset(x: x)
-                    .opacity(max(0, min(1, alpha)))
-                    .shadow(color: .black.opacity(abs(rel) < 0.5 ? 0.45 : 0), radius: 14, x: 6, y: 0)
-                    .allowsHitTesting(abs(rel) < 0.02)
-                    .zIndex(rel >= 0 ? Double(10 - rel) : Double(10.99 + rel))
-                }
-            }
-            .frame(width: geo.size.width, height: heroHeight, alignment: .leading)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 18)
-                    .onChanged { v in
-                        // Horizontal only; a vertical drag stays with the page.
-                        guard abs(v.translation.width) > abs(v.translation.height) else { return }
-                        stackDragX = v.translation.width
-                    }
-                    .onEnded { v in
-                        let dx = v.translation.width
-                        var target = stackIndex
-                        if abs(dx) > abs(v.translation.height) {
-                            if dx < -60 || v.predictedEndTranslation.width < -w / 2 { target += 1 }
-                            else if dx > 60 || v.predictedEndTranslation.width > w / 2 { target -= 1 }
-                        }
-                        // Wrap: the index cycles and the dots follow the page.
-                        let wrappedTarget = ((target % count) + count) % count
-                        withAnimation(.spring(response: 0.38, dampingFraction: 0.85)) {
-                            stackIndex = wrappedTarget
-                            stackDragX = 0
-                        }
-                        currentID = pages[wrappedTarget].id
-                    }
+        PhoneCardDeck(items: pages, cardHeight: heroHeight,
+                      onCurrentChange: { currentID = $0.id }) { page in
+            MoviesHero(
+                item: page.item,
+                progress: page.progress,
+                backdropOverride: page.backdropOverride,
+                headers: headers,
+                onPrimary: { onPrimary(page) },
+                onPlayFromStart: { onPlayFromStart(page) },
+                onDetails: { onDetails(page) },
+                onRemove: page.progress != nil ? { onRemove(page) } : nil,
+                isOnWatchlist: isOnWatchlist?(page) ?? false,
+                onToggleWatchlist: onToggleWatchlist.map { toggle in { toggle(page) } },
+                primaryFocusID: page.id
             )
-        }
-        .frame(height: heroHeight)
-        .overlay(alignment: .bottom) {
-            if pages.count > 1 {
-                HStack(spacing: 8) {
-                    ForEach(pages) { page in
-                        Circle()
-                            .fill(page.id == activePageID
-                                  ? Color.accentPrimary : Color.textTertiary.opacity(0.5))
-                            .frame(width: dot, height: dot)
-                    }
-                }
-                .offset(y: dotInset)
-            }
-        }
-        .padding(.bottom, 24)
-        .onChange(of: pages.map(\.id)) { _, ids in
-            // Keep the deck on the same title when the pages refresh.
-            if let cur = currentID, let i = ids.firstIndex(of: cur) { stackIndex = i }
-            else { stackIndex = min(stackIndex, max(ids.count - 1, 0)) }
         }
     }
     #endif

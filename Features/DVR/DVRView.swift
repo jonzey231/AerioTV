@@ -162,6 +162,16 @@ struct DVRView: View {
 
     /// Recording in progress first, else the newest recording with saved
     /// progress, else the newest recording.
+    /// Phone deck: recordings in progress first, then finished ones with a
+    /// saved position short of the end, newest first.
+    private var continueWatching: [Recording] {
+        let live = recordingNow.sorted { $0.scheduledStart > $1.scheduledStart }
+        let partial = completed
+            .filter { progressFraction($0) > 0 && progressFraction($0) < 0.97 }
+            .sorted { $0.scheduledStart > $1.scheduledStart }
+        return live + partial
+    }
+
     private var heroRecording: Recording? {
         if let live = recordingNow.first(where: { actions.canPlay($0) }) ?? recordingNow.first { return live }
         let done = completed.sorted { $0.scheduledStart > $1.scheduledStart }
@@ -400,6 +410,32 @@ struct DVRView: View {
             // nudged the scroll before the shelf came back (trace 2026-09-05
             // 01:47:12). The grid below stays lazy.
             VStack(alignment: .leading, spacing: sectionSpacing) {
+                #if os(iOS)
+                if isPhone, !continueWatching.isEmpty {
+                    // Phone (Logan 2026-09-05): a deck of every recording that
+                    // is started but unfinished, a recording in progress first.
+                    Text(continueWatching.allSatisfy(\.isInProgress) ? "Recording Now" : "Continue Watching")
+                        .font(.headlineSmall)
+                        .foregroundColor(.textPrimary)
+                        .padding(.horizontal, sectionInset)
+                    PhoneCardDeck(items: continueWatching, cardHeight: 220) { rec in
+                        DVRHero(recording: rec, headers: headers,
+                                progress: progressFraction(rec), canPlay: actions.canPlay(rec),
+                                inDeck: true,
+                                onPrimary: { heroPrimary(rec) },
+                                onSecondary: { heroSecondary(rec) },
+                                onStop: { actions.stop(rec) },
+                                menu: { menuItems(for: rec) })
+                    }
+                } else if let hero = heroRecording {
+                    DVRHero(recording: hero, headers: headers,
+                            progress: progressFraction(hero), canPlay: actions.canPlay(hero),
+                            onPrimary: { heroPrimary(hero) },
+                            onSecondary: { heroSecondary(hero) },
+                            onStop: { actions.stop(hero) },
+                            menu: { menuItems(for: hero) })
+                }
+                #else
                 if let hero = heroRecording {
                     #if os(tvOS)
                     // Down from the tab bar lands on whatever is geometrically
@@ -432,6 +468,7 @@ struct DVRView: View {
                         .id("hero")
                         #endif
                 }
+                #endif
                 if !recordingNow.isEmpty {
                     shelf(title: "Recording Now", items: recordingNow)
                 }
@@ -859,6 +896,8 @@ struct DVRHero<Menu: View>: View {
     var headers: [String: String] = [:]
     let progress: Double
     let canPlay: Bool
+    /// Inside the phone card deck: the deck owns the margins.
+    var inDeck: Bool = false
     let onPrimary: () -> Void
     let onSecondary: () -> Void
     let onStop: () -> Void
@@ -893,7 +932,7 @@ struct DVRHero<Menu: View>: View {
         }
         .frame(height: heroHeight)
         .frame(maxWidth: .infinity)
-        .padding(.horizontal, 16)
+        .padding(.horizontal, inDeck ? 0 : 16)
         #else
         ZStack(alignment: .leading) {
             artwork
@@ -985,9 +1024,11 @@ struct DVRHero<Menu: View>: View {
                 .font(.system(size: metaSize - 2, weight: .bold))
                 .foregroundColor(.red)
             } else if progress > 0 {
+                #if os(tvOS)
                 Text("Continue watching")
                     .font(.system(size: metaSize - 2, weight: .bold))
                     .foregroundColor(.accentPrimary)
+                #endif
             }
             Text(recording.programTitle.isEmpty ? "Recording" : recording.programTitle)
                 .font(titleFont)

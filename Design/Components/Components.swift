@@ -1075,3 +1075,95 @@ struct TVQRLinkSheet: View {
 }
 #endif
 
+
+#if os(iOS)
+// MARK: - Phone card deck
+
+/// Horizontal card deck for the iPhone hero rows (Logan 2026-09-05): the
+/// current card in front at the left margin, the following ones peeking
+/// out to its right, the previous one parked at the left edge with a
+/// sliver showing. A drag slides the deck and snaps to the nearest card;
+/// the deck is endless. Dots under it follow the current card.
+struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
+    let items: [Item]
+    let cardHeight: CGFloat
+    var onCurrentChange: ((Item) -> Void)? = nil
+    @ViewBuilder let card: (Item) -> Card
+
+    @State private var index: Int = 0
+    @State private var dragX: CGFloat = 0
+    private let peek: CGFloat = 9
+    private let margin: CGFloat = 10
+    private let parkedSliver: CGFloat = 14
+    private let dot: CGFloat = 6
+    private let dotInset: CGFloat = 16
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width - margin * 2 - peek * 2
+            let count = max(items.count, 1)
+            let p = CGFloat(index) - dragX / w
+            ZStack(alignment: .leading) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
+                    let raw = (CGFloat(i) - p).truncatingRemainder(dividingBy: CGFloat(count))
+                    let wrapped = raw < 0 ? raw + CGFloat(count) : raw
+                    let rel = (count > 1 && wrapped >= CGFloat(count) - 1 - 0.0001) ? wrapped - CGFloat(count) : wrapped
+                    let x: CGFloat = rel >= 0
+                        ? margin + rel * peek
+                        : margin + max(rel, -1) * (w - parkedSliver + margin) - max(0, -rel - 1) * 4
+                    let scale: CGFloat = rel >= 0 ? 1 - min(rel, 3) * 0.03 : 1
+                    let alpha: Double = rel >= 0 ? Double(1 - min(rel, 3) * 0.2) : Double(0.9 + max(rel, -1) * 0.3)
+                    card(item)
+                        .frame(width: w, height: cardHeight)
+                        .scaleEffect(scale, anchor: .trailing)
+                        .offset(x: x)
+                        .opacity(max(0, min(1, alpha)))
+                        .shadow(color: .black.opacity(abs(rel) < 0.5 ? 0.45 : 0), radius: 14, x: 6, y: 0)
+                        .allowsHitTesting(abs(rel) < 0.02)
+                        .zIndex(rel >= 0 ? Double(10 - rel) : Double(10.99 + rel))
+                }
+            }
+            .frame(width: geo.size.width, height: cardHeight, alignment: .leading)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 18)
+                    .onChanged { v in
+                        guard abs(v.translation.width) > abs(v.translation.height) else { return }
+                        dragX = v.translation.width
+                    }
+                    .onEnded { v in
+                        let dx = v.translation.width
+                        var target = index
+                        if abs(dx) > abs(v.translation.height) {
+                            if dx < -60 || v.predictedEndTranslation.width < -w / 2 { target += 1 }
+                            else if dx > 60 || v.predictedEndTranslation.width > w / 2 { target -= 1 }
+                        }
+                        let wrappedTarget = ((target % count) + count) % count
+                        withAnimation(.spring(response: 0.38, dampingFraction: 0.85)) {
+                            index = wrappedTarget
+                            dragX = 0
+                        }
+                        if wrappedTarget < items.count { onCurrentChange?(items[wrappedTarget]) }
+                    }
+            )
+        }
+        .frame(height: cardHeight)
+        .overlay(alignment: .bottom) {
+            if items.count > 1 {
+                HStack(spacing: 8) {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { i, _ in
+                        Circle()
+                            .fill(i == index ? Color.accentPrimary : Color.textTertiary.opacity(0.5))
+                            .frame(width: dot, height: dot)
+                    }
+                }
+                .offset(y: dotInset)
+            }
+        }
+        .padding(.bottom, 24)
+        .onChange(of: items.map { $0.id }) { _, ids in
+            index = min(index, max(ids.count - 1, 0))
+        }
+    }
+}
+#endif
