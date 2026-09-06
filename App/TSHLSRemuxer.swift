@@ -1845,6 +1845,18 @@ struct AVPlayerMultiviewTile: View {
         // position instead. Allowed again each time playback has
         // advanced 15s+ since the last reconnect - repeated failures
         // at the same spot fall through to the card.
+        // Catch-up 404 before anything played: the archive has no
+        // recording for this time (a provider that advertises more days
+        // than it keeps; Logan 2026-09-05, ESPN 7d flag, 3d archive).
+        // Re-minting the session only asks the same question again, so
+        // this is terminal, with a card that says what happened.
+        if catchup != nil, tileError == nil,
+           reason.contains("ingest failed: HTTP 404"),
+           progressStore.currentMs <= catchupBaseMs, readyLocalURL == nil {
+            debugLog("[AVP-CU] archive 404 at \(catchupBaseMs / 1000)s; not retrying title=\(channelName)")
+            failOrFallbackTerminal("archive unavailable (HTTP 404)")
+            return
+        }
         if let cu = catchup, tileError == nil {
             let pos = progressStore.currentMs
             if pos > lastCatchupReconnectMs + 15_000 || lastCatchupReconnectMs < 0 {
@@ -1918,6 +1930,12 @@ struct AVPlayerMultiviewTile: View {
         // startup watchdog firing a generic "never became ready" a few
         // seconds later (field find, 2026-08-26: two cards back to
         // back, the informative one lost).
+        failOrFallbackTerminal(reason, version: versionLabel)
+    }
+
+    /// The error card, with playback torn down. Shared by the generic
+    /// failure tail and the catch-up archive 404.
+    private func failOrFallbackTerminal(_ reason: String, version: String? = nil) {
         guard tileError == nil else { return }
         player?.pause()
         // A paused AVPlayer still reloads a live playlist (field log
@@ -1933,7 +1951,7 @@ struct AVPlayerMultiviewTile: View {
         let friendly = Self.userFacingError(reason)
         tileError = TileError(title: friendly.title,
                               message: friendly.message,
-                              version: versionLabel,
+                              version: version,
                               diagnostic: reason)
     }
 
@@ -1941,6 +1959,11 @@ struct AVPlayerMultiviewTile: View {
     /// The raw reason still shows in the small diagnostic line.
     private static func userFacingError(_ reason: String) -> (title: String, message: String) {
         let r = reason.lowercased()
+        if r.contains("archive unavailable") {
+            return ("Not Available in the Archive",
+                    "The provider has no recording for this time. The channel advertises "
+                    + "more catch-up days than its archive actually holds; try a more recent programme.")
+        }
         func codecName(_ marker: String) -> String {
             // "audio codec A_DTS" / "video codec V_MS/VFW/FOURCC"
             guard let range = reason.range(of: marker, options: .caseInsensitive) else { return "" }

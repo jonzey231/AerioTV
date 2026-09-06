@@ -373,7 +373,11 @@ struct PlaybackChromeOverlay: View {
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 8)
-            if store.vodSoloTile != nil {
+            // Catch-up rides the VOD transport (Logan 2026-09-05: no seek
+            // controls in catch-up): the pipeline pins durationMs to the
+            // programme length and routes seekAction through the window
+            // re-tune, so the drag-to-seek bar and skips work as they are.
+            if store.vodSoloTile != nil || store.catchupTile != nil {
                 VODTransportBar_iOS(store: store)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
