@@ -1999,9 +1999,9 @@ struct MoviesView: View {
 
     private func iOSCircle(_ systemImage: String) -> some View {
         Image(systemName: systemImage)
-            .font(.system(size: 14, weight: .semibold))
+            .font(.system(size: 17, weight: .semibold))
             .foregroundColor(.textPrimary)
-            .frame(width: 30, height: 30)
+            .frame(width: 38, height: 38)
             .background(Circle().fill(Color.textPrimary.opacity(0.08)))
     }
     #endif

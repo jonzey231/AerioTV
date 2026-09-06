@@ -818,9 +818,9 @@ struct ChannelListView: View {
 
     private func phoneCircle(_ systemImage: String) -> some View {
         Image(systemName: systemImage)
-            .font(.system(size: 14, weight: .semibold))
+            .font(.system(size: 17, weight: .semibold))
             .foregroundColor(.textPrimary)
-            .frame(width: 30, height: 30)
+            .frame(width: 38, height: 38)
             .background(Circle().fill(Color.textPrimary.opacity(0.08)))
     }
 
@@ -4596,9 +4596,9 @@ struct PhoneGroupDrawer: View {
                 Spacer()
                 Button(action: onManage) {
                     Image(systemName: "line.3.horizontal.decrease.circle")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(.textPrimary)
-                        .frame(width: 28, height: 28)
+                        .frame(width: 34, height: 34)
                         .background(Circle().fill(Color.textPrimary.opacity(0.08)))
                 }
                 .accessibilityLabel("Manage Groups")
