@@ -3229,7 +3229,7 @@ struct ChannelRow: View {
         // confirmationDialogs race on tvOS otherwise).
         Button {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
-        } label: { Label("Add to Collection", systemImage: "folder.badge.plus") }
+        } label: { Label("Add Channel to Collection", systemImage: "folder.badge.plus") }
 
         // #45: contextual remove. Viewing a collection -> remove from just
         // that one; otherwise (and only if it's in any) remove from all.

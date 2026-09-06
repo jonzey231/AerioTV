@@ -5784,7 +5784,7 @@ private struct GuideProgramButton: View {
                     onMultiviewIntent(channelItem)
                 }
                 // #45: add/remove this channel from a user collection.
-                Button("Add to Collection") {
+                Button("Add Channel to Collection") {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
                 }
                 // #45: contextual remove (viewing a collection -> that one;
@@ -6003,7 +6003,7 @@ private struct GuideProgramButton: View {
         }
         Button {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
-        } label: { Label("Add to Collection", systemImage: "folder.badge.plus") }
+        } label: { Label("Add Channel to Collection", systemImage: "folder.badge.plus") }
         if let cid = ChannelCollectionsStore.shared.activeFilterCollectionID,
            let coll = ChannelCollectionsStore.shared.collection(id: cid),
            coll.memberIDs.contains(channelItem.id) {
