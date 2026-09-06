@@ -887,6 +887,9 @@ struct DVRView: View {
     /// Dispatcharr program id (the sheet lazy-loads art and categories from
     /// it); the recording's own fields cover the rest.
     private func showInfo(_ rec: Recording) {
+        #if os(iOS)
+        debugLog("[DECK] card tap (DVR) \(Int((CACurrentMediaTime() - PhoneCardDeckStats.lastDragEnded) * 1000)) ms after last drag end")
+        #endif
         let title = rec.programTitle
         let sid = rec.serverID
         let start = rec.scheduledStart

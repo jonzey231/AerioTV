@@ -1084,6 +1084,12 @@ struct TVQRLinkSheet: View {
 /// out to its right, the previous one parked at the left edge with a
 /// sliver showing. A drag slides the deck and snaps to the nearest card;
 /// the deck is endless. Dots under it follow the current card.
+/// Deck drag bookkeeping shared across generic instantiations.
+@MainActor
+enum PhoneCardDeckStats {
+    static var lastDragEnded: TimeInterval = 0
+}
+
 struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
     let items: [Item]
     let cardHeight: CGFloat
@@ -1092,6 +1098,12 @@ struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
 
     @State private var index: Int = 0
     @State private var dragX: CGFloat = 0
+    /// Drag instrumentation (Logan 2026-09-06, "very laggy"): frame gaps
+    /// between drag samples and the tap-after-drag window.
+    @State private var lastDragSample: TimeInterval = 0
+    @State private var dragFrames = 0
+    @State private var dragDropped = 0
+    @State private var dragWorstMs: Double = 0
     private let peek: CGFloat = 9
     private let margin: CGFloat = 10
     private let parkedSliver: CGFloat = 14
@@ -1108,6 +1120,11 @@ struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
                     let raw = (CGFloat(i) - p).truncatingRemainder(dividingBy: CGFloat(count))
                     let wrapped = raw < 0 ? raw + CGFloat(count) : raw
                     let rel = (count > 1 && wrapped >= CGFloat(count) - 1 - 0.0001) ? wrapped - CGFloat(count) : wrapped
+                    // Only the cards that can be seen are built: the current
+                    // one, three behind it and the parked previous one. A
+                    // ten-item deck was laying out ten hero views per drag
+                    // frame (Logan 2026-09-06, "very laggy").
+                    if rel > -1.5 && rel < 3.5 {
                     let x: CGFloat = rel >= 0
                         ? margin + rel * peek
                         : margin + max(rel, -1) * (w - parkedSliver + margin) - max(0, -rel - 1) * 4
@@ -1115,23 +1132,48 @@ struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
                     let alpha: Double = rel >= 0 ? Double(1 - min(rel, 3) * 0.2) : Double(0.9 + max(rel, -1) * 0.3)
                     card(item)
                         .frame(width: w, height: cardHeight)
+                        // The drop shadow lives on a plain shape under the
+                        // card, not on the card: shadowing a hero with
+                        // gradients and masks re-renders it offscreen on
+                        // every frame of the drag.
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(Color.black.opacity(0.001))
+                                .shadow(color: .black.opacity(abs(rel) < 0.5 ? 0.45 : 0), radius: 14, x: 6, y: 0)
+                        )
                         .scaleEffect(scale, anchor: .trailing)
                         .offset(x: x)
                         .opacity(max(0, min(1, alpha)))
-                        .shadow(color: .black.opacity(abs(rel) < 0.5 ? 0.45 : 0), radius: 14, x: 6, y: 0)
                         .allowsHitTesting(abs(rel) < 0.02)
                         .zIndex(rel >= 0 ? Double(10 - rel) : Double(10.99 + rel))
+                    }
                 }
             }
             .frame(width: geo.size.width, height: cardHeight, alignment: .leading)
             .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 18)
+            // High priority from 10 pt: a card that started to slide must not
+            // hand the touch to its own tap or buttons (accidental taps,
+            // Logan 2026-09-06). Taps with no movement still reach the card.
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 10)
                     .onChanged { v in
                         guard abs(v.translation.width) > abs(v.translation.height) else { return }
+                        let now = CACurrentMediaTime()
+                        if lastDragSample > 0 {
+                            let gap = (now - lastDragSample) * 1000
+                            dragFrames += 1
+                            if gap > 34 { dragDropped += 1 }
+                            dragWorstMs = max(dragWorstMs, gap)
+                        } else {
+                            dragFrames = 0; dragDropped = 0; dragWorstMs = 0
+                        }
+                        lastDragSample = now
                         dragX = v.translation.width
                     }
                     .onEnded { v in
+                        debugLog("[DECK] drag end: \(dragFrames) samples, \(dragDropped) gaps > 34 ms, worst \(Int(dragWorstMs)) ms, cards=\(items.count)")
+                        lastDragSample = 0
+                        PhoneCardDeckStats.lastDragEnded = CACurrentMediaTime()
                         let dx = v.translation.width
                         var target = index
                         if abs(dx) > abs(v.translation.height) {
