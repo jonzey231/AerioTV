@@ -55,7 +55,7 @@ struct CompactChannelRow: View {
            let end = item.currentProgramEnd {
             return (title, item.currentProgramDescription, start, end)
         }
-        if let p = guideStore.programs[item.id]?.first(where: { $0.isLive }) {
+        if let p = guideStore.liveProgram(for: item.id) {
             return (p.title, p.description, p.start, p.end)
         }
         return nil

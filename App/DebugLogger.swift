@@ -657,3 +657,46 @@ final class DebugLogger: @unchecked Sendable {
     }
 #endif
 }
+
+
+/// Tab switch latency probe (2026-09-06): counts body evaluations per view
+/// and flushes one line per second so the log shows how many times each
+/// tab root and each channel row re-rendered around a switch.
+import Combine
+
+@MainActor
+enum TabProbe {
+    private static var subs: [AnyCancellable] = []
+    private static var probed = false
+    /// Counts objectWillChange sends per store, once per session.
+    static func probePublishers(channelStore: ChannelStore, nowPlaying: NowPlayingManager,
+                                favorites: FavoritesStore, collections: ChannelCollectionsStore,
+                                guide: GuideStore) {
+        guard !probed else { return }
+        probed = true
+        subs.append(channelStore.objectWillChange.sink { _ in body("pub:channelStore") })
+        subs.append(nowPlaying.objectWillChange.sink { _ in body("pub:nowPlaying") })
+        subs.append(favorites.objectWillChange.sink { _ in body("pub:favorites") })
+        subs.append(collections.objectWillChange.sink { _ in body("pub:collections") })
+        subs.append(guide.objectWillChange.sink { _ in body("pub:guide") })
+        subs.append(guide.$programs.dropFirst().sink { _ in body("pub:guide.programs") })
+        subs.append(guide.$isLoading.dropFirst().sink { _ in body("pub:guide.isLoading") })
+    }
+    private static var counts: [String: Int] = [:]
+    private static var distinct: [String: Set<String>] = [:]
+    private static var flushScheduled = false
+    static func body(_ name: String, key: String? = nil) {
+        counts[name, default: 0] += 1
+        if let key { distinct[name, default: []].insert(key) }
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            let line = counts.sorted { $0.key < $1.key }.map {
+                "\($0.key)=\($0.value)" + (distinct[$0.key].map { " (\($0.count) distinct)" } ?? "")
+            }.joined(separator: " ")
+            counts.removeAll(); distinct.removeAll()
+            flushScheduled = false
+            debugLog("[TAB] bodies/1s: \(line)")
+        }
+    }
+}

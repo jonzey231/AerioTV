@@ -95,6 +95,31 @@ final class GuideStore: ObservableObject {
     /// still parsing silently.
     static let shared = GuideStore()
 
+    /// The airing program for a channel by binary search on the start
+    /// time (each channel's array is kept sorted by start). The linear
+    /// `first(where: isLive)` walked up to 30 days of history per call and
+    /// the channel rows called it several times per render (Time Profiler
+    /// 2026-09-06: tab switches away from Live TV hung on it).
+    func liveProgram(for channelID: String, at now: Date = Date()) -> GuideProgram? {
+        guard let list = programs[channelID], !list.isEmpty else { return nil }
+        var lo = 0, hi = list.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if list[mid].start <= now { lo = mid + 1 } else { hi = mid }
+        }
+        // lo = first index with start > now; the candidate is the one before.
+        var i = lo - 1
+        // Overlapping entries (feed glitches): step back a little for one
+        // that still covers now.
+        var steps = 0
+        while i >= 0, steps < 3 {
+            let p = list[i]
+            if p.end > now { return p.start <= now ? p : nil }
+            i -= 1; steps += 1
+        }
+        return nil
+    }
+
     @Published var programs: [String: [GuideProgram]] = [:] {  // channelID → programs
         // Task #188: any EPG mutation invalidates the focus-path memo below.
         didSet { programChannelMemo.removeAll() }
@@ -1713,17 +1738,25 @@ final class GuideStore: ObservableObject {
     private func fetchGridChunks(_ chunks: [(Date, Date)], api: DispatcharrAPI,
                                  maps: DispatcharrGridMaps, serverID: String) async {
         var total = 0
-        for (start, end) in chunks {
+        // Publish sparingly: every chunk used to replace `programs`, and one
+        // publish re-renders the tab roots and every channel row (probe
+        // 2026-09-06: 656 row bodies twice a second for the ~25 s of a
+        // 30-day history fill, the tab-switch "hang"). Forward chunks change
+        // what is on screen and publish at once; history chunks merge into
+        // a staging copy and publish every few chunks and at the end.
+        var staged = programs_snapshotForMerge()
+        var unpublished = 0
+        for (i, (start, end)) in chunks.enumerated() {
             guard displayedServerID == nil || displayedServerID == serverID else { return }
             let programs: [DispatcharrCurrentProgram]
             do {
                 programs = try await api.getEPGGrid(start: start, end: end)
             } catch {
                 debugLog("📺 grid window chunk failed (\(error.localizedDescription)); stopping extension")
-                return
+                break
             }
-            guard !programs.isEmpty else { continue }
-            let base = programs_snapshotForMerge()
+            if programs.isEmpty { continue }
+            let base = staged
             let merged = await Task.detached(priority: .utility) {
                 GuideStore.mergeGridPrograms(programs, into: base,
                                              tvgIDToChannelIDs: maps.tvgIDToChannelIDs,
@@ -1731,11 +1764,21 @@ final class GuideStore: ObservableObject {
                                              uuidToChannelID: maps.uuidToChannelID,
                                              windowStart: start, windowEnd: end)
             }.value
+            staged = merged.dict
             total += merged.matched
+            unpublished += 1
             debugLog("📺 grid window chunk \(Self.chunkStamp(start))..\(Self.chunkStamp(end)): \(programs.count) from server, \(merged.matched) matched")
-            guard commitPrograms(merged.dict, for: serverID, source: "dispatcharr-grid-window") else { return }
-            if end > (forwardLoadedUntil ?? .distantPast), end > Date() { forwardLoadedUntil = end }
+            let isForward = end > Date()
+            if isForward || unpublished >= 6 || i == chunks.count - 1 {
+                guard commitPrograms(staged, for: serverID, source: "dispatcharr-grid-window") else { return }
+                unpublished = 0
+                staged = programs_snapshotForMerge()
+            }
+            if isForward, end > (forwardLoadedUntil ?? .distantPast) { forwardLoadedUntil = end }
             try? await Task.sleep(for: .milliseconds(250))
+        }
+        if unpublished > 0 {
+            _ = commitPrograms(staged, for: serverID, source: "dispatcharr-grid-window")
         }
         debugLog("📺 grid window extension done: \(total) programmes merged over \(chunks.count) chunk(s)")
     }
@@ -4824,7 +4867,7 @@ struct EPGGuideView: View {
     /// channel now (never an empty banner over a full guide).
     private func seedPreviewIfNeeded() {
         guard previewMode, previewProgram == nil, let ch = channels.first,
-              let live = guideStore.programs[ch.id]?.first(where: { $0.isLive }) else { return }
+              let live = guideStore.liveProgram(for: ch.id) else { return }
         previewProgram = live
         previewChannel = ch
     }
@@ -6045,7 +6088,7 @@ private struct GuideProgramButton: View {
         // underneath never moves. The anchor also carries the tap.
         cellContent
             .overlay(alignment: .leading) {
-                SystemMenuAnchor(items: guideMenuItems) {
+                SystemMenuAnchor(items: { guideMenuItems }) {
                     // v1.7.x: when staging is active, the cell tap toggles
                     // the channel in the multiview pile rather than starting
                     // playback. See `EPGGuideView.handleMultiviewIntent`.
@@ -6459,7 +6502,9 @@ struct SystemMenuItem {
 /// the system menu opens with nothing lifted and the content beneath is
 /// untouched (guide cells, Logan 2026-09-06).
 struct SystemMenuAnchor: UIViewRepresentable {
-    let items: [SystemMenuItem]
+    /// Built only when the menu opens: the anchor is updated on every row
+    /// render, and building the items scanned guide data per row.
+    let items: () -> [SystemMenuItem]
     let onTap: () -> Void
 
     func makeUIView(context: Context) -> AnchorView {
@@ -6476,14 +6521,14 @@ struct SystemMenuAnchor: UIViewRepresentable {
     }
 
     final class AnchorView: UIView, UIContextMenuInteractionDelegate {
-        var items: [SystemMenuItem] = []
+        var items: () -> [SystemMenuItem] = { [] }
         var onTap: () -> Void = {}
 
         @objc func tapped() { onTap() }
 
         func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
                                     configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
-            let items = self.items
+            let items = self.items()
             return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
                 UIMenu(children: items.map { item in
                     UIAction(title: item.title, image: UIImage(systemName: item.systemImage),

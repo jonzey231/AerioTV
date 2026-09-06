@@ -448,6 +448,7 @@ struct MoviesView: View {
     var isAtRoot: Bool { navPath.isEmpty }
 
     var body: some View {
+        let _ = TabProbe.body("MoviesView")
         NavigationStack(path: $navPath) {
             ZStack {
                 Color.appBackground.ignoresSafeArea()
@@ -1264,6 +1265,12 @@ struct MoviesView: View {
                     // header with the field is never re-created mid-typing.
                     Group {
                         VStack(alignment: .leading, spacing: sectionSpacing) {
+                            #if os(iOS)
+                            if UIDevice.current.userInterfaceIdiom == .phone {
+                                // Room under the Syncing pill (2026-09-06).
+                                Color.clear.frame(height: 22)
+                            }
+                            #endif
                             // Continue Watching IS the hero: one page per title
                             // in progress (Logan 2026-09-03), so the separate
                             // poster row is gone from this tab.

@@ -379,6 +379,10 @@ struct ChannelListView: View {
     @State private var groupSortMode: String = GroupSortMode.default.rawValue
 
     var body: some View {
+        let _ = TabProbe.body("ChannelListView")
+        let _ = TabProbe.probePublishers(channelStore: channelStore, nowPlaying: nowPlaying,
+                                         favorites: favoritesStore, collections: collectionsStore,
+                                         guide: GuideStore.shared)
         NavigationStack {
             mainContent
                 #if os(iOS)
@@ -1397,48 +1401,43 @@ struct ChannelListView: View {
                 }
             }
             #else
-            List {
-                // GH #72: an empty group is a legitimate state (a provider
-                // group the upstream has not populated yet), not an error, so
-                // it gets a notice with a way out rather than a blank list.
-                if filteredChannels.isEmpty {
-                    emptyGroupNotice
-                        .frame(minHeight: 320)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
+            // A lazy stack, not a List (probe 2026-09-06): the List ran every
+            // channel row's body on each store publish (655 distinct rows per
+            // pass, two passes per render), so a guide commit or a tab switch
+            // rebuilt the whole playlist. LazyVStack builds only the rows on
+            // screen. The rows draw their own card chrome, so the old row
+            // insets become padding; pull-to-refresh, the header inset, the
+            // group swipe and scroll-away all work on a ScrollView.
+            ScrollView(.vertical) {
+                LazyVStack(spacing: 0) {
+                    // GH #72: an empty group is a legitimate state (a provider
+                    // group the upstream has not populated yet), not an error,
+                    // so it gets a notice with a way out rather than a blank list.
+                    if filteredChannels.isEmpty {
+                        emptyGroupNotice
+                            .frame(minHeight: 320)
+                    }
+                    // Key rows by the unique stream URL, not the channel id,
+                    // so a provider that reuses one tvg-id across distinct
+                    // channels can't produce duplicate SwiftUI identities.
+                    ForEach(filteredChannels, id: \.rowKey) { item in
+                        ChannelRow(
+                            item: item,
+                            onTap: { startPlayback(item) },
+                            fetchUpcoming: makeFetchUpcoming(for: item)
+                        )
+                        .padding(.vertical, sizeClass == .regular ? 5 : 3)
+                        .padding(.horizontal, sizeClass == .regular ? 24 : 16)
+                        .id(item.id)
+                    }
+                    // GH #20 follow-up: with the list frame extended under the
+                    // floating tab bar (ignoresSafeArea below), this spacer is
+                    // the bottom content padding that lets the last channel row
+                    // scroll clear of the bar + home indicator.
+                    Color.clear.frame(height: 96)
                 }
-                // Key rows by the unique stream URL, not the channel id,
-                // so a provider that reuses one tvg-id across distinct
-                // channels can't produce duplicate SwiftUI identities.
-                ForEach(filteredChannels, id: \.rowKey) { item in
-                    ChannelRow(
-                        item: item,
-                        onTap: { startPlayback(item) },
-                        fetchUpcoming: makeFetchUpcoming(for: item)
-                    )
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(
-                        top: sizeClass == .regular ? 5 : 3,
-                        leading: sizeClass == .regular ? 24 : 16,
-                        bottom: sizeClass == .regular ? 5 : 3,
-                        trailing: sizeClass == .regular ? 24 : 16
-                    ))
-                    .listRowSeparator(.hidden)
-                }
-                // GH #20 follow-up: with the list frame extended under the
-                // floating tab bar (ignoresSafeArea below), this spacer is
-                // the bottom content padding that lets the last channel row
-                // scroll clear of the bar + home indicator (the Android
-                // LazyColumn's 104dp contentPadding analog; .contentMargins
-                // leaked the margin to the top edge on iOS 26).
-                Color.clear
-                    .frame(height: 96)
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
             }
-            .listStyle(.plain)
             .background(Color.appBackground)
-            .scrollContentBackground(.hidden)
             // Apple GH #55 (jayegles): swiping left/right on the list cycles
             // the selected group pill (left = next, right = previous, clamped
             // at the ends). simultaneousGesture plus the horizontal-dominance
@@ -2540,14 +2539,14 @@ struct ChannelRow: View {
             // XMLTV <sub-title>; when GuideStore has the same now-airing
             // program, borrow both so the collapsed row can show LIVE/NEW and
             // the episode / sports-match name (GH #34).
-            let liveGuideProg = guideStore.programs[item.id]?.first(where: { $0.isLive })
+            let liveGuideProg = guideStore.liveProgram(for: item.id)
             let flags = liveGuideProg
                 .map { EPGFlags(isNew: $0.isNew, isLiveBroadcast: $0.isLiveBroadcast,
                                 isPremiere: $0.isPremiere, isFinale: $0.isFinale,
                                 isRepeat: $0.isRepeat) } ?? EPGFlags()
             return (title, liveGuideProg?.subTitle, item.currentProgramDescription, start, end, flags)
         }
-        if let p = guideStore.programs[item.id]?.first(where: { $0.isLive }) {
+        if let p = guideStore.liveProgram(for: item.id) {
             return (p.title, p.subTitle, p.description, p.start, p.end,
                     EPGFlags(isNew: p.isNew, isLiveBroadcast: p.isLiveBroadcast,
                              isPremiere: p.isPremiere, isFinale: p.isFinale,
@@ -2686,6 +2685,7 @@ struct ChannelRow: View {
     #endif
 
     var body: some View {
+        let _ = TabProbe.body("ChannelRow", key: item.id)
         VStack(spacing: 0) {
             #if os(tvOS)
             tvRow
@@ -3171,7 +3171,7 @@ struct ChannelRow: View {
         // the card never changes. The trailing strip stays with the
         // expand button.
         .overlay(alignment: .leading) {
-            SystemMenuAnchor(items: cardMenuItems, onTap: onTap)
+            SystemMenuAnchor(items: { cardMenuItems }, onTap: onTap)
                 .padding(.trailing, (isWide ? 150 : 58) * s)
         }
         // #45: per-channel "Add to Collection" — toggle membership in any
@@ -3242,7 +3242,7 @@ struct ChannelRow: View {
         let live = liveProgram
         if let live {
             items.append(.init(title: "Program Info", systemImage: "info.circle") {
-                let nowAiring = guideStore.programs[item.id]?.first(where: { $0.isLive })
+                let nowAiring = guideStore.liveProgram(for: item.id)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                     activeSheet = .programInfo(
                         ProgramInfoTarget(
@@ -3323,7 +3323,7 @@ struct ChannelRow: View {
         let live = liveProgram
         if let live {
             Button {
-                let nowAiring = guideStore.programs[item.id]?.first(where: { $0.isLive })
+                let nowAiring = guideStore.liveProgram(for: item.id)
                 // tvOS swallowed the sheet when it was asked to present while the
                 // long-press dialog was still dismissing (trace 2026-09-05 12:32):
                 // let the dialog finish first.

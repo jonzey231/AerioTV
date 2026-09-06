@@ -194,6 +194,7 @@ struct DVRView: View {
     // MARK: Body
 
     var body: some View {
+        let _ = TabProbe.body("DVRView")
         NavigationStack {
             ZStack {
                 Color.appBackground.ignoresSafeArea()
@@ -460,6 +461,11 @@ struct DVRView: View {
             // 01:47:12). The grid below stays lazy.
             VStack(alignment: .leading, spacing: sectionSpacing) {
                 #if os(iOS)
+                if isPhone {
+                    // Room under the Syncing pill, which sits in the top-left
+                    // of the safe area over the first header (2026-09-06).
+                    Color.clear.frame(height: 22)
+                }
                 if isPhone, !continueWatching.isEmpty {
                     // Phone (Logan 2026-09-05): a deck of every recording that
                     // is started but unfinished, a recording in progress first.

@@ -58,7 +58,7 @@ struct ChannelPickRow: View {
     /// group-name fallback, matching `ChannelRow`).
     private var nowTitle: String? {
         if let t = item.currentProgram, !t.isEmpty { return t }
-        if let live = guideStore.programs[item.id]?.first(where: { $0.isLive }),
+        if let live = guideStore.liveProgram(for: item.id),
            !live.title.isEmpty {
             return live.title
         }

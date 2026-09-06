@@ -4398,6 +4398,7 @@ struct MainTabView: View {
     }
 
     var body: some View {
+        let _ = TabProbe.body("MainTabView")
         ZStack {
             tabContentView
                 #if os(tvOS)
@@ -5392,6 +5393,10 @@ struct MainTabView: View {
         .id(tvTabViewIdentity)
         #endif
         .tint(theme.accent)
+        // Tab switch latency probe (Logan 2026-09-06, "visual hang").
+        .onChange(of: selectedTab) { old, new in
+            debugLog("[TAB] switch \(old) -> \(new)")
+        }
         // GH #20 auto-hide, iOS 26+ path (reworked 2026-07-12): minimize
         // is set to .never so there is no minimized pill and no system
         // minimize state machine competing with the manual toggle - that
@@ -6801,7 +6806,7 @@ private struct ChannelInfoBanner: View {
            let end = item.currentProgramEnd {
             return (title, start, end)
         }
-        if let p = guideStore.programs[item.id]?.first(where: { $0.isLive }) {
+        if let p = guideStore.liveProgram(for: item.id) {
             return (p.title, p.start, p.end)
         }
         return nil
