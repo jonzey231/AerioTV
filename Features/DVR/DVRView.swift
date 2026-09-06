@@ -41,6 +41,7 @@ struct DVRView: View {
     @State private var showDeleteConfirmation = false
     @State private var showDeleteFromServerAlert = false
     @State private var showDownloadConfirmation = false
+    @State private var infoTarget: ProgramInfoTarget?
 
     #if os(tvOS)
     /// "primary" | "secondary" | "stop" while a hero button has focus.
@@ -238,6 +239,7 @@ struct DVRView: View {
         } message: {
             Text("Download this recording from the Dispatcharr server to your device's local storage.")
         }
+        .sheet(item: $infoTarget) { ProgramInfoView(target: $0) }
         .fullScreenCover(item: $playingRecording) { item in
             PlayerView(
                 urls: [item.url],
@@ -466,6 +468,7 @@ struct DVRView: View {
                                 onPrimary: { heroPrimary(rec) },
                                 onSecondary: { heroSecondary(rec) },
                                 onStop: { actions.stop(rec) },
+                                onInfo: { showInfo(rec) },
                                 menu: { menuItems(for: rec) })
                     }
                 } else if let hero = heroRecording {
@@ -531,6 +534,7 @@ struct DVRView: View {
                                     onPrimary: { heroPrimary(rec) },
                                     onSecondary: { heroSecondary(rec) },
                                     onStop: { actions.stop(rec) },
+                                    onInfo: { showInfo(rec) },
                                     menu: { menuItems(for: rec) })
                         }
                     } else {
@@ -874,6 +878,45 @@ struct DVRView: View {
         #endif
     }
 
+    /// The Live TV program info sheet for a recording. The guide row that
+    /// matches by title and air window lends its description, category and
+    /// Dispatcharr program id (the sheet lazy-loads art and categories from
+    /// it); the recording's own fields cover the rest.
+    private func showInfo(_ rec: Recording) {
+        let title = rec.programTitle
+        let sid = rec.serverID
+        let start = rec.scheduledStart
+        let end = rec.scheduledEnd
+        var descriptor = FetchDescriptor<EPGProgram>(
+            predicate: #Predicate<EPGProgram> { p in
+                p.serverID == sid && p.title == title && p.startTime < end && p.endTime > start
+            }
+        )
+        descriptor.fetchLimit = 1
+        let epg = try? modelContext.fetch(descriptor).first
+        let channelName = rec.channelName.isEmpty
+            ? (ChannelStore.shared.channels.first(where: {
+                $0.id == rec.channelID || $0.dispatcharrChannelID.map(String.init) == rec.channelID
+            })?.name ?? "")
+            : rec.channelName
+        infoTarget = ProgramInfoTarget(
+            channelName: channelName,
+            title: title.isEmpty ? "Recording" : title,
+            start: epg?.startTime ?? start,
+            end: epg?.endTime ?? end,
+            description: rec.programDescription.isEmpty ? (epg?.programDescription ?? "") : rec.programDescription,
+            category: (rec.epgCategory ?? "").isEmpty ? (epg?.category ?? "") : (rec.epgCategory ?? ""),
+            programID: epg?.programID,
+            subTitle: rec.subTitle ?? epg?.subTitle,
+            season: rec.seasonNumber ?? epg?.season,
+            episode: rec.episodeNumber ?? epg?.episode,
+            isNew: epg?.isNew ?? false,
+            isLiveBroadcast: epg?.isLiveBroadcast ?? false,
+            isPremiere: epg?.isPremiere ?? false,
+            isFinale: epg?.isFinale ?? false,
+            isRepeat: epg?.isRepeat ?? false)
+    }
+
     private func select(_ rec: Recording) {
         if actions.canPlay(rec) {
             actions.play(rec)
@@ -887,6 +930,7 @@ struct DVRView: View {
 
     @ViewBuilder
     private func menuItems(for rec: Recording) -> some View {
+        Button { showInfo(rec) } label: { Label("Program Info", systemImage: "info.circle") }
         if rec.isCompleted || rec.status == .stopped || rec.status == .interrupted {
             Button { actions.play(rec) } label: { Label("Play", systemImage: "play.fill") }
             if rec.destination == .dispatcharrServer, rec.remoteRecordingID != nil {
@@ -964,6 +1008,9 @@ struct DVRHero<Menu: View>: View {
     let onPrimary: () -> Void
     let onSecondary: () -> Void
     let onStop: () -> Void
+    /// Phone: a tap on the card itself (outside its buttons) opens the
+    /// program info sheet (Logan 2026-09-05).
+    var onInfo: (() -> Void)? = nil
     @ViewBuilder let menu: () -> Menu
 
     #if os(tvOS)
@@ -1010,6 +1057,8 @@ struct DVRHero<Menu: View>: View {
         .frame(height: heroHeight)
         .frame(maxWidth: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        .onTapGesture { onInfo?() }
         .padding(.horizontal, 16)
         #endif
     }
