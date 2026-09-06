@@ -145,8 +145,16 @@ final class DVRArtResolver: ObservableObject {
     private var task: Task<Void, Never>?
 
     private func needsWork(_ rec: Recording) -> Bool {
-        (rec.posterURL ?? "").isEmpty || (rec.backdropURL ?? "").isEmpty
+        !hasPoster(rec) || (rec.backdropURL ?? "").isEmpty
             || (rec.subTitle ?? "").isEmpty || rec.seasonNumber == nil
+    }
+
+    /// Rows resolved before 2026-09-05 hold a landscape TMDB backdrop in the
+    /// poster slot (the resolver preferred it for the 16:9 cards). The phone
+    /// library is a portrait grid now, so those rows get a real poster.
+    private func hasPoster(_ rec: Recording) -> Bool {
+        guard let url = rec.posterURL, !url.isEmpty else { return false }
+        return !(url.contains("image.tmdb.org") && url.contains("/w780/"))
     }
 
     func resolve(_ recordings: [Recording], modelContext: ModelContext) {
@@ -164,7 +172,7 @@ final class DVRArtResolver: ObservableObject {
             var changed = false
             for rec in todo {
                 guard !Task.isCancelled else { return }
-                let hadArt = !(rec.posterURL ?? "").isEmpty
+                let hadArt = hasPoster(rec)
                 let url = hadArt ? nil : await resolveOne(rec, modelContext: modelContext)
                 if hadArt {
                     // Episode identity only (the art is already there).
@@ -206,7 +214,28 @@ final class DVRArtResolver: ObservableObject {
         }
         // 3. TMDB, when the user has a key: movies as movies, everything
         //    else as a TV title (news and sports programmes are listed too).
-        return await tmdbArt(title: rec.programTitle, isMovie: kind == .movie, size: "w780")
+        if let art = await tmdbArt(title: rec.programTitle, isMovie: kind == .movie) { return art }
+        // 4. The loaded Movies / TV Shows library: many recordings are shows
+        //    the provider also carries on demand (Logan 2026-09-05). Library
+        //    art is TMDB-first itself when a key is set, provider poster
+        //    otherwise.
+        return libraryPoster(title: rec.programTitle, isMovie: kind == .movie)
+    }
+
+    private func libraryPoster(title: String, isMovie: Bool) -> String? {
+        let wanted = LibraryMatcher.cleanTitle(title).lowercased()
+        guard !wanted.isEmpty else { return nil }
+        let store = VODStore.shared
+        let primary = isMovie ? store.movies : store.series
+        let secondary = isMovie ? store.series : store.movies
+        for pool in [primary, secondary] {
+            guard let item = pool.first(where: { LibraryMatcher.cleanTitle($0.name).lowercased() == wanted }) else { continue }
+            if let url = TMDBArtCache.shared.posterURL(for: item) ?? item.posterURL {
+                debugLog("[DVR-ART] library poster for \(title): \(item.displayName)")
+                return url.absoluteString
+            }
+        }
+        return nil
     }
 
     /// One TMDB search per title and kind for the session: the poster and
@@ -222,11 +251,12 @@ final class DVRArtResolver: ObservableObject {
         return entry
     }
 
-    private func tmdbArt(title: String, isMovie: Bool, size: String) async -> String? {
+    /// The poster slot holds portrait art (the phone library grid); the
+    /// 16:9 cards and the hero read `backdropURL` first and fall back here.
+    private func tmdbArt(title: String, isMovie: Bool) async -> String? {
         let entry = await tmdbEntry(title: title, isMovie: isMovie)
-        // 16:9 cards and the hero: landscape art first.
-        if let b = entry?.backdrop, !b.isEmpty { return TMDBService.imageURL(path: b, size: size)?.absoluteString }
         if let p = entry?.poster, !p.isEmpty { return TMDBService.imageURL(path: p, size: "w500")?.absoluteString }
+        if let b = entry?.backdrop, !b.isEmpty { return TMDBService.imageURL(path: b, size: "w1280")?.absoluteString }
         return nil
     }
 

@@ -68,8 +68,8 @@ struct DVRView: View {
     private let gridColumns = 5
     private let gridSpacing: CGFloat = 24
     #else
-    private let gridColumns = 2
-    private let gridSpacing: CGFloat = 12
+    private var gridColumns: Int { isPhone ? 3 : 2 }
+    private var gridSpacing: CGFloat { isPhone ? 10 : 12 }
     #endif
 
     // MARK: Data
@@ -506,15 +506,7 @@ struct DVRView: View {
                 if !library.isEmpty {
                     libraryHeader(proxy: proxy)
                         .id("dvr-library")
-                    #if os(iOS)
-                    if isPhone {
-                        recordingList
-                    } else {
-                        grid
-                    }
-                    #else
                     grid
-                    #endif
                 }
             }
             .padding(.bottom, 80)
@@ -787,29 +779,14 @@ struct DVRView: View {
                                    value: g.frame(in: .named("dvrScroll")).minY.rounded())
         })
         .padding(.horizontal, sectionInset)
+        #if os(iOS)
+        .padding(.trailing, isPhone ? 18 : 0)   // alphabet rail lane, like Movies
+        #endif
         #if os(tvOS)
         .padding(.vertical, 20)
         .focusSection()
         #endif
     }
-
-    #if os(iOS)
-    /// Phone library: one recording per row (thumbnail, title, when and
-    /// length, chevron), like the mockup (Logan 2026-09-05).
-    private var recordingList: some View {
-        LazyVStack(spacing: 0) {
-            ForEach(filteredLibrary, id: \.id) { rec in
-                Button { select(rec) } label: {
-                    DVRRecordingRow(recording: rec, headers: headers, progress: progressFraction(rec))
-                }
-                .buttonStyle(.plain)
-                .contextMenu { menuItems(for: rec) }
-                .id(rec.id)
-            }
-        }
-        .padding(.horizontal, sectionInset)
-    }
-    #endif
 
     private var gridRowSpacing: CGFloat {
         #if os(tvOS)
@@ -826,7 +803,15 @@ struct DVRView: View {
         let button = Button {
             select(rec)
         } label: {
+            #if os(iOS)
+            if isPhone {
+                DVRPosterCard(recording: rec, headers: headers, progress: progressFraction(rec))
+            } else {
+                DVRRecordingCard(recording: rec, headers: headers, progress: progressFraction(rec))
+            }
+            #else
             DVRRecordingCard(recording: rec, headers: headers, progress: progressFraction(rec))
+            #endif
         }
         #if os(tvOS)
         .buttonStyle(MoviesPosterFocusStyle())
@@ -1192,38 +1177,36 @@ extension View {
 /// 16:9 recording card: art (server, EPG, TMDB or TheSportsDB; channel
 /// logo when none), REC / Scheduled badge, channel logo bottom-left,
 #if os(iOS)
-/// Phone library row: 16:9 thumbnail with the channel logo and progress,
-/// title, "Today · 1 h 02 min", chevron.
-struct DVRRecordingRow: View {
+/// Phone library tile: a 2:3 poster (TMDB or the library's, channel logo
+/// when neither exists), REC badge, progress bar, title and meta below,
+/// like the Movies grid (Logan 2026-09-05).
+struct DVRPosterCard: View {
     let recording: Recording
     var headers: [String: String] = [:]
     var progress: Double = 0
     @ObservedObject private var art = DVRArtResolver.shared
 
-    private var artworkURL: URL? { (recording.backdropURL ?? recording.posterURL).flatMap { URL(string: $0) } }
+    private var posterURL: URL? { recording.posterURL.flatMap { URL(string: $0) } }
     private var logoURL: URL? { recording.channelLogoURL.flatMap { URL(string: $0) } }
 
     var body: some View {
-        HStack(spacing: 12) {
-            thumb
-                .frame(width: 116, height: 65)
+        VStack(alignment: .leading, spacing: 6) {
+            poster
+                .aspectRatio(2/3, contentMode: .fit)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(recording.programTitle.isEmpty ? "Recording" : recording.programTitle)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.labelSmall)
                     .foregroundColor(.textPrimary)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .frame(height: 34, alignment: .top)
                 Text(meta)
-                    .font(.system(size: 12))
+                    .font(.system(size: 11))
                     .foregroundColor(.textSecondary)
                     .lineLimit(1)
             }
-            Spacer(minLength: 0)
-            Image(systemName: "chevron.right")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(.textTertiary)
         }
-        .padding(.vertical, 8)
         .contentShape(Rectangle())
     }
 
@@ -1240,28 +1223,22 @@ struct DVRRecordingRow: View {
         return parts.joined(separator: " · ")
     }
 
-    private var thumb: some View {
-        ZStack(alignment: .bottomLeading) {
+    private var poster: some View {
+        ZStack {
             Color.cardBackground
-            if let url = artworkURL {
-                AuthPosterImage(url: url, headers: headers, placeholder: .cardBackground, maxPixel: 400)
+            if let posterURL {
+                AuthPosterImage(url: posterURL, headers: headers, placeholder: .cardBackground, maxPixel: 500)
                     .aspectRatio(contentMode: .fill)
-                    .frame(width: 116, height: 65)
-                    .clipped()
-                if let logoURL {
-                    AuthPosterImage(url: logoURL, headers: headers, placeholder: .clear, maxPixel: 120)
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 30, height: 16)
-                        .padding(4)
-                        .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.9)))
-                        .padding(5)
-                }
             } else if let logoURL {
-                AuthPosterImage(url: logoURL, headers: headers, placeholder: .clear, maxPixel: 200)
+                AuthPosterImage(url: logoURL, headers: headers, placeholder: .clear, maxPixel: 240)
                     .aspectRatio(contentMode: .fit)
-                    .padding(12)
-                    .frame(width: 116, height: 65)
+                    .padding(18)
+            } else {
+                NoPosterPlaceholder()
             }
+        }
+        .clipped()
+        .overlay(alignment: .topLeading) {
             if recording.isInProgress {
                 HStack(spacing: 3) {
                     Circle().fill(Color.red).frame(width: 5, height: 5)
@@ -1271,8 +1248,9 @@ struct DVRRecordingRow: View {
                 .padding(.horizontal, 5).padding(.vertical, 2)
                 .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.7)))
                 .padding(5)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
+        }
+        .overlay(alignment: .bottom) {
             if progress > 0 {
                 GeometryReader { g in
                     ZStack(alignment: .leading) {
@@ -1281,7 +1259,6 @@ struct DVRRecordingRow: View {
                     }
                 }
                 .frame(height: 3)
-                .frame(maxHeight: .infinity, alignment: .bottom)
             }
         }
     }
