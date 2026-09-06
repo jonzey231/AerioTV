@@ -89,10 +89,28 @@ enum DVRClassifier {
             if let range = text.range(of: sep, options: .caseInsensitive) {
                 let a = clean(text[..<range.lowerBound])
                 let b = clean(text[range.upperBound...])
-                if !a.isEmpty, !b.isEmpty { return (a, b) }
+                if isTeamLike(a), isTeamLike(b) { return (a, b) }
             }
         }
         return nil
+    }
+
+    /// A team or school name: one to four words, each a proper noun or a
+    /// number ("Miami Hurricanes", "49ers", "Ohio State"). Talk-show blurbs
+    /// also contain " at " ("SVP's up at midnight and bringing his ...",
+    /// SportsCenter With Scott Van Pelt, 2026-09-05) and used to pass as a
+    /// matchup, sending every studio show to TheSportsDB.
+    static func isTeamLike(_ s: String) -> Bool {
+        let words = s.split(separator: " ")
+        guard (1...4).contains(words.count) else { return false }
+        return words.allSatisfy { w in
+            guard let c = w.first else { return false }
+            if c.isNumber { return true }
+            // "of" / "and" / "the" inside a name ("Sisters of the Poor") only
+            // when they are not the first word.
+            if c.isLowercase { return w != words.first && ["of", "the", "and", "de", "del", "la"].contains(w.lowercased()) }
+            return c.isUppercase
+        }
     }
 
     /// Matchup from a programme description: "The Stanford Cardinal host
@@ -115,7 +133,7 @@ enum DVRClassifier {
                 if let r = rest.range(of: stop, options: .caseInsensitive) { rest = String(rest[..<r.lowerBound]) }
             }
             let b = clean(rest[...])
-            if a.split(separator: " ").count <= 5, !a.isEmpty, !b.isEmpty { return (a, b) }
+            if isTeamLike(a), isTeamLike(b) { return (a, b) }
         }
         return teams(in: sentence)
     }
