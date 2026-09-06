@@ -404,6 +404,7 @@ struct DVRView: View {
     #endif
 
     private func scrollBody(outer: GeometryProxy) -> some View {
+        ScrollViewReader { proxy in
         ScrollView(.vertical, showsIndicators: false) {
             // Plain stack: a LazyVStack unloaded the Recording Now shelf once
             // it scrolled off, so Up from Recent landed on a UIKit filler and
@@ -503,7 +504,8 @@ struct DVRView: View {
                     quotaWarning
                 }
                 if !library.isEmpty {
-                    libraryHeader
+                    libraryHeader(proxy: proxy)
+                        .id("dvr-library")
                     #if os(iOS)
                     if isPhone {
                         recordingList
@@ -569,6 +571,7 @@ struct DVRView: View {
             if TVTabBarScrollState.shared.isHidden { TVTabBarScrollState.shared.isHidden = false }
         }
         #endif
+        }   // ScrollViewReader
     }
 
     /// Same warning My Recordings shows on iOS: local storage near its cap.
@@ -669,15 +672,26 @@ struct DVRView: View {
 
     // MARK: Library header + grid
 
-    private var libraryHeader: some View {
+    private func libraryHeader(proxy: ScrollViewProxy) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 10) {
-                Text(isPhone ? "Recordings" : "All Recordings")
-                    .font(.headlineSmall)
-                    .foregroundColor(.textPrimary)
-                Text("\(filteredLibrary.count)")
-                    .font(.labelMedium)
-                    .foregroundColor(.textTertiary)
+                // Plain text, tappable on the phone: scrolls the library to
+                // the top of the page (Logan 2026-09-05), same as Movies.
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("All Recordings")
+                        .font(.headlineSmall)
+                        .foregroundColor(.textPrimary)
+                    Text("\(filteredLibrary.count)")
+                        .font(.labelMedium)
+                        .foregroundColor(.textTertiary)
+                }
+                .contentShape(Rectangle())
+                #if os(iOS)
+                .onTapGesture {
+                    guard isPhone else { return }
+                    withAnimation(.easeInOut(duration: 0.55)) { proxy.scrollTo("dvr-library", anchor: .top) }
+                }
+                #endif
                 #if os(tvOS)
                 TVNavActionCircle(systemImage: "arrow.up.arrow.down", label: "Sort") { showSortMenu = true }
                     .padding(.leading, 12)
