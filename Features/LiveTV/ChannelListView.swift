@@ -2814,7 +2814,7 @@ struct ChannelRow: View {
         // (tap on an upcoming-schedule row trigger). Single
         // `.sheet(item:)` to keep the contextMenu / popover from
         // flickering during presentation (see `ChannelRowSheet` doc).
-        .sheet(item: $activeSheet) { sheet in
+        .sheet(item: recordSheet) { sheet in
             switch sheet {
             case .record(let entry):
                 RecordProgramSheet(
@@ -2829,10 +2829,12 @@ struct ChannelRow: View {
                     streamURL: item.streamURL,
                     channelLogoURL: item.logoURL
                 )
-            case .programInfo(let target):
-                ProgramInfoView(target: target)
+            case .programInfo:
+                EmptyView()   // presented by the presenter below
             }
         }
+        // Phone: floating card like tvOS; iPad: system sheet.
+        .programInfoPresenter(item: programInfoTarget)
         #endif
     }
 

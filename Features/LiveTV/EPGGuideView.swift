@@ -5930,7 +5930,7 @@ private struct GuideProgramButton: View {
             // iOS: single .sheet(item:) — see `GuideCellSheet` doc
             // for why presenting both Record + Program Info through
             // separate sheet modifiers was bad.
-            .sheet(item: $activeSheet) { sheet in
+            .sheet(item: recordSheet) { sheet in
                 switch sheet {
                 case .record:
                     RecordProgramSheet(
@@ -5949,10 +5949,12 @@ private struct GuideProgramButton: View {
                         programEpisode: prog.episode,
                         programID: prog.programID
                     )
-                case .programInfo(let target):
-                    ProgramInfoView(target: target)
+                case .programInfo:
+                    EmptyView()   // presented by the presenter below
                 }
             }
+            // Phone: floating card like tvOS; iPad: system sheet.
+            .programInfoPresenter(item: programInfoTarget)
         #endif
     }
 

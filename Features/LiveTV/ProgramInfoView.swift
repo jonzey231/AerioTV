@@ -99,6 +99,9 @@ struct ProgramInfoTarget: Identifiable, Equatable {
 // user nothing about why a program isn't tinted.
 struct ProgramInfoView: View {
     let target: ProgramInfoTarget
+    /// Phone: the tvOS card layout at phone scale in a glass system sheet,
+    /// instead of the navigation form (Logan 2026-09-05).
+    var cardLayout = false
     @Environment(\.dismiss) private var dismiss
 
     /// v1.7.x: lazy-loaded category result for Dispatcharr programs
@@ -303,6 +306,25 @@ struct ProgramInfoView: View {
                 await loadTMDBPosterIfNeeded()
             }
         #else
+        if cardLayout {
+            // Same chrome as RecordProgramSheet: NavigationStack, inline
+            // title, capsule Done, the system sheet's own glass and grouped
+            // cards (Logan 2026-09-05).
+            NavigationStack {
+                phoneCard
+                    .navigationTitle("Program Info")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { dismiss() }
+                        }
+                    }
+            }
+            .task(id: target.id) {
+                await loadCategoryIfNeeded()
+                await loadTMDBPosterIfNeeded()
+            }
+        } else {
         NavigationStack {
             iOSForm
                 // Suppress the system grouped-list background so the
@@ -330,8 +352,107 @@ struct ProgramInfoView: View {
             await loadCategoryIfNeeded()
             await loadTMDBPosterIfNeeded()
         }
+        }
         #endif
     }
+
+    #if os(iOS)
+    // MARK: - Phone card layout (glass sheet)
+
+    /// The tvOS card at phone scale: art beside the copy, facts row,
+    /// description, pills. Scrolls only when it must.
+    private var phoneCard: some View {
+        Form {
+            Section {
+                HStack(alignment: .top, spacing: 14) {
+                    if let posterURL {
+                        AuthPosterImage(url: posterURL, headers: posterAuthHeaders,
+                                        onImageLoaded: { updatePosterRatio($0) })
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 104, height: 104 / posterRatio)
+                            .clipped()
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(target.channelName.uppercased())
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.textSecondary)
+                            .tracking(1.2)
+                        Text(target.title)
+                            .font(.system(size: 21, weight: .bold))
+                            .foregroundColor(.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let sub = target.subTitle,
+                           !EPGText.subtitleIsRedundant(sub, title: target.title, description: target.description) {
+                            Text(sub)
+                                .font(.system(size: 14))
+                                .foregroundColor(.textSecondary)
+                                .italic()
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if !titleBadges.isEmpty {
+                            CategoryPillsLayout(spacing: 6) {
+                                ForEach(titleBadges.indices, id: \.self) { i in
+                                    EPGFlagBadge(flag: titleBadges[i])
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.vertical, 4)
+            }
+            Section {
+                HStack(alignment: .top, spacing: 18) {
+                    phoneFact(title: "Airs", value: timeRangeLabel)
+                    phoneFact(title: "Date", value: dateLabel)
+                    phoneFact(title: "Duration", value: durationLabel)
+                    if let episodeLabel {
+                        phoneFact(title: "Episode", value: episodeLabel)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            Section {
+                descriptionText
+                    .font(.system(size: 15))
+                    .foregroundColor(.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !metadataPills.isEmpty || !genrePills.isEmpty {
+                Section {
+                    if !metadataPills.isEmpty {
+                        CategoryPillsLayout(spacing: 6) {
+                            ForEach(metadataPills, id: \.self) { token in
+                                CategoryPill(rawToken: token, forceNeutral: true)
+                            }
+                        }
+                    }
+                    if !genrePills.isEmpty {
+                        CategoryPillsLayout(spacing: 6) {
+                            ForEach(genrePills, id: \.self) { token in
+                                CategoryPill(rawToken: token)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func phoneFact(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title.uppercased())
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.textTertiary)
+                .tracking(1)
+            Text(value)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(.textPrimary)
+                .lineLimit(2)
+        }
+    }
+    #endif
 
     // MARK: - Lazy Category Load (Dispatcharr only)
     //
@@ -817,3 +938,24 @@ struct CategoryPillsLayout: Layout {
         }
     }
 }
+
+#if os(iOS)
+// MARK: - Glass sheet (phone)
+
+extension View {
+    /// Presents Program Info. On the phone it is the system sheet on
+    /// Liquid Glass with the tvOS card layout (Logan 2026-09-05); iPad
+    /// keeps the form sheet.
+    @ViewBuilder
+    func programInfoPresenter(item: Binding<ProgramInfoTarget?>) -> some View {
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            self.sheet(item: item) { target in
+                ProgramInfoView(target: target, cardLayout: true)
+                    .presentationDetents([.medium, .large])
+            }
+        } else {
+            self.sheet(item: item) { ProgramInfoView(target: $0) }
+        }
+    }
+}
+#endif

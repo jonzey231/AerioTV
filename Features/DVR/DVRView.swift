@@ -239,7 +239,11 @@ struct DVRView: View {
         } message: {
             Text("Download this recording from the Dispatcharr server to your device's local storage.")
         }
+        #if os(iOS)
+        .programInfoPresenter(item: $infoTarget)
+        #else
         .sheet(item: $infoTarget) { ProgramInfoView(target: $0) }
+        #endif
         .fullScreenCover(item: $playingRecording) { item in
             PlayerView(
                 urls: [item.url],
