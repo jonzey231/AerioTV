@@ -3348,6 +3348,65 @@ struct DispatcharrAPI {
         return try decodeRecording(from: data)
     }
 
+    // MARK: Series rules (Dispatcharr DVR)
+
+    /// A DVR series rule, `POST /api/channels/series-rules/`. The server
+    /// upserts by (tvg_id, title, epg_source_id) and stores it in
+    /// CoreSettings; matching episodes are scheduled by `evaluateSeriesRules`.
+    struct SeriesRule {
+        enum Mode: String { case all, new }
+        enum TitleMode: String, CaseIterable { case exact, contains, search, regex }
+        enum DescriptionMode: String, CaseIterable { case contains, search, regex }
+        var tvgID: String?            // nil: match across every channel
+        var mode: Mode = .all
+        var untaggedIsNew = false     // mode .new: untagged programs count as new
+        var title: String
+        var titleMode: TitleMode = .exact
+        var description: String = ""
+        var descriptionMode: DescriptionMode = .contains
+        var channelID: Int?           // pin recordings to this channel
+    }
+
+    func createSeriesRule(_ rule: SeriesRule) async throws {
+        let url = try buildURL(path: "/api/channels/series-rules/")
+        var body: [String: Any] = [
+            "mode": rule.mode.rawValue,
+            "title": rule.title,
+            "title_mode": rule.titleMode.rawValue,
+            "description": rule.description,
+            "description_mode": rule.descriptionMode.rawValue,
+        ]
+        if let tvg = rule.tvgID, !tvg.isEmpty { body["tvg_id"] = tvg }
+        if rule.mode == .new, rule.untaggedIsNew { body["untagged_is_new"] = true }
+        if let ch = rule.channelID { body["channel_id"] = ch }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+    }
+
+    /// `POST /api/channels/series-rules/evaluate/`: schedules the episodes
+    /// the rules match right now (the web UI calls this after saving a
+    /// rule; the server deliberately does not). Returns the count scheduled.
+    @discardableResult
+    func evaluateSeriesRules(tvgID: String?) async throws -> Int {
+        let url = try buildURL(path: "/api/channels/series-rules/evaluate/")
+        var body: [String: Any] = [:]
+        if let tvgID, !tvgID.isEmpty { body["tvg_id"] = tvgID }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return json?["scheduled"] as? Int ?? 0
+    }
+
     /// Lists all recordings on the server. Filter client-side on status.
     func listRecordings() async throws -> [Recording] {
         let url = try buildURL(path: "/api/channels/recordings/")

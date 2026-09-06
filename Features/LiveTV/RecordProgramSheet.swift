@@ -46,6 +46,9 @@ struct RecordProgramSheet: View {
     /// Dispatcharr programme id: the sheet's art follows the banner's lookup
     /// order (feed icon, programme detail, TMDB) instead of TMDB alone.
     var programID: Int? = nil
+    /// The channel's EPG id (`tvg_id`) for series rules; nil = title-only
+    /// rule across every channel.
+    var channelTVGID: String? = nil
     #if os(tvOS)
     @ObservedObject private var artCache = GuidePreviewArtCache.shared
     #endif
@@ -63,6 +66,49 @@ struct RecordProgramSheet: View {
     // detection/removal) after the recording completes. Only meaningful
     // when destination == .dispatcharrServer; ignored for local.
     @State private var comskip = false
+
+    /// Dispatcharr series rules (Logan 2026-09-06): record this airing, every
+    /// episode, or new episodes only, with the server's rule options behind
+    /// "Customize rule".
+    enum RuleMode: String, CaseIterable { case once, all, new }
+    @State private var ruleMode: RuleMode = .once
+    @State private var showCustomRule = false
+    @State private var ruleTitleMode: DispatcharrAPI.SeriesRule.TitleMode = .exact
+    @State private var ruleDescription = ""
+    @State private var ruleDescriptionMode: DispatcharrAPI.SeriesRule.DescriptionMode = .contains
+    @State private var ruleUntaggedIsNew = false
+    @State private var ruleAllChannels = false
+    @State private var ruleError: String?
+    @State private var isSavingRule = false
+
+    /// Series rules live on the Dispatcharr server and need DVR Manage.
+    private var canOfferSeriesRule: Bool {
+        isDispatcharr && canRecordToServer && !programTitle.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+    private var isSeriesRule: Bool { canOfferSeriesRule && ruleMode != .once }
+
+    private static func ruleLabel(_ m: RuleMode) -> String {
+        switch m {
+        case .once: return "Just this one"
+        case .all:  return "Every episode"
+        case .new:  return "New episodes only"
+        }
+    }
+    private static func titleModeLabel(_ m: DispatcharrAPI.SeriesRule.TitleMode) -> String {
+        switch m {
+        case .exact: return "Exact title"
+        case .contains: return "Title contains"
+        case .search: return "Title has words"
+        case .regex: return "Title regex"
+        }
+    }
+    private static func descriptionModeLabel(_ m: DispatcharrAPI.SeriesRule.DescriptionMode) -> String {
+        switch m {
+        case .contains: return "Contains"
+        case .search: return "Has words"
+        case .regex: return "Regex"
+        }
+    }
 
     @StateObject private var coordinator = RecordingCoordinator.shared
 
@@ -169,7 +215,57 @@ struct RecordProgramSheet: View {
                 LabeledContent("Time", value: timeLabel)
             }
 
+            if canOfferSeriesRule {
+                Section {
+                    ForEach(RuleMode.allCases, id: \.self) { m in
+                        Button {
+                            ruleMode = m
+                        } label: {
+                            HStack {
+                                Text(Self.ruleLabel(m)).foregroundColor(.primary)
+                                Spacer()
+                                if ruleMode == m { Image(systemName: "checkmark").foregroundColor(.accentColor) }
+                            }
+                        }
+                    }
+                    if ruleMode != .once {
+                        Button(showCustomRule ? "Hide rule options" : "Customize rule...") {
+                            withAnimation { showCustomRule.toggle() }
+                        }
+                    }
+                } header: {
+                    Text("Record")
+                } footer: {
+                    if ruleMode != .once {
+                        Text("Episodes are scheduled on the Dispatcharr server as the guide updates, with the server's default padding. \(ruleMode == .new ? "Only programs the guide marks as new are recorded." : "")")
+                    }
+                }
+                if ruleMode != .once, showCustomRule {
+                    Section("Rule Options") {
+                        Picker("Match", selection: $ruleTitleMode) {
+                            ForEach(DispatcharrAPI.SeriesRule.TitleMode.allCases, id: \.self) { Text(Self.titleModeLabel($0)).tag($0) }
+                        }
+                        TextField("Description contains (optional)", text: $ruleDescription)
+                        if !ruleDescription.isEmpty {
+                            Picker("Description match", selection: $ruleDescriptionMode) {
+                                ForEach(DispatcharrAPI.SeriesRule.DescriptionMode.allCases, id: \.self) { Text(Self.descriptionModeLabel($0)).tag($0) }
+                            }
+                        }
+                        if ruleMode == .new {
+                            Toggle("Untagged programs count as new", isOn: $ruleUntaggedIsNew)
+                        }
+                        if channelTVGID != nil {
+                            Toggle("Match on every channel", isOn: $ruleAllChannels)
+                        }
+                    }
+                }
+                if let ruleError {
+                    Section { Text(ruleError).foregroundColor(.red).font(.footnote) }
+                }
+            }
+
             // Pre-roll
+            if !isSeriesRule {
             Section("Start Early") {
                 if isLive {
                     Text("Pre-roll unavailable (program already started)")
@@ -197,6 +293,7 @@ struct RecordProgramSheet: View {
                     }
                 )
             }
+            }   // !isSeriesRule
 
             // Destination picker, only shown for live recordings on
             // Dispatcharr playlists. For future programs (`!isLive`),
@@ -208,7 +305,7 @@ struct RecordProgramSheet: View {
             // server (Standard / Streamer); only local is valid then,
             // so there's no choice to present and destination is
             // already forced to `.local` in `.onAppear`.
-            if isDispatcharr && isLive && canRecordToServer {
+            if isDispatcharr && isLive && canRecordToServer && !isSeriesRule {
                 Section {
                     Picker("Record to", selection: $destination) {
                         Text("Dispatcharr server").tag(RecordingDestination.dispatcharrServer)
@@ -224,7 +321,7 @@ struct RecordProgramSheet: View {
             // when destination == .local (Comskip is a server-side
             // feature; local recordings can't run it). The footer
             // explains why so users don't wonder if it's broken.
-            if isDispatcharr {
+            if isDispatcharr && !isSeriesRule {
                 Section {
                     Toggle("Remove commercials (Comskip)", isOn: $comskip)
                         .disabled(destination == .local)
@@ -332,9 +429,10 @@ struct RecordProgramSheet: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Record") { scheduleRecording() }
+                Button(isSeriesRule ? "Save" : "Record") { scheduleRecording() }
                     .bold()
                     .foregroundColor(.red)
+                    .disabled(isSavingRule)
                     // Disabled when there's no recording path
                     // available: future program + non-Dispatcharr
                     // playlist, or future program on a Dispatcharr
@@ -348,6 +446,43 @@ struct RecordProgramSheet: View {
         }
     }
     #endif
+
+    /// Series rule: save it on the server, evaluate it so the matching
+    /// episodes are scheduled now, then reconcile so the DVR tab shows them.
+    private func saveSeriesRule() {
+        guard let server = activeServer else { return }
+        isSavingRule = true
+        ruleError = nil
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode)
+        let tvg = ruleAllChannels ? nil : channelTVGID
+        let rule = DispatcharrAPI.SeriesRule(
+            tvgID: tvg,
+            mode: ruleMode == .new ? .new : .all,
+            untaggedIsNew: ruleUntaggedIsNew,
+            title: programTitle,
+            titleMode: ruleTitleMode,
+            description: ruleDescription.trimmingCharacters(in: .whitespaces),
+            descriptionMode: ruleDescriptionMode,
+            channelID: dispatcharrChannelID ?? Int(channelID))
+        Task {
+            do {
+                try await api.createSeriesRule(rule)
+                let scheduled = try await api.evaluateSeriesRules(tvgID: tvg)
+                debugLog("[DVR] series rule saved: \(rule.mode.rawValue) \"\(programTitle)\" tvg=\(tvg ?? "any") scheduled=\(scheduled)")
+                _ = await coordinator.reconcileDispatcharrRecordings(api: api, serverID: server.id.uuidString,
+                                                                 modelContext: modelContext)
+                isSavingRule = false
+                dismiss()
+            } catch {
+                isSavingRule = false
+                ruleError = "Could not save the rule: \(error.localizedDescription)"
+                debugLog("[DVR] series rule failed: \(error)")
+            }
+        }
+    }
 
     // MARK: - tvOS Form
     // Presented as a .sheet card (Logan 2026-09-05). Form was dropped
@@ -384,7 +519,11 @@ struct RecordProgramSheet: View {
                     }
                 }
 
-                if !isLive {
+                if canOfferSeriesRule {
+                    ruleRow
+                }
+
+                if !isLive && !isSeriesRule {
                     optionRow(
                         title: "Start Early",
                         options: [0, 5, 10, 15, 30],
@@ -397,6 +536,7 @@ struct RecordProgramSheet: View {
                     )
                 }
 
+                if !isSeriesRule {
                 optionRow(
                     title: "End Late",
                     options: [0, 5, 10, 15, 30, 60],
@@ -407,18 +547,19 @@ struct RecordProgramSheet: View {
                         showCustomPostRoll = true
                     }
                 )
+                }
 
                 // Destination only for live recordings on Dispatcharr with an
                 // admin account (future recordings are forced to the server;
                 // non-admin is forced local). Comskip for any Dispatcharr
                 // context, disabling itself when the destination is local.
-                if isDispatcharr && isLive && canRecordToServer {
+                if isDispatcharr && isLive && canRecordToServer && !isSeriesRule {
                     destinationRow
                 }
-                if isDispatcharr {
+                if isDispatcharr && !isSeriesRule {
                     comskipRow
                 }
-                if destination == .local {
+                if destination == .local && !isSeriesRule {
                     warningsBox
                 }
                 if hasNoRecordingPath && isDispatcharr {
@@ -428,11 +569,11 @@ struct RecordProgramSheet: View {
                 if !hasNoRecordingPath {
                     VStack(spacing: 18) {
                         // What the buffers add up to, updated as pills change.
-                        Text(recordingWindowSummary)
+                        Text(isSeriesRule ? (ruleError ?? seriesRuleSummary) : recordingWindowSummary)
                             .font(.system(size: 22))
-                            .foregroundColor(.textSecondary)
+                            .foregroundColor(ruleError == nil ? .textSecondary : .red)
                         RecordActionPill(
-                            label: "Record",
+                            label: isSeriesRule ? "Save Rule" : "Record",
                             systemImage: "record.circle",
                             tintColor: .red,
                             action: { scheduleRecording() }
@@ -458,6 +599,59 @@ struct RecordProgramSheet: View {
         let minutes = max(1, Int(end.timeIntervalSince(start) / 60))
         let length = minutes >= 60 ? "\(minutes / 60) h \(minutes % 60) min" : "\(minutes) min"
         return "Records \(f.string(from: start)) to \(f.string(from: end)) · \(length)"
+    }
+
+    /// "Every episode of College Football on ESPN HD" for the rule pills.
+    private var seriesRuleSummary: String {
+        let what = ruleMode == .new ? "New episodes of" : "Every episode of"
+        let scope = (ruleAllChannels || channelTVGID == nil) ? "on any channel" : "on \(channelName)"
+        return "\(what) \"\(programTitle)\" \(scope), scheduled by the Dispatcharr server"
+    }
+
+    /// Record: Just this one / Every episode / New episodes only, plus the
+    /// rule options (title match, untagged-as-new, every channel). The
+    /// description match needs typing and stays on iOS.
+    private var ruleRow: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Record")
+                .font(.system(size: 24, weight: .semibold))
+                .padding(.leading, 4)
+            HStack(spacing: 12) {
+                ForEach(RuleMode.allCases, id: \.self) { m in
+                    RecordOptionPill(label: Self.ruleLabel(m), isSelected: ruleMode == m) { ruleMode = m }
+                }
+                if ruleMode != .once {
+                    RecordOptionPill(label: showCustomRule ? "Hide Options" : "Customize", isSelected: showCustomRule) {
+                        showCustomRule.toggle()
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .focusSection()
+            if ruleMode != .once, showCustomRule {
+                Text("Title Match")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundColor(.textSecondary)
+                    .padding(.leading, 4)
+                HStack(spacing: 12) {
+                    ForEach(DispatcharrAPI.SeriesRule.TitleMode.allCases, id: \.self) { m in
+                        RecordOptionPill(label: Self.titleModeLabel(m), isSelected: ruleTitleMode == m) { ruleTitleMode = m }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .focusSection()
+                HStack(spacing: 12) {
+                    if ruleMode == .new {
+                        RecordOptionPill(label: "Untagged Counts as New", isSelected: ruleUntaggedIsNew) { ruleUntaggedIsNew.toggle() }
+                    }
+                    if channelTVGID != nil {
+                        RecordOptionPill(label: "Every Channel", isSelected: ruleAllChannels) { ruleAllChannels.toggle() }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .focusSection()
+            }
+        }
     }
 
     // MARK: - tvOS Row Builders
@@ -745,6 +939,10 @@ struct RecordProgramSheet: View {
     // MARK: - Schedule
 
     private func scheduleRecording() {
+        if isSeriesRule {
+            saveSeriesRule()
+            return
+        }
         // v1.7.x: belt-and-suspenders for the admin gate. The UI
         // hides/disables Record for the no-path case and forces local
         // for live programs on non-admin Dispatcharr accounts, but if

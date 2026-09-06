@@ -2798,7 +2798,8 @@ struct ChannelRow: View {
                     isLive: (entry.startTime ?? Date()) <= Date(),
                     dispatcharrChannelID: item.dispatcharrChannelID,
                     streamURL: item.streamURL,
-                    channelLogoURL: item.logoURL
+                    channelLogoURL: item.logoURL,
+                    channelTVGID: item.tvgID
                 )
             case .programInfo:
                 EmptyView()   // presented by the .sheet below
@@ -2826,7 +2827,8 @@ struct ChannelRow: View {
                     isLive: (entry.startTime ?? Date()) <= Date(),
                     dispatcharrChannelID: item.dispatcharrChannelID,
                     streamURL: item.streamURL,
-                    channelLogoURL: item.logoURL
+                    channelLogoURL: item.logoURL,
+                    channelTVGID: item.tvgID
                 )
             case .programInfo:
                 EmptyView()   // presented by the presenter below

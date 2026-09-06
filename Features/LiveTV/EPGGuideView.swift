@@ -3279,7 +3279,9 @@ struct EPGGuideView: View {
     private var previewMode: Bool { liveTVLayout == "preview" }
     @State private var previewProgram: GuideProgram?
     @State private var previewChannel: ChannelDisplayItem?
-    private var rowHeight: CGFloat { previewMode ? 80 : 110 }
+    // Preview rows hold title, subtitle and the badge row (Logan 2026-09-06:
+    // 80 pt clipped the badges against the subtitle).
+    private var rowHeight: CGFloat { previewMode ? 96 : 110 }
     private let timeHeaderHeight: CGFloat = 50
     private let pixelsPerHour: CGFloat = 600
     private let cellGap: CGFloat = 1        // hairline gap between program cells (Emby style)
@@ -5457,6 +5459,7 @@ private struct GuideProgramButton: View {
                     EPGFlagsRow(isLiveBroadcast: prog.isLiveBroadcast, isNew: prog.isNew,
                                 isPremiere: prog.isPremiere, isFinale: prog.isFinale,
                                 isRepeat: prog.isRepeat, compact: true)
+                        .padding(.top, 3)
                 }
             } else {
             // GH #34: the XMLTV <sub-title> (episode / sports-match name) is what
@@ -5893,7 +5896,8 @@ private struct GuideProgramButton: View {
                         programSubTitle: prog.subTitle,
                         programSeason: prog.season,
                         programEpisode: prog.episode,
-                        programID: prog.programID
+                        programID: prog.programID,
+                        channelTVGID: channelItem.tvgID
                     )
                 case .programInfo:
                     // Presented by the .sheet below (Logan 2026-09-05: Program
@@ -5971,7 +5975,8 @@ private struct GuideProgramButton: View {
                         programSubTitle: prog.subTitle,
                         programSeason: prog.season,
                         programEpisode: prog.episode,
-                        programID: prog.programID
+                        programID: prog.programID,
+                        channelTVGID: channelItem.tvgID
                     )
                 case .programInfo:
                     EmptyView()   // presented by the presenter below
