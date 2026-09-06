@@ -476,7 +476,28 @@ struct DVRView: View {
                     shelf(title: "Scheduled", items: scheduled)
                 }
                 if recent.count > 1 {
+                    #if os(iOS)
+                    if isPhone {
+                        // Phone (Logan 2026-09-05): the same deck as Continue Watching.
+                        Text("Recent Recordings")
+                            .font(.headlineSmall)
+                            .foregroundColor(.textPrimary)
+                            .padding(.horizontal, sectionInset)
+                        PhoneCardDeck(items: recent, cardHeight: 220) { rec in
+                            DVRHero(recording: rec, headers: headers,
+                                    progress: progressFraction(rec), canPlay: actions.canPlay(rec),
+                                    inDeck: true,
+                                    onPrimary: { heroPrimary(rec) },
+                                    onSecondary: { heroSecondary(rec) },
+                                    onStop: { actions.stop(rec) },
+                                    menu: { menuItems(for: rec) })
+                        }
+                    } else {
+                        shelf(title: "Recent Recordings", items: recent)
+                    }
+                    #else
                     shelf(title: "Recent Recordings", items: recent)
+                    #endif
                 }
                 if coordinator.isApproachingQuotaLimit {
                     quotaWarning
