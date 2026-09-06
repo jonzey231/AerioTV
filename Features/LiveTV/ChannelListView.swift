@@ -1866,7 +1866,11 @@ struct ChannelListView: View {
             tokens.append(favoritesToken)
         }
         if !(hiddenGroups.contains("All") && !visible.isEmpty) { tokens.append("All") }
-        return tokens + visible
+        let all = tokens + visible
+        // Manual order may place Favorites / All Channels anywhere (Logan
+        // 2026-09-06); orders that never mention them keep them in front.
+        guard groupSortMode == GroupSortMode.manual.rawValue else { return all }
+        return GroupOrderStore.applyTokens(all, order: groupOrder, pinnedFirst: [favoritesToken, "All"])
     }
 
     private func pillIcon(for token: String) -> String? {
@@ -4702,11 +4706,11 @@ struct PhoneGroupDrawer: View {
                     .listRowInsets(EdgeInsets(top: 0, leading: 18, bottom: 0, trailing: 14))
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
-                    .moveDisabled(token == favoritesToken || token == "All")
+                    .moveDisabled(token.hasPrefix("collection:"))
                 }
                 .onMove { from, to in
                     order.move(fromOffsets: from, toOffset: to)
-                    onReorder(order.filter { $0 != favoritesToken && $0 != "All" && !$0.hasPrefix("collection:") })
+                    onReorder(order.filter { !$0.hasPrefix("collection:") })
                 }
                 Color.clear.frame(height: 90).listRowBackground(Color.clear).listRowSeparator(.hidden)
             }

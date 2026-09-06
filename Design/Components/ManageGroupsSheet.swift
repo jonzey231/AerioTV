@@ -74,6 +74,19 @@ enum GroupOrderStore {
         return result
     }
 
+    /// Like `apply`, for the full pill token list (Favorites, All Channels,
+    /// groups). Tokens the saved order does not mention keep their place:
+    /// the pinned ones stay in front (orders saved before All Channels was
+    /// movable, Roman via Discord 2026-09-06), new groups go to the end.
+    static func applyTokens(_ tokens: [String], order: [String], pinnedFirst: Set<String>) -> [String] {
+        guard !order.isEmpty else { return tokens }
+        let present = Set(tokens)
+        let ordered = order.filter { present.contains($0) }
+        let placed = Set(ordered)
+        let unlisted = tokens.filter { !placed.contains($0) }
+        return unlisted.filter { pinnedFirst.contains($0) } + ordered + unlisted.filter { !pinnedFirst.contains($0) }
+    }
+
     /// Resolve the effective display order for a sort mode.
     static func displayOrder(_ groups: [String], mode: String, order: [String]) -> [String] {
         switch GroupSortMode(rawValue: mode) ?? .default {
@@ -134,6 +147,22 @@ struct ManageGroupsSheet: View {
     #endif
 
     private var reorderEnabled: Bool { orderStorageKey != nil }
+    /// Live TV (has a default-group key): Favorites and All Channels are
+    /// ordinary rows in Manual order so any group can go to the very top
+    /// (Logan 2026-09-06). VOD callers order plain groups only.
+    private var pinnedAreOrderable: Bool { reorderEnabled && defaultGroupKey != nil }
+    private var pinnedTokens: [String] {
+        (favoritesAvailable ? [favoritesToken] : []) + [allChannelsToken]
+    }
+    private var orderableTokens: [String] { pinnedAreOrderable ? pinnedTokens + allGroups : allGroups }
+    private func seededOrder(_ saved: [String]) -> [String] {
+        pinnedAreOrderable
+            ? GroupOrderStore.applyTokens(orderableTokens, order: saved, pinnedFirst: Set(pinnedTokens))
+            : GroupOrderStore.apply(allGroups, order: saved)
+    }
+    /// True when the pinned rows are folded into the movable list.
+    private var pinnedInList: Bool { pinnedAreOrderable && sortMode == .manual }
+    private func rowTitle(_ token: String) -> String { defaultTitle(token) }
     /// GH #80: the "All" pill sentinel stored in the hidden set when the user
     /// hides the All Channels pill (same token ChannelListView uses).
     private let allChannelsToken = "All"
@@ -145,7 +174,7 @@ struct ManageGroupsSheet: View {
         case .alphabetical:
             return allGroups.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
         case .manual:
-            return manualOrder.isEmpty ? allGroups : manualOrder
+            return manualOrder.isEmpty ? orderableTokens : manualOrder
         case .default:
             return allGroups
         }
@@ -202,17 +231,17 @@ struct ManageGroupsSheet: View {
             }
             if let key = orderStorageKey, let mKey = modeKey {
                 sortMode = GroupSortMode(rawValue: GroupOrderStore.loadMode(forKey: mKey)) ?? .default
-                manualOrder = GroupOrderStore.apply(allGroups, order: GroupOrderStore.load(forKey: key))
+                manualOrder = seededOrder(GroupOrderStore.load(forKey: key))
             } else {
                 sortMode = .default
-                manualOrder = allGroups
+                manualOrder = orderableTokens
             }
         }
         .onChange(of: sortMode) { _, newMode in
             // Switching into Manual seeds the manual order from whatever is
             // currently visible so dragging starts from the same arrangement.
             if newMode == .manual {
-                manualOrder = GroupOrderStore.apply(allGroups, order: manualOrder)
+                manualOrder = seededOrder(manualOrder)
             }
             persistConfig()
         }
@@ -257,10 +286,14 @@ struct ManageGroupsSheet: View {
 
     private func moveGrabbed(_ direction: MoveDirection) {
         guard let grabbed = grabbedGroup,
-              let idx = manualOrder.firstIndex(of: grabbed) else { return }
+              let idx = manualOrder.firstIndex(of: grabbed) else {
+            debugLog("[GROUPS] move \(direction): grabbed=\(grabbedGroup ?? "nil") not in manual order (\(manualOrder.count))")
+            return
+        }
         let target = direction == .up ? idx - 1 : idx + 1
         guard manualOrder.indices.contains(target) else { return }
         manualOrder.swapAt(idx, target)
+        debugLog("[GROUPS] moved \(grabbed) \(direction) to \(target)")
         persistConfig()
     }
     #endif
@@ -360,7 +393,7 @@ struct ManageGroupsSheet: View {
             // GH #80: the All Channels pill is hideable too; pinned in its own
             // section so the reorderable list's indices stay intact.
             Section {
-                if favoritesAvailable {
+                if favoritesAvailable && !pinnedInList {
                     Button {
                         toggleHidden(favoritesToken)
                     } label: {
@@ -377,6 +410,7 @@ struct ManageGroupsSheet: View {
                     }
                     .listRowBackground(Color.cardBackground)
                 }
+                if !pinnedInList {
                 Button {
                     toggleHidden(allChannelsToken)
                 } label: {
@@ -392,6 +426,7 @@ struct ManageGroupsSheet: View {
                     }
                 }
                 .listRowBackground(Color.cardBackground)
+                }
             }
 
             Section {
@@ -405,8 +440,8 @@ struct ManageGroupsSheet: View {
                                 .foregroundColor(hiddenGroups.contains(group) ? .textTertiary : .accentPrimary)
                                 .frame(width: 28)
 
-                            Text(group)
-                                .font(.bodyMedium)
+                            Text(rowTitle(group))
+                                .font(pinnedTokens.contains(group) ? .bodyMedium.weight(.semibold) : .bodyMedium)
                                 .foregroundColor(hiddenGroups.contains(group) ? .textTertiary : .textPrimary)
 
                             Spacer()
@@ -482,31 +517,35 @@ struct ManageGroupsSheet: View {
                         .padding(.bottom, 12)
                 }
 
-                // Favorites group (Logan 2026-09-05): pinned first, hideable,
-                // never reordered.
-                if favoritesAvailable {
+                // Favorites group (Logan 2026-09-05): pinned first, hideable.
+                // In Manual order it is a movable row like any group.
+                if favoritesAvailable && !pinnedInList {
                     TVGroupToggleRow(
                         group: "Favorites",
                         isOn: !hiddenGroups.contains(favoritesToken),
                         onToggle: { toggleHidden(favoritesToken) },
                         isDefault: defaultGroup == favoritesToken,
-                        onSetDefault: defaultGroupKey == nil ? nil : { setDefault(favoritesToken) }
+                        onSetDefault: defaultGroupKey == nil ? nil : { setDefault(favoritesToken) },
+                        canFocus: grabbedGroup == nil
                     )
                 }
 
-                // GH #80: pinned All Channels toggle, never reordered.
+                // GH #80: pinned All Channels toggle (movable in Manual order).
+                if !pinnedInList {
                 TVGroupToggleRow(
                     group: "All Channels",
                     isOn: !hiddenGroups.contains(allChannelsToken),
                     onToggle: { toggleHidden(allChannelsToken) },
                     isDefault: defaultGroup.isEmpty || defaultGroup == allChannelsToken,
-                    onSetDefault: defaultGroupKey == nil ? nil : { setDefault("") }
+                    onSetDefault: defaultGroupKey == nil ? nil : { setDefault("") },
+                    canFocus: grabbedGroup == nil
                 )
+                }
 
                 ForEach(displayList, id: \.self) { group in
                     if reorderEnabled && sortMode == .manual {
                         TVReorderableGroupRow(
-                            group: group,
+                            group: rowTitle(group),
                             isOn: !hiddenGroups.contains(group),
                             isGrabbed: grabbedGroup == group,
                             anyGrabbed: grabbedGroup != nil,
@@ -521,7 +560,7 @@ struct ManageGroupsSheet: View {
                         )
                     } else {
                         TVGroupToggleRow(
-                            group: group,
+                            group: rowTitle(group),
                             isOn: !hiddenGroups.contains(group),
                             onToggle: { toggleHidden(group) },
                             isDefault: defaultGroup == group,
@@ -531,6 +570,19 @@ struct ManageGroupsSheet: View {
                 }
             }
             .padding(.vertical, 16)
+        }
+        // Belt and braces (Roman via Discord, trace 2026-09-06 00:57): the
+        // grabbed row's overlay did not see the Up press and the focus
+        // engine moved focus instead. A move command that reaches the list
+        // while a group is grabbed moves the group and is consumed here.
+        .onMoveCommand { direction in
+            guard grabbedGroup != nil else { return }
+            debugLog("[GROUPS] move \(direction) caught by list while grabbed")
+            switch direction {
+            case .up: moveGrabbed(.up)
+            case .down: moveGrabbed(.down)
+            default: break
+            }
         }
     }
 
@@ -647,6 +699,9 @@ struct TVGroupToggleRow: View {
     /// Live TV: this group is the one the guide opens on; long press sets it.
     var isDefault: Bool = false
     var onSetDefault: (() -> Void)? = nil
+    /// False while another row is grabbed for reordering, so an Up press
+    /// cannot carry focus onto the pinned rows (trace 2026-09-06 00:57).
+    var canFocus: Bool = true
 
     // @State (not @FocusState): the UIKit-backed TVPressOverlay owns focus
     // and reports it here. A plain SwiftUI Button draws the squared system
@@ -659,6 +714,7 @@ struct TVGroupToggleRow: View {
             TVPressOverlay(
                 minimumPressDuration: 0.35,
                 isFocused: $isFocused,
+                canFocus: canFocus,
                 onTap: onToggle,
                 onLongPress: { onSetDefault?() }
             )

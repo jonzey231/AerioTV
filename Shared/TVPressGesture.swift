@@ -152,6 +152,9 @@ struct TVPressOverlay: UIViewRepresentable {
         // Set horizontalAdjustOnly BEFORE interceptsDirectional so the
         // latter's didSet enables the correct swipe recognizers.
         catcher.horizontalAdjustOnly = horizontalAdjustOnly
+        if catcher.interceptsDirectional != interceptsDirectional {
+            debugLog("[PRESS] catcher interceptsDirectional -> \(interceptsDirectional) focused=\(catcher.isFocused)")
+        }
         catcher.interceptsDirectional = interceptsDirectional
         catcher.onFocusChange = { focused in
             DispatchQueue.main.async {
@@ -264,9 +267,11 @@ final class PressCatcherView: UIView {
                 // engine can navigate away to adjacent rows.
                 case .upArrow:
                     if horizontalAdjustOnly { break }
+                    debugLog("[PRESS] reorder intercept UP")
                     onMoveUp(); return
                 case .downArrow:
                     if horizontalAdjustOnly { break }
+                    debugLog("[PRESS] reorder intercept DOWN")
                     onMoveDown(); return
                 case .menu:
                     if horizontalAdjustOnly { break }
