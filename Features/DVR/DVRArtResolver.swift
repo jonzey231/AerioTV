@@ -218,8 +218,16 @@ final class DVRArtResolver: ObservableObject {
     private func resolveOne(_ rec: Recording, modelContext: ModelContext) async -> String? {
         // 1. EPG programme poster + category, matched by title and air window
         //    (the recording's channelID and the feed's tvg-id differ).
-        if let program = await epgProgram(for: rec, modelContext: modelContext), !program.posterURL.isEmpty {
+        let program = await epgProgram(for: rec, modelContext: modelContext)
+        if let program, !program.posterURL.isEmpty {
             return program.posterURL
+        }
+        // 1b. Dispatcharr strips artwork from the bulk grid, so the cached
+        //     row has none; the per-program detail endpoint still carries the
+        //     XMLTV icon (Gracenote guides put one on every program).
+        if let pid = program?.programID,
+           let art = await dispatcharrDetailArt(programID: pid, rec: rec, modelContext: modelContext) {
+            return art
         }
         let kind = DVRClassifier.kind(for: rec)
         // 2. Sports: the event or a team from TheSportsDB when a matchup can
@@ -251,6 +259,64 @@ final class DVRArtResolver: ObservableObject {
             if let url = TMDBArtCache.shared.posterURL(for: item) ?? item.posterURL {
                 debugLog("[DVR-ART] library poster for \(title): \(item.displayName)")
                 return url.absoluteString
+            }
+        }
+        return nil
+    }
+
+    private var dispatcharrAPIs: [String: DispatcharrAPI] = [:]
+
+    private func dispatcharrAPI(for rec: Recording, modelContext: ModelContext) -> (DispatcharrAPI, String)? {
+        guard let uuid = UUID(uuidString: rec.serverID) else { return nil }
+        let servers = (try? modelContext.fetch(FetchDescriptor<ServerConnection>())) ?? []
+        guard let server = servers.first(where: { $0.id == uuid }), server.type == .dispatcharrAPI else { return nil }
+        let base = server.effectiveBaseURL
+        guard !base.isEmpty, !server.effectiveApiKey.isEmpty else { return nil }
+        if let api = dispatcharrAPIs[rec.serverID] { return (api, base) }
+        let api = DispatcharrAPI(baseURL: base,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode,
+                                 serverID: server.id,
+                                 savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                                     ? server.username : nil)
+        dispatcharrAPIs[rec.serverID] = api
+        return (api, base)
+    }
+
+    /// Poster from `/api/epg/programs/{id}/`. Gracenote (TMS) icons come as
+    /// 4:3 `_h9_` assets; the same asset id serves a 2:3 `_v8_` (960x1440),
+    /// which fills the phone poster grid. The landscape original goes to
+    /// the backdrop slot when it is still empty.
+    private func dispatcharrDetailArt(programID: Int, rec: Recording, modelContext: ModelContext) async -> String? {
+        guard let (api, base) = dispatcharrAPI(for: rec, modelContext: modelContext) else { return nil }
+        guard let detail = try? await api.getProgramDetail(id: programID),
+              let raw = detail.bestPosterString,
+              let url = VODService.resolveImageURL(raw, base: base, size: "w500") else { return nil }
+        let landscape = url.absoluteString
+        var poster = landscape
+        if let portrait = await Self.tmsPortraitVariant(of: url) {
+            poster = portrait
+            if (rec.backdropURL ?? "").isEmpty, rec.modelContext != nil, !rec.isDeleted { rec.backdropURL = landscape }
+        }
+        debugLog("[DVR-ART] Dispatcharr program \(programID) art for \(rec.programTitle): \(poster)")
+        return poster
+    }
+
+    /// `.../p123_b_h9_ag.jpg` -> `.../p123_b_v8_ag.jpg` when the CDN has it
+    /// (one HEAD; falls back to the 480x720 `_v7_`). Only for tmsimg hosts.
+    nonisolated private static func tmsPortraitVariant(of url: URL) async -> String? {
+        guard let host = url.host?.lowercased(), host.hasSuffix("tmsimg.com") else { return nil }
+        let s = url.absoluteString
+        guard let r = s.range(of: #"_h\d+_"#, options: .regularExpression) else { return nil }
+        for code in ["_v8_", "_v7_"] {
+            let candidate = s.replacingCharacters(in: r, with: code)
+            guard let u = URL(string: candidate) else { continue }
+            var req = URLRequest(url: u, timeoutInterval: 8)
+            req.httpMethod = "HEAD"
+            if let (_, resp) = try? await URLSession.shared.data(for: req),
+               (resp as? HTTPURLResponse)?.statusCode == 200 {
+                return candidate
             }
         }
         return nil
@@ -291,6 +357,7 @@ final class DVRArtResolver: ObservableObject {
     /// Logan 2026-09-05).
     private struct EPGMatch: Sendable {
         let posterURL: String
+        let programID: Int?
         let category: String
         let subTitle: String?
         let season: Int?
@@ -312,8 +379,8 @@ final class DVRArtResolver: ObservableObject {
             )
             descriptor.fetchLimit = 1
             guard let p = try? ctx.fetch(descriptor).first else { return nil }
-            return EPGMatch(posterURL: p.posterURL, category: p.category, subTitle: p.subTitle,
-                            season: p.season, episode: p.episode)
+            return EPGMatch(posterURL: p.posterURL, programID: p.programID, category: p.category,
+                            subTitle: p.subTitle, season: p.season, episode: p.episode)
         }.value
         guard let match else { return nil }
         // Episode identity and category from the guide, when the row has
