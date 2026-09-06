@@ -1746,6 +1746,7 @@ struct MoviesView: View {
                 .scrollAwayTabBar(collapsed: gridTabBarHidden)
                 .ignoresSafeArea(.container, edges: .bottom)
                 .aerioContentUnderTabBar()
+                .aerioNoTopScrollEdge()
                 #endif
             }
         }
@@ -2619,11 +2620,18 @@ struct MoviesHeroCarousel: View {
             // Wide card (Logan 2026-09-05): 10pt margins, two 9pt peeks.
             let w = geo.size.width - 20 - stackPeek * 2
             let count = max(pages.count, 1)
-            // Fractional deck position while dragging.
-            let p = CGFloat(min(max(stackIndex, 0), count - 1)) - stackDragX / w
+            // Fractional deck position while dragging. The deck is endless
+            // (Logan 2026-09-05): positions wrap modulo the page count, so
+            // past the last card the first one comes round again and the
+            // previous card is always the one parked at the left.
+            let p = CGFloat(stackIndex) - stackDragX / w
             ZStack(alignment: .leading) {
                 ForEach(Array(pages.enumerated()), id: \.element.id) { i, page in
-                    let rel = CGFloat(i) - p
+                    let raw = (CGFloat(i) - p).truncatingRemainder(dividingBy: CGFloat(count))
+                    let wrapped = raw < 0 ? raw + CGFloat(count) : raw
+                    // The previous card (cyclically) is the parked one; with
+                    // three cards that leaves one peek on the right.
+                    let rel = (count > 1 && wrapped >= CGFloat(count) - 1 - 0.0001) ? wrapped - CGFloat(count) : wrapped
                     let x: CGFloat = rel >= 0
                         ? 10 + rel * stackPeek
                         : 10 + max(rel, -1) * (w - parkedSliver + 10) - max(0, -rel - 1) * 4
@@ -2658,10 +2666,7 @@ struct MoviesHeroCarousel: View {
                     .onChanged { v in
                         // Horizontal only; a vertical drag stays with the page.
                         guard abs(v.translation.width) > abs(v.translation.height) else { return }
-                        var dx = v.translation.width
-                        // Rubber band past either end of the deck.
-                        if (stackIndex == 0 && dx > 0) || (stackIndex >= count - 1 && dx < 0) { dx /= 3 }
-                        stackDragX = dx
+                        stackDragX = v.translation.width
                     }
                     .onEnded { v in
                         let dx = v.translation.width
@@ -2670,12 +2675,13 @@ struct MoviesHeroCarousel: View {
                             if dx < -60 || v.predictedEndTranslation.width < -w / 2 { target += 1 }
                             else if dx > 60 || v.predictedEndTranslation.width > w / 2 { target -= 1 }
                         }
-                        target = min(max(target, 0), count - 1)
+                        // Wrap: the index cycles and the dots follow the page.
+                        let wrappedTarget = ((target % count) + count) % count
                         withAnimation(.spring(response: 0.38, dampingFraction: 0.85)) {
-                            stackIndex = target
+                            stackIndex = wrappedTarget
                             stackDragX = 0
                         }
-                        currentID = pages[target].id
+                        currentID = pages[wrappedTarget].id
                     }
             )
         }

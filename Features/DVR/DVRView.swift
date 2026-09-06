@@ -465,6 +465,9 @@ struct DVRView: View {
             #endif
         }
         .coordinateSpace(name: "dvrScroll")
+        #if os(iOS)
+        .aerioNoTopScrollEdge()
+        #endif
         #if os(tvOS)
         .scrollPosition($scrollPosition)
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in

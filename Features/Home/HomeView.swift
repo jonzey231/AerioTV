@@ -7374,6 +7374,22 @@ extension View {
     /// indicator (GH #20 follow-up, user report 2026-07-12). Hiding the
     /// bottom effect lets rows show through, matching the Android pill.
     /// No-op pre-26 and on tvOS.
+    /// iOS 26: no hairline where content scrolls under the status bar
+    /// (Logan 2026-09-05: the line above Continue Watching once the
+    /// navigation bar was gone). No-op pre-26 and on tvOS.
+    @ViewBuilder
+    func aerioNoTopScrollEdge() -> some View {
+        #if os(iOS)
+        if #available(iOS 26.0, *) {
+            self.scrollEdgeEffectHidden(true, for: .top)
+        } else {
+            self
+        }
+        #else
+        self
+        #endif
+    }
+
     @ViewBuilder
     func aerioContentUnderTabBar() -> some View {
         #if os(iOS)
