@@ -1439,7 +1439,11 @@ struct MoviesView: View {
                     // shown only once the library header has scrolled past
                     // the top so the grid owns the display (Logan 2026-09-05),
                     // fading out again when the hero or shelves come back.
-                    let top = railCenteredTop(in: outer.size.height)
+                    // Centered on the VISIBLE grid, not the screen: while the
+                    // library header is still on screen the rail moves down
+                    // by half of it (Logan 2026-09-05). An offset, so it can
+                    // never feed back into layout.
+                    let top = max(0, gridTopY) / 2
                     if railTop != top { railTop = top }
                     let want = gridTopY <= 110 && searchText.isEmpty
                     if want != railVisible {
@@ -1721,6 +1725,7 @@ struct MoviesView: View {
                         // Centered by frame alignment (Logan 2026-09-05), not
                         // by an offset from the top.
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                        .offset(y: railTop)
                         .padding(.trailing, 2)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                         #endif
