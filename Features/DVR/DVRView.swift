@@ -355,9 +355,13 @@ struct DVRView: View {
                         jumpToLetter(letter)
                     }
                     .frame(width: railWidth)
-                    // Offset, never padding: see the Movies rail (layout loop).
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-                    .offset(y: railTop)
+                    // Fixed-height box + padding, same as Movies: an offset
+                    // rail's taps fell through to the grid (Logan 2026-09-05).
+                    .padding(.top, max(0, (outer.size.height + outer.safeAreaInsets.top - AlphabetRail.totalHeight) / 2) + railTop)
+                    .frame(width: outer.size.width,
+                           height: outer.size.height + outer.safeAreaInsets.top,
+                           alignment: .topTrailing)
+                    .clipped()
                     .padding(.trailing, 2)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
                     .ignoresSafeArea(.container, edges: .top)
@@ -404,6 +408,7 @@ struct DVRView: View {
         let items = filteredLibrary
         guard let index = items.firstIndex(where: { AlphabetRail.bucket(for: $0.programTitle) == letter }) else { return }
         let id = items[index].id
+        debugLog("[RAIL] dvr jump \(letter) index=\(index) pitch=\(rowPitch) gridTop=\(gridTopVisible) scrollY=\(lastScrollY)")
         if rowPitch > 0 {
             // Absolute offset: scrollTo(id) silently no-ops for lazy grid
             // rows not yet built.

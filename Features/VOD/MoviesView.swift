@@ -1682,6 +1682,7 @@ struct MoviesView: View {
                             }
                         ) { letter in
                             let found = firstGridID(for: letter)
+                            debugLog("[RAIL] movies jump \(letter) id=\(found ?? "nil") pitch=\(geometryBox.rowPitch) width=\(geometryBox.gridWidth) gridTop=\(geometryBox.gridTopVisible) offset=\(geometryBox.contentOffsetY)")
                             guard let id = found else { return }
                             let itemID = String(id.dropFirst("grid-".count))
                             if let index = libraryMovies.firstIndex(where: { $0.id == itemID }),
@@ -1724,8 +1725,17 @@ struct MoviesView: View {
                         // flipping 350 / 514 every frame).
                         // Centered by frame alignment (Logan 2026-09-05), not
                         // by an offset from the top.
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-                        .offset(y: railTop)
+                        // Real layout inside a FIXED-height box, not .offset:
+                        // an offset rail drew in the right place but its taps
+                        // fell through to the poster beneath (Logan 2026-09-05,
+                        // "tapping a letter opens the closest item"). The box
+                        // is pinned to the scroll area's height, so the padding
+                        // can never feed back into the layout (the 18:13 loop).
+                        .padding(.top, railRestingTop(in: outer) + railTop)
+                        .frame(width: outer.size.width,
+                               height: outer.size.height + outer.safeAreaInsets.top,
+                               alignment: .topTrailing)
+                        .clipped()
                         .padding(.trailing, 2)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                         #endif
@@ -1764,6 +1774,15 @@ struct MoviesView: View {
             }
         }
     }
+
+    #if os(iOS)
+    /// Top padding that centers the rail in the scroll area (the box spans
+    /// the top safe area too); `railTop` then moves it down by half of the
+    /// visible library header.
+    private func railRestingTop(in outer: GeometryProxy) -> CGFloat {
+        max(0, (outer.size.height + outer.safeAreaInsets.top - AlphabetRail.totalHeight) / 2)
+    }
+    #endif
 
     /// Where the rail parks once the grid has scrolled under it: centered
     /// vertically in the scroll area.
@@ -3288,12 +3307,41 @@ struct AlphabetRail: View {
     @FocusState private var focused: String?
     #endif
 
+    #if os(iOS)
+    /// Letter under the last touch, so a slide only fires on a change.
+    @State private var touchedLetter: String?
+    #endif
+
     var body: some View {
+        #if os(iOS)
+        // Phone: the whole column is one touch surface, like the Contacts
+        // index. Tap or slide anywhere across the rail's width and the
+        // letter at that height is chosen; a per-letter Button left the
+        // gaps and the lane beside the glyphs to the poster grid beneath
+        // (Logan 2026-09-05, "tapped M and ended up in a movie").
+        VStack(spacing: spacing) {
+            ForEach(Self.letters, id: \.self) { letter in
+                Text(letter)
+                    .font(.system(size: fontSize, weight: .semibold, design: .rounded))
+                    .foregroundColor(letterColor(letter, enabled: available.contains(letter)))
+                    .frame(width: cell, height: cell)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .contentShape(Rectangle())
+        .highPriorityGesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                .onChanged { choose(at: $0.location.y) }
+                .onEnded { _ in touchedLetter = nil }
+        )
+        #else
         VStack(spacing: spacing) {
             ForEach(Self.letters, id: \.self) { letter in
                 let enabled = available.contains(letter)
                 Button {
-                    if let target = nearestAvailable(to: letter) { onSelect(target) }
+                    let target = nearestAvailable(to: letter)
+                    debugLog("[RAIL] tap \(letter) -> \(target ?? "none")")
+                    if let target { onSelect(target) }
                 } label: {
                     Text(letter)
                         .font(.system(size: fontSize, weight: .semibold, design: .rounded))
@@ -3351,7 +3399,21 @@ struct AlphabetRail: View {
             }
         }
         #endif
+        #endif
     }
+
+    #if os(iOS)
+    private func choose(at y: CGFloat) {
+        let pitch = cell + spacing
+        let index = min(Self.letters.count - 1, max(0, Int(y / pitch)))
+        let letter = Self.letters[index]
+        guard letter != touchedLetter else { return }
+        touchedLetter = letter
+        let target = nearestAvailable(to: letter)
+        debugLog("[RAIL] touch \(letter) -> \(target ?? "none")")
+        if let target { onSelect(target) }
+    }
+    #endif
 
     /// The letter itself when it has titles, else the closest one after
     /// it, else the closest one before it.
