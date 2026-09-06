@@ -3675,6 +3675,14 @@ struct ChannelRow: View {
                 Spacer(minLength: 8)
                 if let start = entry.startTime, let end = entry.endTime {
                     HStack(spacing: 3) {
+                        // Day before the times once it is not today
+                        // (Logan 2026-09-05: a week of history reads as
+                        // one long day otherwise).
+                        if !Calendar.current.isDateInToday(start) {
+                            Text(DVRFormat.day(start))
+                                .foregroundColor(.textSecondary)
+                            Text("·")
+                        }
                         Text(start, style: .time)
                         Text("-")
                         Text(end, style: .time)
@@ -4116,6 +4124,13 @@ struct ChannelRow: View {
                     }
                     if let start = entry.startTime {
                         HStack(spacing: 4) {
+                            // Day prefix once the programme is not today
+                            // (tomorrow's schedule, or history).
+                            if !Calendar.current.isDateInToday(start) {
+                                Text(DVRFormat.day(start))
+                                    .foregroundColor(.textSecondary)
+                                Text("·")
+                            }
                             Text(start, style: .time)
                             if let end = entry.endTime {
                                 Text("–")
