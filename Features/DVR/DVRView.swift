@@ -347,7 +347,9 @@ struct DVRView: View {
                 #else
                 // Phone: same rail as Movies, parked at the right edge and
                 // centered on the visible grid (Logan 2026-09-05).
-                if isPhone, filteredLibrary.count > railMinimumCount, let railTop, railVisible {
+                // No minimum count, same as Movies: the rail is part of the
+                // grid's look even for a short library (Logan 2026-09-05).
+                if isPhone, let railTop, railVisible {
                     AlphabetRail(available: railLetters) { letter in
                         jumpToLetter(letter)
                     }
