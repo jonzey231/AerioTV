@@ -49,28 +49,29 @@ struct DVRView: View {
     @State private var tvTabBarHidden = false
     @State private var wantsTabBarHidden = false
     @State private var scrollIsIdle = true
-    @State private var lastScrollY: CGFloat = 0
-    @State private var scrollPosition = ScrollPosition()
     /// Grid card with focus (recording id). Drives the alphabet rail.
     @FocusState private var gridFocus: UUID?
     @State private var lastGridFocus: UUID?
     @FocusState private var railCatcherFocused: Bool
     @State private var railFocusRequest: String?
     @State private var railFocused = false
-    @State private var railVisible = false
     @State private var railHideTask: Task<Void, Never>?
-    @State private var railTop: CGFloat?
-    @State private var gridTopVisible: CGFloat = 0
-    @State private var rowPitch: CGFloat = 0
     private let railWidth: CGFloat = 72
-    /// The rail appears only for libraries worth jumping around in.
-    private let railMinimumCount = 15
     private let gridColumns = 5
     private let gridSpacing: CGFloat = 24
     #else
     private var gridColumns: Int { isPhone ? 3 : 2 }
     private var gridSpacing: CGFloat { isPhone ? 10 : 12 }
+    private let railWidth: CGFloat = 22
     #endif
+    @State private var lastScrollY: CGFloat = 0
+    @State private var scrollPosition = ScrollPosition()
+    @State private var railVisible = false
+    @State private var railTop: CGFloat?
+    @State private var gridTopVisible: CGFloat = 0
+    @State private var rowPitch: CGFloat = 0
+    /// The rail appears only for libraries worth jumping around in.
+    private let railMinimumCount = 15
 
     // MARK: Data
 
@@ -343,16 +344,40 @@ struct DVRView: View {
                     .ignoresSafeArea(.container, edges: [.top, .leading])
                     .transition(.move(edge: .leading).combined(with: .opacity))
                 }
+                #else
+                // Phone: same rail as Movies, parked at the right edge and
+                // centered on the visible grid (Logan 2026-09-05).
+                if isPhone, filteredLibrary.count > railMinimumCount, let railTop, railVisible {
+                    AlphabetRail(available: railLetters) { letter in
+                        jumpToLetter(letter)
+                    }
+                    .frame(width: railWidth)
+                    // Offset, never padding: see the Movies rail (layout loop).
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                    .offset(y: railTop)
+                    .padding(.trailing, 2)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .ignoresSafeArea(.container, edges: .top)
+                }
                 #endif
             }
-            #if os(tvOS)
             .onPreferenceChange(GridTopKey.self) { gridTopY in
                 guard let gridTopY else { return }
                 gridTopVisible = gridTopY
+                #if os(tvOS)
                 let centered = max(8, (outer.size.height + outer.safeAreaInsets.top - AlphabetRail.totalHeight) / 2 + 80)
                 let top = max(centered, gridTopY + 24)
                 if railTop != top { railTop = top }
+                #else
+                let top = max(0, gridTopY) / 2
+                if railTop != top { railTop = top }
+                let want = gridTopY <= 110
+                if want != railVisible {
+                    withAnimation(.easeInOut(duration: 0.25)) { railVisible = want }
+                }
+                #endif
             }
+            #if os(tvOS)
             .onChange(of: gridFocus) { _, id in
                 if let id { lastGridFocus = id }
                 updateRailVisibility()
@@ -368,7 +393,6 @@ struct DVRView: View {
         }
     }
 
-    #if os(tvOS)
     private var railLetters: Set<String> {
         Set(filteredLibrary.map { AlphabetRail.bucket(for: $0.programTitle) })
     }
@@ -382,12 +406,20 @@ struct DVRView: View {
             // rows not yet built.
             let row = index / gridColumns
             let gridTopContent = gridTopVisible + lastScrollY
-            let y = gridTopContent + 20 + CGFloat(row) * rowPitch - 24
+            #if os(tvOS)
+            let gridLead: CGFloat = 20   // the grid's vertical padding
+            #else
+            let gridLead: CGFloat = 0
+            #endif
+            let y = gridTopContent + gridLead + CGFloat(row) * rowPitch - 24
             withAnimation(.easeInOut(duration: 0.25)) { scrollPosition.scrollTo(y: max(0, y)) }
         }
+        #if os(tvOS)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { gridFocus = id }
+        #endif
     }
 
+    #if os(tvOS)
     private func updateRailVisibility() {
         let want = gridFocus != nil || railFocused
         railHideTask?.cancel()
@@ -520,8 +552,13 @@ struct DVRView: View {
         #if os(iOS)
         .aerioNoTopScrollEdge()
         #endif
-        #if os(tvOS)
         .scrollPosition($scrollPosition)
+        #if os(iOS)
+        .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in
+            lastScrollY = y
+        }
+        #endif
+        #if os(tvOS)
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in
             lastScrollY = y
             // Same rule as Movies: hide the bar once the hero has scrolled
@@ -765,13 +802,11 @@ struct DVRView: View {
         return LazyVGrid(columns: columns, alignment: .leading, spacing: gridRowSpacing) {
             ForEach(items, id: \.id) { rec in
                 card(rec, inGrid: true)
-                    #if os(tvOS)
                     .background(GeometryReader { g in
                         Color.clear.onAppear {
                             if rec.id == firstID { rowPitch = g.size.height + gridRowSpacing }
                         }
                     })
-                    #endif
             }
         }
         .background(GeometryReader { g in
@@ -1224,20 +1259,20 @@ struct DVRPosterCard: View {
     }
 
     private var poster: some View {
-        ZStack {
-            Color.cardBackground
-            if let posterURL {
-                AuthPosterImage(url: posterURL, headers: headers, placeholder: .cardBackground, maxPixel: 500)
-                    .aspectRatio(contentMode: .fill)
-            } else if let logoURL {
-                AuthPosterImage(url: logoURL, headers: headers, placeholder: .clear, maxPixel: 240)
-                    .aspectRatio(contentMode: .fit)
-                    .padding(18)
-            } else {
-                NoPosterPlaceholder()
+        Color.cardBackground
+            .overlay {
+                if let posterURL {
+                    AuthPosterImage(url: posterURL, headers: headers, placeholder: .cardBackground, maxPixel: 500)
+                        .aspectRatio(contentMode: .fill)
+                } else if let logoURL {
+                    AuthPosterImage(url: logoURL, headers: headers, placeholder: .clear, maxPixel: 240)
+                        .aspectRatio(contentMode: .fit)
+                        .padding(18)
+                } else {
+                    NoPosterPlaceholder()
+                }
             }
-        }
-        .clipped()
+            .clipped()
         .overlay(alignment: .topLeading) {
             if recording.isInProgress {
                 HStack(spacing: 3) {
