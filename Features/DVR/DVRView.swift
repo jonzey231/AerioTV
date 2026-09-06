@@ -72,6 +72,7 @@ struct DVRView: View {
     @State private var rowPitch: CGFloat = 0
     /// The rail appears only for libraries worth jumping around in.
     private let railMinimumCount = 15
+    private let phoneRailMinimumCount = 9
 
     // MARK: Data
 
@@ -347,9 +348,9 @@ struct DVRView: View {
                 #else
                 // Phone: same rail as Movies, parked at the right edge and
                 // centered on the visible grid (Logan 2026-09-05).
-                // No minimum count, same as Movies: the rail is part of the
-                // grid's look even for a short library (Logan 2026-09-05).
-                if isPhone, let railTop, railVisible {
+                // Three columns: nine posters fill the display, so the rail
+                // is worth having from nine (Logan 2026-09-05); tvOS keeps 15.
+                if isPhone, filteredLibrary.count >= phoneRailMinimumCount, let railTop, railVisible {
                     AlphabetRail(available: railLetters) { letter in
                         jumpToLetter(letter)
                     }
