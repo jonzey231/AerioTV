@@ -2777,14 +2777,6 @@ struct ChannelRow: View {
                 }
             #endif
         }
-        #if os(iOS)
-        // The system context menu on the whole card, previewed as the card
-        // itself in its own rounded shape (Logan 2026-09-06): attached to
-        // the inner row it was snapshotted without the card chrome, so the
-        // lifted copy changed shape.
-        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .contextMenu { cardMenuButtons }
-        #endif
         #if os(tvOS)
         .conditionalExitCommand(isActive: isExpanded) {
             debugLog("🎮 Back pressed: collapsing expanded card for \(item.name)")
@@ -3168,8 +3160,14 @@ struct ChannelRow: View {
         }
         .padding(.vertical, (isWide ? 18 : 13) * s)
         .padding(.horizontal, (isWide ? 18 : 14) * s)
-        .contentShape(Rectangle())
-        .onTapGesture { onTap() }
+        // Tap and long press through a clear UIKit anchor, as in the guide
+        // (Logan 2026-09-06): the system menu opens with nothing lifted and
+        // the card never changes. The trailing strip stays with the
+        // expand button.
+        .overlay(alignment: .leading) {
+            SystemMenuAnchor(items: cardMenuItems, onTap: onTap)
+                .padding(.trailing, (isWide ? 150 : 58) * s)
+        }
         // #45: per-channel "Add to Collection" — toggle membership in any
         // existing collection (a checkmark marks current members) or create a
         // new one with this channel already in it.
@@ -3206,6 +3204,65 @@ struct ChannelRow: View {
         if case .needsWarning = store.add(item, server: server) {
             _ = store.add(item, server: server, bypassWarning: true)
         }
+    }
+    #endif
+
+    #if os(iOS)
+    /// `cardMenuButtons` as data for `SystemMenuAnchor` (iOS rows).
+    private var cardMenuItems: [SystemMenuItem] {
+        var items: [SystemMenuItem] = []
+        items.append(.init(title: "Watch", systemImage: "play.fill") { onTap() })
+        let isFav = favoritesStore.isFavorite(item.id)
+        items.append(.init(title: isFav ? "Remove from Favorites" : "Add to Favorites",
+                           systemImage: isFav ? "star.slash" : "star") { favoritesStore.toggle(item) })
+        let isStaged = MultiviewStore.shared.tile(forChannelID: item.id) != nil
+        items.append(.init(title: isStaged ? "Remove from Multiview" : "Add to Multiview",
+                           systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill") { toggleMultiview() })
+        items.append(.init(title: "Add Channel to Collection", systemImage: "folder.badge.plus") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
+        })
+        if let cid = ChannelCollectionsStore.shared.activeFilterCollectionID,
+           let coll = ChannelCollectionsStore.shared.collection(id: cid),
+           coll.memberIDs.contains(item.id) {
+            items.append(.init(title: "Remove from \(coll.name)", systemImage: "folder.badge.minus", destructive: true) {
+                ChannelCollectionsStore.shared.removeMember(channelID: item.id, in: cid)
+            })
+        } else if ChannelCollectionsStore.shared.activeFilterCollectionID == nil,
+                  ChannelCollectionsStore.shared.isInAnyCollection(item.id) {
+            items.append(.init(title: "Remove from All Collections", systemImage: "folder.badge.minus", destructive: true) {
+                ChannelCollectionsStore.shared.removeFromAllCollections(item.id)
+            })
+        }
+        let live = liveProgram
+        if let live {
+            items.append(.init(title: "Program Info", systemImage: "info.circle") {
+                let nowAiring = guideStore.programs[item.id]?.first(where: { $0.isLive })
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    activeSheet = .programInfo(
+                        ProgramInfoTarget(
+                            channelName: item.name, title: live.title, start: live.start, end: live.end,
+                            description: live.description ?? nowAiring?.description ?? "",
+                            category: item.currentProgramCategory ?? nowAiring?.category ?? "",
+                            programID: nowAiring?.programID,
+                            subTitle: live.subTitle ?? nowAiring?.subTitle,
+                            season: nowAiring?.season, episode: nowAiring?.episode,
+                            isNew: nowAiring?.isNew ?? false, isLiveBroadcast: nowAiring?.isLiveBroadcast ?? false,
+                            isPremiere: nowAiring?.isPremiere ?? false, isFinale: nowAiring?.isFinale ?? false,
+                            isRepeat: nowAiring?.isRepeat ?? false))
+                }
+            })
+        }
+        if item.streamURL != nil {
+            items.append(.init(title: live != nil ? "Record from Now" : "Record", systemImage: "record.circle") {
+                let now = Date()
+                let entry = EPGEntry(title: live?.title ?? "\(item.name) live recording",
+                                     description: live?.description ?? "",
+                                     startTime: live?.start ?? now,
+                                     endTime: (live?.end).flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(3600))
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { activeSheet = .record(entry) }
+            })
+        }
+        return items
     }
     #endif
 

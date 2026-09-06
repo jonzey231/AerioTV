@@ -5905,29 +5905,28 @@ private struct GuideProgramButton: View {
                 ProgramInfoView(target: target)
             }
         #else
+        // The system menu with no preview and no change to the cell (Logan
+        // 2026-09-06). SwiftUI's context menu always lifts (or hides) its
+        // source, so a clear UIKit anchor over the VISIBLE part of the cell
+        // owns the interaction: its snapshot is transparent, the menu
+        // anchors on screen even when the cell spans hours, and the cell
+        // underneath never moves. The anchor also carries the tap.
         cellContent
-            .contentShape(Rectangle())
-            .onTapGesture {
-                // v1.7.x: when staging is active, the cell tap
-                // toggles the channel in the multiview pile rather
-                // than starting playback. Otherwise normal Guide
-                // behavior (play this channel). See
-                // `EPGGuideView.handleMultiviewIntent(channel:)`.
-                if multiviewStore.isStagingFromGuide {
-                    onMultiviewIntent(channelItem)
-                } else {
-                    onSelect(channelItem)
+            .overlay(alignment: .leading) {
+                SystemMenuAnchor(items: guideMenuItems) {
+                    // v1.7.x: when staging is active, the cell tap toggles
+                    // the channel in the multiview pile rather than starting
+                    // playback. See `EPGGuideView.handleMultiviewIntent`.
+                    if multiviewStore.isStagingFromGuide {
+                        onMultiviewIntent(channelItem)
+                    } else {
+                        onSelect(channelItem)
+                    }
                 }
+                .frame(width: max(20, min(width - leadingClip, UIScreen.main.bounds.width)),
+                       height: rowHeight)
+                .offset(x: leadingClip)
             }
-            // The system context menu (Logan 2026-09-06): the same option
-            // set as the channel row's menu and the tvOS guide menu.
-            // Preview = the cell itself, capped to the screen so a cell that
-            // spans hours is not shrunk to fit (Logan 2026-09-06).
-            .contextMenu(menuItems: { guideMenuButtons }, preview: {
-                cellContent
-                    .frame(width: min(width, UIScreen.main.bounds.width - 32), alignment: .leading)
-                    .clipped()
-            })
             .confirmationDialog("Add to Collection", isPresented: $showCollectionPicker, titleVisibility: .visible) {
                 ForEach(ChannelCollectionsStore.shared.collections) { c in
                     Button((ChannelCollectionsStore.shared.contains(channelID: channelItem.id, in: c.id) ? "\u{2713} " : "") + c.name) {
@@ -5984,6 +5983,70 @@ private struct GuideProgramButton: View {
     }
 
     #if os(iOS)
+    /// The guide cell's menu as data for `SystemMenuAnchor`. Same options,
+    /// order and icons as `ChannelListView.cardMenuButtons` (Logan
+    /// 2026-09-06). Follow-on sheets wait for the menu's dismiss animation.
+    private var guideMenuItems: [SystemMenuItem] {
+        var items: [SystemMenuItem] = []
+        if canReplayNow {
+            items.append(.init(title: "Watch", systemImage: "clock.arrow.circlepath") { onWatchCatchup(channelItem, prog) })
+        } else if prog.isLive {
+            items.append(.init(title: "Watch", systemImage: "play.fill") { onSelect(channelItem) })
+        }
+        let isFav = favoritesStore.isFavorite(channelItem.id)
+        items.append(.init(title: isFav ? "Remove from Favorites" : "Add to Favorites",
+                           systemImage: isFav ? "star.slash" : "star") { favoritesStore.toggle(channelItem) })
+        let isStaged = multiviewStore.tile(forChannelID: channelItem.id) != nil
+        items.append(.init(title: isStaged ? "Remove from Multiview" : "Add to Multiview",
+                           systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { onMultiviewIntent(channelItem) }
+        })
+        items.append(.init(title: "Add Channel to Collection", systemImage: "folder.badge.plus") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
+        })
+        if let cid = ChannelCollectionsStore.shared.activeFilterCollectionID,
+           let coll = ChannelCollectionsStore.shared.collection(id: cid),
+           coll.memberIDs.contains(channelItem.id) {
+            items.append(.init(title: "Remove from \(coll.name)", systemImage: "folder.badge.minus", destructive: true) {
+                ChannelCollectionsStore.shared.removeMember(channelID: channelItem.id, in: cid)
+            })
+        } else if ChannelCollectionsStore.shared.activeFilterCollectionID == nil,
+                  ChannelCollectionsStore.shared.isInAnyCollection(channelItem.id) {
+            items.append(.init(title: "Remove from All Collections", systemImage: "folder.badge.minus", destructive: true) {
+                ChannelCollectionsStore.shared.removeFromAllCollections(channelItem.id)
+            })
+        }
+        items.append(.init(title: "Program Info", systemImage: "info.circle") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                activeSheet = .programInfo(
+                    ProgramInfoTarget(
+                        channelName: channelItem.name, title: prog.title, start: prog.start, end: prog.end,
+                        description: prog.description, category: prog.category, programID: prog.programID,
+                        subTitle: prog.subTitle, season: prog.season, episode: prog.episode,
+                        isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
+                        isPremiere: prog.isPremiere, isFinale: prog.isFinale, isRepeat: prog.isRepeat))
+            }
+        })
+        if canOfferRecord {
+            items.append(.init(title: prog.isLive ? "Record from Now" : "Record", systemImage: "record.circle") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { activeSheet = .record }
+            })
+        }
+        if isFutureProgram {
+            if reminderManager.hasReminder(forKey: reminderKey) {
+                items.append(.init(title: "Cancel Reminder", systemImage: "bell.slash", destructive: true) {
+                    reminderManager.cancelReminder(forKey: reminderKey)
+                })
+            } else {
+                items.append(.init(title: "Set Reminder", systemImage: "bell.badge") {
+                    reminderManager.scheduleReminder(programTitle: prog.title, channelName: channelItem.name,
+                                                     startTime: prog.start)
+                })
+            }
+        }
+        return items
+    }
+
     /// Context menu for an iOS guide cell. Same options, order and icons as
     /// `ChannelListView.cardMenuButtons` (Logan 2026-09-06). Follow-on
     /// sheets wait for the menu's dismiss animation.
@@ -6240,6 +6303,78 @@ private struct TVPagePressCatcher: UIViewRepresentable {
 
         @objc private func firePageUp() { onPage(false) }
         @objc private func firePageDown() { onPage(true) }
+    }
+}
+#endif
+
+
+#if os(iOS)
+// MARK: - System menu anchor (no preview)
+
+struct SystemMenuItem {
+    let title: String
+    let systemImage: String
+    var destructive = false
+    let action: () -> Void
+    init(title: String, systemImage: String, destructive: Bool = false, action: @escaping () -> Void) {
+        self.title = title; self.systemImage = systemImage; self.destructive = destructive; self.action = action
+    }
+}
+
+/// A clear view that owns a UIKit context menu interaction and a tap. Its
+/// highlight preview is its own (transparent) snapshot with no shadow, so
+/// the system menu opens with nothing lifted and the content beneath is
+/// untouched (guide cells, Logan 2026-09-06).
+struct SystemMenuAnchor: UIViewRepresentable {
+    let items: [SystemMenuItem]
+    let onTap: () -> Void
+
+    func makeUIView(context: Context) -> AnchorView {
+        let v = AnchorView()
+        v.backgroundColor = .clear
+        v.addInteraction(UIContextMenuInteraction(delegate: v))
+        v.addGestureRecognizer(UITapGestureRecognizer(target: v, action: #selector(AnchorView.tapped)))
+        return v
+    }
+
+    func updateUIView(_ v: AnchorView, context: Context) {
+        v.items = items
+        v.onTap = onTap
+    }
+
+    final class AnchorView: UIView, UIContextMenuInteractionDelegate {
+        var items: [SystemMenuItem] = []
+        var onTap: () -> Void = {}
+
+        @objc func tapped() { onTap() }
+
+        func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                    configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
+            let items = self.items
+            return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
+                UIMenu(children: items.map { item in
+                    UIAction(title: item.title, image: UIImage(systemName: item.systemImage),
+                             attributes: item.destructive ? .destructive : []) { _ in item.action() }
+                })
+            }
+        }
+
+        private func clearPreview() -> UITargetedPreview {
+            let p = UIPreviewParameters()
+            p.backgroundColor = .clear
+            p.shadowPath = UIBezierPath()
+            return UITargetedPreview(view: self, parameters: p)
+        }
+
+        func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                    previewForHighlightingMenuWithConfiguration configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+            clearPreview()
+        }
+
+        func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                    previewForDismissingMenuWithConfiguration configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+            clearPreview()
+        }
     }
 }
 #endif
