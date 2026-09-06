@@ -2737,6 +2737,14 @@ final class ChannelStore: ObservableObject {
             return item
         }
         items = sortChannels(items, groupOrder: groupOrder)
+        // Catch-up depth as the server reports it (Logan 2026-09-05: "why
+        // can't I replay older programmes"): one histogram line per load.
+        let catchupHistogram = Dictionary(grouping: items, by: { $0.catchupDays })
+            .mapValues(\.count).sorted { $0.key < $1.key }
+            .map { "\($0.key)d: \($0.value)" }.joined(separator: ", ")
+        let sample = items.filter { $0.catchupDays > 0 }.prefix(6)
+            .map { "\($0.name)=\($0.catchupDays)d" }.joined(separator: ", ")
+        debugLog("📺 Dispatcharr catch-up days across \(items.count) channels: [\(catchupHistogram)] e.g. \(sample)")
 
         // Current-program enrichment used to live here (populated
         // from the removed `getCurrentPrograms()` call above). It

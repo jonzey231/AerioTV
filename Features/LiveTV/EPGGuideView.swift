@@ -1691,10 +1691,15 @@ final class GuideStore: ObservableObject {
                                              windowStart: start, windowEnd: end)
             }.value
             total += merged.matched
+            debugLog("📺 grid window chunk \(Self.chunkStamp(start))..\(Self.chunkStamp(end)): \(programs.count) from server, \(merged.matched) matched")
             guard commitPrograms(merged.dict, for: serverID, source: "dispatcharr-grid-window") else { return }
             try? await Task.sleep(for: .milliseconds(250))
         }
         debugLog("📺 grid window extension done: \(total) programmes merged over \(chunks.count) chunk(s)")
+    }
+
+    private static func chunkStamp(_ d: Date) -> String {
+        let f = DateFormatter(); f.dateFormat = "MM-dd HH:mm"; return f.string(from: d)
     }
 
     /// Current committed programmes as the merge base for a window chunk.

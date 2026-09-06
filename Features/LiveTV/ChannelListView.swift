@@ -3701,6 +3701,17 @@ struct ChannelRow: View {
                     withAnimation(.easeInOut(duration: 0.2)) {
                         showAiredPrograms.toggle()
                     }
+                    if showAiredPrograms {
+                        let aired = airedPrograms
+                        let now = Date()
+                        let replayable = aired.filter { e in
+                            guard let s = e.startTime, let en = e.endTime else { return false }
+                            return item.canReplay(start: s, end: en, now: now)
+                        }
+                        let oldest = aired.first?.startTime.map { DVRFormat.dateRange($0, aired.first?.endTime ?? $0) } ?? "-"
+                        let oldestReplay = replayable.first?.startTime.map { DVRFormat.dateRange($0, replayable.first?.endTime ?? $0) } ?? "-"
+                        debugLog("[CATCHUP] \(item.name) days=\(item.catchupDays) aired=\(aired.count) replayable=\(replayable.count) oldest=\(oldest) oldestReplayable=\(oldestReplay)")
+                    }
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "clock.arrow.circlepath")
