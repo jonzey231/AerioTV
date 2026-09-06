@@ -5264,7 +5264,7 @@ enum CatchupError: LocalizedError {
         case .unsupportedServer:
             return "Catch-up is available on Dispatcharr and Xtream Codes servers."
         case .badURL:
-            return "Could not build a catch-up URL for this programme."
+            return "Could not build a catch-up URL for this program."
         }
     }
 }

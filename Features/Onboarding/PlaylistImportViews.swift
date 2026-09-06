@@ -362,7 +362,7 @@ struct EPGImportView: View {
                             Image(systemName: "info.circle.fill")
                                 .foregroundColor(.accentSecondary)
                                 .font(.system(size: 15))
-                            Text("Import an XMLTV-formatted EPG guide to show programme schedules in the TV Guide.")
+                            Text("Import an XMLTV-formatted EPG guide to show program schedules in the TV Guide.")
                                 .font(.bodySmall)
                                 .foregroundColor(.textSecondary)
                         }
@@ -387,7 +387,7 @@ struct EPGImportView: View {
                             HStack(spacing: 10) {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundColor(.statusOnline)
-                                Text("Found \(count) programmes")
+                                Text("Found \(count) programs")
                                     .font(.bodyMedium)
                                     .foregroundColor(.statusOnline)
                             }
@@ -564,7 +564,7 @@ struct EPGImportView: View {
             }
             previewCount = programmes.count
             if programmes.isEmpty {
-                errorMessage = "No programme data found. Make sure this is a valid XMLTV file."
+                errorMessage = "No program data found. Make sure this is a valid XMLTV file."
             }
         } catch let error as APIError {
             errorMessage = error.errorDescription

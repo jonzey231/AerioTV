@@ -75,7 +75,7 @@ enum WhatsNewStore {
             title: "What's new in 1.8.8",
             bullets: [
                 "Fixed glitches and audio dropouts after pausing or rewinding live TV. When the app reconnected to your server it could throw away several seconds of video it had already received and leave a hole in the buffer, which is what broke the picture and sound where playback crossed that point",
-                "Guide accuracy on Direct Connect: channels that share a placeholder guide entry no longer show each other's schedule, and programmes from one guide provider no longer appear on another provider's channels"
+                "Guide accuracy on Direct Connect: channels that share a placeholder guide entry no longer show each other's schedule, and programs from one guide provider no longer appear on another provider's channels"
             ],
             releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.8.8")
         ),
@@ -144,7 +144,7 @@ enum WhatsNewStore {
                 "Menu now also snaps the guide timeline back to now",
                 "Channels without guide data are selectable again",
                 "New Audio Sync control in the player audio menu",
-                "Catch-up: smarter programme windows, and paused sessions stay alive"
+                "Catch-up: smarter program windows, and paused sessions stay alive"
             ],
             releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.8.1")
         ),

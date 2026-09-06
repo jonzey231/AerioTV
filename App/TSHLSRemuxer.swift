@@ -1962,7 +1962,7 @@ struct AVPlayerMultiviewTile: View {
         if r.contains("archive unavailable") {
             return ("Not Available in the Archive",
                     "The provider has no recording for this time. The channel advertises "
-                    + "more catch-up days than its archive actually holds; try a more recent programme.")
+                    + "more catch-up days than its archive actually holds; try a more recent program.")
         }
         func codecName(_ marker: String) -> String {
             // "audio codec A_DTS" / "video codec V_MS/VFW/FOURCC"
