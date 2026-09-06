@@ -1258,6 +1258,14 @@ struct MoviesView: View {
                             // poster row is gone from this tab.
                             let pages = heroPages
                             if !pages.isEmpty {
+                                #if os(iOS)
+                                if UIDevice.current.userInterfaceIdiom == .phone {
+                                    Text("Continue Watching")
+                                        .font(.headlineSmall)
+                                        .foregroundColor(.textPrimary)
+                                        .padding(.horizontal, 16)
+                                }
+                                #endif
                                 MoviesHeroCarousel(
                                     pages: pages,
                                     headers: dispatcharrHeaders,
@@ -1325,12 +1333,45 @@ struct MoviesView: View {
 
                             let watchlist = watchlistItems
                             if !watchlist.isEmpty {
+                                #if os(iOS)
+                                if UIDevice.current.userInterfaceIdiom == .phone {
+                                    // Phone: the Watchlist is a second card deck, same
+                                    // cards and gestures as Continue Watching (Logan
+                                    // 2026-09-05).
+                                    Text("Watchlist")
+                                        .font(.headlineSmall)
+                                        .foregroundColor(.textPrimary)
+                                        .padding(.horizontal, 16)
+                                    MoviesHeroCarousel(
+                                        pages: watchlist.map { MoviesHeroPage(item: $0, progress: nil) },
+                                        headers: dispatcharrHeaders,
+                                        onPrimary: { heroPrimary($0) },
+                                        onPlayFromStart: { playMovie($0.item, resumePositionMs: 0) },
+                                        onDetails: { navPath.append($0.item) },
+                                        onRemove: { _ in },
+                                        isOnWatchlist: { _ in true },
+                                        onToggleWatchlist: { page in WatchlistManager.toggle(page.item) }
+                                    )
+                                    .background(GeometryReader { g in
+                                        Color.clear.onAppear { geometryBox.watchlistShelfHeight = g.size.height }
+                                            .onChange(of: g.size.height) { _, h in geometryBox.watchlistShelfHeight = h }
+                                    })
+                                } else {
+                                    posterShelf(title: "Watchlist", items: watchlist)
+                                        .padding(.leading, contentLeadingInset)
+                                        .background(GeometryReader { g in
+                                            Color.clear.onAppear { geometryBox.watchlistShelfHeight = g.size.height }
+                                                .onChange(of: g.size.height) { _, h in geometryBox.watchlistShelfHeight = h }
+                                        })
+                                }
+                                #else
                                 posterShelf(title: "Watchlist", items: watchlist)
                                     .padding(.leading, contentLeadingInset)
                                     .background(GeometryReader { g in
                                         Color.clear.onAppear { geometryBox.watchlistShelfHeight = g.size.height }
                                             .onChange(of: g.size.height) { _, h in geometryBox.watchlistShelfHeight = h }
                                     })
+                                #endif
                             }
                             // No Recently Added shelf (Logan 2026-09-04): the Watchlist
                             // is the one shelf under the hero. recentlyAdded still
@@ -2517,8 +2558,14 @@ struct MoviesHeroCarousel: View {
                 Color.clear.frame(height: 8)
             }
             #endif
+            #if os(iOS)
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                cardStack
+            } else {
+                carousel
+            }
+            #else
             carousel
-                #if os(tvOS)
                 .onChange(of: heroFocus) { _, id in
                     if id != nil { lastHeroButton = id }
                     onHeroFocusChange?(id != nil)
@@ -2551,6 +2598,109 @@ struct MoviesHeroCarousel: View {
                 #endif
         }
     }
+
+    #if os(iOS)
+    /// Phone hero: a horizontal card deck (Logan's wife, 2026-09-05).
+    /// Cards sit along one track: the current title in front at the left
+    /// margin, the following ones peeking out to its right, the ones
+    /// already passed parked off the left edge. A
+    /// drag slides the deck continuously and snaps to the nearest card,
+    /// so the user can go back and forth. Same pages and actions as the
+    /// carousel.
+    @State private var stackIndex: Int = 0
+    @State private var stackDragX: CGFloat = 0
+    private let stackPeek: CGFloat = 9
+    /// Passed cards park at the left edge with a sliver showing (Logan
+    /// 2026-09-05); a swipe right brings them back.
+    private let parkedSliver: CGFloat = 14
+
+    private var cardStack: some View {
+        GeometryReader { geo in
+            // Wide card (Logan 2026-09-05): 10pt margins, two 9pt peeks.
+            let w = geo.size.width - 20 - stackPeek * 2
+            let count = max(pages.count, 1)
+            // Fractional deck position while dragging.
+            let p = CGFloat(min(max(stackIndex, 0), count - 1)) - stackDragX / w
+            ZStack(alignment: .leading) {
+                ForEach(Array(pages.enumerated()), id: \.element.id) { i, page in
+                    let rel = CGFloat(i) - p
+                    let x: CGFloat = rel >= 0
+                        ? 10 + rel * stackPeek
+                        : 10 + max(rel, -1) * (w - parkedSliver + 10) - max(0, -rel - 1) * 4
+                    let scale: CGFloat = rel >= 0 ? 1 - min(rel, 3) * 0.03 : 1
+                    let alpha: Double = rel >= 0 ? Double(1 - min(rel, 3) * 0.2) : Double(0.9 + max(rel, -1) * 0.3)
+                    MoviesHero(
+                        item: page.item,
+                        progress: page.progress,
+                        backdropOverride: page.backdropOverride,
+                        headers: headers,
+                        onPrimary: { onPrimary(page) },
+                        onPlayFromStart: { onPlayFromStart(page) },
+                        onDetails: { onDetails(page) },
+                        onRemove: page.progress != nil ? { onRemove(page) } : nil,
+                        isOnWatchlist: isOnWatchlist?(page) ?? false,
+                        onToggleWatchlist: onToggleWatchlist.map { toggle in { toggle(page) } },
+                        primaryFocusID: page.id
+                    )
+                    .frame(width: w, height: heroHeight)
+                    .scaleEffect(scale, anchor: .trailing)
+                    .offset(x: x)
+                    .opacity(max(0, min(1, alpha)))
+                    .shadow(color: .black.opacity(abs(rel) < 0.5 ? 0.45 : 0), radius: 14, x: 6, y: 0)
+                    .allowsHitTesting(abs(rel) < 0.02)
+                    .zIndex(rel >= 0 ? Double(10 - rel) : Double(10.99 + rel))
+                }
+            }
+            .frame(width: geo.size.width, height: heroHeight, alignment: .leading)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 18)
+                    .onChanged { v in
+                        // Horizontal only; a vertical drag stays with the page.
+                        guard abs(v.translation.width) > abs(v.translation.height) else { return }
+                        var dx = v.translation.width
+                        // Rubber band past either end of the deck.
+                        if (stackIndex == 0 && dx > 0) || (stackIndex >= count - 1 && dx < 0) { dx /= 3 }
+                        stackDragX = dx
+                    }
+                    .onEnded { v in
+                        let dx = v.translation.width
+                        var target = stackIndex
+                        if abs(dx) > abs(v.translation.height) {
+                            if dx < -60 || v.predictedEndTranslation.width < -w / 2 { target += 1 }
+                            else if dx > 60 || v.predictedEndTranslation.width > w / 2 { target -= 1 }
+                        }
+                        target = min(max(target, 0), count - 1)
+                        withAnimation(.spring(response: 0.38, dampingFraction: 0.85)) {
+                            stackIndex = target
+                            stackDragX = 0
+                        }
+                        currentID = pages[target].id
+                    }
+            )
+        }
+        .frame(height: heroHeight)
+        .overlay(alignment: .bottom) {
+            if pages.count > 1 {
+                HStack(spacing: 8) {
+                    ForEach(pages) { page in
+                        Circle()
+                            .fill(page.id == activePageID
+                                  ? Color.accentPrimary : Color.textTertiary.opacity(0.5))
+                            .frame(width: dot, height: dot)
+                    }
+                }
+                .offset(y: dotInset)
+            }
+        }
+        .padding(.bottom, 24)
+        .onChange(of: pages.map(\.id)) { _, ids in
+            // Keep the deck on the same title when the pages refresh.
+            if let cur = currentID, let i = ids.firstIndex(of: cur) { stackIndex = i }
+            else { stackIndex = min(stackIndex, max(ids.count - 1, 0)) }
+        }
+    }
+    #endif
 
     private var carousel: some View {
         GeometryReader { geo in
