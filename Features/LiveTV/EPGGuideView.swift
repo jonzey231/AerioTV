@@ -906,6 +906,16 @@ final class GuideStore: ObservableObject {
     nonisolated static let largePlaylistChannels = 5_000
     nonisolated static let largePlaylistHistorySecs: TimeInterval = 6 * 3_600
 
+    /// Channel-matching maps from the last base grid fetch, kept for the
+    /// 0.30 window extension (same maps, later chunks).
+    struct DispatcharrGridMaps {
+        let serverID: String
+        let tvgIDToChannelIDs: [String: [String]]
+        let intIDToChannelID: [Int: String]
+        let uuidToChannelID: [String: String]
+    }
+    private var lastDispatcharrMaps: DispatcharrGridMaps?
+
     func trimExpiredPrograms() {
         let cutoff = Date().addingTimeInterval(-GuideStore.activeRetentionSeconds())
         var trimmed: [String: [GuideProgram]] = [:]
@@ -990,13 +1000,22 @@ final class GuideStore: ObservableObject {
             // background, measured on the affected server).
             if !upstreamLayeringInFlight {
                 upstreamLayeringInFlight = true
+                let gridWindowCapable = server.dispatcharrVersionAtLeast("0.30.0")
                 Task { [weak self] in
                     guard let self else { return }
-                    await self.layerDispatcharrUpstreamSources(
-                        server: server,
-                        channels: channels,
-                        windowEnd: windowEnd
-                    )
+                    if gridWindowCapable, didRefresh {
+                        // Dispatcharr 0.30: the grid itself serves history and
+                        // days ahead; no third-party XMLTV layering needed.
+                        await self.extendDispatcharrGridWindow(server: server,
+                                                               channels: channels,
+                                                               windowEnd: windowEnd)
+                    } else {
+                        await self.layerDispatcharrUpstreamSources(
+                            server: server,
+                            channels: channels,
+                            windowEnd: windowEnd
+                        )
+                    }
                     self.upstreamLayeringInFlight = false
                 }
             }
@@ -1214,6 +1233,10 @@ final class GuideStore: ObservableObject {
 
         // Try the EPG grid endpoint first — returns -1h to +24h in one request with
         // synthetic dummy programs for channels without EPG data.
+        lastDispatcharrMaps = DispatcharrGridMaps(serverID: server.id.uuidString,
+                                                  tvgIDToChannelIDs: tvgIDToChannelIDs,
+                                                  intIDToChannelID: intIDToChannelID,
+                                                  uuidToChannelID: uuidToChannelID)
         #if DEBUG
         debugLog("📺 Dispatcharr: fetching EPG grid, tvgID map has \(tvgIDToChannelIDs.count) entries, intID map has \(intIDToChannelID.count) entries, uuid map has \(uuidToChannelID.count) entries")
         #endif
@@ -1238,52 +1261,11 @@ final class GuideStore: ObservableObject {
             let base = _pendingPrograms
             let merged: (dict: [String: [GuideProgram]], matched: Int, viaUUID: Int) =
                 await Task.detached(priority: .userInitiated) {
-                    var dict = base
-                    var matched = 0
-                    var viaUUID = 0
-                    var touched = Set<String>()
-                    for prog in gridPrograms {
-                        guard let start = prog.startTime?.toDate(),
-                              let end = prog.endTime?.toDate(),
-                              end > windowStart && start < windowEnd else { continue }
-                        let cids: [String]
-                        if let tvg = prog.tvgID, !tvg.isEmpty {
-                            let key = tvg.lowercased()
-                            if let arr = tvgIDToChannelIDs[key], !arr.isEmpty {
-                                cids = arr
-                            } else if let cid = uuidToChannelID[key] {
-                                // Dummy EPG entry; the `tvg_id` IS the channel UUID.
-                                cids = [cid]
-                                viaUUID += 1
-                            } else {
-                                cids = []
-                            }
-                        } else if let chInt = prog.channel, let cid = intIDToChannelID[chInt] {
-                            cids = [cid]
-                        } else {
-                            cids = []
-                        }
-                        if cids.isEmpty { continue }
-                        matched += 1
-                        let desc = prog.description.isEmpty ? prog.subTitle : prog.description
-                        // thread `programID` so ProgramInfoView can lazy-load
-                        // `<category>` via /api/epg/programs/<id>/.
-                        for cid in cids {
-                            let gp = GuideProgram(channelID: cid, title: prog.title,
-                                                  description: desc, start: start, end: end,
-                                                  category: "", programID: prog.programID,
-                                                  subTitle: prog.subTitle.isEmpty ? nil : prog.subTitle,
-                                                  season: prog.season, episode: prog.episode,
-                                                  isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
-                                                  isPremiere: prog.isPremiere, isFinale: prog.isFinale,
-                                                  isRepeat: prog.isRepeat)
-                            GuideStore.mergeProgramInto(&dict, program: gp, for: cid, deferSort: true)
-                            touched.insert(cid)
-                        }
-                    }
-                    // deferSort:true above; sort each touched list once.
-                    for cid in touched { dict[cid]?.sort { $0.start < $1.start } }
-                    return (dict, matched, viaUUID)
+                    GuideStore.mergeGridPrograms(gridPrograms, into: base,
+                                                 tvgIDToChannelIDs: tvgIDToChannelIDs,
+                                                 intIDToChannelID: intIDToChannelID,
+                                                 uuidToChannelID: uuidToChannelID,
+                                                 windowStart: windowStart, windowEnd: windowEnd)
                 }.value
             _pendingPrograms = merged.dict
             let matched = merged.matched
@@ -1586,6 +1568,137 @@ final class GuideStore: ObservableObject {
     /// 403 is not a transient error and re-asking 155 times in one session
     /// (measured, same device) is indistinguishable from an attack.
     private static var xmltvRefused = Set<String>()
+
+
+    /// Grid programme -> channel matching and merge (shared-tvg-id fan-out,
+    /// Dummy-EPG UUID key, integer channel fallback). Pure: runs off the
+    /// main actor for the base grid and for the 0.30 window extension.
+    nonisolated static func mergeGridPrograms(_ gridPrograms: [DispatcharrCurrentProgram],
+                                              into base: [String: [GuideProgram]],
+                                              tvgIDToChannelIDs: [String: [String]],
+                                              intIDToChannelID: [Int: String],
+                                              uuidToChannelID: [String: String],
+                                              windowStart: Date,
+                                              windowEnd: Date) -> (dict: [String: [GuideProgram]], matched: Int, viaUUID: Int) {
+
+                    var dict = base
+                    var matched = 0
+                    var viaUUID = 0
+                    var touched = Set<String>()
+                    for prog in gridPrograms {
+                        guard let start = prog.startTime?.toDate(),
+                              let end = prog.endTime?.toDate(),
+                              end > windowStart && start < windowEnd else { continue }
+                        let cids: [String]
+                        if let tvg = prog.tvgID, !tvg.isEmpty {
+                            let key = tvg.lowercased()
+                            if let arr = tvgIDToChannelIDs[key], !arr.isEmpty {
+                                cids = arr
+                            } else if let cid = uuidToChannelID[key] {
+                                // Dummy EPG entry; the `tvg_id` IS the channel UUID.
+                                cids = [cid]
+                                viaUUID += 1
+                            } else {
+                                cids = []
+                            }
+                        } else if let chInt = prog.channel, let cid = intIDToChannelID[chInt] {
+                            cids = [cid]
+                        } else {
+                            cids = []
+                        }
+                        if cids.isEmpty { continue }
+                        matched += 1
+                        let desc = prog.description.isEmpty ? prog.subTitle : prog.description
+                        // thread `programID` so ProgramInfoView can lazy-load
+                        // `<category>` via /api/epg/programs/<id>/.
+                        for cid in cids {
+                            let gp = GuideProgram(channelID: cid, title: prog.title,
+                                                  description: desc, start: start, end: end,
+                                                  category: "", programID: prog.programID,
+                                                  subTitle: prog.subTitle.isEmpty ? nil : prog.subTitle,
+                                                  season: prog.season, episode: prog.episode,
+                                                  isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
+                                                  isPremiere: prog.isPremiere, isFinale: prog.isFinale,
+                                                  isRepeat: prog.isRepeat)
+                            GuideStore.mergeProgramInto(&dict, program: gp, for: cid, deferSort: true)
+                            touched.insert(cid)
+                        }
+                    }
+                    // deferSort:true above; sort each touched list once.
+                    for cid in touched { dict[cid]?.sort { $0.start < $1.start } }
+                    return (dict, matched, viaUUID)
+    }
+
+    /// Dispatcharr 0.30 window extension: the base grid paints the default
+    /// -1h..+24h fast; this then fills history back to the Guide History
+    /// setting (6 h on very large playlists) and forward to the guide
+    /// window, one day per request through `start`/`end`, merging via the
+    /// same matcher and committing each chunk. Replaces the upstream XMLTV
+    /// layering on servers that support the window (no third-party fetch,
+    /// no LAN-only 403s).
+    private func extendDispatcharrGridWindow(server: ServerConnection,
+                                             channels: [ChannelDisplayItem],
+                                             windowEnd: Date) async {
+        guard let maps = lastDispatcharrMaps, maps.serverID == server.id.uuidString else { return }
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode,
+                                 serverID: server.id,
+                                 savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                                     ? server.username : nil)
+        let now = Date()
+        let historySecs: TimeInterval = channels.count > Self.largePlaylistChannels
+            ? Self.largePlaylistHistorySecs : Self.activeRetentionSeconds()
+        let historyStart = now.addingTimeInterval(-historySecs)
+        let baseStart = now.addingTimeInterval(-3600)
+        let baseEnd = now.addingTimeInterval(24 * 3600)
+        // Chunks: history newest-first (catch-up depth users reach first),
+        // then forward. One day each.
+        var chunks: [(Date, Date)] = []
+        var hEnd = baseStart
+        while hEnd > historyStart {
+            let hStart = max(historyStart, hEnd.addingTimeInterval(-86_400))
+            chunks.append((hStart, hEnd))
+            hEnd = hStart
+        }
+        var fStart = baseEnd
+        while fStart < windowEnd {
+            let fEnd = min(windowEnd, fStart.addingTimeInterval(86_400))
+            chunks.append((fStart, fEnd))
+            fStart = fEnd
+        }
+        guard !chunks.isEmpty else { return }
+        debugLog("📺 [EPG source=dispatcharr-api grid window] \(chunks.count) chunk(s): history \(Int(historySecs / 3600))h, forward to +\(Int(windowEnd.timeIntervalSince(now) / 3600))h")
+        let serverID = server.id.uuidString
+        var total = 0
+        for (start, end) in chunks {
+            guard displayedServerID == nil || displayedServerID == serverID else { return }
+            let programs: [DispatcharrCurrentProgram]
+            do {
+                programs = try await api.getEPGGrid(start: start, end: end)
+            } catch {
+                debugLog("📺 grid window chunk failed (\(error.localizedDescription)); stopping extension")
+                return
+            }
+            guard !programs.isEmpty else { continue }
+            let base = programs_snapshotForMerge()
+            let merged = await Task.detached(priority: .utility) {
+                GuideStore.mergeGridPrograms(programs, into: base,
+                                             tvgIDToChannelIDs: maps.tvgIDToChannelIDs,
+                                             intIDToChannelID: maps.intIDToChannelID,
+                                             uuidToChannelID: maps.uuidToChannelID,
+                                             windowStart: start, windowEnd: end)
+            }.value
+            total += merged.matched
+            guard commitPrograms(merged.dict, for: serverID, source: "dispatcharr-grid-window") else { return }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        debugLog("📺 grid window extension done: \(total) programmes merged over \(chunks.count) chunk(s)")
+    }
+
+    /// Current committed programmes as the merge base for a window chunk.
+    private func programs_snapshotForMerge() -> [String: [GuideProgram]] { programs }
 
     /// Standard XC EPG: the server's bulk `xmltv.php` guide (full programmes,
     /// server-native naming + categories), matched by tvg-id through the same

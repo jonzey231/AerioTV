@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.8.28 - 2026-09-03
+
+Playback fix release for the AVPlayer engine.
+
+### Fixed
+
+- Live channels on a Dispatcharr Redirect stream profile failed on the
+  native engine with "the server is not correctly configured". The HLS
+  capability probe took any redirect as native HLS output, but a Redirect
+  profile answers the same way, straight to the raw upstream stream. The
+  probe now only trusts a redirect that points at a playlist, and a
+  channel that still fails this way re-tunes once through the on-device
+  remux instead of stopping.
+- Apple TV stayed in HDR after leaving a movie that was exited within
+  the first seconds: the preparation still running after the player
+  closed applied the display mode with nothing left to reset it.
+- Live streams are given at least 30 seconds to deliver their first
+  bytes before the app reports a failure, so slow providers no longer
+  trip the timeout at tune.
+
 ## v1.8.27 - 2026-09-03
 
 Seventh AVPlayer-engine beta, and the first one going to every TestFlight

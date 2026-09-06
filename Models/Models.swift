@@ -230,6 +230,19 @@ final class ServerConnection {
     /// is below 10 during a connect/verify.
     var dispatcharrUserLevel: Int = 10
 
+    /// Dispatcharr 0.30 granular permissions, captured from
+    /// /api/accounts/users/me/ at connect and refreshed on every launch.
+    /// Defaults are the permissive server defaults so pre-capture rows and
+    /// non-Dispatcharr servers behave as before. `dispatcharrDVRAccess` is
+    /// "" until learned, in which case the level decides (admin = manage,
+    /// standard = view, streamer = none), matching the server's default.
+    var dispatcharrDVRAccess: String = ""
+    var dispatcharrCatchupEnabled: Bool = true
+    var dispatcharrVODMoviesEnabled: Bool = true
+    var dispatcharrVODSeriesEnabled: Bool = true
+    /// Server version string from /api/core/version/ ("" = unknown).
+    var dispatcharrServerVersion: String = ""
+
     /// v1.7.x: the Channel Profile id(s) assigned to the connected
     /// Dispatcharr user (`channel_profiles` on /api/accounts/users/me/),
     /// stored comma-joined for SwiftData stability. A Channel Profile is
@@ -389,7 +402,59 @@ final class ServerConnection {
     /// pre-capture servers recording-capable. Local recording is NOT
     /// gated by this and stays available to everyone.
     var dispatcharrCanRecordToServer: Bool {
-        type != .dispatcharrAPI || dispatcharrUserLevel >= 10
+        type != .dispatcharrAPI || dispatcharrCanManageDVR
+    }
+
+    /// Effective DVR access for a Dispatcharr account (0.30 semantics,
+    /// mirrors apps/channels/dvr_access.py). Non-Dispatcharr = manage.
+    var dispatcharrEffectiveDVRAccess: DispatcharrDVRAccess {
+        guard type == .dispatcharrAPI else { return .manage }
+        if dispatcharrUserLevel >= 10 { return .manage }
+        if dispatcharrUserLevel < 1 { return .none }
+        switch dispatcharrDVRAccess {
+        case "none": return .none
+        case "manage": return .manage
+        default: return .view
+        }
+    }
+    /// May list and play recordings (view or manage).
+    var dispatcharrCanViewDVR: Bool { dispatcharrEffectiveDVRAccess != .none }
+    /// May schedule, stop, cancel and delete recordings and rules.
+    var dispatcharrCanManageDVR: Bool { dispatcharrEffectiveDVRAccess == .manage }
+    /// Catch-up / timeshift allowed for this account.
+    var dispatcharrCanUseCatchup: Bool { type != .dispatcharrAPI || dispatcharrCatchupEnabled }
+
+    /// Copies the 0.30 permission flags (and version, when known) from a
+    /// fresh /users/me/ read. Used by Test Connection and the launch
+    /// refresh so server-side permission changes apply without re-adding
+    /// the playlist. Returns true when anything changed.
+    @discardableResult
+    func applyDispatcharrPermissions(from user: DispatcharrUser, version: String?) -> Bool {
+        var changed = false
+        func set<T: Equatable>(_ kp: ReferenceWritableKeyPath<ServerConnection, T>, _ v: T) {
+            if self[keyPath: kp] != v { self[keyPath: kp] = v; changed = true }
+        }
+        set(\.dispatcharrDVRAccess, user.dvrAccessRaw ?? "")
+        set(\.dispatcharrCatchupEnabled, user.catchupEnabled)
+        set(\.dispatcharrVODMoviesEnabled, user.vodMoviesEnabled)
+        set(\.dispatcharrVODSeriesEnabled, user.vodSeriesEnabled)
+        if let version, !version.isEmpty { set(\.dispatcharrServerVersion, version) }
+        return changed
+    }
+
+    /// Whether the server is at least `minimum` (semver, "0.30.0"). False
+    /// when the version is unknown.
+    func dispatcharrVersionAtLeast(_ minimum: String) -> Bool {
+        guard type == .dispatcharrAPI, !dispatcharrServerVersion.isEmpty else { return false }
+        func parts(_ v: String) -> [Int] {
+            v.split(separator: ".").prefix(3).map { Int($0.prefix { $0.isNumber }) ?? 0 }
+        }
+        let a = parts(dispatcharrServerVersion), b = parts(minimum)
+        for i in 0..<3 {
+            let x = i < a.count ? a[i] : 0, y = i < b.count ? b[i] : 0
+            if x != y { return x > y }
+        }
+        return true
     }
 
     /// Whether the connected account may use Switch Stream (pick a

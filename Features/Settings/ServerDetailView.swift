@@ -701,6 +701,7 @@ struct ServerDetailView: View {
                         debugLog("SettingsView Test Connection: persisting user_level \(level) for \(server.name)")
                         SyncManager.shared.pushServers(servers, immediate: true)
                     }
+                    server.applyDispatcharrPermissions(from: user, version: info.version)
                 }
             case .m3uPlaylist:
                 guard let url = URL(string: server.baseURL) else { throw APIError.invalidURL }

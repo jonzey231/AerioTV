@@ -274,9 +274,18 @@ struct MyRecordingsView: View {
     /// in `visibleRecordings`. When the user switches active server,
     /// the next `.task { await reconcileAll() }` invocation catches
     /// that server up.
+    /// Dispatcharr 0.30 DVR access: stop / cancel / delete on a server
+    /// recording need "manage"; a "view" account only lists and plays.
+    /// Local recordings are always the device's own.
+    private func canManage(_ rec: Recording) -> Bool {
+        guard rec.destination == .dispatcharrServer,
+              let server = servers.first(where: { $0.id.uuidString == rec.serverID }) else { return true }
+        return server.dispatcharrCanManageDVR
+    }
+
     private func reconcileAll() async {
         guard let active = servers.first(where: { $0.isActive }) ?? servers.first,
-              active.type == .dispatcharrAPI else { return }
+              active.type == .dispatcharrAPI, active.dispatcharrCanViewDVR else { return }
         let api = DispatcharrAPI(baseURL: active.effectiveBaseURL,
                                  auth: .apiKey(active.effectiveApiKey),
                                  userAgent: active.effectiveUserAgent,
@@ -377,14 +386,16 @@ struct MyRecordingsView: View {
                     Label("Watch from Beginning", systemImage: "backward.end.fill")
                 }
             }
-            Button {
-                stopRecording(rec)
-            } label: {
-                Label("Stop Recording", systemImage: "stop.fill")
+            if canManage(rec) {
+                Button {
+                    stopRecording(rec)
+                } label: {
+                    Label("Stop Recording", systemImage: "stop.fill")
+                }
             }
         }
 
-        if rec.isUpcoming {
+        if rec.isUpcoming, canManage(rec) {
             Button(role: .destructive) {
                 cancelRecording(rec)
             } label: {
@@ -402,7 +413,7 @@ struct MyRecordingsView: View {
             }
         }
 
-        if rec.destination == .dispatcharrServer {
+        if rec.destination == .dispatcharrServer, canManage(rec) {
             Button(role: .destructive) {
                 recordingToDelete = rec
                 showDeleteFromServerAlert = true
