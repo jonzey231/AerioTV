@@ -1379,7 +1379,15 @@ struct MoviesView: View {
 
                             let gridItems = isSearching ? filteredMovies : libraryMovies
                             libraryHeader(title: isSearching ? "Results" : "All \(kindTitle)",
-                                          count: gridItems.count, showPills: !isSearching)
+                                          count: gridItems.count, showPills: !isSearching,
+                                          onTitleTap: {
+                                              // Phone (Logan 2026-09-05): the title scrolls the
+                                              // library to the top of the page, rail and all.
+                                              withAnimation(.easeInOut(duration: 0.55)) {
+                                                  proxy.scrollTo("movies-library", anchor: .top)
+                                              }
+                                          })
+                                .id("movies-library")
                                 .padding(.leading, contentLeadingInset)
                             if isSearching {
                                 if let who = personMatchName {
@@ -1966,15 +1974,23 @@ struct MoviesView: View {
 
     /// "All Movies · N" with the genre pills and, on tvOS, the search /
     /// sort / filter controls on the right.
-    private func libraryHeader(title: String, count: Int, showPills: Bool) -> some View {
+    private func libraryHeader(title: String, count: Int, showPills: Bool,
+                               onTitleTap: (() -> Void)? = nil) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 10) {
-                Text(title)
-                    .font(.headlineSmall)
-                    .foregroundColor(.textPrimary)
-                Text("\(count)")
-                    .font(.labelMedium)
-                    .foregroundColor(.textTertiary)
+                // Plain text, but tappable on the phone: no button look.
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(title)
+                        .font(.headlineSmall)
+                        .foregroundColor(.textPrimary)
+                    Text("\(count)")
+                        .font(.labelMedium)
+                        .foregroundColor(.textTertiary)
+                }
+                .contentShape(Rectangle())
+                #if os(iOS)
+                .onTapGesture { if UIDevice.current.userInterfaceIdiom == .phone { onTitleTap?() } }
+                #endif
                 #if os(tvOS)
                 // Directly beside the title (Logan 2026-09-03), not
                 // pushed to the far right.
