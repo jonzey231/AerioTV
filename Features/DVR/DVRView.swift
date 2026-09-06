@@ -31,8 +31,10 @@ struct DVRView: View {
         }
     }
 
-    @AppStorage("dvrSortOrder") private var sortOrderRaw = SortOrder.newest.rawValue
-    private var sortOrder: SortOrder { SortOrder(rawValue: sortOrderRaw) ?? .newest }
+    // Title A to Z by default: the library has an alphabet rail (Logan
+    // 2026-09-06). A stored choice still wins.
+    @AppStorage("dvrSortOrder") private var sortOrderRaw = SortOrder.title.rawValue
+    private var sortOrder: SortOrder { SortOrder(rawValue: sortOrderRaw) ?? .title }
     @State private var selectedKind: DVRContentKind?
     @State private var showSortMenu = false
 
