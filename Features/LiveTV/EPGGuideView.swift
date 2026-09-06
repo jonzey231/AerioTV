@@ -1636,6 +1636,41 @@ final class GuideStore: ObservableObject {
     /// same matcher and committing each chunk. Replaces the upstream XMLTV
     /// layering on servers that support the window (no third-party fetch,
     /// no LAN-only 403s).
+    /// Furthest point the grid window has been fetched forward to, for
+    /// the guide's jump-to-day (Roman via Discord, 2026-09-06).
+    private(set) var forwardLoadedUntil: Date?
+    private var forwardExtensionInFlight = false
+
+    /// Jump-to-day: fetch the grid forward through `end` (day chunks) when
+    /// a Dispatcharr 0.30 server is active and that range is not loaded.
+    func ensureForwardWindow(through end: Date, channels: [ChannelDisplayItem],
+                             servers: [ServerConnection]) async {
+        guard let server = servers.first(where: { $0.isActive }) ?? servers.first,
+              server.type == .dispatcharrAPI, server.dispatcharrVersionAtLeast("0.30.0"),
+              let maps = lastDispatcharrMaps, maps.serverID == server.id.uuidString,
+              !forwardExtensionInFlight else { return }
+        let from = max(forwardLoadedUntil ?? Date().addingTimeInterval(24 * 3600), Date())
+        guard end > from.addingTimeInterval(60) else { return }
+        forwardExtensionInFlight = true
+        defer { forwardExtensionInFlight = false }
+        var chunks: [(Date, Date)] = []
+        var fStart = from
+        while fStart < end {
+            let fEnd = min(end, fStart.addingTimeInterval(86_400))
+            chunks.append((fStart, fEnd))
+            fStart = fEnd
+        }
+        debugLog("📺 [EPG grid window] jump: \(chunks.count) forward chunk(s) to \(Self.chunkStamp(end))")
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode,
+                                 serverID: server.id,
+                                 savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                                     ? server.username : nil)
+        await fetchGridChunks(chunks, api: api, maps: maps, serverID: server.id.uuidString)
+    }
+
     private func extendDispatcharrGridWindow(server: ServerConnection,
                                              channels: [ChannelDisplayItem],
                                              windowEnd: Date) async {
@@ -1670,7 +1705,13 @@ final class GuideStore: ObservableObject {
         }
         guard !chunks.isEmpty else { return }
         debugLog("📺 [EPG source=dispatcharr-api grid window] \(chunks.count) chunk(s): history \(Int(historySecs / 3600))h, forward to +\(Int(windowEnd.timeIntervalSince(now) / 3600))h")
-        let serverID = server.id.uuidString
+        await fetchGridChunks(chunks, api: api, maps: maps, serverID: server.id.uuidString)
+    }
+
+    /// Fetch, merge and commit grid chunks in order; records the furthest
+    /// forward edge reached so a later jump does not refetch it.
+    private func fetchGridChunks(_ chunks: [(Date, Date)], api: DispatcharrAPI,
+                                 maps: DispatcharrGridMaps, serverID: String) async {
         var total = 0
         for (start, end) in chunks {
             guard displayedServerID == nil || displayedServerID == serverID else { return }
@@ -1693,6 +1734,7 @@ final class GuideStore: ObservableObject {
             total += merged.matched
             debugLog("📺 grid window chunk \(Self.chunkStamp(start))..\(Self.chunkStamp(end)): \(programs.count) from server, \(merged.matched) matched")
             guard commitPrograms(merged.dict, for: serverID, source: "dispatcharr-grid-window") else { return }
+            if end > (forwardLoadedUntil ?? .distantPast), end > Date() { forwardLoadedUntil = end }
             try? await Task.sleep(for: .milliseconds(250))
         }
         debugLog("📺 grid window extension done: \(total) programmes merged over \(chunks.count) chunk(s)")
@@ -3263,7 +3305,34 @@ struct EPGGuideView: View {
     }
     private var hoursForward: TimeInterval {
         let raw = UserDefaults.standard.integer(forKey: "epgWindowHours")
-        return TimeInterval(raw > 0 ? raw : 36)
+        let setting = TimeInterval(raw > 0 ? raw : 36)
+        // Jump-to-day (Roman via Discord, 2026-09-06): the grid grows to
+        // hold the target day so the timeline can scroll there.
+        guard let target = jumpTarget else { return setting }
+        let needed = (target.timeIntervalSinceNow / 3600) + 12
+        return min(max(setting, needed), 14 * 24)
+    }
+    /// Jump-to-day target; nil = the live timeline anchored on now.
+    @State private var jumpTarget: Date?
+    @State private var showJumpSheet = false
+    #if os(tvOS)
+    @State private var clockFocused = false
+    #endif
+
+    /// Long press on the clock: choose a day and a time of day. A tap on the
+    /// clock returns to now (Logan 2026-09-06).
+    private func jump(to date: Date) {
+        jumpTarget = date
+        Task { await guideStore.ensureForwardWindow(through: date.addingTimeInterval(12 * 3600),
+                                                    channels: channels, servers: servers) }
+        let target = min(0, max(maxHorizontalOffset, -xOffset(for: date) + pixelsPerHour * 0.1))
+        debugLog("[GUIDE] jump to \(date) offset=\(Int(target)) forward=\(Int(hoursForward))h")
+        withAnimation(.easeInOut(duration: 0.35)) { horizontalOffset = target }
+    }
+
+    private func snapToNow() {
+        jumpTarget = nil
+        withAnimation(.easeInOut(duration: 0.35)) { horizontalOffset = nowAnchorOffset() }
     }
     private var windowStart: Date { Date().addingTimeInterval(-hoursBack * 3600) }
     private var windowEnd: Date { Date().addingTimeInterval(hoursForward * 3600) }
@@ -3621,6 +3690,14 @@ struct EPGGuideView: View {
                 }
             }
             .onChange(of: geo.size.width) { _, w in visibleProgramWidth = w - channelColumnWidth }
+            // Jump-to-day (Logan 2026-09-06): scrolling back until the now
+            // line is on screen ends the jump on its own; the clock returns
+            // to the live time and the grid width settles back.
+            .onChange(of: horizontalOffset) { _, offset in
+                guard jumpTarget != nil, -offset <= xOffset(for: Date()) else { return }
+                debugLog("[GUIDE] jump ended: scrolled back to now")
+                jumpTarget = nil
+            }
             #if os(iOS)
             // iOS-only: `guideScale` (the Settings -> Appearance -> Display
             // Scale -> Guide slider) exists only on iOS; the tvOS guide uses
@@ -4517,7 +4594,41 @@ struct EPGGuideView: View {
                 // locale-aware format so it honors the device's
                 // 12 or 24-hour setting.
                 .overlay {
-                    GuideCornerClock(fontSize: timeHeaderHeight * 0.4)
+                    GuideCornerClock(fontSize: timeHeaderHeight * 0.4, target: jumpTarget)
+                }
+                // Tap: back to now. Long press: jump to a day and time
+                // (Roman via Discord; Logan 2026-09-06).
+                #if os(tvOS)
+                .overlay {
+                    TVPressOverlay(minimumPressDuration: 0.45,
+                                   isFocused: $clockFocused,
+                                   onTap: { snapToNow() },
+                                   onLongPress: { showJumpSheet = true })
+                }
+                // Focus visual: focus reached the cell but nothing showed
+                // (trace 2026-09-06 01:16), so it read as a dead corner.
+                .background(clockFocused ? Color.accentPrimary.opacity(0.22) : Color.clear)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.accentPrimary, lineWidth: clockFocused ? 3 : 0)
+                        .padding(3)
+                )
+                .animation(.easeInOut(duration: 0.12), value: clockFocused)
+                #else
+                .contentShape(Rectangle())
+                .onTapGesture { snapToNow() }
+                .onLongPressGesture(minimumDuration: 0.4) {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    showJumpSheet = true
+                }
+                #endif
+                .sheet(isPresented: $showJumpSheet) {
+                    GuideJumpSheet(daysBack: Int(hoursBack / 24), daysAhead: 7) { date in
+                        showJumpSheet = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            if let date { jump(to: date) } else { snapToNow() }
+                        }
+                    }
                 }
                 .overlay(alignment: .trailing) {
                     Rectangle().fill(Color.accentPrimary.opacity(0.2)).frame(width: 1)
@@ -4535,6 +4646,13 @@ struct EPGGuideView: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.accentPrimary.opacity(0.15)).frame(height: 1)
         }
+        #if os(tvOS)
+        // The whole time strip is one focus section whose only focusable is
+        // the clock, so Down from the banner description (sidebar mode) or
+        // from the group pills (pill mode) lands on the clock wherever the
+        // focus was horizontally (Logan 2026-09-06).
+        .focusSection()
+        #endif
     }
 
     // MARK: - Time Header
@@ -5076,19 +5194,29 @@ struct EPGGuideView: View {
 /// device's 12 or 24-hour setting.
 private struct GuideCornerClock: View {
     let fontSize: CGFloat
+    /// Jump target while the guide is away from now; drawn in the accent.
+    var target: Date? = nil
     @State private var now = Date()
     private let tick = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
     /// Re-render when the Time Format setting changes.
     @AppStorage(ClockFormat.defaultsKey) private var timeFormatMode = "system"
 
     var body: some View {
-        Text(ClockFormat.short().string(from: now))
-            .font(.system(size: fontSize, weight: .semibold).monospacedDigit())
-            .foregroundColor(.textPrimary)
-            .lineLimit(1)
-            .minimumScaleFactor(0.5)
-            .padding(.horizontal, 4)
-            .onReceive(tick) { now = $0 }
+        Group {
+            if let target {
+                let day = DateFormatter(); let _ = day.setLocalizedDateFormatFromTemplate("EEE")
+                Text("\(day.string(from: target)) \(ClockFormat.short().string(from: target))")
+                    .foregroundColor(.accentPrimary)
+            } else {
+                Text(ClockFormat.short().string(from: now))
+                    .foregroundColor(.textPrimary)
+            }
+        }
+        .font(.system(size: fontSize, weight: .semibold).monospacedDigit())
+        .lineLimit(1)
+        .minimumScaleFactor(0.5)
+        .padding(.horizontal, 4)
+        .onReceive(tick) { now = $0 }
     }
 }
 

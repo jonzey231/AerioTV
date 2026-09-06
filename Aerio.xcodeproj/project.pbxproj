@@ -245,6 +245,8 @@
 		F564DDA103FF386C57BADEDE /* SwiftDraw in Frameworks */ = {isa = PBXBuildFile; productRef = 7DA561DBA031A892F41D5EDE /* SwiftDraw */; };
 		F6DA0B63B6CE27A4CE6FED9F /* GroupSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9D05502DABB3026FDA895C1 /* GroupSidebar.swift */; };
 		5EC13B0FAB0F82A309E38E02 /* GuidePreviewBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33064DC410FCAA08C5AFD943 /* GuidePreviewBanner.swift */; };
+		6A1D3E2F4B5C6D7E8F901A2C /* GuideJumpSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A1D3E2F4B5C6D7E8F901A2B /* GuideJumpSheet.swift */; };
+		6A1D3E2F4B5C6D7E8F901A2D /* GuideJumpSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A1D3E2F4B5C6D7E8F901A2B /* GuideJumpSheet.swift */; };
 		F7D895407ADC7A76C1959955 /* GroupSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9D05502DABB3026FDA895C1 /* GroupSidebar.swift */; };
 		300FEAF5ADB7BB2149BF00A3 /* GuidePreviewBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33064DC410FCAA08C5AFD943 /* GuidePreviewBanner.swift */; };
 		F7E00AC7791418818CC81D52 /* RemoteControlHints.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7548A26AF128BE1520EA3FFA /* RemoteControlHints.swift */; };
@@ -430,6 +432,7 @@
 		B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistImportViews.swift; sourceTree = "<group>"; };
 		B9D05502DABB3026FDA895C1 /* GroupSidebar.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GroupSidebar.swift; sourceTree = "<group>"; };
 		33064DC410FCAA08C5AFD943 /* GuidePreviewBanner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GuidePreviewBanner.swift; sourceTree = "<group>"; };
+		6A1D3E2F4B5C6D7E8F901A2B /* GuideJumpSheet.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GuideJumpSheet.swift; sourceTree = "<group>"; };
 		BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeveloperSettingsView.swift; sourceTree = "<group>"; };
 		BB5A3862C25D699CA7931AE8 /* Pods_Aerio_tvOS.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Aerio_tvOS.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		BD9D88342F84B8870005EA3D /* CarPlay.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CarPlay.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.4.sdk/System/Library/Frameworks/CarPlay.framework; sourceTree = DEVELOPER_DIR; };
@@ -550,6 +553,7 @@
 				65319FCB313930453DF8EFCA /* SwitchStreamView.swift */,
 				B9D05502DABB3026FDA895C1 /* GroupSidebar.swift */,
 				33064DC410FCAA08C5AFD943 /* GuidePreviewBanner.swift */,
+				6A1D3E2F4B5C6D7E8F901A2B /* GuideJumpSheet.swift */,
 			);
 			path = LiveTV;
 			sourceTree = "<group>";
@@ -1356,6 +1360,7 @@
 				5C8D82B12B1996C98C0B301B /* RemoteControlHints.swift in Sources */,
 				F7D895407ADC7A76C1959955 /* GroupSidebar.swift in Sources */,
 				300FEAF5ADB7BB2149BF00A3 /* GuidePreviewBanner.swift in Sources */,
+				6A1D3E2F4B5C6D7E8F901A2C /* GuideJumpSheet.swift in Sources */,
 				E84F424529D2C704578CE146 /* ChannelListOverlay.swift in Sources */,
 				11498F007DA11FFB20B44A68 /* RecentChannelsOverlay.swift in Sources */,
 				5EE3763D926BD2529786F56B /* RemoteControlSettingsView.swift in Sources */,
@@ -1482,6 +1487,7 @@
 				F7E00AC7791418818CC81D52 /* RemoteControlHints.swift in Sources */,
 				F6DA0B63B6CE27A4CE6FED9F /* GroupSidebar.swift in Sources */,
 				5EC13B0FAB0F82A309E38E02 /* GuidePreviewBanner.swift in Sources */,
+				6A1D3E2F4B5C6D7E8F901A2D /* GuideJumpSheet.swift in Sources */,
 				15A7DCA00E6B561C88FEAB27 /* ChannelListOverlay.swift in Sources */,
 				B4833CE00C0F5847BBC5F2A8 /* RecentChannelsOverlay.swift in Sources */,
 				240BCCC86B210B13A95FB87C /* RemoteControlSettingsView.swift in Sources */,
