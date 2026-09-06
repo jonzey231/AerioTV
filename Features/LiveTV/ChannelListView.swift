@@ -3355,6 +3355,11 @@ struct ChannelRow: View {
         let fromGuideStore = guideStore.programs[item.id] ?? []
         return fromGuideStore
             .filter { $0.end <= now }
+            // Catch-up channels list only what the archive can still play
+            // (Logan 2026-09-05: two weeks of greyed rows sat above the
+            // playable ones). Channels without an archive keep their
+            // reference rows.
+            .filter { !item.hasCatchup || item.canReplay(start: $0.start, end: $0.end, now: now) }
             .sorted { $0.start < $1.start }
             .map {
                 EPGEntry(title: $0.title, description: $0.description,
@@ -3399,6 +3404,7 @@ struct ChannelRow: View {
                 }
                 #endif
             } catch {
+                debugLog("[CATCHUP] resolve failed for \(item.name) \(entry.title): \(error)")
                 catchupErrorMessage = error.localizedDescription
             }
         }
@@ -3653,6 +3659,7 @@ struct ChannelRow: View {
             return item.canReplay(start: start, end: end)
         }()
         Button {
+            debugLog("[CATCHUP] tap \(item.name) days=\(item.catchupDays) replayable=\(replayable) \(entry.title) \(entry.startTime.map { DVRFormat.dateRange($0, entry.endTime ?? $0) } ?? "")")
             if replayable { watchCatchup(entry) }
         } label: {
             HStack(spacing: 6) {
