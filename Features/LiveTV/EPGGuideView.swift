@@ -5692,11 +5692,12 @@ private struct GuideProgramButton: View {
     // route is a self-contained modal that is not re-evaluated from cell
     // updates, so the highlight stays stable.
     @State private var showCtxDialog = false
-    // #45: per-channel "Add to Collection" picker + new-collection name alert.
+    #endif
+    // #45: per-channel "Add to Collection" picker + new-collection name alert
+    // (both platforms' menus).
     @State private var showCollectionPicker = false
     @State private var showNewCollectionAlert = false
     @State private var newCollectionName = ""
-    #endif
     #if os(iOS)
     /// iOS long-press menu. Mirrors the mechanism ChannelListView
     /// already uses on upcoming-schedule rows (`.popover` over
@@ -5719,7 +5720,6 @@ private struct GuideProgramButton: View {
     /// `guideProgramActionPopover`). It's SwiftUI all the way down,
     /// so SwiftUI's own diffing handles any ancestor re-renders
     /// without visible animation churn.
-    @State private var showGuidePopover = false
     #endif
 
     var body: some View {
@@ -5919,13 +5919,32 @@ private struct GuideProgramButton: View {
                     onSelect(channelItem)
                 }
             }
-            .onLongPressGesture(minimumDuration: 0.4) {
-                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                showGuidePopover = true
+            // The system context menu (Logan 2026-09-06): the same option
+            // set as the channel row's menu and the tvOS guide menu.
+            .contextMenu { guideMenuButtons }
+            .confirmationDialog("Add to Collection", isPresented: $showCollectionPicker, titleVisibility: .visible) {
+                ForEach(ChannelCollectionsStore.shared.collections) { c in
+                    Button((ChannelCollectionsStore.shared.contains(channelID: channelItem.id, in: c.id) ? "\u{2713} " : "") + c.name) {
+                        ChannelCollectionsStore.shared.toggleMember(channelID: channelItem.id, in: c.id)
+                    }
+                }
+                Button("New Collection") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showNewCollectionAlert = true }
+                }
             }
-            .popover(isPresented: $showGuidePopover, attachmentAnchor: .rect(.bounds)) {
-                guideProgramActionPopover
-                    .presentationCompactAdaptation(.popover)
+            .alert("New Collection", isPresented: $showNewCollectionAlert) {
+                TextField("Name", text: $newCollectionName)
+                Button("Add at Beginning") {
+                    ChannelCollectionsStore.shared.create(name: newCollectionName, memberIDs: [channelItem.id], placement: .beginning)
+                    newCollectionName = ""
+                }
+                Button("Add at End") {
+                    ChannelCollectionsStore.shared.create(name: newCollectionName, memberIDs: [channelItem.id], placement: .end)
+                    newCollectionName = ""
+                }
+                Button("Cancel", role: .cancel) { newCollectionName = "" }
+            } message: {
+                Text("Name the collection and choose where its pill appears in the Live TV row.")
             }
             // iOS: single .sheet(item:) — see `GuideCellSheet` doc
             // for why presenting both Record + Program Info through
@@ -5959,205 +5978,84 @@ private struct GuideProgramButton: View {
     }
 
     #if os(iOS)
-    /// SwiftUI-native long-press menu content for iOS guide cells.
-    /// Replaces the old `.contextMenu(menuItems:preview:)` because
-    /// that form re-compiled its UIMenuElement array on every cell
-    /// body re-eval, which made the menu items visibly pulse while
-    /// the menu was open (the UIKit "menu appearing" fade fires per
-    /// rebuild). This popover stays in SwiftUI land end-to-end, so
-    /// SwiftUI's own diffing handles any ancestor re-renders without
-    /// animation churn. Mirrors `ChannelListView.programActionPopover`
-    /// both in structure and visual weight for UX consistency.
+    /// Context menu for an iOS guide cell. Same options, order and icons as
+    /// `ChannelListView.cardMenuButtons` (Logan 2026-09-06). Follow-on
+    /// sheets wait for the menu's dismiss animation.
     @ViewBuilder
-    private var guideProgramActionPopover: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Header — channel + program title + time range. The
-            // iOS context menu used to do this via its
-            // `preview:` closure; doing it inline here gives the
-            // same "what am I about to act on?" affordance without
-            // needing the now-gone preview slot.
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    if prog.isLive {
-                        Text("LIVE")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.statusLive)
-                            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                    }
-                    Text(channelItem.name)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.textSecondary)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                }
-                Text(prog.title)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.textPrimary)
-                    .lineLimit(2)
-                Text("\(shortTimeFormatter.string(from: prog.start)) – \(shortTimeFormatter.string(from: prog.end))")
-                    .font(.system(size: 12))
-                    .foregroundColor(.textTertiary)
+    private var guideMenuButtons: some View {
+        if canReplayNow {
+            Button { onWatchCatchup(channelItem, prog) } label: {
+                Label("Watch", systemImage: "clock.arrow.circlepath")
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 10)
-
-            Divider()
-
-            VStack(spacing: 0) {
-                // Catch-up: a replayable aired programme leads with Watch
-                // (the primary action for a show that already aired).
-                if canReplayNow {
-                    guidePopoverActionButton(
-                        title: "Watch",
-                        systemImage: "clock.arrow.circlepath",
-                        isDestructive: false
-                    ) {
-                        showGuidePopover = false
-                        onWatchCatchup(channelItem, prog)
-                    }
+        } else if prog.isLive {
+            Button { onSelect(channelItem) } label: { Label("Watch", systemImage: "play.fill") }
+        }
+        let isFav = favoritesStore.isFavorite(channelItem.id)
+        Button { favoritesStore.toggle(channelItem) } label: {
+            Label(isFav ? "Remove from Favorites" : "Add to Favorites", systemImage: isFav ? "star.slash" : "star")
+        }
+        let isStaged = multiviewStore.tile(forChannelID: channelItem.id) != nil
+        Button {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { onMultiviewIntent(channelItem) }
+        } label: {
+            Label(isStaged ? "Remove from Multiview" : "Add to Multiview",
+                  systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill")
+        }
+        Button {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
+        } label: { Label("Add to Collection", systemImage: "folder.badge.plus") }
+        if let cid = ChannelCollectionsStore.shared.activeFilterCollectionID,
+           let coll = ChannelCollectionsStore.shared.collection(id: cid),
+           coll.memberIDs.contains(channelItem.id) {
+            Button(role: .destructive) {
+                ChannelCollectionsStore.shared.removeMember(channelID: channelItem.id, in: cid)
+            } label: { Label("Remove from \(coll.name)", systemImage: "folder.badge.minus") }
+        } else if ChannelCollectionsStore.shared.activeFilterCollectionID == nil,
+                  ChannelCollectionsStore.shared.isInAnyCollection(channelItem.id) {
+            Button(role: .destructive) {
+                ChannelCollectionsStore.shared.removeFromAllCollections(channelItem.id)
+            } label: { Label("Remove from All Collections", systemImage: "folder.badge.minus") }
+        }
+        Button {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                activeSheet = .programInfo(
+                    ProgramInfoTarget(
+                        channelName: channelItem.name,
+                        title: prog.title,
+                        start: prog.start,
+                        end: prog.end,
+                        description: prog.description,
+                        category: prog.category,
+                        programID: prog.programID,
+                        subTitle: prog.subTitle,
+                        season: prog.season,
+                        episode: prog.episode,
+                        isNew: prog.isNew,
+                        isLiveBroadcast: prog.isLiveBroadcast,
+                        isPremiere: prog.isPremiere,
+                        isFinale: prog.isFinale,
+                        isRepeat: prog.isRepeat
+                    )
+                )
+            }
+        } label: { Label("Program Info", systemImage: "info.circle") }
+        if canOfferRecord {
+            Button {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { activeSheet = .record }
+            } label: { Label(prog.isLive ? "Record from Now" : "Record", systemImage: "record.circle") }
+        }
+        if isFutureProgram {
+            if reminderManager.hasReminder(forKey: reminderKey) {
+                Button(role: .destructive) { reminderManager.cancelReminder(forKey: reminderKey) } label: {
+                    Label("Cancel Reminder", systemImage: "bell.slash")
                 }
-                // Favorite toggle first — most frequent action on a
-                // program cell that isn't "just play it."
-                guidePopoverActionButton(
-                    title: favoritesStore.isFavorite(channelItem.id)
-                        ? "Remove from Favorites"
-                        : "Add to Favorites",
-                    systemImage: favoritesStore.isFavorite(channelItem.id)
-                        ? "star.slash"
-                        : "star",
-                    isDestructive: false
-                ) {
-                    favoritesStore.toggle(channelItem)
-                    showGuidePopover = false
-                }
-                // v1.7.x: Add / Remove from Multiview. Label and icon
-                // flip based on whether this channel is currently
-                // staged so the action verb always matches the
-                // outcome of tapping.
-                let isStaged = multiviewStore.tile(forChannelID: channelItem.id) != nil
-                guidePopoverActionButton(
-                    title: isStaged
-                        ? "Remove from Multiview"
-                        : "Add to Multiview",
-                    systemImage: isStaged
-                        ? "rectangle.3.group"
-                        : "rectangle.3.group.fill",
-                    isDestructive: false
-                ) {
-                    showGuidePopover = false
-                    // Slight delay matches the Program Info / Record
-                    // pattern below: iOS occasionally swallows
-                    // follow-on UI work if it fires during the
-                    // popover's dismiss animation.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                        onMultiviewIntent(channelItem)
-                    }
-                }
-                guidePopoverActionButton(
-                    title: "Program Info",
-                    systemImage: "info.circle",
-                    isDestructive: false
-                ) {
-                    showGuidePopover = false
-                    // Slight delay so the popover dismiss animation
-                    // finishes before the sheet presents — iOS
-                    // sometimes swallows the sheet without this.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                        activeSheet = .programInfo(
-                            ProgramInfoTarget(
-                                channelName: channelItem.name,
-                                title: prog.title,
-                                start: prog.start,
-                                end: prog.end,
-                                description: prog.description,
-                                category: prog.category,
-                                programID: prog.programID,
-                                subTitle: prog.subTitle,
-                                season: prog.season,
-                                episode: prog.episode,
-                                isNew: prog.isNew,
-                                isLiveBroadcast: prog.isLiveBroadcast,
-                                isPremiere: prog.isPremiere,
-                                isFinale: prog.isFinale,
-                                isRepeat: prog.isRepeat
-                            )
-                        )
-                    }
-                }
-                if canOfferRecord {
-                    guidePopoverActionButton(
-                        title: prog.isLive ? "Record from Now" : "Record",
-                        systemImage: "record.circle",
-                        isDestructive: false
-                    ) {
-                        showGuidePopover = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                            activeSheet = .record
-                        }
-                    }
-                }
-                if isFutureProgram {
-                    if reminderManager.hasReminder(forKey: reminderKey) {
-                        guidePopoverActionButton(
-                            title: "Cancel Reminder",
-                            systemImage: "bell.slash",
-                            isDestructive: true
-                        ) {
-                            reminderManager.cancelReminder(forKey: reminderKey)
-                            showGuidePopover = false
-                        }
-                    } else {
-                        guidePopoverActionButton(
-                            title: "Set Reminder",
-                            systemImage: "bell.badge",
-                            isDestructive: false
-                        ) {
-                            reminderManager.scheduleReminder(
-                                programTitle: prog.title,
-                                channelName: channelItem.name,
-                                startTime: prog.start
-                            )
-                            showGuidePopover = false
-                        }
-                    }
-                }
+            } else {
+                Button {
+                    reminderManager.scheduleReminder(programTitle: prog.title, channelName: channelItem.name,
+                                                     startTime: prog.start)
+                } label: { Label("Set Reminder", systemImage: "bell.badge") }
             }
         }
-        .frame(minWidth: 260, idealWidth: 300, maxWidth: 340)
-    }
-
-    /// One row inside `guideProgramActionPopover`. Same visual
-    /// contract as `ChannelListView.popoverActionButton` —
-    /// full-width tap target with leading icon + label — but the
-    /// two views live in different modules so they can't share a
-    /// private implementation. Small enough that the duplication
-    /// is cheaper than plumbing a shared helper.
-    private func guidePopoverActionButton(
-        title: String,
-        systemImage: String,
-        isDestructive: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(isDestructive ? .red : .accentPrimary)
-                    .frame(width: 20)
-                Text(title)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(isDestructive ? .red : .textPrimary)
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 11)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
     #endif
 

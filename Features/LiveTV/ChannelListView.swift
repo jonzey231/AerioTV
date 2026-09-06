@@ -2662,7 +2662,6 @@ struct ChannelRow: View {
     /// True when running on a wider display (iPad / macOS).
     private var isWide: Bool { sizeClass == .regular }
 
-    @State private var showCardMenu = false
 
     // #45: per-channel "Add to Collection" picker + new-collection name alert.
     // Used by the iOS row (iOSRow) as well as tvOS, so these stay unconditional.
@@ -3163,18 +3162,9 @@ struct ChannelRow: View {
         .padding(.horizontal, (isWide ? 18 : 14) * s)
         .contentShape(Rectangle())
         .onTapGesture { onTap() }
-        .onLongPressGesture(minimumDuration: 0.5) {
-            let generator = UIImpactFeedbackGenerator(style: .medium)
-            generator.impactOccurred()
-            showCardMenu = true
-        }
-        .confirmationDialog(
-            item.currentProgram ?? item.name,
-            isPresented: $showCardMenu,
-            titleVisibility: .visible
-        ) {
-            cardMenuButtons
-        }
+        // The system context menu (Logan 2026-09-06), same option set as
+        // the guide cell's menu.
+        .contextMenu { cardMenuButtons }
         // #45: per-channel "Add to Collection" — toggle membership in any
         // existing collection (a checkmark marks current members) or create a
         // new one with this channel already in it.
@@ -3194,50 +3184,78 @@ struct ChannelRow: View {
     // Swift type-checker's expression budget ("unable to type-check in
     // reasonable time"), which only surfaced on the iOS build (tvOS uses the
     // separate, lighter `tvRow`). Behaviour is unchanged.
+    #if os(iOS)
+    /// Mirror of `EPGGuideView.handleMultiviewIntent`: the first add from a
+    /// menu starts a fresh pile and flags staging; later taps toggle.
+    private func toggleMultiview() {
+        let store = MultiviewStore.shared
+        if !store.isStagingFromGuide {
+            store.clearAll()
+            store.isStagingFromGuide = true
+        }
+        if let tile = store.tile(forChannelID: item.id) {
+            store.remove(id: tile.id)
+            return
+        }
+        let server = ChannelStore.shared.activeServer
+        if case .needsWarning = store.add(item, server: server) {
+            _ = store.add(item, server: server, bypassWarning: true)
+        }
+    }
+    #endif
+
     @ViewBuilder
     private var cardMenuButtons: some View {
         let isFav = favoritesStore.isFavorite(item.id)
         #if os(iOS)
-        Button("Watch") { onTap() }
+        Button { onTap() } label: { Label("Watch", systemImage: "play.fill") }
         #endif
-        Button(isFav ? "Remove from Favorites" : "Add to Favorites") {
-            favoritesStore.toggle(item)
+        Button { favoritesStore.toggle(item) } label: {
+            Label(isFav ? "Remove from Favorites" : "Add to Favorites", systemImage: isFav ? "star.slash" : "star")
         }
+        #if os(iOS)
+        // Same Multiview toggle as the guide menu (Logan 2026-09-06):
+        // stage the channel for the Multiview tab, the guide's banner
+        // and the Multiview tab both read the store.
+        let isStaged = MultiviewStore.shared.tile(forChannelID: item.id) != nil
+        Button { toggleMultiview() } label: {
+            Label(isStaged ? "Remove from Multiview" : "Add to Multiview",
+                  systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill")
+        }
+        #endif
 
         // #45: add/remove this channel from a user collection. Deferred so
         // this dialog fully dismisses before the picker presents (chained
         // confirmationDialogs race on tvOS otherwise).
-        Button("Add to Collection") {
+        Button {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
-        }
+        } label: { Label("Add to Collection", systemImage: "folder.badge.plus") }
 
         // #45: contextual remove. Viewing a collection -> remove from just
         // that one; otherwise (and only if it's in any) remove from all.
         if let cid = ChannelCollectionsStore.shared.activeFilterCollectionID,
            let coll = ChannelCollectionsStore.shared.collection(id: cid),
            coll.memberIDs.contains(item.id) {
-            Button("Remove from \(coll.name)", role: .destructive) {
+            Button(role: .destructive) {
                 ChannelCollectionsStore.shared.removeMember(channelID: item.id, in: cid)
-            }
+            } label: { Label("Remove from \(coll.name)", systemImage: "folder.badge.minus") }
         } else if ChannelCollectionsStore.shared.activeFilterCollectionID == nil,
                   ChannelCollectionsStore.shared.isInAnyCollection(item.id) {
-            Button("Remove from All Collections", role: .destructive) {
+            Button(role: .destructive) {
                 ChannelCollectionsStore.shared.removeFromAllCollections(item.id)
-            }
+            } label: { Label("Remove from All Collections", systemImage: "folder.badge.minus") }
         }
 
-        // Program Info for the now-airing program. `ChannelDisplayItem` only
-        // carries a current program once the guide has enriched it, which
-        // never happens on the Dispatcharr load path; the guide store's
-        // now-airing row is the reliable source (the list row already draws
-        // from it), so the button no longer vanished on those channels
-        // (Logan 2026-09-05).
-        let nowAiring = guideStore.programs[item.id]?
-            .first(where: { $0.start <= Date() && $0.end > Date() })
-        if let title = item.currentProgram ?? nowAiring?.title,
-           let start = item.currentProgramStart ?? nowAiring?.start,
-           let end = item.currentProgramEnd ?? nowAiring?.end {
-            Button("Program Info") {
+        // Program Info and Record for the now-airing program. The context
+        // menu builder runs on EVERY row update (Time Profiler 2026-09-06:
+        // `cardMenuButtons` in 38 of 297 ChannelRow samples during launch,
+        // each scanning the channel's guide array), so the builder reads
+        // only the row's already-computed `liveProgram` and the full guide
+        // lookup (badges, program id) waits until the action fires.
+        let live = liveProgram
+        if let live {
+            Button {
+                let nowAiring = guideStore.programs[item.id]?.first(where: { $0.isLive })
                 // tvOS swallowed the sheet when it was asked to present while the
                 // long-press dialog was still dismissing (trace 2026-09-05 12:32):
                 // let the dialog finish first.
@@ -3245,13 +3263,13 @@ struct ChannelRow: View {
                     activeSheet = .programInfo(
                         ProgramInfoTarget(
                             channelName: item.name,
-                            title: title,
-                            start: start,
-                            end: end,
-                            description: item.currentProgramDescription ?? nowAiring?.description ?? "",
+                            title: live.title,
+                            start: live.start,
+                            end: live.end,
+                            description: live.description ?? nowAiring?.description ?? "",
                             category: item.currentProgramCategory ?? nowAiring?.category ?? "",
                             programID: nowAiring?.programID,
-                            subTitle: nowAiring?.subTitle,
+                            subTitle: live.subTitle ?? nowAiring?.subTitle,
                             season: nowAiring?.season,
                             episode: nowAiring?.episode,
                             isNew: nowAiring?.isNew ?? false,
@@ -3262,7 +3280,7 @@ struct ChannelRow: View {
                         )
                     )
                 }
-            }
+            } label: { Label("Program Info", systemImage: "info.circle") }
         }
 
         // Record the currently-airing program. v1.6.8 (B1 Phase 1):
@@ -3276,23 +3294,16 @@ struct ChannelRow: View {
         // title + a 60-minute default duration that the user can
         // override in `RecordProgramSheet`.
         if item.streamURL != nil {
-            let airingTitle = item.currentProgram ?? nowAiring?.title
-            let hasEPG = (airingTitle?.isEmpty == false)
-            Button(hasEPG ? "Record from Now" : "Record") {
+            let hasEPG = live != nil
+            Button {
                 let now = Date()
-                let title = airingTitle ?? "\(item.name) live recording"
-                let start = item.currentProgramStart ?? nowAiring?.start ?? now
-                let end = ((item.currentProgramEnd ?? nowAiring?.end).flatMap { $0 > now ? $0 : nil })
-                    ?? now.addingTimeInterval(3600)
-                activeSheet = .record(
-                    EPGEntry(
-                        title: title,
-                        description: item.currentProgramDescription ?? nowAiring?.description ?? "",
-                        startTime: start,
-                        endTime: end
-                    )
-                )
-            }
+                let title = live?.title ?? "\(item.name) live recording"
+                let start = live?.start ?? now
+                let end = (live?.end).flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(3600)
+                let entry = EPGEntry(title: title, description: live?.description ?? "",
+                                     startTime: start, endTime: end)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { activeSheet = .record(entry) }
+            } label: { Label(hasEPG ? "Record from Now" : "Record", systemImage: "record.circle") }
         }
     }
 

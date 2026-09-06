@@ -144,6 +144,13 @@ struct MoviesView: View {
         guard hasLoadedLibrary else { return }
         TMDBArtCache.shared.enrich(libraryItems, isMovie: kind == .movie, priority: heroPages.map(\.item))
     }
+    private func applyPendingDerived() {
+        guard let p = pendingDerived else { return }
+        pendingDerived = nil
+        // Only if nothing newer has been requested since it was computed.
+        if p.key == libraryKey { derived = p.value }
+    }
+
     private func searchLibrary(_ query: String, providerID: Int?) {
         if kind == .series {
             vodStore.searchSeries(query: query, servers: servers, providerID: providerID)
@@ -349,8 +356,8 @@ struct MoviesView: View {
     private var deepJumpThreshold: CGFloat {
         geometryBox.viewportHeight > 0 ? geometryBox.viewportHeight + 300 : 1400
     }
-    @State private var scrollIsIdle = true
     #endif
+    @State private var scrollIsIdle = true
 
     /// User-tunable UI scale (0.85–1.25). Only consumed on iPad / Mac Catalyst
     /// where the default 120 px minimum can feel cramped on wide displays;
@@ -507,15 +514,19 @@ struct MoviesView: View {
                 // library sweep republishes every 5 s and each rebuild of a
                 // multi-thousand-item grid mid-scroll read as stutter (Time
                 // Profiler + log 2026-09-04 15:18, test ran during the sweep).
-                if (tvTabBarHidden || !scrollIsIdle) && !derived.library.isEmpty {
+                let hold = tvTabBarHidden || !scrollIsIdle
+                #else
+                // Phone: same hold while the finger is down or the scroll is
+                // decelerating (Logan 2026-09-06, "a lot of refreshing when I
+                // scroll down"); applied as soon as the scroll rests.
+                let hold = !scrollIsIdle
+                #endif
+                if hold && !derived.library.isEmpty {
                     pendingDerived = (libraryKey, result)
                 } else {
                     derived = result
                     pendingDerived = nil
                 }
-                #else
-                derived = result
-                #endif
             }
             .onAppear {
                 pushRouter.push = { navPath.append($0) }
@@ -1766,6 +1777,10 @@ struct MoviesView: View {
                         }
                     }
                 }
+                .onScrollPhaseChange { _, phase in
+                    scrollIsIdle = phase == .idle
+                    if phase == .idle { applyPendingDerived() }
+                }
                 .scrollAwayTabBar(collapsed: gridTabBarHidden)
                 .ignoresSafeArea(.container, edges: .bottom)
                 .aerioContentUnderTabBar()
@@ -1895,12 +1910,6 @@ struct MoviesView: View {
         }
     }
 
-    private func applyPendingDerived() {
-        guard let p = pendingDerived else { return }
-        pendingDerived = nil
-        // Only if nothing newer has been requested since it was computed.
-        if p.key == libraryKey { derived = p.value }
-    }
 
     /// Search field (when open) and the Search, Sort, Manage Groups circles.
     /// Lives in the library header now (Logan 2026-09-03).
