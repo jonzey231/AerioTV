@@ -148,7 +148,11 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
     private var highWater = 96 * 1024 * 1024
     private var lowWater = 32 * 1024 * 1024
     /// Bytes kept BEHIND the consume point for re-reads.
-    private let keepBehind: Int64 = 8 * 1024 * 1024
+    /// Span-aware (setSpanSize): a fixed 8MB dropped the neighbor span
+    /// that a scrub-time re-request of the previous segment needs, so the
+    /// same span reopened the connection three times in six seconds
+    /// (2026-09-06, Thunderbolts credits scrub: 21 connections in 4 min).
+    private var keepBehind: Int64 = 8 * 1024 * 1024
     private var consumePoint: Int64 = 0
     /// End of the range a read() is currently WAITING for. Flow control
     /// must never suspend below this, or a span larger than the
@@ -188,6 +192,7 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         cond.lock()
         lowWater = max(32 * 1024 * 1024, maxSpan + 8 * 1024 * 1024)
         highWater = max(96 * 1024 * 1024, lowWater + maxSpan + 8 * 1024 * 1024)
+        keepBehind = Int64(max(8 * 1024 * 1024, maxSpan + 4 * 1024 * 1024))
         cond.unlock()
         debugLog(String(format: "[MKV] flow control: span %.1f MB -> low %.0f MB, high %.0f MB",
                         Double(maxSpan) / 1_048_576, Double(lowWater) / 1_048_576, Double(highWater) / 1_048_576))
@@ -1737,6 +1742,45 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         }
     }
 
+    /// Walk the length-prefixed NAL units of one frame up to its first
+    /// VCL NAL and report whether that NAL is an IDR (AVC) or IRAP (HEVC).
+    /// Parameter sets and SEI ahead of it are skipped. AV1 and anything
+    /// unparseable return false, leaving the container flag in charge.
+    private static func firstVCLIsKeyframe(_ data: [UInt8], track: TrackInfo?) -> Bool {
+        guard let track else { return false }
+        let isHEVC: Bool
+        let lengthSize: Int
+        switch track.codecID {
+        case "V_MPEGH/ISO/HEVC":
+            isHEVC = true
+            lengthSize = track.codecPrivate.count > 21 ? Int(track.codecPrivate[21] & 0x03) + 1 : 4
+        case "V_MPEG4/ISO/AVC":
+            isHEVC = false
+            lengthSize = track.codecPrivate.count > 4 ? Int(track.codecPrivate[4] & 0x03) + 1 : 4
+        default:
+            return false
+        }
+        var pos = 0
+        var scanned = 0
+        while pos + lengthSize < data.count, scanned < 16 {
+            var len = 0
+            for i in 0..<lengthSize { len = (len << 8) | Int(data[pos + i]) }
+            pos += lengthSize
+            guard len > 0, pos + len <= data.count else { return false }
+            let b0 = data[pos]
+            if isHEVC {
+                let type = Int((b0 >> 1) & 0x3F)
+                if type < 32 { return type >= 16 && type <= 23 }   // first VCL NAL
+            } else {
+                let type = Int(b0 & 0x1F)
+                if type >= 1 && type <= 5 { return type == 5 }      // first VCL NAL
+            }
+            pos += len
+            scanned += 1
+        }
+        return false
+    }
+
     private func parseBlock(_ block: [UInt8], clusterTS: Int64,
                             video: inout [Sample], audio: inout [Sample],
                             keyframeFromFlags: Bool, groupKeyframe: Bool = false,
@@ -1808,7 +1852,14 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
             // A laced video block would smear timestamps; unseen in the
             // wild for AVC/HEVC, refuse loudly rather than guess.
             guard frames.count == 1 else { throw MKVRemuxError(reason: "laced video block") }
-            video.append(Sample(data: frames[0], ptsTicks: pts, keyframe: keyframe))
+            // The container flag is advisory: muxers leave it clear on
+            // some IRAP frames (2026-09-06, Thunderbolts credits: three
+            // cue points, two flagged keyframes, "no video samples in
+            // window" on every build of segment 1017). The bitstream is
+            // authoritative, so a frame whose first VCL NAL is an IDR /
+            // IRAP counts as a keyframe whatever the flag says.
+            let key = keyframe || Self.firstVCLIsKeyframe(frames[0], track: videoTrack)
+            video.append(Sample(data: frames[0], ptsTicks: pts, keyframe: key))
         } else {
             // Laced audio frames sit defaultDuration (or frame duration)
             // apart; AC-3/E-AC-3 = 1536 samples, AAC = 1024.
