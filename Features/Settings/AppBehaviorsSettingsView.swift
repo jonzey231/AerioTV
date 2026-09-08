@@ -164,6 +164,15 @@ struct AppBehaviorsSettingsView: View {
     @AppStorage("appBehaviorsAutoRecoverFrozenStreams")
     private var autoRecoverFrozenStreams = true
 
+    /// How often a launch re-sweeps the Movies and TV Shows libraries.
+    /// The tabs always open from the saved library; this only decides
+    /// whether the background sweep runs. Pull to refresh always sweeps.
+    @AppStorage(VODStore.refreshHoursKey)
+    private var vodRefreshHours = 24
+    private static let vodRefreshChoices: [(hours: Int, title: String)] = [
+        (0, "Every Launch"), (24, "Daily"), (168, "Weekly")
+    ]
+
     /// Show the LIVE / NEW / season-episode pills on the guide, channel
     /// list, and program info. Default ON. Synced per device type (tv vs
     /// mobile) via `epgBadgesVisibleKey`, so an Apple TV preference and an
@@ -421,6 +430,34 @@ struct AppBehaviorsSettingsView: View {
                 Text("Default Landing Tab").sectionHeaderStyle()
             } footer: {
                 Text("The tab shown when the app first launches.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+            .listSectionSeparator(.hidden)
+
+            // MARK: On Demand refresh cadence
+            Section {
+                ForEach(Self.vodRefreshChoices, id: \.hours) { choice in
+                    Button {
+                        vodRefreshHours = choice.hours
+                    } label: {
+                        HStack {
+                            Text(choice.title)
+                                .font(.bodyMedium)
+                                .foregroundColor(.textPrimary)
+                            Spacer()
+                            if vodRefreshHours == choice.hours {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(theme.accent)
+                            }
+                        }
+                    }
+                    .listRowBackground(Color.cardBackground)
+                }
+            } header: {
+                Text("Refresh Movies and TV Shows").sectionHeaderStyle()
+            } footer: {
+                Text("Live TV channels refresh on every launch. Movies and TV Shows open from the saved library and re-sweep the provider on this schedule. Pull down on either tab to refresh right away.")
                     .font(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
@@ -741,6 +778,21 @@ struct AppBehaviorsSettingsView: View {
                             label: tab.title,
                             isSelected: defaultTabRaw == tab.rawValue,
                             action: { defaultTabRaw = tab.rawValue }
+                        )
+                    }
+                }
+
+                SettingsSection("Refresh Movies and TV Shows", style: .card) {
+                    ForEach(Self.vodRefreshChoices, id: \.hours) { choice in
+                        TVSettingsSelectionRow(
+                            icon: choice.hours == 0 ? "arrow.clockwise" : "calendar",
+                            iconColor: theme.accent,
+                            label: choice.title,
+                            subtitle: choice.hours == 0
+                                ? "Re-sweep the provider library on every launch"
+                                : "Open from the saved library; re-sweep the provider \(choice.hours == 24 ? "once a day" : "once a week")",
+                            isSelected: vodRefreshHours == choice.hours,
+                            action: { vodRefreshHours = choice.hours }
                         )
                     }
                 }

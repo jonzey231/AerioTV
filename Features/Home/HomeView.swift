@@ -201,9 +201,36 @@ final class VODStore: ObservableObject {
     /// had a chance to flip that flag. Awaiting `task.value`
     /// guarantees the caller observes a completed (or cancelled)
     /// load.
-    func refreshMoviesAndWait(servers: [ServerConnection]) async {
+    /// How old the persisted library may be before a LAUNCH re-sweeps it.
+    /// 0 = every launch; default one day. Tester feedback (Freyguy1975,
+    /// 2026-09-07): a large XC library was re-pulled on every open even
+    /// though the tab was already served from the snapshot. User-initiated
+    /// refreshes (pull, Retry, the server sheet) always bypass this.
+    static let refreshHoursKey = "vodLibraryRefreshHours"
+    static var refreshInterval: TimeInterval {
+        let d = UserDefaults.standard
+        let hours = d.object(forKey: refreshHoursKey) == nil ? 24 : d.integer(forKey: refreshHoursKey)
+        return TimeInterval(max(0, hours)) * 3600
+    }
+    /// Snapshot timestamps restored this session, so the series gate can
+    /// judge age even when loadMovies performed the restore.
+    private var restoredMoviesAt: Date?
+    private var restoredSeriesAt: Date?
+
+    /// True when a restored snapshot is young enough for this launch to
+    /// skip the network sweep.
+    private func snapshotIsFresh(_ at: Date?, kind: String) -> Bool {
+        guard let at else { return false }
+        let age = Date().timeIntervalSince(at)
+        let limit = Self.refreshInterval
+        guard limit > 0, age < limit else { return false }
+        debugLog("[VOD-CACHE] \(kind) snapshot is \(Int(age / 60)) min old (< \(Int(limit / 3600)) h); skipping launch sweep")
+        return true
+    }
+
+    func refreshMoviesAndWait(servers: [ServerConnection], honorCache: Bool = false) async {
         moviesTask?.cancel()
-        let task = Task { await loadMovies(servers: servers) }
+        let task = Task { await loadMovies(servers: servers, honorCache: honorCache) }
         moviesTask = task
         await task.value
     }
@@ -211,9 +238,9 @@ final class VODStore: ObservableObject {
     /// v1.6.21: awaitable variant of `refreshSeries` mirroring
     /// `refreshMoviesAndWait`. Used by the initial-sync orchestrator
     /// to sequence series strictly after movies.
-    func refreshSeriesAndWait(servers: [ServerConnection]) async {
+    func refreshSeriesAndWait(servers: [ServerConnection], honorCache: Bool = false) async {
         seriesTask?.cancel()
-        let task = Task { await loadSeries(servers: servers) }
+        let task = Task { await loadSeries(servers: servers, honorCache: honorCache) }
         seriesTask = task
         await task.value
     }
@@ -429,8 +456,8 @@ final class VODStore: ObservableObject {
         return VODDisplayItem(series: show)
     }
 
-    private func loadMovies(servers: [ServerConnection]) async {
-        debugLog("🎬 VODStore.loadMovies: starting, servers=\(servers.count)")
+    private func loadMovies(servers: [ServerConnection], honorCache: Bool = false) async {
+        debugLog("🎬 VODStore.loadMovies: starting, servers=\(servers.count) honorCache=\(honorCache)")
         let activeServer = servers.first(where: { $0.isActive })
         // Active server exists but doesn't support VOD (e.g. M3U) — clear and bail silently.
         if let active = activeServer, !active.supportsVOD {
@@ -506,6 +533,7 @@ final class VODStore: ObservableObject {
             movieCategories = snap.categories
             isLoadingMovies = false
             hasLoadedMovies = true
+            restoredMoviesAt = snap.at
             debugLog("[VOD-CACHE] restored \(snap.items.count) movies from \(Int(Date().timeIntervalSince(snap.at)))s ago")
         }
         // The launch orchestrator runs the series sweep only after the
@@ -518,7 +546,12 @@ final class VODStore: ObservableObject {
             seriesCategories = snap.categories
             isLoadingSeries = false
             hasLoadedSeries = true
+            restoredSeriesAt = snap.at
             debugLog("[VOD-CACHE] restored \(snap.items.count) series from \(Int(Date().timeIntervalSince(snap.at)))s ago (with movies)")
+        }
+        if honorCache, !movies.isEmpty, snapshotIsFresh(restoredMoviesAt, kind: "movies") {
+            isLoadingMovies = false
+            return
         }
 
         // Dispatcharr libraries can be enormous (20 000+ items across 40+ pages).
@@ -745,8 +778,8 @@ final class VODStore: ObservableObject {
         hasLoadedMovies = true
     }
 
-    private func loadSeries(servers: [ServerConnection]) async {
-        debugLog("📺 VODStore.loadSeries: starting, servers=\(servers.count)")
+    private func loadSeries(servers: [ServerConnection], honorCache: Bool = false) async {
+        debugLog("📺 VODStore.loadSeries: starting, servers=\(servers.count) honorCache=\(honorCache)")
         let activeServer = servers.first(where: { $0.isActive })
         if let active = activeServer, !active.supportsVOD {
             series = []; seriesCategories = []
@@ -808,7 +841,12 @@ final class VODStore: ObservableObject {
             seriesCategories = snap.categories
             isLoadingSeries = false
             hasLoadedSeries = true
+            restoredSeriesAt = snap.at
             debugLog("[VOD-CACHE] restored \(snap.items.count) series from \(Int(Date().timeIntervalSince(snap.at)))s ago")
+        }
+        if honorCache, !series.isEmpty, snapshotIsFresh(restoredSeriesAt, kind: "series") {
+            isLoadingSeries = false
+            return
         }
 
         if server.type == .dispatcharrAPI {
@@ -6112,10 +6150,10 @@ struct MainTabView: View {
         // Demand shows its own spinner, so the delay is invisible in practice.
         try? await Task.sleep(for: .seconds(3))
         debugLog("🟢 [Orchestrator] phase 3 BEGIN: VOD movies, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
-        await vodStore.refreshMoviesAndWait(servers: allServers)
+        await vodStore.refreshMoviesAndWait(servers: allServers, honorCache: true)
         debugLog("🟢 [Orchestrator] phase 3 done (movies), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, movies=\(vodStore.movies.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         debugLog("🟢 [Orchestrator] phase 4 BEGIN: VOD series, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
-        await vodStore.refreshSeriesAndWait(servers: allServers)
+        await vodStore.refreshSeriesAndWait(servers: allServers, honorCache: true)
         debugLog("🟢 [Orchestrator] phase 4 done (series), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, series=\(vodStore.series.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         debugLog("🟢 [Orchestrator] END, total elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
     }
