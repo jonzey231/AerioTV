@@ -153,6 +153,16 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
     /// same span reopened the connection three times in six seconds
     /// (2026-09-06, Thunderbolts credits scrub: 21 connections in 4 min).
     private var keepBehind: Int64 = 8 * 1024 * 1024
+    /// A read starting this far past the buffered head is a seek and
+    /// reopens rather than waits; span-aware so a one-span forward step
+    /// on a high-bitrate file streams through instead of reconnecting.
+    private var farAhead: Int64 = 48 * 1024 * 1024
+    /// Byte offset the current task asked for, checked against the
+    /// response's Content-Range: a reply that starts elsewhere (a proxy
+    /// ignoring Range, or adopting another session's position) would be
+    /// appended under the wrong bufferStart and parse as no clusters at
+    /// all ("parsed 0 frames", 2026-09-08 credits scrub).
+    private var requestedOffset: Int64 = 0
     private var consumePoint: Int64 = 0
     /// End of the range a read() is currently WAITING for. Flow control
     /// must never suspend below this, or a span larger than the
@@ -193,6 +203,7 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         lowWater = max(32 * 1024 * 1024, maxSpan + 8 * 1024 * 1024)
         highWater = max(96 * 1024 * 1024, lowWater + maxSpan + 8 * 1024 * 1024)
         keepBehind = Int64(max(8 * 1024 * 1024, maxSpan + 4 * 1024 * 1024))
+        farAhead = Int64(max(48 * 1024 * 1024, 2 * maxSpan))
         cond.unlock()
         debugLog(String(format: "[MKV] flow control: span %.1f MB -> low %.0f MB, high %.0f MB",
                         Double(maxSpan) / 1_048_576, Double(lowWater) / 1_048_576, Double(highWater) / 1_048_576))
@@ -217,16 +228,23 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         buffer.removeAll(keepingCapacity: false)
         bufferStart = offset
         consumePoint = offset
+        requestedOffset = offset
         finished = false
         failed = nil
         suspended = false
-        cond.unlock()
         var request = URLRequest(url: url)
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
         request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
         let t = session.dataTask(with: request)
+        // Assign INSIDE the lock. The first cut set `task` after unlock,
+        // so a data callback already queued for the cancelled task still
+        // matched the identity guard and prepended its bytes (from the
+        // OLD position) to the fresh buffer: every span cached from that
+        // connection was shifted, and builds parsed 0 frames (2026-09-08,
+        // credits scrub; the server's bytes at those offsets were fine).
         task = t
         requestsMade += 1
+        cond.unlock()
         debugLog(String(format: "[MKV] stream opened at %.1f MB (request #%d this session)",
                         Double(offset) / 1_048_576, requestsMade))
         t.resume()
@@ -252,7 +270,7 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         // seek and failed instantly (2026-08-26 field failure, In the
         // Grey: "span 91 unreadable" in the same millisecond as open,
         // -> watchdog -> mpv fallback).
-        if offset > bufferStart + Int64(buffer.count) + 48 * 1024 * 1024 {
+        if offset > bufferStart + Int64(buffer.count) + farAhead {
             debugLog(String(format: "[MKV] read far ahead (%.1f MB > head %.1f MB); reopening",
                             Double(offset) / 1_048_576, Double(bufferStart + Int64(buffer.count)) / 1_048_576))
             return nil
@@ -346,15 +364,38 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         cond.lock()
         defer { cond.unlock() }
         guard dataTask === task else { completionHandler(.cancel); return }
-        if expectedTotalLength > 0,
-           let http = response as? HTTPURLResponse,
-           let range = http.value(forHTTPHeaderField: "Content-Range"),
-           let total = range.split(separator: "/").last.flatMap({ Int64($0) }),
-           total != expectedTotalLength {
-            failed = "file changed upstream (indexed \(expectedTotalLength) bytes, stream now \(total))"
-            cond.broadcast()
+        let http = response as? HTTPURLResponse
+        let status = http?.statusCode ?? 200
+        let rangeHeader = http?.value(forHTTPHeaderField: "Content-Range") ?? ""
+        let reject: (String) -> Void = { reason in
+            self.failed = reason
+            debugLog("[MKV] response rejected: \(reason) (HTTP \(status), Content-Range '\(rangeHeader)')")
+            self.cond.broadcast()
             completionHandler(.cancel)
-            return
+        }
+        if status >= 400 {
+            reject("HTTP \(status) on media range"); return
+        }
+        // "bytes S-E/T": the start must be the offset this task asked for.
+        var rangeStart: Int64?
+        var rangeTotal: Int64?
+        if rangeHeader.hasPrefix("bytes ") {
+            let body = rangeHeader.dropFirst(6)
+            let parts = body.split(separator: "/")
+            if let span = parts.first, let s0 = span.split(separator: "-").first {
+                rangeStart = Int64(s0)
+            }
+            if parts.count > 1 { rangeTotal = Int64(parts[1]) }
+        }
+        if status == 206 {
+            if let rs = rangeStart, rs != requestedOffset {
+                reject("range starts at \(rs), requested \(requestedOffset)"); return
+            }
+        } else if requestedOffset != 0 {
+            reject("server ignored Range (HTTP \(status), wanted offset \(requestedOffset))"); return
+        }
+        if expectedTotalLength > 0, let total = rangeTotal, total != expectedTotalLength {
+            reject("file changed upstream (indexed \(expectedTotalLength) bytes, stream now \(total))"); return
         }
         completionHandler(.allow)
     }
@@ -1534,8 +1575,21 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
                     throw MKVRemuxError(reason: "span \(i) retry read failed: \(error) (first: \(firstError ?? "nil/short"), \(stream.debugState))")
                 }
             }
-            guard let data = piece, data.count == length else {
+            guard var data = piece, data.count == length else {
                 throw MKVRemuxError(reason: "span \(i) unreadable (got \(piece?.count ?? -1)/\(length) at \(lo), first: \(firstError ?? "nil/short"), \(stream.debugState))")
+            }
+            // A cue span begins on a Cluster. Anything else means the
+            // stream buffer is not what its offsets claim; reopen once
+            // rather than cache bytes that can only parse as nothing.
+            if !Self.startsWithCluster(data) {
+                let hex = data.prefix(4).map { String(format: "%02X", $0) }.joined(separator: " ")
+                log("[MKV] span \(i) at \(lo) does not start on a cluster (\(hex)); reopening")
+                stream.open(at: lo)
+                guard let again = try stream.read(offset: lo, length: length), again.count == length,
+                      Self.startsWithCluster(again) else {
+                    throw MKVRemuxError(reason: "span \(i) misaligned after reopen at \(lo) (\(stream.debugState))")
+                }
+                data = again
             }
             spanCache.append((i, data))
             spanCacheBytes += data.count
@@ -1546,6 +1600,11 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
                 spanCacheBytes -= spanCache.remove(at: evictIdx).data.count
             }
         }
+    }
+
+    private static func startsWithCluster(_ d: Data) -> Bool {
+        d.count >= 4 && d[d.startIndex] == 0x1F && d[d.startIndex + 1] == 0x43
+            && d[d.startIndex + 2] == 0xB6 && d[d.startIndex + 3] == 0x75
     }
 
     func buildMediaSegment(_ index: Int) throws -> Data {
@@ -1681,6 +1740,20 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
             videoSamples = Array(videoSamples[..<endKey])
         }
         audioSamples = audioSamples.filter { $0.ptsTicks >= seg.startTicks && $0.ptsTicks < nextStart }
+        // A cue that indexes a non-keyframe (cues written per cluster,
+        // not per keyframe: Thunderbolts 3840x1606, segment 1017, three
+        // cue points but two IRAPs) leaves this window with no start of
+        // its own. That is not an error: the PREVIOUS segment's run
+        // already carried these frames through to the next keyframe, so
+        // the timeline is complete. Emit the audio for the window and no
+        // video rather than failing the build.
+        if videoSamples.isEmpty, !audioSamples.isEmpty, parsedCount > 0,
+           parsedPtsLo <= seg.startTicks, parsedPtsHi >= nextStart - boundarySlack {
+            let sec = { (t: Int64) in Double(t) / Double(Self.ticksPerSecond) }
+            log(String(format: "[MKV] segment %d: no keyframe in %.1f-%.1fs (cue on a non-keyframe); audio-only fragment, video carried by segment %d",
+                       index, sec(seg.startTicks), sec(nextStart), index - 1))
+            return writeSegment(index: index, seg: seg, video: [], audio: audioSamples)
+        }
         guard !videoSamples.isEmpty else {
             // Say WHY: "parsed 0" = spans held no clusters (garbage /
             // HTML mid-stream); a healthy count with a pts range far
@@ -1690,6 +1763,16 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
             // 2026-08-26 '8.0 Mbps copy' field fallback); frames present
             // but 0 keyframes = flag/reference parsing trouble.
             let sec = { (t: Int64) in Double(t) / Double(Self.ticksPerSecond) }
+            if parsedCount == 0 {
+                // Spans that hold no clusters: show what actually sits at
+                // each span's first bytes (a cue span starts on a Cluster
+                // id 1F 43 B6 75) so misaligned or foreign data is obvious.
+                let heads = (loIndex...hiIndex).map { k -> String in
+                    let hex = (cachedSpan(k)?.prefix(8) ?? Data()).map { String(format: "%02X", $0) }.joined(separator: " ")
+                    return "span \(k) @\(segmentsMap[k].byteStart): \(hex)"
+                }
+                log("[MKV] empty parse for segment \(index): " + heads.joined(separator: " | ") + " " + stream.debugState)
+            }
             throw MKVRemuxError(reason: String(
                 format: "segment %d: no video samples in window %.1f-%.1fs (parsed %d frames, %d keyframes, pts %.1f-%.1fs)",
                 index, sec(seg.startTicks), sec(nextStart),
@@ -1946,11 +2029,13 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
                 vbody.append(Self.u32(video[i].keyframe ? 0x02000000 : 0x01010000))
                 vbody.append(Self.u32(Int(max(0, video[i].ptsTicks - dts[i]))))
             }
-            let vtraf = Self.box("traf",
-                Self.fullBox("tfhd", 0, 0x020000, Self.u32(Self.videoTrackID)),
-                Self.fullBox("tfdt", 1, 0, Self.u64(UInt64(max(0, dts[0])))),
-                Self.fullBox("trun", 1, 0x000F01, vbody))
-            var trafs = [vtraf]
+            var trafs: [Data] = []
+            if n > 0 {
+                trafs.append(Self.box("traf",
+                    Self.fullBox("tfhd", 0, 0x020000, Self.u32(Self.videoTrackID)),
+                    Self.fullBox("tfdt", 1, 0, Self.u64(UInt64(max(0, dts[0])))),
+                    Self.fullBox("trun", 1, 0x000F01, vbody)))
+            }
             if let firstAudio = audio.first {
                 var abody = Data(capacity: 16 + audio.count * 8)
                 abody.append(Self.u32(audio.count)); abody.append(Self.u32(aOff))
