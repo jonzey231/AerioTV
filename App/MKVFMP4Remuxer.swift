@@ -1973,32 +1973,49 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
 
     private func writeSegment(index: Int, seg: SegmentInfo,
                               video: [Sample], audio: [Sample]) -> Data {
-        // dts ladder: blocks are in decode order, timestamps are pts.
-        // Constant-rate movies: dts_i = base + i*frameDuration, with the
-        // base chosen so cts = pts - dts stays non-negative.
+        // Timing follows the FILE's timestamps, the way VLC and ffmpeg play
+        // it. The first cut laid video on a constant-rate ladder (dts_i =
+        // base + i*frameDuration, cts absorbing the difference) and that
+        // broke on live captures (Roman, S28E36 2026-09-08, played fine in
+        // VLC): timestamps rounded to whole ms made the median period 17 ms
+        // against a true 16.683, and the source dropped 30-50 ms of A/V
+        // every 4 s. Each 6 s fragment then declared ~60 ms more video than
+        // it spanned, consecutive fragments overlapped in dts, and the
+        // player resynced audio against the gaps and overlaps.
+        //
+        // Now: dts is the sorted pts sequence shifted back by a constant
+        // reorder lead (so cts = pts - dts stays >= 0), each sample lasts
+        // until the next dts, and fragments tile exactly because both ends
+        // are real timestamps.
         let n = video.count
         var frameDur = frameDurationTicks
+        let sortedPts = video.map(\.ptsTicks).sorted()
         if n > 2 {
-            let sorted = video.map(\.ptsTicks).sorted()
+            // Robust period: mean of the deltas that are not discontinuities.
             var deltas: [Int64] = []
-            for i in 1..<sorted.count { deltas.append(sorted[i] - sorted[i - 1]) }
+            for i in 1..<sortedPts.count { deltas.append(sortedPts[i] - sortedPts[i - 1]) }
             let med = deltas.sorted()[deltas.count / 2]
-            if med > 300 { frameDur = med }
+            let regular = deltas.filter { $0 > 0 && $0 < med * 3 / 2 }
+            if !regular.isEmpty {
+                let mean = regular.reduce(0, +) / Int64(regular.count)
+                if mean > 300 { frameDur = mean }
+            }
         }
-        // Deterministic base: seg.startTicks minus a fixed 4-frame reorder
-        // lead, so consecutive segments' ladders are CONTINUOUS. The old
-        // per-segment min() base made each segment independent and let
-        // seams butt up with duplicate/overlapping dts (ffmpeg: "non
-        // monotonically increasing dts ... 64 >= 64" exactly at seg
-        // boundaries) - a per-seam hiccup. cts floors at 0 for the rare
-        // deeper-than-4 reorder rather than breaking monotonic dts.
-        // 10-frame lead: 4 frames of reorder depth plus the 6-frame
-        // boundary slack (a starting keyframe may sit up to 6 frames
-        // BEFORE seg.startTicks and its pts must not dip below its dts).
-        // Still deterministic/continuous across segments - same formula
-        // every build.
-        let base = seg.startTicks - 10 * frameDur
-        let dts = (0..<n).map { base + Int64($0) * frameDur }
+        // Reorder depth: how far a frame's decode index runs ahead of its
+        // presentation rank. B-pyramids give 2-4; the +1 is slack for a
+        // discontinuity landing inside the reorder window.
+        var rank: [Int64: Int] = [:]
+        for (r, p) in sortedPts.enumerated() where rank[p] == nil { rank[p] = r }
+        var reorder = 0
+        for (i, sample) in video.enumerated() {
+            reorder = max(reorder, i - (rank[sample.ptsTicks] ?? i))
+        }
+        let lead = Int64(reorder + 1) * frameDur
+        var dts = sortedPts.map { $0 - lead }
+        // Whole-ms timestamps can collide; keep dts strictly increasing.
+        for i in 1..<max(1, n) where dts[i] <= dts[i - 1] { dts[i] = dts[i - 1] + 1 }
+        var videoDurations = [Int64](repeating: frameDur, count: n)
+        for i in 0..<max(0, n - 1) { videoDurations[i] = max(1, dts[i + 1] - dts[i]) }
 
         let videoBytes = video.reduce(0) { $0 + $1.data.count }
         let audioBytes = audio.reduce(0) { $0 + $1.data.count }
@@ -2024,7 +2041,7 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
             var vbody = Data(capacity: 16 + n * 16)
             vbody.append(Self.u32(n)); vbody.append(Self.u32(vOff))
             for i in 0..<n {
-                vbody.append(Self.u32(Int(frameDur)))
+                vbody.append(Self.u32(Int(videoDurations[i])))
                 vbody.append(Self.u32(video[i].data.count))
                 vbody.append(Self.u32(video[i].keyframe ? 0x02000000 : 0x01010000))
                 vbody.append(Self.u32(Int(max(0, video[i].ptsTicks - dts[i]))))
