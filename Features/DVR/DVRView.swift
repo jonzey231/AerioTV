@@ -46,7 +46,7 @@ struct DVRView: View {
     @State private var infoTarget: ProgramInfoTarget?
 
     #if os(tvOS)
-    /// "primary" | "secondary" | "stop" while a hero button has focus.
+    /// "<recording id>|primary | secondary | stop" while a hero button has focus.
     @FocusState private var heroFocus: String?
     @FocusState private var catcherFocused: Bool
     @State private var tvTabBarHidden = false
@@ -185,6 +185,67 @@ struct DVRView: View {
     }
 
     private var headers: [String: String] { activeServer?.authHeaders ?? [:] }
+
+    #if os(tvOS)
+    /// Hero pages: every started-but-unfinished recording (a recording in
+    /// progress first), the same set the phone deck shows; otherwise the
+    /// single hero pick. Logan (2026-09-05): DVR on tvOS matches Movies
+    /// and TV Shows, whose hero pages through Continue Watching.
+    private var heroPages: [Recording] {
+        let cw = continueWatching
+        if cw.count > 1 { return cw }
+        return heroRecording.map { [$0] } ?? []
+    }
+    /// Page the pager is aligned on; nil = first.
+    @State private var heroPageID: String?
+    private var primaryFocusID: String {
+        "\(heroPageID ?? heroPages.first.map { "\($0.id)" } ?? "")|primary"
+    }
+    private func heroPageLabel(_ id: String?) -> String {
+        guard let id, let i = heroPages.firstIndex(where: { "\($0.id)" == id }) else { return "nil" }
+        return "page\(i + 1)"
+    }
+
+    /// Same focus-driven pager as the Movies hero (no ScrollView: the focus
+    /// engine's scroll-to-visible fought view-aligned paging, 2026-09-08).
+    private var heroPager: some View {
+        GeometryReader { geo in
+            let pages = heroPages
+            let pageWidth = pages.count > 1 ? geo.size.width * 0.62 : geo.size.width
+            let spacing: CGFloat = 8
+            let index = pages.firstIndex(where: { "\($0.id)" == heroPageID }) ?? 0
+            HStack(spacing: spacing) {
+                ForEach(pages) { rec in
+                    DVRHero(recording: rec, headers: headers,
+                            progress: progressFraction(rec), canPlay: actions.canPlay(rec),
+                            onPrimary: { heroPrimary(rec) },
+                            onSecondary: { heroSecondary(rec) },
+                            onStop: { actions.stop(rec) },
+                            focusPrefix: "\(rec.id)",
+                            menu: { menuItems(for: rec) })
+                        .frame(width: pageWidth)
+                }
+            }
+            .offset(x: -CGFloat(index) * (pageWidth + spacing))
+            .animation(.smooth(duration: 0.35), value: index)
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
+            .overlay(alignment: .bottom) {
+                if pages.count > 1 {
+                    HStack(spacing: 8) {
+                        ForEach(pages) { rec in
+                            Circle()
+                                .fill(index == pages.firstIndex(where: { $0.id == rec.id })
+                                      ? Color.accentPrimary : Color.textTertiary.opacity(0.5))
+                                .frame(width: 10, height: 10)
+                        }
+                    }
+                    .offset(y: 22)
+                }
+            }
+        }
+        .frame(height: 420)
+    }
+    #endif
 
     private var actions: RecordingActions {
         RecordingActions(servers: servers, modelContext: modelContext, coordinator: coordinator,
@@ -338,10 +399,10 @@ struct DVRView: View {
                                 } else if let first = items.first?.id {
                                     gridFocus = first
                                 } else {
-                                    heroFocus = "primary"
+                                    heroFocus = primaryFocusID
                                 }
                             },
-                            onExitUp: { heroFocus = "primary" }
+                            onExitUp: { heroFocus = primaryFocusID }
                         ) { letter in
                             jumpToLetter(letter)
                         }
@@ -507,22 +568,24 @@ struct DVRView: View {
                             .focused($catcherFocused)
                             .onChange(of: catcherFocused) { _, focused in
                                 guard focused else { return }
-                                heroFocus = "primary"
+                                heroFocus = primaryFocusID
                             }
                     } else {
                         Color.clear.frame(height: 8)
                     }
                     #endif
+                    #if os(tvOS)
+                    heroPager
+                        .focusedDVRHero($heroFocus)
+                        .id("hero")
+                    #else
                     DVRHero(recording: hero, headers: headers,
                             progress: progressFraction(hero), canPlay: actions.canPlay(hero),
                             onPrimary: { heroPrimary(hero) },
                             onSecondary: { heroSecondary(hero) },
                             onStop: { actions.stop(hero) },
                             menu: { menuItems(for: hero) })
-                        #if os(tvOS)
-                        .focusedDVRHero($heroFocus)
-                        .id("hero")
-                        #endif
+                    #endif
                 }
                 #endif
                 if !recordingNow.isEmpty {
@@ -610,9 +673,14 @@ struct DVRView: View {
             tvTabBarHidden = false
             wantsTabBarHidden = false
             if TVTabBarScrollState.shared.isHidden { TVTabBarScrollState.shared.isHidden = false }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { heroFocus = "primary" }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { heroFocus = primaryFocusID }
         }
         .onChange(of: heroFocus) { _, id in
+            if let id, let rec = heroPages.first(where: { id.hasPrefix("\($0.id)|") }),
+               "\(rec.id)" != heroPageID {
+                debugLog("[HERO] dvr page \(heroPageLabel(heroPageID)) -> \(heroPageLabel("\(rec.id)")) (focus \(id))")
+                withAnimation(.smooth(duration: 0.35)) { heroPageID = "\(rec.id)" }
+            }
             // A hero button gaining focus while the page is scrolled brings
             // the page back to the top so the (system-collapsed) bar expands
             // fully, focus staying on the button (Logan 2026-09-05: the bar
@@ -1026,6 +1094,9 @@ struct DVRHero<Menu: View>: View {
     /// Phone: a tap on the card itself (outside its buttons) opens the
     /// program info sheet (Logan 2026-09-05).
     var onInfo: (() -> Void)? = nil
+    /// tvOS pager: focus ids become "<prefix>|<role>" so each page's
+    /// buttons are distinct (Movies uses "<page id>|primary" the same way).
+    var focusPrefix: String? = nil
     @ViewBuilder let menu: () -> Menu
 
     #if os(tvOS)
@@ -1242,7 +1313,7 @@ struct DVRHero<Menu: View>: View {
     private func focusable<V: View>(_ view: V, role: String) -> some View {
         #if os(tvOS)
         if let focusBinding {
-            view.focused(focusBinding, equals: role)
+            view.focused(focusBinding, equals: focusPrefix.map { "\($0)|\(role)" } ?? role)
         } else {
             view
         }
