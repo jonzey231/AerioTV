@@ -140,8 +140,13 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
     private var suspended = false
 
     /// Suspend past this much unread look-ahead; resume below the low mark.
-    private let highWater = 96 * 1024 * 1024
-    private let lowWater = 32 * 1024 * 1024
+    /// Both scale with the file's largest cue span (setSpanSize): fixed
+    /// 96/32MB marks against ~50MB UHD spans left the task suspended with
+    /// 32-50MB buffered, and the next span read then waited on bytes
+    /// nothing was scheduled to deliver (2026-09-06, Thunderbolts 4K:
+    /// "buffer ran empty" every 50-80s with 200MB already downloaded).
+    private var highWater = 96 * 1024 * 1024
+    private var lowWater = 32 * 1024 * 1024
     /// Bytes kept BEHIND the consume point for re-reads.
     private let keepBehind: Int64 = 8 * 1024 * 1024
     private var consumePoint: Int64 = 0
@@ -174,6 +179,18 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         let delegateQueue = OperationQueue()
         delegateQueue.maxConcurrentOperationCount = 1
         session = URLSession(configuration: config, delegate: self, delegateQueue: delegateQueue)
+    }
+
+    /// Size flow control so the stream never idles holding less than one
+    /// full span: resume once fewer than (span + 8MB) bytes are unread,
+    /// suspend only past a further span of look-ahead.
+    func setSpanSize(_ maxSpan: Int) {
+        cond.lock()
+        lowWater = max(32 * 1024 * 1024, maxSpan + 8 * 1024 * 1024)
+        highWater = max(96 * 1024 * 1024, lowWater + maxSpan + 8 * 1024 * 1024)
+        cond.unlock()
+        debugLog(String(format: "[MKV] flow control: span %.1f MB -> low %.0f MB, high %.0f MB",
+                        Double(maxSpan) / 1_048_576, Double(lowWater) / 1_048_576, Double(highWater) / 1_048_576))
     }
 
     func open(at offset: Int64) {
@@ -217,7 +234,11 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         cond.lock()
         defer { cond.unlock() }
         if task == nil { return nil }
-        if offset < bufferStart { return nil }
+        if offset < bufferStart {
+            debugLog(String(format: "[MKV] read behind window (%.1f MB < %.1f MB); reopening",
+                            Double(offset) / 1_048_576, Double(bufferStart) / 1_048_576))
+            return nil
+        }
         // A FORWARD seek far past the buffered head must reopen, not
         // wait. Measure the gap to the START of the requested range only:
         // the first version added the requested LENGTH into this test, so
@@ -227,6 +248,8 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         // Grey: "span 91 unreadable" in the same millisecond as open,
         // -> watchdog -> mpv fallback).
         if offset > bufferStart + Int64(buffer.count) + 48 * 1024 * 1024 {
+            debugLog(String(format: "[MKV] read far ahead (%.1f MB > head %.1f MB); reopening",
+                            Double(offset) / 1_048_576, Double(bufferStart + Int64(buffer.count)) / 1_048_576))
             return nil
         }
         neededThrough = max(neededThrough, offset + Int64(length))
@@ -235,6 +258,14 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         while bufferStart + Int64(buffer.count) < offset + Int64(length) {
             if let failed { throw MKVRemuxError(reason: "stream failed: \(failed)") }
             if finished { break }
+            // A waiting read is the one thing that must always wake a
+            // suspended task: flow control only ever resumed AFTER data
+            // arrived, so a range ending past the head deadlocked here
+            // until the 45s timeout (or the watchdog) killed the build.
+            if suspended {
+                suspended = false
+                task?.resume()
+            }
             if !cond.wait(until: deadline) {
                 throw MKVRemuxError(reason: "stream read timed out")
             }
@@ -342,9 +373,36 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         if !suspended, ahead > highWater, head >= neededThrough + 1_048_576 || neededThrough == 0 {
             suspended = true
             dataTask.suspend()
+            scheduleKeepalive(for: dataTask)
         }
         cond.broadcast()
         cond.unlock()
+    }
+
+    /// A suspended data task stops reading its socket, and a reverse
+    /// proxy whose write to us stalls past its send timeout (nginx
+    /// defaults to 60s) closes the connection: "The network connection
+    /// was lost" every ~110MB on an 8.6Mbps copy (2026-09-06), because
+    /// draining 64MB of look-ahead at that rate takes longer than 60s.
+    /// Resume briefly before that: one chunk lands, didReceive
+    /// re-suspends (still above the high mark) and re-arms. Costs a few
+    /// tens of KB per tick, keeps the provider's single connection alive.
+    private static let keepaliveInterval: TimeInterval = 25
+    private var keepaliveTicks = 0
+
+    private func scheduleKeepalive(for suspendedTask: URLSessionDataTask) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Self.keepaliveInterval) { [weak self] in
+            guard let self else { return }
+            self.cond.lock()
+            defer { self.cond.unlock() }
+            guard self.suspended, !self.cancelled, suspendedTask === self.task else { return }
+            self.suspended = false
+            self.keepaliveTicks += 1
+            if self.keepaliveTicks == 1 || self.keepaliveTicks % 20 == 0 {
+                debugLog("[MKV] keepalive resume #\(self.keepaliveTicks) (look-ahead \(Int((self.bufferStart + Int64(self.buffer.count) - self.consumePoint) / 1_048_576)) MB)")
+            }
+            suspendedTask.resume()
+        }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
@@ -718,6 +776,7 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         // the app at 1.4GB during a version switch (2026-08-26).
         let maxSpan = segmentsMap.map { Int($0.byteEnd - $0.byteStart) }.max() ?? 0
         spanCacheByteLimit = max(160 * 1024 * 1024, 3 * maxSpan + 16 * 1024 * 1024)
+        stream.setSpanSize(maxSpan)
         let mins = Double(durationTicks) / Double(Self.ticksPerSecond) / 60
         log(String(format: "[MKV] prepared: %@ %dx%d + %@ + %d text sub(s), %.0f min, %d segments, cues %@",
                    v.codecID, v.width, v.height, audio?.codecID ?? "no-audio",
@@ -1462,6 +1521,8 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
                 // Outside the window (seek, either direction), short at an
                 // EOF race, or a failed/timed-out stream: reopen once at
                 // the wanted offset and retry.
+                log("[MKV] span \(i) first read \(piece == nil ? "nil" : "short \(piece!.count)/\(length)")"
+                    + (firstError.map { ": \($0)" } ?? "") + "; reopening")
                 stream.open(at: lo)
                 do { piece = try stream.read(offset: lo, length: length) }
                 catch {
