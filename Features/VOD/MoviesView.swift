@@ -2679,55 +2679,81 @@ struct MoviesHeroCarousel: View {
     }
     #endif
 
+    @ViewBuilder
+    private func heroPage(_ page: MoviesHeroPage, width: CGFloat) -> some View {
+        MoviesHero(
+            item: page.item,
+            progress: page.progress,
+            backdropOverride: page.backdropOverride,
+            headers: headers,
+            onPrimary: { onPrimary(page) },
+            onPlayFromStart: { onPlayFromStart(page) },
+            onDetails: { onDetails(page) },
+            onRemove: page.progress != nil ? { onRemove(page) } : nil,
+            isOnWatchlist: isOnWatchlist?(page) ?? false,
+            onToggleWatchlist: onToggleWatchlist.map { toggle in { toggle(page) } },
+            primaryFocusID: page.id
+        )
+        .frame(width: width)
+        .id(page.id)
+    }
+
+    /// Page dots centred just beneath the carousel (Logan 2026-09-05),
+    /// hung off the bottom edge so the hero's height is unchanged.
+    @ViewBuilder
+    private var dots: some View {
+        if pages.count > 1 {
+            HStack(spacing: 8) {
+                ForEach(pages) { page in
+                    Circle()
+                        .fill(page.id == activePageID
+                              ? Color.accentPrimary : Color.textTertiary.opacity(0.5))
+                        .frame(width: dot, height: dot)
+                }
+            }
+            .offset(y: dotInset)
+        }
+    }
+
     private var carousel: some View {
         GeometryReader { geo in
             // Pages are narrower than the row so the next title peeks in
-            // (Logan 2026-09-03); view-aligned snapping keeps one page
-            // leading. Single page keeps the full width.
+            // (Logan 2026-09-03). Single page keeps the full width.
             let pageWidth = pages.count > 1 ? geo.size.width * pageFraction : geo.size.width
+            #if os(tvOS)
+            // No ScrollView on tvOS. The focus engine scrolls any scroll
+            // view to keep the focused button visible, and it fought the
+            // page change: the paging animation stopped as soon as the
+            // next card's Resume was on screen (x=350 of 1019), the
+            // view-aligned tracker still called card 1 the aligned page,
+            // and the first focus move after that (Details) made the
+            // scroll view rewrite the position id back to card 1 and snap
+            // (device log 2026-09-08 18:45). A plain HStack offset by the
+            // page index has exactly one mover: the focus handler.
+            let index = pages.firstIndex(where: { $0.id == currentID }) ?? 0
+            HStack(spacing: pageSpacing) {
+                ForEach(pages) { page in heroPage(page, width: pageWidth) }
+            }
+            .offset(x: -CGFloat(index) * (pageWidth + pageSpacing))
+            .animation(.smooth(duration: 0.35), value: index)
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
+            .focusedHeroPage($heroFocus)
+            .onChange(of: currentID) { old, new in
+                debugLog("[HERO] page \(pageLabel(old)) -> \(pageLabel(new)) (focus \(heroFocus ?? "nil"))")
+            }
+            .overlay(alignment: .bottom) { dots }
+            #else
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: pageSpacing) {
-                    ForEach(pages) { page in
-                        MoviesHero(
-                            item: page.item,
-                            progress: page.progress,
-                            backdropOverride: page.backdropOverride,
-                            headers: headers,
-                            onPrimary: { onPrimary(page) },
-                            onPlayFromStart: { onPlayFromStart(page) },
-                            onDetails: { onDetails(page) },
-                            onRemove: page.progress != nil ? { onRemove(page) } : nil,
-                            isOnWatchlist: isOnWatchlist?(page) ?? false,
-                            onToggleWatchlist: onToggleWatchlist.map { toggle in { toggle(page) } },
-                            primaryFocusID: page.id
-                        )
-                        .frame(width: pageWidth)
-                        .id(page.id)
-                    }
+                    ForEach(pages) { page in heroPage(page, width: pageWidth) }
                 }
                 .scrollTargetLayout()
             }
             .scrollTargetBehavior(.viewAligned)
             .scrollPosition(id: $currentID)
             .scrollClipDisabled()
-            #if os(tvOS)
-            .focusedHeroPage($heroFocus)
+            .overlay(alignment: .bottom) { dots }
             #endif
-            // Page dots centred just beneath the carousel (Logan 2026-09-05),
-            // hung off the bottom edge so the hero's height is unchanged.
-            .overlay(alignment: .bottom) {
-                if pages.count > 1 {
-                    HStack(spacing: 8) {
-                        ForEach(pages) { page in
-                            Circle()
-                                .fill(page.id == activePageID
-                                      ? Color.accentPrimary : Color.textTertiary.opacity(0.5))
-                                .frame(width: dot, height: dot)
-                        }
-                    }
-                    .offset(y: dotInset)
-                }
-            }
         }
         .frame(height: heroHeight)
         #if os(iOS)
@@ -2743,6 +2769,12 @@ struct MoviesHeroCarousel: View {
     /// Distance the dots hang below the carousel's bottom edge.
     private let dotInset: CGFloat = 22
     private let pageFraction: CGFloat = 0.62
+    #if os(tvOS)
+    private func pageLabel(_ id: String?) -> String {
+        guard let id, let i = pages.firstIndex(where: { $0.id == id }) else { return "nil" }
+        return "page\(i + 1)"
+    }
+    #endif
     private let pageSpacing: CGFloat = 8
     #else
     private let heroHeight: CGFloat = 220
