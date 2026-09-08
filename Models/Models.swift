@@ -906,6 +906,18 @@ final class Recording {
     /// Channel logo captured at schedule / import time (the recording's
     /// `channelID` is not resolvable back to a Channel row on every source).
     var channelLogoURL: String? = nil
+    /// Stream facts Dispatcharr captures when a recording finishes
+    /// (custom_properties.stream_info): shown in Program Info's
+    /// Recording block. Nil for local recordings and older servers.
+    /// Server-side file name (custom_properties.file_name); the playback
+    /// URL has no extension, so the container format comes from here.
+    var remoteFileName: String? = nil
+    var videoCodec: String? = nil
+    var videoResolution: String? = nil
+    var videoFrameRate: Double? = nil
+    var videoBitrateKbps: Double? = nil
+    var audioCodec: String? = nil
+    var audioChannels: String? = nil
 
     init(channelID: String,
          channelName: String,

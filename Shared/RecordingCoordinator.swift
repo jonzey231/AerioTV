@@ -395,6 +395,23 @@ final class RecordingCoordinator: ObservableObject {
     /// resolved ourselves; the other fields fill in only when empty so a
     /// value captured at schedule time is never blanked by a sparse poll.
     /// Returns true when anything changed.
+    /// Copies the server's end-of-recording facts (size, codec, resolution,
+    /// fps, bitrates) onto the local row. Returns true when anything changed.
+    static func applyStreamFacts(_ r: DispatcharrAPI.Recording, to local: Recording) -> Bool {
+        var changed = false
+        if let bytes = r.bytesWritten, bytes > 0, local.fileSizeBytes != bytes {
+            local.fileSizeBytes = bytes; changed = true
+        }
+        if let v = r.fileName, !v.isEmpty, local.remoteFileName != v { local.remoteFileName = v; changed = true }
+        if let v = r.videoCodec, local.videoCodec != v { local.videoCodec = v; changed = true }
+        if let v = r.videoResolution, local.videoResolution != v { local.videoResolution = v; changed = true }
+        if let v = r.videoFrameRate, local.videoFrameRate != v { local.videoFrameRate = v; changed = true }
+        if let v = r.videoBitrateKbps, local.videoBitrateKbps != v { local.videoBitrateKbps = v; changed = true }
+        if let v = r.audioCodec, local.audioCodec != v { local.audioCodec = v; changed = true }
+        if let v = r.audioChannels, local.audioChannels != v { local.audioChannels = v; changed = true }
+        return changed
+    }
+
     private func applyRemoteMetadata(_ r: DispatcharrAPI.Recording, to local: Recording,
                                      api: DispatcharrAPI) -> Bool {
         var changed = false
@@ -473,6 +490,7 @@ final class RecordingCoordinator: ObservableObject {
                     didMutate = true
                 }
                 if applyRemoteMetadata(r, to: local, api: api) { didMutate = true }
+                if Self.applyStreamFacts(r, to: local) { didMutate = true }
             } else {
                 debugLog("🧹 DVR reconcile: server \(serverID) dropped remoteID \(rid) — deleting local row")
                 modelContext.delete(local)
@@ -501,6 +519,7 @@ final class RecordingCoordinator: ObservableObject {
                 serverID: serverID
             )
             _ = applyRemoteMetadata(r, to: rec, api: api)
+            _ = Self.applyStreamFacts(r, to: rec)
             modelContext.insert(rec)
             didMutate = true
             debugLog("📥 DVR reconcile: imported remote recording \(r.id) (\(r.programTitle ?? "—")) from server \(serverID)")

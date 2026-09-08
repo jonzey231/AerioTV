@@ -3221,6 +3221,16 @@ struct DispatcharrAPI {
         let rating: String?
         /// First EPG category carried on `custom_properties.program`, if any.
         let category: String?
+        /// custom_properties.bytes_written, set when the recording ends.
+        let bytesWritten: Int64?
+        /// custom_properties.stream_info, captured from the live proxy at
+        /// the end of the recording (codec, resolution, fps, bitrates).
+        let videoCodec: String?
+        let videoResolution: String?
+        let videoFrameRate: Double?
+        let videoBitrateKbps: Double?
+        let audioCodec: String?
+        let audioChannels: String?
 
         /// Parses a single recording out of an already-deserialized JSON
         /// object. Returns nil if required fields are missing.
@@ -3280,6 +3290,26 @@ struct DispatcharrAPI {
             self.rating = props["rating"] as? String
             let cats = (program?["categories"] as? [String]) ?? (props["categories"] as? [String])
             self.category = cats?.first ?? (program?["category"] as? String)
+            func doubleValue(_ any: Any?) -> Double? {
+                if let d = any as? Double { return d }
+                if let i = any as? Int { return Double(i) }
+                if let s = any as? String { return Double(s) }
+                return nil
+            }
+            self.bytesWritten = doubleValue(props["bytes_written"]).map { Int64($0) }
+            let info = props["stream_info"] as? [String: Any] ?? [:]
+            self.videoCodec = info["video_codec"] as? String
+            if let res = info["resolution"] as? String, !res.isEmpty {
+                self.videoResolution = res
+            } else if let w = doubleValue(info["width"]), let h = doubleValue(info["height"]), w > 0, h > 0 {
+                self.videoResolution = "\(Int(w))x\(Int(h))"
+            } else {
+                self.videoResolution = nil
+            }
+            self.videoFrameRate = doubleValue(info["source_fps"])
+            self.videoBitrateKbps = doubleValue(info["video_bitrate"])
+            self.audioCodec = info["audio_codec"] as? String
+            self.audioChannels = info["audio_channels"] as? String
         }
     }
 

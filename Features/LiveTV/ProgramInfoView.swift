@@ -17,6 +17,84 @@ import SwiftUI
 // The `id` is built from the same title+start+end triple `EPGEntry`
 // uses so switching programs in rapid succession doesn't fight
 // SwiftUI's identity diffing.
+/// DVR extras shown under the program facts when Program Info opens from
+/// a recording (Logan 2026-09-08: "recording date, quality, etc.").
+struct RecordingFacts: Equatable {
+    let recordedOn: Date
+    let windowStart: Date
+    let windowEnd: Date
+    let fileSizeBytes: Int64
+    let format: String?
+    let location: String
+    let status: String
+    /// From Dispatcharr's stream_info when present.
+    var videoCodec: String? = nil
+    var resolution: String? = nil
+    var frameRate: Double? = nil
+    var videoBitrateKbps: Double? = nil
+    var audioCodec: String? = nil
+    var audioChannels: String? = nil
+
+    /// "1920x1080 H.264 59.94 fps" from whatever stream_info carried.
+    var qualityLabel: String? {
+        var parts: [String] = []
+        if let resolution, !resolution.isEmpty { parts.append(resolution) }
+        if let videoCodec, !videoCodec.isEmpty { parts.append(Self.codecName(videoCodec)) }
+        if let frameRate, frameRate > 0 { parts.append(String(format: frameRate.rounded() == frameRate ? "%.0f fps" : "%.2f fps", frameRate)) }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+    var audioLabel: String? {
+        var parts: [String] = []
+        if let audioCodec, !audioCodec.isEmpty { parts.append(Self.codecName(audioCodec)) }
+        if let audioChannels, !audioChannels.isEmpty { parts.append(audioChannels) }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+    static func codecName(_ raw: String) -> String {
+        switch raw.lowercased() {
+        case "h264", "avc": return "H.264"
+        case "hevc", "h265": return "HEVC"
+        case "mpeg2video": return "MPEG-2"
+        case "aac": return "AAC"
+        case "ac3": return "AC-3"
+        case "eac3": return "E-AC-3"
+        case "mp2": return "MP2"
+        default: return raw.uppercased()
+        }
+    }
+
+    var sizeLabel: String? {
+        guard fileSizeBytes > 0 else { return nil }
+        return ByteCountFormatter.string(fromByteCount: fileSizeBytes, countStyle: .file)
+    }
+    /// Average bitrate from file size over the recording window: the
+    /// closest thing to a quality figure the recording itself carries.
+    var bitrateLabel: String? {
+        if let kbps = videoBitrateKbps, kbps > 0 {
+            let mbps = kbps / 1000
+            return String(format: mbps >= 10 ? "%.0f Mbps" : "%.1f Mbps", mbps)
+        }
+        let seconds = windowEnd.timeIntervalSince(windowStart)
+        guard fileSizeBytes > 0, seconds > 60 else { return nil }
+        let mbps = Double(fileSizeBytes) * 8 / seconds / 1_000_000
+        return String(format: mbps >= 10 ? "%.0f Mbps" : "%.1f Mbps", mbps)
+    }
+    var rows: [(String, String)] {
+        var out: [(String, String)] = []
+        let df = DateFormatter(); df.dateStyle = .medium; df.timeStyle = .none
+        out.append(("Recorded", df.string(from: recordedOn)))
+        let tf = DateFormatter(); tf.dateStyle = .none; tf.timeStyle = .short
+        out.append(("Window", "\(tf.string(from: windowStart)) to \(tf.string(from: windowEnd))"))
+        if let qualityLabel { out.append(("Quality", qualityLabel)) }
+        if let audioLabel { out.append(("Audio", audioLabel)) }
+        if let sizeLabel { out.append(("Size", sizeLabel)) }
+        if let bitrateLabel { out.append(("Bitrate", bitrateLabel)) }
+        if let format, !format.isEmpty { out.append(("Format", format.uppercased())) }
+        out.append(("Location", location))
+        out.append(("Status", status))
+        return out
+    }
+}
+
 struct ProgramInfoTarget: Identifiable, Equatable {
     let channelName: String
     let title: String
@@ -50,6 +128,7 @@ struct ProgramInfoTarget: Identifiable, Equatable {
     let isPremiere: Bool
     let isFinale: Bool
     let isRepeat: Bool
+    let recording: RecordingFacts?
 
     var id: String {
         "\(title)-\(start.timeIntervalSinceReferenceDate)-\(end.timeIntervalSinceReferenceDate)"
@@ -59,7 +138,8 @@ struct ProgramInfoTarget: Identifiable, Equatable {
          description: String, category: String, programID: Int? = nil,
          subTitle: String? = nil, season: Int? = nil, episode: Int? = nil,
          isNew: Bool = false, isLiveBroadcast: Bool = false,
-         isPremiere: Bool = false, isFinale: Bool = false, isRepeat: Bool = false) {
+         isPremiere: Bool = false, isFinale: Bool = false, isRepeat: Bool = false,
+         recording: RecordingFacts? = nil) {
         self.channelName = channelName
         self.title = title
         self.start = start
@@ -75,6 +155,7 @@ struct ProgramInfoTarget: Identifiable, Equatable {
         self.isPremiere = isPremiere
         self.isFinale = isFinale
         self.isRepeat = isRepeat
+        self.recording = recording
     }
 }
 
@@ -413,6 +494,14 @@ struct ProgramInfoView: View {
                 }
                 .padding(.vertical, 2)
             }
+            if let rec = target.recording {
+                Section("Recording") {
+                    ForEach(rec.rows, id: \.0) { row in
+                        LabeledContent(row.0, value: row.1)
+                            .font(.system(size: 14))
+                    }
+                }
+            }
             Section {
                 descriptionText
                     .font(.system(size: 15))
@@ -626,6 +715,13 @@ struct ProgramInfoView: View {
                     LabeledContent("Episode", value: episodeLabel)
                 }
             }
+            if let rec = target.recording {
+                Section("Recording") {
+                    ForEach(rec.rows, id: \.0) { row in
+                        LabeledContent(row.0, value: row.1)
+                    }
+                }
+            }
 
             Section("Description") {
                 descriptionText
@@ -713,6 +809,14 @@ struct ProgramInfoView: View {
                         }
                     }
                     .padding(.top, 6)
+                    if let rec = target.recording {
+                        HStack(spacing: 36) {
+                            ForEach(rec.rows, id: \.0) { row in
+                                infoColumn(title: row.0, value: row.1)
+                            }
+                        }
+                        .padding(.top, 10)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }

@@ -198,6 +198,11 @@ struct DVRView: View {
     }
     /// Page the pager is aligned on; nil = first.
     @State private var heroPageID: String?
+    /// Left from the aligned page's first button: the previous page sits
+    /// entirely off screen, so the focus engine finds nothing. An 8 pt
+    /// catcher at the pager's leading edge takes that hop and hands focus
+    /// to the previous page's last button (Logan 2026-09-08).
+    @FocusState private var heroBackCatcherFocused: Bool
     private var primaryFocusID: String {
         "\(heroPageID ?? heroPages.first.map { "\($0.id)" } ?? "")|primary"
     }
@@ -221,6 +226,7 @@ struct DVRView: View {
                             onPrimary: { heroPrimary(rec) },
                             onSecondary: { heroSecondary(rec) },
                             onStop: { actions.stop(rec) },
+                            onInfo: { showInfo(rec) },
                             focusPrefix: "\(rec.id)",
                             menu: { menuItems(for: rec) })
                         .frame(width: pageWidth)
@@ -229,6 +235,19 @@ struct DVRView: View {
             .offset(x: -CGFloat(index) * (pageWidth + spacing))
             .animation(.smooth(duration: 0.35), value: index)
             .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
+            .overlay(alignment: .leading) {
+                if index > 0 {
+                    Color.clear
+                        .frame(width: 8)
+                        .frame(maxHeight: .infinity)
+                        .focusable(true)
+                        .focused($heroBackCatcherFocused)
+                        .onChange(of: heroBackCatcherFocused) { _, focused in
+                            guard focused, index > 0 else { return }
+                            heroFocus = "\(pages[index - 1].id)|details"
+                        }
+                }
+            }
             .overlay(alignment: .bottom) {
                 if pages.count > 1 {
                     HStack(spacing: 8) {
@@ -584,6 +603,7 @@ struct DVRView: View {
                             onPrimary: { heroPrimary(hero) },
                             onSecondary: { heroSecondary(hero) },
                             onStop: { actions.stop(hero) },
+                            onInfo: { showInfo(hero) },
                             menu: { menuItems(for: hero) })
                     #endif
                 }
@@ -997,7 +1017,37 @@ struct DVRView: View {
             isLiveBroadcast: epg?.isLiveBroadcast ?? false,
             isPremiere: epg?.isPremiere ?? false,
             isFinale: epg?.isFinale ?? false,
-            isRepeat: epg?.isRepeat ?? false)
+            isRepeat: epg?.isRepeat ?? false,
+            recording: recordingFacts(rec))
+    }
+
+    private func recordingFacts(_ rec: Recording) -> RecordingFacts {
+        let path = rec.dispatcharrFileURL ?? rec.localFilePath ?? ""
+        var ext = URL(string: path).map { $0.pathExtension } ?? (path as NSString).pathExtension
+        if ext.isEmpty, let name = rec.remoteFileName ?? rec.localFilePath {
+            ext = (name as NSString).pathExtension
+        }
+        let location: String
+        if rec.destination == .local {
+            location = "This device"
+        } else {
+            location = servers.first(where: { $0.id.uuidString == rec.serverID })?.name ?? "Dispatcharr"
+        }
+        let status: String
+        switch rec.status {
+        case .scheduled: status = "Scheduled"
+        case .recording: status = "Recording"
+        case .completed: status = "Completed"
+        default: status = rec.statusRaw.capitalized
+        }
+        return RecordingFacts(recordedOn: rec.scheduledStart,
+                              windowStart: rec.scheduledStart, windowEnd: rec.scheduledEnd,
+                              fileSizeBytes: rec.fileSizeBytes,
+                              format: ext.lowercased() == "m3u8" ? "HLS" : ext,
+                              location: location, status: status,
+                              videoCodec: rec.videoCodec, resolution: rec.videoResolution,
+                              frameRate: rec.videoFrameRate, videoBitrateKbps: rec.videoBitrateKbps,
+                              audioCodec: rec.audioCodec, audioChannels: rec.audioChannels)
     }
 
     private func select(_ rec: Recording) {
@@ -1301,6 +1351,10 @@ struct DVRHero<Menu: View>: View {
                     focusable(MoviesHeroButton(title: "Play from Beginning", systemImage: "gobackward",
                                                isPrimary: false, action: onSecondary), role: "secondary")
                 }
+            }
+            if let onInfo, !inDeck {
+                focusable(MoviesHeroButton(title: "Details", systemImage: "info.circle",
+                                           isPrimary: false, action: onInfo), role: "details")
             }
         }
         .padding(.top, 4)

@@ -2579,6 +2579,10 @@ struct MoviesHeroCarousel: View {
     /// "<page id>|primary|start|details" of the focused hero button.
     @FocusState private var heroFocus: String?
     @FocusState private var catcherFocused: Bool
+    /// Leading-edge catcher for Left from the aligned page's Resume: the
+    /// previous page is entirely off screen, so the engine finds nothing
+    /// (Logan 2026-09-08, DVR). Lands on the previous page's Details.
+    @FocusState private var backCatcherFocused: Bool
     @State private var lastHeroButton: String?
     private var primaryFocusID: String { "\(currentID ?? pages.first?.id ?? "")|primary" }
 
@@ -2737,6 +2741,19 @@ struct MoviesHeroCarousel: View {
             .offset(x: -CGFloat(index) * (pageWidth + pageSpacing))
             .animation(.smooth(duration: 0.35), value: index)
             .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
+            .overlay(alignment: .leading) {
+                if index > 0 {
+                    Color.clear
+                        .frame(width: 8)
+                        .frame(maxHeight: .infinity)
+                        .focusable(true)
+                        .focused($backCatcherFocused)
+                        .onChange(of: backCatcherFocused) { _, focused in
+                            guard focused, index > 0 else { return }
+                            heroFocus = "\(pages[index - 1].id)|details"
+                        }
+                }
+            }
             .focusedHeroPage($heroFocus)
             .onChange(of: currentID) { old, new in
                 debugLog("[HERO] page \(pageLabel(old)) -> \(pageLabel(new)) (focus \(heroFocus ?? "nil"))")
