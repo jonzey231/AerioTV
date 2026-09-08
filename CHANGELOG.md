@@ -1,5 +1,48 @@
 # Changelog
 
+## v1.8.30 - 2026-09-08
+
+Second media-center beta for the AVPlayer TestFlight testers: MKV
+playback fixes for 4K and DVR titles, the DVR hero paged like Movies and
+TV Shows on Apple TV, and a refresh cadence for the on-demand libraries.
+
+### Added
+
+- Apple TV: the DVR hero pages through Continue Watching the way Movies
+  and TV Shows do, with page dots. Every hero page ends with a Details
+  button that opens Program Info with a Recording block: recorded date,
+  recording window, quality, audio, size, bitrate, format, location and
+  status.
+- Settings > App Behaviors > Refresh Movies and TV Shows: Every Launch,
+  Daily (default) or Weekly. The tabs still open from the saved library
+  at once; this decides whether launch re-sweeps the provider. Pull to
+  refresh always sweeps.
+
+### Fixed
+
+- MKV movies stalling every minute or so on high-bitrate copies: the
+  read-ahead stream could pause its download and then wait for bytes it
+  had stopped fetching. It now wakes the download itself and sizes its
+  buffers to the file.
+- MKV connections dropping about every 110 MB on low-bitrate copies while
+  the read-ahead was paused: a keepalive holds the single provider
+  connection open.
+- Scrubbing an MKV could corrupt the read-ahead buffer with bytes from
+  the previous position, failing segment builds and falling back to the
+  other engine. Fixed at the source, and every span is checked for a
+  cluster header before use.
+- A cue that points at a non-keyframe no longer fails its segment; the
+  previous segment already carries that video.
+- DVR recordings of live channels drifting out of sync during playback:
+  video timing now follows the file's own timestamps, the way VLC plays
+  the same file, instead of a constant frame-rate ladder.
+- Apple TV: moving focus across a hero card's buttons could snap the
+  carousel back to the first card. The hero rows are driven by focus
+  alone now, and Left from a card's first button returns to the previous
+  card.
+- DVR recording size and stream facts from Dispatcharr were never read;
+  the sync now stores them.
+
 ## v1.8.29 - 2026-09-06
 
 Media-center redesign beta for the AVPlayer TestFlight testers: new DVR,

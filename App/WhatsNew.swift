@@ -57,6 +57,19 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.30",
+            title: "What's new in 1.8.30",
+            bullets: [
+                "MKV movies: no more stalls on high-bitrate 4K copies, and scrubbing no longer breaks playback",
+                "DVR: recordings of live channels stay in sync for the whole program",
+                "Apple TV: the DVR hero pages through Continue Watching like Movies and TV Shows",
+                "Details on every DVR hero page, with recording date, quality, size and bitrate",
+                "Apple TV: hero cards stay put while moving across their buttons, and Left returns to the previous card",
+                "Settings: choose how often Movies and TV Shows re-sweep the provider (daily by default)"
+            ],
+            releaseURL: nil
+        ),
+        WhatsNewRelease(
             version: "1.8.29",
             title: "What's new in 1.8.29",
             bullets: [
