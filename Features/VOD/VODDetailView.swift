@@ -367,6 +367,15 @@ struct VODDetailView: View {
                     if item.type == .series, !usesTVMovieLayout {
                         episodeSection
                     }
+                    #if os(iOS)
+                    // Phone: the same TMDB-recommendations-in-library strip
+                    // tvOS has, under the cast (movies) or the episodes
+                    // (series). Logan 2026-09-09.
+                    if !usesTVMovieLayout {
+                        phoneRelatedSection
+                        tvRelatedRefresh
+                    }
+                    #endif
                     if TMDBPosters.isEnabled {
                         TMDBAttributionView(style: .long)
                             .padding(.horizontal, usesTVMovieLayout ? 56 : 16)
@@ -454,8 +463,8 @@ struct VODDetailView: View {
             await loadTMDBPosterIfNeeded()
             #if os(tvOS)
             await loadTMDBBackdropIfNeeded()
-            await loadRelatedIfNeeded()
             #endif
+            await loadRelatedIfNeeded()
         }
         #if os(tvOS)
         .fullScreenCover(item: $bioPerson) { person in
@@ -536,15 +545,21 @@ struct VODDetailView: View {
     }
     @State private var qrLink: QRLink?
     @State private var tvVersionPickerPresented = false
-    /// "Related" strip: TMDB recommendations narrowed to the library.
+    #endif
+    /// "Related" strip: TMDB recommendations narrowed to the library
+    /// (tvOS and iPhone).
     @State private var relatedItems: [VODDisplayItem] = []
     /// The TMDB candidates, kept so the library match can re-run when the
     /// sweep publishes more titles (a page opened 20 s after launch matched
     /// against a near-empty library: 40 candidates -> 0, Logan 2026-09-04).
     @State private var relatedCandidates: [TMDBKnownForItem] = []
-    /// Series page: TMDB id once known, per-season episode info, and the
-    /// episode card that holds focus (drives "In this episode").
+    /// Series page: TMDB id once known.
     @State private var seriesTMDBID: String?
+    @State private var relatedMatchedCount = -1
+    @ObservedObject private var relatedLibrary = VODStore.shared
+    #if os(tvOS)
+    /// Per-season episode info and the episode card that holds focus
+    /// (drives "In this episode").
     @State private var seasonInfo: [Int: [Int: TMDBService.EpisodeInfo]] = [:]
     @FocusState private var focusedEpisodeID: String?
     /// Last episode card that held focus. The people strip keys off this,
@@ -552,8 +567,6 @@ struct VODDetailView: View {
     /// left the card, so Down from a card had nowhere to land (Logan
     /// 2026-09-04: could not reach Cast & Crew).
     @State private var peopleEpisodeID: String?
-    @State private var relatedMatchedCount = -1
-    @ObservedObject private var relatedLibrary = VODStore.shared
 
     /// TMDB backdrop first when a key is set, then the provider's, then a
     /// poster (Logan 2026-09-04: TMDB is the priority, provider the fallback).
@@ -990,13 +1003,15 @@ struct VODDetailView: View {
         .focusSection()
     }
 
+    #endif
+
     /// Related titles (TMDB recommendations, library only). Matching runs
     /// off the main thread over a snapshot: the first version walked all
     /// ~5k titles per suggestion on the main actor and froze the page
     /// (Logan 2026-09-04 16:11).
     @MainActor
     private func loadRelatedIfNeeded() async {
-        guard usesTVMovieLayout, relatedCandidates.isEmpty,
+        guard relatedCandidates.isEmpty,
               TMDBPosters.isEnabled, let apiKey = TMDBPosters.apiKey else { return }
         let isMovie = item.type == .movie
         let stored = [fullMovie?.tmdbID, fullSeries?.tmdbID, item.movie?.tmdbID, item.series?.tmdbID]
@@ -1038,6 +1053,7 @@ struct VODDetailView: View {
         relatedItems = hits
     }
 
+    #if os(tvOS)
     @ViewBuilder
     private var tvRelatedSection: some View {
         if !relatedItems.isEmpty {
@@ -1073,6 +1089,36 @@ struct VODDetailView: View {
         }
     }
 
+    #endif
+    #if os(iOS)
+    /// Phone strip: 110pt posters, 12pt apart, same insets as the cast row.
+    @ViewBuilder
+    private var phoneRelatedSection: some View {
+        if !relatedItems.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Related")
+                    .font(.headlineSmall)
+                    .foregroundColor(.textPrimary)
+                    .padding(.horizontal, 16)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 12) {
+                        ForEach(relatedItems) { related in
+                            Button { pushDetail(related) } label: {
+                                VODPosterCard(item: related, headers: serverHeaders())
+                                    .frame(width: 110)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                }
+            }
+            .padding(.top, 8)
+        }
+    }
+    #endif
+
     /// Re-match once the sweep has published more titles.
     private var tvRelatedRefresh: some View {
         Color.clear.frame(height: 0)
@@ -1081,6 +1127,7 @@ struct VODDetailView: View {
             }
     }
 
+    #if os(tvOS)
     /// Two-column facts block under the cast strip.
     private var tvFacts: [(String, String)] {
         var facts: [(String, String)] = []
