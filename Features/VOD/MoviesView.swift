@@ -204,7 +204,12 @@ struct MoviesView: View {
     @State private var gridTabBarHidden = false
     @State private var tabBarTracker = TabBarScrollTracker()
     /// System search presented (the header's search icon opens it).
-    @State private var searchPresented = false
+    #if os(iOS)
+    @FocusState private var iosSearchFocused: Bool
+    /// Bumped when the phone search opens; the library header's onChange
+    /// scrolls itself to the top (the proxy lives at that call site).
+    @State private var scrollToLibraryTick = 0
+    #endif
     #endif
     @State private var navPath = NavigationPath()
     #if os(tvOS)
@@ -494,12 +499,11 @@ struct MoviesView: View {
             #endif
             #if os(iOS)
             // Phone pass (Logan 2026-09-05): no navigation bar; the hero
-            // starts under the status bar. The bar appears only while the
-            // system search is up, opened from the library header's icon.
-            .toolbar(searchPresented || isSearching ? .visible : .hidden, for: .navigationBar)
-            .searchable(text: $searchText, isPresented: $searchPresented,
-                        placement: .navigationBarDrawer(displayMode: .always),
-                        prompt: "Search \(kindLower)")
+            // starts under the status bar. Search is an inline pill field
+            // under the library header, where the search circle is, like
+            // Android (Logan 2026-09-09); the page scrolls the header to
+            // the top so the results land in view.
+            .toolbar(.hidden, for: .navigationBar)
             #endif
             .task(id: libraryKey) {
                 let movies = libraryItems
@@ -1407,6 +1411,13 @@ struct MoviesView: View {
                                           })
                                 .id("movies-library")
                                 .padding(.leading, contentLeadingInset)
+                                #if os(iOS)
+                                .onChange(of: scrollToLibraryTick) { _, _ in
+                                    withAnimation(.easeInOut(duration: 0.45)) {
+                                        proxy.scrollTo("movies-library", anchor: .top)
+                                    }
+                                }
+                                #endif
                             if isSearching {
                                 if let who = personMatchName {
                                     Text("Includes titles with \(who)")
@@ -2046,6 +2057,13 @@ struct MoviesView: View {
             #if os(tvOS)
             .focusSection()
             #endif
+            #if os(iOS)
+            if showSearchField {
+                iOSSearchField
+                    .padding(.horizontal, 16)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+            #endif
 
             if showPills && !genrePills.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -2074,8 +2092,17 @@ struct MoviesView: View {
     /// (Logan 2026-09-05: no separate row at the top).
     private var iOSHeaderControls: some View {
         HStack(spacing: 8) {
-            Button { searchPresented = true } label: { iOSCircle("magnifyingglass") }
-                .accessibilityLabel("Search")
+            Button {
+                withAnimation(.spring(response: 0.3)) {
+                    if showSearchField { clearSearch() } else { showSearchField = true }
+                }
+                if showSearchField {
+                    scrollToLibraryTick += 1
+                    // Keyboard after the row has appeared.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { iosSearchFocused = true }
+                }
+            } label: { iOSCircle("magnifyingglass") }
+                .accessibilityLabel(showSearchField ? "Close search" : "Search")
             Menu {
                 ForEach(MoviesSortOrder.allCases, id: \.self) { order in
                     Button {
@@ -2093,6 +2120,33 @@ struct MoviesView: View {
             Button { showManageGroups = true } label: { iOSCircle("line.3.horizontal.decrease") }
                 .accessibilityLabel("Manage Groups")
         }
+    }
+
+    /// Pill search field under the library header (phone).
+    private var iOSSearchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.textSecondary)
+            TextField("Search \(kindLower)", text: $searchText)
+                .font(.system(size: 16))
+                .foregroundColor(.textPrimary)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+                .focused($iosSearchFocused)
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(.textSecondary)
+                }
+                .accessibilityLabel("Clear")
+            }
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 40)
+        .background(Capsule().fill(Color.elevatedBackground))
     }
 
     private func iOSCircle(_ systemImage: String) -> some View {
