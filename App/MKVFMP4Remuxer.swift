@@ -1242,37 +1242,45 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
             throw MKVRemuxError(reason: "audio segment \(index): no frames for track \(trackNumber)")
         }
 
-        var durations = [Int64](repeating: 2880, count: samples.count)
-        if samples.count > 1 {
-            var deltas: [Int64] = []
-            for i in 0..<(samples.count - 1) {
-                let d = max(300, samples[i + 1].ptsTicks - samples[i].ptsTicks)
-                durations[i] = d
-                deltas.append(d)
+        // Same rule as the A/V build: codec frame durations, and a new
+        // fragment at every timeline gap, so a rendition track cannot creep
+        // ahead of the video either.
+        let nominal = audioFrameDurationTicks(samples, track: track)
+        var runs: [[Sample]] = []
+        var run: [Sample] = []
+        for a in samples {
+            if let last = run.last, abs(a.ptsTicks - (last.ptsTicks + nominal)) > nominal / 2, runs.count < 14 {
+                runs.append(run); run = []
             }
-            durations[samples.count - 1] = deltas.sorted()[deltas.count / 2]
+            run.append(a)
         }
-        let audioBytes = samples.reduce(0) { $0 + $1.data.count }
-        func moof(_ off: Int) -> Data {
-            let mfhd = Self.fullBox("mfhd", 0, 0, Self.u32(index + 1))
-            var body = Data(capacity: 16 + samples.count * 8)
-            body.append(Self.u32(samples.count)); body.append(Self.u32(off))
-            for (i, s) in samples.enumerated() {
-                body.append(Self.u32(Int(durations[i])))
-                body.append(Self.u32(s.data.count))
+        if !run.isEmpty { runs.append(run) }
+        func fragment(seq: Int, _ frames: [Sample]) -> Data {
+            let bytes = frames.reduce(0) { $0 + $1.data.count }
+            func moof(_ off: Int) -> Data {
+                var body = Data(capacity: 16 + frames.count * 8)
+                body.append(Self.u32(frames.count)); body.append(Self.u32(off))
+                for f in frames {
+                    body.append(Self.u32(Int(nominal)))
+                    body.append(Self.u32(f.data.count))
+                }
+                return Self.box("moof", Self.fullBox("mfhd", 0, 0, Self.u32(seq)), Self.box("traf",
+                    Self.fullBox("tfhd", 0, 0x020000, Self.u32(Self.audioTrackID)),
+                    Self.fullBox("tfdt", 1, 0, Self.u64(UInt64(max(0, frames[0].ptsTicks + Self.timelineOffsetTicks)))),
+                    Self.fullBox("trun", 0, 0x000301, body)))
             }
-            return Self.box("moof", mfhd, Self.box("traf",
-                Self.fullBox("tfhd", 0, 0x020000, Self.u32(Self.audioTrackID)),
-                Self.fullBox("tfdt", 1, 0, Self.u64(UInt64(max(0, firstSample.ptsTicks)))),
-                Self.fullBox("trun", 0, 0x000301, body)))
+            let m = moof(moof(0).count + 8)
+            var out = Data(capacity: m.count + 8 + bytes)
+            out.append(m)
+            out.append(Self.u32(8 + bytes))
+            out.append(Self.bytes("mdat"))
+            for f in frames { out.append(contentsOf: f.data) }
+            return out
         }
-        var m = moof(0)
-        m = moof(m.count + 8)
-        var out = Data(capacity: m.count + 8 + audioBytes)
-        out.append(m)
-        out.append(Self.u32(8 + audioBytes))
-        out.append(Self.bytes("mdat"))
-        for s in samples { out.append(contentsOf: s.data) }
+        var out = Data()
+        let seqBase = (index + 1) * 16
+        for (j, r) in runs.enumerated() { out.append(fragment(seq: seqBase + j, r)) }
+        _ = firstSample
         return out
     }
 
@@ -1971,27 +1979,76 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         }
     }
 
+    /// Constant added to every emitted decode/presentation base (Apple's
+    /// segmenter uses the same 10 s) so no fragment ever needs clamping.
+    static let timelineOffsetTicks: Int64 = 10 * ticksPerSecond
+
+    /// Audio-master retiming state (see writeSegment). The renderer plays
+    /// audio samples back to back and does not re-anchor on small
+    /// timestamp gaps between fragments, so sequential builds carry the
+    /// accumulated slip; a non-sequential build (seek) starts over because
+    /// the player flushed and re-anchored.
+    private var audioTimelineEnd: Int64?
+    private var lastTimedSegment = Int.min
+
     private func writeSegment(index: Int, seg: SegmentInfo,
                               video: [Sample], audio: [Sample]) -> Data {
-        // Timing follows the FILE's timestamps, the way VLC and ffmpeg play
-        // it. The first cut laid video on a constant-rate ladder (dts_i =
-        // base + i*frameDuration, cts absorbing the difference) and that
-        // broke on live captures (Roman, S28E36 2026-09-08, played fine in
-        // VLC): timestamps rounded to whole ms made the median period 17 ms
-        // against a true 16.683, and the source dropped 30-50 ms of A/V
-        // every 4 s. Each 6 s fragment then declared ~60 ms more video than
-        // it spanned, consecutive fragments overlapped in dts, and the
-        // player resynced audio against the gaps and overlaps.
-        //
-        // Now: dts is the sorted pts sequence shifted back by a constant
-        // reorder lead (so cts = pts - dts stays >= 0), each sample lasts
-        // until the next dts, and fragments tile exactly because both ends
-        // are real timestamps.
+        // Timing follows the AUDIO SAMPLE CLOCK, the way VLC plays this
+        // class of file. A live capture loses audio frames (Suits: about
+        // one 32 ms frame every 15 s) and rounds timestamps to whole ms.
+        // Two earlier cuts failed on it: a constant-rate video ladder
+        // (fragments overlapped), then real-timestamp durations with the
+        // audio re-anchored per fragment (the renderer ignores a 15 ms
+        // gap and keeps playing samples, so audio still crept ahead ~17 ms
+        // per fragment, Logan 2026-09-08). Now audio is declared strictly
+        // contiguous at its codec frame duration, and every video
+        // timestamp is pulled back by the audio time lost before it, so
+        // the picture stays with the sound. Audio time lost is carried
+        // across consecutive segments and reset on a seek.
+        let sec = { (t: Int64) in Double(t) / Double(Self.ticksPerSecond) }
+        let nominalAudio = audioFrameDurationTicks(audio)
+        var slipIn: Int64 = 0
+        if let a0 = audio.first?.ptsTicks {
+            if index == lastTimedSegment + 1, let end = audioTimelineEnd {
+                // Continue the contiguous audio line from where the last
+                // fragment's samples ended. Clamp: a jump of more than 2 s
+                // is a real discontinuity the renderer WILL honor.
+                let gap = a0 - end
+                slipIn = (gap > -nominalAudio && gap < 2 * Self.ticksPerSecond) ? gap : 0
+            }
+        }
+        // Within the segment: audio frame k plays at a0 - slipIn + k*nominal.
+        // The lost time before any instant t is (pts of the last audio frame
+        // at or before t) - (its contiguous time).
+        var audioPts: [Int64] = []
+        var audioLoss: [Int64] = []       // pts_k - contiguous_k, monotone-ish
+        if let a0 = audio.first?.ptsTicks {
+            audioPts.reserveCapacity(audio.count); audioLoss.reserveCapacity(audio.count)
+            for (k, a) in audio.enumerated() {
+                audioPts.append(a.ptsTicks)
+                audioLoss.append(a.ptsTicks - (a0 - slipIn + Int64(k) * nominalAudio))
+            }
+        }
+        func lossBefore(_ t: Int64) -> Int64 {
+            guard !audioPts.isEmpty else { return slipIn }
+            // Last audio frame with pts <= t (binary search).
+            var lo = 0, hi = audioPts.count - 1, best = -1
+            while lo <= hi {
+                let mid = (lo + hi) / 2
+                if audioPts[mid] <= t { best = mid; lo = mid + 1 } else { hi = mid - 1 }
+            }
+            return best >= 0 ? audioLoss[best] : slipIn
+        }
+
+        // Video: shift each pts by the audio time lost before it, then keep
+        // presentation order strictly increasing (two frames that straddled
+        // a lost audio frame now collide; the later one shows for one tick,
+        // the same drop VLC makes).
         let n = video.count
+        var shiftedPts = video.map { $0.ptsTicks - lossBefore($0.ptsTicks) }
         var frameDur = frameDurationTicks
-        let sortedPts = video.map(\.ptsTicks).sorted()
+        var sortedPts = shiftedPts.sorted()
         if n > 2 {
-            // Robust period: mean of the deltas that are not discontinuities.
             var deltas: [Int64] = []
             for i in 1..<sortedPts.count { deltas.append(sortedPts[i] - sortedPts[i - 1]) }
             let med = deltas.sorted()[deltas.count / 2]
@@ -2001,76 +2058,92 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
                 if mean > 300 { frameDur = mean }
             }
         }
-        // Reorder depth: how far a frame's decode index runs ahead of its
-        // presentation rank. B-pyramids give 2-4; the +1 is slack for a
-        // discontinuity landing inside the reorder window.
+        // De-duplicate collided presentation times in decode order: bump
+        // the later frame by one tick over the highest earlier pts it ties.
+        if n > 1 {
+            var seen = Set<Int64>()
+            for i in 0..<n {
+                var p = shiftedPts[i]
+                while seen.contains(p) { p += 1 }
+                seen.insert(p); shiftedPts[i] = p
+            }
+            sortedPts = shiftedPts.sorted()
+        }
         var rank: [Int64: Int] = [:]
         for (r, p) in sortedPts.enumerated() where rank[p] == nil { rank[p] = r }
         var reorder = 0
-        for (i, sample) in video.enumerated() {
-            reorder = max(reorder, i - (rank[sample.ptsTicks] ?? i))
-        }
+        for (i, p) in shiftedPts.enumerated() { reorder = max(reorder, i - (rank[p] ?? i)) }
         let lead = Int64(reorder + 1) * frameDur
         var dts = sortedPts.map { $0 - lead }
-        // Whole-ms timestamps can collide; keep dts strictly increasing.
         for i in 1..<max(1, n) where dts[i] <= dts[i - 1] { dts[i] = dts[i - 1] + 1 }
         var videoDurations = [Int64](repeating: frameDur, count: n)
         for i in 0..<max(0, n - 1) { videoDurations[i] = max(1, dts[i + 1] - dts[i]) }
 
-        let videoBytes = video.reduce(0) { $0 + $1.data.count }
-        let audioBytes = audio.reduce(0) { $0 + $1.data.count }
-        // TRUE per-frame durations from successive pts deltas (last frame
-        // gets the median). The old single averaged tick smeared any real
-        // gap across every frame's declared timing - audible as
-        // progressive desync snapping back at each segment (2026-08-25
-        // field find). Explicit deltas keep the timeline honest, holes
-        // included.
-        var audioDurations = [Int64](repeating: 2880, count: audio.count)
-        if audio.count > 1 {
-            var deltas: [Int64] = []
-            for i in 0..<(audio.count - 1) {
-                let d = max(300, audio[i + 1].ptsTicks - audio[i].ptsTicks)
-                audioDurations[i] = d
-                deltas.append(d)
-            }
-            audioDurations[audio.count - 1] = deltas.sorted()[deltas.count / 2]
+        // Audio out: contiguous from a0 - slipIn.
+        let audioStart: Int64 = (audio.first?.ptsTicks ?? 0) - slipIn
+        // Every emitted timestamp carries a constant 10 s offset, the same
+        // one Apple's segmenter applies. Without it the first segment's
+        // video decode time (pts minus the reorder lead) is negative; it
+        // was clamped to 0 while the composition offsets were not, so
+        // segment 0 presented every frame `lead` late and segment 1's
+        // tfdt then jumped backwards (Apple HLS authoring rule 7.3), an
+        // undefined seam for the player (agent review 2026-09-08).
+        let timelineOffset = Self.timelineOffsetTicks
+        let audioEnd = audioStart + Int64(audio.count) * nominalAudio
+        if !audio.isEmpty {
+            audioTimelineEnd = audioEnd
+            lastTimedSegment = index
         }
 
-        func moof(_ vOff: Int, _ aOff: Int) -> Data {
-            let mfhd = Self.fullBox("mfhd", 0, 0, Self.u32(index + 1))
-            var vbody = Data(capacity: 16 + n * 16)
-            vbody.append(Self.u32(n)); vbody.append(Self.u32(vOff))
-            for i in 0..<n {
-                vbody.append(Self.u32(Int(videoDurations[i])))
-                vbody.append(Self.u32(video[i].data.count))
-                vbody.append(Self.u32(video[i].keyframe ? 0x02000000 : 0x01010000))
-                vbody.append(Self.u32(Int(max(0, video[i].ptsTicks - dts[i]))))
+        if n > 0 || !audio.isEmpty {
+            var line = String(format: "[MKV-TIMING] seg %d slip %+.3f", index, sec(slipIn))
+            if n > 0 {
+                line += String(format: " | video n=%d pts %.3f-%.3f out %.3f-%.3f declared %.3f",
+                               n, sec(video.map(\.ptsTicks).min()!), sec(video.map(\.ptsTicks).max()!),
+                               sec(sortedPts.first!), sec(sortedPts.last!), sec(videoDurations.reduce(0, +)))
             }
+            if let a0 = audio.first, let a1 = audio.last {
+                line += String(format: " | audio n=%d frame %.1fms pts %.3f-%.3f out %.3f-%.3f lost %.3f",
+                               audio.count, Double(nominalAudio) / 90, sec(a0.ptsTicks), sec(a1.ptsTicks),
+                               sec(audioStart), sec(audioEnd), sec(audioLoss.last ?? 0))
+            }
+            debugLog(line)
+        }
+
+        let videoBytes = video.reduce(0) { $0 + $1.data.count }
+        let audioBytes = audio.reduce(0) { $0 + $1.data.count }
+        func moof(_ vOff: Int, _ aOff: Int) -> Data {
             var trafs: [Data] = []
             if n > 0 {
+                var vbody = Data(capacity: 16 + n * 16)
+                vbody.append(Self.u32(n)); vbody.append(Self.u32(vOff))
+                for i in 0..<n {
+                    vbody.append(Self.u32(Int(videoDurations[i])))
+                    vbody.append(Self.u32(video[i].data.count))
+                    vbody.append(Self.u32(video[i].keyframe ? 0x02000000 : 0x01010000))
+                    vbody.append(Self.u32(Int(max(0, shiftedPts[i] - dts[i]))))
+                }
                 trafs.append(Self.box("traf",
                     Self.fullBox("tfhd", 0, 0x020000, Self.u32(Self.videoTrackID)),
-                    Self.fullBox("tfdt", 1, 0, Self.u64(UInt64(max(0, dts[0])))),
+                    Self.fullBox("tfdt", 1, 0, Self.u64(UInt64(max(0, dts[0] + timelineOffset)))),
                     Self.fullBox("trun", 1, 0x000F01, vbody)))
             }
-            if let firstAudio = audio.first {
+            if !audio.isEmpty {
                 var abody = Data(capacity: 16 + audio.count * 8)
                 abody.append(Self.u32(audio.count)); abody.append(Self.u32(aOff))
-                for (i, a) in audio.enumerated() {
-                    abody.append(Self.u32(Int(audioDurations[i])))
+                for a in audio {
+                    abody.append(Self.u32(Int(nominalAudio)))
                     abody.append(Self.u32(a.data.count))
                 }
                 trafs.append(Self.box("traf",
                     Self.fullBox("tfhd", 0, 0x020000, Self.u32(Self.audioTrackID)),
-                    Self.fullBox("tfdt", 1, 0, Self.u64(UInt64(max(0, firstAudio.ptsTicks)))),
+                    Self.fullBox("tfdt", 1, 0, Self.u64(UInt64(max(0, audioStart + timelineOffset)))),
                     Self.fullBox("trun", 0, 0x000301, abody)))
             }
-            return Self.box("moof", mfhd, Self.concat(trafs))
+            return Self.box("moof", Self.fullBox("mfhd", 0, 0, Self.u32(index + 1)), Self.concat(trafs))
         }
-
-        var m = moof(0, 0)
-        let msize = m.count
-        m = moof(msize + 8, msize + 8 + videoBytes)
+        let msize = moof(0, 0).count
+        let m = moof(msize + 8, msize + 8 + videoBytes)
         var out = Data(capacity: m.count + 8 + videoBytes + audioBytes)
         out.append(m)
         out.append(Self.u32(8 + videoBytes + audioBytes))
@@ -2078,6 +2151,36 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         for s in video { out.append(contentsOf: s.data) }
         for a in audio { out.append(contentsOf: a.data) }
         return out
+    }
+
+    /// The codec's frame duration in 90 kHz ticks, checked against the
+    /// observed spacing so a doubled-frame AAC (SBR) or an unknown codec
+    /// still lands on the right value.
+    private func audioFrameDurationTicks(_ frames: [Sample], track: TrackInfo? = nil) -> Int64 {
+        let track = track ?? audio
+        let rate = Int64(max(8000, track?.sampleRate ?? 48000))
+        var samples: Int64 = 1536
+        if let id = track?.codecID {
+            if id.hasPrefix("A_AAC") { samples = 1024 }
+            else if id.hasPrefix("A_MPEG/L3") || id.hasPrefix("A_MPEG/L2") { samples = 1152 }
+            else if id == "A_OPUS" { samples = 960 }
+            else if id == "A_FLAC" || id.hasPrefix("A_PCM") { samples = 0 }
+        }
+        var nominal = samples > 0 ? samples * Self.ticksPerSecond / rate : 0
+        // Observed spacing: median of deltas.
+        var median: Int64 = 0
+        if frames.count > 2 {
+            var deltas: [Int64] = []
+            for i in 1..<frames.count { deltas.append(frames[i].ptsTicks - frames[i - 1].ptsTicks) }
+            median = deltas.sorted()[deltas.count / 2]
+        }
+        if nominal > 0, median > 0 {
+            // SBR/doubled frames present as ~2x the table value.
+            if abs(median - nominal * 2) < abs(median - nominal) { nominal *= 2 }
+        } else if nominal == 0 {
+            nominal = median > 0 ? median : 2880
+        }
+        return max(300, nominal)
     }
 
     // MARK: stats

@@ -33,9 +33,13 @@ TV Shows on Apple TV, and a refresh cadence for the on-demand libraries.
   cluster header before use.
 - A cue that points at a non-keyframe no longer fails its segment; the
   previous segment already carries that video.
-- DVR recordings of live channels drifting out of sync during playback:
-  video timing now follows the file's own timestamps, the way VLC plays
-  the same file, instead of a constant frame-rate ladder.
+- DVR recordings of live channels drifting out of sync during playback,
+  and a small constant audio lead on completed recordings. Audio is now
+  the timing master (a dropped audio frame no longer lets the sound run
+  ahead of the picture), and every fragment carries the same 10 s
+  timeline offset so the first segment is never clamped.
+- Play from Beginning now clears the saved position at once, so backing
+  out within the first seconds no longer resumes at the old spot.
 - Apple TV: moving focus across a hero card's buttons could snap the
   carousel back to the first card. The hero rows are driven by focus
   alone now, and Left from a card's first button returns to the previous

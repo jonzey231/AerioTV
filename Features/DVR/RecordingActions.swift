@@ -145,6 +145,11 @@ struct RecordingActions {
         let dvrVodID = rec.watchProgressID ?? "dvr-\(remoteID)"
         let resume: Int32?
         if fromStart {
+            // Play from Beginning discards the saved position now, not at
+            // exit: backing out inside the first two seconds saves nothing,
+            // which left the old position for the next Resume (Logan
+            // 2026-09-08, Suits). Same rule the local-file path applies.
+            WatchProgressManager.delete(vodID: dvrVodID, serverID: rec.serverID)
             resume = isDVR ? 0 : nil
         } else if isDVR, liveEdge {
             resume = nil
