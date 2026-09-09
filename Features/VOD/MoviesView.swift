@@ -257,6 +257,13 @@ struct MoviesView: View {
     /// ScrollViewReader.scrollTo(id) silently no-ops for lazy grid rows
     /// that have not been built yet (device log 2026-09-03).
     private final class ScrollGeometryBox {
+        /// The ScrollView's position, held OUTSIDE @State: bound as @State
+        /// it wrote view state on every scroll frame and re-rendered the
+        /// whole tab (phone probe 2026-09-09: 102 of 128 layout passes over
+        /// 12 ms during a bounce, plus a re-grab after it). Programmatic
+        /// scrolls go through scrollContent(toY:), which bumps a tick so the
+        /// ScrollView re-reads the binding once.
+        var position = ScrollPosition()
         var contentOffsetY: CGFloat = 0
         var gridTopVisible: CGFloat = 0
         var rowPitch: CGFloat = 0
@@ -265,13 +272,14 @@ struct MoviesView: View {
     var viewportHeight: CGFloat = 0
     }
     @State private var geometryBox = ScrollGeometryBox()
-    // @State on purpose: a class-held position behind a custom Binding let
-    // SwiftUI re-apply a stale value on re-render and snapped the page back
-    // to the hero mid-scroll (Logan 2026-09-09 recording). The per-frame
-    // cost that motivated it is handled by the rail-write throttle and the
-    // tab bar overscroll guard instead.
-    @State private var scrollPosition = ScrollPosition()
-    private func scrollContent(toY y: CGFloat) { scrollPosition.scrollTo(y: y) }
+    @State private var scrollPositionTick = 0
+    private var scrollPositionBinding: Binding<ScrollPosition> {
+        Binding(get: { geometryBox.position }, set: { geometryBox.position = $0 })
+    }
+    private func scrollContent(toY y: CGFloat) {
+        geometryBox.position.scrollTo(y: y)
+        scrollPositionTick += 1
+    }
     #if os(tvOS)
     @FocusState private var railCatcherFocused: Bool
     #endif
@@ -1461,7 +1469,8 @@ struct MoviesView: View {
                 // Alphabet rail: pinned to the leading edge, jumps the
                 // library grid to the first title for a letter.
                 .coordinateSpace(name: "moviesScroll")
-                .scrollPosition($scrollPosition)
+                .scrollPosition(scrollPositionBinding)
+                .onChange(of: scrollPositionTick) { _, _ in }
                 .onPreferenceChange(GridTopKey.self) { gridTopY in
                     guard let gridTopY else { return }
                     geometryBox.gridTopVisible = gridTopY
