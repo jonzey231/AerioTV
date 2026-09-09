@@ -2135,14 +2135,17 @@ struct MoviesView: View {
                 .autocorrectionDisabled()
                 .submitLabel(.search)
                 .focused($iosSearchFocused)
-            if !searchText.isEmpty {
-                Button { searchText = "" } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 16))
-                        .foregroundColor(.textSecondary)
-                }
-                .accessibilityLabel("Clear")
+            // Always shown: clears the query and closes the field (Logan
+            // 2026-09-09).
+            Button {
+                iosSearchFocused = false
+                withAnimation(.spring(response: 0.25)) { clearSearch() }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundColor(.textSecondary)
             }
+            .accessibilityLabel("Clear and close search")
         }
         .padding(.horizontal, 14)
         .frame(height: 40)
