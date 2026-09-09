@@ -569,6 +569,7 @@ struct DVRView: View {
                             onPrimary: { heroPrimary(hero) },
                             onSecondary: { heroSecondary(hero) },
                             onStop: { actions.stop(hero) },
+                            onInfo: { showInfo(hero) },
                             menu: { menuItems(for: hero) })
                 }
                 #else
@@ -1331,6 +1332,16 @@ struct DVRHero<Menu: View>: View {
         .frame(maxHeight: .infinity, alignment: .bottom)
     }
 
+    /// Secondary hero buttons are icon-only circles on the phone, labelled
+    /// pills on tvOS (same rule as MoviesHeroCard).
+    private func secondaryTitle(_ title: String) -> String {
+        #if os(tvOS)
+        return title
+        #else
+        return ""
+        #endif
+    }
+
     private var actions: some View {
         HStack(spacing: 12) {
             if recording.isInProgress {
@@ -1348,12 +1359,17 @@ struct DVRHero<Menu: View>: View {
                                            isPrimary: true, action: onPrimary)
                             .contextMenu { menu() }, role: "primary")
                 if progress > 0 {
-                    focusable(MoviesHeroButton(title: "Play from Beginning", systemImage: "gobackward",
+                    // iPhone: icon circle like the Movies / TV Shows hero and
+                    // the Android DVR card (Logan 2026-09-09); tvOS keeps the
+                    // labelled pill.
+                    focusable(MoviesHeroButton(title: secondaryTitle("Play from Beginning"), systemImage: "gobackward",
                                                isPrimary: false, action: onSecondary), role: "secondary")
                 }
             }
-            if let onInfo, !inDeck {
-                focusable(MoviesHeroButton(title: "Details", systemImage: "info.circle",
+            // Details on every card, deck included (was hidden in the phone
+            // decks; Android and the Movies hero always show it).
+            if let onInfo {
+                focusable(MoviesHeroButton(title: secondaryTitle("Details"), systemImage: "info.circle",
                                            isPrimary: false, action: onInfo), role: "details")
             }
         }
