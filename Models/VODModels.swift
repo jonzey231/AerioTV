@@ -1239,8 +1239,10 @@ struct VODDisplayItem: Identifiable, Hashable, Codable {
             let rest = String(s[r.upperBound...]).trimmingCharacters(in: .whitespaces)
             if !rest.isEmpty { s = rest }
         }
-        // Trailing tag groups, repeated: (2026) (GB) (DUAL/ES) (MULTI) [1080p] [4K].
-        while let r = s.range(of: #"\s*(\((19|20)\d{2}\)|\([A-Z]{2,3}(/[A-Z]{2,3})*\)|\((DUAL|MULTI)(/[A-Z]{2,3})*\)|\[[^\]]{1,12}\])\s*$"#,
+        // Trailing tag groups, repeated: (2026) (GB) (DUAL/ES) (MULTI) [1080p] [4K],
+        // and a bare " - 2023" year the way some providers append it (the
+        // year has its own line; Android already dropped it, 2026-09-09).
+        while let r = s.range(of: #"\s*(\((19|20)\d{2}\)|[-\u{2013}]\s*(19|20)\d{2}|\([A-Z]{2,3}(/[A-Z]{2,3})*\)|\((DUAL|MULTI)(/[A-Z]{2,3})*\)|\[[^\]]{1,12}\])\s*$"#,
                                 options: .regularExpression) {
             let head = s[..<r.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
             guard !head.isEmpty else { break }
