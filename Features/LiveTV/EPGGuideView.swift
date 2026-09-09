@@ -5316,12 +5316,15 @@ private struct GuideChannelButton: View {
                 // both show.
                 // Display only: favorites are added and removed from the
                 // long-press menu (Logan 2026-09-05).
+                // Centred on the same line as the 9pt catch-up clock (top 3 +
+                // 4.5 = 7.5): 2 + 11 / 2 = 7.5 (Logan 2026-09-09: the star sat
+                // below the clock).
                 if favoritesStore.isFavorite(channel.id) {
                     Image(systemName: "star.fill")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.statusWarning)
-                        .padding(6)
-                        .padding(.trailing, channel.hasCatchup ? 12 : 0)
+                        .padding(.top, 2)
+                        .padding(.trailing, channel.hasCatchup ? 17 : 3)
                         .allowsHitTesting(false)
                 }
             }
