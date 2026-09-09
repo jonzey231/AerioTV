@@ -1494,9 +1494,10 @@ struct MoviesView: View {
                     // Written every frame, it capped scrolling at ~40 layout
                     // passes a second (Logan 2026-09-09, probe).
                     let want = gridTopY <= 110 && searchText.isEmpty
-                    if want != railVisible {
-                        withAnimation(.easeInOut(duration: 0.25)) { railVisible = want }
-                    }
+                    // No global animation transaction here: the rail animates
+                    // itself (see railMounted). A withAnimation around this
+                    // write animated the scroll view's own pending layout.
+                    if want != railVisible { railVisible = want }
                     if want {
                         let top = (max(0, gridTopY) / 8).rounded() * 4
                         if railTop != top { railTop = top }
@@ -1678,7 +1679,17 @@ struct MoviesView: View {
                 // Shown only while focus is in the grid or on the rail itself:
                 // it slides in from the left edge on the first poster focus and
                 // stays out of the way of the hero and shelves (Logan 2026-09-05).
-                if searchText.isEmpty, let railTop, railVisible {
+                // iPhone: the rail stays MOUNTED and fades with a local
+                // animation. Inserting it as a sibling with a transition
+                // inside a global withAnimation caught the scroll as the pills
+                // left the screen and bounced it twice at the top (Logan
+                // 2026-09-09). tvOS keeps the focus-driven mount.
+                #if os(tvOS)
+                let railMounted = searchText.isEmpty && railTop != nil && railVisible
+                #else
+                let railMounted = searchText.isEmpty && railTop != nil
+                #endif
+                if railMounted, let railTop {
                     ZStack(alignment: .topLeading) {
                         #if os(tvOS)
                         // Invisible catcher under the letters: if the focus
@@ -1789,7 +1800,10 @@ struct MoviesView: View {
                                alignment: .topTrailing)
                         .clipped()
                         .padding(.trailing, 2)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                        .opacity(railVisible ? 1 : 0)
+                        .offset(x: railVisible ? 0 : 24)
+                        .allowsHitTesting(railVisible)
+                        .animation(.easeInOut(duration: 0.25), value: railVisible)
                         #endif
                     }
                     #if os(tvOS)
@@ -2499,22 +2513,24 @@ struct VODPosterCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             // Poster image — uses authenticated fetch so Dispatcharr /media/ images load correctly
-            ZStack {
-                // Spinner where the poster will be ONLY while there is no art
-                // URL yet (Logan 2026-09-09). An animating ProgressView under
-                // every poster in the lazy grid kept invalidating layout and
-                // the page jumped back and stuck while scrolling.
-                if posterURL != nil {
-                    AuthPosterImage(url: posterURL, headers: headers)
-                        .aspectRatio(2/3, contentMode: .fill)
-                        .clipped()
-                } else {
-                    Rectangle()
-                        .fill(Color.cardBackground)
-                        .aspectRatio(2/3, contentMode: .fit)
-                        .overlay { ProgressView().tint(.textTertiary).scaleEffect(0.8) }
+            // The 2:3 box is the SIZE ANCHOR and never changes: the image is
+            // an overlay on it. With the image as the cell's only child, the
+            // placeholder colour had no height until the art arrived and the
+            // grid reflowed under the finger as posters loaded (Logan
+            // 2026-09-09). Spinner only while there is no art URL at all; an
+            // animating ProgressView under every poster invalidated layout.
+            Rectangle()
+                .fill(Color.cardBackground)
+                .aspectRatio(2/3, contentMode: .fit)
+                .overlay {
+                    if posterURL != nil {
+                        AuthPosterImage(url: posterURL, headers: headers)
+                            .aspectRatio(2/3, contentMode: .fill)
+                    } else {
+                        ProgressView().tint(.textTertiary).scaleEffect(0.8)
+                    }
                 }
-            }
+                .clipped()
             #if os(tvOS)
             // Fill the cell: a fixed 200x300 poster left every wider grid
             // cell as empty gap (Logan 2026-09-04, "too spread out").
