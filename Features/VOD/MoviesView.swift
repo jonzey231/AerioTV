@@ -2491,18 +2491,19 @@ struct VODPosterCard: View {
         VStack(alignment: .leading, spacing: 6) {
             // Poster image — uses authenticated fetch so Dispatcharr /media/ images load correctly
             ZStack {
-                // A small spinner where the poster will be while the art is
-                // missing, loading, or failed; the title sits under the box
-                // (Logan 2026-09-09, both platforms). The image draws over it
-                // once it lands.
-                Rectangle()
-                    .fill(Color.cardBackground)
-                    .aspectRatio(2/3, contentMode: .fit)
-                    .overlay { ProgressView().tint(.textTertiary).scaleEffect(0.8) }
+                // Spinner where the poster will be ONLY while there is no art
+                // URL yet (Logan 2026-09-09). An animating ProgressView under
+                // every poster in the lazy grid kept invalidating layout and
+                // the page jumped back and stuck while scrolling.
                 if posterURL != nil {
                     AuthPosterImage(url: posterURL, headers: headers)
                         .aspectRatio(2/3, contentMode: .fill)
                         .clipped()
+                } else {
+                    Rectangle()
+                        .fill(Color.cardBackground)
+                        .aspectRatio(2/3, contentMode: .fit)
+                        .overlay { ProgressView().tint(.textTertiary).scaleEffect(0.8) }
                 }
             }
             #if os(tvOS)
