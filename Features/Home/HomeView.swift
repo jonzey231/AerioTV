@@ -7368,7 +7368,14 @@ extension View {
             // in scrollAwayTabBar is the bar's sole authority and restores
             // reliably - full Android behavior: bar hides on scroll down,
             // full bar returns on any scroll up.
-            self.tabBarMinimizeBehavior(.never)
+            // 2026-09-09 trial (Logan, iPhone scroll "catch" on the first
+            // scroll up after a deep dive): the manual hidden/visible toggle
+            // changes the scroll view's bottom inset when the bar returns,
+            // which reflows the grid mid-gesture. The system minimize keeps
+            // the inset constant, so the bar shrinks and grows with no
+            // content movement. scrollAwayTabBar is a no-op while this is
+            // on; revert both if the minimized pill is not wanted.
+            self.tabBarMinimizeBehavior(.onScrollDown)
         } else {
             self
         }
@@ -7398,7 +7405,10 @@ extension View {
     func scrollAwayTabBar(collapsed: Bool) -> some View {
         #if os(iOS)
         if #available(iOS 26.0, *) {
-            self.toolbarVisibility(collapsed ? .hidden : .visible, for: .tabBar)
+            // System minimize owns the bar on 26+ (aerioTabBarAutoMinimize);
+            // toggling visibility here changed the bottom inset and reflowed
+            // the content on every show (2026-09-09).
+            self
         } else {
             self.toolbar(collapsed ? .hidden : .visible, for: .tabBar)
         }
