@@ -1119,13 +1119,20 @@ struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
                 ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
                     let raw = (CGFloat(i) - p).truncatingRemainder(dividingBy: CGFloat(count))
                     let wrapped = raw < 0 ? raw + CGFloat(count) : raw
-                    let rel = (count > 1 && wrapped >= CGFloat(count) - 1 - 0.0001) ? wrapped - CGFloat(count) : wrapped
+                    // Single card: no wrap or stack; it follows the finger with
+                    // a dampened drag and springs back (Logan 2026-09-09: the
+                    // wrapped position moved and faded it, which read as the
+                    // image reloading).
+                    let single = count == 1
+                    let rel: CGFloat = single ? 0
+                        : ((wrapped >= CGFloat(count) - 1 - 0.0001) ? wrapped - CGFloat(count) : wrapped)
                     // Only the cards that can be seen are built: the current
                     // one, three behind it and the parked previous one. A
                     // ten-item deck was laying out ten hero views per drag
                     // frame (Logan 2026-09-06, "very laggy").
                     if rel > -1.5 && rel < 3.5 {
-                    let x: CGFloat = rel >= 0
+                    let x: CGFloat = single ? margin + dragX * 0.35
+                        : rel >= 0
                         ? margin + rel * peek
                         : margin + max(rel, -1) * (w - parkedSliver + margin) - max(0, -rel - 1) * 4
                     let scale: CGFloat = rel >= 0 ? 1 - min(rel, 3) * 0.03 : 1

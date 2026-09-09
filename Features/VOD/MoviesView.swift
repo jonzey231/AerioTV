@@ -257,6 +257,13 @@ struct MoviesView: View {
     /// ScrollViewReader.scrollTo(id) silently no-ops for lazy grid rows
     /// that have not been built yet (device log 2026-09-03).
     private final class ScrollGeometryBox {
+        /// The ScrollView's position, held OUTSIDE @State: bound as @State
+        /// it wrote view state on every scroll frame and re-rendered the
+        /// whole tab (phone probe 2026-09-09: 102 of 128 layout passes over
+        /// 12 ms during a bounce, plus a re-grab after it). Programmatic
+        /// scrolls go through scrollContent(toY:), which bumps a tick so the
+        /// ScrollView re-reads the binding once.
+        var position = ScrollPosition()
         var contentOffsetY: CGFloat = 0
         var gridTopVisible: CGFloat = 0
         var rowPitch: CGFloat = 0
@@ -265,7 +272,14 @@ struct MoviesView: View {
     var viewportHeight: CGFloat = 0
     }
     @State private var geometryBox = ScrollGeometryBox()
-    @State private var scrollPosition = ScrollPosition()
+    @State private var scrollPositionTick = 0
+    private var scrollPositionBinding: Binding<ScrollPosition> {
+        Binding(get: { geometryBox.position }, set: { geometryBox.position = $0 })
+    }
+    private func scrollContent(toY y: CGFloat) {
+        geometryBox.position.scrollTo(y: y)
+        scrollPositionTick += 1
+    }
     #if os(tvOS)
     @FocusState private var railCatcherFocused: Bool
     #endif
@@ -1317,7 +1331,7 @@ struct MoviesView: View {
                                                 }
                                             } else {
                                                 withAnimation(.smooth(duration: 0.45)) {
-                                                    scrollPosition.scrollTo(y: 0)
+                                                    scrollContent(toY: 0)
                                                 }
                                             }
                                             // Bar back at once: waiting for the
@@ -1455,7 +1469,8 @@ struct MoviesView: View {
                 // Alphabet rail: pinned to the leading edge, jumps the
                 // library grid to the first title for a letter.
                 .coordinateSpace(name: "moviesScroll")
-                .scrollPosition($scrollPosition)
+                .scrollPosition(scrollPositionBinding)
+                .onChange(of: scrollPositionTick) { _, _ in }
                 .onPreferenceChange(GridTopKey.self) { gridTopY in
                     guard let gridTopY else { return }
                     geometryBox.gridTopVisible = gridTopY
@@ -1472,11 +1487,19 @@ struct MoviesView: View {
                     // library header is still on screen the rail moves down
                     // by half of it (Logan 2026-09-05). An offset, so it can
                     // never feed back into layout.
-                    let top = max(0, gridTopY) / 2
-                    if railTop != top { railTop = top }
+                    // State writes here re-render the whole tab, so they run
+                    // only when something visible changes: the rail's park
+                    // position is updated in 4pt steps and only while the
+                    // rail is (about to be) shown; never while searching.
+                    // Written every frame, it capped scrolling at ~40 layout
+                    // passes a second (Logan 2026-09-09, probe).
                     let want = gridTopY <= 110 && searchText.isEmpty
                     if want != railVisible {
                         withAnimation(.easeInOut(duration: 0.25)) { railVisible = want }
+                    }
+                    if want {
+                        let top = (max(0, gridTopY) / 8).rounded() * 4
+                        if railTop != top { railTop = top }
                     }
                     #endif
                 }
@@ -1531,7 +1554,7 @@ struct MoviesView: View {
                         var t = Transaction(); t.disablesAnimations = true
                         withTransaction(t) {
                             // Shelf height plus the VStack gap it adds.
-                            scrollPosition.scrollTo(y: geometryBox.contentOffsetY + h + sectionSpacing)
+                            scrollContent(toY: geometryBox.contentOffsetY + h + sectionSpacing)
                         }
                     }
                 }
@@ -1638,7 +1661,7 @@ struct MoviesView: View {
                             guard focused else { return }
                             scrollToTopInFlight = true
                             withAnimation(.smooth(duration: 0.45)) {
-                                scrollPosition.scrollTo(y: 0)
+                                scrollContent(toY: 0)
                             }
                             tvTabBarHidden = false
                             // Restore at once: holding focus here while the
@@ -1726,7 +1749,7 @@ struct MoviesView: View {
                                 let gridTopContent = geometryBox.gridTopVisible + geometryBox.contentOffsetY
                                 let y = gridTopContent + 16 + CGFloat(row) * geometryBox.rowPitch - 24
                                 withAnimation(.easeInOut(duration: 0.25)) {
-                                    scrollPosition.scrollTo(y: max(0, y))
+                                    scrollContent(toY: max(0, y))
                                 }
                             } else {
                                 withAnimation(.easeInOut(duration: 0.25)) {
@@ -1784,10 +1807,22 @@ struct MoviesView: View {
                 }
                 }
                 #if os(iOS)
-                .onScrollGeometryChange(for: CGFloat.self) { scrollGeo in
-                    scrollGeo.contentOffset.y
-                } action: { oldY, y in
+                .onScrollGeometryChange(for: [CGFloat].self) { scrollGeo in
+                    // Resting offset at the end of the content (measured on
+                    // the iPhone 2026-09-09: content 1984, container 894,
+                    // insets 49 bottom / 62 top rest at 1077).
+                    [scrollGeo.contentOffset.y,
+                     scrollGeo.contentSize.height - scrollGeo.containerSize.height
+                        + scrollGeo.contentInsets.bottom - scrollGeo.contentInsets.top]
+                } action: { old, new in
                     guard UIDevice.current.userInterfaceIdiom == .phone else { return }
+                    let oldY = old[0], y = new[0], maxY = new[1]
+                    // Rubber-band past the end: the content moves up as it
+                    // springs back, which read as a scroll-up and brought the
+                    // bar back mid-bounce; the bar's inset then re-laid the
+                    // grid out, the "re-grab" at the bottom of the results
+                    // (Logan 2026-09-09). No bar changes while overscrolled.
+                    if y > maxY - 1 || oldY > maxY - 1 { return }
                     if let hidden = tabBarTracker.update(oldY: oldY, newY: y,
                                                          hidden: gridTabBarHidden) {
                         withAnimation(.easeInOut(duration: 0.2)) {
@@ -2061,7 +2096,6 @@ struct MoviesView: View {
             if showSearchField {
                 iOSSearchField
                     .padding(.horizontal, 16)
-                    .transition(.move(edge: .top).combined(with: .opacity))
             }
             #endif
 
@@ -2093,13 +2127,18 @@ struct MoviesView: View {
     private var iOSHeaderControls: some View {
         HStack(spacing: 8) {
             Button {
-                withAnimation(.spring(response: 0.3)) {
-                    if showSearchField { clearSearch() } else { showSearchField = true }
-                }
                 if showSearchField {
-                    scrollToLibraryTick += 1
-                    // Keyboard after the row has appeared.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { iosSearchFocused = true }
+                    withAnimation(.spring(response: 0.3)) { clearSearch() }
+                } else {
+                    // Insert the field with no animation, run ONE scroll, and
+                    // raise the keyboard only after the scroll has settled:
+                    // the insert transition, the scroll and the keyboard
+                    // avoidance all animating at once read as jitter (Logan
+                    // 2026-09-09).
+                    var t = Transaction(); t.disablesAnimations = true
+                    withTransaction(t) { showSearchField = true }
+                    DispatchQueue.main.async { scrollToLibraryTick += 1 }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { iosSearchFocused = true }
                 }
             } label: { iOSCircle("magnifyingglass") }
                 .accessibilityLabel(showSearchField ? "Close search" : "Search")
