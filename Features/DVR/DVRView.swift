@@ -1547,17 +1547,20 @@ struct DVRPosterCard: View {
             poster
                 .aspectRatio(2/3, contentMode: .fit)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
+            // Centered under the poster like the Movies cards (Logan 2026-09-10).
+            VStack(alignment: .center, spacing: 2) {
                 Text(recording.programTitle.isEmpty ? "Recording" : recording.programTitle)
                     .font(.labelSmall)
                     .foregroundColor(.textPrimary)
                     .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity, alignment: .top)
                     .frame(height: 34, alignment: .top)
                 Text(meta)
                     .font(.system(size: 11))
                     .foregroundColor(.textSecondary)
                     .lineLimit(1)
+                    .frame(maxWidth: .infinity)
             }
         }
         .contentShape(Rectangle())

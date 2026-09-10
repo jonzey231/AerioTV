@@ -2785,26 +2785,28 @@ private struct PersonCard: View {
         }
         .frame(width: cardWidth)
         #else
+        // Name and role centered under the photo, like tvOS (Logan 2026-09-10).
         Button(action: onSelect) {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .center, spacing: 6) {
                 photo
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .center, spacing: 2) {
                     Text(person.name)
                         .font(.labelMedium)
                         .foregroundColor(.textPrimary)
                         .lineLimit(2)
-                        .multilineTextAlignment(.leading)
+                        .multilineTextAlignment(.center)
                     if let role = person.role {
                         Text(role)
                             .font(.labelSmall)
                             .foregroundColor(.textSecondary)
                             .lineLimit(2)
-                            .multilineTextAlignment(.leading)
+                            .multilineTextAlignment(.center)
                     }
                     Spacer(minLength: 0)
                 }
+                .frame(maxWidth: .infinity)
             }
-            .frame(width: cardWidth, alignment: .leading)
+            .frame(width: cardWidth)
         }
         .buttonStyle(.plain)
         #endif

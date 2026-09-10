@@ -2762,13 +2762,9 @@ struct VODPosterCard: View {
         }
     }
 
-    private var textAlignment: HorizontalAlignment {
-        #if os(tvOS)
-        return .center
-        #else
-        return .leading
-        #endif
-    }
+    // Title and year centered under the poster on every platform (Logan
+    // 2026-09-10; tvOS had it since 2026-09-05).
+    private var textAlignment: HorizontalAlignment { .center }
 }
 
 // TVCategoryPill is defined in Components.swift
