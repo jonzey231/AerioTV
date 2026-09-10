@@ -1724,14 +1724,15 @@ struct CompanionControlFAB: View {
     @ObservedObject private var theme: ThemeManager = .shared
     var action: () -> Void
     var body: some View {
-        // Same shape and material as the iOS 26 minimized tab-bar pill it
-        // sits opposite (Logan 2026-09-09): a plain regular-glass capsule,
-        // no accent tint, no shadow. Earlier systems keep the tinted glass.
+        // Same shape and material as the iOS 26 minimized tab-bar button it
+        // sits opposite (measured on Logan's screenshot 2026-09-09: a 52 pt
+        // plain regular-glass circle, no accent tint, no shadow). Earlier
+        // systems keep the tinted glass.
         Button(action: action) {
             Image(systemName: "tv.and.mediabox")
                 .font(.system(size: 19, weight: .semibold))
                 .foregroundStyle(theme.accent)
-                .frame(width: 64, height: 50)
+                .frame(width: 52, height: 52)
         }
         .modifier(CompanionFABChrome())
         .accessibilityLabel("Control a TV")
@@ -1742,10 +1743,13 @@ private struct CompanionFABChrome: ViewModifier {
     @ObservedObject private var theme: ThemeManager = .shared
     func body(content: Content) -> some View {
         if #available(iOS 26.0, tvOS 26.0, *), theme.liquidGlassStyle == .full {
-            content.glassEffect(.regular.interactive(), in: Capsule())
+            // Measured against the system's minimized tab button: same 52 pt
+            // circle, and a dark tint so the glass reads as dark as the
+            // system's rather than the lighter untinted regular glass.
+            content.glassEffect(.regular.tint(Color.black.opacity(0.45)), in: Circle())
         } else {
             content
-                .liquidGlass(cornerRadius: 25)
+                .liquidGlass(cornerRadius: 26)
                 .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
         }
     }

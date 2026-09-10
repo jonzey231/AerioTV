@@ -7537,7 +7537,9 @@ private struct CompanionControlFABDock: View {
     var body: some View {
         CompanionControlFAB(action: action)
             .padding(.trailing, 20)
-            .padding(.bottom, collapse.collapsed ? 0 : 52)
+            // Minimized system button baseline measured 9 pt below the safe
+            // area edge (screenshot 2026-09-09).
+            .padding(.bottom, collapse.collapsed ? -9 : 52)
             .animation(.easeInOut(duration: 0.2), value: collapse.collapsed)
     }
 }
