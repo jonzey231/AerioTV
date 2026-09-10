@@ -1916,7 +1916,9 @@ struct MoviesView: View {
         #if os(tvOS)
         return 72
         #else
-        return 34
+        // Narrow lane at the screen edge: it only needs to be tappable
+        // (Logan 2026-09-09), and the grid no longer reserves room for it.
+        return 20
         #endif
     }
 
