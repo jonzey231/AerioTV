@@ -3770,12 +3770,11 @@ struct ChannelRow: View {
         .disabled(!replayable)
     }
 
+    /// Aired rows above a "Previously aired" divider. On iOS this scrolls
+    /// inside the guide panel with the upcoming rows; on tvOS it sits
+    /// above the upcoming ScrollView.
     @ViewBuilder
-    private var guidePanel: some View {
-        Divider()
-            .background(Color.borderSubtle)
-            .padding(.horizontal, 14)
-
+    private var airedSection: some View {
         // Catch-up: retained history shown without a disclosure tap
         // (Logan 2026-09-09, matching Android): the aired rows come
         // first, then a centered "Previously aired" divider, then the
@@ -3826,6 +3825,17 @@ struct ChannelRow: View {
                 Text(catchupErrorMessage ?? "")
             }
         }
+    }
+
+    @ViewBuilder
+    private var guidePanel: some View {
+        Divider()
+            .background(Color.borderSubtle)
+            .padding(.horizontal, 14)
+
+        #if os(tvOS)
+        airedSection
+        #endif
 
         if fetchUpcoming != nil {
             if isLoadingUpcoming {
@@ -3838,6 +3848,9 @@ struct ChannelRow: View {
                 .padding(.horizontal, 14)
                 .padding(.bottom, 8)
             } else if futurePrograms.isEmpty {
+                #if os(iOS)
+                airedSection
+                #endif
                 HStack(spacing: 6) {
                     Image(systemName: "calendar.badge.exclamationmark")
                         .font(.system(size: 12))
@@ -3850,10 +3863,16 @@ struct ChannelRow: View {
                 .padding(.bottom, 10)
             } else {
                 #if os(iOS)
-                // iOS: No inner ScrollView — nesting vertical scrolls traps
-                // the gesture inside the expanded card and prevents the
-                // outer channel list from scrolling. Let the outer list
-                // handle all vertical scrolling.
+                // iOS: the panel scrolls inside the card (max height as
+                // Android's 360) and opens on the first upcoming row, so
+                // the aired rows above the "Previously aired" divider are
+                // reached by scrolling up within the panel (Logan
+                // 2026-09-09). At the panel's edges the gesture hands off
+                // to the outer list.
+                ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 0) {
+                airedSection
                 VStack(spacing: 0) {
                     ForEach(futurePrograms) { entry in
                         // Rebind to a local constant so SwiftUI's ForEach
@@ -3947,6 +3966,14 @@ struct ChannelRow: View {
                                 programActionSheetButtons(for: rowEntry)
                             }
                     }
+                }
+                .id("upcoming-top")
+                }
+                }
+                .frame(maxHeight: 360)
+                .onAppear {
+                    DispatchQueue.main.async { proxy.scrollTo("upcoming-top", anchor: .top) }
+                }
                 }
                 .padding(.bottom, 4)
                 #else
