@@ -70,7 +70,12 @@ struct DVRView: View {
     /// Scroll-time numbers read only by the rail jump math, kept OUT of
     /// view state: written on every scroll frame they re-rendered the whole
     /// tab (phone stutter, Logan 2026-09-09; same fix as Movies).
-    private final class ScrollNumbers { var lastScrollY: CGFloat = 0; var gridTopVisible: CGFloat = 0; var rowPitch: CGFloat = 0 }
+    private final class ScrollNumbers { var lastScrollY: CGFloat = 0; var gridTopVisible: CGFloat = 0; var rowPitch: CGFloat = 0
+        /// Phone rail state. Observed ONLY by the rail overlay (DVRPhoneRail),
+        /// never by DVRView: flipping it as @State here re-rendered the whole
+        /// tab (~25 ms) at every pills crossing (Instruments 2026-09-09).
+        let phoneRail = DVRPhoneRailState()
+    }
     @State private var scrollNumbers = ScrollNumbers()
     private var lastScrollY: CGFloat { scrollNumbers.lastScrollY }
     @State private var scrollPosition = ScrollPosition()
@@ -449,23 +454,11 @@ struct DVRView: View {
                 // is worth having from nine (Logan 2026-09-05); tvOS keeps 15.
                 // Stays mounted and fades with a local animation (a sibling
                 // mount with a transition caught the scroll; same as Movies).
-                if isPhone, filteredLibrary.count >= phoneRailMinimumCount, let railTop {
-                    AlphabetRail(available: railLetters) { letter in
+                if isPhone, filteredLibrary.count >= phoneRailMinimumCount {
+                    DVRPhoneRail(state: scrollNumbers.phoneRail, letters: railLetters, railWidth: railWidth,
+                                 boxWidth: outer.size.width, boxHeight: outer.size.height + outer.safeAreaInsets.top) { letter in
                         jumpToLetter(letter)
                     }
-                    .frame(width: railWidth)
-                    // Fixed-height box + padding, same as Movies: an offset
-                    // rail's taps fell through to the grid (Logan 2026-09-05).
-                    .padding(.top, max(0, (outer.size.height + outer.safeAreaInsets.top - AlphabetRail.totalHeight) / 2) + railTop)
-                    .frame(width: outer.size.width,
-                           height: outer.size.height + outer.safeAreaInsets.top,
-                           alignment: .topTrailing)
-                    .clipped()
-                    .padding(.trailing, 2)
-                    .opacity(railVisible ? 1 : 0)
-                    .allowsHitTesting(railVisible)
-                    .animation(.easeInOut(duration: 0.25), value: railVisible)
-                    .ignoresSafeArea(.container, edges: .top)
                 }
                 #endif
             }
@@ -482,14 +475,12 @@ struct DVRView: View {
                 // position moves in 4pt steps only while the rail shows.
                 let want = gridTopY <= 110
                 // The park position is set ONCE, at the moment the rail
-                // appears, and never tracks the scroll: updating it in steps
-                // re-evaluated the tab 5 to 6 times a second near the pills
-                // (probe 2026-09-09) and re-laid the full-height rail box.
-                if want != railVisible {
-                    railVisible = want
-                    if want { railTop = (max(0, gridTopY) / 8).rounded() * 4 }
-                } else if railTop == nil {
-                    railTop = 0
+                // appears, and never tracks the scroll. Writes go to the rail's
+                // own observable so only the rail overlay re-renders.
+                let rail = scrollNumbers.phoneRail
+                if want != rail.visible {
+                    if want { rail.top = (max(0, gridTopY) / 8).rounded() * 4 }
+                    rail.visible = want
                 }
                 #endif
             }
@@ -1760,3 +1751,39 @@ enum DVRFormat {
         "\(day(start)) \(time(start)) to \(time(end))"
     }
 }
+
+
+#if os(iOS)
+/// Phone rail state, published to the rail overlay only.
+final class DVRPhoneRailState: ObservableObject {
+    @Published var visible = false
+    @Published var top: CGFloat = 0
+}
+
+/// The phone rail overlay: stays mounted, fades with a local animation,
+/// and is the only view that observes DVRPhoneRailState, so a visibility
+/// flip re-renders this overlay and nothing else.
+private struct DVRPhoneRail: View {
+    @ObservedObject var state: DVRPhoneRailState
+    let letters: Set<String>
+    let railWidth: CGFloat
+    let boxWidth: CGFloat
+    let boxHeight: CGFloat
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        AlphabetRail(available: letters, onSelect: onSelect)
+            .frame(width: railWidth)
+            // Fixed-height box + padding: an offset rail's taps fell through
+            // to the grid (Logan 2026-09-05).
+            .padding(.top, max(0, (boxHeight - AlphabetRail.totalHeight) / 2) + state.top)
+            .frame(width: boxWidth, height: boxHeight, alignment: .topTrailing)
+            .clipped()
+            .padding(.trailing, 2)
+            .opacity(state.visible ? 1 : 0)
+            .allowsHitTesting(state.visible)
+            .animation(.easeInOut(duration: 0.25), value: state.visible)
+            .ignoresSafeArea(.container, edges: .top)
+    }
+}
+#endif
