@@ -7524,7 +7524,36 @@ final class TabBarScrollTracker {
 final class TabBarCollapseState: ObservableObject {
     static let shared = TabBarCollapseState()
     @Published private(set) var collapsed = false
-    func set(_ value: Bool) { if collapsed != value { collapsed = value } }
+    func set(_ value: Bool) {
+        if collapsed != value {
+            collapsed = value
+            #if DEBUG
+            if value { DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { Self.dumpMinimizedTabBar() } }
+            #endif
+        }
+    }
+
+    #if DEBUG
+    /// Logs the frames and backing views of the system's minimized tab-bar
+    /// button so the Control-a-TV button can be matched by measurement.
+    static func dumpMinimizedTabBar() {
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene }).flatMap({ $0.windows }).first(where: { $0.isKeyWindow }) else { return }
+        func walk(_ v: UIView, _ depth: Int) {
+            let name = String(describing: type(of: v))
+            let f = v.convert(v.bounds, to: window)
+            if f.width < 120, f.height < 120, f.width > 20, f.height > 20, f.maxY > window.bounds.height - 120 {
+                var extra = ""
+                if let bg = v.backgroundColor { extra += " bg=\(bg)" }
+                extra += " alpha=\(v.alpha) radius=\(v.layer.cornerRadius) corner=\(v.layer.cornerCurve.rawValue)"
+                if let ev = v as? UIVisualEffectView { extra += " effect=\(String(describing: ev.effect))" }
+                debugLog("[TABBAR] \(String(repeating: " ", count: depth))\(name) frame=\(f.integral)\(extra)")
+            }
+            v.subviews.forEach { walk($0, depth + 1) }
+        }
+        walk(window, 0)
+    }
+    #endif
 }
 
 /// Hosts the Control-a-TV FAB above the right end of the full tab bar and,
@@ -7536,10 +7565,11 @@ private struct CompanionControlFABDock: View {
     init(action: @escaping () -> Void) { self.action = action }
     var body: some View {
         CompanionControlFAB(action: action)
-            .padding(.trailing, 20)
-            // Minimized system button baseline measured 9 pt below the safe
-            // area edge (screenshot 2026-09-09).
-            .padding(.bottom, collapse.collapsed ? -9 : 52)
+            // Minimized system button measured from the view hierarchy
+            // ([TABBAR] dump 2026-09-09): 48 pt circle at x 28, bottom edge
+            // 6 pt below the safe-area edge. Mirror it on the trailing side.
+            .padding(.trailing, collapse.collapsed ? 28 : 20)
+            .padding(.bottom, collapse.collapsed ? -6 : 52)
             .animation(.easeInOut(duration: 0.2), value: collapse.collapsed)
     }
 }

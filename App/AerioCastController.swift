@@ -1732,7 +1732,7 @@ struct CompanionControlFAB: View {
             Image(systemName: "tv.and.mediabox")
                 .font(.system(size: 19, weight: .semibold))
                 .foregroundStyle(theme.accent)
-                .frame(width: 52, height: 52)
+                .frame(width: 48, height: 48)
         }
         .modifier(CompanionFABChrome())
         .accessibilityLabel("Control a TV")
@@ -1742,11 +1742,16 @@ struct CompanionControlFAB: View {
 private struct CompanionFABChrome: ViewModifier {
     @ObservedObject private var theme: ThemeManager = .shared
     func body(content: Content) -> some View {
-        if #available(iOS 26.0, tvOS 26.0, *), theme.liquidGlassStyle == .full {
-            // Measured against the system's minimized tab button: same 52 pt
-            // circle, and a dark tint so the glass reads as dark as the
-            // system's rather than the lighter untinted regular glass.
-            content.glassEffect(.regular.tint(Color.black.opacity(0.45)), in: Circle())
+        // Always glass on 26+, whatever the app's Liquid Glass style: the
+        // system's minimized tab button ignores that setting, and the flat
+        // fallback fill read as a solid navy disc next to it (pixel check
+        // 2026-09-09).
+        if #available(iOS 26.0, tvOS 26.0, *) {
+            // Measured from the live view hierarchy (2026-09-09, [TABBAR]
+            // dump): the minimized tab button is a 48 pt _UITabBarPlatterView
+            // backed by ClearGlassView, but regular glass is what matches it
+            // pixel for pixel on device (sampled 2026-09-09); clear ran darker.
+            content.glassEffect(.regular, in: Circle())
         } else {
             content
                 .liquidGlass(cornerRadius: 26)
