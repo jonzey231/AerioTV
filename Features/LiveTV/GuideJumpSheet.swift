@@ -39,16 +39,23 @@ struct GuideJumpSheet: View {
 
     private var dayOffsets: [Int] { Array(-max(0, daysBack)...max(1, daysAhead)) }
 
+    /// "Today, Sep 10" / "Tomorrow, Sep 11" / "Sat, Sep 12" (Logan 2026-09-10:
+    /// every day pill carries its date).
     private func dayLabel(_ offset: Int) -> String {
+        let day = date(forDayOffset: offset, hour: nil)
+        let date = DateFormatter()
+        date.setLocalizedDateFormatFromTemplate("MMM d")
+        let name: String
         switch offset {
-        case 0: return "Today"
-        case 1: return "Tomorrow"
-        case -1: return "Yesterday"
+        case 0: name = "Today"
+        case 1: name = "Tomorrow"
+        case -1: name = "Yesterday"
         default:
             let f = DateFormatter()
-            f.setLocalizedDateFormatFromTemplate(abs(offset) < 7 ? "EEEE" : "EEE d")
-            return f.string(from: date(forDayOffset: offset, hour: nil))
+            f.setLocalizedDateFormatFromTemplate("EEE")
+            name = f.string(from: day)
         }
+        return "\(name), \(date.string(from: day))"
     }
 
     private func date(forDayOffset offset: Int, hour: Int?) -> Date {
