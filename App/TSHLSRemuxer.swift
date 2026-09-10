@@ -172,6 +172,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var nextSeq = 0
     private var readySignaled = false
     private var errorSignaled = false
+    /// Loopback requests logged so far (the first 24 per session).
+    private var loggedRequests = 0
     private var totalBytesIngested = 0
 
     // Live Rewind window (task #145): when > 0, every closed segment is
@@ -419,6 +421,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                     if isKeyframe {
                         awaitingFirstKeyframe = false
                         beginSegment(at: pts)
+                        if nextSeq < 12 { currentSegmentLeadNALs = leadingNALTypes(p) }
                     }
                 } else if isKeyframe,
                           let start = currentStartPTS {
@@ -430,6 +433,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                     if elapsed >= cutAt {
                         closeSegment(endPTS: pts)
                         beginSegment(at: pts)
+                        if nextSeq < 12 { currentSegmentLeadNALs = leadingNALTypes(p) }
                     }
                 }
             }
@@ -653,7 +657,38 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         guard let start = currentStartPTS, !currentSegment.isEmpty else { return }
         var duration = endPTS - start
         if duration <= 0 || duration > 10 { duration = targetSegmentSeconds }
+        if nextSeq < 12 {
+            // Startup detail for the next unexplained "never became ready"
+            // (2026-09-09): where each early segment starts, how long it
+            // really is, and what its first video access unit opens with.
+            debugLog("[TS-REMUX] seg \(nextSeq) start=\(String(format: "%.3f", start)) end=\(String(format: "%.3f", endPTS)) dur=\(String(format: "%.3f", duration)) bytes=\(currentSegment.count) lead=\(currentSegmentLeadNALs)")
+        }
         storeSegment(data: currentSegment, duration: duration)
+    }
+
+    /// NAL types (in order) of the first video PES in the open segment,
+    /// captured when the segment begins. Logging only.
+    private var currentSegmentLeadNALs: [Int] = []
+
+    private func leadingNALTypes(_ p: Data) -> [Int] {
+        guard let base = payloadStart(p), base + 9 < 188 else { return [] }
+        var i = base + 9 + Int(p[base + 8])
+        var out: [Int] = []
+        let end = 188 - 4
+        while i < end, out.count < 6 {
+            if p[i] == 0x00, p[i + 1] == 0x00 {
+                var nalStart = -1
+                if p[i + 2] == 0x01 { nalStart = i + 3 }
+                else if p[i + 2] == 0x00, i + 3 < end, p[i + 3] == 0x01 { nalStart = i + 4 }
+                if nalStart > 0, nalStart < 188 {
+                    out.append(Int(p[nalStart] & 0x1F))
+                    i = nalStart
+                    continue
+                }
+            }
+            i += 1
+        }
+        return out
     }
 
     /// Shared segment store for BOTH arms (TS passthrough and fMP4):
@@ -879,6 +914,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 status = "404 Not Found"
             }
 
+            if self.loggedRequests < 24 {
+                self.loggedRequests += 1
+                debugLog("[TS-REMUX] GET \(path) -> \(status) \(body.count) B (segments \(self.segments.first?.seq ?? -1)...\(self.segments.last?.seq ?? -1))")
+            }
             let header = "HTTP/1.1 \(status)\r\n"
                 + "Content-Type: \(contentType)\r\n"
                 + "Content-Length: \(body.count)\r\n"
@@ -1016,6 +1055,22 @@ final class AVPStallWatchdog {
         func die(_ reason: String) {
             fired = true
             debugLog("[AVP-WATCHDOG] \(label): \(reason); falling back to mpv")
+            // What AVFoundation itself thinks went wrong (Freyguy1975
+            // 2026-09-09: one channel sat at .unknown for 12 s with no
+            // app-side clue; the item's own logs name playlist parse
+            // errors, segment fetch failures and format rejections).
+            if let events = item.errorLog()?.events, !events.isEmpty {
+                for e in events.suffix(6) {
+                    debugLog("[AVP-WATCHDOG] errorLog: code=\(e.errorStatusCode) domain=\(e.errorDomain) uri=\(e.uri ?? "-") comment=\(e.errorComment ?? "-")")
+                }
+            } else {
+                debugLog("[AVP-WATCHDOG] errorLog: none")
+            }
+            if let a = item.accessLog()?.events.last {
+                debugLog("[AVP-WATCHDOG] accessLog: segments=\(a.numberOfMediaRequests) bytes=\(a.numberOfBytesTransferred) stalls=\(a.numberOfStalls) startup=\(String(format: "%.2f", a.startupTime)) indicated=\(Int(a.indicatedBitrate)) observed=\(Int(a.observedBitrate)) uri=\(a.uri ?? "-")")
+            } else {
+                debugLog("[AVP-WATCHDOG] accessLog: none")
+            }
             onDead(reason)
         }
         let progressing = pollStreamingProgress()
