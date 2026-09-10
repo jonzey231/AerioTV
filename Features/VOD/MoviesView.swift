@@ -1270,6 +1270,7 @@ struct MoviesView: View {
                 ScrollViewReader { proxy in
                 ZStack(alignment: .topLeading) {
                 ScrollView {
+                    VStack(spacing: 0) {
                     Color.clear.frame(height: 0).id("movies-top")
                     #if os(tvOS)
                     // The tab bar's reserved top inset as plain content (the
@@ -1290,8 +1291,10 @@ struct MoviesView: View {
                         VStack(alignment: .leading, spacing: sectionSpacing) {
                             #if os(iOS)
                             if UIDevice.current.userInterfaceIdiom == .phone {
-                                // Room under the Syncing pill (2026-09-06).
-                                Color.clear.frame(height: 22)
+                                // Header at DVR's height: measured 131 vs 104
+                                // (2026-09-09), so 22 pt of spacer and the
+                                // scroll view's implicit spacing come off.
+                                Color.clear.frame(height: 3)
                             }
                             #endif
                             // Continue Watching IS the hero: one page per title
@@ -1470,6 +1473,7 @@ struct MoviesView: View {
                     #if os(iOS)
                     Color.clear.frame(height: 96)
                     #endif
+                    }
                 }
                 // Alphabet rail: pinned to the leading edge, jumps the
                 // library grid to the first title for a letter.
@@ -3021,7 +3025,10 @@ struct MoviesHero: View {
         .frame(height: heroHeight)
         .frame(maxWidth: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
-        .padding(.horizontal, 16)
+        // On the phone the card deck places the card (its front edge lines
+        // up with the library grid, Logan 2026-09-09); iPad's carousel keeps
+        // the 16 pt inset.
+        .padding(.horizontal, UIDevice.current.userInterfaceIdiom == .phone ? 0 : 16)
         #endif
     }
 

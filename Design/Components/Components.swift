@@ -1110,7 +1110,6 @@ struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
     /// grid's 18 pt margin (Logan 2026-09-09); the right side keeps its
     /// peeks toward the screen edge.
     private let leadInset: CGFloat = 8
-    private let parkedSliver: CGFloat = 14
     private let dot: CGFloat = 6
     private let dotInset: CGFloat = 16
 
@@ -1129,8 +1128,12 @@ struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
                     // wrapped position moved and faded it, which read as the
                     // image reloading).
                     let single = count == 1
+                    // Android rule (Logan 2026-09-09): nothing parks to the
+                    // side. Only a card mid-exit (wrapped strictly past the
+                    // last slot) is negative; at rest the previous card sits
+                    // at the back of the stack.
                     let rel: CGFloat = single ? 0
-                        : ((wrapped >= CGFloat(count) - 1 - 0.0001) ? wrapped - CGFloat(count) : wrapped)
+                        : ((wrapped > CGFloat(count) - 1 + 0.0001) ? wrapped - CGFloat(count) : wrapped)
                     // Only the cards that can be seen are built: the current
                     // one, three behind it and the parked previous one. A
                     // ten-item deck was laying out ten hero views per drag
@@ -1139,9 +1142,12 @@ struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
                     let x: CGFloat = single ? front0 + dragX * 0.35
                         : rel >= 0
                         ? front0 + rel * peek
-                        : front0 + max(rel, -1) * (w - parkedSliver + front0) - max(0, -rel - 1) * 4
+                        : front0 - (w + front0) * min(-rel, 1)
                     let scale: CGFloat = rel >= 0 ? 1 - min(rel, 3) * 0.03 : 1
-                    let alpha: Double = rel >= 0 ? Double(1 - min(rel, 3) * 0.2) : Double(0.9 + max(rel, -1) * 0.3)
+                    // The leaving card stays solid (Logan 2026-09-09: the
+                    // exit fade read as the DVR card "fading out too quickly"
+                    // against its darker hero gradient).
+                    let alpha: Double = rel >= 0 ? Double(1 - min(rel, 3) * 0.2) : 1
                     card(item)
                         .frame(width: w, height: cardHeight)
                         // The drop shadow lives on a plain shape under the
@@ -1162,6 +1168,7 @@ struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
                 }
             }
             .frame(width: geo.size.width, height: cardHeight, alignment: .leading)
+            .clipped()
             .contentShape(Rectangle())
             // A UIKit pan that FAILS on a vertical start (Logan 2026-09-09:
             // "can't scroll if I begin on a stacked card"): vertical swipes

@@ -1222,7 +1222,10 @@ struct DVRHero<Menu: View>: View {
         .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
         .onTapGesture { onInfo?() }
-        .padding(.horizontal, 16)
+        // In the deck the deck places the card at the grid's edge; only the
+        // standalone hero keeps its own 16 pt (was unconditional on iOS,
+        // which is why the DVR deck sat 16 pt in, Logan 2026-09-09).
+        .padding(.horizontal, inDeck ? 0 : 16)
         #endif
     }
 
