@@ -2633,9 +2633,6 @@ struct ChannelRow: View {
     @State private var playingCatchup: CatchupPlayback? = nil
     /// Catch-up: user-facing resolve failure, shown as an alert.
     @State private var catchupErrorMessage: String? = nil
-    /// Catch-up: whether the "Previously aired" history section is
-    /// expanded. Collapsed by default so the panel lands on upcoming.
-    @State private var showAiredPrograms = false
     /// Tracks which upcoming-program row currently owns the popover
     /// shown in response to a long-press. `EPGEntry.id` is
     /// deterministic (title + start + end) so the binding is stable
@@ -3723,7 +3720,7 @@ struct ChannelRow: View {
     }
     #endif
 
-    /// One aired programme row inside the "Previously aired" disclosure.
+    /// One aired program row above the "Previously aired" divider.
     /// Replayable entries (inside the channel's archive window) carry the
     /// rewind badge and tap straight into catch-up playback; the rest are
     /// dimmed reference rows.
@@ -3779,50 +3776,34 @@ struct ChannelRow: View {
             .background(Color.borderSubtle)
             .padding(.horizontal, 14)
 
-        // Catch-up: retained history, collapsed by default so the panel
-        // still lands on the upcoming schedule. Replayable entries tap
-        // straight into playback; older-than-retention entries (or
-        // channels with no archive) render as plain reference rows.
-        // DisclosureGroup is unavailable on tvOS, so this is a manual
-        // expander that renders identically on both platforms.
+        // Catch-up: retained history shown without a disclosure tap
+        // (Logan 2026-09-09, matching Android): the aired rows come
+        // first, then a centered "Previously aired" divider, then the
+        // upcoming schedule. Replayable entries tap straight into
+        // playback; older-than-retention entries (or channels with no
+        // archive) render as plain reference rows.
         if !airedPrograms.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        showAiredPrograms.toggle()
-                    }
-                    if showAiredPrograms {
-                        let aired = airedPrograms
-                        let now = Date()
-                        let replayable = aired.filter { e in
-                            guard let s = e.startTime, let en = e.endTime else { return false }
-                            return item.canReplay(start: s, end: en, now: now)
-                        }
-                        let oldest = aired.first?.startTime.map { DVRFormat.dateRange($0, aired.first?.endTime ?? $0) } ?? "-"
-                        let oldestReplay = replayable.first?.startTime.map { DVRFormat.dateRange($0, replayable.first?.endTime ?? $0) } ?? "-"
-                        debugLog("[CATCHUP] \(item.name) days=\(item.catchupDays) aired=\(aired.count) replayable=\(replayable.count) oldest=\(oldest) oldestReplayable=\(oldestReplay)")
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: 12))
+                ForEach(airedPrograms) { entry in
+                    airedEntryRow(entry)
+                }
+                // Up arrows on both sides of the label say "everything
+                // above this line already aired" (Logan 2026-09-09).
+                HStack(spacing: 8) {
+                    Rectangle().fill(Color.borderSubtle).frame(height: 1)
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 9, weight: .semibold))
                         Text("Previously aired")
                             .font(.labelSmall)
-                        Image(systemName: showAiredPrograms ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
-                        Spacer(minLength: 0)
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 9, weight: .semibold))
                     }
                     .foregroundColor(.textTertiary)
-                    .padding(.vertical, 6)
-                    .contentShape(Rectangle())
+                    .fixedSize()
+                    Rectangle().fill(Color.borderSubtle).frame(height: 1)
                 }
-                .buttonStyle(.plain)
-
-                if showAiredPrograms {
-                    ForEach(airedPrograms) { entry in
-                        airedEntryRow(entry)
-                    }
-                }
+                .padding(.vertical, 6)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 4)
