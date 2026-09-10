@@ -1854,9 +1854,7 @@ struct MoviesView: View {
                     if phase == .idle { applyPendingDerived() }
                 }
                 .scrollAwayTabBar(collapsed: gridTabBarHidden)
-                // DIAGNOSTIC 2026-09-09: bottom safe-area ignore removed on
-                // Movies only, to test whether it stops the system tab bar
-                // from re-expanding on scroll up (DVR keeps it for comparison).
+                .ignoresSafeArea(.container, edges: .bottom)
                 .aerioContentUnderTabBar()
                 .aerioNoTopScrollEdge()
                 #endif

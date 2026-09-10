@@ -43,6 +43,9 @@ struct DVRView: View {
     @State private var showDeleteConfirmation = false
     @State private var showDeleteFromServerAlert = false
     @State private var showDownloadConfirmation = false
+    #if os(iOS)
+    @State private var tabBarTracker = TabBarScrollTracker()
+    #endif
     @State private var infoTarget: ProgramInfoTarget?
 
     #if os(tvOS)
@@ -675,14 +678,18 @@ struct DVRView: View {
         .ignoresSafeArea(.container, edges: .bottom)
         .aerioContentUnderTabBar()
         .aerioNoTopScrollEdge()
+        .modifier(DVRTabBarCollapse())
         #endif
         .scrollPosition($scrollPosition)
         #if os(iOS)
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in
-            // Direction only feeds the Control-a-TV dock (observed by that
-            // overlay alone), mirroring the system tab-bar minimize.
-            if y > 80, y > scrollNumbers.lastScrollY + 2 { TabBarCollapseState.shared.set(true) }
-            else if y < scrollNumbers.lastScrollY - 2 || y <= 0 { TabBarCollapseState.shared.set(false) }
+            // Same tracker as Movies and Live TV (hide after 48 pt down, show
+            // after 12 pt up); the flag is read, not observed, so no DVR
+            // re-render per frame.
+            if let flip = tabBarTracker.update(oldY: scrollNumbers.lastScrollY, newY: y,
+                                               hidden: TabBarCollapseState.shared.collapsed) {
+                TabBarCollapseState.shared.set(flip)
+            }
             scrollNumbers.lastScrollY = y
         }
         #endif
@@ -1790,6 +1797,19 @@ private struct DVRPhoneRail: View {
             .allowsHitTesting(state.visible)
             .animation(.easeInOut(duration: 0.25), value: state.visible)
             .ignoresSafeArea(.container, edges: .top)
+    }
+}
+#endif
+
+#if os(iOS)
+/// Applies the shared tab-bar collapse to the DVR tab (iOS 26+).
+private struct DVRTabBarCollapse: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.modifier(TabBarCollapseVisibility())
+        } else {
+            content
+        }
     }
 }
 #endif

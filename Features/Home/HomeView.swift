@@ -5065,6 +5065,9 @@ struct MainTabView: View {
                 CompanionControlFABDock { showCompanionPickerGlobal = true }
             }
         }
+        .overlay(alignment: .bottomLeading) {
+            MinimizedTabButton(tab: selectedTab)
+        }
         #endif
         // safeAreaInset on the outer ZStack pushes the entire TabView (including its tab bar)
         // upward so the tab bar sits above the mini player bar and remains tappable.
@@ -5370,6 +5373,7 @@ struct MainTabView: View {
                 .tabItem { Label(AppTab.liveTV.title, systemImage: AppTab.liveTV.icon) }
                 .tag(AppTab.liveTV)
 
+
             // Favorites is a pinned channel group inside Live TV now
             // (Logan 2026-09-05); the tab is gone. `AppTab.favorites` stays
             // so a persisted default tab from an older build decodes.
@@ -5430,6 +5434,12 @@ struct MainTabView: View {
         #endif
         .tint(theme.accent)
         // Tab switch latency probe (Logan 2026-09-06, "visual hang").
+        .onChange(of: selectedTab) { _, _ in
+            #if os(iOS)
+            // A new tab may be too short to scroll the bar back.
+            TabBarCollapseState.shared.set(false)
+            #endif
+        }
         .onChange(of: selectedTab) { old, new in
             debugLog("[TAB] switch \(old) -> \(new)")
         }
@@ -7373,7 +7383,13 @@ extension View {
             // the inset constant, so the bar shrinks and grows with no
             // content movement. scrollAwayTabBar is a no-op while this is
             // on; revert both if the minimized pill is not wanted.
-            self.tabBarMinimizeBehavior(.onScrollDown)
+            // 2026-09-09 (Logan, verified on a bare TabView through iPhone
+            // Mirroring): the system minimize only re-expands at the top of
+            // the content on this iOS build, so the bar is ours again: the
+            // tabs' scroll trackers feed TabBarCollapseState (hide after 48 pt
+            // down, show after 12 pt up, like Android) and this modifier
+            // toggles the bar; MinimizedTabButton draws the corner pill.
+            self.tabBarMinimizeBehavior(.never)
         } else {
             self
         }
@@ -7408,7 +7424,10 @@ extension View {
             // the content on every show (2026-09-09). The collapsed flag
             // still feeds TabBarCollapseState so the Control-a-TV button can
             // drop level with the minimized pill (Logan 2026-09-09).
+            // toolbarVisibility for the tab bar only takes effect from inside
+            // a tab's content, so the modifier rides here, not on the TabView.
             self.onChange(of: collapsed, initial: true) { _, c in TabBarCollapseState.shared.set(c) }
+                .modifier(TabBarCollapseVisibility())
         } else {
             self.toolbar(collapsed ? .hidden : .visible, for: .tabBar)
         }
@@ -7524,36 +7543,47 @@ final class TabBarScrollTracker {
 final class TabBarCollapseState: ObservableObject {
     static let shared = TabBarCollapseState()
     @Published private(set) var collapsed = false
-    func set(_ value: Bool) {
-        if collapsed != value {
-            collapsed = value
-            #if DEBUG
-            if value { DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { Self.dumpMinimizedTabBar() } }
-            #endif
-        }
-    }
+    func set(_ value: Bool) { if collapsed != value { collapsed = value } }
+}
 
-    #if DEBUG
-    /// Logs the frames and backing views of the system's minimized tab-bar
-    /// button so the Control-a-TV button can be matched by measurement.
-    static func dumpMinimizedTabBar() {
-        guard let window = UIApplication.shared.connectedScenes
-            .compactMap({ $0 as? UIWindowScene }).flatMap({ $0.windows }).first(where: { $0.isKeyWindow }) else { return }
-        func walk(_ v: UIView, _ depth: Int) {
-            let name = String(describing: type(of: v))
-            let f = v.convert(v.bounds, to: window)
-            if f.width < 120, f.height < 120, f.width > 20, f.height > 20, f.maxY > window.bounds.height - 120 {
-                var extra = ""
-                if let bg = v.backgroundColor { extra += " bg=\(bg)" }
-                extra += " alpha=\(v.alpha) radius=\(v.layer.cornerRadius) corner=\(v.layer.cornerCurve.rawValue)"
-                if let ev = v as? UIVisualEffectView { extra += " effect=\(String(describing: ev.effect))" }
-                debugLog("[TABBAR] \(String(repeating: " ", count: depth))\(name) frame=\(f.integral)\(extra)")
-            }
-            v.subviews.forEach { walk($0, depth + 1) }
-        }
-        walk(window, 0)
+/// Applies TabBarCollapseState to the system tab bar (iOS 26+, minimize
+/// behavior off). Only this modifier observes the state, so a flip
+/// re-evaluates the toolbar visibility and nothing else.
+@available(iOS 26.0, *)
+struct TabBarCollapseVisibility: ViewModifier {
+    @ObservedObject private var collapse = TabBarCollapseState.shared
+    func body(content: Content) -> some View {
+        content
+            .toolbarVisibility(collapse.collapsed ? .hidden : .visible, for: .tabBar)
+            .animation(.easeInOut(duration: 0.25), value: collapse.collapsed)
     }
-    #endif
+}
+
+/// Our own minimized tab button: the 48 pt glass circle the system used to
+/// draw (measured 2026-09-09: x 28, bottom 6 pt below the safe-area edge),
+/// carrying the selected tab's icon. Tap to bring the bar back.
+private struct MinimizedTabButton: View {
+    @ObservedObject private var collapse = TabBarCollapseState.shared
+    @ObservedObject private var theme: ThemeManager = .shared
+    let tab: AppTab
+    var body: some View {
+        if #available(iOS 26.0, *) {
+            Button { TabBarCollapseState.shared.set(false) } label: {
+                Image(systemName: tab.icon)
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                    .frame(width: 48, height: 48)
+            }
+            .glassEffect(.regular, in: Circle())
+            .padding(.leading, 28)
+            .padding(.bottom, -6)
+            .opacity(collapse.collapsed ? 1 : 0)
+            .scaleEffect(collapse.collapsed ? 1 : 0.6)
+            .allowsHitTesting(collapse.collapsed)
+            .animation(.easeInOut(duration: 0.2), value: collapse.collapsed)
+            .accessibilityLabel("Show tab bar")
+        }
+    }
 }
 
 /// Hosts the Control-a-TV FAB above the right end of the full tab bar and,
@@ -7574,3 +7604,4 @@ private struct CompanionControlFABDock: View {
     }
 }
 #endif
+
