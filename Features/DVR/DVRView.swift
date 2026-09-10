@@ -64,7 +64,7 @@ struct DVRView: View {
     private let gridSpacing: CGFloat = 24
     #else
     private var gridColumns: Int { isPhone ? 3 : 2 }
-    private var gridSpacing: CGFloat { isPhone ? 10 : 12 }
+    private var gridSpacing: CGFloat { isPhone ? 8 : 12 }
     private let railWidth: CGFloat = 22
     #endif
     /// Scroll-time numbers read only by the rail jump math, kept OUT of
@@ -946,9 +946,10 @@ struct DVRView: View {
             Color.clear.preference(key: GridTopKey.self,
                                    value: g.frame(in: .named("dvrScroll")).minY.rounded())
         })
+        // Phone: 2 pt extra each side (column gap 8) so the alphabet rail
+        // at the edge clears the posters (Logan 2026-09-09).
+        .padding(.horizontal, isPhone ? 2 : 0)
         .padding(.horizontal, sectionInset)
-        #if os(iOS)
-        #endif
         #if os(tvOS)
         .padding(.vertical, 20)
         .focusSection()

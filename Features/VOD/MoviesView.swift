@@ -402,7 +402,7 @@ struct MoviesView: View {
         let clamped = max(0.85, min(1.25, uiScale))
         let isRegular = UIDevice.current.userInterfaceIdiom != .phone
         // Phone: three across, like the mockup (Logan 2026-09-05).
-        if !isRegular { return Array(repeating: GridItem(.flexible(), spacing: 10), count: 3) }
+        if !isRegular { return Array(repeating: GridItem(.flexible(), spacing: 8), count: 3) }
         let minimum: CGFloat = 120 * clamped
         let maximum: CGFloat = 160 * clamped
         return [GridItem(.adaptive(minimum: minimum, maximum: maximum), spacing: 12)]
@@ -1854,7 +1854,9 @@ struct MoviesView: View {
                     if phase == .idle { applyPendingDerived() }
                 }
                 .scrollAwayTabBar(collapsed: gridTabBarHidden)
-                .ignoresSafeArea(.container, edges: .bottom)
+                // DIAGNOSTIC 2026-09-09: bottom safe-area ignore removed on
+                // Movies only, to test whether it stops the system tab bar
+                // from re-expanding on scroll up (DVR keeps it for comparison).
                 .aerioContentUnderTabBar()
                 .aerioNoTopScrollEdge()
                 #endif
@@ -1918,7 +1920,7 @@ struct MoviesView: View {
         #else
         // Narrow lane at the screen edge: it only needs to be tappable
         // (Logan 2026-09-09), and the grid no longer reserves room for it.
-        return 20
+        return 14
         #endif
     }
 
@@ -2435,13 +2437,14 @@ struct MoviesView: View {
                 })
             }
         }
-        // Symmetric 16 pt margins so the posters sit centered (Logan
+        // Symmetric 18 pt margins so the posters sit centered (Logan
         // 2026-09-09); the alphabet rail overlays the right edge instead of
-        // owning a gutter.
-        .padding(16)
+        // owning a gutter. Column gap 8 gives the two extra edge points.
+        .padding(.vertical, 16)
+        .padding(.horizontal, 18)
         .background(GeometryReader { g in
-            Color.clear.onAppear { geometryBox.gridWidth = g.size.width - 32 }
-                .onChange(of: g.size.width) { _, w in geometryBox.gridWidth = w - 32 }
+            Color.clear.onAppear { geometryBox.gridWidth = g.size.width - 36 }
+                .onChange(of: g.size.width) { _, w in geometryBox.gridWidth = w - 36 }
         })
         #if os(tvOS)
         .focusSection()
