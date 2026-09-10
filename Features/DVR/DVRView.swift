@@ -65,7 +65,7 @@ struct DVRView: View {
     #else
     private var gridColumns: Int { isPhone ? 3 : 2 }
     private var gridSpacing: CGFloat { isPhone ? 8 : 12 }
-    private let railWidth: CGFloat = 22
+    private let railWidth: CGFloat = 14   // matches Movies (Logan 2026-09-09)
     #endif
     /// Scroll-time numbers read only by the rail jump math, kept OUT of
     /// view state: written on every scroll frame they re-rendered the whole
