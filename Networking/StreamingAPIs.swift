@@ -3219,8 +3219,15 @@ struct DispatcharrAPI {
         let season: Int?
         let episode: Int?
         let rating: String?
-        /// First EPG category carried on `custom_properties.program`, if any.
+        /// Every EPG category carried on the recording, comma-joined (the
+        /// Program Info pills split on that; Android joins the same way).
         let category: String?
+        /// Dispatcharr's programme id for the recording: a top-level
+        /// `program` / `epg_program` / `program_id` FK, else the nested
+        /// `custom_properties.program.id`. The guide row's id goes stale
+        /// once the server purges the aired programme (404, Logan
+        /// 2026-09-10); this one lives with the recording.
+        let programID: Int?
         /// custom_properties.bytes_written, set when the recording ends.
         let bytesWritten: Int64?
         /// custom_properties.stream_info, captured from the live proxy at
@@ -3288,8 +3295,12 @@ struct DispatcharrAPI {
             self.season = intValue(props["season"]) ?? intValue(program?["season"])
             self.episode = intValue(props["episode"]) ?? intValue(program?["episode"])
             self.rating = props["rating"] as? String
-            let cats = (program?["categories"] as? [String]) ?? (props["categories"] as? [String])
-            self.category = cats?.first ?? (program?["category"] as? String)
+            let cats = ((program?["categories"] as? [String]) ?? (props["categories"] as? [String]))?
+                .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            self.category = (cats?.isEmpty == false ? cats?.joined(separator: ",") : nil)
+                ?? (program?["category"] as? String)
+            self.programID = intValue(dict["program"]) ?? intValue(dict["epg"]) ?? intValue(dict["epg_program"])
+                ?? intValue(dict["program_id"]) ?? intValue(program?["id"])
             func doubleValue(_ any: Any?) -> Double? {
                 if let d = any as? Double { return d }
                 if let i = any as? Int { return Double(i) }

@@ -197,6 +197,7 @@ final class DVRArtResolver: ObservableObject {
                     // Episode identity only (the art is already there).
                     _ = await epgProgram(for: rec, modelContext: modelContext)
                 }
+                await fillCategory(rec, modelContext: modelContext)
                 // Landscape art for the hero and cards: a portrait poster
                 // crops badly in 16:9 (Suits, Aquaman; Logan 2026-09-05).
                 let b = (rec.backdropURL ?? "").isEmpty ? await backdrop(for: rec) : nil
@@ -247,6 +248,48 @@ final class DVRArtResolver: ObservableObject {
         //    art is TMDB-first itself when a key is set, provider poster
         //    otherwise.
         return libraryPoster(title: rec.programTitle, isMovie: kind == .movie)
+    }
+
+    /// Category pills for the recording's Program Info (Logan 2026-09-10,
+    /// parity with Android): the bulk grid strips <category>, the
+    /// per-program detail carries it. The recording's OWN programme id
+    /// first; the guide row's id 404s once the server purges the aired
+    /// programme (log 2026-09-10 18:22). One fetch per row per session.
+    private func fillCategory(_ rec: Recording, modelContext: ModelContext) async {
+        guard (rec.epgCategory ?? "").isEmpty else { return }
+        var pid = rec.dispatcharrProgramID
+        if pid == nil, let match = await epgProgram(for: rec, modelContext: modelContext) { pid = match.programID }
+        if let pid, let (api, _) = dispatcharrAPI(for: rec, modelContext: modelContext),
+           let detail = try? await api.getProgramDetail(id: pid) {
+            let cats = detail.categories.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            if !cats.isEmpty, rec.modelContext != nil, !rec.isDeleted {
+                rec.epgCategory = cats.joined(separator: ",")
+                debugLog("[DVR-ART] category for \(rec.programTitle): \(rec.epgCategory ?? "")")
+                return
+            }
+        }
+        // Dispatcharr's recording JSON carries no programme id (log
+        // 2026-09-10 18:52) and an aired programme is purged from the
+        // server, so borrow the category any guide row with the SAME
+        // title got from enrichment (Android hydrates its recordings the
+        // same way): "48 Hours" airs weekly, its later rows are tinted.
+        let title = rec.programTitle
+        let sid = rec.serverID
+        let container = modelContext.container
+        let borrowed: String? = await Task.detached(priority: .utility) {
+            let ctx = ModelContext(container)
+            var d = FetchDescriptor<EPGProgram>(
+                predicate: #Predicate<EPGProgram> { p in p.serverID == sid && p.title == title && p.category != "" }
+            )
+            d.fetchLimit = 1
+            return try? ctx.fetch(d).first?.category
+        }.value
+        guard let borrowed, !borrowed.isEmpty, rec.modelContext != nil, !rec.isDeleted else {
+            debugLog("[DVR-ART] no category source for \(rec.programTitle)")
+            return
+        }
+        rec.epgCategory = borrowed
+        debugLog("[DVR-ART] category for \(rec.programTitle) from a same-title guide row: \(borrowed)")
     }
 
     private func libraryPoster(title: String, isMovie: Bool) -> String? {
@@ -390,17 +433,6 @@ final class DVRArtResolver: ObservableObject {
         if (rec.subTitle ?? "").isEmpty, let sub = match.subTitle, !sub.isEmpty { rec.subTitle = sub }
         if rec.seasonNumber == nil, let s = match.season { rec.seasonNumber = s }
         if rec.episodeNumber == nil, let e = match.episode { rec.episodeNumber = e }
-        // Category pills for the recording's Program Info (Logan 2026-09-10,
-        // parity with Android): the bulk grid strips <category>, the
-        // per-program detail carries it. One fetch per row per session.
-        if (rec.epgCategory ?? "").isEmpty, let pid = match.programID,
-           let (api, _) = dispatcharrAPI(for: rec, modelContext: modelContext),
-           let detail = try? await api.getProgramDetail(id: pid),
-           !detail.categories.isEmpty,
-           rec.modelContext != nil, !rec.isDeleted {
-            rec.epgCategory = detail.categories.joined(separator: ",")
-            debugLog("[DVR-ART] category for \(rec.programTitle): \(rec.epgCategory ?? "")")
-        }
         return match
     }
 }

@@ -903,6 +903,10 @@ final class Recording {
     /// (movie / series / sports) for the DVR pills and art lookups.
     var epgCategory: String? = nil
     var contentRating: String? = nil
+    /// Dispatcharr programme id carried by the recording itself (see
+    /// DispatcharrAPI.Recording.programID). Default nil for the lightweight
+    /// migration of existing rows.
+    var dispatcharrProgramID: Int? = nil
     /// Channel logo captured at schedule / import time (the recording's
     /// `channelID` is not resolvable back to a Channel row on every source).
     var channelLogoURL: String? = nil

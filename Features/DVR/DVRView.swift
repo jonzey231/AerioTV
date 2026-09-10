@@ -1110,7 +1110,7 @@ struct DVRView: View {
             end: epg?.endTime ?? end,
             description: rec.programDescription.isEmpty ? (epg?.programDescription ?? "") : rec.programDescription,
             category: (rec.epgCategory ?? "").isEmpty ? (epg?.category ?? "") : (rec.epgCategory ?? ""),
-            programID: epg?.programID,
+            programID: rec.dispatcharrProgramID ?? epg?.programID,
             subTitle: rec.subTitle ?? epg?.subTitle,
             season: rec.seasonNumber ?? epg?.season,
             episode: rec.episodeNumber ?? epg?.episode,

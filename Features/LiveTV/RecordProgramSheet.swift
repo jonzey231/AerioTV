@@ -995,6 +995,10 @@ struct RecordProgramSheet: View {
         )
         rec.channelLogoURL = channelLogoURL?.absoluteString
         if let c = programCategory, !c.isEmpty { rec.epgCategory = c }
+        // The grid strips <category>; keep the programme id so the DVR
+        // resolver can fetch it from the detail endpoint while the server
+        // still has the programme (a purged airing 404s, 2026-09-10).
+        rec.dispatcharrProgramID = programID
         if let p = programPosterURL, !p.isEmpty { rec.posterURL = p }
         if let sub = programSubTitle, !sub.isEmpty { rec.subTitle = sub }
         rec.seasonNumber = programSeason

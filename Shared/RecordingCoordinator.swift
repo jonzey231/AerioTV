@@ -437,6 +437,7 @@ final class RecordingCoordinator: ObservableObject {
         if local.episodeNumber == nil, let e = r.episode { local.episodeNumber = e; changed = true }
         if (local.contentRating ?? "").isEmpty, let c = r.rating, !c.isEmpty { local.contentRating = c; changed = true }
         if (local.epgCategory ?? "").isEmpty, let c = r.category, !c.isEmpty { local.epgCategory = c; changed = true }
+        if local.dispatcharrProgramID == nil, let pid = r.programID { local.dispatcharrProgramID = pid; changed = true }
         return changed
     }
 
