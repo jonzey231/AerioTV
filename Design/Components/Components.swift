@@ -1158,43 +1158,41 @@ struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
             }
             .frame(width: geo.size.width, height: cardHeight, alignment: .leading)
             .contentShape(Rectangle())
-            // High priority from 10 pt: a card that started to slide must not
-            // hand the touch to its own tap or buttons (accidental taps,
-            // Logan 2026-09-06). Taps with no movement still reach the card.
-            .highPriorityGesture(
-                DragGesture(minimumDistance: 10)
-                    .onChanged { v in
-                        guard abs(v.translation.width) > abs(v.translation.height) else { return }
-                        let now = CACurrentMediaTime()
-                        if lastDragSample > 0 {
-                            let gap = (now - lastDragSample) * 1000
-                            dragFrames += 1
-                            if gap > 34 { dragDropped += 1 }
-                            dragWorstMs = max(dragWorstMs, gap)
-                        } else {
-                            dragFrames = 0; dragDropped = 0; dragWorstMs = 0
-                        }
-                        lastDragSample = now
-                        dragX = v.translation.width
+            // A UIKit pan that FAILS on a vertical start (Logan 2026-09-09:
+            // "can't scroll if I begin on a stacked card"): vertical swipes
+            // fall through to the scroll view, horizontal ones page the deck,
+            // and a recognised pan still cancels the card's own taps.
+            .gesture(HorizontalPanGesture(
+                onChanged: { dx in
+                    let now = CACurrentMediaTime()
+                    if lastDragSample > 0 {
+                        let gap = (now - lastDragSample) * 1000
+                        dragFrames += 1
+                        if gap > 34 { dragDropped += 1 }
+                        dragWorstMs = max(dragWorstMs, gap)
+                    } else {
+                        dragFrames = 0; dragDropped = 0; dragWorstMs = 0
                     }
-                    .onEnded { v in
-                        debugLog("[DECK] drag end: \(dragFrames) samples, \(dragDropped) gaps > 34 ms, worst \(Int(dragWorstMs)) ms, cards=\(items.count)")
-                        lastDragSample = 0
-                        PhoneCardDeckStats.lastDragEnded = CACurrentMediaTime()
-                        let dx = v.translation.width
-                        var target = index
-                        if abs(dx) > abs(v.translation.height) {
-                            if dx < -60 || v.predictedEndTranslation.width < -w / 2 { target += 1 }
-                            else if dx > 60 || v.predictedEndTranslation.width > w / 2 { target -= 1 }
-                        }
-                        let wrappedTarget = ((target % count) + count) % count
-                        withAnimation(.spring(response: 0.38, dampingFraction: 0.85)) {
-                            index = wrappedTarget
-                            dragX = 0
-                        }
-                        if wrappedTarget < items.count { onCurrentChange?(items[wrappedTarget]) }
+                    lastDragSample = now
+                    dragX = dx
+                },
+                onEnded: { dx, vx in
+                    debugLog("[DECK] drag end: \(dragFrames) samples, \(dragDropped) gaps > 34 ms, worst \(Int(dragWorstMs)) ms, cards=\(items.count)")
+                    lastDragSample = 0
+                    PhoneCardDeckStats.lastDragEnded = CACurrentMediaTime()
+                    // Predicted end: where a flick would settle (~0.15 s of velocity).
+                    let predicted = dx + vx * 0.15
+                    var target = index
+                    if dx < -60 || predicted < -w / 2 { target += 1 }
+                    else if dx > 60 || predicted > w / 2 { target -= 1 }
+                    let wrappedTarget = ((target % count) + count) % count
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.85)) {
+                        index = wrappedTarget
+                        dragX = 0
                     }
-            )
+                    if wrappedTarget < items.count { onCurrentChange?(items[wrappedTarget]) }
+                }
+            ))
         }
         .frame(height: cardHeight)
         .overlay(alignment: .bottom) {
@@ -1214,5 +1212,50 @@ struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
             index = min(index, max(ids.count - 1, 0))
         }
     }
+}
+#endif
+
+#if os(iOS)
+/// Horizontal-only pan for the phone card deck. Fails as soon as the first
+/// movement is more vertical than horizontal, so the enclosing scroll view
+/// keeps vertical drags that start on a card.
+struct HorizontalPanGesture: UIGestureRecognizerRepresentable {
+    var onChanged: (CGFloat) -> Void
+    var onEnded: (CGFloat, CGFloat) -> Void
+
+    func makeUIGestureRecognizer(context: Context) -> HorizontalPanRecognizer {
+        let r = HorizontalPanRecognizer()
+        r.maximumNumberOfTouches = 1
+        return r
+    }
+
+    func handleUIGestureRecognizerAction(_ r: HorizontalPanRecognizer, context: Context) {
+        let t = r.translation(in: r.view)
+        switch r.state {
+        case .changed: onChanged(t.x)
+        case .ended, .cancelled: onEnded(t.x, r.velocity(in: r.view).x)
+        default: break
+        }
+    }
+}
+
+final class HorizontalPanRecognizer: UIPanGestureRecognizer {
+    private var start: CGPoint?
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        start = touches.first?.location(in: view)
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        if state == .possible, let s = start, let p = touches.first?.location(in: view) {
+            let dx = abs(p.x - s.x), dy = abs(p.y - s.y)
+            if dy > 8, dy > dx { state = .failed; return }
+            if dx < 10 { return }   // same 10 pt lead-in as before
+        }
+        super.touchesMoved(touches, with: event)
+    }
+
+    override func reset() { start = nil; super.reset() }
 }
 #endif
