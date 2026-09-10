@@ -4522,6 +4522,27 @@ struct EPGGuideView: View {
     }
 
     #if os(tvOS)
+    /// Focus left the clock: if it landed on a programme cell that does not
+    /// cover the anchor column, move it to the one that does on the same row.
+    private func retargetAfterClockExit() {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            guard let pid = focusedProgramID, let chID = channelID(ofProgram: pid) else { return }
+            let anchor = viewportAnchorTime
+            if let focused = guideStore.programs[chID]?.first(where: { $0.id == pid }),
+               focused.start <= anchor, focused.end > anchor {
+                return
+            }
+            guard let target = programID(forChannel: chID, containing: anchor), target != pid else { return }
+            debugLog("[GuideFocus] clock exit: retarget \(pid) -> \(target)")
+            for _ in 0..<4 {
+                focusedProgramID = target
+                try? await Task.sleep(nanoseconds: 60_000_000)
+                if focusedProgramID == target { break }
+            }
+        }
+    }
+
     /// After a LEFT/RIGHT timeline pan, walk focus to the cell at the NEW
     /// viewport anchor column on the same channel row, so the ring rides
     /// the visible window instead of sliding off-screen with the old cell.
@@ -4698,6 +4719,15 @@ struct EPGGuideView: View {
                         .padding(3)
                 )
                 .animation(.easeInOut(duration: 0.12), value: clockFocused)
+                // Down out of the clock: the engine picks the cell whose
+                // frame overlaps the clock's column, which is the just-ended
+                // programme hidden under the channel column (trace
+                // 2026-09-10 17:06:59, cell @-279 with 80 pt showing), so
+                // the ring vanished. Land on the row's cell at the anchor
+                // column instead, like the Android guide's clock Down.
+                .onChange(of: clockFocused) { _, focused in
+                    if !focused { retargetAfterClockExit() }
+                }
                 #else
                 .contentShape(Rectangle())
                 .onTapGesture { snapToNow() }
