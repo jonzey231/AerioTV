@@ -3625,6 +3625,9 @@ struct EPGGuideView: View {
     @State private var horizontalOffset: CGFloat = -360  // -(hoursBack=1 * pixelsPerHour=360)
     #endif
     @State private var didSetInitialGuideOffset = false
+    /// When focusedProgramID last changed: a Left whose engine move landed
+    /// within the last quarter second is judged by its destination cell.
+    @State private var lastFocusChangeAt = Date.distantPast
 
     /// Captured `horizontalOffset` at the start of an active drag
     /// gesture. `DragGesture.Value.translation` is cumulative from
@@ -3842,6 +3845,7 @@ struct EPGGuideView: View {
             // column, snap to the cell that does. Same-channel changes (our
             // own snaps/restores/pans) are ignored so this can never loop.
             .onChange(of: focusedProgramID) { oldValue, newValue in
+                lastFocusChangeAt = Date()
                 guard let pid = newValue else { lastFocusedChannelForSnap = nil; return }
                 let chID = channelID(ofProgram: pid)
                 #if os(tvOS)
@@ -4340,7 +4344,38 @@ struct EPGGuideView: View {
             // .guideOpenGroupSidebar) and a single Left is ALWAYS
             // plain navigation, because the tap-opens scheme made the
             // EPG history left of "now" unreachable in sidebar mode.
-            let pidBeforeLeft = focusedProgramID
+            // The engine has already moved focus by the time onMoveCommand
+            // runs (trace 2026-09-05 13:54), so the cell under the ring here
+            // is the DESTINATION. The old "pid != pidBeforeLeft" guard
+            // compared the destination with itself and never fired, which
+            // left every Left onto the live programme panning the whole
+            // grid half an hour into the past (Logan video 2026-09-10 17:06).
+            // Rules, tvOS being the reference the Android guide copies:
+            //  - landed on the live programme: re-anchor to now if the
+            //    timeline drifted, otherwise nothing moves;
+            //  - landed on a cell whose start is already on screen: nothing
+            //    moves (a pan would only slide the target away);
+            //  - otherwise (focus stayed put at the left edge, or the target
+            //    starts off-screen): pan half an hour and let the ring ride
+            //    the viewport (Task #185).
+            let movedRecently = Date().timeIntervalSince(lastFocusChangeAt) < 0.25
+            if movedRecently, let pid = focusedProgramID,
+               let chID = channelID(ofProgram: pid),
+               let prog = guideStore.programs[chID]?.first(where: { $0.id == pid }) {
+                if prog.isLive {
+                    if abs(horizontalOffset - nowAnchorOffset()) > pixelsPerHour * 0.05 {
+                        debugLog("[GuideFocus] back on the live programme: re-anchoring to now")
+                        reAnchorTimelineToNow()
+                    }
+                    break
+                }
+                // The edge sits a few minutes past the half hour (now minus
+                // the 15-minute lead), so a cell starting ON the half hour
+                // counts as on screen when its start is within the lead.
+                if prog.start >= timeAtViewportLeft.addingTimeInterval(-15 * 60) {
+                    break   // the target is on screen already
+                }
+            }
             withAnimation(.easeOut(duration: 0.3)) {
                 horizontalOffset = min(0, horizontalOffset + pixelsPerHour * 0.5)
             }
@@ -4349,24 +4384,6 @@ struct EPGGuideView: View {
             // still holding focus, so the ring vanished and OK acted
             // on an invisible programme.
             retargetFocusToViewportColumn()
-            // Stepping back onto the programme airing now re-anchors the
-            // timeline to now: a wide live cell was reached in one press
-            // while the pans had walked the now line to the right (Logan
-            // 2026-09-05). Only when this press MOVED focus, so a Left that
-            // stays on the live cell still pans into the past for catch-up.
-            // Exact, not the half-hour Menu slop: a long live programme
-            // reached from the future left the now line 20 minutes adrift
-            // (video 2026-09-05 15:36).
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 90_000_000)
-                guard let pid = focusedProgramID, pid != pidBeforeLeft,
-                      let chID = channelID(ofProgram: pid),
-                      let prog = guideStore.programs[chID]?.first(where: { $0.id == pid }),
-                      prog.isLive,
-                      abs(horizontalOffset - nowAnchorOffset()) > pixelsPerHour * 0.05 else { return }
-                debugLog("[GuideFocus] back on the live programme: re-anchoring to now")
-                reAnchorTimelineToNow()
-            }
         case .right:
             // #42: a hold-Right (close corner mini) freezes the timeline so
             // the still-held Right does not scroll the EPG forward after the
