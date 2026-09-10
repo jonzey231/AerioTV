@@ -7424,10 +7424,7 @@ extension View {
             // the content on every show (2026-09-09). The collapsed flag
             // still feeds TabBarCollapseState so the Control-a-TV button can
             // drop level with the minimized pill (Logan 2026-09-09).
-            // toolbarVisibility for the tab bar only takes effect from inside
-            // a tab's content, so the modifier rides here, not on the TabView.
             self.onChange(of: collapsed, initial: true) { _, c in TabBarCollapseState.shared.set(c) }
-                .modifier(TabBarCollapseVisibility())
         } else {
             self.toolbar(collapsed ? .hidden : .visible, for: .tabBar)
         }
@@ -7543,19 +7540,37 @@ final class TabBarScrollTracker {
 final class TabBarCollapseState: ObservableObject {
     static let shared = TabBarCollapseState()
     @Published private(set) var collapsed = false
-    func set(_ value: Bool) { if collapsed != value { collapsed = value } }
-}
+    func set(_ value: Bool) {
+        guard collapsed != value else { return }
+        collapsed = value
+        applyToSystemBar()
+    }
 
-/// Applies TabBarCollapseState to the system tab bar (iOS 26+, minimize
-/// behavior off). Only this modifier observes the state, so a flip
-/// re-evaluates the toolbar visibility and nothing else.
-@available(iOS 26.0, *)
-struct TabBarCollapseVisibility: ViewModifier {
-    @ObservedObject private var collapse = TabBarCollapseState.shared
-    func body(content: Content) -> some View {
-        content
-            .toolbarVisibility(collapse.collapsed ? .hidden : .visible, for: .tabBar)
-            .animation(.easeInOut(duration: 0.25), value: collapse.collapsed)
+    /// Slides the UIKit tab bar off screen instead of hiding it through the
+    /// toolbar API: hiding it changed the tabs' scroll container by 49 pt on
+    /// every toggle ([JUMP] log 2026-09-09, container 873 <-> 922), which read
+    /// as a scroll jump. A transform leaves layout and insets untouched.
+    private func applyToSystemBar() {
+        let bars = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .flatMap { Self.tabBars(in: $0) }
+        let hide = collapsed
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState]) {
+            for bar in bars {
+                bar.transform = hide ? CGAffineTransform(translationX: 0, y: bar.bounds.height + 40) : .identity
+            }
+        }
+    }
+
+    private static func tabBars(in root: UIView) -> [UITabBar] {
+        var out: [UITabBar] = []
+        func walk(_ v: UIView) {
+            if let bar = v as? UITabBar { out.append(bar); return }
+            v.subviews.forEach(walk)
+        }
+        walk(root)
+        return out
     }
 }
 

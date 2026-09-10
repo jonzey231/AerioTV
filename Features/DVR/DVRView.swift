@@ -678,7 +678,6 @@ struct DVRView: View {
         .ignoresSafeArea(.container, edges: .bottom)
         .aerioContentUnderTabBar()
         .aerioNoTopScrollEdge()
-        .modifier(DVRTabBarCollapse())
         #endif
         .scrollPosition($scrollPosition)
         #if os(iOS)
@@ -1801,15 +1800,3 @@ private struct DVRPhoneRail: View {
 }
 #endif
 
-#if os(iOS)
-/// Applies the shared tab-bar collapse to the DVR tab (iOS 26+).
-private struct DVRTabBarCollapse: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) {
-            content.modifier(TabBarCollapseVisibility())
-        } else {
-            content
-        }
-    }
-}
-#endif
