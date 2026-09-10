@@ -382,12 +382,18 @@ struct MultiviewContainerView: View {
                     MultiviewTransportBar(
                         store: store,
                         onAdd: { showAddSheet = true },
-                        // Exit resumes the audio tile's channel in
-                        // single-stream mode — users expect to return
-                        // to "the channel I was watching", not to the
-                        // guide. Fall-through to `.exit()` (full stop)
-                        // only happens when there's no audio tile.
-                        onExit: { session.exitMultiviewKeepingAudioTile() }
+                        // iPhone and iPad: the X closes the SELECTED stream
+                        // (the audio tile). Collapsing to the audio tile
+                        // instead read as "it closed the wrong one"
+                        // (Freyguy1975, Discord 2026-09-09). tvOS keeps the
+                        // Menu-press collapse with its confirmation.
+                        onExit: {
+                            #if os(tvOS)
+                            session.exitMultiviewKeepingAudioTile()
+                            #else
+                            session.closeAudioTile()
+                            #endif
+                        }
                     )
                     .frame(height: chromeState.isVisible ? nil : 0)
                     .opacity(chromeState.isVisible ? 1 : 0)

@@ -117,6 +117,29 @@ final class PlayerSession: ObservableObject {
     /// If there's no audio tile (empty grid edge case), falls back
     /// to a full `exit()` which clears NowPlayingManager and lands
     /// the user on the Live TV guide.
+    /// iPhone and iPad transport-bar X: closes the SELECTED stream (the
+    /// audio tile), which is what a tap on a tile followed by X means to
+    /// people (Freyguy1975, Discord 2026-09-09: with two streams the X
+    /// closed the other one and kept the one he had picked). The store
+    /// promotes audio to the newest remaining tile; the last stream closes
+    /// the player.
+    func closeAudioTile() {
+        let store = MultiviewStore.shared
+        guard let audioID = store.audioTileID, store.tiles.contains(where: { $0.id == audioID }) else {
+            exit()
+            return
+        }
+        if store.tiles.count <= 1 {
+            stop()
+            return
+        }
+        DebugLogger.shared.log(
+            "[MV-Mode] close selected tile=\(audioID) remaining=\(store.tiles.count - 1)",
+            category: "Playback", level: .info
+        )
+        store.remove(id: audioID)
+    }
+
     func exitMultiviewKeepingAudioTile() {
         let store = MultiviewStore.shared
         // Capture the audio tile BEFORE we reset the store.

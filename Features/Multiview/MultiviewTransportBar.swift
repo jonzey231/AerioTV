@@ -160,8 +160,13 @@ struct MultiviewTransportBar: View {
         #else
         .buttonStyle(.plain)
         #endif
+        #if os(tvOS)
         .accessibilityLabel("Exit multiview")
-        .accessibilityHint("Leave multiview and stop all streams")
+        .accessibilityHint("Leave multiview and keep the stream you were listening to")
+        #else
+        .accessibilityLabel("Close selected stream")
+        .accessibilityHint("Closes the stream that has audio; the last stream closes the player")
+        #endif
     }
 }
 
