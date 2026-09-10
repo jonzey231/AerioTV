@@ -15,15 +15,14 @@ struct GuideJumpSheet: View {
 
     enum Slot: CaseIterable {
         case sameTime, morning, afternoon, evening, prime, late
+        /// Clock times, not descriptions (Logan 2026-09-10); Same Time stays.
         var label: String {
-            switch self {
-            case .sameTime: return "Same Time"
-            case .morning: return "Morning"
-            case .afternoon: return "Afternoon"
-            case .evening: return "Evening"
-            case .prime: return "Prime Time"
-            case .late: return "Late"
-            }
+            guard let hour else { return "Same Time" }
+            let f = DateFormatter()
+            f.setLocalizedDateFormatFromTemplate("j")
+            let cal = Calendar.current
+            let date = cal.date(bySettingHour: hour, minute: 0, second: 0, of: Date()) ?? Date()
+            return f.string(from: date)
         }
         var hour: Int? {
             switch self {
