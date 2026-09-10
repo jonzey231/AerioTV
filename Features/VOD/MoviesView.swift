@@ -3090,6 +3090,8 @@ struct MoviesHero: View {
     var onRemove: (() -> Void)? = nil
     var isOnWatchlist: Bool = false
     var onToggleWatchlist: (() -> Void)? = nil
+    /// The hero menu behind the right-most options circle (Logan 2026-09-10, all platforms).
+    @State private var showOptions = false
     /// tvOS: base id the carousel uses to focus this page's buttons
     /// ("<id>|primary", "<id>|start", "<id>|details").
     var primaryFocusID: String? = nil
@@ -3282,22 +3284,11 @@ struct MoviesHero: View {
         .frame(maxHeight: .infinity, alignment: .bottom)
     }
 
+    private var hasOptions: Bool { onToggleWatchlist != nil || onRemove != nil }
+
     private var actions: some View {
         HStack(spacing: 12) {
             primaryButton
-                .contextMenu {
-                    if let onToggleWatchlist {
-                        Button(action: onToggleWatchlist) {
-                            Label(isOnWatchlist ? "Remove from Watchlist" : "Add to Watchlist",
-                                  systemImage: isOnWatchlist ? "bookmark.slash" : "bookmark")
-                        }
-                    }
-                    if let onRemove {
-                        Button(role: .destructive, action: onRemove) {
-                            Label("Remove from Continue Watching", systemImage: "trash")
-                        }
-                    }
-                }
             #if os(tvOS)
             if progress != nil {
                 heroFocusable(MoviesHeroButton(title: "Play from Beginning", systemImage: "gobackward",
@@ -3305,6 +3296,10 @@ struct MoviesHero: View {
             }
             heroFocusable(MoviesHeroButton(title: "Details", systemImage: "info.circle",
                                            isPrimary: false, action: onDetails), role: "details")
+            if hasOptions {
+                heroFocusable(MoviesHeroButton(title: "", systemImage: "ellipsis",
+                                               isPrimary: false, action: { showOptions = true }), role: "options")
+            }
             #else
             if progress != nil {
                 MoviesHeroButton(title: "", systemImage: "gobackward",
@@ -3312,6 +3307,10 @@ struct MoviesHero: View {
             }
             MoviesHeroButton(title: "", systemImage: "info.circle",
                              isPrimary: false, action: onDetails)
+            if hasOptions {
+                MoviesHeroButton(title: "", systemImage: "ellipsis",
+                                 isPrimary: false, action: { showOptions = true })
+            }
             if let remainingLabel {
                 Text(remainingLabel)
                     .font(.labelSmall)
@@ -3320,6 +3319,20 @@ struct MoviesHero: View {
             #endif
         }
         .padding(.top, 4)
+        // The menu that used to sit behind a long press on Resume.
+        .confirmationDialog("Options", isPresented: $showOptions, titleVisibility: .hidden) {
+            if let onToggleWatchlist {
+                Button(action: onToggleWatchlist) {
+                    Label(isOnWatchlist ? "Remove from Watchlist" : "Add to Watchlist",
+                          systemImage: isOnWatchlist ? "bookmark.slash" : "bookmark")
+                }
+            }
+            if let onRemove {
+                Button(role: .destructive, action: onRemove) {
+                    Label("Remove from Continue Watching", systemImage: "trash")
+                }
+            }
+        }
         #if os(tvOS)
         // One focus section for the row: Up from ANY button is resolved
         // from the row's frame, the frame Resume already reaches the

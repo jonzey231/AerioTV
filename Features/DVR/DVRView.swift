@@ -1249,6 +1249,8 @@ struct DVRHero<Menu: View>: View {
     /// buttons are distinct (Movies uses "<page id>|primary" the same way).
     var focusPrefix: String? = nil
     @ViewBuilder let menu: () -> Menu
+    /// The row menu behind the right-most options circle (Logan 2026-09-10, all platforms).
+    @State private var showOptions = false
 
     #if os(tvOS)
     @Environment(\.dvrHeroFocusBinding) private var focusBinding
@@ -1452,8 +1454,7 @@ struct DVRHero<Menu: View>: View {
             if recording.isInProgress {
                 if canPlay {
                     focusable(MoviesHeroButton(title: "Watch from Start", systemImage: "play.fill",
-                                               isPrimary: true, action: onPrimary)
-                                .contextMenu { menu() }, role: "primary")
+                                               isPrimary: true, action: onPrimary), role: "primary")
                     focusable(MoviesHeroButton(title: "Jump to Live", systemImage: "dot.radiowaves.left.and.right",
                                                isPrimary: false, action: onSecondary), role: "secondary")
                 }
@@ -1461,8 +1462,7 @@ struct DVRHero<Menu: View>: View {
                                            isPrimary: !canPlay, action: onStop), role: canPlay ? "stop" : "primary")
             } else {
                 focusable(MoviesHeroButton(title: progress > 0 ? "Resume" : "Play", systemImage: "play.fill",
-                                           isPrimary: true, action: onPrimary)
-                            .contextMenu { menu() }, role: "primary")
+                                           isPrimary: true, action: onPrimary), role: "primary")
                 if progress > 0 {
                     // iPhone: icon circle like the Movies / TV Shows hero and
                     // the Android DVR card (Logan 2026-09-09); tvOS keeps the
@@ -1477,8 +1477,11 @@ struct DVRHero<Menu: View>: View {
                 focusable(MoviesHeroButton(title: secondaryTitle("Details"), systemImage: "info.circle",
                                            isPrimary: false, action: onInfo), role: "details")
             }
+            focusable(MoviesHeroButton(title: "", systemImage: "ellipsis",
+                                       isPrimary: false, action: { showOptions = true }), role: "options")
         }
         .padding(.top, 4)
+        .confirmationDialog("Options", isPresented: $showOptions, titleVisibility: .hidden) { menu() }
         #if os(tvOS)
         .focusSection()
         #endif
