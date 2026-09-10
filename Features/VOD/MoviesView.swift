@@ -2433,12 +2433,10 @@ struct MoviesView: View {
                 })
             }
         }
+        // Symmetric 16 pt margins so the posters sit centered (Logan
+        // 2026-09-09); the alphabet rail overlays the right edge instead of
+        // owning a gutter.
         .padding(16)
-        #if os(iOS)
-        // Phone: a right gutter is the alphabet rail's lane, so the letters
-        // never sit on the third column's rating badges (Logan 2026-09-05).
-        .padding(.trailing, UIDevice.current.userInterfaceIdiom == .phone ? 18 : 0)
-        #endif
         .background(GeometryReader { g in
             Color.clear.onAppear { geometryBox.gridWidth = g.size.width - 32 }
                 .onChange(of: g.size.width) { _, w in geometryBox.gridWidth = w - 32 }

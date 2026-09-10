@@ -948,7 +948,6 @@ struct DVRView: View {
         })
         .padding(.horizontal, sectionInset)
         #if os(iOS)
-        .padding(.trailing, isPhone ? 18 : 0)   // alphabet rail lane, like Movies
         #endif
         #if os(tvOS)
         .padding(.vertical, 20)
