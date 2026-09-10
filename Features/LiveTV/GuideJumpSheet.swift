@@ -76,14 +76,29 @@ struct GuideJumpSheet: View {
 
     var body: some View {
         #if os(tvOS)
-        VStack(alignment: .leading, spacing: 30) {
+        VStack(alignment: .leading, spacing: 22) {
             Text("Jump To")
                 .font(.system(size: 38, weight: .bold))
                 .foregroundColor(.textPrimary)
-            pillRow(title: "Day") {
-                ForEach(dayOffsets, id: \.self) { o in
-                    Button(dayLabel(o)) { dayOffset = o }
-                        .buttonStyle(MoviesPillStyle(isSelected: dayOffset == o))
+            // Days in three groups (Logan 2026-09-10): Today, Upcoming, Previous.
+            pillRow(title: "Today") {
+                Button(dayLabel(0)) { dayOffset = 0 }
+                    .buttonStyle(MoviesPillStyle(isSelected: dayOffset == 0))
+            }
+            if dayOffsets.contains(where: { $0 > 0 }) {
+                pillRow(title: "Upcoming") {
+                    ForEach(dayOffsets.filter { $0 > 0 }, id: \.self) { o in
+                        Button(dayLabel(o)) { dayOffset = o }
+                            .buttonStyle(MoviesPillStyle(isSelected: dayOffset == o))
+                    }
+                }
+            }
+            if dayOffsets.contains(where: { $0 < 0 }) {
+                pillRow(title: "Previous") {
+                    ForEach(dayOffsets.filter { $0 < 0 }.reversed(), id: \.self) { o in
+                        Button(dayLabel(o)) { dayOffset = o }
+                            .buttonStyle(MoviesPillStyle(isSelected: dayOffset == o))
+                    }
                 }
             }
             pillRow(title: "Time") {
