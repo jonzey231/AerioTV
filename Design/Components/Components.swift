@@ -1106,13 +1106,18 @@ struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
     @State private var dragWorstMs: Double = 0
     private let peek: CGFloat = 9
     private let margin: CGFloat = 10
+    /// Extra lead so the front card's left edge lines up with the library
+    /// grid's 18 pt margin (Logan 2026-09-09); the right side keeps its
+    /// peeks toward the screen edge.
+    private let leadInset: CGFloat = 8
     private let parkedSliver: CGFloat = 14
     private let dot: CGFloat = 6
     private let dotInset: CGFloat = 16
 
     var body: some View {
         GeometryReader { geo in
-            let w = geo.size.width - margin * 2 - peek * 2
+            let w = geo.size.width - leadInset - margin * 2 - peek * 2
+            let front0 = leadInset + margin
             let count = max(items.count, 1)
             let p = CGFloat(index) - dragX / w
             ZStack(alignment: .leading) {
@@ -1131,10 +1136,10 @@ struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
                     // ten-item deck was laying out ten hero views per drag
                     // frame (Logan 2026-09-06, "very laggy").
                     if rel > -1.5 && rel < 3.5 {
-                    let x: CGFloat = single ? margin + dragX * 0.35
+                    let x: CGFloat = single ? front0 + dragX * 0.35
                         : rel >= 0
-                        ? margin + rel * peek
-                        : margin + max(rel, -1) * (w - parkedSliver + margin) - max(0, -rel - 1) * 4
+                        ? front0 + rel * peek
+                        : front0 + max(rel, -1) * (w - parkedSliver + front0) - max(0, -rel - 1) * 4
                     let scale: CGFloat = rel >= 0 ? 1 - min(rel, 3) * 0.03 : 1
                     let alpha: Double = rel >= 0 ? Double(1 - min(rel, 3) * 0.2) : Double(0.9 + max(rel, -1) * 0.3)
                     card(item)
