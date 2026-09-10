@@ -800,7 +800,9 @@ struct ProgramInfoView: View {
                             }
                         }
                     }
-                    HStack(spacing: 36) {
+                    // Top-aligned: a wrapped value (Window, Location) must
+                    // not float its neighbours' headers (Logan 2026-09-10).
+                    HStack(alignment: .top, spacing: 36) {
                         infoColumn(title: "Airs", value: timeRangeLabel)
                         infoColumn(title: "Date", value: dateLabel)
                         infoColumn(title: "Duration", value: durationLabel)
@@ -810,7 +812,7 @@ struct ProgramInfoView: View {
                     }
                     .padding(.top, 6)
                     if let rec = target.recording {
-                        HStack(spacing: 36) {
+                        HStack(alignment: .top, spacing: 36) {
                             ForEach(rec.rows, id: \.0) { row in
                                 infoColumn(title: row.0, value: row.1)
                             }
