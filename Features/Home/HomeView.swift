@@ -7556,9 +7556,25 @@ final class TabBarCollapseState: ObservableObject {
             .flatMap { $0.windows }
             .flatMap { Self.tabBars(in: $0) }
         let hide = collapsed
-        UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState]) {
+        UIView.animate(withDuration: 0.28, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState]) {
             for bar in bars {
-                bar.transform = hide ? CGAffineTransform(translationX: 0, y: bar.bounds.height + 40) : .identity
+                if hide, let window = bar.window {
+                    // Morph into the bottom-left mini button (Logan 2026-09-09):
+                    // shrink toward its centre and fade, instead of sliding
+                    // off the bottom edge. Mini button: 48 pt at x 28, bottom
+                    // 6 pt below the safe-area edge (MinimizedTabButton).
+                    let barCenter = bar.superview?.convert(bar.center, to: window) ?? bar.center
+                    let target = CGPoint(x: 28 + 24,
+                                         y: window.bounds.height - window.safeAreaInsets.bottom + 6 - 24)
+                    let scale: CGFloat = 48 / max(bar.bounds.height, 1)
+                    bar.transform = CGAffineTransform(translationX: target.x - barCenter.x,
+                                                      y: target.y - barCenter.y)
+                        .scaledBy(x: scale, y: scale)
+                    bar.alpha = 0
+                } else {
+                    bar.transform = .identity
+                    bar.alpha = 1
+                }
             }
         }
     }
