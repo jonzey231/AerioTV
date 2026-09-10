@@ -3343,8 +3343,15 @@ struct EPGGuideView: View {
     // would multiply the per-row cell count ~5x on tvOS. Deeper history
     // stays reachable from the channel list's expanded schedule panel,
     // which lists ALL retained aired programmes.
-    /// Whole days from now to the latest programme end in the store, at least 1, at most 14.
+    /// Days the Jump To sheet offers ahead. A Dispatcharr 0.30+ server keeps
+    /// many days and the guide fetches the jumped day on demand
+    /// (ensureForwardWindow), so offer two weeks there (Logan 2026-09-10);
+    /// other sources are limited to what is loaded.
     private var loadedEpgDaysAhead: Int {
+        if let server = servers.first(where: { $0.isActive }) ?? servers.first,
+           server.type == .dispatcharrAPI, server.dispatcharrVersionAtLeast("0.30.0") {
+            return 14
+        }
         var maxEnd = Date.distantPast
         for list in guideStore.programs.values {
             if let last = list.last, last.end > maxEnd { maxEnd = last.end }

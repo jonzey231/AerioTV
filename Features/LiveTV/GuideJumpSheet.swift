@@ -171,11 +171,15 @@ struct GuideJumpSheet: View {
             Text(title)
                 .font(.system(size: 24, weight: .semibold))
                 .foregroundColor(.textPrimary)
+            // 12 pt of slack each side so the focused pill's 1.05 scale and
+            // 3 pt ring are not clipped by the scroll view; pulled back by
+            // the same amount so the first pill stays flush with the title.
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) { content() }
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
             }
+            .padding(.horizontal, -12)
             .focusSection()
         }
     }
