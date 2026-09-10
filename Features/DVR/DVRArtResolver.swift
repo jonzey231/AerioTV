@@ -165,6 +165,7 @@ final class DVRArtResolver: ObservableObject {
     private func needsWork(_ rec: Recording) -> Bool {
         !hasPoster(rec) || (rec.backdropURL ?? "").isEmpty
             || (rec.subTitle ?? "").isEmpty || rec.seasonNumber == nil
+            || (rec.epgCategory ?? "").isEmpty
     }
 
     /// Rows resolved before 2026-09-05 hold a landscape TMDB backdrop in the
@@ -389,6 +390,17 @@ final class DVRArtResolver: ObservableObject {
         if (rec.subTitle ?? "").isEmpty, let sub = match.subTitle, !sub.isEmpty { rec.subTitle = sub }
         if rec.seasonNumber == nil, let s = match.season { rec.seasonNumber = s }
         if rec.episodeNumber == nil, let e = match.episode { rec.episodeNumber = e }
+        // Category pills for the recording's Program Info (Logan 2026-09-10,
+        // parity with Android): the bulk grid strips <category>, the
+        // per-program detail carries it. One fetch per row per session.
+        if (rec.epgCategory ?? "").isEmpty, let pid = match.programID,
+           let (api, _) = dispatcharrAPI(for: rec, modelContext: modelContext),
+           let detail = try? await api.getProgramDetail(id: pid),
+           !detail.categories.isEmpty,
+           rec.modelContext != nil, !rec.isDeleted {
+            rec.epgCategory = detail.categories.joined(separator: ",")
+            debugLog("[DVR-ART] category for \(rec.programTitle): \(rec.epgCategory ?? "")")
+        }
         return match
     }
 }
