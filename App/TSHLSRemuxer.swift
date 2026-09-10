@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import UniformTypeIdentifiers
 import SwiftData
 import SwiftUI
 import AVFoundation
@@ -35,6 +36,109 @@ import Combine
 /// 4-8s tap-to-video and 6-10s behind the live edge (vs ~3.5s on mpv).
 /// Segment length is ultimately dictated by the provider's GOP cadence
 /// because segments must start on keyframes.
+/// How the remuxed HLS reaches AVPlayer. Loopback HTTP (127.0.0.1) is the
+/// proven path. iOS and iPadOS route EVERY URL request, loopback included,
+/// through a configured Wi-Fi proxy or PAC, so on such a network the
+/// player's playlist and segment fetches never come back and the item sits
+/// at .unknown until the watchdog gives up, while mpv (its own networking)
+/// plays the same channel (Freyguy1975, iPad at work, 2026-09-09: nine
+/// straight 12 s timeouts on one afternoon, sub-second starts at home).
+/// In-process delivery hands the same bytes to AVFoundation through an
+/// AVAssetResourceLoader on a custom scheme: no socket, no proxy.
+enum HLSDelivery {
+    static let scheme = "aeriohls"
+
+    /// A one-line description of the system proxy configuration, nil when
+    /// there is none.
+    static func systemProxyDescription() -> String? {
+        guard let dict = CFNetworkCopySystemProxySettings()?.takeRetainedValue() as? [String: Any] else { return nil }
+        var parts: [String] = []
+        if (dict["HTTPEnable"] as? Int) == 1 {
+            parts.append("HTTP=\(dict["HTTPProxy"] as? String ?? "?"):\(dict["HTTPPort"] as? Int ?? 0)")
+        }
+        if (dict["HTTPSEnable"] as? Int) == 1 {
+            parts.append("HTTPS=\(dict["HTTPSProxy"] as? String ?? "?"):\(dict["HTTPSPort"] as? Int ?? 0)")
+        }
+        if (dict["ProxyAutoConfigEnable"] as? Int) == 1 {
+            parts.append("PAC=\(dict["ProxyAutoConfigURLString"] as? String ?? "?")")
+        }
+        if (dict["ProxyAutoDiscoveryEnable"] as? Int) == 1 {
+            parts.append("WPAD")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
+    /// Set when a loopback start died at .unknown (a proxy or VPN that
+    /// captures loopback without showing up in the system settings); the
+    /// next remuxer in this process delivers in-process instead.
+    nonisolated(unsafe) static var forceInProcessNextStart = false
+
+    /// Developer override: UserDefaults "hlsInProcessDelivery" = true.
+    static var developerForced: Bool { UserDefaults.standard.bool(forKey: "hlsInProcessDelivery") }
+}
+
+/// Serves the remuxers' playlists and segments to AVFoundation on the
+/// custom scheme. One delegate for every session; the URL host is the
+/// session id.
+final class HLSResourceLoaderRegistry: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
+    static let shared = HLSResourceLoaderRegistry()
+    let queue = DispatchQueue(label: "com.aerio.hls-loader")
+    private let lock = NSLock()
+    private var sessions: [String: () -> TSHLSRemuxer?] = [:]
+
+    func register(_ remuxer: TSHLSRemuxer, id: String) {
+        lock.lock(); sessions[id] = { [weak remuxer] in remuxer }; lock.unlock()
+    }
+
+    func unregister(id: String) {
+        lock.lock(); sessions[id] = nil; lock.unlock()
+    }
+
+    private func remuxer(for id: String) -> TSHLSRemuxer? {
+        lock.lock(); defer { lock.unlock() }
+        return sessions[id]?()
+    }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+        guard let url = loadingRequest.request.url, url.scheme == HLSDelivery.scheme,
+              let id = url.host, let remuxer = remuxer(for: id) else { return false }
+        // AVFoundation only takes PLAYLISTS (and keys) from a resource
+        // loader: a media segment answered with bytes, or redirected to a
+        // file, fails with CoreMedia -12881 "custom url not redirect", and a
+        // file-scheme playlist never opens (Mac harness 2026-09-10). What it
+        // DOES accept is a segment given as a data: URI inside the playlist,
+        // so in-process delivery inlines the segments (see playlistText).
+        guard url.path.hasSuffix(".m3u8") else {
+            loadingRequest.finishLoading(with: NSError(domain: NSURLErrorDomain, code: NSURLErrorUnsupportedURL))
+            return true
+        }
+        remuxer.serve(path: url.path) { response in
+            if response.status != 200 {
+                loadingRequest.finishLoading(with: NSError(domain: NSURLErrorDomain, code: NSURLErrorFileDoesNotExist))
+                return
+            }
+            if let info = loadingRequest.contentInformationRequest {
+                info.contentType = response.uti
+                info.contentLength = Int64(response.body.count)
+                info.isByteRangeAccessSupported = true
+            }
+            if let data = loadingRequest.dataRequest {
+                let start = Int(data.requestedOffset)
+                let end = data.requestsAllDataToEndOfResource
+                    ? response.body.count
+                    : min(response.body.count, start + data.requestedLength)
+                if start < end { data.respond(with: response.body.subdata(in: start..<end)) }
+            }
+            loadingRequest.finishLoading()
+        }
+        return true
+    }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        didCancel loadingRequest: AVAssetResourceLoadingRequest) {}
+}
+
 final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     enum RemuxError: Error, CustomStringConvertible {
@@ -140,6 +244,17 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var ingestTask: URLSessionDataTask?
     private var listener: NWListener?
     private var localPort: UInt16 = 0
+    /// In-process delivery: base64 of each RAM-window segment (and the fMP4
+    /// init), computed once per segment for the inlined playlist.
+    private var deliveryBase64: [Int: String] = [:]
+    /// Segments advertised by the inlined playlist. Smaller than the
+    /// loopback window: every reload carries the segments themselves
+    /// (~1.3 MB per 2 s segment as base64).
+    private let inlineWindowSegments = 4
+    /// In-process delivery (see HLSDelivery): decided once at init.
+    let inProcessDelivery: Bool
+    let deliveryID = UUID().uuidString.lowercased()
+    private let deliveryNote: String
     private var stopped = false
 
     // TS demux state
@@ -191,6 +306,18 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         self.sourceURL = sourceURL
         self.headers = headers
         self.rewindWindowSeconds = rewindWindowSeconds
+        let proxy = HLSDelivery.systemProxyDescription()
+        let forced = HLSDelivery.forceInProcessNextStart
+        HLSDelivery.forceInProcessNextStart = false
+        if HLSDelivery.developerForced {
+            inProcessDelivery = true; deliveryNote = "in-process (developer override)"
+        } else if let proxy {
+            inProcessDelivery = true; deliveryNote = "in-process (system proxy: \(proxy))"
+        } else if forced {
+            inProcessDelivery = true; deliveryNote = "in-process (previous loopback start never became ready)"
+        } else {
+            inProcessDelivery = false; deliveryNote = "loopback (no system proxy)"
+        }
         super.init()
     }
 
@@ -202,7 +329,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             if self.rewindWindowSeconds > 0 {
                 self.setupSpillDir()
             }
-            self.startServer()
+            debugLog("[TS-REMUX] delivery: \(self.deliveryNote)")
+            if self.inProcessDelivery {
+                HLSResourceLoaderRegistry.shared.register(self, id: self.deliveryID)
+                self.localPort = 1   // READY gate: "server ready" marker
+            } else {
+                self.startServer()
+            }
             self.startIngest()
         }
     }
@@ -243,6 +376,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             self.ingestTask?.cancel()
             self.urlSession?.invalidateAndCancel()
             self.listener?.cancel()
+            HLSResourceLoaderRegistry.shared.unregister(id: self.deliveryID)
+            self.deliveryBase64.removeAll()
             self.segments.removeAll()
             self.currentSegment.removeAll()
             // Assign a fresh Data rather than removeAll(): the latter keeps
@@ -714,10 +849,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
         segments.append((seq: nextSeq, data: data, duration: duration))
         spillSegment(seq: nextSeq, data: data, duration: duration)
+        if inProcessDelivery { deliveryBase64[nextSeq] = data.base64EncodedString() }
         nextSeq += 1
         let ramCap = retainedRAMCap ?? maxBufferedSegments
         if segments.count > ramCap {
             segments.removeFirst(segments.count - ramCap)
+        }
+        if inProcessDelivery, let first = segments.first?.seq {
+            for k in deliveryBase64.keys where k >= 0 && k < first { deliveryBase64[k] = nil }
         }
         // nextSeq, not segments.count: the count pins at maxBufferedSegments
         // once the window fills, and 12 % 5 != 0 silenced every close after
@@ -728,7 +867,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if !readySignaled, segments.count >= readyThreshold, localPort != 0,
            fmp4 == nil || fmp4InitSegment != nil {
             readySignaled = true
-            let url = URL(string: "http://127.0.0.1:\(localPort)/live.m3u8")!
+            let url = inProcessDelivery
+                ? URL(string: "\(HLSDelivery.scheme)://\(deliveryID)/live.m3u8")!
+                : URL(string: "http://127.0.0.1:\(localPort)/live.m3u8")!
             debugLog("[TS-REMUX] READY -> \(url.absoluteString)")
             DispatchQueue.main.async { [weak self] in self?.onReady?(url) }
         }
@@ -769,9 +910,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // seekable range then IS the rewind window. Every spilled entry
         // also existed in memory when written, so seq numbering is one
         // continuous run either way.
-        let window: [(seq: Int, duration: Double)] = (spillDir != nil && !spilled.isEmpty)
-            ? spilled.map { (seq: $0.seq, duration: $0.duration) }
-            : segments.suffix(liveWindowSegments).map { (seq: $0.seq, duration: $0.duration) }
+        // In-process delivery inlines the segments, so the window is the
+        // last few RAM segments only; the rewind disk window is not
+        // advertised there (a 30-minute window would be a 1 GB playlist).
+        let window: [(seq: Int, duration: Double)] = inProcessDelivery
+            ? segments.suffix(inlineWindowSegments).map { (seq: $0.seq, duration: $0.duration) }
+            : (spillDir != nil && !spilled.isEmpty)
+                ? spilled.map { (seq: $0.seq, duration: $0.duration) }
+                : segments.suffix(liveWindowSegments).map { (seq: $0.seq, duration: $0.duration) }
         guard let first = window.first else {
             return "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:\(Int(pinnedTargetDuration.rounded(.up)))\n#EXT-X-MEDIA-SEQUENCE:0\n"
         }
@@ -797,10 +943,20 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             text += "#EXT-X-PLAYLIST-TYPE:EVENT\n"
         }
         if fmp4 != nil {
-            text += "#EXT-X-MAP:URI=\"init.mp4\"\n"
+            if inProcessDelivery, let initSeg = fmp4InitSegment {
+                text += "#EXT-X-MAP:URI=\"data:video/mp4;base64,\(initSeg.base64EncodedString())\"\n"
+            } else {
+                text += "#EXT-X-MAP:URI=\"init.mp4\"\n"
+            }
         }
         for segment in window {
-            text += "#EXTINF:\(String(format: "%.3f", segment.duration)),\nseg\(segment.seq).\(segmentFileExtension)\n"
+            text += "#EXTINF:\(String(format: "%.3f", segment.duration)),\n"
+            if inProcessDelivery, let b64 = deliveryBase64[segment.seq] {
+                let mime = fmp4 != nil ? "video/iso.segment" : "video/mp2t"
+                text += "data:\(mime);base64,\(b64)\n"
+            } else {
+                text += "seg\(segment.seq).\(segmentFileExtension)\n"
+            }
         }
         if playlistComplete {
             text += "#EXT-X-ENDLIST\n"
@@ -885,46 +1041,56 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
     }
 
-    private func respond(_ connection: NWConnection, path: String) {
-        queue.async { [weak self] in
-            guard let self else { connection.cancel(); return }
-            let body: Data
-            let contentType: String
-            var status = "200 OK"
+    struct ServedResource {
+        let status: Int
+        let body: Data
+        let contentType: String
+        let uti: String
+    }
 
+    /// Resolves one playlist / init / segment request on the remux queue.
+    /// Shared by the loopback HTTP server and the in-process loader.
+    func serve(path: String, completion: @escaping (ServedResource) -> Void) {
+        queue.async { [weak self] in
+            guard let self else {
+                completion(ServedResource(status: 410, body: Data(), contentType: "text/plain", uti: "public.plain-text"))
+                return
+            }
+            let r: ServedResource
             if path.hasSuffix("live.m3u8") {
-                body = Data(self.playlistText().utf8)
-                contentType = "application/vnd.apple.mpegurl"
+                r = ServedResource(status: 200, body: Data(self.playlistText().utf8),
+                                   contentType: "application/vnd.apple.mpegurl", uti: "public.m3u-playlist")
             } else if path.hasSuffix("init.mp4"), let initSeg = self.fmp4InitSegment {
-                body = initSeg
-                contentType = "video/mp4"
+                r = ServedResource(status: 200, body: initSeg, contentType: "video/mp4", uti: "public.mpeg-4")
             } else if path.hasPrefix("/seg"), path.hasSuffix(".ts"),
                       let seq = Int(path.dropFirst(4).dropLast(3)),
                       let data = self.segmentData(seq: seq) {
-                body = data
-                contentType = "video/mp2t"
+                r = ServedResource(status: 200, body: data, contentType: "video/mp2t", uti: "public.mpeg-2-transport-stream")
             } else if path.hasPrefix("/seg"), path.hasSuffix(".m4s"),
                       let seq = Int(path.dropFirst(4).dropLast(4)),
                       let data = self.segmentData(seq: seq) {
-                body = data
-                contentType = "video/iso.segment"
+                r = ServedResource(status: 200, body: data, contentType: "video/iso.segment", uti: "public.mpeg-4")
             } else {
-                body = Data("not found".utf8)
-                contentType = "text/plain"
-                status = "404 Not Found"
+                r = ServedResource(status: 404, body: Data("not found".utf8), contentType: "text/plain", uti: "public.plain-text")
             }
-
             if self.loggedRequests < 24 {
                 self.loggedRequests += 1
-                debugLog("[TS-REMUX] GET \(path) -> \(status) \(body.count) B (segments \(self.segments.first?.seq ?? -1)...\(self.segments.last?.seq ?? -1))")
+                debugLog("[TS-REMUX] GET \(path) -> \(r.status) \(r.body.count) B (segments \(self.segments.first?.seq ?? -1)...\(self.segments.last?.seq ?? -1))")
             }
+            completion(r)
+        }
+    }
+
+    private func respond(_ connection: NWConnection, path: String) {
+        serve(path: path) { r in
+            let status = r.status == 200 ? "200 OK" : (r.status == 404 ? "404 Not Found" : "410 Gone")
             let header = "HTTP/1.1 \(status)\r\n"
-                + "Content-Type: \(contentType)\r\n"
-                + "Content-Length: \(body.count)\r\n"
+                + "Content-Type: \(r.contentType)\r\n"
+                + "Content-Length: \(r.body.count)\r\n"
                 + "Cache-Control: no-cache\r\n"
                 + "Connection: close\r\n\r\n"
             var response = Data(header.utf8)
-            response.append(body)
+            response.append(r.body)
             connection.send(content: response, completion: .contentProcessed { _ in
                 connection.cancel()
             })
@@ -1876,6 +2042,14 @@ struct AVPlayerMultiviewTile: View {
         }
         if retryable, mismatchAutoRetries < 2, tileError == nil {
             mismatchAutoRetries += 1
+            if reason.contains("never became ready"), reason.contains(".unknown"),
+               let mux = remuxer, !mux.inProcessDelivery {
+                // Loopback fetches never answered: a proxy or VPN is
+                // capturing 127.0.0.1 (see HLSDelivery). The retry hands
+                // the bytes to AVFoundation in-process instead.
+                HLSDelivery.forceInProcessNextStart = true
+                debugLog("[AVP-MV] loopback delivery never became ready; retrying with in-process delivery title=\(channelName)")
+            }
             debugLog("[AVP-MV] recoverable failure (\(reason)); auto-retrying with a fresh pipeline title=\(channelName)")
             if isVOD, progressStore.currentMs > 2_000 {
                 progressStore.explicitResumeMs = progressStore.currentMs
@@ -2470,6 +2644,10 @@ struct AVPlayerMultiviewTile: View {
             options["AVURLAssetHTTPHeaderFieldsKey"] = requestHeaders
         }
         let asset = AVURLAsset(url: url, options: options)
+        if url.scheme == HLSDelivery.scheme {
+            asset.resourceLoader.setDelegate(HLSResourceLoaderRegistry.shared,
+                                             queue: HLSResourceLoaderRegistry.shared.queue)
+        }
         let playerItem = AVPlayerItem(asset: asset)
         // Live-edge point: trust the server, do not force an offset. The
         // Dispatcharr HLS output now pins the join point itself, correctly for
