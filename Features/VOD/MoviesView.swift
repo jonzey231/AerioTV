@@ -257,6 +257,11 @@ struct MoviesView: View {
     /// ScrollViewReader.scrollTo(id) silently no-ops for lazy grid rows
     /// that have not been built yet (device log 2026-09-03).
     private final class ScrollGeometryBox {
+        /// Phone rail visibility and park offset, observed ONLY by
+        /// PhoneRailFade (never by this view): a @State flip on the tab at
+        /// the pills crossing re-rendered the whole tab, ~25 ms (Instruments
+        /// on DVR 2026-09-09; same structure here, TV Shows included).
+        let phoneRail = DVRPhoneRailState()
         /// The ScrollView's position, held OUTSIDE @State: bound as @State
         /// it wrote view state on every scroll frame and re-rendered the
         /// whole tab (phone probe 2026-09-09: 102 of 128 layout passes over
@@ -1497,11 +1502,17 @@ struct MoviesView: View {
                     // No global animation transaction here: the rail animates
                     // itself (see railMounted). A withAnimation around this
                     // write animated the scroll view's own pending layout.
-                    if want != railVisible { railVisible = want }
-                    if want {
-                        let top = (max(0, gridTopY) / 8).rounded() * 4
-                        if railTop != top { railTop = top }
+                    // Writes go to the rail's own observable so only the fade
+                    // wrapper re-renders; the park offset is set once when the
+                    // rail appears. railTop (@State) is written a single time
+                    // so the shared mount condition holds; railVisible is
+                    // unused on the phone.
+                    let rail = geometryBox.phoneRail
+                    if want != rail.visible {
+                        if want { rail.top = (max(0, gridTopY) / 8).rounded() * 4 }
+                        rail.visible = want
                     }
+                    if railTop == nil { railTop = 0 }
                     #endif
                 }
                 #if os(tvOS)
@@ -1794,16 +1805,10 @@ struct MoviesView: View {
                         // "tapping a letter opens the closest item"). The box
                         // is pinned to the scroll area's height, so the padding
                         // can never feed back into the layout (the 18:13 loop).
-                        .padding(.top, railRestingTop(in: outer) + railTop)
-                        .frame(width: outer.size.width,
-                               height: outer.size.height + outer.safeAreaInsets.top,
-                               alignment: .topTrailing)
-                        .clipped()
-                        .padding(.trailing, 2)
-                        .opacity(railVisible ? 1 : 0)
-                        .offset(x: railVisible ? 0 : 24)
-                        .allowsHitTesting(railVisible)
-                        .animation(.easeInOut(duration: 0.25), value: railVisible)
+                        .modifier(PhoneRailFade(state: geometryBox.phoneRail,
+                                                restingTop: railRestingTop(in: outer),
+                                                boxWidth: outer.size.width,
+                                                boxHeight: outer.size.height + outer.safeAreaInsets.top))
                         #endif
                     }
                     #if os(tvOS)
@@ -3819,6 +3824,32 @@ struct MoviesPillStyle: ButtonStyle {
             .scaleEffect(isFocused ? 1.05 : 1.0)
             .opacity(isFocused || isSelected ? 1.0 : 0.85)
             .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+#endif
+
+
+#if os(iOS)
+/// Applies the phone rail's park offset and fade. The ONLY observer of the
+/// rail state, so a show/hide flip re-renders this modifier's content and
+/// not the tab.
+private struct PhoneRailFade: ViewModifier {
+    @ObservedObject var state: DVRPhoneRailState
+    let restingTop: CGFloat
+    let boxWidth: CGFloat
+    let boxHeight: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            // Fixed-height box + padding, not an offset: an offset rail's taps
+            // fell through to the poster beneath (Logan 2026-09-05).
+            .padding(.top, restingTop + state.top)
+            .frame(width: boxWidth, height: boxHeight, alignment: .topTrailing)
+            .clipped()
+            .padding(.trailing, 2)
+            .opacity(state.visible ? 1 : 0)
+            .allowsHitTesting(state.visible)
+            .animation(.easeInOut(duration: 0.25), value: state.visible)
     }
 }
 #endif
