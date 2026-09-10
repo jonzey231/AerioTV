@@ -3297,8 +3297,9 @@ struct MoviesHero: View {
             heroFocusable(MoviesHeroButton(title: "Details", systemImage: "info.circle",
                                            isPrimary: false, action: onDetails), role: "details")
             if hasOptions {
-                heroFocusable(MoviesHeroButton(title: "", systemImage: "ellipsis",
-                                               isPrimary: false, action: { showOptions = true }), role: "options")
+                // The nav bar's 60 pt circle (Logan 2026-09-10), not an icon pill.
+                heroFocusable(TVNavActionCircle(systemImage: "ellipsis", label: "Options",
+                                                action: { showOptions = true }), role: "options")
             }
             #else
             if progress != nil {
@@ -3403,8 +3404,8 @@ struct MoviesHeroButton: View {
                 }
             }
             .foregroundColor(isPrimary ? .appBackground : .textPrimary)
-            .padding(.horizontal, title.isEmpty ? 14 : hPad)
-            .frame(height: height)
+            .padding(.horizontal, title.isEmpty ? 0 : hPad)
+            .frame(width: title.isEmpty ? height : nil, height: height)
             // Pills, like the rest of the app (Logan 2026-09-05).
             .background(
                 Capsule()

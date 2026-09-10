@@ -1477,8 +1477,12 @@ struct DVRHero<Menu: View>: View {
                 focusable(MoviesHeroButton(title: secondaryTitle("Details"), systemImage: "info.circle",
                                            isPrimary: false, action: onInfo), role: "details")
             }
-            focusable(MoviesHeroButton(title: "", systemImage: "ellipsis",
-                                       isPrimary: false, action: { showOptions = true }), role: "options")
+            #if os(tvOS)
+            focusable(TVNavActionCircle(systemImage: "ellipsis", label: "Options",
+                                        action: { showOptions = true }), role: "options")
+            #else
+            MoviesHeroButton(title: "", systemImage: "ellipsis", isPrimary: false, action: { showOptions = true })
+            #endif
         }
         .padding(.top, 4)
         .confirmationDialog("Options", isPresented: $showOptions, titleVisibility: .hidden) { menu() }
