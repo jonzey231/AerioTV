@@ -67,12 +67,20 @@ struct DVRView: View {
     private var gridSpacing: CGFloat { isPhone ? 10 : 12 }
     private let railWidth: CGFloat = 22
     #endif
-    @State private var lastScrollY: CGFloat = 0
+    /// Scroll-time numbers read only by the rail jump math, kept OUT of
+    /// view state: written on every scroll frame they re-rendered the whole
+    /// tab (phone stutter, Logan 2026-09-09; same fix as Movies).
+    private final class ScrollNumbers { var lastScrollY: CGFloat = 0; var gridTopVisible: CGFloat = 0; var rowPitch: CGFloat = 0 }
+    @State private var scrollNumbers = ScrollNumbers()
+    private var lastScrollY: CGFloat { scrollNumbers.lastScrollY }
     @State private var scrollPosition = ScrollPosition()
     @State private var railVisible = false
     @State private var railTop: CGFloat?
-    @State private var gridTopVisible: CGFloat = 0
-    @State private var rowPitch: CGFloat = 0
+    private var gridTopVisible: CGFloat { scrollNumbers.gridTopVisible }
+    // Row pitch is measured by the first grid cell's onAppear, which fires
+    // exactly as the pills scroll off; as @State that write re-rendered the
+    // tab at that moment (the DVR "stutter right past the pills", 2026-09-09).
+    private var rowPitch: CGFloat { scrollNumbers.rowPitch }
     /// The rail appears only for libraries worth jumping around in.
     private let railMinimumCount = 15
     private let phoneRailMinimumCount = 9
@@ -439,7 +447,9 @@ struct DVRView: View {
                 // centered on the visible grid (Logan 2026-09-05).
                 // Three columns: nine posters fill the display, so the rail
                 // is worth having from nine (Logan 2026-09-05); tvOS keeps 15.
-                if isPhone, filteredLibrary.count >= phoneRailMinimumCount, let railTop, railVisible {
+                // Stays mounted and fades with a local animation (a sibling
+                // mount with a transition caught the scroll; same as Movies).
+                if isPhone, filteredLibrary.count >= phoneRailMinimumCount, let railTop {
                     AlphabetRail(available: railLetters) { letter in
                         jumpToLetter(letter)
                     }
@@ -452,24 +462,34 @@ struct DVRView: View {
                            alignment: .topTrailing)
                     .clipped()
                     .padding(.trailing, 2)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .opacity(railVisible ? 1 : 0)
+                    .allowsHitTesting(railVisible)
+                    .animation(.easeInOut(duration: 0.25), value: railVisible)
                     .ignoresSafeArea(.container, edges: .top)
                 }
                 #endif
             }
             .onPreferenceChange(GridTopKey.self) { gridTopY in
                 guard let gridTopY else { return }
-                gridTopVisible = gridTopY
+                scrollNumbers.gridTopVisible = gridTopY
                 #if os(tvOS)
                 let centered = max(8, (outer.size.height + outer.safeAreaInsets.top - AlphabetRail.totalHeight) / 2 + 80)
                 let top = max(centered, gridTopY + 24)
                 if railTop != top { railTop = top }
                 #else
-                let top = max(0, gridTopY) / 2
-                if railTop != top { railTop = top }
+                // Same rules as Movies: the flip runs in no animation
+                // transaction (the rail animates itself), and the park
+                // position moves in 4pt steps only while the rail shows.
                 let want = gridTopY <= 110
+                // The park position is set ONCE, at the moment the rail
+                // appears, and never tracks the scroll: updating it in steps
+                // re-evaluated the tab 5 to 6 times a second near the pills
+                // (probe 2026-09-09) and re-laid the full-height rail box.
                 if want != railVisible {
-                    withAnimation(.easeInOut(duration: 0.25)) { railVisible = want }
+                    railVisible = want
+                    if want { railTop = (max(0, gridTopY) / 8).rounded() * 4 }
+                } else if railTop == nil {
+                    railTop = 0
                 }
                 #endif
             }
@@ -658,17 +678,22 @@ struct DVRView: View {
         }
         .coordinateSpace(name: "dvrScroll")
         #if os(iOS)
+        // Content flows under the tab bar like Movies and Live TV: without
+        // these the system bar painted a solid platter over a hard edge
+        // (Logan 2026-09-09).
+        .ignoresSafeArea(.container, edges: .bottom)
+        .aerioContentUnderTabBar()
         .aerioNoTopScrollEdge()
         #endif
         .scrollPosition($scrollPosition)
         #if os(iOS)
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in
-            lastScrollY = y
+            scrollNumbers.lastScrollY = y
         }
         #endif
         #if os(tvOS)
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in
-            lastScrollY = y
+            scrollNumbers.lastScrollY = y
             // Same rule as Movies: hide the bar once the hero has scrolled
             // away and the scroll has settled; show it at once on the way up.
             let hide = y > heroHideThreshold
@@ -917,7 +942,7 @@ struct DVRView: View {
                 card(rec, inGrid: true)
                     .background(GeometryReader { g in
                         Color.clear.onAppear {
-                            if rec.id == firstID { rowPitch = g.size.height + gridRowSpacing }
+                            if rec.id == firstID { scrollNumbers.rowPitch = g.size.height + gridRowSpacing }
                         }
                     })
             }
