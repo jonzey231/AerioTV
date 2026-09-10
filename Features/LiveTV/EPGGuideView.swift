@@ -3343,6 +3343,16 @@ struct EPGGuideView: View {
     // would multiply the per-row cell count ~5x on tvOS. Deeper history
     // stays reachable from the channel list's expanded schedule panel,
     // which lists ALL retained aired programmes.
+    /// Whole days from now to the latest programme end in the store, at least 1, at most 14.
+    private var loadedEpgDaysAhead: Int {
+        var maxEnd = Date.distantPast
+        for list in guideStore.programs.values {
+            if let last = list.last, last.end > maxEnd { maxEnd = last.end }
+        }
+        let days = Int(ceil(maxEnd.timeIntervalSinceNow / 86_400))
+        return min(14, max(1, days))
+    }
+
     private var hoursBack: TimeInterval {
         min(TimeInterval(GuideStore.activeRetentionDays()) * 24, 24)
     }
@@ -4666,7 +4676,10 @@ struct EPGGuideView: View {
                 }
                 #endif
                 .sheet(isPresented: $showJumpSheet) {
-                    GuideJumpSheet(daysBack: Int(hoursBack / 24), daysAhead: 7) { date in
+                    // Days follow the EPG actually loaded (Logan 2026-09-10):
+                    // back no further than the grid's history window, ahead
+                    // to the last programme end in the store.
+                    GuideJumpSheet(daysBack: Int(hoursBack / 24), daysAhead: loadedEpgDaysAhead) { date in
                         showJumpSheet = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                             if let date { jump(to: date) } else { snapToNow() }
