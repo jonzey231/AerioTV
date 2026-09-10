@@ -1753,12 +1753,14 @@ enum DVRFormat {
 }
 
 
-#if os(iOS)
-/// Phone rail state, published to the rail overlay only.
+/// Phone rail state, published to the rail overlay only (declared for both
+/// platforms: the scroll holder that owns it is shared).
 final class DVRPhoneRailState: ObservableObject {
     @Published var visible = false
     @Published var top: CGFloat = 0
 }
+
+#if os(iOS)
 
 /// The phone rail overlay: stays mounted, fades with a local animation,
 /// and is the only view that observes DVRPhoneRailState, so a visibility
