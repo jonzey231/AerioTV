@@ -5062,9 +5062,7 @@ struct MainTabView: View {
                // fullscreen player (field find 2026-08-26, "rogue cast
                // button"). Gate on the session mode too.
                playerSession.mode == .idle || nowPlaying.isMinimized {
-                CompanionControlFAB { showCompanionPickerGlobal = true }
-                    .padding(.trailing, 20)
-                    .padding(.bottom, 52)
+                CompanionControlFABDock { showCompanionPickerGlobal = true }
             }
         }
         #endif
@@ -7407,8 +7405,10 @@ extension View {
         if #available(iOS 26.0, *) {
             // System minimize owns the bar on 26+ (aerioTabBarAutoMinimize);
             // toggling visibility here changed the bottom inset and reflowed
-            // the content on every show (2026-09-09).
-            self
+            // the content on every show (2026-09-09). The collapsed flag
+            // still feeds TabBarCollapseState so the Control-a-TV button can
+            // drop level with the minimized pill (Logan 2026-09-09).
+            self.onChange(of: collapsed, initial: true) { _, c in TabBarCollapseState.shared.set(c) }
         } else {
             self.toolbar(collapsed ? .hidden : .visible, for: .tabBar)
         }
@@ -7511,6 +7511,34 @@ final class TabBarScrollTracker {
             debugLog("[TABBAR] auto-hide -> \(result ? "hidden" : "shown") y=\(Int(newY)) dy=\(Int(dy))")
         }
         return result
+    }
+}
+#endif
+
+#if os(iOS)
+/// Whether the scrolling tab has collapsed the tab bar (iOS 26 minimizes it
+/// to a small pill at the leading edge). Observed ONLY by the Control-a-TV
+/// dock below, never by the tab views, so the per-scroll publish cannot
+/// re-render a tab body (see the scroll-churn rule).
+@MainActor
+final class TabBarCollapseState: ObservableObject {
+    static let shared = TabBarCollapseState()
+    @Published private(set) var collapsed = false
+    func set(_ value: Bool) { if collapsed != value { collapsed = value } }
+}
+
+/// Hosts the Control-a-TV FAB above the right end of the full tab bar and,
+/// once the bar has minimized, level with the minimized pill on the left so
+/// the two corners match (Logan 2026-09-09).
+private struct CompanionControlFABDock: View {
+    @ObservedObject private var collapse = TabBarCollapseState.shared
+    let action: () -> Void
+    init(action: @escaping () -> Void) { self.action = action }
+    var body: some View {
+        CompanionControlFAB(action: action)
+            .padding(.trailing, 20)
+            .padding(.bottom, collapse.collapsed ? 0 : 52)
+            .animation(.easeInOut(duration: 0.2), value: collapse.collapsed)
     }
 }
 #endif

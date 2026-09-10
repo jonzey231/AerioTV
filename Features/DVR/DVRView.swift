@@ -679,6 +679,10 @@ struct DVRView: View {
         .scrollPosition($scrollPosition)
         #if os(iOS)
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in
+            // Direction only feeds the Control-a-TV dock (observed by that
+            // overlay alone), mirroring the system tab-bar minimize.
+            if y > 80, y > scrollNumbers.lastScrollY + 2 { TabBarCollapseState.shared.set(true) }
+            else if y < scrollNumbers.lastScrollY - 2 || y <= 0 { TabBarCollapseState.shared.set(false) }
             scrollNumbers.lastScrollY = y
         }
         #endif
