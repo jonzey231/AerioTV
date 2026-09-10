@@ -163,6 +163,20 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var videoPTSDeltas: [Double] = []
     private var lastVideoAUPTS: Double = -1
     private var videoParamsSent = false
+    /// IDR gate (Freyguy1975, iPad 2026-09-09: one sports feed never left
+    /// AVPlayerItem.status .unknown, 9 times, ~12 s each, while mpv played
+    /// it at once). The keyframe test accepts an access unit that opens
+    /// with an SPS, but AVFoundation's HLS demuxer only starts on a real
+    /// IDR slice (NAL 5); an open-GOP feed that repeats its SPS in front
+    /// of non-IDR I-frames therefore produces clean segments the native
+    /// player can never enter. The first keyframe AUs are scanned for an
+    /// IDR; two SPS-led AUs without one fail the remuxer straight to mpv
+    /// (an "unsupported codec" reason is not retried) instead of two
+    /// 12 s watchdog timeouts. Scanning stops for good at the first IDR.
+    private var currentAUKeyframe = false
+    private var currentAUHasIDR = false
+    private var idrSeen = false
+    private var spsOnlyKeyframeAUs = 0
 
     // Segmenter state
     private var currentSegment = Data()
@@ -415,6 +429,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                     }
                 }
                 let isKeyframe = packetStartsKeyframeAccessUnit(p)
+                finishAccessUnit()
+                currentAUKeyframe = isKeyframe
+                currentAUHasIDR = isKeyframe && !idrSeen && packetHasNAL(p, type: 5, pesStart: true)
                 if awaitingFirstKeyframe {
                     if isKeyframe {
                         awaitingFirstKeyframe = false
@@ -435,8 +452,56 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
         }
 
+        // Continuation packets of a keyframe AU: look for the IDR slice
+        // only until the first one is found (bounded work, see idrSeen).
+        if pid == videoPID, !pusi, currentAUKeyframe, !currentAUHasIDR, !idrSeen,
+           packetHasNAL(p, type: 5, pesStart: false) {
+            currentAUHasIDR = true
+        }
+
         guard !awaitingFirstKeyframe else { return }
         currentSegment.append(p)
+    }
+
+    /// Closes the bookkeeping of the video access unit that just ended.
+    private func finishAccessUnit() {
+        guard currentAUKeyframe, !idrSeen else { currentAUKeyframe = false; return }
+        currentAUKeyframe = false
+        if currentAUHasIDR {
+            idrSeen = true
+            return
+        }
+        spsOnlyKeyframeAUs += 1
+        if spsOnlyKeyframeAUs >= 2 {
+            debugLog("[TS-REMUX] keyframe gate: \(spsOnlyKeyframeAUs) SPS-led access units with no IDR slice (open GOP); AVPlayer cannot start on these segments")
+            fail(.unsupportedCodec("H.264 without IDR keyframes"))
+        }
+    }
+
+    /// True when a TS packet's payload carries an Annex B NAL of `type`.
+    /// `pesStart` skips the PES header of a PUSI packet first.
+    private func packetHasNAL(_ p: Data, type: UInt8, pesStart: Bool) -> Bool {
+        guard let base = payloadStart(p) else { return false }
+        var i = base
+        if pesStart {
+            guard base + 9 < 188 else { return false }
+            i = base + 9 + Int(p[base + 8])
+        }
+        let end = 188 - 4
+        while i < end {
+            if p[i] == 0x00, p[i + 1] == 0x00 {
+                var nalStart = -1
+                if p[i + 2] == 0x01 { nalStart = i + 3 }
+                else if p[i + 2] == 0x00, i + 3 < end, p[i + 3] == 0x01 { nalStart = i + 4 }
+                if nalStart > 0, nalStart < 188 {
+                    if (p[nalStart] & 0x1F) == type { return true }
+                    i = nalStart
+                    continue
+                }
+            }
+            i += 1
+        }
+        return false
     }
 
     /// Rotate a malformed IDR AU's AUD in front of its SPS/PPS, in
@@ -1983,6 +2048,12 @@ struct AVPlayerMultiviewTile: View {
                     + "which this device can't decode natively. See the "
                     + "OTA / HDHomeRun section of the AerioTV GitHub README "
                     + "for a Dispatcharr Stream Profile that fixes this.")
+        }
+        if r.contains("without idr keyframes") {
+            // Open-GOP feed (Freyguy1975 2026-09-09): the native player
+            // needs an IDR frame to start; mpv does not.
+            return ("Channel Needs mpv",
+                    "This channel's video has no IDR keyframes (open GOP), which the native player can't start on. Turn on the mpv fallback in Settings > Playback to play it.")
         }
         if r.contains("range fetch http 503") || r.contains("range fetch http 502") {
             // Tester 2026-09-01 (iPad over VPN, 1.8.23): every VOD copy on
