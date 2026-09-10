@@ -7556,20 +7556,50 @@ final class TabBarCollapseState: ObservableObject {
             .flatMap { $0.windows }
             .flatMap { Self.tabBars(in: $0) }
         let hide = collapsed
-        UIView.animate(withDuration: 0.28, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState]) {
-            for bar in bars {
-                if hide {
-                    // Fade in place with a slight shrink while the mini
-                    // button grows in, the look Logan approved (2026-09-09);
-                    // no travel across the screen.
-                    bar.transform = CGAffineTransform(scaleX: 0.85, y: 0.85)
+        for bar in bars {
+            guard let window = bar.window, let superview = bar.superview else { continue }
+            // Mini button: 48 pt at x 28, bottom 6 pt below the safe-area
+            // edge (MinimizedTabButton). The bar collapses right-to-left
+            // INTO it (Logan 2026-09-09): anchor the bar on the button's
+            // centre, then scale toward that anchor while the far end fades.
+            let frame = superview.convert(bar.frame, to: window)
+            let target = CGPoint(x: 28 + 24,
+                                 y: window.bounds.height - window.safeAreaInsets.bottom + 6 - 24)
+            if hide {
+                let ax = ((target.x - frame.minX) / max(frame.width, 1)).clamped(to: 0...1)
+                let ay = ((target.y - frame.minY) / max(frame.height, 1)).clamped(to: 0...1)
+                Self.setAnchor(bar, CGPoint(x: ax, y: ay))
+                let sx = 48 / max(frame.width, 1), sy = 48 / max(frame.height, 1)
+                UIView.animate(withDuration: 0.32, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState]) {
+                    bar.transform = CGAffineTransform(scaleX: sx, y: sy)
+                }
+                UIView.animate(withDuration: 0.14, delay: 0.16, options: [.curveEaseIn, .beginFromCurrentState]) {
                     bar.alpha = 0
-                } else {
+                }
+            } else {
+                UIView.animate(withDuration: 0.32, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState], animations: {
                     bar.transform = .identity
+                }, completion: { _ in
+                    if !self.collapsed { Self.setAnchor(bar, CGPoint(x: 0.5, y: 0.5)) }
+                })
+                UIView.animate(withDuration: 0.14, delay: 0.02, options: [.curveEaseOut, .beginFromCurrentState]) {
                     bar.alpha = 1
                 }
             }
         }
+    }
+
+    /// Moves the layer anchor without moving the view on screen.
+    private static func setAnchor(_ v: UIView, _ anchor: CGPoint) {
+        let old = v.layer.anchorPoint
+        guard old != anchor else { return }
+        let size = v.bounds.size
+        let dx = (anchor.x - old.x) * size.width, dy = (anchor.y - old.y) * size.height
+        let t = v.transform
+        v.transform = .identity
+        v.layer.anchorPoint = anchor
+        v.center = CGPoint(x: v.center.x + dx, y: v.center.y + dy)
+        v.transform = t
     }
 
     private static func tabBars(in root: UIView) -> [UITabBar] {
@@ -7629,3 +7659,7 @@ private struct CompanionControlFABDock: View {
 }
 #endif
 
+
+private extension Comparable {
+    func clamped(to r: ClosedRange<Self>) -> Self { min(max(self, r.lowerBound), r.upperBound) }
+}
