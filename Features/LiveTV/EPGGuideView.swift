@@ -3361,7 +3361,14 @@ struct EPGGuideView: View {
     }
 
     private var hoursBack: TimeInterval {
-        min(TimeInterval(GuideStore.activeRetentionDays()) * 24, 24)
+        let retention = TimeInterval(GuideStore.activeRetentionDays()) * 24
+        let base = min(retention, 24)
+        // Jump-to-day into the past (Logan 2026-09-10): like the forward
+        // window, the grid grows to hold the target day only while a jump
+        // is active, so the everyday layout keeps its 24h of columns.
+        guard let target = jumpTarget, target < Date() else { return base }
+        let needed = (-target.timeIntervalSinceNow / 3600) + 12
+        return min(max(base, needed), retention)
     }
     private var hoursForward: TimeInterval {
         let raw = UserDefaults.standard.integer(forKey: "epgWindowHours")
@@ -4686,7 +4693,7 @@ struct EPGGuideView: View {
                     // Days follow the EPG actually loaded (Logan 2026-09-10):
                     // back no further than the grid's history window, ahead
                     // to the last programme end in the store.
-                    GuideJumpSheet(daysBack: Int(hoursBack / 24), daysAhead: loadedEpgDaysAhead) { date in
+                    GuideJumpSheet(daysBack: min(14, GuideStore.activeRetentionDays()), daysAhead: loadedEpgDaysAhead) { date in
                         showJumpSheet = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                             if let date { jump(to: date) } else { snapToNow() }
