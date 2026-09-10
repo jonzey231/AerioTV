@@ -1240,7 +1240,158 @@ struct MoviesView: View {
     }
 
     // MARK: - Content
+    @ViewBuilder
     private var content: some View {
+        #if os(iOS)
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            phoneContent
+        } else {
+            legacyContent
+        }
+        #else
+        legacyContent
+        #endif
+    }
+
+    #if os(iOS)
+    /// Phone: the shared media page (Logan 2026-09-09, one template for
+    /// Movies, TV Shows and DVR). This view only supplies data and cards.
+    private var phoneContent: some View {
+        let gridItems = isSearching ? filteredMovies : libraryMovies
+        let watchlistPages = watchlistItems.map { MoviesHeroPage(item: $0, progress: nil) }
+        return VStack(spacing: 0) {
+            if !hiddenGroups.isEmpty && searchText.isEmpty {
+                hiddenGroupsBanner
+            }
+            PhoneMediaPage(
+                decks: [
+                    PhoneDeck(title: "Continue Watching", cards: heroPages.map { page in
+                        PhoneDeckCard(id: page.id) { AnyView(phoneHero(page, inWatchlistDeck: false)) }
+                    }),
+                    PhoneDeck(title: "Watchlist", cards: watchlistPages.map { page in
+                        PhoneDeckCard(id: "wl-" + page.id) { AnyView(phoneHero(page, inWatchlistDeck: true)) }
+                    }),
+                ],
+                headerTitle: isSearching ? "Results" : "All \(kindTitle)",
+                headerCount: gridItems.count,
+                search: PhoneSearch(isActive: $showSearchField, text: $searchText,
+                                    placeholder: "Search \(kindLower)", onClose: clearSearch),
+                searchExtras: phoneSearchExtras,
+                sortMenu: {
+                    AnyView(ForEach(MoviesSortOrder.allCases, id: \.self) { order in
+                        Button { sortOrderRaw = order.rawValue } label: {
+                            if order == sortOrder { Label(order.label, systemImage: "checkmark") } else { Text(order.label) }
+                        }
+                    })
+                },
+                onFilter: { showManageGroups = true },
+                pills: genrePills,
+                selectedPill: $selectedGenre,
+                items: gridItems.map { item in
+                    PhoneGridItem(id: item.id) {
+                        AnyView(
+                            NavigationLink(value: item) {
+                                VODPosterCard(item: item, headers: dispatcharrHeaders)
+                            }
+                            .buttonStyle(.plain)
+                            .contextMenu { watchlistMenuButton(item) }
+                        )
+                    }
+                },
+                emptyView: isSearching && !isSearchingLibrary ? {
+                    AnyView(Text("No results").font(.labelMedium).foregroundColor(.textTertiary))
+                } : nil,
+                railLetters: railLetters,
+                railTarget: { letter in firstGridID(for: letter).map { String($0.dropFirst("grid-".count)) } }
+            )
+        }
+    }
+
+    private func phoneHero(_ page: MoviesHeroPage, inWatchlistDeck: Bool) -> some View {
+        let saved = watchlistEntries.contains { $0.vodID == page.item.id
+            && ($0.serverID == nil || $0.serverID == page.item.serverID.uuidString) }
+        return MoviesHero(
+            item: page.item,
+            progress: page.progress,
+            backdropOverride: page.backdropOverride,
+            headers: dispatcharrHeaders,
+            onPrimary: { heroPrimary(page) },
+            onPlayFromStart: {
+                if kind == .series, let p = page.progress {
+                    resumeFromContinueWatching(p, startAt: 0)
+                } else {
+                    playMovie(page.item, resumePositionMs: 0)
+                }
+            },
+            onDetails: { navPath.append(page.item) },
+            onRemove: (!inWatchlistDeck && page.progress != nil) ? {
+                guard let p = page.progress else { return }
+                WatchProgressManager.delete(vodID: p.vodID, serverID: p.serverID)
+            } : nil,
+            isOnWatchlist: inWatchlistDeck ? true : saved,
+            onToggleWatchlist: { WatchlistManager.toggle(page.item) },
+            primaryFocusID: page.id
+        )
+    }
+
+    private var phoneSearchExtras: [PhoneRow] {
+        var rows: [PhoneRow] = []
+        if let who = personMatchName {
+            rows.append(PhoneRow(id: "person") {
+                AnyView(Text("Includes titles with \(who)")
+                    .font(.labelMedium)
+                    .foregroundColor(.textTertiary)
+                    .padding(.horizontal, 16))
+            })
+        }
+        let ids = providerNames.keys.sorted()
+        if ids.count >= 2 {
+            rows.append(PhoneRow(id: "providers") {
+                AnyView(ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        DVRSegmentPill(label: "All Providers", isSelected: selectedProviderID == nil) { selectProvider(nil) }
+                        ForEach(ids, id: \.self) { pid in
+                            DVRSegmentPill(label: providerNames[pid] ?? "Provider \(pid)", isSelected: selectedProviderID == pid) {
+                                selectProvider(selectedProviderID == pid ? nil : pid)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                })
+            })
+        }
+        if isSearchingLibrary {
+            rows.append(PhoneRow(id: "searching") {
+                AnyView(HStack(spacing: 10) {
+                    ProgressView().tint(.accentPrimary)
+                    Text("Searching server…").font(.labelMedium).foregroundColor(.textTertiary)
+                }
+                .padding(.horizontal, 16))
+            })
+        }
+        return rows
+    }
+
+    private var hiddenGroupsBanner: some View {
+        HStack(spacing: 6) {
+            Text("\(hiddenGroups.count) group\(hiddenGroups.count == 1 ? "" : "s") hidden")
+                .font(.labelMedium)
+                .foregroundColor(.textSecondary)
+            Button {
+                hiddenGroups.removeAll()
+                HiddenGroupsStore.save(hiddenGroups, forKey: hiddenGroupsKey)
+            } label: {
+                Text("Show All").font(.labelMedium).foregroundColor(.accentPrimary)
+            }
+            .buttonStyle(.plain)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+    #endif
+
+    private var legacyContent: some View {
         VStack(spacing: 0) {
             // Hidden groups indicator
             if !hiddenGroups.isEmpty && searchText.isEmpty {
@@ -3841,23 +3992,4 @@ struct MoviesPillStyle: ButtonStyle {
 /// Applies the phone rail's park offset and fade. The ONLY observer of the
 /// rail state, so a show/hide flip re-renders this modifier's content and
 /// not the tab.
-private struct PhoneRailFade: ViewModifier {
-    @ObservedObject var state: DVRPhoneRailState
-    let restingTop: CGFloat
-    let boxWidth: CGFloat
-    let boxHeight: CGFloat
-
-    func body(content: Content) -> some View {
-        content
-            // Fixed-height box + padding, not an offset: an offset rail's taps
-            // fell through to the poster beneath (Logan 2026-09-05).
-            .padding(.top, restingTop + state.top)
-            .frame(width: boxWidth, height: boxHeight, alignment: .topTrailing)
-            .clipped()
-            .padding(.trailing, 2)
-            .opacity(state.visible ? 1 : 0)
-            .allowsHitTesting(state.visible)
-            .animation(.easeInOut(duration: 0.25), value: state.visible)
-    }
-}
 #endif

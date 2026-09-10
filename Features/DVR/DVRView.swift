@@ -400,7 +400,81 @@ struct DVRView: View {
 
     // MARK: Content
 
+    @ViewBuilder
     private var content: some View {
+        #if os(iOS)
+        if isPhone {
+            phoneContent
+        } else {
+            legacyContent
+        }
+        #else
+        legacyContent
+        #endif
+    }
+
+    #if os(iOS)
+    /// Phone: the shared media page, same as Movies and TV Shows (Logan
+    /// 2026-09-09); the second deck is Recently Recorded.
+    private var phoneContent: some View {
+        let library = filteredLibrary
+        let cwTitle = continueWatching.allSatisfy(\.isInProgress) ? "Recording Now" : "Continue Watching"
+        let recentDeck = recent.count > 1 ? recent : []
+        var rows: [PhoneRow] = []
+        if !scheduled.isEmpty {
+            rows.append(PhoneRow(id: "scheduled") { AnyView(shelf(title: "Scheduled", items: scheduled)) })
+        }
+        if coordinator.isApproachingQuotaLimit {
+            rows.append(PhoneRow(id: "quota") { AnyView(quotaWarning) })
+        }
+        let kinds = kindsPresent
+        return PhoneMediaPage(
+            decks: [
+                PhoneDeck(title: cwTitle, cards: continueWatching.map { rec in
+                    PhoneDeckCard(id: rec.id.uuidString) { AnyView(phoneHero(rec)) }
+                }),
+                PhoneDeck(title: "Recently Recorded", cards: recentDeck.map { rec in
+                    PhoneDeckCard(id: "recent-" + rec.id.uuidString) { AnyView(phoneHero(rec)) }
+                }),
+            ],
+            rows: rows,
+            headerTitle: "All Recordings",
+            headerCount: library.count,
+            sortMenu: {
+                AnyView(ForEach(SortOrder.allCases, id: \.self) { order in
+                    Button { sortOrderRaw = order.rawValue } label: {
+                        if order == sortOrder { Label(order.label, systemImage: "checkmark") } else { Text(order.label) }
+                    }
+                })
+            },
+            pills: kinds.count > 1 ? kinds.map(\.label) : [],
+            selectedPill: Binding(
+                get: { selectedKind?.label },
+                set: { label in selectedKind = kinds.first { $0.label == label } }
+            ),
+            items: library.map { rec in
+                PhoneGridItem(id: rec.id.uuidString) { AnyView(card(rec, inGrid: true)) }
+            },
+            railLetters: railLetters,
+            railTarget: { letter in
+                library.first { AlphabetRail.bucket(for: $0.programTitle) == letter }?.id.uuidString
+            }
+        )
+    }
+
+    private func phoneHero(_ rec: Recording) -> some View {
+        DVRHero(recording: rec, headers: headers,
+                progress: progressFraction(rec), canPlay: actions.canPlay(rec),
+                inDeck: true,
+                onPrimary: { heroPrimary(rec) },
+                onSecondary: { heroSecondary(rec) },
+                onStop: { actions.stop(rec) },
+                onInfo: { showInfo(rec) },
+                menu: { menuItems(for: rec) })
+    }
+    #endif
+
+    private var legacyContent: some View {
         GeometryReader { outer in
             ZStack(alignment: .topLeading) {
                 scrollBody(outer: outer)
@@ -1233,7 +1307,9 @@ struct DVRHero<Menu: View>: View {
     private var artwork: some View {
         GeometryReader { geo in
             if let url = artworkURL {
-                AuthPosterImage(url: url, headers: headers, placeholder: .clear, maxPixel: 1920)
+                // Opaque placeholder: a clear one let the page show through
+                // the card while its art loaded (Logan 2026-09-09).
+                AuthPosterImage(url: url, headers: headers, placeholder: .cardBackground, maxPixel: 1920)
                     .aspectRatio(contentMode: .fill)
                     .frame(width: geo.size.width, height: geo.size.height)
                     .clipped()

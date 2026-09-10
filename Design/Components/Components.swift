@@ -1132,18 +1132,28 @@ struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
                     // side. Only a card mid-exit (wrapped strictly past the
                     // last slot) is negative; at rest the previous card sits
                     // at the back of the stack.
-                    let rel: CGFloat = single ? 0
+                    let relRaw: CGFloat = single ? 0
                         : ((wrapped > CGFloat(count) - 1 + 0.0001) ? wrapped - CGFloat(count) : wrapped)
+                    // Decks of any size behave like a four-card deck (Logan
+                    // 2026-09-09: the swiped card must arrive at the back of
+                    // the stack on a 12-card deck too, not vanish): the last
+                    // card at rest takes the rear slot.
+                    let rel: CGFloat = (count > 4 && abs(relRaw - (CGFloat(count) - 1)) < 0.0001) ? 3 : relRaw
                     // Only the cards that can be seen are built: the current
                     // one, three behind it and the parked previous one. A
                     // ten-item deck was laying out ten hero views per drag
                     // frame (Logan 2026-09-06, "very laggy").
-                    if rel > -1.5 && rel < 3.5 {
+                    // One extra card is built behind the visible three (drawn
+                    // under the rear slot) so its art loads before it is seen;
+                    // on a big deck the rear card used to load its image the
+                    // moment it appeared (log 2026-09-09).
+                    if rel > -1.5 && rel < 4.5 {
+                    let slot = min(rel, 3)
                     let x: CGFloat = single ? front0 + dragX * 0.35
                         : rel >= 0
-                        ? front0 + rel * peek
+                        ? front0 + slot * peek
                         : front0 - (w + front0) * min(-rel, 1)
-                    let scale: CGFloat = rel >= 0 ? 1 - min(rel, 3) * 0.03 : 1
+                    let scale: CGFloat = rel >= 0 ? 1 - slot * 0.03 : 1
                     // The leaving card stays solid (Logan 2026-09-09: the
                     // exit fade read as the DVR card "fading out too quickly"
                     // against its darker hero gradient).
