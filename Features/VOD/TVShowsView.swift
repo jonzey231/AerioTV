@@ -505,6 +505,8 @@ struct TVShowsView: View {
                     }
                     .padding(16)
                     #if os(tvOS)
+                    // Last row's title and year must clear the bottom edge.
+                    .padding(.bottom, tvPosterGridBottomInset)
                     // Grid is its own focus section so Down from the
                     // Continue Watching rail lands here cleanly and Up
                     // returns to the rail, rather than geometric jumps.

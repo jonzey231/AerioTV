@@ -2594,6 +2594,10 @@ struct MoviesView: View {
         // 2026-09-09); the alphabet rail overlays the right edge instead of
         // owning a gutter. Column gap 8 gives the two extra edge points.
         .padding(.vertical, 16)
+        #if os(tvOS)
+        // Last row's title and year must clear the bottom edge.
+        .padding(.bottom, tvPosterGridBottomInset)
+        #endif
         .padding(.horizontal, 18)
         .background(GeometryReader { g in
             Color.clear.onAppear { geometryBox.gridWidth = g.size.width - 36 }
@@ -3843,6 +3847,15 @@ extension Notification.Name {
 /// same time (pills -> first tile row) that was the remaining stutter
 /// (Time Profiler 2026-09-03: main thread idle, so rendering cost). The
 /// accent ring on the poster itself is the focus indicator.
+/// Bottom inset the tvOS poster / recording grids reserve so the LAST
+/// row's caption clears the screen edge (Logan 2026-09-11: title and year
+/// were cut off). The focus engine scrolls the focused cell's frame into
+/// view and nothing more, and the focus style scales the cell 1.08, so the
+/// caption needs room of its own: the two caption lines (44 pt title slot +
+/// 2 spacing + 20 year + 4 bottom padding = 70) plus 40 pt of breathing
+/// room. tvOS only - the phone and iPad grids keep their own insets.
+let tvPosterGridBottomInset: CGFloat = 110
+
 struct MoviesPosterFocusStyle: ButtonStyle {
     @Environment(\.isFocused) private var isFocused
 

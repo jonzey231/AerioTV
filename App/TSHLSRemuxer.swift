@@ -1692,6 +1692,7 @@ final class LiveChannelRetention: ObservableObject {
         if let id = activeChannelID, let idx = entries.firstIndex(where: { $0.channelID == id }) {
             let e = entries.remove(at: idx)
             e.remuxer.stop()
+            LiveUpstreamReleases.note(e.key)
             DebugLogger.shared.log(
                 "[AVP-RETAIN] dropped stale entry for now-active '\(e.channelName)'",
                 category: "Playback", level: .warning)
@@ -1701,6 +1702,7 @@ final class LiveChannelRetention: ObservableObject {
             if let idx = entries.indices.min(by: { entries[$0].lastActiveAt < entries[$1].lastActiveAt }) {
                 let e = entries.remove(at: idx)
                 e.remuxer.stop()
+                LiveUpstreamReleases.note(e.key)
                 DebugLogger.shared.log(
                     "[AVP-RETAIN] evicted oldest '\(e.channelName)' (over cap)",
                     category: "Playback", level: .info)
@@ -1711,6 +1713,7 @@ final class LiveChannelRetention: ObservableObject {
     func drop(key: String) {
         guard let idx = entries.firstIndex(where: { $0.key == key }) else { return }
         entries[idx].remuxer.stop()
+        LiveUpstreamReleases.note(key)
         entries.remove(at: idx)
     }
 
@@ -1719,8 +1722,37 @@ final class LiveChannelRetention: ObservableObject {
         DebugLogger.shared.log(
             "[AVP-RETAIN] stopping all \(entries.count) retained channels (\(reason))",
             category: "Playback", level: .info)
-        entries.forEach { $0.remuxer.stop() }
+        entries.forEach {
+            $0.remuxer.stop()
+            LiveUpstreamReleases.note($0.key)
+        }
         entries.removeAll()
+    }
+}
+
+/// Upstreams released in the last few seconds, by ANY tile or by channel
+/// retention. Dispatcharr drops a provider connection asynchronously, so
+/// re-opening a channel the app JUST let go of is what draws the 503
+/// "max connections" (session.txt:3546-3550, 2026-09-11). Re-opening a
+/// channel nobody was holding needs no such wait, which is why the flip
+/// path settles only on a hit here (session3: every flip was paying a
+/// blanket 1.16 s for a case that almost never applies).
+@MainActor
+enum LiveUpstreamReleases {
+    private static var released: [(key: String, at: Date)] = []
+
+    static func note(_ key: String) {
+        prune()
+        released.append((key: key, at: Date()))
+    }
+
+    static func releasedRecently(_ key: String, within: TimeInterval = 5) -> Bool {
+        prune()
+        return released.contains { $0.key == key && Date().timeIntervalSince($0.at) < within }
+    }
+
+    private static func prune() {
+        released.removeAll { Date().timeIntervalSince($0.at) > 10 }
     }
 }
 
@@ -1898,8 +1930,6 @@ struct AVPlayerMultiviewTile: View {
     /// tune (session.txt:3375-3380).
     @State private var pendingDisplayCriteria: (width: Int, height: Int, fps: Double, tenBit: Bool)?
     @State private var firstFrameSeen = false
-    /// Channels this tile released recently, for the flip settle window.
-    @State private var releasedUpstreams: [(key: String, at: Date)] = []
 
     var body: some View {
         ZStack {
@@ -2030,32 +2060,40 @@ struct AVPlayerMultiviewTile: View {
             serverBusyRetries = 0
             standingRetries = 0
             teardownToken = UUID()
-            // Channel-flip settle (review 2026-09-11 section 2 proposals
+            // Channel-flip ordering (review 2026-09-11 section 2 proposals
             // 1 and 2). session.txt:3546-3547: the flip STOPPED the
             // ESPNews upstream and re-opened the SAME channel in the
             // identical millisecond; Dispatcharr still held the old
-            // connection and answered 503 six times, then the tile died
-            // for five minutes. Release first and WAIT for the stop to
-            // land, then settle 1.0 s - the same beat the generic retry
-            // path at the top of failOrFallback has used since
-            // 2026-08-26 - or 2.0 s when this very tile held the target
-            // channel's upstream in the last 5 seconds.
-            let now = Date()
-            releasedUpstreams.removeAll { now.timeIntervalSince($0.at) > 10 }
-            let justHeld = releasedUpstreams.contains {
-                $0.key == newURL.absoluteString && now.timeIntervalSince($0.at) < 5
-            }
-            releasedUpstreams.append((key: oldURL.absoluteString, at: now))
-            let settle = justHeld ? 2.0 : 1.0
+            // connection, answered 503 six times, and the tile died for
+            // five minutes. The fix that matters is ORDER - release, wait
+            // for the confirmed teardown, then acquire.
+            //
+            // Narrowed 2026-09-11 (session3): the blanket 1 s settle on
+            // top of that cost every flip 1.16 s before the ingest even
+            // started, for a hazard that only exists when the app itself
+            // was holding the TARGET channel moments ago. So: no wait at
+            // all in the normal case, and 2 s only when this tile or
+            // channel retention released that same upstream inside the
+            // last 5 s.
+            let justReleased = LiveUpstreamReleases.releasedRecently(newURL.absoluteString)
+            LiveUpstreamReleases.note(oldURL.absoluteString)
+            let settle = justReleased ? 2.0 : 0.0
             let outgoing = remuxer
             let token = teardownToken
             stop()
             statusText = "Tuning..."
             let resume = {
-                DispatchQueue.main.asyncAfter(deadline: .now() + settle) {
+                let go = {
                     guard token == teardownToken else { return }
-                    debugLog("[AVP-MV] flip settle \(settle)s elapsed; starting channel=\(channelName)")
+                    debugLog("[AVP-MV] flip start after confirmed teardown "
+                        + "(\(justReleased ? "2.0s settle: target released <5s ago" : "no settle: target was not ours")) "
+                        + "channel=\(channelName)")
                     start()
+                }
+                if settle > 0 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + settle, execute: go)
+                } else {
+                    go()
                 }
             }
             if let outgoing {
@@ -3235,6 +3273,16 @@ struct AVPlayerMultiviewTile: View {
         driver = nil
         player?.pause()
         player = nil
+        if remuxer != nil, !isVOD, !isDVR, catchup == nil, let releasedKey = sessionRetainKey {
+            // This upstream is now in the provider's asynchronous
+            // teardown; a re-open of it inside the next few seconds is
+            // the 503 case the flip path settles for. sessionRetainKey,
+            // NEVER the struct's streamURL: a channel-flip onChange has
+            // already advanced streamURL to the INCOMING channel (same
+            // trap the retain snapshot documents above), so using it here
+            // would mark the channel we are about to open as released.
+            LiveUpstreamReleases.note(releasedKey)
+        }
         remuxer?.stop()
         remuxer = nil
         mkvServer?.stop()

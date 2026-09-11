@@ -1178,6 +1178,8 @@ struct DVRView: View {
         .padding(.horizontal, sectionInset)
         #if os(tvOS)
         .padding(.vertical, 20)
+        // Last row's title and metadata must clear the bottom edge.
+        .padding(.bottom, tvPosterGridBottomInset)
         .focusSection()
         #endif
     }
