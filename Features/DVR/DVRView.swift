@@ -37,6 +37,18 @@ struct DVRView: View {
     private var sortOrder: SortOrder { SortOrder(rawValue: sortOrderRaw) ?? .title }
     @State private var selectedKind: DVRContentKind?
     @State private var showSortMenu = false
+    // Search and Filter beside Sort, like Movies and TV Shows (Logan
+    // 2026-09-10, all platforms): search matches title, subtitle and
+    // description; Filter hides channels (HiddenGroupsStore "hiddenDvrChannels").
+    @State private var searchText = ""
+    @State private var showSearchField = false
+    @State private var searchFieldFocused = false
+    @State private var hiddenChannels: Set<String> = HiddenGroupsStore.load(forKey: "hiddenDvrChannels")
+    @State private var showFilterMenu = false
+    @State private var showManageChannels = false
+    #if os(iOS)
+    @FocusState private var iosSearchFocused: Bool
+    #endif
 
     @State private var playingRecording: PlayingRecording?
     @State private var recordingToDelete: Recording?
@@ -141,9 +153,28 @@ struct DVRView: View {
         return DVRContentKind.allCases.filter { kinds.contains($0) }
     }
 
+    private var isSearching: Bool { !searchText.trimmingCharacters(in: .whitespaces).isEmpty }
+    /// Channels with at least one recording, for the Filter page.
+    private var channelNames: [String] {
+        Array(Set(library.map(\.channelName).filter { !$0.isEmpty })).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+    private func clearSearch() {
+        searchText = ""
+        showSearchField = false
+    }
+
     private var filteredLibrary: [Recording] {
         var items = library
         if let k = selectedKind { items = items.filter { DVRClassifier.kind(for: $0) == k } }
+        if !hiddenChannels.isEmpty { items = items.filter { !hiddenChannels.contains($0.channelName) } }
+        let q = searchText.trimmingCharacters(in: .whitespaces)
+        if !q.isEmpty {
+            items = items.filter {
+                $0.programTitle.localizedCaseInsensitiveContains(q)
+                    || ($0.subTitle ?? "").localizedCaseInsensitiveContains(q)
+                    || $0.programDescription.localizedCaseInsensitiveContains(q)
+            }
+        }
         switch sortOrder {
         case .newest:  items.sort { $0.scheduledStart > $1.scheduledStart }
         case .oldest:  items.sort { $0.scheduledStart < $1.scheduledStart }
@@ -920,7 +951,7 @@ struct DVRView: View {
                 // Plain text, tappable on the phone: scrolls the library to
                 // the top of the page (Logan 2026-09-05), same as Movies.
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text("All Recordings")
+                    Text(isSearching ? "Results" : "All Recordings")
                         .font(.headlineSmall)
                         .foregroundColor(.textPrimary)
                     Text("\(filteredLibrary.count)")
@@ -935,36 +966,23 @@ struct DVRView: View {
                 }
                 #endif
                 #if os(tvOS)
-                TVNavActionCircle(systemImage: "arrow.up.arrow.down", label: "Sort") { showSortMenu = true }
+                tvHeaderControls
                     .padding(.leading, 12)
                 Spacer()
                 #else
                 Spacer()
-                Menu {
-                    ForEach(SortOrder.allCases, id: \.self) { order in
-                        Button {
-                            sortOrderRaw = order.rawValue
-                        } label: {
-                            if order == sortOrder {
-                                Label(order.label, systemImage: "checkmark")
-                            } else {
-                                Text(order.label)
-                            }
-                        }
-                    }
-                } label: {
-                    Image(systemName: "arrow.up.arrow.down")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundColor(.textPrimary)
-                        .frame(width: 38, height: 38)
-                        .background(Circle().fill(Color.textPrimary.opacity(0.08)))
-                }
-                .accessibilityLabel("Sort")
+                iOSHeaderControls
                 #endif
             }
             .padding(.horizontal, sectionInset)
             #if os(tvOS)
             .focusSection()
+            #endif
+            #if os(iOS)
+            if showSearchField {
+                iOSSearchField
+                    .padding(.horizontal, sectionInset)
+            }
             #endif
 
             if kindsPresent.count > 1 {
@@ -988,6 +1006,134 @@ struct DVRView: View {
             }
         }
     }
+
+    #if os(tvOS)
+    /// Search field (when open), then the Search, Sort and Filter circles:
+    /// the same row Movies and TV Shows carry (Logan 2026-09-10).
+    private var tvHeaderControls: some View {
+        HStack(spacing: 14) {
+            if showSearchField {
+                DarkFocusTextFieldRepresentable(
+                    text: $searchText,
+                    placeholder: "Search recordings",
+                    isSecure: false,
+                    fontSize: 24,
+                    verticalInset: 6,
+                    onFocusChange: { searchFieldFocused = $0 }
+                )
+                .frame(width: 380, height: 60)
+                .clipShape(Capsule())
+                .background(Capsule().fill(Color.elevatedBackground))
+                .overlay(
+                    Capsule()
+                        .stroke(Color.accentPrimary, lineWidth: searchFieldFocused ? 3 : 0)
+                        .animation(.easeInOut(duration: 0.15), value: searchFieldFocused)
+                )
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+            TVNavActionCircle(systemImage: "magnifyingglass", label: "Search", isSelected: showSearchField) {
+                withAnimation(.spring(response: 0.25)) {
+                    showSearchField.toggle()
+                    if !showSearchField { searchText = "" }
+                }
+            }
+            if isSearching {
+                TVNavActionCircle(systemImage: "xmark", label: "Clear Search") { clearSearch() }
+            }
+            TVNavActionCircle(systemImage: "arrow.up.arrow.down", label: "Sort") { showSortMenu = true }
+            TVNavActionCircle(systemImage: "line.3.horizontal.decrease", label: "Filter",
+                              isSelected: !hiddenChannels.isEmpty) {
+                showFilterMenu = true
+            }
+        }
+        .fullScreenCover(isPresented: $showFilterMenu) {
+            MoviesFilterPage(
+                providerNames: [:],
+                disabledProviders: .constant([]),
+                groups: channelNames,
+                hiddenGroups: $hiddenChannels,
+                onChange: { HiddenGroupsStore.save(hiddenChannels, forKey: "hiddenDvrChannels") }
+            )
+            .presentationBackground(.clear)
+        }
+    }
+    #endif
+
+    #if os(iOS)
+    private var iOSHeaderControls: some View {
+        HStack(spacing: 8) {
+            Button {
+                if showSearchField {
+                    withAnimation(.spring(response: 0.3)) { clearSearch() }
+                } else {
+                    var t = Transaction(); t.disablesAnimations = true
+                    withTransaction(t) { showSearchField = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { iosSearchFocused = true }
+                }
+            } label: { iOSCircle("magnifyingglass") }
+                .accessibilityLabel(showSearchField ? "Close search" : "Search")
+            Menu {
+                ForEach(SortOrder.allCases, id: \.self) { order in
+                    Button {
+                        sortOrderRaw = order.rawValue
+                    } label: {
+                        if order == sortOrder {
+                            Label(order.label, systemImage: "checkmark")
+                        } else {
+                            Text(order.label)
+                        }
+                    }
+                }
+            } label: { iOSCircle("arrow.up.arrow.down") }
+            .accessibilityLabel("Sort")
+            Button { showManageChannels = true } label: { iOSCircle("line.3.horizontal.decrease") }
+                .accessibilityLabel("Filter")
+        }
+        .sheet(isPresented: $showManageChannels) {
+            ManageGroupsSheet(
+                title: "Manage Channels",
+                allGroups: channelNames,
+                storageKey: "hiddenDvrChannels",
+                onDismiss: { updated in hiddenChannels = updated }
+            )
+        }
+    }
+
+    private var iOSSearchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.textSecondary)
+            TextField("Search recordings", text: $searchText)
+                .font(.system(size: 16))
+                .foregroundColor(.textPrimary)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+                .focused($iosSearchFocused)
+            Button {
+                iosSearchFocused = false
+                withAnimation(.spring(response: 0.25)) { clearSearch() }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundColor(.textSecondary)
+            }
+            .accessibilityLabel("Clear and close search")
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 40)
+        .background(Capsule().fill(Color.elevatedBackground))
+    }
+
+    private func iOSCircle(_ systemImage: String) -> some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 17, weight: .semibold))
+            .foregroundColor(.textPrimary)
+            .frame(width: 38, height: 38)
+            .background(Circle().fill(Color.textPrimary.opacity(0.08)))
+    }
+    #endif
 
     @ViewBuilder
     private func kindPill(_ title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
