@@ -220,6 +220,32 @@ struct ChannelListView: View {
     // Left-hold detector sets it true.
     @State private var leftHoldPinningAll = false
 
+    /// Remote hint strip (Logan 2026-09-11). Synced preference, default ON.
+    @AppStorage(showRemoteHintsKey) private var showRemoteHints = true
+
+    #if os(tvOS)
+    /// The strip lives in the tab-bar band, so it hides with the bar.
+    @ObservedObject private var tabBarScrollState = TVTabBarScrollState.shared
+
+    /// Pairs shown on the Live TV tab, resolved from the CURRENT map plus
+    /// the current state (group selector mode, mini player up or not).
+    private var liveTVHintPairs: [RemoteHintPair] {
+        RemoteControlHints.liveTVPairs(
+            map: remoteStore.map,
+            useGroupSidebar: remoteStore.useGroupSidebar,
+            miniActive: nowPlaying.isActive && nowPlaying.isMinimized
+        )
+    }
+
+    /// The corner mini is 410 wide, 40 from the trailing edge. The strip
+    /// stays CENTERED and truncates instead of shifting (Logan
+    /// 2026-09-11), so the mini's column is kept clear by padding BOTH
+    /// sides equally.
+    private var hintStripSideInset: CGFloat {
+        nowPlaying.isActive && nowPlaying.isMinimized ? 462 : 40
+    }
+    #endif
+
     // Docked group sidebar (Remote Control "Group Selection: Sidebar Menu",
     // default off). Declared UNCONDITIONALLY (the guide branch is shared with
     // the iPad guide); the tvOS-only behavior is gated inside the members below.
@@ -1005,6 +1031,18 @@ struct ChannelListView: View {
                         // the guide reads rows, pills, banner, tab bar (Logan
                         // 2026-09-05). No crossfade: old and new copy overlapped
                         // while stepping channels (recording 11:20).
+                        // Remote hint strip (Logan 2026-09-11): the band
+                        // between the system tab bar and the Channel Preview
+                        // banner, horizontally CENTERED on screen. It carries
+                        // the banner's old -28 pull so it sits
+                        // in that band instead of under the tab bar, and it
+                        // disappears with the tab bar when that band collapses.
+                        if showRemoteHints && !tabBarScrollState.isHidden {
+                            RemoteHintStrip(pairs: liveTVHintPairs)
+                                .padding(.horizontal, hintStripSideInset)
+                                .padding(.top, previewMode ? -28 : 0)
+                                .padding(.bottom, 2)
+                        }
                         if previewMode {
                             GuidePreviewBanner(program: previewProgram, channel: previewChannel,
                                                shortTimeFormatter: ClockFormat.guideShort(),
@@ -1018,7 +1056,7 @@ struct ChannelListView: View {
                                 // margins, not 80 + 40. Pulled up under the tab bar
                                 // so eight rows still fit (Logan 2026-09-05).
                                 .ignoresSafeArea(.container, edges: .horizontal)
-                                .padding(.top, -28)
+                                .padding(.top, (showRemoteHints && !tabBarScrollState.isHidden) ? 0 : -28)
                         }
                         // The pill row. Its leading controls moved to the nav
                         // circles, so in sidebar mode (no pills) there is

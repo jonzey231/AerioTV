@@ -179,3 +179,234 @@ enum GuideRemoteDispatch {
     }
 }
 #endif
+
+// MARK: - Remote hint strip (Logan 2026-09-11)
+
+/// Synced preference backing the on-screen remote hint strip. Named to
+/// match the Android twin's `show_remote_hints` so SyncManager maps the
+/// two by name. Default ON.
+let showRemoteHintsKey = "showRemoteHints"
+
+#if os(tvOS)
+// MARK: - Hint resolvers
+
+extension RemoteControlHints {
+
+    /// Terse action label for a PLAYER slot, for the hint strip. Nil
+    /// means "do not advertise this slot" (unmapped, or no short phrase).
+    /// `isPaused` only matters for the literal play/pause action.
+    static func stripPlayerAction(_ action: PlayerRemoteAction, isPaused: Bool) -> String? {
+        switch action {
+        case .channelUp:       return "Channel up"
+        case .channelDown:     return "Channel down"
+        case .lastChannel:     return "Previous channel"
+        case .recentChannels:  return "Recent channels"
+        case .toggleControls:  return "Player controls"
+        case .showProgramInfo: return "Program info"
+        case .optionsMenu:     return "Options"
+        case .playPause:       return isPaused ? "Resume" : "Pause"
+        case .seekForward:     return "Seek forward"
+        case .seekBackward:    return "Seek back"
+        case .restartProgram:  return "Restart"
+        case .jumpToLive:      return "Jump to live"
+        case .minimizeToGuide: return "TV guide"
+        case .channelList:     return "Channel list"
+        case .subtitles:       return "Subtitles"
+        case .audioTracks:     return "Audio"
+        case .aspectRatio:     return "Aspect ratio"
+        case .record:          return "Record"
+        case .sleepTimer:      return "Sleep timer"
+        case .openSearch:      return "Search"
+        case .stopPlayback:    return "Stop"
+        case .none:            return nil
+        }
+    }
+
+    /// Terse action label for a GUIDE slot, for the hint strip.
+    static func stripGuideAction(_ action: GuideRemoteAction) -> String? {
+        switch action {
+        case .pageUp:          return "Page up"
+        case .pageDown:        return "Page down"
+        case .timelineBack:    return "Earlier"
+        case .timelineForward: return "Later"
+        case .jumpToNow:       return "Now"
+        case .jumpToTop:       return "Top channel"
+        case .focusGroupPills: return "Group pills"
+        case .resumePlayer:    return "Resume"
+        case .closeMiniPlayer: return "Close mini"
+        case .programInfo:     return "Program info"
+        case .openSearch:      return "Search"
+        case .none:            return nil
+        }
+    }
+
+    /// Live TV tab strip. Everything is derived from the CURRENT map plus
+    /// the current state; nothing is hard-coded.
+    ///
+    /// - Groups: sidebar mode owns the hold (RemoteControlStore ruling), so
+    ///   it reads "Hold Left  Groups". In pills mode the hold runs whatever
+    ///   `leftLong` maps to, and the pair is dropped when that is unmapped.
+    /// - Back: HomeView.handleMenuPress - with the mini up a single Back
+    ///   expands it and a double Back jumps to the top channel; with no mini
+    ///   a single Back jumps to the top channel (#42 P3/P5).
+    /// - Mini pairs come from the guide map's `playPause` and `rightLong`
+    ///   slots and only while the corner mini is actually up.
+    static func liveTVPairs(map: RemoteControlMap,
+                            useGroupSidebar: Bool,
+                            miniActive: Bool) -> [RemoteHintPair] {
+        var pairs: [RemoteHintPair] = []
+        if useGroupSidebar {
+            pairs.append(RemoteHintPair(key: "Hold Left", action: "Groups"))
+        } else if let phrase = stripGuideAction(map.guideAction(.leftLong)) {
+            pairs.append(RemoteHintPair(key: "Hold Left", action: phrase))
+        }
+        pairs.append(RemoteHintPair(key: miniActive ? "Double Back" : "Back",
+                                    action: "Top channel"))
+        if miniActive {
+            if let phrase = stripGuideAction(map.guideAction(.playPause)) {
+                pairs.append(RemoteHintPair(key: "Play/Pause", action: phrase))
+            }
+            if let phrase = stripGuideAction(map.guideAction(.rightLong)) {
+                pairs.append(RemoteHintPair(key: "Hold Right", action: phrase))
+            }
+        }
+        return pairs
+    }
+
+    /// The unified live chrome's strip (MultiviewContainerView, solo tile).
+    /// Every pair but Back comes straight off the map; Back is fixed and
+    /// never remappable, and with the chrome up it dismisses the chrome.
+    ///
+    /// - `scrubbable`: catch-up / VOD / Live Rewind, where short Left/Right
+    ///   step the timeline instead of running their mapped action, and the
+    ///   holds scrub rather than dispatching leftLong/rightLong.
+    /// - `channelFlipEnabled`: the pre-map App Behaviors toggle still
+    ///   suppresses a channelUp/channelDown mapping, so the pair is dropped.
+    static func livePlayerPairs(map: RemoteControlMap,
+                                scrubbable: Bool,
+                                isPaused: Bool,
+                                channelFlipEnabled: Bool) -> [RemoteHintPair] {
+        var pairs: [RemoteHintPair] = []
+        if let phrase = stripPlayerAction(map.playerAction(.playPause), isPaused: isPaused) {
+            pairs.append(RemoteHintPair(key: "Play/Pause", action: phrase))
+        }
+        if let phrase = stripPlayerAction(map.playerAction(.okShort), isPaused: isPaused) {
+            pairs.append(RemoteHintPair(key: "Select", action: phrase))
+        }
+        if scrubbable {
+            pairs.append(RemoteHintPair(key: "Left/Right", action: "Scrub"))
+        } else {
+            if let phrase = stripPlayerAction(map.playerAction(.leftShort), isPaused: isPaused) {
+                pairs.append(RemoteHintPair(key: "Left", action: phrase))
+            }
+            if let phrase = stripPlayerAction(map.playerAction(.rightShort), isPaused: isPaused) {
+                pairs.append(RemoteHintPair(key: "Right", action: phrase))
+            }
+        }
+        let up = map.playerAction(.upShort)
+        let down = map.playerAction(.downShort)
+        let flipSuppressed = { (a: PlayerRemoteAction) in
+            (a == .channelUp || a == .channelDown) && !channelFlipEnabled
+        }
+        if up == .channelUp, down == .channelDown, channelFlipEnabled {
+            pairs.append(RemoteHintPair(key: "Up/Down", action: "Change channel"))
+        } else {
+            if !flipSuppressed(up), let phrase = stripPlayerAction(up, isPaused: isPaused) {
+                pairs.append(RemoteHintPair(key: "Up", action: phrase))
+            }
+            if !flipSuppressed(down), let phrase = stripPlayerAction(down, isPaused: isPaused) {
+                pairs.append(RemoteHintPair(key: "Down", action: phrase))
+            }
+        }
+        if !scrubbable {
+            if let phrase = stripPlayerAction(map.playerAction(.leftLong), isPaused: isPaused) {
+                pairs.append(RemoteHintPair(key: "Hold Left", action: phrase))
+            }
+            if let phrase = stripPlayerAction(map.playerAction(.rightLong), isPaused: isPaused) {
+                pairs.append(RemoteHintPair(key: "Hold Right", action: phrase))
+            }
+        }
+        pairs.append(RemoteHintPair(key: "Back", action: "Hide controls"))
+        return pairs
+    }
+
+    /// The legacy full-screen presentation's strip (PlayerView: VOD,
+    /// recordings, catch-up covers). That view does NOT run the mapped
+    /// executor - its own `.onMoveCommand` / `.onTapGesture` handlers own
+    /// every press - so these pairs are read off THOSE handlers, not the
+    /// map, and stay honest about what the buttons really do there.
+    /// `.onPlayPauseCommand` and `handleBackPress` are map-independent too.
+    static func legacyPlayerPairs(scrubberActive: Bool,
+                                  isPaused: Bool) -> [RemoteHintPair] {
+        var pairs: [RemoteHintPair] = [
+            RemoteHintPair(key: "Play/Pause", action: isPaused ? "Resume" : "Pause")
+        ]
+        if scrubberActive {
+            pairs.append(RemoteHintPair(key: "Left/Right", action: "Scrub"))
+            pairs.append(RemoteHintPair(key: "Select", action: isPaused ? "Resume" : "Pause"))
+            pairs.append(RemoteHintPair(key: "Up/Down", action: "Transport row"))
+        }
+        pairs.append(RemoteHintPair(key: "Back", action: "Mini player"))
+        return pairs
+    }
+}
+#endif
+
+#if os(tvOS)
+/// One "key  action" pair in the hint strip.
+struct RemoteHintPair: Identifiable {
+    let key: String
+    let action: String
+    var id: String { key + action }
+}
+
+/// The redesigned tvOS hint surface (Logan 2026-09-11): ONE line of
+/// "key  action" pairs separated by a middle dot. No capsules, no
+/// backgrounds, 18pt, key names in the secondary text color and the
+/// action in the tertiary one. Only pairs that apply right now are
+/// passed in, and every pair is resolved from the CURRENT remote map.
+///
+/// Horizontally CENTERED on screen (Logan 2026-09-11). One line: when
+/// the pairs do not fit the width the host allows, the line truncates
+/// with an ellipsis rather than shifting off center, which is why the
+/// whole strip is a single concatenated `Text` and not an `HStack` of
+/// them. Never focusable, never hit-testable: it is a reminder, not a
+/// control.
+struct RemoteHintStrip: View {
+    let pairs: [RemoteHintPair]
+
+    private var line: Text {
+        var out = Text("")
+        for (index, pair) in pairs.enumerated() {
+            if index > 0 {
+                out = out + Text("  \u{00B7}  ")
+                    .font(.system(size: 18, weight: .regular))
+                    .foregroundColor(.textTertiary)
+            }
+            out = out + Text(pair.key)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(.textSecondary)
+            out = out + Text("  ")
+            out = out + Text(pair.action)
+                .font(.system(size: 18, weight: .regular))
+                .foregroundColor(.textTertiary)
+        }
+        return out
+    }
+
+    var body: some View {
+        if pairs.isEmpty {
+            EmptyView()
+        } else {
+            line
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .focusable(false)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+}
+#endif

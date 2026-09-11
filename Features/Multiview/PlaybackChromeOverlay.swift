@@ -1133,6 +1133,29 @@ struct PlaybackBottomChrome_tvOS: View {
     /// re-render cadence for the position readouts below.
     @ObservedObject private var liveRewind = LiveRewindEngine.shared
 
+    /// Remote hint strip (Logan 2026-09-11). Synced preference, default ON.
+    @AppStorage(showRemoteHintsKey) private var showRemoteHints = true
+    /// Observed so a remap in Settings re-derives the strip live.
+    @ObservedObject private var remoteStore = RemoteControlStore.shared
+    /// The pre-map App Behaviors channel-flip toggle still suppresses a
+    /// channelUp/channelDown mapping, so the strip drops that pair too.
+    @AppStorage("appBehaviorsAppleTVChannelFlip") private var appleTVChannelFlip = true
+
+    /// Pairs for this chrome, resolved from the current map and mode.
+    /// Catch-up, VOD solo and a rolling Live Rewind all put short
+    /// Left/Right on the timeline instead of their mapped actions.
+    private var hintPairs: [RemoteHintPair] {
+        let scrubbable = store.catchupTile != nil
+            || store.vodSoloTile != nil
+            || liveRewind.buffering
+        return RemoteControlHints.livePlayerPairs(
+            map: remoteStore.map,
+            scrubbable: scrubbable,
+            isPaused: store.audioProgressStore?.isPaused ?? false,
+            channelFlipEnabled: appleTVChannelFlip
+        )
+    }
+
     /// Record pill availability (tvOS). v1.6.8 (B1 Phase 1): no
     /// longer gates on EPG — see `canRecordCurrentProgram_iOS`
     /// for full rationale. We only need a stream URL.
@@ -1380,6 +1403,19 @@ struct PlaybackBottomChrome_tvOS: View {
                     }
                     addButton
                 }
+            }
+
+            // Remote hint strip (Logan 2026-09-11): the LAST row of the
+            // bottom control block, under the timeline / transport rows,
+            // centered on screen. It is extra height, so no existing
+            // control moves; it lives inside the chrome so it appears and
+            // fades with it, and it is neither focusable nor hit-testable.
+            // Pairs come from the CURRENT remote map (this chrome is the
+            // one that actually runs the mapped executor).
+            if showRemoteHints {
+                RemoteHintStrip(pairs: hintPairs)
+                    .padding(.horizontal, 80)
+                    .padding(.top, -2)
             }
         }
         .padding(.vertical, 24)

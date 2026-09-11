@@ -138,7 +138,11 @@ final class SyncManager: ObservableObject {
         "categoryBucketEnabled.music",
         // TV "Play Channels In" mini-player toggle, per-device-type. See
         // RemoteControlStore.
-        RemoteControlStore.tuneInMiniKey
+        RemoteControlStore.tuneInMiniKey,
+        // On-screen remote hint strips (Live TV + player). Android
+        // stores the same preference as `show_remote_hints` and the two
+        // are mapped by name.
+        showRemoteHintsKey
     ]
     private let syncDoubleKeys  = ["networkTimeout"]
     private let syncIntKeys = [

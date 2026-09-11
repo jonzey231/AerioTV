@@ -32,6 +32,9 @@ struct RemoteControlSettingsView: View {
     /// Drives the guarded Reset-to-Defaults confirmation alert.
     @State private var showResetConfirm = false
 
+    /// Synced, default ON. Both hint strips observe this key.
+    @AppStorage(showRemoteHintsKey) private var showRemoteHints = true
+
     // MARK: - Curated slot layouts
 
     /// Player slots offered while watching, in display order: Select and
@@ -101,6 +104,7 @@ struct RemoteControlSettingsView: View {
                     .font(.system(size: 40, weight: .bold))
                     .foregroundColor(.textPrimary)
 
+                hintsSection
                 playChannelsInSection
                 groupSelectionSection
                 whileWatchingSection
@@ -125,6 +129,20 @@ struct RemoteControlSettingsView: View {
     }
 
     // MARK: - Sections
+
+    /// 0. On-screen remote hints (Logan 2026-09-11). Top of the section
+    /// list; the Live TV strip and the player strip both observe it.
+    private var hintsSection: some View {
+        SettingsSection("On-Screen Hints", style: .card) {
+            TVSettingsToggleRow(
+                icon: "questionmark.circle",
+                iconColor: .accentPrimary,
+                title: "Show remote hints",
+                subtitle: "Key reminders on Live TV and in the player",
+                isOn: $showRemoteHints
+            ) { _ in }
+        }
+    }
 
     /// 1. Where a channel starts playing (bound to `tuneInMini`).
     private var playChannelsInSection: some View {

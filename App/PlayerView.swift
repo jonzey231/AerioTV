@@ -676,6 +676,7 @@ private struct PlayerRootView: View {
     /// error overlay. The player is `.id(item.id)`, so a successful
     /// re-begin mounts a fresh PlayerRootView with the flag reset.
     @State private var didAttemptPlayFailover = false
+    @AppStorage(showRemoteHintsKey) private var showRemoteHints = true
     @State private var showControls = true
     @State private var controlsHideTask: Task<Void, Never>?
     @State private var dragOffset: CGFloat = 0
@@ -1836,6 +1837,22 @@ private struct PlayerRootView: View {
     #endif
 
     // MARK: - Bottom controls (timeline + skip buttons)
+    #if os(tvOS)
+    /// The player's hint pairs, read off this view's REAL press handling:
+    /// `.onPlayPauseCommand` (toggle + wake chrome), `.onExitCommand` ->
+    /// `handleBackPress` (chrome visible -> minimize), the scrubber's
+    /// `.onMoveCommand`/`.onTapGesture` (left/right scrub, up/down to the
+    /// transport row, Select commits or toggles) and the transport row's
+    /// own left/right walk. Live streams have no scrubber and no transport
+    /// cells, so only the two global buttons are advertised there.
+    private var playerHintPairs: [RemoteHintPair] {
+        RemoteControlHints.legacyPlayerPairs(
+            scrubberActive: (!isLive || isLiveRewindMode) && isScrubberActive,
+            isPaused: progressStore.isPaused
+        )
+    }
+    #endif
+
     private var bottomControls: some View {
         VStack(spacing: 10) {
             #if os(tvOS)
@@ -1920,6 +1937,19 @@ private struct PlayerRootView: View {
             } else {
                 vodControlsSection
             }
+
+            #if os(tvOS)
+            // Remote hint strip (Logan 2026-09-11): the LAST row of the
+            // bottom control block, 16pt under the scrubber/time row. It is
+            // extra height, so no existing control moves; it appears and
+            // fades with the chrome because it lives inside controlsOverlay,
+            // and it is neither focusable nor hit-testable.
+            if showRemoteHints, !nowPlayingManager.isMinimized {
+                RemoteHintStrip(pairs: playerHintPairs)
+                    .padding(.top, 16)
+                    .padding(.horizontal, tvBandInset)
+            }
+            #endif
         }
         .padding(.horizontal, 20)
         .padding(.bottom, deviceSafeAreaBottom + 20)
