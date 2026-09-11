@@ -1945,18 +1945,26 @@ private struct PlayerRootView: View {
             // fades with the chrome because it lives inside controlsOverlay,
             // and it is neither focusable nor hit-testable.
             if showRemoteHints, !nowPlayingManager.isMinimized {
-                RemoteHintStrip(pairs: playerHintPairs, banded: true)
+                RemoteHintStrip(pairs: playerHintPairs)
                     .padding(.top, 16)
-                    // Cancel `bottomControls`' own insets so the band
-                    // spans the full width and sits flush with the
-                    // bottom edge; the text stays inside it.
-                    .padding(.horizontal, -20)
-                    .padding(.bottom, -(deviceSafeAreaBottom + 20))
+                    .padding(.horizontal, tvBandInset)
             }
             #endif
         }
         .padding(.horizontal, 20)
         .padding(.bottom, deviceSafeAreaBottom + 20)
+        #if os(tvOS)
+        // One continuous band behind the WHOLE bottom block - scrubber,
+        // time / LIVE labels, transport cells and the hint strip (Logan
+        // 2026-09-11). Replaces the old gradient so there is a single
+        // background: full width, black at 55%, flush with the bottom
+        // edge, 24pt above the topmost element, fading with the chrome.
+        .padding(.top, 24)
+        .background(
+            Color.black.opacity(0.55)
+                .ignoresSafeArea(edges: [.horizontal, .bottom])
+        )
+        #else
         .background(
             LinearGradient(
                 colors: [Color.clear, Color.black.opacity(0.72)],
@@ -1964,6 +1972,7 @@ private struct PlayerRootView: View {
             )
             .ignoresSafeArea(edges: .bottom)
         )
+        #endif
     }
 
     // MARK: - Live Progress (program progress bar based on start/end times)

@@ -1413,30 +1413,23 @@ struct PlaybackBottomChrome_tvOS: View {
             // Pairs come from the CURRENT remote map (this chrome is the
             // one that actually runs the mapped executor).
             if showRemoteHints {
-                RemoteHintStrip(pairs: hintPairs, banded: true)
+                RemoteHintStrip(pairs: hintPairs)
                     .padding(.horizontal, 80)
                     .padding(.top, -2)
-                    // Cancel the block's own insets so the band reaches
-                    // the screen edges and sits flush with the bottom.
-                    .padding(.horizontal, -80)
-                    .padding(.bottom, -24)
             }
         }
         .padding(.vertical, 24)
         .frame(maxWidth: .infinity)
-        // Bottom scrim. The chrome floats over whatever the video
-        // shows; a busy bright strip (sports tickers) used to swallow
-        // the idle pills entirely (the Android build grounds its
-        // controls on a scrim, which is why its buttons read better).
-        // Clear at the top so the video still shines through above
-        // the progress band.
+        // One continuous band behind the WHOLE bottom block - timeline,
+        // labels, control cells and the hint strip (Logan 2026-09-11).
+        // Replaces the old two-stop gradient scrim so there is a single
+        // background, not two: full screen width, black at 55%, flush
+        // with the bottom edge, starting 24pt above the topmost element
+        // (this block's own top inset). Contents stay inside it, and it
+        // fades with the chrome because it is part of it.
         .background(
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.45), .black.opacity(0.7)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .padding(.top, -30)
+            Color.black.opacity(0.55)
+                .ignoresSafeArea(edges: [.horizontal, .bottom])
         )
         // `.focusSection()` on the pill row's parent registers
         // this view as its own focus anchor so the engine routes
