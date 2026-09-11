@@ -1961,7 +1961,7 @@ private struct PlayerRootView: View {
         // edge, 24pt above the topmost element, fading with the chrome.
         .padding(.top, 24)
         .background(
-            Color.black.opacity(0.55)
+            Color.black.opacity(playerChromeBandOpacity)
                 .ignoresSafeArea(edges: [.horizontal, .bottom])
         )
         #else

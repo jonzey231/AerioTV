@@ -1428,7 +1428,7 @@ struct PlaybackBottomChrome_tvOS: View {
         // (this block's own top inset). Contents stay inside it, and it
         // fades with the chrome because it is part of it.
         .background(
-            Color.black.opacity(0.55)
+            Color.black.opacity(playerChromeBandOpacity)
                 .ignoresSafeArea(edges: [.horizontal, .bottom])
         )
         // `.focusSection()` on the pill row's parent registers

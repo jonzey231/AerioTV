@@ -187,6 +187,11 @@ enum GuideRemoteDispatch {
 /// two by name. Default ON.
 let showRemoteHintsKey = "showRemoteHints"
 
+/// Opacity of the black band behind the tvOS player chrome's bottom
+/// control block (Logan 2026-09-11). One constant so both chromes and
+/// the hint strip's own banded variant stay identical.
+let playerChromeBandOpacity: Double = 0.75
+
 #if os(tvOS)
 // MARK: - Hint resolvers
 
@@ -415,7 +420,7 @@ struct RemoteHintStrip: View {
                 .padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .background(
-                    Color.black.opacity(0.55)
+                    Color.black.opacity(playerChromeBandOpacity)
                         .ignoresSafeArea(edges: [.horizontal, .bottom])
                 )
                 .focusable(false)
