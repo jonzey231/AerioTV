@@ -324,6 +324,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     // MARK: Lifecycle
 
     func start() {
+        // New remux session = new source: drop the previous stream's
+        // cadence so a channel change cannot leave it on the readouts.
+        // Done HERE and not on the player-item swap, because the SPS is
+        // parsed before the item exists on this path.
+        DispatchQueue.main.async { RemuxMeasuredVideo.shared.reset() }
         queue.async { [weak self] in
             guard let self else { return }
             if self.rewindWindowSeconds > 0 {
@@ -522,28 +527,46 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if pid == videoPID, pusi {
             if let pts = extractPTS(p) {
                 if !videoParamsSent {
+                    // FIRST choice: the stream's OWN declared cadence from
+                    // the SPS VUI timing info. A measured rate is perturbed
+                    // by genpts / nobuffer / discontinuity handling and read
+                    // 32fps on a 59.94 feed (Logan 2026-09-11), so the
+                    // declaration wins whenever the SPS carries one.
+                    if let sps = firstSPSNAL(p), let info = H264SPSTiming.parse(sps) {
+                        videoParamsSent = true
+                        debugLog("[TS-REMUX] video: declared \(String(format: "%.2f", info.fps))fps \(info.isInterlaced ? "interlaced" : "progressive") (H.264 SPS VUI)")
+                        let cb = onVideoParameters
+                        let declaredFPS = info.fps
+                        let interlaced = info.isInterlaced
+                        DispatchQueue.main.async {
+                            RemuxMeasuredVideo.shared.note(fps: declaredFPS, declared: true,
+                                                           interlaced: interlaced)
+                            cb?(0, 0, declaredFPS, false)
+                        }
+                    }
+                }
+                if !videoParamsSent {
                     if lastVideoAUPTS >= 0 {
                         let d = pts - lastVideoAUPTS
                         if d > 0.005, d < 0.1 { videoPTSDeltas.append(d) }
                     }
                     lastVideoAUPTS = pts
-                    if videoPTSDeltas.count >= 60 {
+                    // 240 access units (4-10s of video), not 60: a short
+                    // window over a feed that is still settling is exactly
+                    // what produced the bogus 32fps. Deltas further than 3x
+                    // from the median are discontinuities and are dropped
+                    // before the median is taken again.
+                    if videoPTSDeltas.count >= 240 {
                         videoParamsSent = true
-                        let median = videoPTSDeltas.sorted()[videoPTSDeltas.count / 2]
-                        var fps = 1.0 / median
-                        // Snap to the nearest broadcast rate; B-pyramid PTS
-                        // ordering can skew the median (a catch-up archive
-                        // measured 20.00 on a 60fps feed and Match Content
-                        // asked the panel for it - 5-10s of frozen video
-                        // while HDMI resynced, 2026-08-28). Implausible
-                        // rates never reach the display.
-                        let standards: [Double] = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60]
-                        if let snap = standards.min(by: { abs($0 - fps) < abs($1 - fps) }),
-                           abs(snap - fps) / snap < 0.05 {
-                            fps = snap
-                        }
+                        let sorted = videoPTSDeltas.sorted()
+                        let rough = sorted[sorted.count / 2]
+                        let kept = sorted.filter { $0 <= rough * 3 && $0 >= rough / 3 }
+                        let median = kept.isEmpty ? rough : kept[kept.count / 2]
+                        var fps = median > 0 ? 1.0 / median : 0
+                        // Snap to the nearest broadcast rate within 1%.
+                        fps = VideoRateStandards.snap(fps)
                         if fps >= 23, fps <= 61 {
-                            debugLog("[TS-REMUX] video: measured \(String(format: "%.2f", fps))fps (H.264 arm)")
+                            debugLog("[TS-REMUX] video: measured \(String(format: "%.2f", fps))fps over \(videoPTSDeltas.count) AUs (H.264 arm, no SPS timing)")
                             let cb = onVideoParameters
                             DispatchQueue.main.async { cb?(0, 0, fps, false) }
                         } else {
@@ -782,7 +805,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 // AVPlayer driver has nothing else to report until frames
                 // render; park it where the driver can pick it up
                 // (Logan 2026-09-11: badge showed a resolution and no fps).
-                RemuxMeasuredVideo.shared.note(fps: fps)
+                RemuxMeasuredVideo.shared.note(fps: VideoRateStandards.snap(fps))
                 cb?(w, h, fps, tenBit)
             }
         }
@@ -812,6 +835,42 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// NAL types (in order) of the first video PES in the open segment,
     /// captured when the segment begins. Logging only.
     private var currentSegmentLeadNALs: [Int] = []
+
+    /// The first SPS (NAL type 7) inside this 188-byte packet's PES
+    /// payload, start code stripped. Nil when the packet carries none, or
+    /// when the SPS continues into the next packet - the caller simply
+    /// tries again on the next PES start rather than reassembling.
+    private func firstSPSNAL(_ p: Data) -> [UInt8]? {
+        guard let base = payloadStart(p), base + 9 < 188 else { return nil }
+        var i = base + 9 + Int(p[base + 8])
+        let end = 188 - 4
+        while i < end {
+            if p[i] == 0x00, p[i + 1] == 0x00 {
+                var nalStart = -1
+                if p[i + 2] == 0x01 { nalStart = i + 3 }
+                else if p[i + 2] == 0x00, i + 3 < end, p[i + 3] == 0x01 { nalStart = i + 4 }
+                if nalStart > 0, nalStart < 188 {
+                    if (p[nalStart] & 0x1F) == 7 {
+                        // Run to the next start code, or the packet end.
+                        var j = nalStart + 1
+                        while j < 188 - 3 {
+                            if p[j] == 0x00, p[j + 1] == 0x00,
+                               (p[j + 2] == 0x01 || (p[j + 2] == 0x00 && p[j + 3] == 0x01)) {
+                                break
+                            }
+                            j += 1
+                        }
+                        let slice = Array(p[nalStart..<min(j + 1, 188)])
+                        return slice.count > 8 ? slice : nil
+                    }
+                    i = nalStart
+                    continue
+                }
+            }
+            i += 1
+        }
+        return nil
+    }
 
     private func leadingNALTypes(_ p: Data) -> [Int] {
         guard let base = payloadStart(p), base + 9 < 188 else { return [] }
@@ -3094,15 +3153,182 @@ struct AVPlayerLayerView: UIViewRepresentable {
 @MainActor
 final class RemuxMeasuredVideo: ObservableObject {
     static let shared = RemuxMeasuredVideo()
-    /// 0 when nothing has been measured for the current stream.
+    /// 0 when nothing is known for the current stream.
     @Published private(set) var fps: Double = 0
+    /// True once the rate came from the stream's OWN declaration (H.264
+    /// SPS VUI timing). A declared rate is never replaced by a measured
+    /// one (Logan 2026-09-11).
+    @Published private(set) var isDeclared = false
+    /// Interlaced per the SPS (frame_mbs_only_flag == 0).
+    @Published private(set) var isInterlaced = false
+
     private init() {}
 
-    func note(fps: Double) {
-        guard fps > 0, abs(fps - self.fps) > 0.001 else { return }
-        self.fps = fps
+    func note(fps: Double, declared: Bool = false, interlaced: Bool? = nil) {
+        if let interlaced, interlaced != isInterlaced { isInterlaced = interlaced }
+        guard fps > 0 else { return }
+        if isDeclared, !declared { return }
+        if declared, !isDeclared { isDeclared = true }
+        if abs(fps - self.fps) > 0.001 { self.fps = fps }
     }
 
     /// New source: forget the previous stream's cadence.
-    func reset() { if fps != 0 { fps = 0 } }
+    func reset() {
+        if fps != 0 { fps = 0 }
+        if isDeclared { isDeclared = false }
+        if isInterlaced { isInterlaced = false }
+    }
 }
+
+/// Standard broadcast frame rates every readout snaps to.
+enum VideoRateStandards {
+    static let all: [Double] = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60]
+
+    /// Snap to the nearest standard when within `tolerance` (default 1%),
+    /// otherwise return the input untouched. Measured cadences drift; a
+    /// declared one does not, but snapping a declared 29.97 that arrives
+    /// as 29.969999 is harmless.
+    static func snap(_ fps: Double, tolerance: Double = 0.01) -> Double {
+        guard fps > 0, let nearest = all.min(by: { abs($0 - fps) < abs($1 - fps) }) else { return fps }
+        return abs(nearest - fps) / nearest <= tolerance ? nearest : fps
+    }
+}
+
+/// H.264 SPS reader for the bits the readouts need: the VUI timing info
+/// (the stream's OWN declared cadence) and `frame_mbs_only_flag` (0 for
+/// an interlaced source). Reading the declared rate is the only way to
+/// be right on a feed whose PTS deltas are perturbed by genpts /
+/// nobuffer / discontinuity handling (Logan 2026-09-11: a 59.94 feed
+/// measured as 32).
+enum H264SPSTiming {
+    struct Info {
+        /// FRAME rate. For H.264 the VUI clock ticks twice per frame, so
+        /// this is time_scale / (2 * num_units_in_tick). A 1080i59.94
+        /// ATSC feed carries time_scale 60000 / num_units_in_tick 1001,
+        /// i.e. 29.97 FRAMES per second (59.94 fields), and its
+        /// frame_mbs_only_flag is 0, so the readouts say 1080i 29.97.
+        var fps: Double
+        var isInterlaced: Bool
+    }
+
+    /// `nal` is one SPS NAL unit WITHOUT its start code, first byte the
+    /// NAL header. Returns nil when the SPS carries no timing info or
+    /// cannot be parsed.
+    static func parse(_ nal: [UInt8]) -> Info? {
+        guard nal.count > 4, (nal[0] & 0x1F) == 7 else { return nil }
+        // Strip emulation prevention bytes.
+        var rbsp: [UInt8] = []
+        rbsp.reserveCapacity(nal.count)
+        var zeros = 0
+        for b in nal.dropFirst() {
+            if zeros == 2, b == 0x03 { zeros = 0; continue }
+            rbsp.append(b)
+            zeros = b == 0 ? zeros + 1 : 0
+        }
+        var r = Reader(rbsp)
+        do {
+            let profile = try r.bits(8)
+            _ = try r.bits(8)            // constraint flags + reserved
+            _ = try r.bits(8)            // level_idc
+            _ = try r.ue()               // seq_parameter_set_id
+            if [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].contains(profile) {
+                let chroma = try r.ue()
+                if chroma == 3 { _ = try r.bit() }  // separate_colour_plane_flag
+                _ = try r.ue()           // bit_depth_luma_minus8
+                _ = try r.ue()           // bit_depth_chroma_minus8
+                _ = try r.bit()          // qpprime_y_zero_transform_bypass_flag
+                if try r.bit() == 1 {    // seq_scaling_matrix_present_flag
+                    let count = chroma != 3 ? 8 : 12
+                    for i in 0..<count where try r.bit() == 1 {
+                        try skipScalingList(&r, size: i < 6 ? 16 : 64)
+                    }
+                }
+            }
+            _ = try r.ue()               // log2_max_frame_num_minus4
+            let pocType = try r.ue()
+            if pocType == 0 {
+                _ = try r.ue()           // log2_max_pic_order_cnt_lsb_minus4
+            } else if pocType == 1 {
+                _ = try r.bit()          // delta_pic_order_always_zero_flag
+                _ = try r.se()           // offset_for_non_ref_pic
+                _ = try r.se()           // offset_for_top_to_bottom_field
+                let cycle = try r.ue()
+                for _ in 0..<cycle { _ = try r.se() }
+            }
+            _ = try r.ue()               // max_num_ref_frames
+            _ = try r.bit()              // gaps_in_frame_num_value_allowed_flag
+            _ = try r.ue()               // pic_width_in_mbs_minus1
+            _ = try r.ue()               // pic_height_in_map_units_minus1
+            let frameMbsOnly = try r.bit()
+            if frameMbsOnly == 0 { _ = try r.bit() }   // mb_adaptive_frame_field_flag
+            _ = try r.bit()              // direct_8x8_inference_flag
+            if try r.bit() == 1 {        // frame_cropping_flag
+                _ = try r.ue(); _ = try r.ue(); _ = try r.ue(); _ = try r.ue()
+            }
+            guard try r.bit() == 1 else { return nil }  // vui_parameters_present_flag
+            if try r.bit() == 1 {        // aspect_ratio_info_present_flag
+                let idc = try r.bits(8)
+                if idc == 255 { _ = try r.bits(16); _ = try r.bits(16) }
+            }
+            if try r.bit() == 1 { _ = try r.bit() }     // overscan
+            if try r.bit() == 1 {        // video_signal_type_present_flag
+                _ = try r.bits(3)        // video_format
+                _ = try r.bit()          // video_full_range_flag
+                if try r.bit() == 1 { _ = try r.bits(24) }  // colour description
+            }
+            if try r.bit() == 1 { _ = try r.ue(); _ = try r.ue() }  // chroma_loc
+            guard try r.bit() == 1 else { return nil }  // timing_info_present_flag
+            let numUnitsInTick = try r.bits(32)
+            let timeScale = try r.bits(32)
+            guard numUnitsInTick > 0, timeScale > 0 else { return nil }
+            let fps = Double(timeScale) / (2.0 * Double(numUnitsInTick))
+            guard fps >= 1, fps <= 480 else { return nil }
+            return Info(fps: VideoRateStandards.snap(fps), isInterlaced: frameMbsOnly == 0)
+        } catch {
+            return nil
+        }
+    }
+
+    private static func skipScalingList(_ r: inout Reader, size: Int) throws {
+        var last = 8, next = 8
+        for _ in 0..<size {
+            if next != 0 {
+                let delta = try r.se()
+                next = (last + delta + 256) % 256
+            }
+            last = next == 0 ? last : next
+        }
+    }
+
+    struct Reader {
+        private let bytes: [UInt8]
+        private var pos = 0
+        enum Err: Error { case eof }
+        init(_ b: [UInt8]) { bytes = b }
+
+        mutating func bit() throws -> Int {
+            let byte = pos >> 3
+            guard byte < bytes.count else { throw Err.eof }
+            let v = (Int(bytes[byte]) >> (7 - (pos & 7))) & 1
+            pos += 1
+            return v
+        }
+        mutating func bits(_ n: Int) throws -> UInt32 {
+            var v: UInt32 = 0
+            for _ in 0..<n { v = (v << 1) | UInt32(try bit()) }
+            return v
+        }
+        mutating func ue() throws -> Int {
+            var zeros = 0
+            while try bit() == 0 { zeros += 1; if zeros > 31 { throw Err.eof } }
+            if zeros == 0 { return 0 }
+            let rest = Int(try bits(zeros))
+            return (1 << zeros) - 1 + rest
+        }
+        mutating func se() throws -> Int {
+            let k = try ue()
+            return k % 2 == 0 ? -(k / 2) : (k + 1) / 2
+        }
+    }
+}
+

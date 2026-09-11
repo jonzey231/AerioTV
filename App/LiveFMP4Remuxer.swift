@@ -147,6 +147,9 @@ final class LiveFMP4Remuxer {
     private var emittedSegments = 0
     private var videoParamsSent = false
     private var parsedSPSInfo: HEVCSPSInfo?
+    /// Video sample durations accumulated across segments for the cadence
+    /// estimate (needs >= 240 access units, see finalizeSegment).
+    private var videoDurationSamples: [Int64] = []
 
     // MARK: - Ingest
 
@@ -539,11 +542,26 @@ final class LiveFMP4Remuxer {
                 keepAudio.append(a)
             }
         }
-        if !videoParamsSent, let info = parsedSPSInfo, durations.count >= 8 {
+        // Cadence needs a real window: 8 durations from one segment of a
+        // still-settling feed measured nonsense (Logan 2026-09-11 saw
+        // 32fps on a 59.94 channel through the other arm). Accumulate at
+        // least 240 access units across segments, drop the outliers that
+        // are discontinuities, then snap to the nearest standard rate.
+        // HEVC VUI timing is not read here: reaching the VUI means walking
+        // the scaling lists and short-term ref pic sets, so the snapped
+        // median over a long window is the reliable source on this arm.
+        videoDurationSamples.append(contentsOf: durations)
+        if videoDurationSamples.count > 600 {
+            videoDurationSamples.removeFirst(videoDurationSamples.count - 600)
+        }
+        if !videoParamsSent, let info = parsedSPSInfo, videoDurationSamples.count >= 240 {
             videoParamsSent = true
-            let sorted = durations.sorted()
-            let median = Double(sorted[sorted.count / 2])
-            let fps = median > 0 ? Double(Self.ticksPerSecond) / median : 0
+            let sorted = videoDurationSamples.sorted()
+            let rough = Double(sorted[sorted.count / 2])
+            let kept = sorted.map(Double.init).filter { $0 <= rough * 3 && $0 >= rough / 3 }
+            let median = kept.isEmpty ? rough : kept[kept.count / 2]
+            var fps = median > 0 ? Double(Self.ticksPerSecond) / median : 0
+            fps = VideoRateStandards.snap(fps)
             log("[FMP4] video: \(info.width)x\(info.height) \(String(format: "%.2f", fps))fps \(info.bitDepthLuma)-bit")
             onVideoParameters?(info.width, info.height, fps, info.bitDepthLuma > 8)
         }

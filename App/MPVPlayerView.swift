@@ -8300,6 +8300,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // source cadence; report the frame rate, not the field rate.
                 if isInterlaced, fps > 0 { fps /= 2 }
             }
+            // Snap to the nearest standard rate within 1%, same as the
+            // remux arms, so the panel never shows 29.970030 or a rate
+            // that drifted while the demuxer settled.
+            if fps > 0 { fps = VideoRateStandards.snap(fps) }
             if fps > 0 { detectedFps = fps }
             #if os(tvOS)
             // Task #186: first shot at matching the panel to the stream.
@@ -8400,6 +8404,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if fps <= 0, self.detectedFps > 0 {
                 fps = self.detectedFps
             }
+            if fps > 0 { fps = VideoRateStandards.snap(fps) }
             if fps > 0 { self.detectedFps = fps }
 
             let ps = progressStore

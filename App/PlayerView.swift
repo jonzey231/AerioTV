@@ -74,6 +74,10 @@ struct StreamInfo: Equatable {
     var fps: Double = 0
     /// True for an interlaced source, so the readouts can say 1080i.
     var isInterlaced: Bool = false
+    /// What the player actually PRESENTED over the last window. Never the
+    /// stream's rate (it drops during buffering); panel-only, and labeled
+    /// as presented (Logan 2026-09-11).
+    var presentedFps: Double = 0
     var pixelFormat: String = ""
     var hwdec: String = ""
     var audioCodec: String = ""
@@ -110,6 +114,9 @@ struct StreamInfoCardView: View {
         VStack(alignment: .leading, spacing: 6) {
             row(label: "VIDEO", value: "\(info.videoCodec)  \(info.width)×\(info.height)\(info.height > 0 ? (info.isInterlaced ? "i" : "p") : "")")
             row(label: "", value: "\(String(format: "%.2f", info.fps))fps  \(info.pixelFormat)")
+            if info.presentedFps > 0 {
+                row(label: "", value: "\(String(format: "%.2f", info.presentedFps))fps presented")
+            }
             row(label: "", value: "hwdec: \(info.hwdec)")
             row(label: "AUDIO", value: "\(info.audioCodec)  \(info.sampleRate)Hz  \(info.channels)ch")
             row(label: "CACHE", value: "\(String(format: "%.1f", info.cacheDuration))s  \(StreamInfoCardView.formatBitrate(info.bitrate))")
@@ -4584,15 +4591,27 @@ final class AVPlayerProgressDriver {
     /// PRESENTED rate once frames render, then the remuxer's own measured
     /// rate for the TS / fMP4 path, which declares no nominal rate at all.
     private func sampleFrameRateIfUnknown() {
-        guard store.streamInfo.fps == 0 else { return }
+        // Presented rate is tracked for the panel only - it is what
+        // AVPlayer managed to show, not what the stream declares, and it
+        // reads low while buffering or dropping (Logan 2026-09-11: 32fps
+        // on a 59.94 feed). It NEVER becomes streamInfo.fps.
         if let item = player.currentItem {
             for track in item.tracks where track.currentVideoFrameRate > 0 {
-                store.streamInfo.fps = Double(track.currentVideoFrameRate)
-                return
+                let presented = Double(track.currentVideoFrameRate)
+                if abs(presented - store.streamInfo.presentedFps) > 0.01 {
+                    store.streamInfo.presentedFps = presented
+                }
+                break
             }
         }
-        let measured = RemuxMeasuredVideo.shared.fps
-        if measured > 0 { store.streamInfo.fps = measured }
+        // The remuxed path's stream rate: the SPS VUI declaration when the
+        // stream carries one, else the long-window snapped median.
+        let remux = RemuxMeasuredVideo.shared
+        if remux.isInterlaced != store.streamInfo.isInterlaced {
+            store.streamInfo.isInterlaced = remux.isInterlaced
+        }
+        guard store.streamInfo.fps == 0, remux.fps > 0 else { return }
+        store.streamInfo.fps = remux.fps
     }
 
     private func populateStreamInfo(item: AVPlayerItem) {
@@ -4608,14 +4627,13 @@ final class AVPlayerProgressDriver {
         // internal-only ones (avsync, dropped frames) at 0.
         store.streamInfo.hwdec = "AVFoundation"
 
-        // Quick sync frame rate from the currently-playing track (0 until
-        // playback actually starts; the async nominalFrameRate below fills in).
-        // `currentVideoFrameRate` is what is being PRESENTED, so it is only
-        // trusted as a seed - nominalFrameRate (the track's own cadence)
-        // wins below when it is available, which also covers HLS variants
-        // that report 0 here until the first frames land.
+        // `currentVideoFrameRate` is the PRESENTED rate, so it is recorded
+        // separately and never used as the stream's rate. The stream rate
+        // comes from the track's nominalFrameRate below, or (remux path,
+        // where fMP4 declares none) from the SPS VUI timing the remuxer
+        // parsed - see sampleFrameRateIfUnknown.
         for track in item.tracks where track.currentVideoFrameRate > 0 {
-            store.streamInfo.fps = Double(track.currentVideoFrameRate)
+            store.streamInfo.presentedFps = Double(track.currentVideoFrameRate)
         }
 
         // Buffered-ahead seconds (the AVPlayer analog of mpv's demuxer cache).
@@ -4645,7 +4663,7 @@ final class AVPlayerProgressDriver {
                     // the presented rate seeded above (a deinterlaced 1080i
                     // presents at 59.94 while the source runs at 29.97).
                     if let rate = try? await asset.load(.nominalFrameRate), rate > 0 {
-                        self.store.streamInfo.fps = Double(rate)
+                        self.store.streamInfo.fps = VideoRateStandards.snap(Double(rate))
                     }
                     if let fds = try? await asset.load(.formatDescriptions), let fd = fds.first {
                         self.store.streamInfo.videoCodec =
