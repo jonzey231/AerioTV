@@ -6840,6 +6840,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Issue #36: new stream, re-arm the audio health check + fallback.
             audioHealthCheckScheduled = false
             audioStereoFallbackApplied = false
+            // New source: clear the format readouts so a channel change can
+            // never leave the PREVIOUS channel's resolution / frame rate on
+            // screen while the new one is still opening (2026-09-11 audit).
+            // populateStreamInfo refills them on PLAYBACK_RESTART.
+            let ps = progressStore
+            DispatchQueue.main.async { ps.streamInfo = StreamInfo() }
             #if DEBUG
             debugLog("[MPV-DIAG] State: opening (start-file)")
             #endif
@@ -8257,18 +8263,42 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let hwdecCurrent = getMPVString(mpv, "hwdec-current") ?? "none"
             let pixelFormat = getMPVString(mpv, "video-params/pixelformat") ?? ""
 
+            // DISPLAY size, not the coded one: `dwidth`/`dheight` already
+            // carry the pixel aspect ratio, so an anamorphic 1440x1080
+            // broadcast reads 1920x1080 like the user sees it. video-params
+            // w/h stay as the fallback for the moment before the VO has
+            // sized itself (2026-09-11 audit).
             var videoW: Int64 = 0; var videoH: Int64 = 0
-            mpv_get_property(mpv, "video-params/w", MPV_FORMAT_INT64, &videoW)
-            mpv_get_property(mpv, "video-params/h", MPV_FORMAT_INT64, &videoH)
+            mpv_get_property(mpv, "dwidth", MPV_FORMAT_INT64, &videoW)
+            mpv_get_property(mpv, "dheight", MPV_FORMAT_INT64, &videoH)
+            if videoW <= 0 || videoH <= 0 {
+                mpv_get_property(mpv, "video-params/w", MPV_FORMAT_INT64, &videoW)
+                mpv_get_property(mpv, "video-params/h", MPV_FORMAT_INT64, &videoH)
+            }
+
+            // Interlaced source: the readouts say 1080i and the frame rate
+            // below must stay the FRAME rate, not the deinterlacer's output.
+            var interlacedFlag: Int32 = 0
+            mpv_get_property(mpv, "video-frame-info/interlaced", MPV_FORMAT_FLAG, &interlacedFlag)
+            let isInterlaced = interlacedFlag != 0
 
             var sampleRate: Int64 = 0; var channels: Int64 = 0
             mpv_get_property(mpv, "audio-params/samplerate", MPV_FORMAT_INT64, &sampleRate)
             mpv_get_property(mpv, "audio-params/channel-count", MPV_FORMAT_INT64, &channels)
 
+            // `container-fps` is the SOURCE cadence and is what the panel
+            // should show; `estimated-vf-fps` measures what comes out of
+            // the filter chain, which doubles to 59.94 on a deinterlaced
+            // 1080i29.97 broadcast and drifts while the stream settles.
+            // Estimated stays as the fallback for containers with no
+            // declared rate (2026-09-11 audit).
             var fps: Double = 0
-            mpv_get_property(mpv, "estimated-vf-fps", MPV_FORMAT_DOUBLE, &fps)
+            mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fps)
             if fps <= 0 {
-                mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fps)
+                mpv_get_property(mpv, "estimated-vf-fps", MPV_FORMAT_DOUBLE, &fps)
+                // A deinterlaced interlaced source measures at double the
+                // source cadence; report the frame rate, not the field rate.
+                if isInterlaced, fps > 0 { fps /= 2 }
             }
             if fps > 0 { detectedFps = fps }
             #if os(tvOS)
@@ -8299,6 +8329,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 width: Int(videoW),
                 height: Int(videoH),
                 fps: fps,
+                isInterlaced: isInterlaced,
                 pixelFormat: pixelFormat,
                 hwdec: hwdecCurrent,
                 audioCodec: audioCodec,
@@ -8352,7 +8383,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             mpv_get_property(mpv, "decoder-frame-drop-count", MPV_FORMAT_INT64, &drops)
             drops += lateFrameCount
             mpv_get_property(mpv, "demuxer-cache-state/raw-input-rate", MPV_FORMAT_DOUBLE, &bitrate)
-            mpv_get_property(mpv, "estimated-vf-fps", MPV_FORMAT_DOUBLE, &fps)
+            // Source cadence first, same reasoning as the initial populate:
+            // estimated-vf-fps is only the fallback here too, so a settled
+            // stream cannot drift the panel off the declared rate.
+            mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fps)
+            if fps <= 0 {
+                mpv_get_property(mpv, "estimated-vf-fps", MPV_FORMAT_DOUBLE, &fps)
+            }
             // v1.7.4.x: `vo=libmpv` can leave estimated-vf-fps at 0 even
             // when playback is healthy (Archie field test 09:01 Sky Sports
             // Football showed 0.00fps in the Stream Info box while real

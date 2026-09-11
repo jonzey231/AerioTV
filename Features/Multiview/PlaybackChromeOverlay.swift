@@ -1655,7 +1655,8 @@ struct TVVideoFormatBadge: View {
 
     static func text(for info: StreamInfo?) -> String? {
         guard let info, info.height > 0 else { return nil }
-        var out = "\(info.height)p"
+        // "i" for an interlaced source (broadcast 1080i), "p" otherwise.
+        var out = "\(info.height)\(info.isInterlaced ? "i" : "p")"
         if info.fps > 0 {
             let rounded = (info.fps * 100).rounded() / 100
             let isWhole = abs(rounded - rounded.rounded()) < 0.005

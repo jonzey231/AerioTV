@@ -63,9 +63,17 @@ struct MediaTrack: Identifiable, Equatable {
 
 struct StreamInfo: Equatable {
     var videoCodec: String = ""
+    /// DISPLAY dimensions (aspect-corrected), not the coded ones: mpv's
+    /// `dwidth`/`dheight` and AVPlayer's `presentationSize`. An anamorphic
+    /// 1440x1080 source therefore reads 1920x1080, which is what the user
+    /// sees (2026-09-11 audit).
     var width: Int = 0
     var height: Int = 0
+    /// FRAME rate, never the field rate: for an interlaced broadcast this
+    /// is 29.97, not the 59.94 a deinterlacer outputs (2026-09-11 audit).
     var fps: Double = 0
+    /// True for an interlaced source, so the readouts can say 1080i.
+    var isInterlaced: Bool = false
     var pixelFormat: String = ""
     var hwdec: String = ""
     var audioCodec: String = ""
@@ -100,7 +108,7 @@ struct StreamInfoCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            row(label: "VIDEO", value: "\(info.videoCodec)  \(info.width)×\(info.height)")
+            row(label: "VIDEO", value: "\(info.videoCodec)  \(info.width)×\(info.height)\(info.height > 0 ? (info.isInterlaced ? "i" : "p") : "")")
             row(label: "", value: "\(String(format: "%.2f", info.fps))fps  \(info.pixelFormat)")
             row(label: "", value: "hwdec: \(info.hwdec)")
             row(label: "AUDIO", value: "\(info.audioCodec)  \(info.sampleRate)Hz  \(info.channels)ch")
@@ -4212,6 +4220,10 @@ final class AVPlayerProgressDriver {
         // never re-run populateTracks/populateStreamInfo with stale data.
         itemObservations.forEach { $0.invalidate() }
         itemObservations.removeAll()
+        // A new item is a new source: clear the format readouts so a
+        // channel change can never leave the PREVIOUS channel's numbers
+        // on screen while the new one is still loading (2026-09-11 audit).
+        store.streamInfo = StreamInfo()
         // New item gets a fresh error-escalation budget.
         if isLive { store.behindLiveEdge = false }
         softErrorCount = 0
@@ -4240,6 +4252,10 @@ final class AVPlayerProgressDriver {
         // Presentation size -> stream info resolution.
         itemObservations.append(item.observe(\.presentationSize, options: [.initial, .new]) {
             [weak self] i, _ in
+            // presentationSize is the DISPLAY size (pixel aspect ratio
+            // already applied), which is what we want for anamorphic and
+            // for an adaptive HLS variant switch: it re-fires on every
+            // variant change, so the readout follows the ladder.
             let size = i.presentationSize
             guard let self, size.width > 0 else { return }
             Task { @MainActor in
@@ -4567,6 +4583,10 @@ final class AVPlayerProgressDriver {
 
         // Quick sync frame rate from the currently-playing track (0 until
         // playback actually starts; the async nominalFrameRate below fills in).
+        // `currentVideoFrameRate` is what is being PRESENTED, so it is only
+        // trusted as a seed - nominalFrameRate (the track's own cadence)
+        // wins below when it is available, which also covers HLS variants
+        // that report 0 here until the first frames land.
         for track in item.tracks where track.currentVideoFrameRate > 0 {
             store.streamInfo.fps = Double(track.currentVideoFrameRate)
         }
@@ -4594,13 +4614,34 @@ final class AVPlayerProgressDriver {
             for asset in assetTracks {
                 switch asset.mediaType {
                 case .video:
-                    if self.store.streamInfo.fps == 0,
-                       let rate = try? await asset.load(.nominalFrameRate), rate > 0 {
+                    // nominalFrameRate is the track's own cadence and beats
+                    // the presented rate seeded above (a deinterlaced 1080i
+                    // presents at 59.94 while the source runs at 29.97).
+                    if let rate = try? await asset.load(.nominalFrameRate), rate > 0 {
                         self.store.streamInfo.fps = Double(rate)
                     }
                     if let fds = try? await asset.load(.formatDescriptions), let fd = fds.first {
                         self.store.streamInfo.videoCodec =
                             Self.fourCCString(CMFormatDescriptionGetMediaSubType(fd))
+                        // Interlaced when the format description carries a
+                        // FieldCount of 2 (broadcast 1080i / 480i).
+                        if let fieldCount = CMFormatDescriptionGetExtension(
+                            fd, extensionKey: kCMFormatDescriptionExtension_FieldCount
+                        ) as? Int {
+                            self.store.streamInfo.isInterlaced = fieldCount > 1
+                        }
+                        // Display size fallback for sources whose
+                        // presentationSize has not arrived yet: the coded
+                        // dimensions corrected by the pixel aspect ratio.
+                        if self.store.streamInfo.width == 0 {
+                            let dims = CMVideoFormatDescriptionGetPresentationDimensions(
+                                fd, usePixelAspectRatio: true, useCleanAperture: true
+                            )
+                            if dims.width > 0 {
+                                self.store.streamInfo.width = Int(dims.width)
+                                self.store.streamInfo.height = Int(dims.height)
+                            }
+                        }
                     }
                 case .audio:
                     if let fds = try? await asset.load(.formatDescriptions), let fd = fds.first {
