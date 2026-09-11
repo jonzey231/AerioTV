@@ -975,20 +975,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if nextSeq == 1 || nextSeq % 5 == 0 {
             debugLog("[TS-REMUX] segment \(nextSeq - 1) closed (\(String(format: "%.2f", duration))s, \(data.count / 1024) KB), buffered \(segments.count)")
         }
-        // READY gate. Two segments is the safe default (see
-        // `readyThreshold`), but the wait for that second segment
-        // measured 1.9 s on ESPN's first tune and 5.5 s on an ESPNU flip
-        // (session4.txt, seg0 -> remuxReady). Ship on segment 0 ALONE
-        // when it is at least a full target duration long: the failure
-        // that forced readyThreshold back to 2 was a 1.05 s segment 0,
-        // where AVPlayer answered -16832 "restarting 1.051000s from end
-        // of live playlist; target duration 2s - stall danger". A seg 0
-        // that is >= TARGETDURATION is not that shape. A short seg 0
-        // still waits for seg 1, and the automatic buffering policy
-        // (never disabled again) does the rest.
-        let seg0IsFullLength = segments.count == 1
-            && (segments.first?.duration ?? 0) >= targetSegmentSeconds
-        if !readySignaled, segments.count >= readyThreshold || seg0IsFullLength,
+        // READY gate: TWO segments, always. Publishing on a full-length
+        // segment 0 alone was tried on 2026-09-11 (78a7fd0) and looped the
+        // very first tune: the player started with 2.5 s buffered, the
+        // feed delivered segment 1 three seconds later (below realtime at
+        // start), the buffer ran empty for 7 s, AVPlayer raised its
+        // holdback and answered -12640 "Cannot get that close to live",
+        // then jumped back 9 s (session5.txt:489-519). One GOP of start
+        // time is not worth that; the gain has to come from upstream.
+        if !readySignaled, segments.count >= readyThreshold,
            localPort != 0,
            fmp4 == nil || fmp4InitSegment != nil {
             readySignaled = true
@@ -996,10 +991,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 ? URL(string: "\(HLSDelivery.scheme)://\(deliveryID)/live.m3u8")!
                 : URL(string: "http://127.0.0.1:\(localPort)/live.m3u8")!
             TuneTimeline.shared.mark("remuxReady")
-            let gate = seg0IsFullLength
-                ? "READY on seg0 (dur >= target)"
-                : "READY on seg\(readyThreshold - 1)"
-            debugLog("[TS-REMUX] \(gate) -> \(url.absoluteString)")
+            debugLog("[TS-REMUX] READY on seg\(readyThreshold - 1) -> \(url.absoluteString)")
             DispatchQueue.main.async { [weak self] in self?.onReady?(url) }
         }
     }
