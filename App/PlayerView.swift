@@ -4126,6 +4126,28 @@ final class AVPlayerProgressDriver {
     private var firstFrameProbeClock: CMTime = .invalid
 
     private var streamSummaryLogged = false
+
+    /// Error-log dedupe. At the UHD live join in atvlogs/s7 (2026-09-11)
+    /// AVPlayer posted the identical -16832 "restarting 3.84s from end of
+    /// live playlist" error-log entry 21 times inside 10 ms, which buried
+    /// every other line. We keep the last logged (status, domain, comment)
+    /// triple plus a suppressed count and the time it was logged; repeats
+    /// inside the window only bump the count.
+    private var lastErrorLogKey: (status: Int, domain: String, comment: String)?
+    private var lastErrorLogTime: Date = .distantPast
+    private var suppressedErrorLogCount = 0
+    private static let errorLogDedupeWindow: TimeInterval = 5
+
+    /// Emits the "repeated N more times" tail for the previous entry, if
+    /// any repeats were swallowed, and clears the dedupe record.
+    private func flushSuppressedErrorLog() {
+        if suppressedErrorLogCount > 0 {
+            debugLog("[AVP-STREAM] error log repeated \(suppressedErrorLogCount) more times")
+        }
+        suppressedErrorLogCount = 0
+        lastErrorLogKey = nil
+        lastErrorLogTime = .distantPast
+    }
     /// NotificationCenter tokens scoped to the current item, torn down
     /// on swap alongside itemObservations.
     private var itemNotificationTokens: [NSObjectProtocol] = []
@@ -4384,6 +4406,7 @@ final class AVPlayerProgressDriver {
     private func instrument(item: AVPlayerItem) {
         itemNotificationTokens.forEach { NotificationCenter.default.removeObserver($0) }
         itemNotificationTokens.removeAll()
+        flushSuppressedErrorLog()
         let nc = NotificationCenter.default
 
         // Access log: AVFoundation's own measurement of startup time and
@@ -4416,9 +4439,24 @@ final class AVPlayerProgressDriver {
             forName: AVPlayerItem.newErrorLogEntryNotification,
             object: item, queue: .main) { [weak self] _ in
             guard let event = item.errorLog()?.events.last else { return }
-            debugLog("[AVP-STREAM] error log: status=\(event.errorStatusCode) domain=\(event.errorDomain) \(event.errorComment ?? "")")
             MainActor.assumeIsolated {
-                guard let self, !self.firedUnrecoverable else { return }
+                guard let self else { return }
+                // Dedupe before logging: see `lastErrorLogKey`.
+                let key = (status: event.errorStatusCode,
+                           domain: event.errorDomain ?? "",
+                           comment: event.errorComment ?? "")
+                let now = Date()
+                if let last = self.lastErrorLogKey,
+                   last == key,
+                   now.timeIntervalSince(self.lastErrorLogTime) < Self.errorLogDedupeWindow {
+                    self.suppressedErrorLogCount += 1
+                } else {
+                    self.flushSuppressedErrorLog()
+                    self.lastErrorLogKey = key
+                    self.lastErrorLogTime = now
+                    debugLog("[AVP-STREAM] error log: status=\(key.status) domain=\(key.domain) \(key.comment)")
+                }
+                guard !self.firedUnrecoverable else { return }
                 let code = event.errorStatusCode
                 // Fatal, one entry is enough: playlist parse/validation failure
                 // (-12642), variant/media selection failure (-12646), and
