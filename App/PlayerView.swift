@@ -2196,6 +2196,13 @@ private struct PlayerRootView: View {
                 .padding(.leading, Self.tvCenterCellSlot / 2 + Self.tvToolCellSpacing)
             }
             .frame(maxWidth: .infinity)
+            // Resolution + frame rate readout at the right edge of the
+            // band, mirroring the unified chrome's badge (Logan
+            // 2026-09-11). Always shown once the format is known.
+            .overlay(alignment: .trailing) {
+                TVVideoFormatBadge(info: progressStore.streamInfo)
+                    .padding(.trailing, 80)
+            }
             .padding(.horizontal, 60)
             .padding(.top, 10)
             // Lift the row off the screen edge to where the live

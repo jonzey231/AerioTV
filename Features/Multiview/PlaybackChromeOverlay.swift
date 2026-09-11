@@ -1457,6 +1457,13 @@ struct PlaybackBottomChrome_tvOS: View {
                         .padding(.leading, 80)
                 }
             }
+            // Resolution + frame rate readout, mirroring the engine badge
+            // at the other edge (Logan 2026-09-11). Not a dev aid: it is
+            // shown whenever the stream's format is known.
+            .overlay(alignment: .trailing) {
+                TVVideoFormatBadge(info: store.audioProgressStore?.streamInfo)
+                    .padding(.trailing, 80)
+            }
             } else {
                 HStack(spacing: 20) {
                     // Render Options first (leftmost) so D-pad-right
@@ -1629,6 +1636,53 @@ struct PlaybackBottomChrome_tvOS: View {
         .accessibilityHint(a11yHint)
     }
 }
+
+#if os(tvOS)
+/// Resolution + frame rate readout for the tvOS player band, e.g.
+/// "1080p \u{00B7} 59.94 fps" (Logan 2026-09-11). Mirrors the engine
+/// badge's capsule at the other edge, but it is NOT a dev aid: it shows
+/// whenever the format is known. The frame rate is omitted while
+/// unknown, and the whole badge stays away until something is known.
+///
+/// Source is `StreamInfo`, which both engines already fill: the AVPlayer
+/// driver from the item's `presentationSize` KVO plus the video track's
+/// `nominalFrameRate` / `currentVideoFrameRate`, and mpv from
+/// `video-params/w`,`/h` with `estimated-vf-fps` falling back to
+/// `container-fps`. Both repopulate on every item / track change, so the
+/// badge follows a channel flip or a version switch on its own.
+struct TVVideoFormatBadge: View {
+    let info: StreamInfo?
+
+    static func text(for info: StreamInfo?) -> String? {
+        guard let info, info.height > 0 else { return nil }
+        var out = "\(info.height)p"
+        if info.fps > 0 {
+            let rounded = (info.fps * 100).rounded() / 100
+            let isWhole = abs(rounded - rounded.rounded()) < 0.005
+            let rate = isWhole
+                ? String(Int(rounded.rounded()))
+                : String(format: "%.2f", rounded)
+            out += " \u{00B7} \(rate) fps"
+        }
+        return out
+    }
+
+    var body: some View {
+        if let text = Self.text(for: info) {
+            Text(text)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.55))
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial, in: Capsule())
+                .focusable(false)
+                .accessibilityLabel("Video format \(text)")
+        }
+    }
+}
+#endif
 
 #if os(tvOS)
 /// The circular tool cell's VISUAL, shared by the unified live chrome
