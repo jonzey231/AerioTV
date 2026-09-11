@@ -344,6 +344,24 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// Width/height are 0 from the TS arm (it never parses the SPS);
     /// the tile falls back to a nominal geometry there.
     var onVideoParameters: ((_ width: Int, _ height: Int, _ fps: Double, _ is10Bit: Bool) -> Void)?
+    /// Fires once, on the main queue, the moment the upstream delivers
+    /// its FIRST byte. The live tile arms a first-byte deadline against
+    /// it: a Dispatcharr connection can open and then stay silent for
+    /// the whole 30 s URLSession timeout while the server's own health
+    /// checks sit behind a 60 s init grace period (s7_86.txt:353-395,
+    /// ESPN2 HD at 18:37:12 - zero bytes for 30 s, then a fresh pipeline
+    /// silent for another 12 s until the user flipped away).
+    var onFirstByte: (() -> Void)?
+    /// True once the upstream has delivered any byte. Readable from any
+    /// thread (set on the URLSession delegate queue, read on the main
+    /// queue by a tile adopting a WARM ingest, whose first byte can
+    /// easily land before the tile mounts and its callback exists).
+    var hasReceivedFirstByte: Bool {
+        firstByteLock.lock(); defer { firstByteLock.unlock() }
+        return firstByteArrived
+    }
+    private let firstByteLock = NSLock()
+    private var firstByteArrived = false
 
     // MARK: State
 
@@ -1373,7 +1391,11 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
             firstByteLogged = true
             let ms = Int(Date().timeIntervalSince(ingestStartedAt) * 1000)
             TuneTimeline.shared.mark("firstByte")
+            firstByteLock.lock(); firstByteArrived = true; firstByteLock.unlock()
             debugLog("[TS-REMUX] first byte after \(ms)ms (\(data.count) B)")
+            // Cancels the tile's first-byte deadline / failover walk
+            // (s7_86.txt:353-395).
+            DispatchQueue.main.async { [weak self] in self?.onFirstByte?() }
         }
         queue.async { [weak self] in self?.consume(data) }
     }
@@ -1887,6 +1909,27 @@ enum LiveUpstreamReleases {
     }
 }
 
+/// Process-lifetime cache of a Dispatcharr channel's member-stream ids
+/// (highest priority first), keyed by the channel's INTEGER pk. The
+/// no-first-byte failover walk (s7_86.txt:353-395) must not spend a
+/// round trip on the list every time it steps, and the list changes only
+/// when the server's M3U sources are re-scanned.
+@MainActor
+enum LiveFailoverStreamCache {
+    private static var byChannel: [Int: [Int]] = [:]
+
+    static func cached(_ channelPK: Int) -> [Int]? {
+        guard let ids = byChannel[channelPK], !ids.isEmpty else { return nil }
+        return ids
+    }
+
+    static func store(_ ids: [Int], for channelPK: Int) {
+        // Never cache an empty answer: the brief's refetch-if-empty rule.
+        guard !ids.isEmpty else { return }
+        byChannel[channelPK] = ids
+    }
+}
+
 struct AVPlayerMultiviewTile: View {
     /// The owning tile's id; mute state derives from comparing this to
     /// the store's audioTileID LIVE (never from a captured snapshot,
@@ -1903,6 +1946,12 @@ struct AVPlayerMultiviewTile: View {
     /// screen, 2026-08-27). This is the retention identity and the
     /// Jump-to-Channel deep-link target.
     var channelID: String = ""
+    /// Dispatcharr channel identity for the no-first-byte failover walk
+    /// (s7_86.txt:353-395): the INTEGER pk keys the member-streams list,
+    /// the uuid keys change_stream. Both nil off Dispatcharr Direct
+    /// Connect, which leaves the tile on its existing retry path.
+    var dispatcharrChannelPK: Int? = nil
+    var dispatcharrChannelUUID: String? = nil
 
     /// VOD tile: route MP4 direct / MKV through MKVVODServer, apply the
     /// resume offset, and never treat the URL as a live TS stream.
@@ -2055,6 +2104,26 @@ struct AVPlayerMultiviewTile: View {
     /// bumping `teardownToken` on teardown or a channel change.
     @State private var standingRetries = 0
     @State private var teardownToken = UUID()
+    /// First-byte deadline / stream-failover walk (s7_86.txt:353-395).
+    /// ESPN2 HD opened its ingest at 18:37:12 and delivered ZERO bytes:
+    /// URLSession sat on its 30 s timeout, the auto-retry's fresh
+    /// pipeline was silent for another 12 s, and Dispatcharr's own
+    /// health checks cannot fail a connected-but-silent stream over for
+    /// about 75 s (60 s channel_init_grace_period + 3 checks at 5 s).
+    /// So the CLIENT walks the channel's member streams instead.
+    @State private var firstByteSeen = false
+    /// Re-rolled every time the deadline is armed; a fired timer whose
+    /// token moved on is a stale one and does nothing.
+    @State private var firstByteDeadlineToken = UUID()
+    /// Streams already walked this tune, so the walk never revisits one.
+    @State private var failoverTriedStreamIDs: Set<Int> = []
+    /// The stream the walk believes is live right now (seeded from
+    /// /status.url on the first step, then from our own change_stream).
+    @State private var failoverCurrentStreamID: Int?
+    /// Steps taken this tune, for the recovery log line.
+    @State private var failoverSteps = 0
+    @State private var failoverInFlight = false
+    @State private var failoverStartedAt: Date?
     /// Display-mode switch deferred until the first frame is on screen
     /// (review section 1 proposal 6): the HDMI mode change used to land
     /// mid-tune and stalled the remuxer for 3.99 s on the session's worst
@@ -2117,6 +2186,9 @@ struct AVPlayerMultiviewTile: View {
             // Cancels any standing slow retry in flight.
             teardownToken = UUID()
             stop()
+            // Tile teardown clears the stream-failover walk
+            // (s7_86.txt:353-395).
+            resetFailoverWalk()
             // Final teardown of a native catch-up session frees its
             // provider slot server-side (seek re-tunes revoke their own
             // predecessors; this covers the last window).
@@ -2191,6 +2263,9 @@ struct AVPlayerMultiviewTile: View {
             serverBusyRetries = 0
             standingRetries = 0
             teardownToken = UUID()
+            // User-initiated tune: the incoming channel starts its own
+            // stream-failover walk (s7_86.txt:353-395).
+            resetFailoverWalk()
             // Channel-flip ordering (review 2026-09-11 section 2 proposals
             // 1 and 2). session.txt:3546-3547: the flip STOPPED the
             // ESPNews upstream and re-opened the SAME channel in the
@@ -2298,6 +2373,179 @@ struct AVPlayerMultiviewTile: View {
             }
             start()
         }
+    }
+
+    // MARK: - No-first-byte stream failover (s7_86.txt:353-395)
+
+    /// Seconds a live ingest may stay connected-but-silent before the
+    /// client starts walking the channel's other streams. Deliberately
+    /// SEPARATE from the ingest's 30 s URLSession request timeout, which
+    /// stays where the Freyguy first-bytes-patience comment put it.
+    private static let firstByteDeadline: Double = 12
+
+    /// Live tune only. Arms (or re-arms, after a failover step) the
+    /// deadline; the remuxer's onFirstByte disarms it.
+    private func armFirstByteDeadline() {
+        guard !isVOD, !isDVR, catchup == nil else { return }
+        firstByteSeen = false
+        firstByteDeadlineToken = UUID()
+        let deadlineToken = firstByteDeadlineToken
+        let token = teardownToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.firstByteDeadline) {
+            guard token == teardownToken, deadlineToken == firstByteDeadlineToken,
+                  !firstByteSeen, !tileStopped, tileError == nil else { return }
+            handleNoFirstByte()
+        }
+    }
+
+    /// Wipes the walk. Called on teardown and on every user-initiated
+    /// tune, so a new channel never inherits the old channel's tried set.
+    private func resetFailoverWalk() {
+        firstByteDeadlineToken = UUID()
+        firstByteSeen = false
+        failoverTriedStreamIDs.removeAll()
+        failoverCurrentStreamID = nil
+        failoverSteps = 0
+        failoverInFlight = false
+        failoverStartedAt = nil
+    }
+
+    /// The remuxer delivered its first byte: disarm, and if we had
+    /// already stepped the walk, say what recovered us.
+    private func noteFirstByte() {
+        guard !firstByteSeen else { return }
+        firstByteSeen = true
+        firstByteDeadlineToken = UUID()
+        if failoverSteps > 0 {
+            let ms = failoverStartedAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? 0
+            let id = failoverCurrentStreamID.map(String.init) ?? "unknown"
+            debugLog("[FAILOVER] channel=\(channelName) recovered on stream id=\(id) after \(ms)ms")
+        }
+        // statusText is cleared by the normal ready/first-frame path.
+    }
+
+    /// Can this tile drive Dispatcharr's change_stream? Direct Connect,
+    /// admin account, and a channel identity to key both endpoints.
+    private func failoverServer() -> ServerConnection? {
+        guard dispatcharrChannelPK != nil,
+              let uuid = dispatcharrChannelUUID, !uuid.isEmpty,
+              let server = ChannelStore.shared.activeServer,
+              server.type == .dispatcharrAPI,
+              server.dispatcharrCanSwitchStream else { return nil }
+        return server
+    }
+
+    /// Deadline fired with zero bytes on the wire.
+    private func handleNoFirstByte() {
+        guard !failoverInFlight else { return }
+        guard let server = failoverServer(),
+              let pk = dispatcharrChannelPK,
+              let uuid = dispatcharrChannelUUID else {
+            // Non-admin, Xtream/M3U, or a single-stream channel: nothing
+            // to fail over TO. Say the tile is working on it and leave
+            // the 30 s URLSession timeout plus the existing retry ladder
+            // exactly as they are.
+            statusText = "Reconnecting..."
+            debugLog("[FAILOVER] channel=\(channelName) no first byte in "
+                + "\(Int(Self.firstByteDeadline))s; no switchable streams, staying on the retry path")
+            return
+        }
+        failoverInFlight = true
+        if failoverStartedAt == nil { failoverStartedAt = Date() }
+        Task { @MainActor in
+            defer { failoverInFlight = false }
+            await stepFailover(server: server, channelPK: pk, channelUUID: uuid)
+        }
+    }
+
+    /// One step of the walk: resolve the list, mark where we are, POST
+    /// change_stream for the next untried entry, re-arm the deadline.
+    /// The ingest connection is deliberately LEFT OPEN - Dispatcharr
+    /// swaps the upstream in place behind the proxy connection (see
+    /// DispatcharrAPI.changeStream), so tearing it down here would only
+    /// cost us the connection and revert the channel to its default.
+    @MainActor
+    private func stepFailover(server: ServerConnection, channelPK: Int, channelUUID: String) async {
+        guard let api = SwitchStreamFlow.makeAPI(server: server) else { return }
+        var ids: [Int]
+        if let cached = LiveFailoverStreamCache.cached(channelPK) {
+            ids = cached
+        } else {
+            guard let fetched = try? await api.getChannelStreams(channelID: channelPK) else {
+                debugLog("[FAILOVER] channel=\(channelName) stream list unavailable; staying on the retry path")
+                statusText = "Reconnecting..."
+                return
+            }
+            ids = fetched.map(\.id)
+            LiveFailoverStreamCache.store(ids, for: channelPK)
+        }
+        guard tileError == nil, !tileStopped, !firstByteSeen else { return }
+        guard ids.count >= 2 else {
+            statusText = "Reconnecting..."
+            debugLog("[FAILOVER] channel=\(channelName) single stream; staying on the retry path")
+            return
+        }
+        // Seed "where are we" once. /status.url is the trustworthy field
+        // (stream_id goes stale on the event path), but the streams list
+        // is keyed by id, so we resolve the id by status and fall back to
+        // the highest-priority entry when the read does not land in 3 s.
+        if failoverCurrentStreamID == nil {
+            failoverCurrentStreamID = await currentStreamID(api: api, channelUUID: channelUUID) ?? ids[0]
+        }
+        if let current = failoverCurrentStreamID { failoverTriedStreamIDs.insert(current) }
+        let startIndex = failoverCurrentStreamID.flatMap { ids.firstIndex(of: $0) } ?? 0
+        // Walk forward from the current entry, wrapping once; the tried
+        // set is what guarantees we never revisit a stream.
+        var next: Int?
+        for offset in 1...ids.count {
+            let candidate = ids[(startIndex + offset) % ids.count]
+            if !failoverTriedStreamIDs.contains(candidate) { next = candidate; break }
+        }
+        guard let target = next else {
+            debugLog("[FAILOVER] channel=\(channelName) exhausted \(ids.count) streams")
+            scheduleStandingRetry("no first byte in \(Int(Self.firstByteDeadline))s")
+            // scheduleStandingRetry's generic copy is wrong here: the
+            // streams all answered, none of them delivered.
+            statusText = "Channel unavailable. Retrying..."
+            return
+        }
+        failoverSteps += 1
+        failoverTriedStreamIDs.insert(target)
+        let step = failoverSteps
+        do {
+            _ = try await api.changeStream(channelUUID: channelUUID, streamID: target)
+        } catch {
+            debugLog("[FAILOVER] channel=\(channelName) change_stream to id=\(target) failed: "
+                + error.localizedDescription)
+            statusText = "Reconnecting..."
+            return
+        }
+        guard tileError == nil, !tileStopped, !firstByteSeen else { return }
+        failoverCurrentStreamID = target
+        statusText = "Trying another stream..."
+        // No owner= field here: change_stream already logs the server's
+        // own owner flag ([SwitchStream] change_stream ... owner=).
+        debugLog("[FAILOVER] channel=\(channelName) stream \(step)/\(ids.count) id=\(target) "
+            + "reason=no first byte in \(Int(Self.firstByteDeadline))s")
+        armFirstByteDeadline()
+    }
+
+    /// `/status.streamID` with a 3 s cap. The change_stream flow only
+    /// trusts this field BEFORE any in-session switch (see
+    /// DispatcharrAPI.getChannelStatus), which is exactly where the walk
+    /// reads it: once, to seed its starting point.
+    @MainActor
+    private func currentStreamID(api: DispatcharrAPI, channelUUID: String) async -> Int? {
+        let read = Task { @MainActor in
+            try? await api.getChannelStatus(channelUUID: channelUUID).streamID
+        }
+        let cap = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            read.cancel()
+        }
+        let value = await read.value
+        cap.cancel()
+        return value
     }
 
     /// Every mpv-fallback trigger routes through here. With the mpv
@@ -2857,6 +3105,16 @@ struct AVPlayerMultiviewTile: View {
                     applyDisplayCriteria(width: vp.width, height: vp.height,
                                          fps: vp.fps, is10Bit: vp.tenBit)
                 }
+                // A warm ingest can be silent too (s7_86.txt:353-395):
+                // it is the same upstream open, just started earlier.
+                mux.onFirstByte = { noteFirstByte() }
+                if mux.hasReceivedFirstByte {
+                    // Bytes arrived before this tile existed, so the
+                    // callback will never fire for it; nothing to guard.
+                    noteFirstByte()
+                } else if warm.failure == nil, warm.readyURL == nil {
+                    armFirstByteDeadline()
+                }
                 if let failure = warm.failure {
                     failOrFallback(failure)
                 } else if let url = warm.readyURL {
@@ -2884,8 +3142,11 @@ struct AVPlayerMultiviewTile: View {
             mux.onVideoParameters = { w, h, fps, tenBit in
                 applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
             }
+            // Connected-but-silent ingest guard (s7_86.txt:353-395).
+            mux.onFirstByte = { noteFirstByte() }
             remuxer = mux
             mux.start()
+            armFirstByteDeadline()
         }
     }
 
@@ -3420,6 +3681,13 @@ struct AVPlayerMultiviewTile: View {
 
     private func stop() {
         tileStopped = true
+        // Disarm the deadline with the pipeline, but KEEP the tried set:
+        // an internal retry (503 ladder, fresh pipeline) is the same tune
+        // on the same channel, and re-walking streams we already proved
+        // silent would loop (s7_86.txt:353-395). Only a channel flip or
+        // the tile going away clears the walk.
+        firstByteDeadlineToken = UUID()
+        firstByteSeen = false
         // Next tune gets its own fast start and its own deferred
         // display-mode switch.
         firstFrameSeen = false

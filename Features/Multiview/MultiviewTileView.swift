@@ -796,6 +796,10 @@ struct MultiviewTileView: View {
                         shouldPause: shouldPause,
                         channelName: tile.item.name,
                         channelID: tile.item.id,
+                        // Dispatcharr identity for the no-first-byte
+                        // stream failover walk (s7_86.txt:353-395).
+                        dispatcharrChannelPK: tile.item.dispatcharrChannelID,
+                        dispatcharrChannelUUID: tile.item.uuid,
                         isVOD: tile.kind == .vod,
                         isDVR: tile.kind == .dvr,
                         resumePositionMs: tile.resumePositionMs,
@@ -1137,6 +1141,10 @@ struct MultiviewTileView: View {
                         shouldPause: shouldPause,
                         channelName: tile.item.name,
                         channelID: tile.item.id,
+                        // Dispatcharr identity for the no-first-byte
+                        // stream failover walk (s7_86.txt:353-395).
+                        dispatcharrChannelPK: tile.item.dispatcharrChannelID,
+                        dispatcharrChannelUUID: tile.item.uuid,
                         isVOD: tile.kind == .vod,
                         isDVR: tile.kind == .dvr,
                         resumePositionMs: tile.resumePositionMs,
