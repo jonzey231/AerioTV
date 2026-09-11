@@ -2925,13 +2925,16 @@ private struct PlayerRootView: View {
     }
 
     private func scheduleControlsHide() {
+        // Cancel FIRST: bailing out before the cancel (paused, scrubbing)
+        // used to leave an older task running, which then fired early -
+        // one of the "controls vanish too soon" paths (Logan 2026-09-11).
+        controlsHideTask?.cancel()
         guard !progressStore.isPaused else { return }
         #if os(tvOS)
         guard !isScrubbing else { return }  // Never auto-hide while user is scrubbing
         #endif
-        controlsHideTask?.cancel()
         controlsHideTask = Task {
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(playerChromeFadeSeconds * 1_000_000_000))
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 withAnimation(.easeInOut(duration: 0.3)) { showControls = false }
@@ -5471,7 +5474,7 @@ struct NativeHLSPlayerScreen: View {
         controlsHideTask?.cancel()
         guard !progressStore.isPaused else { return }
         controlsHideTask = Task {
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(playerChromeFadeSeconds * 1_000_000_000))
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 withAnimation(.easeInOut(duration: 0.3)) { showControls = false }

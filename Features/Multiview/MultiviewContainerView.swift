@@ -971,6 +971,11 @@ struct MultiviewContainerView: View {
             // so we don't OOM at 1.8+ GB RSS on Apple TV 4K.
             // Resumes on dismissal.
             store.isPickerPresented = presenting
+            // A presented cover must PAUSE the fade, not race it: the
+            // chrome kept counting down behind the picker and was gone
+            // when the user came back (Logan 2026-09-11).
+            chromeState.setPinned(presenting)
+            if !presenting { chromeState.reportInteraction() }
         }
         .task(watchThermalState)
         .onReceive(
@@ -1253,6 +1258,20 @@ struct MultiviewContainerView: View {
     /// controls.
     @ViewBuilder
     private var recordSheetContent: some View {
+        // Hold the chrome up for as long as the Record cover is on
+        // screen; released (and re-armed) on dismissal. Attached to the
+        // sheet CONTENT rather than as another onChange on the container,
+        // whose modifier chain is already at the type-checker budget.
+        recordSheetBody
+            .onAppear { chromeState.setPinned(true) }
+            .onDisappear {
+                chromeState.setPinned(false)
+                chromeState.reportInteraction()
+            }
+    }
+
+    @ViewBuilder
+    private var recordSheetBody: some View {
         if let audioID = store.audioTileID,
            let audio = store.tiles.first(where: { $0.id == audioID }),
            audio.item.streamURL != nil {
@@ -2406,14 +2425,14 @@ final class MultiviewChromeState: ObservableObject {
     /// 4.5s of visible chrome either way.
     private var lastRescheduleAt: ContinuousClock.Instant?
 
-    /// Minimum time between reschedules. Calls within this window of
-    /// a prior reschedule early-return if chrome is already visible.
-    /// Chosen at 500ms — well under any human repeat-interaction
-    /// cadence but above the tvOS focus-engine's fastest sweep.
-    private static let rescheduleCoalesceThresholdMs = 500
-
-    /// Delay before auto-hide fires after the last interaction.
+    /// Delay before the FOCUS INDICATOR fades. Separate from the chrome
+    /// fade below: the tile ring is navigation feedback, not controls.
     private static let fadeDelayNs: UInt64 = 5_000_000_000
+
+    /// Delay before the chrome auto-hide fires after the last user
+    /// action. One shared constant (`playerChromeFadeSeconds`) across
+    /// both tvOS chromes.
+    private static var chromeFadeSeconds: Double { playerChromeFadeSeconds }
 
     /// Immediately dismiss the chrome without waiting out the 5s fade
     /// (Back with chrome visible, solo sessions - Logan 2026-08-26).
@@ -2448,16 +2467,12 @@ final class MultiviewChromeState: ObservableObject {
         if let hid = lastHideNowAt, hid.duration(to: now) < .milliseconds(300) {
             return
         }
-        // Fast path: chrome is already visible AND we just
-        // rescheduled within the last 500ms. Dropping this call
-        // still leaves > 4s of visible chrome, so it's indistinct
-        // from the caller's POV.
-        if isVisible, let last = lastRescheduleAt {
-            let elapsed = last.duration(to: now)
-            if elapsed < .milliseconds(Self.rescheduleCoalesceThresholdMs) {
-                return
-            }
-        }
+        // NO coalescing any more (Logan 2026-09-11): every user action
+        // restarts the countdown from zero. The old 500ms fast path
+        // dropped the reschedule, so an action arriving just after a
+        // previous one left the chrome hiding up to half a second early -
+        // exactly the "disappears sooner" report. A cancel + re-arm per
+        // action is cheap next to the alternative being wrong.
 
         if !isVisible {
             withAnimation(.easeInOut(duration: 0.25)) {
@@ -2501,7 +2516,7 @@ final class MultiviewChromeState: ObservableObject {
     /// chrome with no hide task at all (it was cancelled when the pin went
     /// on), stranding it visible forever — the "exit Switch Stream picker via
     /// Menu, chrome never fades" bug.
-    private func scheduleHide(delaySeconds: Double = 5) {
+    private func scheduleHide(delaySeconds: Double = playerChromeFadeSeconds) {
         lastRescheduleAt = ContinuousClock.now
         hideTask?.cancel()
         // While pinned (e.g. TVOptions panel open) don't schedule the hide

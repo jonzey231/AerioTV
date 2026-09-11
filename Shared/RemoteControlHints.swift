@@ -192,6 +192,11 @@ let showRemoteHintsKey = "showRemoteHints"
 /// the hint strip's own banded variant stay identical.
 let playerChromeBandOpacity: Double = 0.88
 
+/// Seconds of inactivity before the player controls fade, on BOTH tvOS
+/// chromes (Logan 2026-09-11: exactly 3 s after the LAST user action).
+/// One constant so the two paths cannot drift apart again.
+let playerChromeFadeSeconds: Double = 3.0
+
 #if os(tvOS)
 // MARK: - Hint resolvers
 
