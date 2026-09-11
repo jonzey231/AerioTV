@@ -1218,14 +1218,22 @@ struct PlaybackBottomChrome_tvOS: View {
         .accessibilityHint("Move left or right to scrub, then wait to jump there")
     }
 
-    /// Spacing between tool cells, and the fixed-width slot the center
-    /// (Pause) cell occupies so its label width never moves the center.
+    /// Spacing between control pills.
     private static let toolCellSpacing: CGFloat = 18
-    private static let centerCellSlot: CGFloat = 120
 
-    /// True while the transport cells exist: catch-up replay, VOD solo,
-    /// or a rolling Live Rewind buffer. Plain live has no Pause cell to
-    /// anchor the row on.
+    /// Focused caption on the greyed transport cells.
+    private static let noRewindCaption = "Enable Live Rewind in Settings"
+
+    /// The center slot is the Pause CELL's natural width, i.e. the 68pt
+    /// circle (the caption is an overlay and adds none), so the row reads
+    /// compact and the center never moves.
+    private static let centerCellWidth: CGFloat = 68
+
+    /// True while a scrubbable window exists: catch-up replay, VOD solo,
+    /// or a rolling Live Rewind buffer. The transport pills still RENDER
+    /// without one (Android parity, Logan 2026-09-11), just dimmed - a
+    /// press then falls through to the progress store, which is a no-op
+    /// when there is no seekable window.
     private var hasTransportCells: Bool {
         store.catchupTile != nil || store.vodSoloTile != nil || liveRewind.buffering
     }
@@ -1246,7 +1254,7 @@ struct PlaybackBottomChrome_tvOS: View {
         }
     }
 
-    /// Everything LEFT of the center cell, in focus order: the dev engine
+    /// Everything LEFT of the center pill, in focus order: the dev engine
     /// badge, connection-issue Retry, Record, Rewind.
     @ViewBuilder
     private var controlRowLeadingCells: some View {
@@ -1265,10 +1273,9 @@ struct PlaybackBottomChrome_tvOS: View {
                 .focusable(false)
         }
 
-        // Connection-issue Retry while the live stream is unavailable, so
-        // the Siri remote has a reachable re-tune - the in-tile "Playback
-        // Problem" card's Retry competes with the tile's own focus and is
-        // fragile to reach (2026-07-12, Android parity).
+        // Connection-issue Retry keeps its place before Record while the
+        // live stream is unavailable, so the Siri remote has a reachable
+        // re-tune (2026-07-12, Android parity).
         if store.audioProgressStore?.connectionIssueActive == true {
             nativeToolButton(
                 .retry,
@@ -1278,8 +1285,6 @@ struct PlaybackBottomChrome_tvOS: View {
                 a11yHint: "Reconnect the stream"
             ) {
                 chromeState.reportInteraction()
-                // Route through the tile's retryNow() (same as the card
-                // button) so the countdown resets + "Reconnecting…" shows.
                 NotificationCenter.default.post(
                     name: .connectionIssueRetryRequested,
                     object: store.audioTileID
@@ -1301,62 +1306,65 @@ struct PlaybackBottomChrome_tvOS: View {
             }
         }
 
-        // The same transport cells serve live rewind AND catch-up:
-        // currentMs ticks in both modes and seekAction routes to the right
-        // seek model per mode (buffer re-tune vs archive window re-tune).
-        if hasTransportCells {
-            nativeToolButton(
-                .rewind30,
-                icon: "gobackward.30",
-                title: "Rewind",
-                a11yLabel: "Rewind 30 seconds",
-                a11yHint: "Jump back thirty seconds"
-            ) {
-                chromeState.reportInteraction()
-                if let ps = store.audioProgressStore {
-                    ps.seekAction?(max(0, ps.currentMs - 30_000))
-                }
+        // Rewind and Forward ALWAYS render (Logan 2026-09-11). Without a
+        // Live Rewind buffer (or a replay window) they grey out and their
+        // caption says why; the press does nothing.
+        nativeToolButton(
+            .rewind30,
+            icon: "gobackward.30",
+            title: hasTransportCells ? "Rewind" : Self.noRewindCaption,
+            dimmed: !hasTransportCells,
+            a11yLabel: "Rewind 30 seconds",
+            a11yHint: hasTransportCells
+                ? "Jump back thirty seconds"
+                : Self.noRewindCaption
+        ) {
+            guard hasTransportCells else { return }
+            chromeState.reportInteraction()
+            if let ps = store.audioProgressStore {
+                ps.seekAction?(max(0, ps.currentMs - 30_000))
             }
         }
     }
 
-    /// Everything RIGHT of the center cell, in focus order: Forward, Go
-    /// Live, Add Stream, Options.
+    /// Everything RIGHT of the center pill, in focus order: Forward, Go
+    /// Live, Multiview, Options.
     @ViewBuilder
     private var controlRowTrailingCells: some View {
-        if hasTransportCells {
+        nativeToolButton(
+            .forward30,
+            icon: "goforward.30",
+            title: hasTransportCells ? "Forward" : Self.noRewindCaption,
+            dimmed: !hasTransportCells,
+            a11yLabel: "Forward 30 seconds",
+            a11yHint: hasTransportCells
+                ? "Jump forward thirty seconds"
+                : Self.noRewindCaption
+        ) {
+            guard hasTransportCells else { return }
+            chromeState.reportInteraction()
+            if let ps = store.audioProgressStore {
+                ps.seekAction?(ps.currentMs + 30_000)
+            }
+        }
+
+        if liveRewind.timeshifting {
             nativeToolButton(
-                .forward30,
-                icon: "goforward.30",
-                title: "Forward",
-                a11yLabel: "Forward 30 seconds",
-                a11yHint: "Jump forward thirty seconds"
+                .goLive,
+                icon: "forward.end.fill",
+                title: "Go Live",
+                a11yLabel: "Go live",
+                a11yHint: "Return to the live broadcast"
             ) {
                 chromeState.reportInteraction()
-                if let ps = store.audioProgressStore {
-                    ps.seekAction?(ps.currentMs + 30_000)
-                }
-            }
-            if liveRewind.timeshifting {
-                nativeToolButton(
-                    .goLive,
-                    icon: "forward.end.fill",
-                    title: "Go Live",
-                    a11yLabel: "Go live",
-                    a11yHint: "Return to the live broadcast"
-                ) {
-                    chromeState.reportInteraction()
-                    let window = Int32(clamping: max(Int64(1), liveRewind.headWallMs - liveRewind.tailWallMs))
-                    store.audioProgressStore?.seekAction?(window)
-                }
+                let window = Int32(clamping: max(Int64(1), liveRewind.headWallMs - liveRewind.tailWallMs))
+                store.audioProgressStore?.seekAction?(window)
             }
         }
 
         // Catch-up is a single archived replay; multiview alongside it
-        // isn't supported, so hide Add Stream.
+        // isn't supported, so hide the Multiview pill.
         if store.catchupTile == nil {
-            // "Add Stream" did not say what it does (Logan 2026-09-11):
-            // it opens a second tile, so the cell reads Multiview.
             nativeToolButton(
                 .addStream,
                 icon: "square.grid.2x2",
@@ -1377,7 +1385,7 @@ struct PlaybackBottomChrome_tvOS: View {
             a11yHint: "Change audio track, subtitles, sleep timer, or stream info"
         ) {
             chromeState.reportInteraction()
-            debugLog("[MV-Cmd] Options pill pressed → showTVOptions=true | audioTileID=\(store.audioTileID ?? "nil") tiles=\(store.tiles.count) audioStore=\(store.audioProgressStore == nil ? "nil" : "ok")")
+            debugLog("[MV-Cmd] Options pill pressed \u{2192} showTVOptions=true | audioTileID=\(store.audioTileID ?? "nil") tiles=\(store.tiles.count) audioStore=\(store.audioProgressStore == nil ? "nil" : "ok")")
             showTVOptions = true
         }
     }
@@ -1413,40 +1421,32 @@ struct PlaybackBottomChrome_tvOS: View {
             // engine) so it can be reverted to the legacy labeled pill row (the
             // `else` branch) via UserDefaults without a code change.
             if PlaybackFeatureFlags.useModernPlayerChrome {
-            // Control row (Logan 2026-09-11): Record, Rewind, Pause,
-            // Forward, Add Stream, Options - with the Pause cell anchored
-            // on the SCREEN center. Laid out as a ZStack rather than one
-            // HStack so a side cell appearing (Record only when the
-            // program is recordable, Retry only on a connection issue) or
-            // a focus label changing width can never shift the center.
-            // The center cell gets a fixed-width slot for the same reason.
-            // Focus order stays left to right because the focus engine
-            // reads geometry, not declaration order.
+            // Control row (Logan 2026-09-11): ALWAYS the six cells -
+            // Record, Rewind, Pause (Play when paused), Forward,
+            // Multiview, Options - in the modern style (frosted circle,
+            // caption only under the focused cell), with the Pause cell
+            // anchored on the SCREEN center. A ZStack, not one HStack, so
+            // a side cell appearing (Record only when the program is
+            // recordable, Retry only on a connection issue, Go Live only
+            // while timeshifting) can never shift the center. The center
+            // slot is the cell's natural 68pt circle, and captions are
+            // overlays that add no width, so the row stays compact at
+            // 18pt spacing. Focus order stays left to right because the
+            // focus engine reads geometry, not declaration order.
             ZStack {
-                if hasTransportCells {
-                    transportCenterCell
-                        .frame(width: Self.centerCellSlot)
+                transportCenterCell
 
-                    HStack(alignment: .top, spacing: Self.toolCellSpacing) {
-                        controlRowLeadingCells
-                    }
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .padding(.trailing, Self.centerCellSlot / 2 + Self.toolCellSpacing)
-
-                    HStack(alignment: .top, spacing: Self.toolCellSpacing) {
-                        controlRowTrailingCells
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, Self.centerCellSlot / 2 + Self.toolCellSpacing)
-                } else {
-                    // No transport cells in plain live (no rewind buffer,
-                    // no replay): nothing to anchor, so the remaining
-                    // cells simply center as a group.
-                    HStack(alignment: .top, spacing: Self.toolCellSpacing) {
-                        controlRowLeadingCells
-                        controlRowTrailingCells
-                    }
+                HStack(alignment: .center, spacing: Self.toolCellSpacing) {
+                    controlRowLeadingCells
                 }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.trailing, Self.centerCellWidth / 2 + Self.toolCellSpacing)
+
+                HStack(alignment: .center, spacing: Self.toolCellSpacing) {
+                    controlRowTrailingCells
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, Self.centerCellWidth / 2 + Self.toolCellSpacing)
             }
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 80)
@@ -1605,6 +1605,7 @@ struct PlaybackBottomChrome_tvOS: View {
         icon: String,
         title: String,
         iconColor: Color = .white,
+        dimmed: Bool = false,
         a11yLabel: String,
         a11yHint: String,
         action: @escaping () -> Void
@@ -1612,7 +1613,8 @@ struct PlaybackBottomChrome_tvOS: View {
         let isFocused = focusedChrome == target
         return Button(action: action) {
             TVPlayerToolCellVisual(icon: icon, title: title,
-                                   iconColor: iconColor, focused: isFocused)
+                                   iconColor: iconColor, dimmed: dimmed,
+                                   focused: isFocused)
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($focusedChrome, equals: target)
@@ -1633,6 +1635,10 @@ struct TVPlayerToolCellVisual: View {
     let icon: String
     let title: String
     var iconColor: Color = .white
+    /// Unavailable in the current state (Logan 2026-09-11): the icon
+    /// greys to 40% and the cell stays focusable so the caption can say
+    /// WHY, but its press does nothing.
+    var dimmed: Bool = false
     let focused: Bool
 
     var body: some View {
@@ -1647,17 +1653,27 @@ struct TVPlayerToolCellVisual: View {
                 Image(systemName: icon)
                     .font(.system(size: 26, weight: .semibold))
                     .foregroundStyle(
-                        iconColor == .red ? Color.red
-                            : (focused ? Color.black : Color.white)
+                        iconColor == .red ? Color.red.opacity(dimmed ? 0.4 : 1)
+                            : (focused ? Color.black : Color.white).opacity(dimmed ? 0.4 : 1)
                     )
             }
             .frame(width: 68, height: 68)
             .scaleEffect(focused ? 1.12 : 1.0)
             .animation(.easeOut(duration: 0.15), value: focused)
 
+            // Height reserved in the layout, but the caption itself is an
+            // OVERLAY: a long caption ("Enable Live Rewind in Settings")
+            // must not widen the cell, which is what spread the row out
+            // (Logan 2026-09-11). Cell width is always the 68pt circle.
+            Color.clear
+                .frame(height: 24)
+        }
+        .overlay(alignment: .bottom) {
             Text(title)
                 .font(.system(size: 20, weight: .medium))
                 .foregroundStyle(.white)
+                .lineLimit(1)
+                .fixedSize()
                 .opacity(focused ? 1 : 0)
                 .frame(height: 24)
         }
