@@ -171,6 +171,10 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
 
     private(set) var requestsMade = 0
     private(set) var bytesStreamed: Int64 = 0
+    /// When the first accepted HTTP response landed (nil until it does).
+    /// Feeds the tile's loading detail line, which must separate "still
+    /// connecting" from "connected, no bytes yet".
+    private var respondedAt: Date?
 
     init(url: URL, headers: [String: String]) {
         self.url = url
@@ -317,6 +321,13 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         return out
     }
 
+    /// When the media connection's response landed, safe from any thread.
+    var connectedAt: Date? {
+        cond.lock()
+        defer { cond.unlock() }
+        return respondedAt
+    }
+
     /// Thread-safe total of media bytes received this session.
     var totalBytesStreamed: Int64 {
         cond.lock()
@@ -397,6 +408,7 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         if expectedTotalLength > 0, let total = rangeTotal, total != expectedTotalLength {
             reject("file changed upstream (indexed \(expectedTotalLength) bytes, stream now \(total))"); return
         }
+        if respondedAt == nil { respondedAt = Date() }
         completionHandler(.allow)
     }
 
@@ -685,6 +697,10 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
     /// still working" (a resumed 4K title's first segment build is
     /// ~190MB - nearly a minute at 30Mbps Wi-Fi) from "actually dead".
     var mediaBytesStreamed: Int64 { stream.totalBytesStreamed }
+
+    /// When the media connection's HTTP response landed (nil while the
+    /// open is still in flight); read by the loading detail line.
+    var mediaConnectedAt: Date? { stream.connectedAt }
 
     func teardown() {
         fetcher.invalidate()
@@ -2424,6 +2440,11 @@ final class MKVVODServer: @unchecked Sendable {
     /// Media bytes received so far (thread-safe); the tile's stall
     /// watchdog polls this to distinguish slow links from dead streams.
     var mediaBytesStreamed: Int64 { remuxer.mediaBytesStreamed }
+
+    /// When the media connection's HTTP response landed; the tile's
+    /// loading detail line reads it to show "Connecting to server"
+    /// versus "Waiting for stream data".
+    var mediaConnectedAt: Date? { remuxer.mediaConnectedAt }
 
     /// Maps a playback position onto the source segment/byte range, for
     /// the failure log. A deterministic CoreMedia item-failed at a fixed

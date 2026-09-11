@@ -5551,6 +5551,11 @@ struct NativeHLSPlayerScreen: View {
                     Text(statusText)
                         .font(.bodyMedium)
                         .foregroundColor(.white.opacity(0.85))
+                    // Same live "what the network is doing" line as the
+                    // AVPlayer tile: this screen shows the identical
+                    // spinner over the identical TS-remux / direct-HLS
+                    // sources (Logan 2026-09-11).
+                    LoadingDetailLine(statusText: statusText) { loadingDetailSample() }
                 }
             }
             if showStreamInfo, let player {
@@ -5725,6 +5730,23 @@ struct NativeHLSPlayerScreen: View {
         }
     }
     #endif
+
+    /// Byte source for the loading detail line: the TS remux ingest when
+    /// this screen stood one up, otherwise the player item's own access
+    /// log (direct HLS). Never both.
+    private func loadingDetailSample() -> LoadingDetailSample {
+        if let mux = remuxer {
+            let at = mux.ingestConnectedAt
+            return LoadingDetailSample(connected: at != nil,
+                                       bytes: mux.bytesIngested,
+                                       connectedAt: at)
+        }
+        if let events = player?.currentItem?.accessLog()?.events, !events.isEmpty {
+            let bytes = events.reduce(Int64(0)) { $0 + max(0, $1.numberOfBytesTransferred) }
+            return LoadingDetailSample(connected: true, bytes: bytes, connectedAt: nil)
+        }
+        return LoadingDetailSample(connected: false, bytes: 0, connectedAt: nil)
+    }
 
     private func startPlayer(with url: URL, headers: [String: String]) {
         var options: [String: Any] = [:]

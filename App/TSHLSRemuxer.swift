@@ -362,6 +362,22 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     }
     private let firstByteLock = NSLock()
     private var firstByteArrived = false
+    /// When the upstream's HTTP response landed (nil until it does), and
+    /// the running total of ingested bytes, both readable from any
+    /// thread. The tile's loading detail line polls these to tell
+    /// "still connecting" from "connected but silent" from "receiving"
+    /// while the spinner is up. Kept separate from totalBytesIngested,
+    /// which is touched only on the remuxer's own queue.
+    var ingestConnectedAt: Date? {
+        firstByteLock.lock(); defer { firstByteLock.unlock() }
+        return connectedAt
+    }
+    var bytesIngested: Int64 {
+        firstByteLock.lock(); defer { firstByteLock.unlock() }
+        return ingestedBytes
+    }
+    private var connectedAt: Date?
+    private var ingestedBytes: Int64 = 0
 
     // MARK: State
 
@@ -1379,6 +1395,9 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
             completionHandler(.cancel)
             return
         }
+        firstByteLock.lock()
+        if connectedAt == nil { connectedAt = Date() }
+        firstByteLock.unlock()
         completionHandler(.allow)
     }
 
@@ -1387,6 +1406,13 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
         // log had NOTHING between `ingest started` and the PAT parse, so
         // connect + TLS + the upstream open (220 to 2532 ms) could not be
         // separated from the PSI walk.
+        firstByteLock.lock()
+        ingestedBytes += Int64(data.count)
+        // A response we never saw (a 200 with no delegate callback is not
+        // possible, but an adopted/warm ingest can hand us data first)
+        // still counts as connected for the loading detail line.
+        if connectedAt == nil { connectedAt = Date() }
+        firstByteLock.unlock()
         if !firstByteLogged {
             firstByteLogged = true
             let ms = Int(Date().timeIntervalSince(ingestStartedAt) * 1000)
@@ -1930,6 +1956,88 @@ enum LiveFailoverStreamCache {
     }
 }
 
+/// One 250 ms poll of whichever byte source a loading tile is using.
+/// `connectedAt` is nil until the source's HTTP response has landed
+/// (the AVPlayer access-log source has no such timestamp: it reports
+/// connected with a nil date and the line times from its own clock).
+struct LoadingDetailSample {
+    var connected: Bool
+    var bytes: Int64
+    var connectedAt: Date?
+}
+
+/// The small line under a loading spinner that says what the network is
+/// actually doing (Logan 2026-09-11: a slow server must LOOK like a slow
+/// server instead of a broken player). Mounted only while the status
+/// text is non-nil, so its own lifetime IS the "statusText went nil ->
+/// non-nil" clock the 3 s delay is keyed to; a change between two
+/// non-nil status texts leaves it mounted and the clock running.
+struct LoadingDetailLine: View {
+    /// Current status text, watched only for the failover step ("Trying
+    /// another stream..."), which restarts the waiting counter.
+    let statusText: String
+    /// Polled on every tick; never captured, because the tile's byte
+    /// source can be swapped out under it (failover, MKV -> direct).
+    let sample: () -> LoadingDetailSample
+
+    @State private var detail: String?
+    @State private var appearedAt = Date()
+    /// Fallback connection clock for sources with no response timestamp,
+    /// and the failover step's restart point.
+    @State private var stepStartedAt: Date?
+    @State private var connectedFallbackAt: Date?
+    private let tick = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Text(detail ?? " ")
+            .font(.caption2)
+            .foregroundColor(.white.opacity(0.55))
+            .monospacedDigit()
+            .lineLimit(1)
+            .opacity(detail == nil ? 0 : 1)
+            .onAppear { appearedAt = Date(); refresh() }
+            .onReceive(tick) { _ in refresh() }
+            .onChange(of: statusText) { _, new in
+                if new.contains("Trying another stream") {
+                    stepStartedAt = Date()
+                    connectedFallbackAt = nil
+                }
+            }
+    }
+
+    private func refresh() {
+        // Held back 3 s: a tune that completes promptly never shows a
+        // line at all, so the detail only appears when there is genuinely
+        // something to explain.
+        guard Date().timeIntervalSince(appearedAt) >= 3.0 else {
+            if detail != nil { detail = nil }
+            return
+        }
+        let s = sample()
+        var next: String
+        if !s.connected {
+            next = "Connecting to server"
+        } else if s.bytes <= 0 {
+            if connectedFallbackAt == nil { connectedFallbackAt = Date() }
+            let base = [s.connectedAt, stepStartedAt, connectedFallbackAt]
+                .compactMap { $0 }.max() ?? Date()
+            let secs = max(0, Int(Date().timeIntervalSince(base)))
+            next = "Waiting for stream data  \(secs) s"
+        } else {
+            next = Self.received(s.bytes)
+        }
+        if next != detail { detail = next }
+    }
+
+    /// KB below 1 MB, one decimal MB below 1024 MB, one decimal GB above.
+    static func received(_ bytes: Int64) -> String {
+        if bytes < 1_048_576 { return "Received \(bytes / 1024) KB" }
+        let mb = Double(bytes) / 1_048_576
+        if mb < 1024 { return String(format: "Received %.1f MB", mb) }
+        return String(format: "Received %.1f GB", mb / 1024)
+    }
+}
+
 struct AVPlayerMultiviewTile: View {
     /// The owning tile's id; mute state derives from comparing this to
     /// the store's audioTileID LIVE (never from a captured snapshot,
@@ -2150,6 +2258,7 @@ struct AVPlayerMultiviewTile: View {
                     Text(statusText)
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.8))
+                    LoadingDetailLine(statusText: statusText) { loadingDetailSample() }
                 }
             }
             if let tileError {
@@ -3280,6 +3389,34 @@ struct AVPlayerMultiviewTile: View {
     /// MKV cue-indexed remux, and a non-Matroska file gets one direct
     /// try (Dispatcharr's extensionless proxy URL can front an MP4)
     /// before the tile falls back to mpv.
+    /// Byte source for the loading detail line, chosen by which pipeline
+    /// this tile is actually running: the TS/fMP4 ingest (live, catch-up,
+    /// local-file and raw-TS VOD), the MKV VOD server, or, for direct
+    /// AVPlayer sources (MP4/MOV VOD, server-side DVR, direct HLS), the
+    /// player item's own access log. Exactly one of them, never a mix.
+    private func loadingDetailSample() -> LoadingDetailSample {
+        if let mux = remuxer {
+            let at = mux.ingestConnectedAt
+            return LoadingDetailSample(connected: at != nil,
+                                       bytes: mux.bytesIngested,
+                                       connectedAt: at)
+        }
+        if let srv = mkvServer {
+            let at = srv.mediaConnectedAt
+            return LoadingDetailSample(connected: at != nil,
+                                       bytes: srv.mediaBytesStreamed,
+                                       connectedAt: at)
+        }
+        if let events = player?.currentItem?.accessLog()?.events, !events.isEmpty {
+            // An access-log event exists only once AVFoundation has a
+            // response for the item, so its presence IS "connected";
+            // numberOfBytesTransferred is -1 when unknown.
+            let bytes = events.reduce(Int64(0)) { $0 + max(0, $1.numberOfBytesTransferred) }
+            return LoadingDetailSample(connected: true, bytes: bytes, connectedAt: nil)
+        }
+        return LoadingDetailSample(connected: false, bytes: 0, connectedAt: nil)
+    }
+
     private func startVOD() {
         let ext = streamURL.pathExtension.lowercased()
         if streamURL.isFileURL || ext == "ts" {
