@@ -1258,21 +1258,6 @@ struct PlaybackBottomChrome_tvOS: View {
     /// badge, connection-issue Retry, Record, Rewind.
     @ViewBuilder
     private var controlRowLeadingCells: some View {
-        // Engine badge is a dev evaluation aid - only shown while an
-        // AVPlayer engine toggle is on. Regular users on the default
-        // (mpv) modern chrome see clean controls with no engine tag.
-        if (PlaybackFeatureFlags.avPlayerForHLS || PlaybackFeatureFlags.avPlayerRemuxTS),
-           let audioID = store.audioTileID,
-           let engine = store.tileEngines[audioID] {
-            Text(engine)
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.55))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(.ultraThinMaterial, in: Capsule())
-                .focusable(false)
-        }
-
         // Connection-issue Retry keeps its place before Record while the
         // live stream is unavailable, so the Siri remote has a reachable
         // re-tune (2026-07-12, Android parity).
@@ -1455,6 +1440,23 @@ struct PlaybackBottomChrome_tvOS: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxWidth: .infinity)
+            // Engine badge (dev aid, only while an AVPlayer toggle is on):
+            // parked at the left edge of the band, where it used to live,
+            // so it never joins the control row (Logan 2026-09-11).
+            .overlay(alignment: .leading) {
+                if (PlaybackFeatureFlags.avPlayerForHLS || PlaybackFeatureFlags.avPlayerRemuxTS),
+                   let audioID = store.audioTileID,
+                   let engine = store.tileEngines[audioID] {
+                    Text(engine)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .focusable(false)
+                        .padding(.leading, 80)
+                }
+            }
             } else {
                 HStack(spacing: 20) {
                     // Render Options first (leftmost) so D-pad-right
