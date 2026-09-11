@@ -1945,9 +1945,13 @@ private struct PlayerRootView: View {
             // fades with the chrome because it lives inside controlsOverlay,
             // and it is neither focusable nor hit-testable.
             if showRemoteHints, !nowPlayingManager.isMinimized {
-                RemoteHintStrip(pairs: playerHintPairs)
+                RemoteHintStrip(pairs: playerHintPairs, banded: true)
                     .padding(.top, 16)
-                    .padding(.horizontal, tvBandInset)
+                    // Cancel `bottomControls`' own insets so the band
+                    // spans the full width and sits flush with the
+                    // bottom edge; the text stays inside it.
+                    .padding(.horizontal, -20)
+                    .padding(.bottom, -(deviceSafeAreaBottom + 20))
             }
             #endif
         }

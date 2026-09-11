@@ -1413,9 +1413,13 @@ struct PlaybackBottomChrome_tvOS: View {
             // Pairs come from the CURRENT remote map (this chrome is the
             // one that actually runs the mapped executor).
             if showRemoteHints {
-                RemoteHintStrip(pairs: hintPairs)
+                RemoteHintStrip(pairs: hintPairs, banded: true)
                     .padding(.horizontal, 80)
                     .padding(.top, -2)
+                    // Cancel the block's own insets so the band reaches
+                    // the screen edges and sits flush with the bottom.
+                    .padding(.horizontal, -80)
+                    .padding(.bottom, -24)
             }
         }
         .padding(.vertical, 24)

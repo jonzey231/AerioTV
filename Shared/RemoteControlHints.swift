@@ -290,9 +290,11 @@ extension RemoteControlHints {
         if let phrase = stripPlayerAction(map.playerAction(.playPause), isPaused: isPaused) {
             pairs.append(RemoteHintPair(key: "Play/Pause", action: phrase))
         }
-        if let phrase = stripPlayerAction(map.playerAction(.okShort), isPaused: isPaused) {
-            pairs.append(RemoteHintPair(key: "Select", action: phrase))
-        }
+        // No Select pair: the strip only renders while the chrome is
+        // VISIBLE, and in that state Select activates whatever control
+        // holds focus rather than running its mapped okShort action
+        // (Logan 2026-09-11). "Back  Hide controls" below covers the way
+        // out instead.
         if scrubbable {
             pairs.append(RemoteHintPair(key: "Left/Right", action: "Scrub"))
         } else {
@@ -343,7 +345,8 @@ extension RemoteControlHints {
         ]
         if scrubberActive {
             pairs.append(RemoteHintPair(key: "Left/Right", action: "Scrub"))
-            pairs.append(RemoteHintPair(key: "Select", action: isPaused ? "Resume" : "Pause"))
+            // Select activates the focused control here too, so it is not
+            // advertised (Logan 2026-09-11).
             pairs.append(RemoteHintPair(key: "Up/Down", action: "Transport row"))
         }
         pairs.append(RemoteHintPair(key: "Back", action: "Mini player"))
@@ -394,9 +397,30 @@ struct RemoteHintStrip: View {
         return out
     }
 
+    /// The player strip rides over live video, so it gets a band behind
+    /// it (Logan 2026-09-11): full screen width, black at 55%, text
+    /// vertically centered with 12pt above and below, flush with the
+    /// bottom edge. The Live TV strip sits on the app background and
+    /// passes `banded: false`.
+    var banded: Bool = false
+
     var body: some View {
         if pairs.isEmpty {
             EmptyView()
+        } else if banded {
+            line
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .multilineTextAlignment(.center)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .background(
+                    Color.black.opacity(0.55)
+                        .ignoresSafeArea(edges: [.horizontal, .bottom])
+                )
+                .focusable(false)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
         } else {
             line
                 .lineLimit(1)
