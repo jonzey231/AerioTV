@@ -190,7 +190,7 @@ let showRemoteHintsKey = "showRemoteHints"
 /// Opacity of the black band behind the tvOS player chrome's bottom
 /// control block (Logan 2026-09-11). One constant so both chromes and
 /// the hint strip's own banded variant stay identical.
-let playerChromeBandOpacity: Double = 0.75
+let playerChromeBandOpacity: Double = 0.88
 
 #if os(tvOS)
 // MARK: - Hint resolvers
