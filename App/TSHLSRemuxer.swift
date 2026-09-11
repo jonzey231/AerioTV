@@ -139,6 +139,18 @@ final class HLSResourceLoaderRegistry: NSObject, AVAssetResourceLoaderDelegate, 
                         didCancel loadingRequest: AVAssetResourceLoadingRequest) {}
 }
 
+/// Thread-safe "when did this last happen" slot.
+final class TimestampBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Date?
+    func set(_ date: Date) { lock.lock(); value = date; lock.unlock() }
+    func secondsSince(_ now: Date = Date()) -> TimeInterval? {
+        lock.lock(); defer { lock.unlock() }
+        guard let value else { return nil }
+        return now.timeIntervalSince(value)
+    }
+}
+
 final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     enum RemuxError: Error, CustomStringConvertible {
@@ -319,6 +331,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var errorSignaled = false
     /// Loopback requests logged so far (the first 24 per session).
     private var loggedRequests = 0
+    private var lastPollLogAt = Date.distantPast
     private var totalBytesIngested = 0
 
     // Live Rewind window (task #145): when > 0, every closed segment is
@@ -951,6 +964,16 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             if gap > duration + 0.6 {
                 starvedClosures += 1
                 worstClosureGap = max(worstClosureGap, gap)
+                // Publish the moment of starvation, not just the 150-segment
+                // summary: an AVPlayer stall that lands within a few seconds
+                // of an upstream gap must NOT be answered by holding further
+                // back from the live edge (2026-09-11, see the holdback note
+                // in AVPlayerProgressDriver).
+                Self.lastFeedStarvation.set(nowWall)
+                if nowWall.timeIntervalSince(lastStarvationLogAt) > 10 {
+                    lastStarvationLogAt = nowWall
+                    debugLog("[TS-REMUX] feed starved: \(String(format: "%.1f", gap))s wall for a \(String(format: "%.1f", duration))s segment (\(starvedClosures) so far)")
+                }
             }
         }
         lastSegmentCloseWall = nowWall
@@ -1020,6 +1043,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     // MARK: Feed-jitter telemetry (read the [TS-REMUX] feed-jitter lines)
     private var lastSegmentCloseWall: Date?
+    private var lastStarvationLogAt = Date.distantPast
+    /// When ANY live remuxer last cut a segment short because bytes
+    /// stopped arriving. Read from the main thread by the playback
+    /// driver; written from the ingest queue, hence the box.
+    static let lastFeedStarvation = TimestampBox()
     private var starvedClosures = 0
     private var worstClosureGap = 0.0
 
@@ -1194,7 +1222,17 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             } else {
                 r = ServedResource(status: 404, body: Data("not found".utf8), contentType: "text/plain", uti: "public.plain-text")
             }
-            if self.loggedRequests < 24 {
+            // First 24 requests verbose, then playlist polls only, at most
+            // one every 10 s. The flat 24-line cap is why the 17:58:55
+            // buffer-empty could not be diagnosed: every GET line had been
+            // spent 15 s earlier, so "AVPlayer stopped fetching" and
+            // "AVPlayer kept fetching" looked identical in the log
+            // (session6.txt, exactly 24 GET lines, last at 17:58:40).
+            let isPlaylistPoll = path.hasSuffix("live.m3u8")
+            let throttledPoll = isPlaylistPoll
+                && Date().timeIntervalSince(self.lastPollLogAt) > 10
+            if self.loggedRequests < 24 || throttledPoll || r.status != 200 {
+                if throttledPoll { self.lastPollLogAt = Date() }
                 self.loggedRequests += 1
                 debugLog("[TS-REMUX] GET \(path) -> \(r.status) \(r.body.count) B (segments \(self.segments.first?.seq ?? -1)...\(self.segments.last?.seq ?? -1))")
             }
@@ -3015,10 +3053,20 @@ struct AVPlayerMultiviewTile: View {
         // 3-5s setting absorbs the deficit at the cost of that much
         // added latency. Live tiles only: VOD/DVR/catch-up have no edge.
         let streamBufferSeconds = UserDefaults.standard.double(forKey: "appBehaviorsStreamBufferSeconds")
-        if !isVOD, !isDVR, catchup == nil, streamBufferSeconds > 0 {
+        let isLiveTune = !isVOD && !isDVR && catchup == nil
+        // Hold-back learned from this channel's PREVIOUS stalls, applied
+        // here at join time. Raising it mid-playback is what replayed
+        // content on the user (see the holdback note in
+        // AVPlayerProgressDriver.logPerfSummary); at join there is no
+        // playhead to move, so it is free.
+        let holdbackKey = isLiveTune ? liveSourceURL.absoluteString : nil
+        let learned = holdbackKey.map { LiveEdgeHoldback.offset(for: $0) } ?? LiveEdgeHoldback.base
+        if isLiveTune, streamBufferSeconds > 0 || learned > LiveEdgeHoldback.base {
+            let offset = max(LiveEdgeHoldback.base + streamBufferSeconds, learned)
             playerItem.configuredTimeOffsetFromLive =
-                CMTime(seconds: 6 + streamBufferSeconds, preferredTimescale: 600)
-            debugLog("[AVP-MV] live edge offset raised to \(6 + streamBufferSeconds)s (Stream Buffer setting) channel=\(channelName)")
+                CMTime(seconds: offset, preferredTimescale: 600)
+            debugLog("[AVP-MV] live edge offset \(offset)s at join "
+                + "(stream buffer \(streamBufferSeconds)s, learned \(learned)s) channel=\(channelName)")
         }
         // Forward buffer: left at AVPlayer's automatic default (0). A device
         // capture DISPROVED the idea that a forced preferredForwardBufferDuration
@@ -3143,6 +3191,8 @@ struct AVPlayerMultiviewTile: View {
         driver = AVPlayerProgressDriver(
             player: avPlayer, store: progressStore,
             isLive: !(isVOD || isDVR || catchup != nil), applyGravity: { _ in })
+        // Where a stall-learned hold-back is recorded for the NEXT tune.
+        driver?.liveHoldbackKey = holdbackKey
         // First frame closes the press-to-picture clock and releases any
         // display-mode switch that was deferred out of the tune.
         driver?.onFirstFrame = {

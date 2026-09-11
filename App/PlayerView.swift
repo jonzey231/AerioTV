@@ -4014,6 +4014,32 @@ struct TVRemoteInputView: UIViewRepresentable {
 
 // MARK: - Native AVPlayer engine (TEST, branch test/avplayer-hls-engine)
 
+/// Per-channel live-edge hold-back learned from stalls, applied at the
+/// START of a tune instead of mid-playback (see the holdback note in
+/// `logPerfSummary`). Persisted so a channel that is reliably bursty
+/// joins further back from the edge on its next tune instead of
+/// re-learning it with a stall every session. Values are seconds of
+/// `configuredTimeOffsetFromLive`, 6 (the default) to 18.
+enum LiveEdgeHoldback {
+    private static let defaultsKey = "playback.liveEdgeHoldback"
+    static let base = 6.0
+
+    static func offset(for key: String) -> Double {
+        let map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]
+        return map?[key] ?? base
+    }
+
+    static func record(_ seconds: Double, for key: String) {
+        var map = (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]) ?? [:]
+        map[key] = min(18, max(base, seconds))
+        // Bounded: one entry per channel the user has stalled on, and a
+        // playlist change rotates keys out on its own.
+        if map.count > 200 { map.removeAll() }
+        UserDefaults.standard.set(map, forKey: defaultsKey)
+    }
+}
+
+
 /// Bridges an `AVPlayer`'s playback state into the shared
 /// `PlayerProgressStore`, the SAME store the mpv path populates, so ONE
 /// custom control overlay can drive both engines. This is the AVPlayer
@@ -4108,6 +4134,9 @@ final class AVPlayerProgressDriver {
     /// reports stalls/dropped-frames since the previous line, like the
     /// mpv vo_drops/dec_drops deltas.
     private var lastStallCount = 0
+    /// Channel key for the persisted live-edge hold-back, set by the tile
+    /// right after init. Nil (VOD/DVR/catch-up) disables the mechanism.
+    var liveHoldbackKey: String?
     private var lastDroppedFrames = 0
     /// Throttle for the periodic VOD WatchProgress save (10s cadence,
     /// matching the mpv coordinator's saver).
@@ -4537,13 +4566,39 @@ final class AVPlayerProgressDriver {
         // the edge, which a bursty source runs dry about every 90 s. Each
         // NEW stall on a live stream moves the target 3 s further back
         // (6 -> 9 -> ... -> 18); a steady stream never pays the latency.
-        if isLive, dStalls > 0, let item = player.currentItem {
-            let current = item.configuredTimeOffsetFromLive.seconds
-            let base = current.isFinite && current > 0 ? current : 6
-            let next = min(18.0, base + 3)
-            if next > base + 0.5 {
-                item.configuredTimeOffsetFromLive = CMTime(seconds: next, preferredTimescale: 600)
-                debugLog(String(format: "[AVP-HOLDBACK] stall #%d: live edge offset %.0fs -> %.0fs", stalls, base, next))
+        //
+        // REWORKED 2026-09-11. Writing `configuredTimeOffsetFromLive` on a
+        // PLAYING item is what produced the "looping" Logan reported: the
+        // player honours the larger offset by repositioning the playhead
+        // back from the edge, so the content replays. The chain is in every
+        // log, pre-batch and post-batch, always in this order and always
+        // within ~1 s: [AVP-HOLDBACK] -> CoreMedia -12640 "Cannot get that
+        // close to live" -> [AVP-FREEZE] clock advanced -N s
+        // (session.txt:3422-3425 -8.107s, :3978-3982 -2.466s;
+        // session6.txt:17:59:04-05 -5.747s). So the new offset is never
+        // applied to the session that stalled; it is remembered for the
+        // channel and applied at its NEXT tune, where it costs nothing.
+        //
+        // And it is not raised at all when the remuxer just reported a
+        // starved closure: the bytes stopped arriving upstream, and no
+        // amount of extra hold-back fills a buffer the provider is not
+        // feeding (this provider: "34 starved closures, worst gap 8.8s",
+        // session.txt:4022).
+        if isLive, dStalls > 0, let key = liveHoldbackKey {
+            let starvedAgo = TSHLSRemuxer.lastFeedStarvation.secondsSince()
+            if let starvedAgo, starvedAgo < 15 {
+                debugLog(String(format:
+                    "[AVP-HOLDBACK] stall #%d ignored: upstream starved %.0fs ago, a larger hold-back cannot fill a buffer the feed is not filling",
+                    stalls, starvedAgo))
+            } else {
+                let base = LiveEdgeHoldback.offset(for: key)
+                let next = min(18.0, base + 3)
+                if next > base + 0.5 {
+                    LiveEdgeHoldback.record(next, for: key)
+                    debugLog(String(format:
+                        "[AVP-HOLDBACK] stall #%d: live edge offset %.0fs -> %.0fs for the NEXT tune of this channel (never applied mid-playback: that seeks backward)",
+                        stalls, base, next))
+                }
             }
         }
         lastDroppedFrames = dropped
