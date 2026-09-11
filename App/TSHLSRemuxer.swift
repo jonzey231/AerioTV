@@ -167,14 +167,16 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// keyframe cadence is denser than 2s. On a 2s-GOP feed the cuts
     /// still land at 2s and this is a no-op, never a regression.
     private let startupRampSegments = 3
-    /// 0.0, not 1.0 (Apple TV review 2026-09-11 section 1 proposal 4,
-    /// session.txt:285, 1594, 2034): "first keyframe at or after 1.0 s"
-    /// is a NO-OP on a 2.5 s-GOP feed - every seg 0 measured dur=2.503,
-    /// so the ramp never shortened anything on the provider Logan
-    /// actually watches. At 0.0 the first `startupRampSegments` cut at
-    /// the first keyframe after any media at all, so segment 0 is exactly
-    /// one GOP and READY lands a GOP sooner. Both arms read this.
-    private let startupSegmentSeconds = 0.0
+    /// REVERTED to 1.0 on 2026-09-11 after the 17:15 device session.
+    /// The 0.0 "cut at the first keyframe after any media" ramp produced
+    /// a 1.05 s segment 0 on ESPN2 (session2.txt:381) and CoreMedia
+    /// answered -16832 "restarting 1.051000s from end of live playlist;
+    /// target duration 2s - stall danger" twice on that item
+    /// (session2.txt:398, 400). A segment shorter than the advertised
+    /// target duration is its own hazard, so the ramp stays at 1.0: on a
+    /// feed with a denser-than-2 s GOP it still halves the accumulation
+    /// phase, and on a 2.5 s-GOP feed it is a no-op rather than a risk.
+    private let startupSegmentSeconds = 1.0
     /// Segments advertised in the live playlist window. 8 (not 6): the
     /// same capture showed AVPlayer recovers from an upstream delivery
     /// gap by re-buffering deeper behind the edge; a 16s window gives
@@ -234,13 +236,17 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
     }
     /// Segments that must exist before `onReady` fires with the playlist
-    /// URL. ONE (Apple TV review 2026-09-11 section 1 proposal 3): two was
-    /// chosen conservatively, and the "seg0 -> READY" wait for the second
-    /// segment measured 487 to 1885 ms on the session's tunes
-    /// (session.txt rows 1, 3, 4, 5). AVPlayer refreshes the playlist as
-    /// segments land, and the first-play buffering policy in the tile
-    /// keeps a one-segment playlist from stalling on a slow feed.
-    private let readyThreshold = 1
+    /// URL. Two keeps startup low; AVPlayer refreshes the playlist as more
+    /// land.
+    ///
+    /// Tried at ONE on 2026-09-11 (review section 1 proposal 3) and
+    /// REVERTED the same day: a one-segment live playlist puts AVPlayer at
+    /// the end of the playlist with nothing ahead of it, and every tune of
+    /// the 17:15 session then froze at pos 0.0 with status playing
+    /// (session2.txt:302-347, with CoreMedia -16832 "stall danger" at
+    /// :398). The 487 to 1885 ms this was meant to save is not worth a
+    /// stream that never starts.
+    private let readyThreshold = 2
 
     // MARK: Callbacks (delivered on the main queue, each at most once)
 
@@ -984,7 +990,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             let url = inProcessDelivery
                 ? URL(string: "\(HLSDelivery.scheme)://\(deliveryID)/live.m3u8")!
                 : URL(string: "http://127.0.0.1:\(localPort)/live.m3u8")!
-            TuneTimeline.shared.mark("ready")
+            TuneTimeline.shared.mark("remuxReady")
             debugLog("[TS-REMUX] READY -> \(url.absoluteString)")
             DispatchQueue.main.async { [weak self] in self?.onReady?(url) }
         }
@@ -2234,7 +2240,9 @@ struct AVPlayerMultiviewTile: View {
             progressStore.explicitResumeMs = pos + 3_000
             stop()
             statusText = "Retrying..."
+            let token = teardownToken
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                guard token == teardownToken else { return }
                 start()
             }
             return
@@ -2283,7 +2291,20 @@ struct AVPlayerMultiviewTile: View {
             // Private Hell #7: 'range fetch HTTP 503' on every switch to
             // it). One second lets the old connections die first.
             statusText = "Retrying..."
+            // Cancellable like every other deferred start (device session
+            // 2026-09-11 17:15): this retry was armed at 17:15:32.863, the
+            // user flipped to ESPN2 at 17:15:33.597, and BOTH the retry
+            // (port 64097, session2.txt:369) and the flip settle (port
+            // 64098, :375) opened an ingest - two upstream connections and
+            // two players for one tile. The token is re-rolled by
+            // onChange(streamURL) and onDisappear, so a stale retry is
+            // dropped instead of racing the new channel.
+            let token = teardownToken
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                guard token == teardownToken else {
+                    debugLog("[AVP-MV] stale auto-retry dropped (channel changed or tile gone)")
+                    return
+                }
                 start()
             }
             return
@@ -2334,7 +2355,9 @@ struct AVPlayerMultiviewTile: View {
             directHLSFallbackURL = plain
             stop()
             statusText = "Retrying..."
+            let token = teardownToken
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                guard token == teardownToken else { return }
                 start()
             }
             return
@@ -2554,6 +2577,16 @@ struct AVPlayerMultiviewTile: View {
     #endif
 
     private func start() {
+        // Exactly ONE pipeline per tile. A deferred start that raced a
+        // fresh one left two remuxers ingesting the same tile on
+        // 2026-09-11 (session2.txt:369 port 64097 and :375 port 64098,
+        // two READY URLs and two players for one channel). The deferred
+        // starts are token-guarded now; this is the backstop for any path
+        // that reaches start() with a pipeline still up.
+        if remuxer != nil || player != nil || mkvServer != nil {
+            debugLog("[AVP-MV] start() with a live pipeline present; tearing it down first channel=\(channelName)")
+            stop()
+        }
         tileStopped = false
         tileError = nil
         if let cu = catchup {
@@ -2981,27 +3014,20 @@ struct AVPlayerMultiviewTile: View {
         if isLoopbackVOD || (catchup != nil && isLoopback) {
             playerItem.preferredForwardBufferDuration = 15
         }
-        // FIRST PLAY of a live tune: take the tune off the automatic
-        // buffering policy (review 2026-09-11 section 1 proposal 5).
-        // `automaticallyWaitsToMinimizeStalling` re-evaluates the
-        // buffering rate before starting - three "waiting to play" ticks
-        // on every tune (session.txt:293-295, 762-764) and 1.3 to 2.2 s
-        // of READY -> first frame on rows 2 and 3. One segment of forward
-        // buffer is all the first play needs; the driver restores the
-        // automatic policy as soon as [AVP-PERF] reports a stable edge
-        // (two consecutive reports with stalls:+0), so the steady-state
-        // behaviour the 2026-08-30 Stream Buffer work tuned is unchanged.
-        let isLiveTune = !isVOD && !isDVR && catchup == nil
-        let fastStart = isLiveTune && !firstFrameSeen
-        if fastStart {
-            playerItem.preferredForwardBufferDuration = 2.0
-        }
-        debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : (fastStart ? "2s (first-play fast start)" : "automatic")) channel=\(channelName)")
+        // NO first-play buffering override. The 2026-09-11 17:15 device
+        // session (session2.txt) is the counter-experiment: with
+        // `automaticallyWaitsToMinimizeStalling = false` and a 2 s
+        // forward buffer, AVPlayer reported timeControlStatus .playing
+        // IMMEDIATELY and then never advanced the clock - eleven
+        // consecutive "[AVP-FREEZE] clock advanced 0.000s ... pos 0.0s,
+        // status playing" ticks per tune (session2.txt:302-347), and
+        // CoreMedia answered -16832 "restarting from end of live
+        // playlist - stall danger" (session2.txt:398). The ONE channel
+        // that played that session was the one whose second remuxer ran
+        // under the automatic policy. Automatic waiting is what actually
+        // starts a live remux stream; leave it alone.
+        debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : "automatic") channel=\(channelName)")
         let avPlayer = AVPlayer(playerItem: playerItem)
-        if fastStart {
-            avPlayer.automaticallyWaitsToMinimizeStalling = false
-            debugLog("[AVP-MV] first-play fast start: automaticallyWaitsToMinimizeStalling=false fwdBuf=2s channel=\(channelName)")
-        }
         // Explicit readyToPlay marker (review 2026-09-11, marker
         // inventory): the log had no discrete line for it, only the
         // layer's isReadyForDisplay, so "how long did AVPlayer take to
@@ -3010,7 +3036,7 @@ struct AVPlayerMultiviewTile: View {
         itemReadyObs = playerItem.observe(\.status, options: [.new]) { item, _ in
             guard item.status != .unknown else { return }
             if item.status == .readyToPlay {
-                TuneTimeline.shared.mark("itemReady")
+                TuneTimeline.shared.mark("ready")
                 debugLog("[AVP-ITEM] AVPlayerItem readyToPlay")
             } else {
                 debugLog("[AVP-ITEM] AVPlayerItem status=failed (\(item.error?.localizedDescription ?? "unknown"))")
@@ -3079,19 +3105,18 @@ struct AVPlayerMultiviewTile: View {
         driver = AVPlayerProgressDriver(
             player: avPlayer, store: progressStore,
             isLive: !(isVOD || isDVR || catchup != nil), applyGravity: { _ in })
-        // Fast start is released by the driver once the edge is stable.
-        driver?.fastStartActive = fastStart
         // First frame closes the press-to-picture clock and releases any
         // display-mode switch that was deferred out of the tune.
         driver?.onFirstFrame = {
-            TuneTimeline.shared.firstFrame()
+            // TuneTimeline.firstFrame() is closed by the driver itself at
+            // the same moment (it owns the clock-advance detection).
             guard !firstFrameSeen else { return }
             firstFrameSeen = true
             if let pending = pendingDisplayCriteria {
                 pendingDisplayCriteria = nil
                 debugLog("[AVP-DISPLAY] applying deferred display criteria now that the first frame is up")
                 applyDisplayCriteria(width: pending.width, height: pending.height,
-                                     fps: pending.fps, is10Bit: pending.tenBit)
+                                     fps: pending.fps, is10Bit: pending.tenBit, force: true)
             }
         }
         if let cu = catchup {
@@ -3240,7 +3265,11 @@ struct AVPlayerMultiviewTile: View {
     /// distinctive-shape CMVideoFormatDescription, BT.2020/PQ extensions
     /// when the mux is 10-bit, at the measured refresh rate. The system
     /// converts HLG under an HDR10 HDMI mode, same as the mpv Metal path.
-    private func applyDisplayCriteria(width: Int, height: Int, fps: Double, is10Bit: Bool) {
+    /// `force` skips the defer check: it is the deferred apply itself,
+    /// running from the first-frame callback, and must not re-defer on a
+    /// stale read of `firstFrameSeen`.
+    private func applyDisplayCriteria(width: Int, height: Int, fps: Double,
+                                      is10Bit: Bool, force: Bool = false) {
         #if os(tvOS)
         guard !tileStopped else {
             debugLog("[AVP-DISPLAY] criteria apply skipped: tile already stopped")
@@ -3261,7 +3290,7 @@ struct AVPlayerMultiviewTile: View {
             debugLog("[AVP-DISPLAY] display criteria unchanged (\(signature)); no mode switch")
             return
         }
-        if !firstFrameSeen {
+        if !force, !firstFrameSeen {
             pendingDisplayCriteria = (width, height, fps, is10Bit)
             debugLog("[AVP-DISPLAY] display criteria deferred until first frame (\(signature))")
             return

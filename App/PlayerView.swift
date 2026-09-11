@@ -4085,19 +4085,20 @@ final class AVPlayerProgressDriver {
     /// display-mode switch (review 2026-09-11 section 1 proposals 6, 7).
     var onFirstFrame: (() -> Void)? {
         didSet {
-            // The status observation below installs with `.initial`, so on
-            // a fast path it can log the first frame during init, BEFORE
-            // the tile assigns this. Fire late rather than never.
-            if firstPlayLogged, onFirstFrame != nil { onFirstFrame?() }
+            // A first frame that landed before the tile assigned this
+            // fires late rather than never.
+            if firstFrameRendered, onFirstFrame != nil { onFirstFrame?() }
         }
     }
-    /// The tile started this play with the first-play fast-start policy
-    /// (automaticallyWaitsToMinimizeStalling off, 2 s forward buffer).
-    /// Released back to automatic once the live edge proves stable -
-    /// two consecutive [AVP-PERF] reports with stalls:+0 (review
-    /// section 1 proposal 5).
-    var fastStartActive = false
-    private var stableEdgeReports = 0
+    /// True once the item clock has actually ADVANCED with rate > 0, which
+    /// is the only honest "there is moving video" signal available here.
+    /// `timeControlStatus == .playing` is NOT that signal: on 2026-09-11
+    /// at 17:15 the player reported .playing 15 ms after construction and
+    /// then sat at pos 0.0s for eleven seconds (session2.txt:280-347),
+    /// which is what made the [TUNE] line print before playback existed.
+    private var firstFrameRendered = false
+    private var firstFrameProbeClock: CMTime = .invalid
+
     private var streamSummaryLogged = false
     /// NotificationCenter tokens scoped to the current item, torn down
     /// on swap alongside itemObservations.
@@ -4156,6 +4157,25 @@ final class AVPlayerProgressDriver {
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: interval, queue: .main) { [weak self] time in
             guard let self else { return }
+            // REAL first frame: the item clock advanced while the rate is
+            // positive. Everything else (timeControlStatus .playing,
+            // readyToPlay, the layer's isReadyForDisplay) can be true over
+            // a frozen picture - session2.txt:280-347 is eleven seconds of
+            // "status playing" at pos 0.0s. Resolution is one observer
+            // tick (0.5 s), which is stated in the log line.
+            if !self.firstFrameRendered, self.player.rate > 0, time.isValid {
+                if self.firstFrameProbeClock.isValid,
+                   (time - self.firstFrameProbeClock).seconds > 0.01 {
+                    self.firstFrameRendered = true
+                    let ms = Int((CACurrentMediaTime() - self.launchStart) * 1000)
+                    debugLog(String(format:
+                        "[AVP-STREAM] first frame rendered by +%dms from screen open (clock at %.2fs, +/-0.5s sampling)",
+                        ms, time.seconds))
+                    TuneTimeline.shared.firstFrame()
+                    self.onFirstFrame?()
+                }
+                self.firstFrameProbeClock = time
+            }
             // Frame rate is not always known when the item goes ready:
             // remuxed fMP4 declares no nominalFrameRate and
             // currentVideoFrameRate stays 0 until frames render. Re-sample
@@ -4226,13 +4246,12 @@ final class AVPlayerProgressDriver {
                         self.firstPlayLogged = true
                         let ms = Int((CACurrentMediaTime() - self.launchStart) * 1000)
                         debugLog("[AVP-STREAM] first frame playing in \(ms)ms from screen open")
-                        // The number Logan feels is press -> first frame,
-                        // which is 10x to 25x the line above (the clock
-                        // there starts at this driver's construction,
-                        // AFTER the remuxer was READY). TuneTimeline
-                        // prints the press-relative total with the
-                        // per-stage breakdown.
-                        self.onFirstFrame?()
+                        // NOT the first frame, despite the wording this
+                        // line has always carried: it only means the
+                        // player accepted a play() request. The real
+                        // first frame is detected in the periodic
+                        // observer below.
+                        TuneTimeline.shared.mark("rate1")
                     }
                 case .waitingToPlayAtSpecifiedRate:
                     // The cause of any mid-stream "skip"/rebuffer. Reason
@@ -4528,25 +4547,6 @@ final class AVPlayerProgressDriver {
             }
         }
         lastDroppedFrames = dropped
-        // Release the first-play fast start once the edge is stable
-        // (review 2026-09-11 section 1 proposal 5): two consecutive
-        // reports with no new stalls and a real live-edge cushion.
-        if fastStartActive, isLive {
-            if dStalls == 0, edge > 0 {
-                stableEdgeReports += 1
-            } else {
-                stableEdgeReports = 0
-            }
-            if stableEdgeReports >= 2 {
-                fastStartActive = false
-                stableEdgeReports = 0
-                player.automaticallyWaitsToMinimizeStalling = true
-                player.currentItem?.preferredForwardBufferDuration = 0
-                debugLog(String(format:
-                    "[AVP-PERF] first-play fast start released (edge=%.1fs stable); buffering policy back to automatic",
-                    edge))
-            }
-        }
         // rss rides this tick deliberately. Apple #74 was an ingest buffer
         // growing at exactly the stream bitrate for the whole session, and
         // nothing sampled memory during steady playback -- rss was only
