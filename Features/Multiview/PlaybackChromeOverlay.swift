@@ -1498,7 +1498,12 @@ struct PlaybackBottomChrome_tvOS: View {
         // 3 s fade like a press does. Nothing reported it before, so the
         // chrome timed out mid-navigation once the fade dropped from 5 s
         // to 3 s (Logan 2026-09-11).
-        .onChange(of: focusedChrome) { _, _ in chromeState.reportInteraction() }
+        .onChange(of: focusedChrome) { _, new in
+            // Only a move ONTO a cell counts. When the fade hides the
+            // chrome, focus leaves it (new == nil) and reporting that
+            // re-showed the chrome forever (Logan 2026-09-11).
+            if new != nil { chromeState.reportInteraction() }
+        }
         // One continuous band behind the WHOLE bottom block - timeline,
         // labels, control cells and the hint strip (Logan 2026-09-11).
         // Replaces the old two-stop gradient scrim so there is a single

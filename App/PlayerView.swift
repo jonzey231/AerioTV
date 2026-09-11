@@ -1176,7 +1176,7 @@ private struct PlayerRootView: View {
         .focusSection()
         // A focus move between controls is a user action: re-arm the fade
         // (Logan 2026-09-11, chrome timed out mid-navigation).
-        .onChange(of: tvFocus) { _, _ in if showControls { scheduleControlsHide() } }
+        .onChange(of: tvFocus) { _, new in if showControls && new != nil { scheduleControlsHide() } }
         #endif
         .onAppear {
             scheduleControlsHide()
