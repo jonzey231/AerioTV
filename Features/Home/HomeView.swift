@@ -6858,53 +6858,15 @@ private struct ChannelInfoBanner: View {
         return nil
     }
 
-    #if os(tvOS)
-    @ViewBuilder
-    private func playerHint(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 15, weight: .medium))
-            .foregroundColor(.white.opacity(0.55))
-            // Keep hint chips to a single line + cap width so a long dynamic
-            // (remapped) label can't bleed across the card. 360 truncated the
-            // default Left/Right line mid-sentence (Logan 2026-08-07); 560
-            // fits every stock line while still capping remapped runaways.
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: 560, alignment: .leading)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            // #42 Part 4: match the program info card's dark fill (black @ 0.72).
-            .background(Color.black.opacity(0.72).clipShape(Capsule()))
-    }
-    #endif
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if shouldRender, let item = nowPlaying.playingItem, nowPlaying.isLive {
                 VStack(alignment: .leading, spacing: 10) {
                     bannerContent(for: item)
-                    #if os(tvOS)
-                    // #42 Part 4: gesture hints below the channel info card,
-                    // riding the banner's same 5s appear/fade window on tune-in.
-                    // Left-padded by sidePadding to line up with the card's edge.
-                    // Hints DERIVED from the effective remote map so a remapped
-                    // button never advertises a stale gesture (compressed
-                    // "gesture = result" copy). Read at banner-appear time.
-                    VStack(alignment: .leading, spacing: 6) {
-                        playerHint("Back = TV Guide")
-                        if let selectLine = RemoteControlHints.selectHint(RemoteControlStore.shared.map) {
-                            playerHint(selectLine)
-                        }
-                        if RemoteControlHints.verticalFlipMapped(RemoteControlStore.shared.map) {
-                            playerHint("Up/Down = channels")
-                        }
-                        if let horizontalLine = RemoteControlHints.playerHorizontalHint(RemoteControlStore.shared.map) {
-                            playerHint(horizontalLine)
-                        }
-                    }
-                    .padding(.leading, sidePadding)
-                    #endif
+                    // The legacy gesture hint chip stack that used to sit
+                    // under this card is GONE (Logan 2026-09-11): the
+                    // remote hint strip in the player chrome replaces it.
                 }
                 .transition(.move(edge: .top).combined(with: .opacity))
             }

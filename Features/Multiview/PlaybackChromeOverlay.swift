@@ -1664,10 +1664,16 @@ struct TVPlayerToolCellVisual: View {
             // Height reserved in the layout, but the caption itself is an
             // OVERLAY: a long caption ("Enable Live Rewind in Settings")
             // must not widen the cell, which is what spread the row out
-            // (Logan 2026-09-11). Cell width is always the 68pt circle.
+            // (Logan 2026-09-11). An unconstrained Color.clear is
+            // INFINITELY flexible and did the spreading all by itself, so
+            // it carries the circle's exact width.
             Color.clear
-                .frame(height: 24)
+                .frame(width: 68, height: 24)
         }
+        // Hug: every cell is exactly the circle's width, so the side
+        // groups sit flush against the center slot at 18pt spacing.
+        .frame(width: 68)
+        .fixedSize(horizontal: true, vertical: false)
         .overlay(alignment: .bottom) {
             Text(title)
                 .font(.system(size: 20, weight: .medium))
