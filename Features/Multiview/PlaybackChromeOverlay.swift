@@ -1390,6 +1390,12 @@ struct PlaybackBottomChrome_tvOS: View {
                     debugLog("[MV-Cmd] Options pill pressed → showTVOptions=true | audioTileID=\(store.audioTileID ?? "nil") tiles=\(store.tiles.count) audioStore=\(store.audioProgressStore == nil ? "nil" : "ok")")
                     showTVOptions = true
                 }
+
+                // Trailing Spacer to match the leading one: the cells sit
+                // CENTERED in the band rather than hugging the trailing
+                // edge (Logan 2026-09-11). The timeline row above keeps
+                // its full width.
+                Spacer()
             }
             .padding(.horizontal, 80)
             } else {

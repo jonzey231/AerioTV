@@ -2172,8 +2172,12 @@ private struct PlayerRootView: View {
                         showTVOptions = true
                     }
                 }
+                // Trailing Spacer to match the leading one: the cells sit
+                // CENTERED under the scrubber rather than hugging the
+                // trailing edge (Logan 2026-09-11).
+                Spacer()
             }
-            .padding(.trailing, 60)
+            .padding(.horizontal, 60)
             .padding(.top, 10)
             // Lift the row off the screen edge to where the live
             // chrome's cells sit (it was flush against the bottom,
