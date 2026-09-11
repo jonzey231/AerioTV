@@ -1494,6 +1494,11 @@ struct PlaybackBottomChrome_tvOS: View {
         }
         .padding(.vertical, 24)
         .frame(maxWidth: .infinity)
+        // A focus move between cells is a user action: it must re-arm the
+        // 3 s fade like a press does. Nothing reported it before, so the
+        // chrome timed out mid-navigation once the fade dropped from 5 s
+        // to 3 s (Logan 2026-09-11).
+        .onChange(of: focusedChrome) { _, _ in chromeState.reportInteraction() }
         // One continuous band behind the WHOLE bottom block - timeline,
         // labels, control cells and the hint strip (Logan 2026-09-11).
         // Replaces the old two-stop gradient scrim so there is a single
