@@ -185,16 +185,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// Segments retained in memory; old ones beyond this are dropped even
     /// if a slow client might still want them (live TV: it should not).
     private let maxBufferedSegments = 12
-    /// ...and a BYTE ceiling on the same ring (Apple TV review 2026-09-11
-    /// section 3 proposal 1): 12 x 3 MB on a 1080p feed is 36 MB and
-    /// nothing changes, but the UHD feed produced 5 to 7 MB segments
-    /// (session.txt:3834, seg9 5555498 B, seg11 6969949 B) - 72 to 84 MB
-    /// of in-RAM segments inside a 721 MB plateau, two seconds before the
-    /// 15:11:12 jetsam. The disk spill holds the rewind window, so the
-    /// RAM ring is only a delivery buffer. Floor of 3 segments so a very
-    /// large segment can never starve delivery.
-    private let maxBufferedBytes = 40 * 1_048_576
-    private let minBufferedSegments = 3
+    /// A BYTE ceiling (40 MB) was added to this ring on 2026-09-11 and
+    /// REVERTED the same day. On Sky Sports Main Event UHD it held the
+    /// ring at SEVEN segments instead of twelve ("buffered 7" with 5 to
+    /// 7 MB segments, session4.txt 17:48:24-17:48:46), so every segment
+    /// the player fetched more than ~25 s behind the edge came off DISK
+    /// instead of RAM on a 4K path that was already running 8 to 11 s
+    /// behind the live edge and stalling. The memory it saved was never
+    /// the thing that killed the app; a count-only ring is what the
+    /// delivery path was tuned against.
     /// Channel retention: while this remuxer ingests DETACHED (no tile
     /// playing it), keep only a couple of segments in RAM - the disk
     /// spill holds the window, and a retained UHD channel at 12 in-RAM
@@ -966,14 +965,6 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if segments.count > ramCap {
             segments.removeFirst(segments.count - ramCap)
         }
-        // Byte ceiling on top of the count (review section 3 proposal 1).
-        // Never trims below `minBufferedSegments` (or the retention cap,
-        // whichever is lower), so delivery always has something to serve.
-        let floorSegments = min(minBufferedSegments, ramCap)
-        var bufferedBytes = segments.reduce(0) { $0 + $1.data.count }
-        while bufferedBytes > maxBufferedBytes, segments.count > floorSegments {
-            bufferedBytes -= segments.removeFirst().data.count
-        }
         if inProcessDelivery, let first = segments.first?.seq {
             for k in deliveryBase64.keys where k >= 0 && k < first { deliveryBase64[k] = nil }
         }
@@ -984,14 +975,31 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if nextSeq == 1 || nextSeq % 5 == 0 {
             debugLog("[TS-REMUX] segment \(nextSeq - 1) closed (\(String(format: "%.2f", duration))s, \(data.count / 1024) KB), buffered \(segments.count)")
         }
-        if !readySignaled, segments.count >= readyThreshold, localPort != 0,
+        // READY gate. Two segments is the safe default (see
+        // `readyThreshold`), but the wait for that second segment
+        // measured 1.9 s on ESPN's first tune and 5.5 s on an ESPNU flip
+        // (session4.txt, seg0 -> remuxReady). Ship on segment 0 ALONE
+        // when it is at least a full target duration long: the failure
+        // that forced readyThreshold back to 2 was a 1.05 s segment 0,
+        // where AVPlayer answered -16832 "restarting 1.051000s from end
+        // of live playlist; target duration 2s - stall danger". A seg 0
+        // that is >= TARGETDURATION is not that shape. A short seg 0
+        // still waits for seg 1, and the automatic buffering policy
+        // (never disabled again) does the rest.
+        let seg0IsFullLength = segments.count == 1
+            && (segments.first?.duration ?? 0) >= targetSegmentSeconds
+        if !readySignaled, segments.count >= readyThreshold || seg0IsFullLength,
+           localPort != 0,
            fmp4 == nil || fmp4InitSegment != nil {
             readySignaled = true
             let url = inProcessDelivery
                 ? URL(string: "\(HLSDelivery.scheme)://\(deliveryID)/live.m3u8")!
                 : URL(string: "http://127.0.0.1:\(localPort)/live.m3u8")!
             TuneTimeline.shared.mark("remuxReady")
-            debugLog("[TS-REMUX] READY -> \(url.absoluteString)")
+            let gate = seg0IsFullLength
+                ? "READY on seg0 (dur >= target)"
+                : "READY on seg\(readyThreshold - 1)"
+            debugLog("[TS-REMUX] \(gate) -> \(url.absoluteString)")
             DispatchQueue.main.async { [weak self] in self?.onReady?(url) }
         }
     }

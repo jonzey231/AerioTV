@@ -4559,9 +4559,15 @@ final class AVPlayerProgressDriver {
         // this line against the JetsamEvent pages and needed the
         // distinction.
         debugLog(String(format:
-            "[AVP-PERF] stalls:+%d(%d) dropped:+%d(%d) observed=%.0fkbps switches=%d edge=%.1fs fp=%.1f MB",
+            "[AVP-PERF] stalls:+%d(%d) dropped:+%d(%d) observed=%.0fkbps mediaReqs=%d edge=%.1fs fp=%.1f MB",
             dStalls, stalls, dDropped, dropped,
             event.observedBitrate / 1000,
+            // Renamed from "switches" 2026-09-11: this is
+            // AVPlayerItemAccessLogEvent.numberOfMediaRequests, the count
+            // of media/playlist REQUESTS in this access-log event, not
+            // bitrate/rendition switches (the remux serves a single
+            // rendition, so it can never switch). It climbing 6 -> 23 in a
+            // minute on the UHD run was just the segment fetch cadence.
             event.numberOfMediaRequests, edge,
             Double(ProcessMetrics.residentSetSizeBytes()) / 1_048_576.0))
     }
