@@ -933,10 +933,16 @@ struct MultiviewContainerView: View {
                     if chromeState.isVisible && !showTVOptions {
                         // Connection issue: the Retry cell leads the row and
                         // is the action the user wants, so land there.
-                        // Catch-up hides Add Stream, so land on the pause cell.
+                        // Otherwise default focus is the Pause cell, the
+                        // row's screen-centered anchor (Logan 2026-09-11);
+                        // it only exists with the transport cells up, so
+                        // plain live still lands on Add Stream.
+                        let hasTransport = store.catchupTile != nil
+                            || store.vodSoloTile != nil
+                            || LiveRewindEngine.shared.buffering
                         focusedChrome = if store.audioProgressStore?.connectionIssueActive == true {
                             .retry
-                        } else if store.catchupTile != nil {
+                        } else if hasTransport {
                             .playPause
                         } else {
                             .addStream
@@ -1630,7 +1636,7 @@ struct MultiviewContainerView: View {
                     // its edge must not suddenly minimize the player.
                     if !stepped, barePlayerState {
                         let slot: RemoteSlot = dir < 0 ? .leftLong : .rightLong
-                        executePlayerAction(RemoteControlStore.shared.playerAction(slot))
+                        executePlayerAction(RemoteControlHints.resolvedPlayerAction(slot))
                     }
                     #endif
                     break
@@ -1656,7 +1662,7 @@ struct MultiviewContainerView: View {
         case .select: slot = .okLong
         default: return
         }
-        let action = RemoteControlStore.shared.playerAction(slot)
+        let action = RemoteControlHints.resolvedPlayerAction(slot)
         guard action != .none else { return }
         if executePlayerAction(action), slot == .upLong || slot == .downLong {
             nowPlaying.cancelPendingChannelChange()
@@ -1959,8 +1965,8 @@ struct MultiviewContainerView: View {
                     NowPlayingManager.shared.expand()
                 }
             } else if barePlayerState,
-                      RemoteControlStore.shared.playerAction(.playPause) != .playPause,
-                      executePlayerAction(RemoteControlStore.shared.playerAction(.playPause)) {
+                      RemoteControlHints.resolvedPlayerAction(.playPause) != .playPause,
+                      executePlayerAction(RemoteControlHints.resolvedPlayerAction(.playPause)) {
                 // Remote Control #195: a REMAPPED Play/Pause slot runs its
                 // mapped action on the bare player; the default (and any
                 // non-bare state: chrome up, N>1, replay) keeps the
@@ -2056,7 +2062,7 @@ struct MultiviewContainerView: View {
                 }
             }()
             if let slot {
-                let action = RemoteControlStore.shared.playerAction(slot)
+                let action = RemoteControlHints.resolvedPlayerAction(slot)
                 // Honor the pre-map App Behaviors flip toggle: users
                 // who turned the Apple TV channel flip OFF keep
                 // up/down inert even under the default map (the

@@ -1853,6 +1853,12 @@ private struct PlayerRootView: View {
     }
     #endif
 
+    /// Control-row geometry: cell spacing, and the fixed-width slot the
+    /// center (Pause) cell occupies so its label width never moves the
+    /// screen center (Logan 2026-09-11).
+    private static let tvToolCellSpacing: CGFloat = 18
+    private static let tvCenterCellSlot: CGFloat = 120
+
     private var bottomControls: some View {
         VStack(spacing: 10) {
             #if os(tvOS)
@@ -2145,13 +2151,13 @@ private struct PlayerRootView: View {
             #if os(tvOS)
             // Circular cells BELOW the band, bottom-right — the live
             // chrome's exact arrangement.
-            HStack(spacing: 18) {
-                Spacer()
-                tvTransportButton(icon: "gobackward.30", title: "Rewind",
-                                  focus: .transportRW) {
-                    progressStore.seekAction?(max(0, progressStore.currentMs - 30_000))
-                    scheduleControlsHide()
-                }
+            // Control row (Logan 2026-09-11): Rewind, Pause, Forward,
+            // Options - with the Pause cell anchored on the SCREEN
+            // center. A ZStack, not one HStack, so a focus label width
+            // change or a missing side cell can never shift the center;
+            // the center cell also gets a fixed-width slot. Focus order
+            // stays left to right (the engine reads geometry).
+            ZStack {
                 tvTransportButton(
                     icon: progressStore.isPaused ? "play.fill" : "pause.fill",
                     title: progressStore.isPaused ? "Play" : "Pause",
@@ -2160,23 +2166,36 @@ private struct PlayerRootView: View {
                     progressStore.togglePauseAction?()
                     scheduleControlsHide()
                 }
-                tvTransportButton(icon: "goforward.30", title: "Forward",
-                                  focus: .transportFF) {
-                    progressStore.seekAction?(progressStore.currentMs + 30_000)
-                    scheduleControlsHide()
-                }
-                tvTransportButton(icon: "slider.horizontal.3", title: "Options",
-                                  focus: .gearIcon) {
-                    controlsHideTask?.cancel()
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        showTVOptions = true
+                .frame(width: Self.tvCenterCellSlot)
+
+                HStack(spacing: Self.tvToolCellSpacing) {
+                    tvTransportButton(icon: "gobackward.30", title: "Rewind",
+                                      focus: .transportRW) {
+                        progressStore.seekAction?(max(0, progressStore.currentMs - 30_000))
+                        scheduleControlsHide()
                     }
                 }
-                // Trailing Spacer to match the leading one: the cells sit
-                // CENTERED under the scrubber rather than hugging the
-                // trailing edge (Logan 2026-09-11).
-                Spacer()
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.trailing, Self.tvCenterCellSlot / 2 + Self.tvToolCellSpacing)
+
+                HStack(spacing: Self.tvToolCellSpacing) {
+                    tvTransportButton(icon: "goforward.30", title: "Forward",
+                                      focus: .transportFF) {
+                        progressStore.seekAction?(progressStore.currentMs + 30_000)
+                        scheduleControlsHide()
+                    }
+                    tvTransportButton(icon: "slider.horizontal.3", title: "Options",
+                                      focus: .gearIcon) {
+                        controlsHideTask?.cancel()
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            showTVOptions = true
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, Self.tvCenterCellSlot / 2 + Self.tvToolCellSpacing)
             }
+            .frame(maxWidth: .infinity)
             .padding(.horizontal, 60)
             .padding(.top, 10)
             // Lift the row off the screen edge to where the live
@@ -3563,11 +3582,11 @@ struct TVPlayerOptionsPanel: View {
 
     @ViewBuilder private var multiviewSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionHeader("Add Stream")
+            sectionHeader("Multiview")
             optionPill(
                 id: "multiview-enter",
                 text: "Add Another Channel…",
-                systemImage: "plus.rectangle.on.rectangle",
+                systemImage: "square.grid.2x2",
                 isSelected: false
             ) {
                 onEnterMultiview?()
@@ -5938,8 +5957,8 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
 
         if let onAddStream {
             items.append(UIAction(
-                title: "Add Stream",
-                image: UIImage(systemName: "plus")
+                title: "Multiview",
+                image: UIImage(systemName: "square.grid.2x2")
             ) { _ in onAddStream() })
         }
 

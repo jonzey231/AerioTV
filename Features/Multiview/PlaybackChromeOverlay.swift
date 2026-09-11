@@ -1218,6 +1218,170 @@ struct PlaybackBottomChrome_tvOS: View {
         .accessibilityHint("Move left or right to scrub, then wait to jump there")
     }
 
+    /// Spacing between tool cells, and the fixed-width slot the center
+    /// (Pause) cell occupies so its label width never moves the center.
+    private static let toolCellSpacing: CGFloat = 18
+    private static let centerCellSlot: CGFloat = 120
+
+    /// True while the transport cells exist: catch-up replay, VOD solo,
+    /// or a rolling Live Rewind buffer. Plain live has no Pause cell to
+    /// anchor the row on.
+    private var hasTransportCells: Bool {
+        store.catchupTile != nil || store.vodSoloTile != nil || liveRewind.buffering
+    }
+
+    private var isPausedNow: Bool { store.audioProgressStore?.isPaused ?? false }
+
+    /// The center anchor: Pause, or Play while paused.
+    private var transportCenterCell: some View {
+        nativeToolButton(
+            .playPause,
+            icon: isPausedNow ? "play.fill" : "pause.fill",
+            title: isPausedNow ? "Play" : "Pause",
+            a11yLabel: isPausedNow ? "Play" : "Pause",
+            a11yHint: "Pause playback"
+        ) {
+            chromeState.reportInteraction()
+            store.audioProgressStore?.togglePauseAction?()
+        }
+    }
+
+    /// Everything LEFT of the center cell, in focus order: the dev engine
+    /// badge, connection-issue Retry, Record, Rewind.
+    @ViewBuilder
+    private var controlRowLeadingCells: some View {
+        // Engine badge is a dev evaluation aid - only shown while an
+        // AVPlayer engine toggle is on. Regular users on the default
+        // (mpv) modern chrome see clean controls with no engine tag.
+        if (PlaybackFeatureFlags.avPlayerForHLS || PlaybackFeatureFlags.avPlayerRemuxTS),
+           let audioID = store.audioTileID,
+           let engine = store.tileEngines[audioID] {
+            Text(engine)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.55))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial, in: Capsule())
+                .focusable(false)
+        }
+
+        // Connection-issue Retry while the live stream is unavailable, so
+        // the Siri remote has a reachable re-tune - the in-tile "Playback
+        // Problem" card's Retry competes with the tile's own focus and is
+        // fragile to reach (2026-07-12, Android parity).
+        if store.audioProgressStore?.connectionIssueActive == true {
+            nativeToolButton(
+                .retry,
+                icon: "arrow.clockwise",
+                title: "Retry",
+                a11yLabel: "Retry",
+                a11yHint: "Reconnect the stream"
+            ) {
+                chromeState.reportInteraction()
+                // Route through the tile's retryNow() (same as the card
+                // button) so the countdown resets + "Reconnecting…" shows.
+                NotificationCenter.default.post(
+                    name: .connectionIssueRetryRequested,
+                    object: store.audioTileID
+                )
+            }
+        }
+
+        if canRecordCurrentProgram {
+            nativeToolButton(
+                .record,
+                icon: "record.circle",
+                title: "Record",
+                iconColor: .red,
+                a11yLabel: "Record current program",
+                a11yHint: "Schedule a recording of what's currently airing on this channel"
+            ) {
+                chromeState.reportInteraction()
+                showRecordSheet = true
+            }
+        }
+
+        // The same transport cells serve live rewind AND catch-up:
+        // currentMs ticks in both modes and seekAction routes to the right
+        // seek model per mode (buffer re-tune vs archive window re-tune).
+        if hasTransportCells {
+            nativeToolButton(
+                .rewind30,
+                icon: "gobackward.30",
+                title: "Rewind",
+                a11yLabel: "Rewind 30 seconds",
+                a11yHint: "Jump back thirty seconds"
+            ) {
+                chromeState.reportInteraction()
+                if let ps = store.audioProgressStore {
+                    ps.seekAction?(max(0, ps.currentMs - 30_000))
+                }
+            }
+        }
+    }
+
+    /// Everything RIGHT of the center cell, in focus order: Forward, Go
+    /// Live, Add Stream, Options.
+    @ViewBuilder
+    private var controlRowTrailingCells: some View {
+        if hasTransportCells {
+            nativeToolButton(
+                .forward30,
+                icon: "goforward.30",
+                title: "Forward",
+                a11yLabel: "Forward 30 seconds",
+                a11yHint: "Jump forward thirty seconds"
+            ) {
+                chromeState.reportInteraction()
+                if let ps = store.audioProgressStore {
+                    ps.seekAction?(ps.currentMs + 30_000)
+                }
+            }
+            if liveRewind.timeshifting {
+                nativeToolButton(
+                    .goLive,
+                    icon: "forward.end.fill",
+                    title: "Go Live",
+                    a11yLabel: "Go live",
+                    a11yHint: "Return to the live broadcast"
+                ) {
+                    chromeState.reportInteraction()
+                    let window = Int32(clamping: max(Int64(1), liveRewind.headWallMs - liveRewind.tailWallMs))
+                    store.audioProgressStore?.seekAction?(window)
+                }
+            }
+        }
+
+        // Catch-up is a single archived replay; multiview alongside it
+        // isn't supported, so hide Add Stream.
+        if store.catchupTile == nil {
+            // "Add Stream" did not say what it does (Logan 2026-09-11):
+            // it opens a second tile, so the cell reads Multiview.
+            nativeToolButton(
+                .addStream,
+                icon: "square.grid.2x2",
+                title: "Multiview",
+                a11yLabel: "Add a multiview tile",
+                a11yHint: "Pick another channel to watch alongside this one"
+            ) {
+                chromeState.reportInteraction()
+                showAddSheet = true
+            }
+        }
+
+        nativeToolButton(
+            .options,
+            icon: "slider.horizontal.3",
+            title: "Options",
+            a11yLabel: "Options",
+            a11yHint: "Change audio track, subtitles, sleep timer, or stream info"
+        ) {
+            chromeState.reportInteraction()
+            debugLog("[MV-Cmd] Options pill pressed → showTVOptions=true | audioTileID=\(store.audioTileID ?? "nil") tiles=\(store.tiles.count) audioStore=\(store.audioProgressStore == nil ? "nil" : "ok")")
+            showTVOptions = true
+        }
+    }
+
     var body: some View {
         VStack(spacing: 18) {
             // Live program progress band — program name + progress
@@ -1249,154 +1413,42 @@ struct PlaybackBottomChrome_tvOS: View {
             // engine) so it can be reverted to the legacy labeled pill row (the
             // `else` branch) via UserDefaults without a code change.
             if PlaybackFeatureFlags.useModernPlayerChrome {
-            HStack(alignment: .top, spacing: 18) {
-                // Engine badge is a dev evaluation aid — only shown while an
-                // AVPlayer engine toggle is on. Regular users on the default
-                // (mpv) modern chrome see clean controls with no engine tag.
-                if (PlaybackFeatureFlags.avPlayerForHLS || PlaybackFeatureFlags.avPlayerRemuxTS),
-                   let audioID = store.audioTileID,
-                   let engine = store.tileEngines[audioID] {
-                    Text(engine)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.55))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .focusable(false)
-                }
+            // Control row (Logan 2026-09-11): Record, Rewind, Pause,
+            // Forward, Add Stream, Options - with the Pause cell anchored
+            // on the SCREEN center. Laid out as a ZStack rather than one
+            // HStack so a side cell appearing (Record only when the
+            // program is recordable, Retry only on a connection issue) or
+            // a focus label changing width can never shift the center.
+            // The center cell gets a fixed-width slot for the same reason.
+            // Focus order stays left to right because the focus engine
+            // reads geometry, not declaration order.
+            ZStack {
+                if hasTransportCells {
+                    transportCenterCell
+                        .frame(width: Self.centerCellSlot)
 
-                Spacer()
+                    HStack(alignment: .top, spacing: Self.toolCellSpacing) {
+                        controlRowLeadingCells
+                    }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.trailing, Self.centerCellSlot / 2 + Self.toolCellSpacing)
 
-                // Connection-issue Retry: leads the row (auto-focused via the
-                // container's chrome focus default) while the live stream is
-                // unavailable, so the Siri remote has a reachable re-tune - the
-                // in-tile "Playback Problem" card's Retry competes with the
-                // tile's own focus and is fragile to reach (2026-07-12, Android
-                // parity). Fires the same retryAction the card's Retry does.
-                if store.audioProgressStore?.connectionIssueActive == true {
-                    nativeToolButton(
-                        .retry,
-                        icon: "arrow.clockwise",
-                        title: "Retry",
-                        a11yLabel: "Retry",
-                        a11yHint: "Reconnect the stream"
-                    ) {
-                        chromeState.reportInteraction()
-                        // Route through the tile's retryNow() (same as the card
-                        // button) so the countdown resets + "Reconnecting…"
-                        // shows; a bare retryAction() call reconnected with no
-                        // visible feedback.
-                        NotificationCenter.default.post(
-                            name: .connectionIssueRetryRequested,
-                            object: store.audioTileID
-                        )
+                    HStack(alignment: .top, spacing: Self.toolCellSpacing) {
+                        controlRowTrailingCells
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, Self.centerCellSlot / 2 + Self.toolCellSpacing)
+                } else {
+                    // No transport cells in plain live (no rewind buffer,
+                    // no replay): nothing to anchor, so the remaining
+                    // cells simply center as a group.
+                    HStack(alignment: .top, spacing: Self.toolCellSpacing) {
+                        controlRowLeadingCells
+                        controlRowTrailingCells
                     }
                 }
-
-                // Live Rewind transport, leading the row so D-pad LEFT
-                // from the existing cells reaches it (same relative
-                // placement the Android TV pill row uses).
-                // The same three transport cells serve live rewind AND
-                // catch-up: currentMs ticks in both modes and seekAction
-                // routes to the right seek model per mode (buffer re-tune
-                // vs archive window re-tune).
-                if store.catchupTile != nil || store.vodSoloTile != nil || liveRewind.buffering {
-                    nativeToolButton(
-                        .rewind30,
-                        icon: "gobackward.30",
-                        title: "Rewind",
-                        a11yLabel: "Rewind 30 seconds",
-                        a11yHint: "Jump back thirty seconds"
-                    ) {
-                        chromeState.reportInteraction()
-                        if let ps = store.audioProgressStore {
-                            ps.seekAction?(max(0, ps.currentMs - 30_000))
-                        }
-                    }
-                    nativeToolButton(
-                        .playPause,
-                        icon: (store.audioProgressStore?.isPaused ?? false) ? "play.fill" : "pause.fill",
-                        title: (store.audioProgressStore?.isPaused ?? false) ? "Play" : "Pause",
-                        a11yLabel: (store.audioProgressStore?.isPaused ?? false) ? "Play" : "Pause",
-                        a11yHint: "Pause playback"
-                    ) {
-                        chromeState.reportInteraction()
-                        store.audioProgressStore?.togglePauseAction?()
-                    }
-                    nativeToolButton(
-                        .forward30,
-                        icon: "goforward.30",
-                        title: "Forward",
-                        a11yLabel: "Forward 30 seconds",
-                        a11yHint: "Jump forward thirty seconds"
-                    ) {
-                        chromeState.reportInteraction()
-                        if let ps = store.audioProgressStore {
-                            ps.seekAction?(ps.currentMs + 30_000)
-                        }
-                    }
-                    if liveRewind.timeshifting {
-                        nativeToolButton(
-                            .goLive,
-                            icon: "forward.end.fill",
-                            title: "Go Live",
-                            a11yLabel: "Go live",
-                            a11yHint: "Return to the live broadcast"
-                        ) {
-                            chromeState.reportInteraction()
-                            let window = Int32(clamping: max(Int64(1), liveRewind.headWallMs - liveRewind.tailWallMs))
-                            store.audioProgressStore?.seekAction?(window)
-                        }
-                    }
-                }
-
-                // Same ordering as the native transport custom items:
-                // Record, Add Stream, then Options rightmost.
-                if canRecordCurrentProgram {
-                    nativeToolButton(
-                        .record,
-                        icon: "record.circle",
-                        title: "Record",
-                        iconColor: .red,
-                        a11yLabel: "Record current program",
-                        a11yHint: "Schedule a recording of what's currently airing on this channel"
-                    ) {
-                        chromeState.reportInteraction()
-                        showRecordSheet = true
-                    }
-                }
-                // Catch-up is a single archived replay; multiview
-                // alongside it isn't supported, so hide Add Stream.
-                if store.catchupTile == nil {
-                    nativeToolButton(
-                        .addStream,
-                        icon: "plus",
-                        title: "Add Stream",
-                        a11yLabel: "Add stream",
-                        a11yHint: "Pick another channel to watch alongside this one"
-                    ) {
-                        chromeState.reportInteraction()
-                        showAddSheet = true
-                    }
-                }
-                nativeToolButton(
-                    .options,
-                    icon: "slider.horizontal.3",
-                    title: "Options",
-                    a11yLabel: "Options",
-                    a11yHint: "Change audio track, subtitles, sleep timer, or stream info"
-                ) {
-                    chromeState.reportInteraction()
-                    debugLog("[MV-Cmd] Options pill pressed → showTVOptions=true | audioTileID=\(store.audioTileID ?? "nil") tiles=\(store.tiles.count) audioStore=\(store.audioProgressStore == nil ? "nil" : "ok")")
-                    showTVOptions = true
-                }
-
-                // Trailing Spacer to match the leading one: the cells sit
-                // CENTERED in the band rather than hugging the trailing
-                // edge (Logan 2026-09-11). The timeline row above keeps
-                // its full width.
-                Spacer()
             }
+            .frame(maxWidth: .infinity)
             .padding(.horizontal, 80)
             } else {
                 HStack(spacing: 20) {
@@ -1459,9 +1511,9 @@ struct PlaybackBottomChrome_tvOS: View {
             showAddSheet = true
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: "plus")
+                Image(systemName: "square.grid.2x2")
                     .font(.system(size: 26, weight: .semibold))
-                Text("Add Stream")
+                Text("Multiview")
                     .font(.system(size: 24, weight: .semibold))
             }
             .foregroundStyle(.white)
@@ -1477,7 +1529,7 @@ struct PlaybackBottomChrome_tvOS: View {
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($focusedChrome, equals: .addStream)
-        .accessibilityLabel("Add stream")
+        .accessibilityLabel("Add a multiview tile")
         .accessibilityHint("Pick another channel to watch alongside this one")
     }
 

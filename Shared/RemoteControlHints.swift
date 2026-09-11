@@ -197,6 +197,28 @@ let playerChromeBandOpacity: Double = 0.88
 
 extension RemoteControlHints {
 
+    /// THE resolution used by BOTH the press path and the hint strip: a
+    /// remote slot resolved through the user's effective map. The live
+    /// chrome's `handleTVMoveCommand`, `startScrubHold` and
+    /// `handlePlayerLongPress` all route their slot lookups through the
+    /// convenience overload below, so a hint can never advertise a
+    /// different action than the press actually runs (Logan 2026-09-11).
+    static func resolvedPlayerAction(_ slot: RemoteSlot, map: RemoteControlMap) -> PlayerRemoteAction {
+        map.playerAction(slot)
+    }
+
+    /// Same resolution against the live store, for the press path.
+    @MainActor
+    static func resolvedPlayerAction(_ slot: RemoteSlot) -> PlayerRemoteAction {
+        resolvedPlayerAction(slot, map: RemoteControlStore.shared.map)
+    }
+
+    /// True for the actions that move the playhead, i.e. the only ones
+    /// that may be advertised as "Scrub".
+    static func isSeekAction(_ action: PlayerRemoteAction) -> Bool {
+        action == .seekForward || action == .seekBackward
+    }
+
     /// Terse action label for a PLAYER slot, for the hint strip. Nil
     /// means "do not advertise this slot" (unmapped, or no short phrase).
     /// `isPaused` only matters for the literal play/pause action.
@@ -292,7 +314,7 @@ extension RemoteControlHints {
                                 isPaused: Bool,
                                 channelFlipEnabled: Bool) -> [RemoteHintPair] {
         var pairs: [RemoteHintPair] = []
-        if let phrase = stripPlayerAction(map.playerAction(.playPause), isPaused: isPaused) {
+        if let phrase = stripPlayerAction(resolvedPlayerAction(.playPause, map: map), isPaused: isPaused) {
             pairs.append(RemoteHintPair(key: "Play/Pause", action: phrase))
         }
         // No Select pair: the strip only renders while the chrome is
@@ -300,18 +322,26 @@ extension RemoteControlHints {
         // holds focus rather than running its mapped okShort action
         // (Logan 2026-09-11). "Back  Hide controls" below covers the way
         // out instead.
-        if scrubbable {
+        // Left / Right are ALWAYS read off the map, never off the mode
+        // (Logan 2026-09-11). The press path resolves them through
+        // `resolvedPlayerAction`, and so does this, so the two cannot
+        // drift. They collapse to one "Scrub" pair ONLY when both sides
+        // actually resolve to a seek; a side mapped to anything else is
+        // shown as itself, and an unmapped side is dropped.
+        let left = resolvedPlayerAction(.leftShort, map: map)
+        let right = resolvedPlayerAction(.rightShort, map: map)
+        if isSeekAction(left), isSeekAction(right) {
             pairs.append(RemoteHintPair(key: "Left/Right", action: "Scrub"))
         } else {
-            if let phrase = stripPlayerAction(map.playerAction(.leftShort), isPaused: isPaused) {
+            if let phrase = stripPlayerAction(left, isPaused: isPaused) {
                 pairs.append(RemoteHintPair(key: "Left", action: phrase))
             }
-            if let phrase = stripPlayerAction(map.playerAction(.rightShort), isPaused: isPaused) {
+            if let phrase = stripPlayerAction(right, isPaused: isPaused) {
                 pairs.append(RemoteHintPair(key: "Right", action: phrase))
             }
         }
-        let up = map.playerAction(.upShort)
-        let down = map.playerAction(.downShort)
+        let up = resolvedPlayerAction(.upShort, map: map)
+        let down = resolvedPlayerAction(.downShort, map: map)
         let flipSuppressed = { (a: PlayerRemoteAction) in
             (a == .channelUp || a == .channelDown) && !channelFlipEnabled
         }
@@ -326,10 +356,10 @@ extension RemoteControlHints {
             }
         }
         if !scrubbable {
-            if let phrase = stripPlayerAction(map.playerAction(.leftLong), isPaused: isPaused) {
+            if let phrase = stripPlayerAction(resolvedPlayerAction(.leftLong, map: map), isPaused: isPaused) {
                 pairs.append(RemoteHintPair(key: "Hold Left", action: phrase))
             }
-            if let phrase = stripPlayerAction(map.playerAction(.rightLong), isPaused: isPaused) {
+            if let phrase = stripPlayerAction(resolvedPlayerAction(.rightLong, map: map), isPaused: isPaused) {
                 pairs.append(RemoteHintPair(key: "Hold Right", action: phrase))
             }
         }
