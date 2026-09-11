@@ -4137,6 +4137,10 @@ final class AVPlayerProgressDriver {
     /// Channel key for the persisted live-edge hold-back, set by the tile
     /// right after init. Nil (VOD/DVR/catch-up) disables the mechanism.
     var liveHoldbackKey: String?
+    /// Live join-offset bookkeeping (see `maybeRaiseJoinOffset`).
+    var appliedLiveOffset = 0.0
+    var liveOffsetFloor = 0.0
+    var liveTargetDuration: (() -> Double)?
     private var lastDroppedFrames = 0
     /// Throttle for the periodic VOD WatchProgress save (10s cadence,
     /// matching the mpv coordinator's saver).
@@ -4205,6 +4209,7 @@ final class AVPlayerProgressDriver {
                 }
                 self.firstFrameProbeClock = time
             }
+            self.maybeRaiseJoinOffset()
             // Frame rate is not always known when the item goes ready:
             // remuxed fMP4 declares no nominalFrameRate and
             // currentVideoFrameRate stays 0 until frames render. Re-sample
@@ -4544,6 +4549,30 @@ final class AVPlayerProgressDriver {
                 freezeConsecutiveTicks = 0
             }
         }
+    }
+
+    /// The remuxer's TARGETDURATION can grow during the first seconds of
+    /// a tune (a long GOP closes and the monotonic pin rises), which
+    /// stretches AVPlayer's poll cadence and leaves the join offset
+    /// chosen at `startPlayer` too small for the new geometry - the
+    /// session7 ESPN stall. Re-apply the offset for that case, but ONLY
+    /// inside the first 30 s and ONLY while the buffer is empty: writing
+    /// `configuredTimeOffsetFromLive` on a healthy playing item is what
+    /// made the player seek backward and replay content (see
+    /// `logPerfSummary`).
+    private func maybeRaiseJoinOffset() {
+        guard isLive, let provider = liveTargetDuration,
+              let item = player.currentItem,
+              CACurrentMediaTime() - launchStart < 30 else { return }
+        let td = provider()
+        guard td > 0 else { return }
+        let want = min(18.0, max(3 * td, liveOffsetFloor))
+        guard want > appliedLiveOffset + 0.5, item.isPlaybackBufferEmpty else { return }
+        appliedLiveOffset = want
+        item.configuredTimeOffsetFromLive = CMTime(seconds: want, preferredTimescale: 600)
+        debugLog(String(format:
+            "[AVP-HOLDBACK] join offset raised to %.1fs (targetDuration grew to %.1f, buffer empty, %.0fs into the tune)",
+            want, td, CACurrentMediaTime() - launchStart))
     }
 
     private func logPerfSummary() {

@@ -139,6 +139,15 @@ final class HLSResourceLoaderRegistry: NSObject, AVAssetResourceLoaderDelegate, 
                         didCancel loadingRequest: AVAssetResourceLoadingRequest) {}
 }
 
+/// Thread-safe scalar slot.
+final class DoubleBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Double
+    init(_ initial: Double) { value = initial }
+    func set(_ v: Double) { lock.lock(); value = v; lock.unlock() }
+    func get() -> Double { lock.lock(); defer { lock.unlock() }; return value }
+}
+
 /// Thread-safe "when did this last happen" slot.
 final class TimestampBox: @unchecked Sendable {
     private let lock = NSLock()
@@ -1052,7 +1061,16 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var worstClosureGap = 0.0
 
     /// See playlistText: monotonic, never shrinks, seeded at the target.
-    private var pinnedTargetDuration = 2.0
+    private var pinnedTargetDuration = 2.0 {
+        didSet { advertisedTargetDuration.set(pinnedTargetDuration) }
+    }
+    /// The TARGETDURATION this remuxer is currently advertising, readable
+    /// from the main thread. AVPlayer polls a live playlist once per
+    /// TARGETDURATION and parks roughly 3 x TARGETDURATION behind the
+    /// edge, so the tile sizes its join offset from this (session7,
+    /// 18:07: the value grew from 3 to 4 when a 3.92 s segment closed and
+    /// the poll cadence went with it).
+    let advertisedTargetDuration = DoubleBox(2.0)
 
     private func playlistText() -> String {
         // Rewind mode: advertise the whole disk window; AVPlayer's
@@ -3023,6 +3041,8 @@ struct AVPlayerMultiviewTile: View {
         if !requestHeaders.isEmpty {
             options["AVURLAssetHTTPHeaderFieldsKey"] = requestHeaders
         }
+        var driverJoinOffset = 0.0
+        var driverOffsetFloor = 0.0
         let asset = AVURLAsset(url: url, options: options)
         if url.scheme == HLSDelivery.scheme {
             asset.resourceLoader.setDelegate(HLSResourceLoaderRegistry.shared,
@@ -3061,12 +3081,29 @@ struct AVPlayerMultiviewTile: View {
         // playhead to move, so it is free.
         let holdbackKey = isLiveTune ? liveSourceURL.absoluteString : nil
         let learned = holdbackKey.map { LiveEdgeHoldback.offset(for: $0) } ?? LiveEdgeHoldback.base
-        if isLiveTune, streamBufferSeconds > 0 || learned > LiveEdgeHoldback.base {
-            let offset = max(LiveEdgeHoldback.base + streamBufferSeconds, learned)
+        // Join offset geometry (session7, ESPN 18:06:52-18:07:18). The
+        // playlist's TARGETDURATION sets AVPlayer's poll cadence, so a
+        // player parked only 6 s back has barely one poll of slack: the
+        // remuxer pinned TARGETDURATION at 4 after a 3.92 s segment,
+        // AVPlayer then polled every 4 s (:15.36, :19.37, :23.37),
+        // segments 10 and 11 closed after its last fetch, the feed also
+        // ran 3.1 s late once, and the buffer ran empty. Three target
+        // durations is AVPlayer's own default hold-back for a reason;
+        // take the largest of that, what this channel's stalls have
+        // taught us, and the 6 s floor, then add the user's Stream
+        // Buffer. Same 18 s ceiling as before.
+        let joinTargetDuration = isLiveTune ? (remuxer?.advertisedTargetDuration.get() ?? 0) : 0
+        if isLiveTune {
+            let floor = max(3 * joinTargetDuration, learned, LiveEdgeHoldback.base)
+            let offset = min(18.0, floor + streamBufferSeconds)
             playerItem.configuredTimeOffsetFromLive =
                 CMTime(seconds: offset, preferredTimescale: 600)
-            debugLog("[AVP-MV] live edge offset \(offset)s at join "
-                + "(stream buffer \(streamBufferSeconds)s, learned \(learned)s) channel=\(channelName)")
+            debugLog(String(format:
+                "[AVP-MV] live edge offset %.1fs at join (3x targetDuration %.1f = %.1f, learned %.1f, floor %.1f, stream buffer %.1f) channel=%@",
+                offset, joinTargetDuration, 3 * joinTargetDuration, learned,
+                LiveEdgeHoldback.base, streamBufferSeconds, channelName))
+            driverJoinOffset = offset
+            driverOffsetFloor = max(learned, LiveEdgeHoldback.base) + streamBufferSeconds
         }
         // Forward buffer: left at AVPlayer's automatic default (0). A device
         // capture DISPROVED the idea that a forced preferredForwardBufferDuration
@@ -3193,6 +3230,16 @@ struct AVPlayerMultiviewTile: View {
             isLive: !(isVOD || isDVR || catchup != nil), applyGravity: { _ in })
         // Where a stall-learned hold-back is recorded for the NEXT tune.
         driver?.liveHoldbackKey = holdbackKey
+        // A TARGETDURATION that grows during the first 30 s (a long GOP
+        // lands and the pin rises) leaves the join offset too small; the
+        // driver re-applies it, but ONLY inside that window and ONLY with
+        // an empty buffer, because writing this on a healthy playing item
+        // is what seeks backward.
+        if isLiveTune, let mux = remuxer {
+            driver?.appliedLiveOffset = driverJoinOffset
+            driver?.liveOffsetFloor = driverOffsetFloor
+            driver?.liveTargetDuration = { mux.advertisedTargetDuration.get() }
+        }
         // First frame closes the press-to-picture clock and releases any
         // display-mode switch that was deferred out of the tune.
         driver?.onFirstFrame = {
