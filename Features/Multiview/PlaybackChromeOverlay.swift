@@ -1433,23 +1433,28 @@ struct PlaybackBottomChrome_tvOS: View {
             // overlays that add no width, so the row stays compact at
             // 18pt spacing. Focus order stays left to right because the
             // focus engine reads geometry, not declaration order.
-            ZStack {
-                transportCenterCell
-
+            // Two equal flexible halves around a fixed center slot: the
+            // leading group hugs the RIGHT edge of the left half and the
+            // trailing group the LEFT edge of the right half, so the six
+            // cells sit together at 18pt gaps with Pause on the screen
+            // center. (A ZStack with full-width frames aligned .trailing
+            // and .leading pushed the groups to the screen EDGES: the
+            // spread Logan saw twice, 2026-09-11.)
+            HStack(alignment: .center, spacing: Self.toolCellSpacing) {
                 HStack(alignment: .center, spacing: Self.toolCellSpacing) {
                     controlRowLeadingCells
                 }
                 .frame(maxWidth: .infinity, alignment: .trailing)
-                .padding(.trailing, Self.centerCellWidth / 2 + Self.toolCellSpacing)
+
+                transportCenterCell
+                    .frame(width: Self.centerCellWidth)
 
                 HStack(alignment: .center, spacing: Self.toolCellSpacing) {
                     controlRowTrailingCells
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, Self.centerCellWidth / 2 + Self.toolCellSpacing)
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 80)
             } else {
                 HStack(spacing: 20) {
                     // Render Options first (leftmost) so D-pad-right
