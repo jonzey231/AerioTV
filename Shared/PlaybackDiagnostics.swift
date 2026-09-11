@@ -155,6 +155,14 @@ enum PlaybackDiagnostics {
             Task { @MainActor in
                 let tiles = MultiviewStore.shared.tiles.count
                 let audioID = MultiviewStore.shared.audioTileID ?? "nil"
+                // Greppable, single-purpose line (review 2026-09-11
+                // section 3 proposal 5): the 15:11:12 jetsam analysis
+                // wanted "did the OS warn us, and at what footprint" and
+                // had to infer it from the [PlaybackDiag] line below.
+                DebugLogger.shared.log(
+                    "[MEM-WARN] didReceiveMemoryWarning fp=\(ProcessMetrics.residentSetSizeMB()) tiles=\(tiles)",
+                    category: "Playback", level: .warning
+                )
                 DebugLogger.shared.log(
                     "[PlaybackDiag] 💥 memory warning tiles=\(tiles) audioTile=\(audioID) \(ProcessMetrics.summaryLine()) mainHops=\(mainHopsInflight)",
                     category: "Playback", level: .warning

@@ -3177,9 +3177,28 @@ private struct AutoResumeWiring: ViewModifier {
 @MainActor
 final class NowPlayingManager: ObservableObject {
     static let shared = NowPlayingManager()
+    /// Equal-value writes to these are FILTERED (review 2026-09-11
+    /// section 6 proposal 4, session.txt:284 and :3800): the tune second
+    /// carried `pub:nowPlaying=11` and then `=16`, each publish
+    /// re-rendering three view trees, and a @Published write with an
+    /// equal value still fires objectWillChange
+    /// (memory/feedback_published_write_on_equal_value.md). The storage
+    /// keeps the @Published wrapper (so observers still see real
+    /// changes); the public name is a guarded setter. None of these are
+    /// used as a Binding anywhere, so the lost `$` projection costs
+    /// nothing - `$playingItem` is the only projection in use and stays
+    /// a plain @Published below.
     @Published var playingItem: ChannelDisplayItem? = nil
-    @Published var playingHeaders: [String: String] = [:]
-    @Published var isMinimized: Bool = false
+    @Published private var _playingHeaders: [String: String] = [:]
+    var playingHeaders: [String: String] {
+        get { _playingHeaders }
+        set { if newValue != _playingHeaders { _playingHeaders = newValue } }
+    }
+    @Published private var _isMinimized: Bool = false
+    var isMinimized: Bool {
+        get { _isMinimized }
+        set { if newValue != _isMinimized { _isMinimized = newValue } }
+    }
     // #42 Part 3: debounce state distinguishing a SINGLE Back (restore the mini
     // to fullscreen) from a DOUBLE Back (jump to the top channel).
     var menuMiniPressCount = 0
@@ -3190,12 +3209,20 @@ final class NowPlayingManager: ObservableObject {
     /// MPVPlayerView.didEnterBackground so audio keeps playing in the car
     /// with video suppressed. Always false off CarPlay and on tvOS.
     @Published var isCarPlayConnected: Bool = false
-    @Published var isLive: Bool = true
+    @Published private var _isLive: Bool = true
+    var isLive: Bool {
+        get { _isLive }
+        set { if newValue != _isLive { _isLive = newValue } }
+    }
 
     /// The channel that was playing before the current one, for the
     /// last-channel "zap back" gesture (rightShort default in the tvOS remote
     /// map). Captured on every distinct live tune.
-    @Published var previousChannelID: String? = nil
+    @Published private var _previousChannelID: String? = nil
+    var previousChannelID: String? {
+        get { _previousChannelID }
+        set { if newValue != _previousChannelID { _previousChannelID = newValue } }
+    }
     /// Set when the fullscreen player hands off to global search (hold-Down);
     /// the search sheet's onDismiss restores fullscreen when this is true.
     @Published var searchOpenedFromPlayer: Bool = false
@@ -3216,7 +3243,11 @@ final class NowPlayingManager: ObservableObject {
     /// has its own `tileID` gate), so this flag is currently read-only
     /// / documentary — but it exists so the invariant is queryable
     /// from anywhere without having to also import `PlayerSession`.
-    @Published var configuredAsMultiviewAdapter: Bool = false
+    @Published private var _configuredAsMultiviewAdapter: Bool = false
+    var configuredAsMultiviewAdapter: Bool {
+        get { _configuredAsMultiviewAdapter }
+        set { if newValue != _configuredAsMultiviewAdapter { _configuredAsMultiviewAdapter = newValue } }
+    }
 
     /// v1.6.13.x: Absolute (`.global`-coordinate) Y-position of the
     /// corner-mini-player's BOTTOM edge, captured dynamically by an
@@ -3230,7 +3261,11 @@ final class NowPlayingManager: ObservableObject {
     /// Default 0 means "no measurement yet" — the consumer treats
     /// that as "no push" so layout stays at natural position until
     /// the geometry observer fires.
-    @Published var miniPlayerBottomAbs: CGFloat = 0
+    @Published private var _miniPlayerBottomAbs: CGFloat = 0
+    var miniPlayerBottomAbs: CGFloat {
+        get { _miniPlayerBottomAbs }
+        set { if newValue != _miniPlayerBottomAbs { _miniPlayerBottomAbs = newValue } }
+    }
 
     /// v1.6.15: stream-start signal — bumped to a fresh UUID inside
     /// `startPlaying(...)` on EVERY live stream begin (cold auto-
@@ -3255,7 +3290,11 @@ final class NowPlayingManager: ObservableObject {
     /// `.onChange(...)` observers on those surfaces. Read by
     /// `ChannelInfoBanner` so its visibility is locked in step with
     /// chrome's auto-fade — banner + chrome appear/disappear together.
-    @Published var chromeIsVisible: Bool = false
+    @Published private var _chromeIsVisible: Bool = false
+    var chromeIsVisible: Bool {
+        get { _chromeIsVisible }
+        set { if newValue != _chromeIsVisible { _chromeIsVisible = newValue } }
+    }
 
     /// v1.6.18: mirror of whether the Stream Info overlay is open.
     /// Both the legacy PlayerView and unified MultiviewContainerView
@@ -3264,7 +3303,11 @@ final class NowPlayingManager: ObservableObject {
     /// visible — without this, on iPhone the banner's top-left
     /// position overlaps the Stream Info card's top-left position
     /// and covers the stats the user explicitly opened.
-    @Published var streamInfoIsVisible: Bool = false
+    @Published private var _streamInfoIsVisible: Bool = false
+    var streamInfoIsVisible: Bool {
+        get { _streamInfoIsVisible }
+        set { if newValue != _streamInfoIsVisible { _streamInfoIsVisible = newValue } }
+    }
 
     /// v1.6.18: most recent channel id the user was actively
     /// watching/listening to. Set on every `startPlaying(...)` call
@@ -3306,7 +3349,7 @@ final class NowPlayingManager: ObservableObject {
         if isLive, let outgoing = playingItem?.id, outgoing != item.id {
             previousChannelID = outgoing
         }
-        playingItem = item
+        if playingItem != item { playingItem = item }
         // v1.6.18: persistent breadcrumb for guide focus default —
         // see the property docstring above.
         lastPlayedChannelID = item.id
@@ -5442,6 +5485,12 @@ struct MainTabView: View {
         }
         .onChange(of: selectedTab) { old, new in
             debugLog("[TAB] switch \(old) -> \(new)")
+            // Entering the DVR tab is the moment recordings must be
+            // current; it is also what lets the background poll back off
+            // (review 2026-09-11 section 6 proposal 5).
+            if new == .dvr {
+                Task { await reconcileAllDispatcharrRecordings() }
+            }
         }
         // GH #20 auto-hide, iOS 26+ path (reworked 2026-07-12): minimize
         // is set to .never so there is no minimized pill and no system
@@ -5706,7 +5755,16 @@ struct MainTabView: View {
             await reconcileAllDispatcharrRecordings()
             didInitialDVRReconcile = true
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(120))
+                // Back off to 10 minutes while a live tile is playing
+                // (review 2026-09-11 section 6 proposal 5): the 2-minute
+                // poll ran for the whole life of the app, including
+                // through the 5-minute dead-tile window
+                // (session.txt:3611-3614). The DVR tab refreshes on entry
+                // (see the selectedTab handler), so a user looking at
+                // recordings still sees them fresh.
+                let livePlaying = PlayerSession.shared.mode == .multiview
+                    && MultiviewStore.shared.tiles.contains { $0.kind == .live }
+                try? await Task.sleep(for: .seconds(livePlaying ? 600 : 120))
                 if Task.isCancelled { break }
                 await reconcileAllDispatcharrRecordings()
             }

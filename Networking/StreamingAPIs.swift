@@ -80,13 +80,55 @@ final class HLSCapabilityStore: NSObject {
     static let shared = HLSCapabilityStore()
 
     private static let defaultsKey = "playback.hlsCapableHosts"
+    /// Persisted verdicts, BOTH ways: host key -> (capable, checkedAt).
+    /// Apple TV review 2026-09-11 (session.txt:259-261, 724-728,
+    /// 1568-1570): only the capable set was persisted, so a server that
+    /// answers "no native HLS" was re-probed on EVERY cold launch and the
+    /// tune paid 1537 ms of blocking probe five launches in a row. A
+    /// negative verdict now survives the launch and is re-checked after
+    /// the TTL, so a server that GAINS HLS support is picked up within a
+    /// week.
+    private static let verdictsKey = "playback.hlsVerdicts"
+    private static let verdictTTL: TimeInterval = 7 * 24 * 60 * 60
     private var capable: Set<String>
+    /// Host key -> when the verdict was recorded (either direction).
+    private var checkedAt: [String: Date] = [:]
     private var probedThisSession: Set<String> = []
     private var inFlight: Set<String> = []
 
     private override init() {
         capable = Set(UserDefaults.standard.stringArray(forKey: Self.defaultsKey) ?? [])
         super.init()
+        loadVerdicts()
+    }
+
+    /// Rehydrate the two-way verdict table. Entries past the TTL are
+    /// dropped so they re-probe; a positive entry also re-seeds `capable`
+    /// for the legacy key's readers.
+    private func loadVerdicts() {
+        guard let raw = UserDefaults.standard.dictionary(forKey: Self.verdictsKey) else { return }
+        let now = Date()
+        for (key, value) in raw {
+            guard let entry = value as? [String: Any],
+                  let isCapable = entry["capable"] as? Bool,
+                  let at = entry["checkedAt"] as? Double else { continue }
+            let date = Date(timeIntervalSince1970: at)
+            guard now.timeIntervalSince(date) < Self.verdictTTL else { continue }
+            checkedAt[key] = date
+            if isCapable { capable.insert(key) } else { capable.remove(key) }
+            // A live verdict answers this session without any network.
+            probedThisSession.insert(key)
+        }
+    }
+
+    private func persistVerdicts() {
+        var raw: [String: [String: Any]] = [:]
+        for (key, date) in checkedAt {
+            raw[key] = ["capable": capable.contains(key),
+                        "checkedAt": date.timeIntervalSince1970]
+        }
+        UserDefaults.standard.set(raw, forKey: Self.verdictsKey)
+        UserDefaults.standard.set(Array(capable), forKey: Self.defaultsKey)
     }
 
     private func hostKey(_ url: URL) -> String? {
@@ -105,7 +147,9 @@ final class HLSCapabilityStore: NSObject {
     func markNotCapable(_ url: URL) {
         guard let key = hostKey(url), capable.contains(key) else { return }
         capable.remove(key)
-        UserDefaults.standard.set(Array(capable), forKey: Self.defaultsKey)
+        checkedAt[key] = Date()
+        probedThisSession.insert(key)
+        persistVerdicts()
         debugLog("[HLS-CAP] \(key) -> no native HLS (playback proved the redirect target is not HLS)")
     }
 
@@ -206,10 +250,14 @@ final class HLSCapabilityStore: NSObject {
         if waited == .success, status != 0 {
             record(status: status, redirectIsHLS: hls, for: key)   // real answer: cache + persist
         } else {
-            // Timed out / no answer: do not poison the session; allow a
-            // later play to retry. A late delegate callback only touches
-            // the local box/semaphore, never the store's state.
+            // Timed out / no answer. Mark the host probed FOR THIS
+            // SESSION anyway (review 2026-09-11 section 1 proposal 2,
+            // session.txt:259-261): leaving it unmarked meant the same
+            // process blocked for the full timeout again on the very next
+            // tune. Nothing is persisted, so the next launch re-probes.
             inFlight.remove(key)
+            probedThisSession.insert(key)
+            debugLog("[HLS-CAP] \(key) -> probe timed out; assuming no native HLS for this session")
         }
         return capable.contains(key)
     }
@@ -226,8 +274,15 @@ final class HLSCapabilityStore: NSObject {
             capable.remove(key)
         }
         // status == 0 (network error): keep the cached answer.
-        if capable.contains(key) != wasCapable {
-            UserDefaults.standard.set(Array(capable), forKey: Self.defaultsKey)
+        // Persist the verdict in BOTH directions with its timestamp
+        // (review 2026-09-11 section 1 proposal 2) - a "no native HLS"
+        // answer is as valuable as a positive one and used to be thrown
+        // away at every launch.
+        if status != 0 {
+            checkedAt[key] = Date()
+            persistVerdicts()
+        } else if capable.contains(key) != wasCapable {
+            persistVerdicts()
         }
         debugLog("[HLS-CAP] \(key) -> \(capable.contains(key) ? "HLS capable" : "no native HLS") (status \(status))")
     }

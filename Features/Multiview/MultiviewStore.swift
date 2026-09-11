@@ -395,6 +395,14 @@ final class MultiviewStore: ObservableObject {
     /// Only fires `objectWillChange` when the registered tile is the
     /// audio tile — every other register is a quiet dictionary write.
     func registerProgressStore(_ store: PlayerProgressStore, for tileID: String) {
+        // De-duplicated at the sink (review 2026-09-11 section 6
+        // proposal 3): MultiviewTileView registers from BOTH onAppear and
+        // task(id:) - deliberately, since SwiftUI's diff can swallow
+        // either - so every tile mount ran the side effect twice and
+        // logged two identical [MV-ProgressStore] register lines a
+        // microsecond apart (session.txt:272/274, 739/741, 3361/3363).
+        // Early-out here keeps both call sites' safety with one effect.
+        guard progressStoresByTileID[tileID] !== store else { return }
         let wasAudio = (audioTileID == tileID)
         let prior = progressStoresByTileID[tileID]
         progressStoresByTileID[tileID] = store
@@ -994,6 +1002,9 @@ final class MultiviewStore: ObservableObject {
         // in chrome) keep treating this tile as the same slot.
         let preservedAddedAt = tiles[idx].addedAt
         let previousName = tiles[idx].item.name
+        // Channel flip is a tune: start the press-to-picture clock here
+        // (review 2026-09-11, marker inventory).
+        TuneTimeline.shared.press(item.name)
         tiles[idx] = MultiviewTile(
             id: tileID,                  // pinned
             item: item,

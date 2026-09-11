@@ -4080,6 +4080,24 @@ final class AVPlayerProgressDriver {
     /// here so it includes asset load, not just decode.
     private let launchStart = CACurrentMediaTime()
     private var firstPlayLogged = false
+    /// Fired once, on the first frame actually playing. The tile uses it
+    /// to close the press-to-picture clock and to release a deferred
+    /// display-mode switch (review 2026-09-11 section 1 proposals 6, 7).
+    var onFirstFrame: (() -> Void)? {
+        didSet {
+            // The status observation below installs with `.initial`, so on
+            // a fast path it can log the first frame during init, BEFORE
+            // the tile assigns this. Fire late rather than never.
+            if firstPlayLogged, onFirstFrame != nil { onFirstFrame?() }
+        }
+    }
+    /// The tile started this play with the first-play fast-start policy
+    /// (automaticallyWaitsToMinimizeStalling off, 2 s forward buffer).
+    /// Released back to automatic once the live edge proves stable -
+    /// two consecutive [AVP-PERF] reports with stalls:+0 (review
+    /// section 1 proposal 5).
+    var fastStartActive = false
+    private var stableEdgeReports = 0
     private var streamSummaryLogged = false
     /// NotificationCenter tokens scoped to the current item, torn down
     /// on swap alongside itemObservations.
@@ -4208,6 +4226,13 @@ final class AVPlayerProgressDriver {
                         self.firstPlayLogged = true
                         let ms = Int((CACurrentMediaTime() - self.launchStart) * 1000)
                         debugLog("[AVP-STREAM] first frame playing in \(ms)ms from screen open")
+                        // The number Logan feels is press -> first frame,
+                        // which is 10x to 25x the line above (the clock
+                        // there starts at this driver's construction,
+                        // AFTER the remuxer was READY). TuneTimeline
+                        // prints the press-relative total with the
+                        // per-stage breakdown.
+                        self.onFirstFrame?()
                     }
                 case .waitingToPlayAtSpecifiedRate:
                     // The cause of any mid-stream "skip"/rebuffer. Reason
@@ -4503,6 +4528,25 @@ final class AVPlayerProgressDriver {
             }
         }
         lastDroppedFrames = dropped
+        // Release the first-play fast start once the edge is stable
+        // (review 2026-09-11 section 1 proposal 5): two consecutive
+        // reports with no new stalls and a real live-edge cushion.
+        if fastStartActive, isLive {
+            if dStalls == 0, edge > 0 {
+                stableEdgeReports += 1
+            } else {
+                stableEdgeReports = 0
+            }
+            if stableEdgeReports >= 2 {
+                fastStartActive = false
+                stableEdgeReports = 0
+                player.automaticallyWaitsToMinimizeStalling = true
+                player.currentItem?.preferredForwardBufferDuration = 0
+                debugLog(String(format:
+                    "[AVP-PERF] first-play fast start released (edge=%.1fs stable); buffering policy back to automatic",
+                    edge))
+            }
+        }
         // rss rides this tick deliberately. Apple #74 was an ingest buffer
         // growing at exactly the stream bitrate for the whole session, and
         // nothing sampled memory during steady playback -- rss was only

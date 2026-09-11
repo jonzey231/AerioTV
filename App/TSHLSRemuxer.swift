@@ -167,7 +167,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// keyframe cadence is denser than 2s. On a 2s-GOP feed the cuts
     /// still land at 2s and this is a no-op, never a regression.
     private let startupRampSegments = 3
-    private let startupSegmentSeconds = 1.0
+    /// 0.0, not 1.0 (Apple TV review 2026-09-11 section 1 proposal 4,
+    /// session.txt:285, 1594, 2034): "first keyframe at or after 1.0 s"
+    /// is a NO-OP on a 2.5 s-GOP feed - every seg 0 measured dur=2.503,
+    /// so the ramp never shortened anything on the provider Logan
+    /// actually watches. At 0.0 the first `startupRampSegments` cut at
+    /// the first keyframe after any media at all, so segment 0 is exactly
+    /// one GOP and READY lands a GOP sooner. Both arms read this.
+    private let startupSegmentSeconds = 0.0
     /// Segments advertised in the live playlist window. 8 (not 6): the
     /// same capture showed AVPlayer recovers from an upstream delivery
     /// gap by re-buffering deeper behind the edge; a 16s window gives
@@ -176,6 +183,16 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// Segments retained in memory; old ones beyond this are dropped even
     /// if a slow client might still want them (live TV: it should not).
     private let maxBufferedSegments = 12
+    /// ...and a BYTE ceiling on the same ring (Apple TV review 2026-09-11
+    /// section 3 proposal 1): 12 x 3 MB on a 1080p feed is 36 MB and
+    /// nothing changes, but the UHD feed produced 5 to 7 MB segments
+    /// (session.txt:3834, seg9 5555498 B, seg11 6969949 B) - 72 to 84 MB
+    /// of in-RAM segments inside a 721 MB plateau, two seconds before the
+    /// 15:11:12 jetsam. The disk spill holds the rewind window, so the
+    /// RAM ring is only a delivery buffer. Floor of 3 segments so a very
+    /// large segment can never starve delivery.
+    private let maxBufferedBytes = 40 * 1_048_576
+    private let minBufferedSegments = 3
     /// Channel retention: while this remuxer ingests DETACHED (no tile
     /// playing it), keep only a couple of segments in RAM - the disk
     /// spill holds the window, and a retained UHD channel at 12 in-RAM
@@ -217,9 +234,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
     }
     /// Segments that must exist before `onReady` fires with the playlist
-    /// URL. Two keeps startup low; AVPlayer refreshes the playlist as more
-    /// land.
-    private let readyThreshold = 2
+    /// URL. ONE (Apple TV review 2026-09-11 section 1 proposal 3): two was
+    /// chosen conservatively, and the "seg0 -> READY" wait for the second
+    /// segment measured 487 to 1885 ms on the session's tunes
+    /// (session.txt rows 1, 3, 4, 5). AVPlayer refreshes the playlist as
+    /// segments land, and the first-play buffering policy in the tile
+    /// keeps a one-segment playlist from stalling on a slow feed.
+    private let readyThreshold = 1
 
     // MARK: Callbacks (delivered on the main queue, each at most once)
 
@@ -242,6 +263,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.aerio.tsremux")
     private var urlSession: URLSession?
     private var ingestTask: URLSessionDataTask?
+    /// First-byte marker state (see the didReceive hook). Touched only
+    /// from the URLSession delegate queue and startIngest.
+    private var ingestStartedAt = Date()
+    private var firstByteLogged = false
     private var listener: NWListener?
     private var localPort: UInt16 = 0
     /// In-process delivery: base64 of each RAM-window segment (and the fMP4
@@ -374,9 +399,18 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
     }
 
-    func stop() {
+    /// `completion` runs on the main queue AFTER every teardown step has
+    /// executed on the serial queue. The channel-flip path waits on it so
+    /// the outgoing upstream is genuinely released before the incoming one
+    /// is opened (review 2026-09-11 section 2 proposal 2: session.txt:3497
+    /// shows the new ingest starting BEFORE `stopped (ingested 205 MB)`).
+    func stop(completion: (@Sendable () -> Void)? = nil) {
         queue.async { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                if let completion { DispatchQueue.main.async(execute: completion) }
+                return
+            }
+            defer { if let completion { DispatchQueue.main.async(execute: completion) } }
             self.stopped = true
             self.ingestTask?.cancel()
             self.urlSession?.invalidateAndCancel()
@@ -424,7 +458,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
         let task = session.dataTask(with: request)
         ingestTask = task
+        ingestStartedAt = Date()
+        firstByteLogged = false
         task.resume()
+        TuneTimeline.shared.mark("ingest")
         debugLog("[TS-REMUX] ingest started (headers: \(headers.keys.sorted().joined(separator: ",")))")
     }
 
@@ -658,6 +695,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             let pidValue = (Int(p[offset + 2] & 0x1F) << 8) | Int(p[offset + 3])
             if programNumber != 0 {
                 pmtPID = pidValue
+                TuneTimeline.shared.mark("PAT")
                 debugLog("[TS-REMUX] PAT: program \(programNumber) -> PMT PID \(pmtPID)")
                 return
             }
@@ -922,12 +960,21 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if segments.count > ramCap {
             segments.removeFirst(segments.count - ramCap)
         }
+        // Byte ceiling on top of the count (review section 3 proposal 1).
+        // Never trims below `minBufferedSegments` (or the retention cap,
+        // whichever is lower), so delivery always has something to serve.
+        let floorSegments = min(minBufferedSegments, ramCap)
+        var bufferedBytes = segments.reduce(0) { $0 + $1.data.count }
+        while bufferedBytes > maxBufferedBytes, segments.count > floorSegments {
+            bufferedBytes -= segments.removeFirst().data.count
+        }
         if inProcessDelivery, let first = segments.first?.seq {
             for k in deliveryBase64.keys where k >= 0 && k < first { deliveryBase64[k] = nil }
         }
         // nextSeq, not segments.count: the count pins at maxBufferedSegments
         // once the window fills, and 12 % 5 != 0 silenced every close after
         // the first ten seconds of the 2026-08-25 UHD soak.
+        if nextSeq == 1 { TuneTimeline.shared.mark("seg0") }
         if nextSeq == 1 || nextSeq % 5 == 0 {
             debugLog("[TS-REMUX] segment \(nextSeq - 1) closed (\(String(format: "%.2f", duration))s, \(data.count / 1024) KB), buffered \(segments.count)")
         }
@@ -937,6 +984,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             let url = inProcessDelivery
                 ? URL(string: "\(HLSDelivery.scheme)://\(deliveryID)/live.m3u8")!
                 : URL(string: "http://127.0.0.1:\(localPort)/live.m3u8")!
+            TuneTimeline.shared.mark("ready")
             debugLog("[TS-REMUX] READY -> \(url.absoluteString)")
             DispatchQueue.main.async { [weak self] in self?.onReady?(url) }
         }
@@ -1180,6 +1228,16 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        // "First byte" marker (review 2026-09-11, marker inventory): the
+        // log had NOTHING between `ingest started` and the PAT parse, so
+        // connect + TLS + the upstream open (220 to 2532 ms) could not be
+        // separated from the PSI walk.
+        if !firstByteLogged {
+            firstByteLogged = true
+            let ms = Int(Date().timeIntervalSince(ingestStartedAt) * 1000)
+            TuneTimeline.shared.mark("firstByte")
+            debugLog("[TS-REMUX] first byte after \(ms)ms (\(data.count) B)")
+        }
         queue.async { [weak self] in self?.consume(data) }
     }
 
@@ -1383,17 +1441,25 @@ final class AVPStallWatchdog {
 @MainActor
 enum DisplayCriteriaCoordinator {
     private static var pendingClear: DispatchWorkItem?
+    /// What the panel was last ASKED for ("1920x1080|SDR|59.94"), so a
+    /// repeat request can be recognised as a no-op and skipped rather
+    /// than stalling the tune across an HDMI mode change that changes
+    /// nothing (review 2026-09-11 section 1 proposal 6).
+    private(set) static var lastAppliedSignature: String?
 
-    static func apply(_ criteria: AVDisplayCriteria, to dm: AVDisplayManager) {
+    static func apply(_ criteria: AVDisplayCriteria, to dm: AVDisplayManager,
+                      signature: String? = nil) {
         pendingClear?.cancel()
         pendingClear = nil
         dm.preferredDisplayCriteria = criteria
+        lastAppliedSignature = signature
     }
 
     static func scheduleClear(_ dm: AVDisplayManager) {
         pendingClear?.cancel()
         let work = DispatchWorkItem {
             dm.preferredDisplayCriteria = nil
+            lastAppliedSignature = nil
             debugLog("[AVP-DISPLAY] display criteria cleared (debounced; panel returns to default mode)")
         }
         pendingClear = work
@@ -1813,6 +1879,21 @@ struct AVPlayerMultiviewTile: View {
     /// clear them (the panel stayed in HDR). Late applies are dropped.
     /// Declared on every platform (start/stop touch it unconditionally).
     @State private var tileStopped = false
+    /// Standing slow retry for a live tile whose fast retries ran out
+    /// (review 2026-09-11 section 2 proposal 3): ESPNews HD died at
+    /// 15:05:36 and the tile stayed dead for 5 minutes 6 seconds
+    /// (session.txt:3610-3619) because nothing tried again. Cancelled by
+    /// bumping `teardownToken` on teardown or a channel change.
+    @State private var standingRetries = 0
+    @State private var teardownToken = UUID()
+    /// Display-mode switch deferred until the first frame is on screen
+    /// (review section 1 proposal 6): the HDMI mode change used to land
+    /// mid-tune and stalled the remuxer for 3.99 s on the session's worst
+    /// tune (session.txt:3375-3380).
+    @State private var pendingDisplayCriteria: (width: Int, height: Int, fps: Double, tenBit: Bool)?
+    @State private var firstFrameSeen = false
+    /// Channels this tile released recently, for the flip settle window.
+    @State private var releasedUpstreams: [(key: String, at: Date)] = []
 
     var body: some View {
         ZStack {
@@ -1866,6 +1947,8 @@ struct AVPlayerMultiviewTile: View {
             start()
         }
         .onDisappear {
+            // Cancels any standing slow retry in flight.
+            teardownToken = UUID()
             stop()
             // Final teardown of a native catch-up session frees its
             // provider slot server-side (seek re-tunes revoke their own
@@ -1936,12 +2019,44 @@ struct AVPlayerMultiviewTile: View {
         }
         // In-place channel swap on the same tile id (the container
         // swaps `tile.streamURL` without changing tile identity).
-        .onChange(of: streamURL) { _, _ in
+        .onChange(of: streamURL) { oldURL, newURL in
             mismatchAutoRetries = 0
-        serverBusyRetries = 0
             serverBusyRetries = 0
+            standingRetries = 0
+            teardownToken = UUID()
+            // Channel-flip settle (review 2026-09-11 section 2 proposals
+            // 1 and 2). session.txt:3546-3547: the flip STOPPED the
+            // ESPNews upstream and re-opened the SAME channel in the
+            // identical millisecond; Dispatcharr still held the old
+            // connection and answered 503 six times, then the tile died
+            // for five minutes. Release first and WAIT for the stop to
+            // land, then settle 1.0 s - the same beat the generic retry
+            // path at the top of failOrFallback has used since
+            // 2026-08-26 - or 2.0 s when this very tile held the target
+            // channel's upstream in the last 5 seconds.
+            let now = Date()
+            releasedUpstreams.removeAll { now.timeIntervalSince($0.at) > 10 }
+            let justHeld = releasedUpstreams.contains {
+                $0.key == newURL.absoluteString && now.timeIntervalSince($0.at) < 5
+            }
+            releasedUpstreams.append((key: oldURL.absoluteString, at: now))
+            let settle = justHeld ? 2.0 : 1.0
+            let outgoing = remuxer
+            let token = teardownToken
             stop()
-            start()
+            statusText = "Tuning..."
+            let resume = {
+                DispatchQueue.main.asyncAfter(deadline: .now() + settle) {
+                    guard token == teardownToken else { return }
+                    debugLog("[AVP-MV] flip settle \(settle)s elapsed; starting channel=\(channelName)")
+                    start()
+                }
+            }
+            if let outgoing {
+                outgoing.stop { resume() }
+            } else {
+                resume()
+            }
         }
         // A second tile joining drops the rewind UI (grid chrome has no
         // scrubber; mpv parity - its relay falls back to direct too).
@@ -1977,6 +2092,36 @@ struct AVPlayerMultiviewTile: View {
                   failed === player?.currentItem else { return }
             debugLog("[AVP-MV] tile playback failed channel=\(channelName); falling back to mpv tile")
             failOrFallback("playback failed")
+        }
+    }
+
+    /// 503/502 backoff ladder. See the call site in failOrFallback.
+    private static let serverBusyDelays: [Double] = [2, 5, 10, 20, 40]
+    /// Slow standing retry cadence after the fast ladder is spent: 15 s,
+    /// 30 s, then every 60 s, for as long as the tile is mounted and
+    /// still showing the user's channel.
+    private static let standingRetryDelays: [Double] = [15, 30]
+
+    /// A live tile is never permanently abandoned (review 2026-09-11
+    /// section 2 proposal 3). Cancelled by `teardownToken` on teardown
+    /// or a channel change, so nothing survives the tile.
+    private func scheduleStandingRetry(_ reason: String) {
+        let delay = standingRetries < Self.standingRetryDelays.count
+            ? Self.standingRetryDelays[standingRetries] : 60
+        standingRetries += 1
+        stop()
+        statusText = reason.contains("503") ? "Too many connections. Reconnecting..." : "Reconnecting..."
+        let token = teardownToken
+        debugLog("[AVP-MV] standing retry #\(standingRetries) in \(delay)s (\(reason)) channel=\(channelName)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard token == teardownToken,
+                  MultiviewStore.shared.tiles.contains(where: {
+                      $0.id == tileID && $0.streamURL == streamURL
+                  }) else {
+                debugLog("[AVP-MV] standing retry dropped (tile gone or channel changed)")
+                return
+            }
+            start()
         }
     }
 
@@ -2095,14 +2240,23 @@ struct AVPlayerMultiviewTile: View {
             return
         }
         let serverBusy = reason.contains("HTTP 503") || reason.contains("HTTP 502")
-        if serverBusy, serverBusyRetries < 4, tileError == nil {
-            let delays: [Double] = [1.5, 3.0, 5.0, 8.0]
-            let delay = delays[serverBusyRetries]
+        if serverBusy, serverBusyRetries < Self.serverBusyDelays.count, tileError == nil {
+            // Widened from [1.5, 3, 5, 8] (review 2026-09-11 section 2
+            // proposal 4): a provider connection cap is a TIME problem,
+            // and the old ladder plus the generic retries all fired
+            // inside 21 s of the first 503 (session.txt:3550-3600), just
+            // before the cap would have cleared.
+            let delay = Self.serverBusyDelays[serverBusyRetries]
             serverBusyRetries += 1
-            debugLog("[AVP-MV] server busy (\(reason)); retry \(serverBusyRetries)/4 in \(delay)s title=\(channelName)")
+            debugLog("[AVP-MV] server busy (\(reason)); retry \(serverBusyRetries)/\(Self.serverBusyDelays.count) in \(delay)s title=\(channelName)")
             stop()
-            statusText = "Retrying..."
+            // Say what 503 actually means on a Dispatcharr live proxy
+            // (review section 2 proposal 5): the tile used to show a
+            // generic "Retrying...".
+            statusText = reason.contains("HTTP 503") ? "Too many connections. Reconnecting..." : "Retrying..."
+            let token = teardownToken
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard token == teardownToken else { return }
                 start()
             }
             return
@@ -2215,6 +2369,18 @@ struct AVPlayerMultiviewTile: View {
             guard let id = store.vodCurrentVersionID else { return "Auto" }
             return store.vodVersionOptions.first(where: { $0.id == id })?.label
         }()
+        // A LIVE tile that is still mounted and still the user's channel
+        // falls into the slow standing retry instead of the terminal card
+        // (review 2026-09-11 section 2 proposal 3). A 404 means the
+        // channel is gone server-side, which no amount of retrying fixes,
+        // so that one keeps its card.
+        if !isVOD, !isDVR, catchup == nil, tileError == nil, !tileStopped,
+           !reason.contains("HTTP 404") {
+            debugLog("[AVP-NO-MPV] live '\(channelName)' exhausted fast retries (\(reason)); "
+                + "entering standing retry rather than abandoning the tile")
+            scheduleStandingRetry(reason)
+            return
+        }
         // One line with everything an iteration needs: what, where,
         // which copy, which file (sanitized), how far in, which chain.
         debugLog("[AVP-NO-MPV] FAILED \(isVOD ? "VOD" : "live") '\(channelName)' "
@@ -2458,12 +2624,50 @@ struct AVPlayerMultiviewTile: View {
                     // channel's port -> this one's), so no direct start here
                     // - that would double-start the player.
                     readyLocalURL = entry.localURL
+                    // A warm ingest for this channel would now be a
+                    // duplicate upstream connection; release it.
+                    LivePrewarm.shared.cancel(reason: "retained window adopted instead")
                     debugLog("[AVP-RETAIN] tile resuming adopted window channel=\(channelName)")
                     return
                 }
                 // Fresh live session takes one of the N retention slots.
                 LiveChannelRetention.shared.evictForNewActive(activeChannelID: channelID)
             }
+            // Warm start (review 2026-09-11 section 1 proposal 8): the
+            // ingest may already be open, started at press time in
+            // parallel with the multiview transition. Adopting it skips
+            // the 125 to 183 ms lock->ingest gap AND overlaps the 220 to
+            // 2532 ms upstream open with the SwiftUI transition.
+            if let warm = LivePrewarm.shared.adopt(key: sourceURL.absoluteString,
+                                                   channelID: channelID,
+                                                   rewindSeconds: rewindSeconds) {
+                let mux = warm.remuxer
+                mux.onReady = { url in readyLocalURL = url }
+                mux.onError = { error in
+                    debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(channelName)")
+                    failOrFallback("\(error)")
+                }
+                mux.onVideoParameters = { w, h, fps, tenBit in
+                    applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
+                }
+                remuxer = mux
+                if let vp = warm.videoParams {
+                    applyDisplayCriteria(width: vp.width, height: vp.height,
+                                         fps: vp.fps, is10Bit: vp.tenBit)
+                }
+                if let failure = warm.failure {
+                    failOrFallback(failure)
+                } else if let url = warm.readyURL {
+                    // The onChange(readyLocalURL) handler starts the player.
+                    readyLocalURL = url
+                }
+                debugLog("[AVP-MV] tile adopted warm ingest channel=\(channelName)")
+                return
+            }
+            // This tile is opening its own ingest, so any warm one left
+            // over (different channel, or a rewind-window mismatch) is
+            // dead weight holding a provider slot.
+            LivePrewarm.shared.cancel(reason: "tile started its own ingest")
             let mux = TSHLSRemuxer(sourceURL: sourceURL, headers: headers,
                                    rewindWindowSeconds: rewindSeconds)
             mux.onReady = { url in
@@ -2777,8 +2981,43 @@ struct AVPlayerMultiviewTile: View {
         if isLoopbackVOD || (catchup != nil && isLoopback) {
             playerItem.preferredForwardBufferDuration = 15
         }
-        debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : "automatic") channel=\(channelName)")
+        // FIRST PLAY of a live tune: take the tune off the automatic
+        // buffering policy (review 2026-09-11 section 1 proposal 5).
+        // `automaticallyWaitsToMinimizeStalling` re-evaluates the
+        // buffering rate before starting - three "waiting to play" ticks
+        // on every tune (session.txt:293-295, 762-764) and 1.3 to 2.2 s
+        // of READY -> first frame on rows 2 and 3. One segment of forward
+        // buffer is all the first play needs; the driver restores the
+        // automatic policy as soon as [AVP-PERF] reports a stable edge
+        // (two consecutive reports with stalls:+0), so the steady-state
+        // behaviour the 2026-08-30 Stream Buffer work tuned is unchanged.
+        let isLiveTune = !isVOD && !isDVR && catchup == nil
+        let fastStart = isLiveTune && !firstFrameSeen
+        if fastStart {
+            playerItem.preferredForwardBufferDuration = 2.0
+        }
+        debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : (fastStart ? "2s (first-play fast start)" : "automatic")) channel=\(channelName)")
         let avPlayer = AVPlayer(playerItem: playerItem)
+        if fastStart {
+            avPlayer.automaticallyWaitsToMinimizeStalling = false
+            debugLog("[AVP-MV] first-play fast start: automaticallyWaitsToMinimizeStalling=false fwdBuf=2s channel=\(channelName)")
+        }
+        // Explicit readyToPlay marker (review 2026-09-11, marker
+        // inventory): the log had no discrete line for it, only the
+        // layer's isReadyForDisplay, so "how long did AVPlayer take to
+        // accept the playlist" was guesswork.
+        var itemReadyObs: NSKeyValueObservation?
+        itemReadyObs = playerItem.observe(\.status, options: [.new]) { item, _ in
+            guard item.status != .unknown else { return }
+            if item.status == .readyToPlay {
+                TuneTimeline.shared.mark("itemReady")
+                debugLog("[AVP-ITEM] AVPlayerItem readyToPlay")
+            } else {
+                debugLog("[AVP-ITEM] AVPlayerItem status=failed (\(item.error?.localizedDescription ?? "unknown"))")
+            }
+            itemReadyObs?.invalidate()
+            itemReadyObs = nil
+        }
         // Live truth at this instant, never a captured snapshot.
         avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)
         // VOD resume (Continue Watching): the store carries the offset
@@ -2840,6 +3079,21 @@ struct AVPlayerMultiviewTile: View {
         driver = AVPlayerProgressDriver(
             player: avPlayer, store: progressStore,
             isLive: !(isVOD || isDVR || catchup != nil), applyGravity: { _ in })
+        // Fast start is released by the driver once the edge is stable.
+        driver?.fastStartActive = fastStart
+        // First frame closes the press-to-picture clock and releases any
+        // display-mode switch that was deferred out of the tune.
+        driver?.onFirstFrame = {
+            TuneTimeline.shared.firstFrame()
+            guard !firstFrameSeen else { return }
+            firstFrameSeen = true
+            if let pending = pendingDisplayCriteria {
+                pendingDisplayCriteria = nil
+                debugLog("[AVP-DISPLAY] applying deferred display criteria now that the first frame is up")
+                applyDisplayCriteria(width: pending.width, height: pending.height,
+                                     fps: pending.fps, is10Bit: pending.tenBit)
+            }
+        }
         if let cu = catchup {
             // Pinned EPG duration + base-offset position composition; the
             // chrome's seekAction becomes the window re-tune (must come
@@ -2931,6 +3185,10 @@ struct AVPlayerMultiviewTile: View {
 
     private func stop() {
         tileStopped = true
+        // Next tune gets its own fast start and its own deferred
+        // display-mode switch.
+        firstFrameSeen = false
+        pendingDisplayCriteria = nil
         if liveRewindArmed {
             LiveRewindEngine.shared.endExternalWindow(owner: tileID)
             // Channel retention: hand a HEALTHY rewind session to the
@@ -2989,12 +3247,40 @@ struct AVPlayerMultiviewTile: View {
             return
         }
         guard fps > 10, fps < 130 else { return }
+        // The HDMI mode change is SERIALIZED INTO THE TUNE (review
+        // 2026-09-11 section 1 proposal 6). session.txt:3375-3380: the
+        // criteria were set at 15:00:31.839, the panel answered 3 s
+        // later, and the remuxer produced nothing for 3.99 s across the
+        // switch - on a request for 59.94 Hz SDR while the panel was
+        // ALREADY at 60. Two changes: skip a no-op switch outright, and
+        // otherwise defer the real one until the first frame is playing
+        // (HDR and 50 Hz still engage, just a beat later).
+        let signature = String(format: "%dx%d|%@|%.2f", width, height,
+                               is10Bit ? "PQ" : "SDR", fps)
+        if DisplayCriteriaCoordinator.lastAppliedSignature == signature {
+            debugLog("[AVP-DISPLAY] display criteria unchanged (\(signature)); no mode switch")
+            return
+        }
+        if !firstFrameSeen {
+            pendingDisplayCriteria = (width, height, fps, is10Bit)
+            debugLog("[AVP-DISPLAY] display criteria deferred until first frame (\(signature))")
+            return
+        }
         let window: UIWindow? = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .first(where: { $0.activationState == .foregroundActive })?
             .keyWindow
         guard let window else {
             debugLog("[AVP-DISPLAY] display criteria skipped: no window available")
+            return
+        }
+        // Nothing applied yet this session and the panel already runs at
+        // the requested SDR rate: the switch would be a no-op that costs
+        // seconds of ingest (row 8 of the review's table).
+        if DisplayCriteriaCoordinator.lastAppliedSignature == nil, !is10Bit,
+           Int(fps.rounded()) == window.screen.maximumFramesPerSecond {
+            debugLog("[AVP-DISPLAY] panel already at \(window.screen.maximumFramesPerSecond)Hz SDR; "
+                + "skipping no-op mode switch (\(signature))")
             return
         }
         var extensions: [CFString: Any]?
@@ -3020,7 +3306,8 @@ struct AVPlayerMultiviewTile: View {
         let dm = window.avDisplayManager
         appliedDisplayManager = dm
         DisplayCriteriaCoordinator.apply(
-            AVDisplayCriteria(refreshRate: Float(fps), formatDescription: formatDesc), to: dm)
+            AVDisplayCriteria(refreshRate: Float(fps), formatDescription: formatDesc), to: dm,
+            signature: signature)
         debugLog("[AVP-DISPLAY] display criteria set: \(width)x\(height) " +
                  "\(is10Bit ? "bt.2020/PQ" : "SDR") @ \(String(format: "%.2f", fps))Hz " +
                  "(matchingEnabled=\(dm.isDisplayCriteriaMatchingEnabled))")

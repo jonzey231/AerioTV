@@ -185,8 +185,14 @@ enum WatchProgressManager {
 
         if let existing {
             let wasFinished = existing.isFinished
-            existing.positionMs = positionMs
-            existing.durationMs = durationMs
+            // 2026-09-11: never regress a saved position back to zero. A
+            // zero here means "the caller had nothing to report", not
+            // "start this title over": the detail sheet used to stamp
+            // metadata through this call and wiped the resume point plus
+            // the duration the Continue Watching progress bar needs. An
+            // explicit reset goes through `delete` instead.
+            if positionMs > 0 { existing.positionMs = positionMs }
+            if durationMs > 0 { existing.durationMs = durationMs }
             existing.updatedAt = Date()
             existing.isFinished = isFinished
             if let poster = posterURL { existing.posterURL = poster }
@@ -216,6 +222,49 @@ enum WatchProgressManager {
             if isFinished, vodType == "episode" {
                 advanceUpNext(from: progress, context: context)
             }
+        }
+        try? context.save()
+        NotificationCenter.default.post(name: .watchProgressDidChange, object: nil)
+    }
+
+    /// Metadata-only upsert. Use this when playback has NOT produced a
+    /// position yet and the caller only wants to stamp context
+    /// (`seriesID`, season/episode numbers, poster, up-next queue) before
+    /// the player launches.
+    ///
+    /// When a row already exists, position, duration and the finished
+    /// flag are left untouched; only the optional metadata and
+    /// `upNextQueue` are merged in. When no row exists, one is created
+    /// with a zero position so the metadata has somewhere to live.
+    static func annotate(vodID: String, title: String,
+                         posterURL: String? = nil, vodType: String = "movie",
+                         streamURL: String? = nil, serverID: String? = nil,
+                         seriesID: String? = nil,
+                         seasonNumber: Int? = nil, episodeNumber: Int? = nil,
+                         upNextQueue: String? = nil) {
+        guard let context = modelContext else { return }
+        let matches = matchingProgress(context: context, vodID: vodID)
+        let existing = pickMatch(matches, serverID: serverID, claimLegacy: true)
+
+        if let existing {
+            existing.updatedAt = Date()
+            if let poster = posterURL { existing.posterURL = poster }
+            if let url = streamURL { existing.streamURL = url }
+            if let sid = serverID { existing.serverID = sid }
+            if let ser = seriesID { existing.seriesID = ser }
+            if let s = seasonNumber { existing.seasonNumber = s }
+            if let e = episodeNumber { existing.episodeNumber = e }
+            if let q = upNextQueue { existing.upNextQueue = q }
+        } else {
+            let progress = WatchProgress(vodID: vodID, title: title, positionMs: 0,
+                                         durationMs: 0, posterURL: posterURL,
+                                         vodType: vodType, isFinished: false,
+                                         streamURL: streamURL, serverID: serverID,
+                                         seriesID: seriesID,
+                                         seasonNumber: seasonNumber ?? 0,
+                                         episodeNumber: episodeNumber ?? 0)
+            progress.upNextQueue = upNextQueue
+            context.insert(progress)
         }
         try? context.save()
         NotificationCenter.default.post(name: .watchProgressDidChange, object: nil)

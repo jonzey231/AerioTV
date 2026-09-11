@@ -530,10 +530,6 @@ struct VODDetailView: View {
         #endif
     }
 
-    /// Set by Play from Beginning so the launch ignores the saved resume
-    /// point. Cleared once playback has been started.
-    @State private var playFromStartRequested = false
-
     #if os(tvOS)
     /// Trailer / TMDB link shown as a scannable QR overlay.
     private struct QRLink: Identifiable {
@@ -763,15 +759,13 @@ struct VODDetailView: View {
                 systemImage: "play.fill", isPrimary: true
             ) {
                 guard let target else { return }
-                playFromStartRequested = false
                 playEpisode(target.episode)
             }
             .focused($playFocused)
             .prefersDefaultFocus(true, in: detailFocusNS)
             if let target, target.resuming {
                 MoviesHeroButton(title: "Play from Beginning", systemImage: "arrow.counterclockwise", isPrimary: false) {
-                    playFromStartRequested = true
-                    playEpisode(target.episode)
+                    playEpisode(target.episode, fromStart: true)
                 }
             }
             tvVersionButton
@@ -875,7 +869,6 @@ struct VODDetailView: View {
                                                   TMDBService.profileImageURL(path: $0, size: "w780") } ?? ep.posterURL,
                                               headers: serverHeaders(),
                                               progress: progressByEpisodeID[ep.id]) {
-                                    playFromStartRequested = false
                                     playEpisode(ep)
                                 }
                                 .focused($focusedEpisodeID, equals: ep.id)
@@ -920,7 +913,7 @@ struct VODDetailView: View {
     private func toggleWatched(_ ep: VODEpisode, watched: Bool) {
         if watched {
             WatchProgressManager.save(
-                vodID: ep.id, title: ep.title, positionMs: 0, durationMs: 0,
+                vodID: ep.id, title: episodeLaunchTitle(ep), positionMs: 0, durationMs: 0,
                 posterURL: ep.posterURL?.absoluteString, vodType: "episode", isFinished: true,
                 streamURL: ep.streamURL?.absoluteString, serverID: ep.serverID.uuidString,
                 seriesID: ep.seriesID, seasonNumber: ep.seasonNumber, episodeNumber: ep.episodeNumber)
@@ -984,7 +977,6 @@ struct VODDetailView: View {
             ) {
                 debugLog("[VOD-Play] pressed url=\(url?.absoluteString ?? "NIL") resolving=\(isResolvingURL)")
                 guard let url, let movie, !isResolvingURL else { return }
-                playFromStartRequested = false
                 Task { await resolveAndLaunch(url: url, title: VODDisplayItem.strippingTrailingYears(movie.name)) }
             }
             .focused($playFocused)
@@ -992,8 +984,8 @@ struct VODDetailView: View {
             if resume > 0 {
                 MoviesHeroButton(title: "Play from Beginning", systemImage: "arrow.counterclockwise", isPrimary: false) {
                     guard let url, let movie, !isResolvingURL else { return }
-                    playFromStartRequested = true
-                    Task { await resolveAndLaunch(url: url, title: VODDisplayItem.strippingTrailingYears(movie.name)) }
+                    Task { await resolveAndLaunch(url: url, title: VODDisplayItem.strippingTrailingYears(movie.name),
+                                                   fromStart: true) }
                 }
             }
             tvVersionButton
@@ -1677,7 +1669,19 @@ struct VODDetailView: View {
         #endif
     }
 
-    private func playEpisode(_ ep: VODEpisode) {
+    /// One canonical title per episode, shared by the WatchProgress row,
+    /// the player and the Continue Watching hero, so the same episode is
+    /// never labeled three different ways depending on where it was
+    /// launched from.
+    private func episodeLaunchTitle(_ ep: VODEpisode) -> String {
+        let own = ep.cleanedTitle(showName: item.name)
+        let label = own.count > 2 ? own : "Episode \(ep.episodeNumber)"
+        let code = String(format: "S%02dE%02d", ep.seasonNumber, ep.episodeNumber)
+        return "\(item.name) \(code) \(label)"
+    }
+
+    /// `fromStart`: Play from Beginning, ignore the saved resume point.
+    private func playEpisode(_ ep: VODEpisode, fromStart: Bool = false) {
         // v1.8.17: honor a picked version by pinning the episode URL to
         // the chosen provider account. Falls back to the default URL
         // (server priority + failover) when no version is selected.
@@ -1691,11 +1695,16 @@ struct VODDetailView: View {
         // v1.7.3 (Issue #19): also capture the rest of the series as an
         // "up next" queue so Continue Watching advances to the next
         // episode when this one finishes, with no later series fetch.
-        WatchProgressManager.save(
+        // 2026-09-11: metadata ONLY. The old `save(positionMs: 0,
+        // durationMs: 0, ...)` here was a full upsert, so every launch
+        // from the detail sheet wiped the saved resume point and the
+        // duration before `resolveAndLaunch` read them back - the
+        // episode always restarted at zero and Continue Watching lost
+        // its progress bar.
+        let launchTitle = episodeLaunchTitle(ep)
+        WatchProgressManager.annotate(
             vodID: ep.id,
-            title: ep.title,
-            positionMs: 0,
-            durationMs: 0,
+            title: launchTitle,
             posterURL: ep.posterURL?.absoluteString,
             vodType: "episode",
             serverID: ep.serverID.uuidString,
@@ -1707,10 +1716,12 @@ struct VODDetailView: View {
         Task {
             await resolveAndLaunch(
                 url: url,
-                title: ep.title,
+                title: launchTitle,
                 vodID: ep.id,               // episode's own unique ID
                 vodType: "episode",
-                posterURL: ep.posterURL?.absoluteString
+                posterURL: ep.posterURL?.absoluteString,
+                serverID: ep.serverID.uuidString,
+                fromStart: fromStart
             )
         }
     }
@@ -2014,8 +2025,16 @@ struct VODDetailView: View {
     /// Dispatcharr's /proxy/vod/* endpoints often redirect to a session-based or provider URL.
     /// The player follows redirects but can drop custom headers; resolving first avoids that.
     @MainActor
+    /// `fromStart`: ignore any saved resume point (Play from Beginning).
+    /// Passed per launch rather than held in view state so it cannot
+    /// survive a re-render or a second sheet presentation.
+    /// `serverID`: the resume key's server scope. Defaults to the item's
+    /// own server so a movie keeps behaving as before; episodes pass
+    /// their own so the lookup matches the row playEpisode stamped.
     private func resolveAndLaunch(url: URL, title: String, vodID: String? = nil,
-                                  vodType: String = "movie", posterURL: String? = nil) async {
+                                  vodType: String = "movie", posterURL: String? = nil,
+                                  serverID: String? = nil, fromStart: Bool = false) async {
+        let resumeServerID = serverID ?? item.serverID.uuidString
         playingTitle = title
         playingHeaders = serverHeaders()
         playingVodID = vodID ?? item.id  // default to movie id
@@ -2097,11 +2116,11 @@ struct VODDetailView: View {
             headers: playingHeaders,
             posterURL: (playingPosterURL ?? item.posterURL?.absoluteString).flatMap { URL(string: $0) },
             vodID: playingVodID,
-            serverID: item.serverID.uuidString,
+            serverID: resumeServerID,
             vodType: playingVodType,
-            resumePositionMs: playFromStartRequested ? 0
+            resumePositionMs: fromStart ? 0
                 : WatchProgressManager.getResumePosition(vodID: playingVodID,
-                                                         serverID: item.serverID.uuidString),
+                                                         serverID: resumeServerID),
             versionOptions: playingVersionOptions,
             selectedVersionID: playingVersionOptionID,
             versionSelectionKey: versionSelectionKey) {

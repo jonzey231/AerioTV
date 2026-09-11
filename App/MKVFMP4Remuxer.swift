@@ -1990,6 +1990,9 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
     /// the player flushed and re-anchored.
     private var audioTimelineEnd: Int64?
     private var lastTimedSegment = Int.min
+    /// How many [MKV-TIMING] lines this remuxer has printed; the first
+    /// five per open are always kept (see writeSegment).
+    private var timingSegmentsLogged = 0
 
     private func writeSegment(index: Int, seg: SegmentInfo,
                               video: [Sample], audio: [Sample]) -> Data {
@@ -2095,7 +2098,15 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
             lastTimedSegment = index
         }
 
-        if n > 0 || !audio.isEmpty {
+        // [MKV-TIMING] is one long interpolated string per segment, and a
+        // D-pad scrub fires about ten of them a second (review 2026-09-11
+        // section 6 proposal 2, session.txt:4217-4231). Keep what
+        // diagnoses a problem - the first 5 segments after an open, and
+        // any non-zero slip - and put the rest behind the verbose flag.
+        timingSegmentsLogged += 1
+        let wantTimingLine = timingSegmentsLogged <= 5 || slipIn != 0
+            || PlaybackFeatureFlags.verbosePlaybackTiming
+        if n > 0 || !audio.isEmpty, wantTimingLine {
             var line = String(format: "[MKV-TIMING] seg %d slip %+.3f", index, sec(slipIn))
             if n > 0 {
                 line += String(format: " | video n=%d pts %.3f-%.3f out %.3f-%.3f declared %.3f",

@@ -82,6 +82,7 @@ final class PlayerSession: ObservableObject {
             // sessionEngine for the session's life (no per-tile decision).
             let resolved = PlayerSession.resolveEngine(item: current, server: server, isLive: isLive)
             MultiviewStore.shared.lockEngine(resolved)
+            TuneTimeline.shared.mark("lock")
             DebugLogger.shared.log(
                 "[Engine] session locked to \(resolved.engine) (seed=\(current.name))",
                 category: "Playback", level: .info
@@ -251,6 +252,11 @@ final class PlayerSession: ObservableObject {
            let audioTile = store.tiles.first(where: { $0.id == audioID }) {
             NowPlayingManager.shared.lastPlayedChannelID = audioTile.item.id
         }
+        // Warm-start cancel path: the user left before any tile adopted
+        // the pre-opened upstream. Holding it would occupy a provider
+        // slot and is exactly what makes the next tune answer 503
+        // (review 2026-09-11 section 2).
+        LivePrewarm.shared.cancel(reason: "session exit")
         store.reset()
         mode = .idle
         NowPlayingManager.shared.configuredAsMultiviewAdapter = false
@@ -452,14 +458,21 @@ final class PlayerSession: ObservableObject {
         // else keeps its TS on the remux path.
         let isDispatcharr = server?.type == .dispatcharrAPI
         if format == .mpegTS, PlaybackFeatureFlags.avPlayerForHLS, isDispatcharr {
-            // Resolve capability BEFORE the engine locks so the first play
-            // of an HLS-capable server already upgrades to ?output_format=hls
-            // and routes direct-HLS (which decodes HEVC and outputs HDR)
-            // instead of the remux path that dead-ends on HEVC.
-            if HLSCapabilityStore.shared.probeBlocking(streamURL: url, headers: headers) {
+            // Tune time (Apple TV review 2026-09-11 section 1 proposal 1;
+            // session.txt:259-261, 724-728, 1568-1570): this used to call
+            // HLSCapabilityStore.probeBlocking, which parks the MAIN ACTOR
+            // on a semaphore for up to 1.5 s. It cost 1537 ms on the first
+            // tune of EVERY launch and froze the UI for that long inside
+            // enterMultiview. Now: decide from the CACHED verdict (which
+            // persists both ways with a 7-day TTL) and fire the probe in
+            // the background, so the answer is ready for the next tune. An
+            // un-probed HLS-capable server takes the remux path once - the
+            // pre-probe behavior, with a working direct-HLS fallback.
+            if HLSCapabilityStore.shared.isCapable(url) {
                 routeURL = appendingHLSOutputFormat(url)
                 effectiveFormat = .hls
             }
+            HLSCapabilityStore.shared.probeIfNeeded(streamURL: url, headers: headers)
         }
         if PlaybackFeatureFlags.avPlayerForHLS, effectiveFormat == .hls {
             return ResolvedEngine(engine: .avPlayerDirectHLS, routeURL: routeURL, headers: headers)
@@ -540,6 +553,18 @@ final class PlayerSession: ObservableObject {
         }
         DebugLogger.shared.log("[Engine] beginVOD: \(title) via AVPlayer container (\(ext.isEmpty ? "proxy" : ext))",
                                category: "Playback", level: .info)
+        // Resume decision, explicitly (review 2026-09-11 section 5
+        // proposal 4): the detail-sheet resume bug had to be found by
+        // bisecting button geometry in the [FOCUS] tracer because the
+        // only evidence was the ABSENCE of a seek line. Log what was
+        // asked for against what is saved, on every launch.
+        if let vodID, !vodID.isEmpty {
+            let saved = WatchProgressManager.getResumePosition(vodID: vodID, serverID: serverID)
+            DebugLogger.shared.log(
+                "[VOD-RESUME] vodID=\(vodID) requested=\(resumePositionMs.map { "\($0)ms" } ?? "none") "
+                + "source=\(kind) saved=\(saved.map { "\($0)ms" } ?? "none")",
+                category: "Playback", level: .info)
+        }
         store.setVODVersionContext(options: versionOptions,
                                    selectedID: selectedVersionID,
                                    selectionKey: versionSelectionKey)
@@ -634,6 +659,31 @@ final class PlayerSession: ObservableObject {
         }
 
         if store.tiles.isEmpty {
+            // Tune clock starts HERE, at the press (review 2026-09-11,
+            // marker inventory): every stage down to the first frame is
+            // measured from this instant, not from the player's own
+            // construction.
+            if isLive { TuneTimeline.shared.press(item.name) }
+            // Warm start (review 2026-09-11 section 1 proposal 8): open
+            // the upstream NOW, in parallel with the SwiftUI multiview
+            // transition, so the 220 to 2532 ms upstream open overlaps
+            // the transition instead of following it. Live TS-remux tunes
+            // only; LivePrewarm owns the cancel path.
+            if isLive, PlaybackFeatureFlags.avPlayerRemuxTS,
+               let resolved = MultiviewStore.resolveStream(item, server: server),
+               PlayerSession.resolveEngine(item: item, server: server,
+                                           isLive: true).engine == .avPlayerRemuxTS,
+               classifyStreamURL(resolved.url) == .mpegTS {
+                let rewindSeconds: Double = {
+                    guard UserDefaults.standard.bool(forKey: "liveRewindEnabled") else { return 0 }
+                    let mins = UserDefaults.standard.integer(forKey: "liveRewindDepthMinutes")
+                    return Double(mins > 0 ? mins : 30) * 60
+                }()
+                LivePrewarm.shared.begin(key: resolved.url.absoluteString,
+                                         channelID: item.id,
+                                         headers: resolved.headers,
+                                         rewindSeconds: rewindSeconds)
+            }
             // Fresh session — delegate to the existing seed-tile path.
             // This ALSO mirrors into `NowPlayingManager.startPlaying`
             // so CarPlay / MPRemoteCommandCenter / lockscreen get
@@ -780,6 +830,13 @@ struct ResolvedEngine {
 }
 
 enum PlaybackFeatureFlags {
+    /// Per-segment [MKV-TIMING] lines for every segment, not just the
+    /// first five and the non-zero-slip ones (review 2026-09-11 section 6
+    /// proposal 2). Off unless a diagnosis needs the full trace.
+    static var verbosePlaybackTiming: Bool {
+        UserDefaults.standard.bool(forKey: "playback.verboseTiming")
+    }
+
     /// Engine auto-detection, HLS arm (user directive 2026-07-15: "detect the
     /// stream type; AVPlayer when able, mpv fallback"). **Default ON**: live
     /// streams that are genuine HLS (.m3u8) or come from a Dispatcharr server
@@ -879,5 +936,164 @@ enum PlaybackFeatureFlags {
             return false
         }
         return defaults.bool(forKey: "dev.mpvEngineEnabled")
+    }
+}
+
+/// Press-to-first-frame stage clock for a live tune.
+///
+/// Apple TV review 2026-09-11, marker inventory: the only tune number
+/// the app printed was `[AVP-STREAM] first frame playing in Nms from
+/// screen open`, measured from the AVPlayer driver's construction -
+/// AFTER the remuxer was already READY. The number Logan feels is
+/// press -> first frame, 10x to 25x larger. This records the PRESS and
+/// every stage in between, then prints one line with the breakdown.
+///
+/// Deliberately not `@MainActor`: stages are marked from the remuxer's
+/// serial ingest queue as well as from main. An NSLock keeps it honest
+/// and the work is a couple of string appends per tune.
+final class TuneTimeline: @unchecked Sendable {
+    static let shared = TuneTimeline()
+
+    private let lock = NSLock()
+    private var pressAt: CFTimeInterval?
+    private var label = ""
+    private var stages: [(name: String, ms: Int)] = []
+
+    /// A channel press (or channel flip) started a tune. Resets the clock.
+    func press(_ name: String) {
+        lock.lock(); defer { lock.unlock() }
+        pressAt = CACurrentMediaTime()
+        label = name
+        stages.removeAll(keepingCapacity: true)
+    }
+
+    /// Record a stage, first occurrence per tune only.
+    func mark(_ stage: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard let pressAt, !stages.contains(where: { $0.name == stage }) else { return }
+        stages.append((stage, Int((CACurrentMediaTime() - pressAt) * 1000)))
+    }
+
+    /// First frame reached the screen: print the whole breakdown and
+    /// disarm until the next press.
+    func firstFrame() {
+        lock.lock()
+        guard let pressAt else { lock.unlock(); return }
+        // A tune that never produced a frame must not hand its clock to
+        // the next unrelated playback (a VOD launched minutes later).
+        guard CACurrentMediaTime() - pressAt < 60 else {
+            self.pressAt = nil
+            stages.removeAll(keepingCapacity: true)
+            lock.unlock()
+            return
+        }
+        let total = Int((CACurrentMediaTime() - pressAt) * 1000)
+        let breakdown = stages.map { "\($0.name)=\($0.ms)ms" }.joined(separator: " ")
+        let name = label
+        self.pressAt = nil
+        stages.removeAll(keepingCapacity: true)
+        lock.unlock()
+        debugLog("[TUNE] press->firstFrame \(total)ms channel=\(name) | \(breakdown)")
+    }
+}
+
+/// Live tune warm-start: open the upstream at PRESS time, in parallel
+/// with the SwiftUI multiview transition, instead of after the tile
+/// mounts.
+///
+/// Apple TV review 2026-09-11 section 1 proposal 8: `lock -> ingest` cost
+/// 125 to 183 ms and the upstream open itself 220 to 2532 ms
+/// (session.txt rows 8, 9, 11), all of it serialized AFTER the
+/// transition. The tile adopts this remuxer when it mounts; if the user
+/// backs out first, `cancel` stops it so no upstream connection is left
+/// dangling (which is exactly what generates the 503 in section 2).
+@MainActor
+final class LivePrewarm {
+    static let shared = LivePrewarm()
+
+    struct Pending {
+        let key: String
+        let channelID: String
+        let rewindSeconds: Double
+        let remuxer: TSHLSRemuxer
+        var readyURL: URL?
+        var failure: String?
+        var videoParams: (width: Int, height: Int, fps: Double, tenBit: Bool)?
+    }
+
+    private var pending: Pending?
+    private var expiry: Task<Void, Never>?
+
+    /// Open the upstream now. No-op when a prewarm for the same channel
+    /// is already running; any OTHER pending prewarm is cancelled first
+    /// so at most one warm connection exists.
+    func begin(key: String, channelID: String, headers: [String: String],
+               rewindSeconds: Double) {
+        if let p = pending {
+            if p.key == key { return }
+            cancel(reason: "superseded by \(channelID)")
+        }
+        // A retained channel is already ingesting this upstream; a second
+        // connection to it is exactly the 503 generator of section 2.
+        guard !LiveChannelRetention.shared.entries.contains(where: {
+            $0.key == key || (!channelID.isEmpty && $0.channelID == channelID)
+        }) else { return }
+        guard let url = URL(string: key) else { return }
+        let mux = TSHLSRemuxer(sourceURL: url, headers: headers,
+                               rewindWindowSeconds: rewindSeconds)
+        pending = Pending(key: key, channelID: channelID,
+                          rewindSeconds: rewindSeconds, remuxer: mux)
+        mux.onReady = { [weak self] url in
+            Task { @MainActor in
+                guard let self, self.pending?.key == key else { return }
+                self.pending?.readyURL = url
+            }
+        }
+        mux.onError = { [weak self] error in
+            Task { @MainActor in
+                guard let self, self.pending?.key == key else { return }
+                self.pending?.failure = "\(error)"
+            }
+        }
+        mux.onVideoParameters = { [weak self] w, h, fps, tenBit in
+            Task { @MainActor in
+                guard let self, self.pending?.key == key else { return }
+                self.pending?.videoParams = (w, h, fps, tenBit)
+            }
+        }
+        mux.start()
+        TuneTimeline.shared.mark("prewarm")
+        debugLog("[TUNE-PREWARM] ingest opened at press for channel=\(channelID)")
+        // Cancel path: nothing adopted it (the user backed out of the
+        // transition, or the tune routed to another engine), so release
+        // the upstream rather than holding a provider slot.
+        expiry?.cancel()
+        expiry = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.cancel(reason: "never adopted")
+        }
+    }
+
+    /// The tile that just mounted takes the warm pipeline, if it is the
+    /// same channel AND wants the same rewind window.
+    func adopt(key: String, channelID: String, rewindSeconds: Double) -> Pending? {
+        guard let p = pending,
+              p.key == key || (!channelID.isEmpty && p.channelID == channelID),
+              abs(p.rewindSeconds - rewindSeconds) < 0.5 else { return nil }
+        pending = nil
+        expiry?.cancel()
+        expiry = nil
+        debugLog("[TUNE-PREWARM] adopted by tile channel=\(channelID)")
+        return p
+    }
+
+    func cancel(reason: String) {
+        guard let p = pending else { return }
+        pending = nil
+        expiry?.cancel()
+        expiry = nil
+        p.remuxer.stop()
+        debugLog("[TUNE-PREWARM] cancelled (\(reason)) channel=\(p.channelID)")
     }
 }
