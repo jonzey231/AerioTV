@@ -1461,8 +1461,10 @@ struct PlaybackBottomChrome_tvOS: View {
             // at the other edge (Logan 2026-09-11). Not a dev aid: it is
             // shown whenever the stream's format is known.
             .overlay(alignment: .trailing) {
-                TVVideoFormatBadge(info: store.audioProgressStore?.streamInfo)
-                    .padding(.trailing, 80)
+                if let audioStore = store.audioProgressStore {
+                    TVVideoFormatBadge(progress: audioStore)
+                        .padding(.trailing, 80)
+                }
             }
             } else {
                 HStack(spacing: 20) {
@@ -1651,7 +1653,12 @@ struct PlaybackBottomChrome_tvOS: View {
 /// `container-fps`. Both repopulate on every item / track change, so the
 /// badge follows a channel flip or a version switch on its own.
 struct TVVideoFormatBadge: View {
-    let info: StreamInfo?
+    /// OBSERVED, not read once: `streamInfo` is published and lands late
+    /// (resolution on the presentationSize callback, frame rate once
+    /// frames render), so the badge has to re-render with it.
+    @ObservedObject var progress: PlayerProgressStore
+
+    private var info: StreamInfo? { progress.streamInfo }
 
     static func text(for info: StreamInfo?) -> String? {
         guard let info, info.height > 0 else { return nil }

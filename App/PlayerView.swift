@@ -2208,7 +2208,7 @@ private struct PlayerRootView: View {
             // band, mirroring the unified chrome's badge (Logan
             // 2026-09-11). Always shown once the format is known.
             .overlay(alignment: .trailing) {
-                TVVideoFormatBadge(info: progressStore.streamInfo)
+                TVVideoFormatBadge(progress: progressStore)
                     .padding(.trailing, 80)
             }
             .padding(.horizontal, 60)
@@ -4125,6 +4125,12 @@ final class AVPlayerProgressDriver {
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: interval, queue: .main) { [weak self] time in
             guard let self else { return }
+            // Frame rate is not always known when the item goes ready:
+            // remuxed fMP4 declares no nominalFrameRate and
+            // currentVideoFrameRate stays 0 until frames render. Re-sample
+            // until something lands, then fall back to the rate the
+            // remuxer measured off the frame timestamps (Logan 2026-09-11).
+            self.sampleFrameRateIfUnknown()
             if self.isLive {
                 self.pumpLiveRewindWindow(time)
                 return
@@ -4223,6 +4229,10 @@ final class AVPlayerProgressDriver {
         // A new item is a new source: clear the format readouts so a
         // channel change can never leave the PREVIOUS channel's numbers
         // on screen while the new one is still loading (2026-09-11 audit).
+        // NOTE: the remuxer's measured cadence is NOT reset here - it is
+        // measured BEFORE the player item exists on the remux path, so
+        // clearing it on item swap would throw away the only rate that
+        // path ever has. It is only read while streamInfo.fps is 0.
         store.streamInfo = StreamInfo()
         // New item gets a fresh error-escalation budget.
         if isLive { store.behindLiveEdge = false }
@@ -4566,6 +4576,23 @@ final class AVPlayerProgressDriver {
            let id = audioOptionByID.first(where: { $0.value == selected })?.key {
             store.currentAudioTrackID = id
         }
+    }
+
+    /// Fills `streamInfo.fps` once anything can report it. Order matches
+    /// the press-free truth of the engine: the track's nominal cadence
+    /// (already applied in `populateStreamInfo` when non-zero), then the
+    /// PRESENTED rate once frames render, then the remuxer's own measured
+    /// rate for the TS / fMP4 path, which declares no nominal rate at all.
+    private func sampleFrameRateIfUnknown() {
+        guard store.streamInfo.fps == 0 else { return }
+        if let item = player.currentItem {
+            for track in item.tracks where track.currentVideoFrameRate > 0 {
+                store.streamInfo.fps = Double(track.currentVideoFrameRate)
+                return
+            }
+        }
+        let measured = RemuxMeasuredVideo.shared.fps
+        if measured > 0 { store.streamInfo.fps = measured }
     }
 
     private func populateStreamInfo(item: AVPlayerItem) {

@@ -776,7 +776,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
         mux.onVideoParameters = { [weak self] w, h, fps, tenBit in
             let cb = self?.onVideoParameters
-            DispatchQueue.main.async { cb?(w, h, fps, tenBit) }
+            DispatchQueue.main.async {
+                // The remuxer MEASURES the cadence off frame timestamps.
+                // fMP4 built here carries no nominal frame rate, so the
+                // AVPlayer driver has nothing else to report until frames
+                // render; park it where the driver can pick it up
+                // (Logan 2026-09-11: badge showed a resolution and no fps).
+                RemuxMeasuredVideo.shared.note(fps: fps)
+                cb?(w, h, fps, tenBit)
+            }
         }
         fmp4 = mux
         codecGatePassed = true
@@ -3076,4 +3084,25 @@ struct AVPlayerLayerView: UIViewRepresentable {
         }
         #endif
     }
+}
+
+
+/// Last video cadence MEASURED by the TS/fMP4 remuxer, for readouts that
+/// have no other source: remuxed fMP4 declares no nominal frame rate, so
+/// `AVAssetTrack.nominalFrameRate` is 0 on that path and
+/// `currentVideoFrameRate` only fills in once frames render.
+@MainActor
+final class RemuxMeasuredVideo: ObservableObject {
+    static let shared = RemuxMeasuredVideo()
+    /// 0 when nothing has been measured for the current stream.
+    @Published private(set) var fps: Double = 0
+    private init() {}
+
+    func note(fps: Double) {
+        guard fps > 0, abs(fps - self.fps) > 0.001 else { return }
+        self.fps = fps
+    }
+
+    /// New source: forget the previous stream's cadence.
+    func reset() { if fps != 0 { fps = 0 } }
 }
