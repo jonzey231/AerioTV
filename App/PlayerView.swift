@@ -4148,6 +4148,14 @@ final class AVPlayerProgressDriver {
     /// Presentation-freeze detector state (see the 1s sampler below).
     private var freezeLastMediaTime = CMTime.invalid
     private var freezeConsecutiveTicks = 0
+    /// Post-stall nudge state (2026-09-11, atvlogs/s6_85.txt:710-770):
+    /// consecutive ticks spent in
+    /// .waitingToPlayAtSpecifiedRate/AVPlayerWaitingToMinimizeStallsReason,
+    /// the remuxer's published-segment count when that streak began, and
+    /// the once-per-streak latch for playImmediately.
+    private var minimizeStallsWaitTicks = 0
+    private var minimizeStallsWaitBaseSegments = 0
+    private var nudgedThisWaitStreak = false
     private var freezeTimer: Timer?
     /// Escalation sink for a fatal/persistent stream error the errorLog
     /// surfaces (e.g. a rejected playlist or a failed blocking reload that
@@ -4513,12 +4521,15 @@ final class AVPlayerProgressDriver {
                 debugLog(String(format:
                     "[AVP-FREEZE] waiting (%@) tick %d, pos %.1fs",
                     reason, freezeConsecutiveTicks, item.currentTime().seconds))
+                maybeNudgeOutOfWait(item: item, reason: reason)
             } else {
+                endWaitStreak()
                 freezeConsecutiveTicks = 0 // paused deliberately
             }
             freezeLastMediaTime = .invalid
             return
         }
+        endWaitStreak()
         let now = item.currentTime()
         defer { freezeLastMediaTime = now }
         guard freezeLastMediaTime.isValid else {
@@ -4549,6 +4560,45 @@ final class AVPlayerProgressDriver {
                 freezeConsecutiveTicks = 0
             }
         }
+    }
+
+    private func endWaitStreak() {
+        minimizeStallsWaitTicks = 0
+        nudgedThisWaitStreak = false
+    }
+
+    /// Post-stall nudge (2026-09-11, atvlogs/s6_85.txt:710-770). On the
+    /// UHD freeze AVPlayer sat in .waitingToPlayAtSpecifiedRate with
+    /// AVPlayerWaitingToMinimizeStallsReason for 7 s AFTER three segments
+    /// (22 MB, 11 s of media) had already landed, until the remuxer
+    /// watchdog rebuilt the pipeline. The data was there; the player was
+    /// simply still waiting. One `playImmediately(atRate:)` per waiting
+    /// streak, and only when new segments really did arrive and the
+    /// loaded range runs at least one target duration past the playhead.
+    /// The watchdog fuse is untouched: if this does not help, it still
+    /// fires exactly as before.
+    private func maybeNudgeOutOfWait(item: AVPlayerItem, reason: String) {
+        guard isLive else { return }
+        guard reason == AVPlayer.WaitingReason.toMinimizeStalls.rawValue else {
+            endWaitStreak()
+            return
+        }
+        minimizeStallsWaitTicks += 1
+        if minimizeStallsWaitTicks == 1 {
+            minimizeStallsWaitBaseSegments = TSHLSRemuxer.feedRateWindow.publishedCount()
+            nudgedThisWaitStreak = false
+        }
+        guard minimizeStallsWaitTicks >= 3, !nudgedThisWaitStreak else { return }
+        let newSegments = TSHLSRemuxer.feedRateWindow.publishedCount() - minimizeStallsWaitBaseSegments
+        guard newSegments >= 1 else { return }
+        guard let loadedEnd = item.loadedTimeRanges.last?.timeRangeValue,
+              (loadedEnd.end - item.currentTime()).seconds >= (liveTargetDuration?() ?? 2.0) else { return }
+        let ahead = (loadedEnd.end - item.currentTime()).seconds
+        nudgedThisWaitStreak = true
+        player.playImmediately(atRate: 1.0)
+        debugLog(String(format:
+            "[AVP-NUDGE] waiting %ds with %d new segments and %.1fs loaded ahead; playImmediately",
+            minimizeStallsWaitTicks, newSegments, ahead))
     }
 
     /// The remuxer's TARGETDURATION can grow during the first seconds of
@@ -4608,26 +4658,43 @@ final class AVPlayerProgressDriver {
         // applied to the session that stalled; it is remembered for the
         // channel and applied at its NEXT tune, where it costs nothing.
         //
-        // And it is not raised at all when the remuxer just reported a
-        // starved closure: the bytes stopped arriving upstream, and no
-        // amount of extra hold-back fills a buffer the provider is not
-        // feeding (this provider: "34 starved closures, worst gap 8.8s",
-        // session.txt:4022).
+        // The first version of this rule then refused to raise the offset
+        // at all whenever the remuxer had just reported a starved closure,
+        // on the theory that no hold-back fills a buffer the provider is
+        // not feeding (this provider: "34 starved closures, worst gap
+        // 8.8s", session.txt:4022).
+        //
+        // REFINED 2026-09-11 (atvlogs/s6_85.txt). That blanket ignore was
+        // wrong for the common case: EVERY stall in that session followed
+        // an upstream gap and so every one was answered by "[AVP-HOLDBACK]
+        // stall #N ignored: upstream starved Ns ago", which meant the
+        // hold-back never grew even though a bigger hold-back was exactly
+        // what would have absorbed the jitter. The feed there is BURSTY,
+        // not slow: 5 to 8 s of nothing and then two or three segments at
+        // once, with the AVERAGE rate still at real time (ESPN HD
+        // :340-380, ESPNU :540-580 and :640-665, UHD :710-770 where three
+        // segments, 22 MB and 11 s of media, landed in one go). So the
+        // decision now reads the rate, not the timestamp:
+        //   - average at or above real time (or not enough window yet):
+        //     bursty, raise the hold-back past the worst observed gap;
+        //   - average below real time: genuinely slow, keep ignoring.
         if isLive, dStalls > 0, let key = liveHoldbackKey {
-            let starvedAgo = TSHLSRemuxer.lastFeedStarvation.secondsSince()
-            if let starvedAgo, starvedAgo < 15 {
+            let rate = TSHLSRemuxer.feedRateWindow.rateRatio()
+            let worstGap = TSHLSRemuxer.feedRateWindow.worstGap()
+            if let rate, rate < 0.95 {
                 debugLog(String(format:
-                    "[AVP-HOLDBACK] stall #%d ignored: upstream starved %.0fs ago, a larger hold-back cannot fill a buffer the feed is not filling",
-                    stalls, starvedAgo))
+                    "[AVP-HOLDBACK] stall #%d ignored: upstream below real time (rate %.2f), a larger hold-back cannot fill a buffer the feed is not filling",
+                    stalls, rate))
             } else {
+                let td = liveTargetDuration?() ?? 2.0
                 let base = LiveEdgeHoldback.offset(for: key)
-                let next = min(18.0, base + 3)
+                let next = min(18.0, max(base + 3, worstGap + (td > 0 ? td : 2.0)))
                 if next > base + 0.5 {
                     LiveEdgeHoldback.record(next, for: key)
-                    debugLog(String(format:
-                        "[AVP-HOLDBACK] stall #%d: live edge offset %.0fs -> %.0fs for the NEXT tune of this channel (never applied mid-playback: that seeks backward)",
-                        stalls, base, next))
                 }
+                debugLog(String(format:
+                    "[AVP-HOLDBACK] stall #%d: bursty feed (rate %.2f, worst gap %.1fs), live edge offset %.0fs -> %.0fs for the NEXT tune of this channel",
+                    stalls, rate ?? -1, worstGap, base, max(base, next)))
             }
         }
         lastDroppedFrames = dropped

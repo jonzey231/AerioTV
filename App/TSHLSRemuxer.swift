@@ -148,6 +148,69 @@ final class DoubleBox: @unchecked Sendable {
     func get() -> Double { lock.lock(); defer { lock.unlock() }; return value }
 }
 
+/// Rolling 30 s wall window of segment closures, shared by every live
+/// remuxer and read from the main thread by the playback driver.
+///
+/// Separates the two shapes of a bad feed, which the starvation
+/// timestamp alone cannot tell apart (2026-09-11, atvlogs/s6_85.txt):
+/// a BURSTY feed delivers nothing for 5 to 8 s and then hands over two
+/// or three segments at once while its AVERAGE rate stays at real time
+/// (a bigger hold-back absorbs that), and a SLOW feed delivers below
+/// real time (no hold-back can fill a buffer the feed is not filling).
+final class FeedRateWindow: @unchecked Sendable {
+    private let lock = NSLock()
+    private let windowSeconds: TimeInterval = 30
+    /// (wall clock of the closure, media seconds it carried, extra wall
+    /// time beyond that media length since the previous closure).
+    private var samples: [(wall: Date, media: Double, excess: Double)] = []
+    private var lastWall: Date?
+    private var published = 0
+
+    func record(closeWall: Date, mediaDuration: Double) {
+        lock.lock(); defer { lock.unlock() }
+        let excess: Double
+        if let lastWall { excess = max(0, closeWall.timeIntervalSince(lastWall) - mediaDuration) }
+        else { excess = 0 }
+        lastWall = closeWall
+        samples.append((wall: closeWall, media: mediaDuration, excess: excess))
+        published &+= 1
+        let cutoff = closeWall.addingTimeInterval(-windowSeconds)
+        while let first = samples.first, first.wall < cutoff { samples.removeFirst() }
+    }
+
+    /// Media seconds closed in the window / wall seconds it spans.
+    /// Nil until the window covers at least 15 s, so a fresh tune never
+    /// looks like a slow feed.
+    func rateRatio(_ now: Date = Date()) -> Double? {
+        lock.lock(); defer { lock.unlock() }
+        guard let first = samples.first, let last = samples.last else { return nil }
+        let span = last.wall.timeIntervalSince(first.wall)
+        guard span >= 15, span > 0 else { return nil }
+        // The first sample bounds the window; its media landed before it.
+        let media = samples.dropFirst().reduce(0.0) { $0 + $1.media }
+        return media / span
+    }
+
+    /// Worst "extra" wall time beyond the media length in the window.
+    func worstGap() -> Double {
+        lock.lock(); defer { lock.unlock() }
+        return samples.reduce(0.0) { max($0, $1.excess) }
+    }
+
+    /// Monotonic count of segments closed since launch. Never resets, so
+    /// a captured value can be compared later for "did anything arrive".
+    func publishedCount() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return published
+    }
+
+    func reset() {
+        lock.lock(); defer { lock.unlock() }
+        samples.removeAll()
+        lastWall = nil
+    }
+}
+
 /// Thread-safe "when did this last happen" slot.
 final class TimestampBox: @unchecked Sendable {
     private let lock = NSLock()
@@ -489,6 +552,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         firstByteLogged = false
         task.resume()
         TuneTimeline.shared.mark("ingest")
+        // New ingest, new window: without this the first closure of a flip
+        // measures its gap against the PREVIOUS channel's last segment and
+        // poisons worstGap for the next 30 s.
+        Self.feedRateWindow.reset()
         debugLog("[TS-REMUX] ingest started (headers: \(headers.keys.sorted().joined(separator: ",")))")
     }
 
@@ -968,6 +1035,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // AVPlayer stalls line up with the worst gaps). Wall-clock gap
         // between closures minus the media duration ~= feed starvation.
         let nowWall = Date()
+        // Rate window first: the driver reads it in the same tick it reads
+        // lastFeedStarvation, and needs THIS closure counted.
+        Self.feedRateWindow.record(closeWall: nowWall, mediaDuration: duration)
         if let lastWall = lastSegmentCloseWall {
             let gap = nowWall.timeIntervalSince(lastWall)
             if gap > duration + 0.6 {
@@ -1057,6 +1127,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// stopped arriving. Read from the main thread by the playback
     /// driver; written from the ingest queue, hence the box.
     static let lastFeedStarvation = TimestampBox()
+    /// Rolling 30 s delivery window behind `lastFeedStarvation`: it says
+    /// whether the feed is bursty (average at real time) or genuinely
+    /// slow, and carries the monotonic published-segment counter the
+    /// post-stall nudge uses.
+    static let feedRateWindow = FeedRateWindow()
     private var starvedClosures = 0
     private var worstClosureGap = 0.0
 
