@@ -711,3 +711,195 @@ enum TabProbe {
         }
     }
 }
+
+#if canImport(UIKit)
+/// Input-to-frame latency + render-load probe (Logan 2026-09-12: "I need you
+/// to not guess. Add something in logging so you can see it.").
+///
+/// Three questions the existing [PRESS]/[FOCUS]/[HANG]/[TAB] lines could not
+/// answer on their own:
+///  1. How long does a press take to be handled, and how long until the NEXT
+///     frame is actually presented. [HANG] only reports single blocks over its
+///     threshold, so a main thread that is 90% busy in 200ms chunks looks
+///     healthy while every press still waits seconds.
+///  2. How many program cells / rows are ALIVE (not "bodies evaluated"), how
+///     many CALayers the render server is carrying, and how long the slowest
+///     frame took.
+///  3. How long a press takes to move focus.
+///
+/// All three are cheap: one CADisplayLink while the guide is on screen, two
+/// integer counters, and one layer-tree walk per second.
+@MainActor
+enum InputProbe {
+    private struct Pending {
+        let name: String
+        let start: CFTimeInterval
+        var handled: CFTimeInterval?
+        var focus: CFTimeInterval?
+        var logged = false
+    }
+    private static var pending: Pending?
+
+    /// Called the moment the app receives the press / touch, BEFORE it is
+    /// delivered. `name` is the key ("DOWN", "SELECT", "TOUCH").
+    static func begin(_ name: String) {
+        // A press that arrives while the previous one is still unresolved
+        // means the queue is backing up: flush the old one so the log shows
+        // both, with the stale one marked.
+        if var old = pending, !old.logged {
+            old.logged = true
+            pending = nil
+            debugLog("[INPUT] \(old.name) superseded after \(ms(CACurrentMediaTime() - old.start))ms (next press arrived first)")
+        }
+        pending = Pending(name: name, start: CACurrentMediaTime())
+        // End of this runloop turn = the handler (and the SwiftUI update it
+        // triggered) has finished on the main thread.
+        DispatchQueue.main.async {
+            guard var p = pending, !p.logged, p.handled == nil else { return }
+            p.handled = CACurrentMediaTime()
+            pending = p
+        }
+        FrameProbe.armInputFrameCapture()
+    }
+
+    /// Called from the [FOCUS] tracer when the focus system reports a move.
+    static func noteFocusChange() {
+        guard var p = pending, p.focus == nil else { return }
+        p.focus = CACurrentMediaTime()
+        pending = p
+    }
+
+    /// Called by FrameProbe on the first presented frame after a press.
+    static func notePresentedFrame(_ at: CFTimeInterval) {
+        guard var p = pending, !p.logged else { return }
+        p.logged = true
+        pending = nil
+        let handled = p.handled ?? at
+        var line = "[INPUT] \(p.name) received -> handled \(ms(handled - p.start))ms"
+        line += " -> next frame presented \(ms(at - p.start))ms"
+        if let f = p.focus {
+            line += " -> focus moved \(ms(f - p.start))ms"
+        } else {
+            line += " -> focus unchanged"
+        }
+        debugLog(line)
+    }
+
+    private static func ms(_ seconds: CFTimeInterval) -> Int { Int((seconds * 1000).rounded()) }
+
+    /// iOS has no press event to swizzle, so a recognizer that never
+    /// recognizes anything is attached to the key window: it sees every
+    /// touch down without consuming or delaying it.
+    private final class TouchSpy: UIGestureRecognizer {
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+            InputProbe.begin("TOUCH")
+            state = .failed
+        }
+    }
+    private static var spy: TouchSpy?
+    static func installTouchSpy() {
+        guard spy == nil,
+              let window = UIApplication.shared.connectedScenes
+                .compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first else { return }
+        let g = TouchSpy(target: nil, action: nil)
+        g.cancelsTouchesInView = false
+        g.delaysTouchesBegan = false
+        g.delaysTouchesEnded = false
+        window.addGestureRecognizer(g)
+        spy = g
+        debugLog("[INPUT] touch spy installed on key window")
+    }
+}
+
+/// Live view/layer census. `cell` / `row` are incremented from onAppear and
+/// decremented from onDisappear, so the number is what EXISTS, not what was
+/// evaluated (the [TAB]/[RENDER] body counters already cover evaluation).
+@MainActor
+enum LiveCensus {
+    private(set) static var cells = 0
+    private(set) static var rows = 0
+    static func cellAppeared() { cells += 1 }
+    static func cellDisappeared() { cells = max(0, cells - 1) }
+    static func rowAppeared() { rows += 1 }
+    static func rowDisappeared() { rows = max(0, rows - 1) }
+
+    /// Total CALayers under the key window. Walked once per second only.
+    static func layerCount() -> Int {
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first else { return 0 }
+        func walk(_ layer: CALayer) -> Int {
+            var n = 1
+            for sub in layer.sublayers ?? [] { n += walk(sub) }
+            return n
+        }
+        return walk(window.layer)
+    }
+}
+
+/// CADisplayLink-backed frame timer. Started while the guide is on screen so
+/// the log carries real frame intervals (the render server's load) next to the
+/// live cell / layer counts.
+@MainActor
+final class FrameProbe: NSObject {
+    static let shared = FrameProbe()
+    private var link: CADisplayLink?
+    private var lastFrame: CFTimeInterval = 0
+    private var frames = 0
+    private var slowFrames = 0
+    private var worst: CFTimeInterval = 0
+    private var lastInterval: CFTimeInterval = 0
+    private var lastReport: CFTimeInterval = 0
+    private var captureNextFrame = false
+    private var owner = ""
+    /// Refcounted: the guide and the iPhone channel list both want the probe,
+    /// and one of them disappearing must not stop it under the other.
+    private var clients = 0
+
+    static func start(_ owner: String) {
+        let p = shared
+        p.clients += 1
+        guard p.link == nil else { return }
+        p.owner = owner
+        p.frames = 0; p.slowFrames = 0; p.worst = 0; p.lastFrame = 0
+        p.lastReport = CACurrentMediaTime()
+        let link = CADisplayLink(target: p, selector: #selector(tick(_:)))
+        link.add(to: .main, forMode: .common)
+        p.link = link
+        InputProbe.installTouchSpy()
+        debugLog("[RENDER] frame probe on (\(owner))")
+    }
+
+    static func stop() {
+        let p = shared
+        p.clients = max(0, p.clients - 1)
+        guard p.clients == 0 else { return }
+        p.link?.invalidate()
+        p.link = nil
+        debugLog("[RENDER] frame probe off (\(p.owner))")
+    }
+
+    static func armInputFrameCapture() { shared.captureNextFrame = true }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        let now = link.timestamp
+        if lastFrame > 0 {
+            lastInterval = now - lastFrame
+            frames += 1
+            if lastInterval > worst { worst = lastInterval }
+            if lastInterval > 0.1 { slowFrames += 1 }
+        }
+        lastFrame = now
+        if captureNextFrame {
+            captureNextFrame = false
+            InputProbe.notePresentedFrame(CACurrentMediaTime())
+        }
+        guard now - lastReport >= 1.0 else { return }
+        lastReport = now
+        let f = frames, slow = slowFrames
+        let worstMS = Int((worst * 1000).rounded())
+        let lastMS = Int((lastInterval * 1000).rounded())
+        frames = 0; slowFrames = 0; worst = 0
+        debugLog("[RENDER] live cells \(LiveCensus.cells), live rows \(LiveCensus.rows), layers ~\(LiveCensus.layerCount()), frames \(f)/s, last frame \(lastMS)ms, worst \(worstMS)ms, frames over 100ms: \(slow)")
+    }
+}
+#endif

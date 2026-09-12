@@ -411,6 +411,10 @@ struct ChannelListView: View {
                                          guide: GuideStore.shared)
         NavigationStack {
             mainContent
+                // Frame / input probe also covers the Live TV list, which is
+                // where the iPhone scroll lag is reported (Logan 2026-09-12).
+                .onAppear { FrameProbe.start("channel list") }
+                .onDisappear { FrameProbe.stop() }
                 #if os(iOS)
                 // No title: the tab bar already says where we are (Logan
                 // 2026-09-05). Phone: no bar at all, the header row above the

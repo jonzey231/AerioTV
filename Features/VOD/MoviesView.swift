@@ -3945,6 +3945,8 @@ final class TVFocusTracer {
             default: heading = "none"
             }
             debugLog("[FOCUS] \(heading): \(desc(ctx.previouslyFocusedItem)) -> \(desc(ctx.nextFocusedItem))")
+            // Feeds the press-to-focus leg of the [INPUT] line.
+            InputProbe.noteFocusChange()
         }
         debugLog("[FOCUS] tracer on")
     }
@@ -3992,6 +3994,9 @@ extension UIApplication {
                 let focused = env.flatMap { UIFocusSystem.focusSystem(for: $0)?.focusedItem }
                 let f = focused.map { String(describing: type(of: $0)) } ?? "nil"
                 debugLog("[PRESS] \(name) \(press.phase == .began ? "began" : "ended") focused=\(f)")
+                // Start the input-to-frame clock on the DOWN edge only; the
+                // matching [INPUT] line lands on the first presented frame.
+                if press.phase == .began { InputProbe.begin(name) }
             }
         }
         aerio_sendEvent(event)

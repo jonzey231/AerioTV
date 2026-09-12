@@ -4721,6 +4721,10 @@ struct EPGGuideView: View {
 
     var body: some View {
         bodyContent
+            // Input-to-frame + render-load probe runs only while the guide is
+            // on screen (Logan 2026-09-12).
+            .onAppear { FrameProbe.start("guide") }
+            .onDisappear { FrameProbe.stop() }
             // GH #71: digit keys (attached keyboard, CEC / universal
             // remote number pad) jump the guide to that channel row
             // without tuning. Resolves against the list the guide is
@@ -5517,9 +5521,11 @@ struct EPGGuideView: View {
             Rectangle().fill(Color.accentPrimary.opacity(0.08)).frame(height: 1)
         }
         .onAppear {
+            LiveCensus.rowAppeared()
             guideStore.prefetchIfNeeded(channel: channel, servers: servers)
         }
         .onDisappear {
+            LiveCensus.rowDisappeared()
             // Cancel the debounced (not-yet-fired) prefetch for this
             // row. If it hasn't slept past its 250ms timer yet, no
             // network request goes out — which is the whole point on
@@ -6933,8 +6939,21 @@ private struct GuideProgramButton: View {
     /// show at any of the guide's font sizes.
     private var minWidthForText: CGFloat { 44 }
 
-    @ViewBuilder
+    /// Live-cell census (Logan 2026-09-12): counts cells that EXIST, which is
+    /// the render-server load, as opposed to the [TAB] body counter which
+    /// counts re-evaluations.
     private var cellContent: some View {
+        censusTrackedCellContent
+    }
+
+    private var censusTrackedCellContent: some View {
+        rawCellContent
+            .onAppear { LiveCensus.cellAppeared() }
+            .onDisappear { LiveCensus.cellDisappeared() }
+    }
+
+    @ViewBuilder
+    private var rawCellContent: some View {
         if width < minWidthForText {
             // Deliberately empty: the cell's background still draws, so the
             // programme remains visible as a block on the timeline and stays
