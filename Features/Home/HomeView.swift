@@ -1124,6 +1124,11 @@ final class ChannelStore: ObservableObject {
         // not a silent no-op (Cloudflare rate-limits lift; bans expire).
         GuideStore.shared.invalidateBulkGuideReuse()
         GuideStore.shared.resetEPGRefusalLatches(forServerKey: server.id.uuidString)
+        // Incremental guide loading: the chunk coverage record would otherwise
+        // make this walk skip every day it already holds. The user asked for
+        // fresh data (Edit Playlist > Refresh, Refresh EPG Data, Refresh
+        // Everything, pull to refresh), so force a full reload of the range.
+        GuideStore.shared.invalidateGridCoverage()
         activeServer = server
         currentChannelServerID = server.id
         loadTask?.cancel()

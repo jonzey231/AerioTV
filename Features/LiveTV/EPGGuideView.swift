@@ -78,6 +78,92 @@ struct GuideProgram: Identifiable, Equatable {
 
 import SwiftData
 
+// MARK: - EPG grid chunk coverage (incremental guide loading)
+
+/// What one-day grid chunks this playlist has already fetched, persisted so a
+/// relaunch refetches only what is missing or stale instead of re-downloading
+/// every day of the Guide Days range (Logan 2026-09-11: the old launch path
+/// refetched EVERY chunk on every launch).
+///
+/// Rebuildable derived data, so it goes through `AppCacheDirectory` like the
+/// VOD library snapshot and the TMDB art cache: tvOS has no writable
+/// Application Support. Never `try?` the write; failures are logged.
+///
+/// Identity follows the EPG cache rule: a record whose identity does not match
+/// the current playlist/server is stale regardless of age, and both the cached
+/// programs and the coverage are dropped rather than trusted.
+enum EPGGridCoverage {
+    /// Bump when `Chunk` changes shape; a mismatch is a miss.
+    private static let schema = 1
+
+    struct Chunk: Codable, Sendable {
+        var start: Date
+        var end: Date
+        var fetchedAt: Date
+        var programCount: Int
+    }
+
+    struct Record: Codable, Sendable {
+        var identity: String
+        var chunks: [Chunk]
+        var at: Date
+    }
+
+    private static var fileURL: URL {
+        AppCacheDirectory.url.appendingPathComponent("epg-grid-coverage.json")
+    }
+
+    /// Same shape as `VODLibraryCache.identity`: another server, base URL or
+    /// account is a different guide and must not reuse this coverage.
+    static func identity(serverID: String, server: ServerConnection?) -> String {
+        guard let server else { return "v\(schema)|\(serverID)" }
+        return "v\(schema)|\(serverID)|\(server.effectiveBaseURL)|\(server.username)"
+    }
+
+    /// Decodes off the main actor. `identityChanged` is true when a record
+    /// exists but belongs to another playlist identity, which is the caller's
+    /// signal to drop the cached programs too.
+    static func load(identity: String) async -> (chunks: [Chunk], identityChanged: Bool) {
+        let url = fileURL
+        return await Task.detached(priority: .userInitiated) { () -> (chunks: [Chunk], identityChanged: Bool) in
+            guard let data = try? Data(contentsOf: url) else { return ([], false) }
+            guard let record = try? JSONDecoder().decode(Record.self, from: data) else {
+                // Unreadable record: treat as an identity change so the guide
+                // is rebuilt from the server rather than trusted blind.
+                return ([], true)
+            }
+            guard record.identity == identity else { return ([], true) }
+            return (record.chunks, false)
+        }.value
+    }
+
+    static func save(identity: String, chunks: [Chunk]) {
+        let url = fileURL
+        let record = Record(identity: identity, chunks: chunks, at: Date())
+        Task.detached(priority: .utility) {
+            do {
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                        withIntermediateDirectories: true)
+                let data = try JSONEncoder().encode(record)
+                try data.write(to: url, options: .atomic)
+                debugLog("[EPG grid window] coverage saved: \(record.chunks.count) chunk(s)")
+            } catch {
+                debugLog("[EPG grid window] coverage save failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    static func clear() {
+        do {
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                try FileManager.default.removeItem(at: fileURL)
+            }
+        } catch {
+            debugLog("[EPG grid window] coverage clear failed: \(error.localizedDescription)")
+        }
+    }
+}
+
 // MARK: - Guide Store
 /// Manages EPG programs for the guide grid.
 /// Phase 0: loads from SwiftData persistent cache (instant, survives app restart).
@@ -483,6 +569,17 @@ final class GuideStore: ObservableObject {
         // to plain `GuideProgram` structs on the bg context; only
         // the resulting Sendable dict (plus counts) comes back.
         let container = modelContext.container
+        // Incremental guide loading: restore (or drop) this playlist's chunk
+        // coverage before the cache read, so the window walk later in this
+        // launch knows what it already holds. An identity change drops the
+        // cached programs here, which makes the read below come back empty and
+        // the follow-up fetch a real one.
+        await prepareGridCoverage(
+            identity: EPGGridCoverage.identity(serverID: serverID,
+                                               server: ChannelStore.shared.activeServer),
+            serverID: serverID,
+            container: container
+        )
         // Guide Days (Logan 2026-09-11): the playlist's own setting governs
         // the window in BOTH directions; Settings > Network no longer has a
         // "Guide Window" preference.
@@ -671,6 +768,10 @@ final class GuideStore: ObservableObject {
         inFlightXMLTVTask?.task.cancel()
         inFlightXMLTVTask = nil
         lastSeedEPGCacheSignature = nil
+        // A purge empties the programs this coverage record claims to describe,
+        // so the record has to go with it or the next walk would skip chunks it
+        // no longer holds.
+        invalidateGridCoverage()
         // `programs` was just emptied; a completed-pass record claiming "these
         // channels are already merged" would be a lie until the next fetch.
         // Every current caller pairs this with forceRefresh (which also
@@ -987,6 +1088,136 @@ final class GuideStore: ObservableObject {
         let uuidToChannelID: [String: String]
     }
     private var lastDispatcharrMaps: DispatcharrGridMaps?
+
+    // MARK: Incremental grid coverage
+
+    /// One entry per one-day chunk this playlist has fetched (plus the live
+    /// window). Loaded once per playlist by `prepareGridCoverage`, consulted by
+    /// the window walk, persisted through `EPGGridCoverage`.
+    private var gridCoverage: [EPGGridCoverage.Chunk] = []
+    /// Playlist identity `gridCoverage` belongs to.
+    private var gridCoverageIdentity: String?
+    /// Container captured by `loadFromCache`, so the coverage paths can prune
+    /// or drop cached rows without threading a `ModelContext` through the
+    /// background walk.
+    private var cachedContainer: ModelContainer?
+    /// Set by the user-facing Refresh paths: the next window walk ignores
+    /// coverage and refetches every chunk.
+    private var forceFullGridReload = false
+
+    /// How long a fetched chunk stays trusted. Long enough that relaunches
+    /// within a day cost nothing, short enough that a provider's late EPG
+    /// corrections land the same day.
+    nonisolated static let gridCoverageTTL: TimeInterval = 12 * 3600
+
+    /// True when a chunk equal to or wider than `start...end` was fetched
+    /// inside the TTL. A 60 s slack absorbs the forward drift of `now`-derived
+    /// chunk edges between launches.
+    private func gridChunkIsCovered(start: Date, end: Date, now: Date) -> Bool {
+        guard !forceFullGridReload else { return false }
+        return gridCoverage.contains {
+            $0.start <= start.addingTimeInterval(60)
+                && $0.end >= end.addingTimeInterval(-60)
+                && now.timeIntervalSince($0.fetchedAt) < Self.gridCoverageTTL
+        }
+    }
+
+    /// Record a fetched chunk, replacing any entry with the same edges.
+    private func recordGridCoverage(start: Date, end: Date, programCount: Int) {
+        gridCoverage.removeAll {
+            abs($0.start.timeIntervalSince(start)) < 60 && abs($0.end.timeIntervalSince(end)) < 60
+        }
+        gridCoverage.append(EPGGridCoverage.Chunk(start: start, end: end,
+                                                  fetchedAt: Date(), programCount: programCount))
+    }
+
+    private func persistGridCoverage() {
+        guard let identity = gridCoverageIdentity else { return }
+        EPGGridCoverage.save(identity: identity, chunks: gridCoverage)
+    }
+
+    /// The user asked for fresh data (Edit Playlist > Refresh, Refresh EPG
+    /// Data, Refresh Everything, pull to refresh): the next window walk must
+    /// refetch every chunk, not skip the ones it already holds.
+    func invalidateGridCoverage() {
+        forceFullGridReload = true
+        gridCoverage = []
+        EPGGridCoverage.clear()
+        debugLog("[EPG grid window] coverage invalidated by an explicit refresh; the next walk refetches every chunk")
+    }
+
+    /// Load (or drop) this playlist's coverage record. An identity change is
+    /// stale regardless of age per the EPG cache rule, so it drops the cached
+    /// programs AND the coverage, and resets the fetch latches so the rebuild
+    /// is a real network attempt.
+    private func prepareGridCoverage(identity: String, serverID: String, container: ModelContainer) async {
+        cachedContainer = container
+        guard gridCoverageIdentity != identity else { return }
+        let result = await EPGGridCoverage.load(identity: identity)
+        gridCoverageIdentity = identity
+        gridCoverage = result.chunks
+        guard result.identityChanged else {
+            debugLog("[EPG grid window] coverage restored: \(result.chunks.count) chunk(s) for \(serverID.prefix(8))")
+            return
+        }
+        EPGGridCoverage.clear()
+        gridCoverage = []
+        programs = [:]
+        lastLoadFromCacheResult = nil
+        await Task.detached(priority: .userInitiated) {
+            let ctx = ModelContext(container)
+            ctx.autosaveEnabled = false
+            do {
+                try ctx.delete(model: EPGProgram.self,
+                               where: #Predicate<EPGProgram> { $0.serverID == serverID })
+                try ctx.save()
+            } catch {
+                debugLog("[EPG grid window] identity purge failed: \(error.localizedDescription)")
+            }
+        }.value
+        invalidateBulkGuideReuse()
+        resetEPGRefusalLatches(forServerKey: serverID)
+        debugLog("[EPG grid window] playlist identity changed; dropped cached programs and chunk coverage for \(serverID.prefix(8))")
+    }
+
+    /// Incremental pruning (Logan 2026-09-11): a smaller Guide Days range must
+    /// shrink what the app holds, the same way a larger one only fetches the
+    /// chunks it is missing. Drops programs that ended before the history
+    /// bound, in memory and on disk, and coverage entries that fall entirely
+    /// outside the current range.
+    private func pruneOutsideGridWindow(historyStart: Date, forwardEnd: Date, serverID: String) async {
+        let before = gridCoverage.count
+        gridCoverage.removeAll { $0.end <= historyStart || $0.start >= forwardEnd }
+        let droppedChunks = before - gridCoverage.count
+
+        var trimmed: [String: [GuideProgram]] = [:]
+        var droppedPrograms = 0
+        for (channelID, list) in programs {
+            let kept = list.filter { $0.end >= historyStart }
+            droppedPrograms += list.count - kept.count
+            if !kept.isEmpty { trimmed[channelID] = kept }
+        }
+        if droppedPrograms > 0 { programs = trimmed }
+
+        if droppedPrograms > 0, let container = cachedContainer {
+            await Task.detached(priority: .utility) {
+                let ctx = ModelContext(container)
+                ctx.autosaveEnabled = false
+                do {
+                    try ctx.delete(model: EPGProgram.self,
+                                   where: #Predicate<EPGProgram> {
+                                       $0.serverID == serverID && $0.endTime < historyStart
+                                   })
+                    try ctx.save()
+                } catch {
+                    debugLog("[EPG grid window] prune delete failed: \(error.localizedDescription)")
+                }
+            }.value
+        }
+        if droppedChunks > 0 || droppedPrograms > 0 {
+            debugLog("[EPG grid window] pruned \(droppedPrograms) program(s) older than the history bound and \(droppedChunks) coverage entry(ies) outside the range")
+        }
+    }
 
     func trimExpiredPrograms() {
         let cutoff = Date().addingTimeInterval(-GuideStore.activeRetentionSeconds())
@@ -1763,12 +1994,38 @@ final class GuideStore: ObservableObject {
                                  savedUsername: server.dispatcharrCredentialType == .usernamePassword
                                      ? server.username : nil)
         await fetchGridChunks(chunks, api: api, maps: maps, serverID: server.id.uuidString)
+        persistGridCoverage()
+    }
+
+    /// Result of one chunk walk, for the summary log and the All Available
+    /// stop rule. `depth` is how many one-day chunks were covered (fetched or
+    /// already held) before the walk stopped.
+    private struct GridWalkResult {
+        var depth = 0
+        var visited = 0
+        var fetched = 0
+        var cached = 0
+        static func + (a: GridWalkResult, b: GridWalkResult) -> GridWalkResult {
+            GridWalkResult(depth: max(a.depth, b.depth), visited: a.visited + b.visited,
+                           fetched: a.fetched + b.fetched, cached: a.cached + b.cached)
+        }
+    }
+
+    /// Programmes currently resident inside a window, recorded with the live
+    /// window's coverage entry.
+    private func residentProgramCount(from start: Date, to end: Date) -> Int {
+        var count = 0
+        for list in programs.values {
+            for gp in list where gp.end > start && gp.start < end { count += 1 }
+        }
+        return count
     }
 
     private func extendDispatcharrGridWindow(server: ServerConnection,
                                              channels: [ChannelDisplayItem],
                                              windowEnd: Date) async {
         guard let maps = lastDispatcharrMaps, maps.serverID == server.id.uuidString else { return }
+        let serverID = server.id.uuidString
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                  auth: .apiKey(server.effectiveApiKey),
                                  userAgent: server.effectiveUserAgent,
@@ -1790,6 +2047,11 @@ final class GuideStore: ObservableObject {
         let forwardEnd = allAvailable
             ? now.addingTimeInterval(TimeInterval(Self.allAvailableMaxDaysAhead) * 86_400)
             : max(windowEnd, now.addingTimeInterval(TimeInterval(playlistDays) * 86_400))
+        // The live window is fetched unconditionally on every load (the base
+        // grid just committed it), so record it rather than let a later walk
+        // ask for it again.
+        recordGridCoverage(start: baseStart, end: baseEnd,
+                           programCount: residentProgramCount(from: baseStart, to: baseEnd))
         // Chunks: history newest-first (catch-up depth users reach first),
         // then forward. One day each.
         var historyChunks: [(Date, Date)] = []
@@ -1806,38 +2068,55 @@ final class GuideStore: ObservableObject {
             forwardChunks.append((fStart, fEnd))
             fStart = fEnd
         }
-        guard !historyChunks.isEmpty || !forwardChunks.isEmpty else { return }
+        let historyHours = Int(historySecs / 3600)
+        let forwardHours = Int(forwardEnd.timeIntervalSince(now) / 3600)
+        guard !historyChunks.isEmpty || !forwardChunks.isEmpty else {
+            forceFullGridReload = false
+            await pruneOutsideGridWindow(historyStart: historyStart, forwardEnd: forwardEnd, serverID: serverID)
+            persistGridCoverage()
+            return
+        }
+        var walk: GridWalkResult
         if allAvailable {
             // All Available (Logan 2026-09-11): walk one-day chunks until a
             // direction runs dry (two consecutive empty chunks), bounded at
             // 30 days back / 60 days ahead so a huge server cannot run
-            // forever. The >5000-channel history clamp still applies.
-            debugLog("📺 [EPG source=dispatcharr-api grid window] all available: up to \(historyChunks.count) history + \(forwardChunks.count) forward chunk(s), history clamp \(Int(historySecs / 3600))h")
-            let backDays = await fetchGridChunks(historyChunks, api: api, maps: maps,
-                                                 serverID: server.id.uuidString,
-                                                 stopAfterConsecutiveEmpty: 2)
-            let aheadDays = await fetchGridChunks(forwardChunks, api: api, maps: maps,
-                                                  serverID: server.id.uuidString,
-                                                  stopAfterConsecutiveEmpty: 2)
-            debugLog("📺 grid window: all available, back \(backDays)d ahead \(aheadDays)d")
-            return
+            // forever. The >5000-channel history clamp still applies. A chunk
+            // that is already covered counts as covered for the stop rule even
+            // when the server had nothing in it.
+            debugLog("📺 [EPG source=dispatcharr-api grid window] all available: up to \(historyChunks.count) history + \(forwardChunks.count) forward chunk(s), history clamp \(historyHours)h")
+            let back = await fetchGridChunks(historyChunks, api: api, maps: maps,
+                                             serverID: serverID,
+                                             stopAfterConsecutiveEmpty: 2)
+            let ahead = await fetchGridChunks(forwardChunks, api: api, maps: maps,
+                                              serverID: serverID,
+                                              stopAfterConsecutiveEmpty: 2)
+            walk = back + ahead
+            debugLog("📺 grid window: all available, back \(back.depth)d ahead \(ahead.depth)d")
+        } else {
+            let chunks = historyChunks + forwardChunks
+            debugLog("📺 [EPG source=dispatcharr-api grid window] \(chunks.count) chunk(s): guideDays=\(playlistDays), history \(historyHours)h, forward to +\(forwardHours)h")
+            walk = await fetchGridChunks(chunks, api: api, maps: maps, serverID: serverID)
         }
-        let chunks = historyChunks + forwardChunks
-        debugLog("📺 [EPG source=dispatcharr-api grid window] \(chunks.count) chunk(s): guideDays=\(playlistDays), history \(Int(historySecs / 3600))h, forward to +\(Int(forwardEnd.timeIntervalSince(now) / 3600))h")
-        _ = await fetchGridChunks(chunks, api: api, maps: maps, serverID: server.id.uuidString)
+        debugLog("📺 [EPG grid window] \(walk.fetched) of \(walk.visited) chunk(s) fetched (\(walk.cached) cached), history \(historyHours)h, forward +\(forwardHours)h")
+        // An explicit refresh forced this walk to ignore coverage; the walk has
+        // now rewritten it, so later walks in this session are incremental again.
+        forceFullGridReload = false
+        await pruneOutsideGridWindow(historyStart: historyStart, forwardEnd: forwardEnd, serverID: serverID)
+        persistGridCoverage()
     }
 
-    /// Fetch, merge and commit grid chunks in order; records the furthest
+    /// Fetch, merge and commit grid chunks in order, skipping any chunk this
+    /// playlist already fetched inside `gridCoverageTTL`; records the furthest
     /// forward edge reached so a later jump does not refetch it.
-    /// Returns the number of one-day chunks that actually carried programmes
-    /// before the walk stopped (the loaded depth, for All Available).
     @discardableResult
     private func fetchGridChunks(_ chunks: [(Date, Date)], api: DispatcharrAPI,
                                  maps: DispatcharrGridMaps, serverID: String,
-                                 stopAfterConsecutiveEmpty: Int? = nil) async -> Int {
+                                 stopAfterConsecutiveEmpty: Int? = nil) async -> GridWalkResult {
+        var result = GridWalkResult()
         var total = 0
         var consecutiveEmpty = 0
-        var covered = 0
+        let now = Date()
         // Publish sparingly: every chunk used to replace `programs`, and one
         // publish re-renders the tab roots and every channel row (probe
         // 2026-09-06: 656 row bodies twice a second for the ~25 s of a
@@ -1847,7 +2126,17 @@ final class GuideStore: ObservableObject {
         var staged = programs_snapshotForMerge()
         var unpublished = 0
         for (i, (start, end)) in chunks.enumerated() {
-            guard displayedServerID == nil || displayedServerID == serverID else { return covered }
+            guard displayedServerID == nil || displayedServerID == serverID else { return result }
+            result.visited += 1
+            // Incremental load: a chunk already fetched inside the TTL is kept
+            // as-is. It counts as covered, never as empty, so an already-loaded
+            // quiet day cannot end an All Available walk early.
+            if gridChunkIsCovered(start: start, end: end, now: now) {
+                consecutiveEmpty = 0
+                result.cached += 1
+                result.depth = i + 1
+                continue
+            }
             let programs: [DispatcharrCurrentProgram]
             do {
                 programs = try await api.getEPGGrid(start: start, end: end)
@@ -1855,6 +2144,8 @@ final class GuideStore: ObservableObject {
                 debugLog("📺 grid window chunk failed (\(error.localizedDescription)); stopping extension")
                 break
             }
+            result.fetched += 1
+            recordGridCoverage(start: start, end: end, programCount: programs.count)
             if programs.isEmpty {
                 consecutiveEmpty += 1
                 if let limit = stopAfterConsecutiveEmpty, consecutiveEmpty >= limit {
@@ -1864,7 +2155,7 @@ final class GuideStore: ObservableObject {
                 continue
             }
             consecutiveEmpty = 0
-            covered = i + 1
+            result.depth = i + 1
             let base = staged
             let merged = await Task.detached(priority: .utility) {
                 GuideStore.mergeGridPrograms(programs, into: base,
@@ -1879,7 +2170,7 @@ final class GuideStore: ObservableObject {
             debugLog("📺 grid window chunk \(Self.chunkStamp(start))..\(Self.chunkStamp(end)): \(programs.count) from server, \(merged.matched) matched")
             let isForward = end > Date()
             if isForward || unpublished >= 6 || i == chunks.count - 1 {
-                guard commitPrograms(staged, for: serverID, source: "dispatcharr-grid-window") else { return covered }
+                guard commitPrograms(staged, for: serverID, source: "dispatcharr-grid-window") else { return result }
                 unpublished = 0
                 staged = programs_snapshotForMerge()
             }
@@ -1889,8 +2180,8 @@ final class GuideStore: ObservableObject {
         if unpublished > 0 {
             _ = commitPrograms(staged, for: serverID, source: "dispatcharr-grid-window")
         }
-        debugLog("📺 grid window extension done: \(total) programmes merged over \(chunks.count) chunk(s)")
-        return covered
+        debugLog("📺 grid window extension done: \(total) programmes merged over \(result.fetched) fetched chunk(s) of \(chunks.count)")
+        return result
     }
 
     private static func chunkStamp(_ d: Date) -> String {
