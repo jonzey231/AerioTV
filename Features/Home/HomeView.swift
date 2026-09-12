@@ -4837,7 +4837,15 @@ struct MainTabView: View {
             // this fullscreen remote drives the TV. Cast Stop resumes the
             // channel locally; companion Disconnect leaves the TV playing and
             // returns to the guide (device-verified Android semantics).
-            if castController.isCasting, let content = castController.castingContent {
+            if castController.isCasting, castController.awaitingChannelPick,
+               castController.castingContent == nil {
+                // Session up, nothing loaded (guide pill with no playback):
+                // ask for a channel instead of leaving the receiver idle
+                // until it dies (Logan 2026-09-11).
+                CastChannelPickCover()
+                    .zIndex(3)
+                    .transition(.opacity)
+            } else if castController.isCasting, let content = castController.castingContent {
                 RemoteControlScreen(
                     title: content.title,
                     subtitle: content.subtitle,

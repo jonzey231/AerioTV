@@ -97,6 +97,19 @@ final class AerioCastController: NSObject, ObservableObject {
     /// Mirrors the remote player's play/pause for the cover's transport button.
     @Published private(set) var remoteIsPlaying = true
 
+    /// A session connected with nothing to play: the receiver is up but the
+    /// user started the cast from the guide pill, where no channel is
+    /// playing. The cover renders a channel list instead of stranding the
+    /// receiver on its idle screen until the web receiver times out (Logan,
+    /// 2026-09-11: "launched then died instantly").
+    @Published private(set) var awaitingChannelPick = false
+    /// Last connect failure, surfaced inline on the picker row that was
+    /// tapped (no alert: the sheet is still on screen).
+    @Published var connectError: String?
+    /// Device id the picker is currently connecting to, so its row can show
+    /// a spinner and the other rows can dim.
+    @Published private(set) var connectingDeviceID: String?
+
     private var started = false
     private var pending: Content?
     private var castStateObserver: NSObjectProtocol?
@@ -265,6 +278,59 @@ final class AerioCastController: NSObject, ObservableObject {
         )
     }
 
+    /// Picker entry point (guide pill AND in-player chrome): start a session
+    /// on `device` and decide up front WHAT it will play, so the receiver is
+    /// never left idle with nothing loaded. Priority: the channel playing
+    /// locally (full or mini player), else the multiview audio tile, else
+    /// nothing -- and "nothing" means the cover shows a channel list once the
+    /// session connects, never a bare receiver.
+    func beginSession(with device: GCKDevice) {
+        let name = device.friendlyName ?? device.deviceID
+        connectError = nil
+        connectingDeviceID = device.deviceID
+        awaitingChannelPick = false
+        // One remote target at a time (Android parity): a companion session
+        // would otherwise leave two remote covers live.
+        if CompanionClient.shared.isControlling { CompanionClient.shared.disconnect() }
+        let seed = Self.currentCastableItem()
+        pending = seed.flatMap { Self.castContent(for: $0) }
+        castingContent = pending
+        debugLog("[Cast] picker selected \(name) -> startSession seed=\(seed?.name ?? "none")")
+        let started = GCKCastContext.sharedInstance().sessionManager.startSession(with: device)
+        if !started {
+            pending = nil
+            castingContent = nil
+            connectingDeviceID = nil
+            connectError = "Could not connect to \(name)"
+            debugLog("[Cast] startSession refused by the SDK for \(name)")
+        }
+    }
+
+    /// What a fresh session should open with, if anything is playing on the
+    /// phone right now. Mirrors the in-player chrome's notion of "the current
+    /// channel" (NowPlayingManager for single streams, the audio tile for
+    /// multiview).
+    static func currentCastableItem() -> ChannelDisplayItem? {
+        if let item = NowPlayingManager.shared.playingItem { return item }
+        if let id = MultiviewStore.shared.audioTileID,
+           let tile = MultiviewStore.shared.tiles.first(where: { $0.id == id }) {
+            return tile.item
+        }
+        return MultiviewStore.shared.tiles.first?.item
+    }
+
+    /// The channel-list cover's row tap: load it on the already-connected
+    /// receiver.
+    func castPickedChannel(_ item: ChannelDisplayItem) {
+        guard let content = Self.castContent(for: item) else {
+            surfaceCastFailure("This channel has no castable stream")
+            return
+        }
+        awaitingChannelPick = false
+        debugLog("[Cast] cover picked channel=\(item.name)")
+        setContent(content)
+    }
+
     // MARK: - Loading
 
     /// In-flight "warm the proxy, then load" task; superseded by every
@@ -282,6 +348,7 @@ final class AerioCastController: NSObject, ObservableObject {
     /// playlist is a hard receiver error, not a retry.
     private func load(_ content: Content, on session: GCKCastSession) {
         proxyLoadTask?.cancel()
+        debugLog("[Cast] load channel=\(content.title) url=proxy playlist (from live TS ingest)")
         guard content.kind == .live, let rawTS = content.streamURL else {
             // No proxyable stream: nothing the web receiver could play.
             surfaceCastFailure("This channel has no castable stream")
@@ -494,8 +561,27 @@ extension AerioCastController: GCKSessionManagerListener {
     nonisolated func sessionManager(_ sessionManager: GCKSessionManager, didResumeCastSession session: GCKCastSession) {
         MainActor.assumeIsolated { self.onConnected() }
     }
+    nonisolated func sessionManager(_ sessionManager: GCKSessionManager,
+                                    didFailToStart session: GCKSession,
+                                    withError error: Error) {
+        let name = session.device.friendlyName ?? session.device.deviceID
+        let text = error.localizedDescription
+        MainActor.assumeIsolated { self.onSessionFailedToStart(device: name, message: text) }
+    }
     nonisolated func sessionManager(_ sessionManager: GCKSessionManager, didEnd session: GCKSession, withError error: Error?) {
         MainActor.assumeIsolated { self.onSessionEnded(error: error) }
+    }
+
+    /// Connect attempt refused by the device: clear the captured intent and
+    /// leave the message on the picker row the user tapped.
+    private func onSessionFailedToStart(device: String, message: String) {
+        debugLog("[Cast] session failed to start \(device): \(message)")
+        pending = nil
+        castingContent = nil
+        awaitingChannelPick = false
+        connectingDeviceID = nil
+        connectError = "Could not connect to \(device): \(message)"
+        syncCastState(GCKCastContext.sharedInstance().castState)
     }
 
     /// Re-fetches the current session on the MainActor (rather than receiving the
@@ -504,6 +590,9 @@ extension AerioCastController: GCKSessionManagerListener {
         guard let session = GCKCastContext.sharedInstance().sessionManager.currentCastSession else { return }
         state = .connected(session.device.friendlyName)
         session.device.friendlyName.map { lastDeviceName = $0 }
+        connectingDeviceID = nil
+        connectError = nil
+        debugLog("[Cast] session started \(session.device.friendlyName ?? session.device.deviceID) state=\(GCKCastContext.sharedInstance().castState.rawValue) pending=\(pending?.title ?? "none")")
         // Ask for notification permission the first time a cast connects (a
         // moment when the user just acted, so the system dialog has obvious
         // context). Without this the app never appears in Settings >
@@ -517,37 +606,37 @@ extension AerioCastController: GCKSessionManagerListener {
             _ = try? await center.requestAuthorization(options: [.alert, .sound])
         }
         session.remoteMediaClient?.add(self)
-        if let pending {
-            load(pending, on: session)
-            // setContent ran before the session connected, so its card sync
-            // hit the not-connected guard; publish now that state is live.
-            syncNowPlayingCard()
-            return
-        }
         // Cast takes precedence over an active companion session: tear that
         // down first so the two remote covers can never both be live (review
         // 2026-07-16). Companion Disconnect leaves the Android TV playing.
         if CompanionClient.shared.isControlling { CompanionClient.shared.disconnect() }
-        // Fresh session started from the player chrome: hand the CURRENTLY
-        // playing channel to the TV, then tear the local player down (frees
-        // the decoder AND the Dispatcharr connection slot -- the receiver is
-        // about to open its own; on max-connections=1 channels the local
-        // stream would starve the TV's, Android review 2026-07-15). The
-        // cast-remote cover (HomeView renders it off isCasting) takes over.
-        if let item = NowPlayingManager.shared.playingItem,
-           let content = Self.castContent(for: item) {
+        // What this session plays: the intent captured at picker tap
+        // (beginSession), else whatever is playing now (a session started by
+        // any other path, e.g. a resumed session).
+        let content = pending
+            ?? Self.currentCastableItem().flatMap { Self.castContent(for: $0) }
+        if let content {
+            // Hand the channel to the TV, then tear the local player down
+            // (frees the decoder AND the Dispatcharr connection slot -- the
+            // receiver is about to open its own; on max-connections=1
+            // channels the local stream would starve the TV's, Android
+            // review 2026-07-15). The cast-remote cover (HomeView renders it
+            // off isCasting) takes over.
             setContent(content)
             AppOrientationLock.release()
-            // PlayerSession.stop() tears down the local player's Now Playing
-            // card; republish the cast card after it.
-            PlayerSession.shared.stop()
+            if PlayerSession.shared.mode != .idle || NowPlayingManager.shared.playingItem != nil {
+                // PlayerSession.stop() tears down the local player's Now
+                // Playing card; republish the cast card after it.
+                PlayerSession.shared.stop()
+            }
             syncNowPlayingCard()
         } else {
-            // Nothing castable to hand over (the chrome gate keys on tile 0,
-            // but the seed/audio item may differ in multiview): don't strand a
-            // connected-but-empty session that renders no cover and can't be
-            // stopped except by re-finding the icon (review 2026-07-16).
-            stopCasting()
+            // Started from the guide pill with nothing playing: the receiver
+            // is up but has no media, and an unloaded web receiver dies on
+            // its idle timeout (Logan 2026-09-11). Keep the session and let
+            // the cover ask which channel to cast.
+            awaitingChannelPick = true
+            debugLog("[Cast] session started with no channel to load; awaiting channel pick")
         }
     }
 
@@ -562,6 +651,9 @@ extension AerioCastController: GCKSessionManagerListener {
         let wasUserStop = userRequestedStop
         userRequestedStop = false
         let involuntary = (error != nil) && !wasUserStop
+        awaitingChannelPick = false
+        connectingDeviceID = nil
+        debugLog("[Cast] session ended reason=\(wasUserStop ? "user stop" : (error != nil ? "error: \(error!.localizedDescription)" : "remote end"))")
         if involuntary {
             debugLog("[CAST] session ended involuntarily: \(error.map(String.init(describing:)) ?? "?")")
         }
@@ -1933,14 +2025,35 @@ struct CastPickerSheet: View {
                                 .foregroundStyle(.secondary)
                         }
                         ForEach(castDevices.devices, id: \.deviceID) { device in
+                            let connecting = castController.connectingDeviceID == device.deviceID
+                            let otherConnecting = castController.connectingDeviceID != nil && !connecting
                             Button {
                                 if !companion.isControlling { companion.disconnect() }
-                                GCKCastContext.sharedInstance().sessionManager
-                                    .startSession(with: device)
+                                // Session start AND the channel to load live
+                                // in one place now (guide pill parity with the
+                                // in-player chrome).
+                                castController.beginSession(with: device)
                             } label: {
-                                Label(device.friendlyName ?? "Cast device",
-                                      systemImage: "sparkles.tv")
+                                HStack {
+                                    Label(device.friendlyName ?? "Cast device",
+                                          systemImage: "sparkles.tv")
+                                    Spacer()
+                                    if connecting {
+                                        Text("Connecting…").foregroundStyle(.secondary)
+                                        ProgressView()
+                                    }
+                                }
                             }
+                            // Selection feedback (Logan 2026-09-11: the sheet
+                            // looked inert after the tap): the tapped row
+                            // spins, the rest dim until the attempt settles.
+                            .disabled(otherConnecting)
+                            .opacity(otherConnecting ? 0.4 : 1)
+                        }
+                        if let error = castController.connectError {
+                            Text(error)
+                                .font(.footnote)
+                                .foregroundStyle(.red)
                         }
                     }
                 }
@@ -1991,6 +2104,54 @@ struct CastPickerSheet: View {
             if case .connected = state { dismiss() }
         }
         .presentationDetents([.medium])
+    }
+}
+
+/// Connected-but-empty cast cover (Logan 2026-09-11): the guide pill can
+/// start a session with nothing playing, and a web receiver with no media
+/// loaded falls to its idle screen and dies. Rather than refusing the cast
+/// (the old behavior: onConnected called stopCasting, so the receiver
+/// "launched then died instantly"), keep the session and ask which channel
+/// to send. Picking a row loads it through the same HLS-proxy path as the
+/// in-player chrome, and the regular RemoteControlScreen cover takes over.
+struct CastChannelPickCover: View {
+    @ObservedObject private var castController = AerioCastController.shared
+    @ObservedObject private var channelStore = ChannelStore.shared
+    @State private var search = ""
+
+    private var channels: [ChannelDisplayItem] {
+        let all = channelStore.channels
+        let query = search.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return all }
+        return all.filter { $0.name.localizedCaseInsensitiveContains(query) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(channels) { item in
+                        CompactChannelRow(item: item,
+                                          isAlreadyAdded: false,
+                                          isDisabled: false) {
+                            castController.castPickedChannel(item)
+                        }
+                    }
+                } header: {
+                    Text("Pick a channel to cast")
+                }
+            }
+            .searchable(text: $search, prompt: "Search channels")
+            .navigationTitle("Casting to \(castController.connectedDeviceName ?? "TV")")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Stop casting", role: .destructive) {
+                        castController.stopCasting()
+                    }
+                }
+            }
+        }
     }
 }
 
