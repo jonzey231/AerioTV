@@ -120,15 +120,11 @@ do {
     // Contiguous sequence numbering across the splice: seg0..seg4.
     for n in 0...4 { expect(lines.contains("seg\(n).m4s"), "seg\(n) advertised") }
     expect(!text.contains("seg5.m4s"), "stale-generation segment claimed no sequence number")
-    // The discontinuity tag must sit immediately before gen2's
-    // PROGRAM-DATE-TIME (added 2026-09-12: every discontinuity restarts
-    // the media timeline, so the segment after it needs its own
-    // generation's wall-clock anchor; see section 12) and then its
-    // MAP + first segment.
+    // The discontinuity tag must sit immediately before the new
+    // generation's MAP and its first segment, with nothing in between
+    // (see section 12: no PROGRAM-DATE-TIME, ever).
     if let di = lines.firstIndex(of: "#EXT-X-DISCONTINUITY") {
-        expect(lines[di + 1].hasPrefix("#EXT-X-PROGRAM-DATE-TIME:"),
-               "discontinuity precedes the new generation's PROGRAM-DATE-TIME")
-        expectEq(lines[di + 2], "#EXT-X-MAP:URI=\"init\(gen2).mp4\"", "discontinuity precedes new MAP")
+        expectEq(lines[di + 1], "#EXT-X-MAP:URI=\"init\(gen2).mp4\"", "discontinuity precedes new MAP")
     } else {
         expect(false, "discontinuity index")
     }
@@ -604,19 +600,27 @@ do {
     expect(allSafe, "every ADTS header value yields a Chromium-parseable 2-byte ASC")
 }
 
-// MARK: 12. EXT-X-PROGRAM-DATE-TIME and the per-segment timeline callback
+// MARK: 12. NO EXT-X-PROGRAM-DATE-TIME, and a window Shaka can seek in
 //
-// Added 2026-09-12 on Logan's order after the Google TV Streamer session
-// at 15:10:03: with manifest.hls.sequenceMode=false Shaka takes segment
-// TIMESTAMPS from the media (our tfdt boxes) and segment POSITIONS from
-// the playlist (accumulated EXTINF from 0), and nothing reconciles the
-// two without an absolute clock. Shaka assumed the window began at media
-// time 0, chose a start position of 2.439 s (11.311 s window minus the
-// 9 s presentation delay) before any media was appended, relocated to
-// 0.016 s once it saw the buffer (MediaGapJumped=1), and then sat at
-// -58 ms in BUFFERING for 45 s. These tests pin the two things that let
-// us see and fix that: the absolute clock in the playlist, and the
-// per-segment timeline numbers in the proxy log.
+// PROGRAM-DATE-TIME was added on 2026-09-12 (a6a443f) and removed the
+// same day. The anchor it was derived from was the wall clock at the
+// moment a segment was STORED, one whole segment later than the media
+// that segment begins with, so every stamp ran a segment ahead of its
+// own media. Shaka makes a PDT the authority for segment POSITIONS
+// (hls_parser.js createSegments_ -> SegmentReference.syncAgainst, and
+// setInitialProgramDateTime in determineDuration_), so its live window
+// slid past the media in the buffer: the receiver reported
+// seek=[51.368-52.373] against buffered=[46.537-51.593] with the
+// playhead at 51.357, outside its own seek range, BUFFERING forever.
+//
+// These tests pin the shape the receiver needs instead: no absolute
+// clock at all, and a window whose MEDIA SPAN exceeds the receiver's
+// presentation delay, because Shaka's live seek range is
+//   [availEnd - segmentAvailabilityDuration, availEnd - presentationDelay]
+// (presentation_timeline.js getSafeSeekRangeStart / getSeekRangeEnd) with
+// segmentAvailabilityDuration taken from the window span
+// (hls_parser.js determineDuration_ -> getLiveDuration_). A window
+// narrower than the delay leaves no seek range at all.
 
 /// Every EXT-X-PROGRAM-DATE-TIME value in a playlist, in order.
 @MainActor func programDateTimes(_ playlist: String) -> [String] {
@@ -627,58 +631,47 @@ do {
     }
 }
 
-@MainActor func parseISO(_ value: String) -> Date? {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return f.date(from: value)
+/// Total EXTINF seconds advertised by a playlist: the window media span
+/// Shaka turns into its availability duration.
+@MainActor func windowSpanSeconds(_ playlist: String) -> Double {
+    playlist.split(separator: "\n").compactMap { line -> Double? in
+        guard line.hasPrefix("#EXTINF:") else { return nil }
+        let value = line.dropFirst("#EXTINF:".count).split(separator: ",").first ?? ""
+        return Double(value)
+    }.reduce(0, +)
 }
+
+/// What the receiver page configures as Shaka's presentation delay
+/// (LIVE_START_BEHIND_SECONDS in receiver.html).
+let receiverPresentationDelay = 4.0
 
 do {
     let store = CastHLSSegmentStore()
     let ticks3s: Int64 = 3 * 90_000
     let gen = store.beginGeneration()
     store.setInitSegment(generation: gen, data: Data("init".utf8))
-    for _ in 0..<3 { store.addSegment(generation: gen, data: Data([1]), durationTicks: ticks3s) }
+    for _ in 0..<4 { store.addSegment(generation: gen, data: Data([1]), durationTicks: ticks3s) }
 
     let first = store.mediaPlaylistText()
-    let stamps = programDateTimes(first)
-    expectEq(stamps.count, 1, "one EXT-X-PROGRAM-DATE-TIME, on the window's first segment")
-    guard let firstStamp = stamps.first, let firstDate = parseISO(firstStamp) else {
-        expect(false, "EXT-X-PROGRAM-DATE-TIME parses as ISO-8601 with fractional seconds")
-        exit(1)
-    }
-    expect(true, "EXT-X-PROGRAM-DATE-TIME parses as ISO-8601 with fractional seconds")
-    // The tag must precede the segment it stamps, and sit inside the
-    // window's first segment's block (i.e. before the first EXTINF).
-    let lines = first.split(separator: "\n").map(String.init)
-    if let pdtIndex = lines.firstIndex(where: { $0.hasPrefix("#EXT-X-PROGRAM-DATE-TIME:") }),
-       let extinfIndex = lines.firstIndex(where: { $0.hasPrefix("#EXTINF:") }) {
-        expect(pdtIndex < extinfIndex, "PROGRAM-DATE-TIME precedes the first EXTINF")
-    } else {
-        expect(false, "PROGRAM-DATE-TIME precedes the first EXTINF")
-    }
+    expectEq(programDateTimes(first).count, 0, "no EXT-X-PROGRAM-DATE-TIME on a live playlist")
+    // The load gate is four segments (CastHLSProxySession.readyMinSegments),
+    // so this is the narrowest window the receiver can ever see.
+    expectEq(windowSpanSeconds(first), 12.0, "four 3 s segments span 12 s of media")
+    expect(windowSpanSeconds(first) - receiverPresentationDelay >= 3.0,
+           "first window leaves a seek range at least one target duration wide")
 
     // Slide the window: windowSize is 5, so six more segments roll the
-    // first four out of the 5-segment window, and the advertised
-    // PROGRAM-DATE-TIME must advance by exactly those segments' durations.
+    // first four out, and the span stays the full five segments.
     for _ in 0..<6 { store.addSegment(generation: gen, data: Data([1]), durationTicks: ticks3s) }
     let slid = store.mediaPlaylistText()
-    guard let slidStamp = programDateTimes(slid).first, let slidDate = parseISO(slidStamp) else {
-        expect(false, "PROGRAM-DATE-TIME still present after the window slid")
-        exit(1)
-    }
-    // 9 segments stored, a 5-segment window: seq 4 is the window head, so
-    // four 3 s segments rolled off.
-    expect(slid.contains("#EXT-X-MEDIA-SEQUENCE:4"), "window head advanced to seq 4")
-    let advanced = slidDate.timeIntervalSince(firstDate)
-    expect(abs(advanced - 12.0) < 0.050,
-           "PROGRAM-DATE-TIME advanced by the rolled-off durations (12.000s, got \(String(format: "%.3f", advanced))s)")
+    expect(slid.contains("#EXT-X-MEDIA-SEQUENCE:5"), "window head advanced with the ring")
+    expectEq(programDateTimes(slid).count, 0, "still no PROGRAM-DATE-TIME after the window slid")
+    expectEq(windowSpanSeconds(slid), 15.0, "a full window spans five segments")
 }
 
-// A playlist built across a discontinuity carries a SECOND
-// PROGRAM-DATE-TIME right after the EXT-X-DISCONTINUITY: the new
-// generation restarts its media timeline at 0, so the segment after the
-// tag needs its own generation's wall-clock anchor.
+// A playlist built across a discontinuity carries no absolute clock
+// either: the discontinuity plus the new EXT-X-MAP is the whole
+// timeline-and-codec change contract.
 do {
     let store = CastHLSSegmentStore()
     let ticks3s: Int64 = 3 * 90_000
@@ -691,16 +684,14 @@ do {
 
     let text = store.mediaPlaylistText()
     let lines = text.split(separator: "\n").map(String.init)
-    expectEq(programDateTimes(text).count, 2, "two PROGRAM-DATE-TIMEs across a splice")
+    expectEq(programDateTimes(text).count, 0, "no PROGRAM-DATE-TIME across a splice")
     if let discIndex = lines.firstIndex(of: "#EXT-X-DISCONTINUITY") {
         expect(discIndex + 1 < lines.count
-               && lines[discIndex + 1].hasPrefix("#EXT-X-PROGRAM-DATE-TIME:"),
-               "PROGRAM-DATE-TIME immediately follows EXT-X-DISCONTINUITY")
+               && lines[discIndex + 1].hasPrefix("#EXT-X-MAP:"),
+               "EXT-X-MAP immediately follows EXT-X-DISCONTINUITY")
     } else {
-        expect(false, "PROGRAM-DATE-TIME immediately follows EXT-X-DISCONTINUITY")
+        expect(false, "EXT-X-MAP immediately follows EXT-X-DISCONTINUITY")
     }
-    expect(programDateTimes(text).allSatisfy { parseISO($0) != nil },
-           "both PROGRAM-DATE-TIMEs parse as ISO-8601")
 }
 
 // onSegmentComposition against the real transport stream: the numbers the

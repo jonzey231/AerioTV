@@ -71,12 +71,21 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// our 3 s targets, is what the receiver page also starts behind the
     /// edge, and is reached by two segments on a feed like that.
     private static let readyMediaTicks: Int64 = 9 * CastFMP4Remuxer.ticksPerSecond
-    private static let readyMinSegments = 2
+    ///
+    /// FOUR segments, not two (2026-09-12, second pass): Shaka sizes its
+    /// live seek range from the span of the playlist window it parses
+    /// (hls_parser.js determineDuration_ -> getLiveDuration_) minus the
+    /// presentation delay the receiver configures (4 s). A two- or
+    /// three-segment window leaves a seek range barely wider than one
+    /// segment, and the playhead then lives on its edge for the whole
+    /// session. Four segments give the receiver a window it can hold a
+    /// playhead inside from the first load.
+    private static let readyMinSegments = 4
 
     /// Bound on the wait for `readyMediaTicks`: nine seconds of media plus
     /// provider join latency; past this the channel is declared
     /// uncastable and the user told. First terminal error wins.
-    private static let readyTimeout: TimeInterval = 25.0
+    private static let readyTimeout: TimeInterval = 32.0
 
     /// The ready bound, for the sender's user-facing "no data" message.
     static var readyTimeoutSeconds: Int { Int(readyTimeout) }

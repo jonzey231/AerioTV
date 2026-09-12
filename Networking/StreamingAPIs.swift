@@ -1352,13 +1352,9 @@ struct DispatcharrOutputProfile: Sendable {
     /// Whole row as lowercased JSON, for the "-c:a aac" fallback match.
     let searchText: String
 
-    /// Name of the profile the user is asked to create for casting (see
-    /// the README). Preferred over anything else the server offers;
-    /// matched case-insensitively and trimmed.
-    static let preferredCastProfileName = "AerioTV Cast"
-
-    /// Name of the built-in profile, used when the server has no
-    /// `preferredCastProfileName` profile.
+    /// Name of the built-in Dispatcharr 0.30 profile. Used ONLY as a last
+    /// resort when no active profile advertises stereo AAC; its output is
+    /// not stereo, so casting a 5.1 channel through it gets refused.
     static let webPlayerAACName = "Web Player (AAC Audio)"
 
     /// Tolerant of both the DRF paginated wrapper and a flat array.
@@ -1386,20 +1382,43 @@ struct DispatcharrOutputProfile: Sendable {
         }
     }
 
-    /// The profile a cast session should request, in preference order over
-    /// the active profiles: the one named "AerioTV Cast"
-    /// (case-insensitive, trimmed), else the built-in "Web Player (AAC
-    /// Audio)", else any profile whose command / parameters ask for both
-    /// an AAC audio encoder and a stereo downmix.
-    static func aacProfile(in profiles: [DispatcharrOutputProfile]) -> DispatcharrOutputProfile? {
+    /// Why a profile was picked, for the "[Cast] output profile pick" log.
+    enum CastPickReason: String {
+        case stereoAAC = "stereo-aac"
+        case webPlayerFallback = "web-player-fallback"
+    }
+
+    /// The profile a cast session should request, chosen by what the
+    /// profile DOES, never by its name (Logan 2026-09-12). Over the ACTIVE
+    /// profiles: any whose command / parameters ask for an AAC audio
+    /// encoder (`-c:a aac` or `-acodec aac`) AND a stereo downmix
+    /// (`-ac 2`); when several match, the ones that also pass the video
+    /// through (`-c:v copy`) win, then the lowest id. Only when nothing
+    /// matches do we fall back to `webPlayerAACName` by name, whose output
+    /// is not stereo (logged as a warning).
+    static func aacProfile(in profiles: [DispatcharrOutputProfile])
+        -> (profile: DispatcharrOutputProfile, reason: CastPickReason)? {
         let active = profiles.filter { $0.isActive }
-        func named(_ name: String) -> DispatcharrOutputProfile? {
-            active.first { $0.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                .caseInsensitiveCompare(name) == .orderedSame }
+        let stereoAAC = active.filter {
+            ($0.searchText.contains("-c:a aac") || $0.searchText.contains("-acodec aac"))
+                && $0.searchText.contains("-ac 2")
         }
-        if let preferred = named(preferredCastProfileName) { return preferred }
-        if let builtIn = named(webPlayerAACName) { return builtIn }
-        return active.first { $0.searchText.contains("-c:a aac") && $0.searchText.contains("-ac 2") }
+        if !stereoAAC.isEmpty {
+            let ranked = stereoAAC.sorted { lhs, rhs in
+                let lCopy = lhs.searchText.contains("-c:v copy")
+                let rCopy = rhs.searchText.contains("-c:v copy")
+                if lCopy != rCopy { return lCopy }
+                return lhs.id < rhs.id
+            }
+            return (ranked[0], .stereoAAC)
+        }
+        if let builtIn = active.first(where: {
+            $0.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare(webPlayerAACName) == .orderedSame
+        }) {
+            return (builtIn, .webPlayerFallback)
+        }
+        return nil
     }
 
     /// Query parameter Dispatcharr reads to pick an output profile for
@@ -2617,11 +2636,16 @@ struct DispatcharrAPI {
             return (false, nil)
         }
         guard let picked = DispatcharrOutputProfile.aacProfile(in: profiles) else {
-            debugLog("[Cast] no AAC output profile on this server")
+            debugLog("[Cast] output profile pick: id=none name=none reason=none")
             return (true, nil)
         }
-        debugLog("[Cast] AAC output profile id=\(picked.id) name=\(picked.name)")
-        return (true, picked.id)
+        debugLog("[Cast] output profile pick: id=\(picked.profile.id) "
+            + "name=\(picked.profile.name) reason=\(picked.reason.rawValue)")
+        if picked.reason == .webPlayerFallback {
+            debugLog("[Cast] WARNING \"\(DispatcharrOutputProfile.webPlayerAACName)\" output is not "
+                + "stereo; casting 5.1 channels will be refused")
+        }
+        return (true, picked.profile.id)
     }
 
     /// Persist the AAC cast output profile id on `server`. Always
@@ -2640,6 +2664,47 @@ struct DispatcharrAPI {
         guard result.known else { return server.dispatcharrAACOutputProfileID }
         server.applyDispatcharrAACOutputProfile(result.id)
         return result.id
+    }
+
+    /// Last time the cast output profile was re-resolved, per server id, so
+    /// the launch and foreground triggers coalesce to one lookup per
+    /// `aacReresolveInterval`.
+    @MainActor
+    private static var aacReresolvedAt: [UUID: Date] = [:]
+
+    /// How often the launch / foreground re-resolve may hit the server.
+    static let aacReresolveInterval: TimeInterval = 15 * 60
+
+    /// Re-resolve the cast output profile at every launch and on every
+    /// foreground return, at most once per `aacReresolveInterval` per
+    /// server, INDEPENDENT of the EPG load: the cached-EPG path skipped the
+    /// re-resolve entirely, so a relaunched phone kept casting with a stale
+    /// profile id after the user created a stereo AAC profile on the server
+    /// (nplogs/session18.txt: 16:28 relaunch, still profile 2 at 16:31).
+    @MainActor
+    static func refreshAACOutputProfileIfDue(for server: ServerConnection,
+                                            trigger: String) async {
+        guard server.type == .dispatcharrAPI else { return }
+        if let last = aacReresolvedAt[server.id],
+           Date().timeIntervalSince(last) < aacReresolveInterval { return }
+        aacReresolvedAt[server.id] = Date()
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode,
+                                 serverID: server.id,
+                                 savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                                     ? server.username : nil)
+        let result = await api.fetchAACOutputProfile()
+        guard result.known else {
+            // Lookup failed: let the next trigger try again.
+            aacReresolvedAt[server.id] = nil
+            return
+        }
+        if server.applyDispatcharrAACOutputProfile(result.id) {
+            debugLog("[Cast] output profile persisted id=\(result.id.map(String.init) ?? "none") "
+                + "trigger=\(trigger)")
+        }
     }
 
     /// Capture point helper for call sites that hold a `ServerConnection`

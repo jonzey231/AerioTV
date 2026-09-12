@@ -4278,10 +4278,20 @@ struct MainTabView: View {
                 changed = true
             }
             if server.applyDispatcharrPermissions(from: user, version: version ?? nil) { changed = true }
-            // Cast audio: learn this server's AAC output profile id on the
-            // same launch refresh (used only while casting).
-            await DispatcharrAPI.captureAACOutputProfile(for: server, using: api)
             debugLog("[PERMS] \(server.name): level=\(server.dispatcharrUserLevel) dvr=\(server.dispatcharrEffectiveDVRAccess.rawValue) catchup=\(server.dispatcharrCatchupEnabled) movies=\(server.dispatcharrVODMoviesEnabled) series=\(server.dispatcharrVODSeriesEnabled) version=\(server.dispatcharrServerVersion.isEmpty ? "?" : server.dispatcharrServerVersion)\(changed ? " (changed)" : "")")
+        }
+    }
+
+    /// Cast audio: re-resolve this server's stereo AAC output profile at
+    /// launch and on every foreground return, independent of the EPG load
+    /// (the cached-EPG path skipped it, so a relaunch kept casting with a
+    /// stale profile id). Rate limited to once per 15 minutes per server
+    /// inside `DispatcharrAPI.refreshAACOutputProfileIfDue`.
+    private func refreshCastAACProfile(trigger: String) {
+        guard let server = allServers.first(where: { $0.isActive }) ?? allServers.first,
+              server.type == .dispatcharrAPI else { return }
+        Task { @MainActor in
+            await DispatcharrAPI.refreshAACOutputProfileIfDue(for: server, trigger: trigger)
         }
     }
 
@@ -4622,6 +4632,9 @@ struct MainTabView: View {
 
     private func refreshGuideIfStaleOnForeground(from oldPhase: ScenePhase, to newPhase: ScenePhase) {
         guard oldPhase != .active, newPhase == .active else { return }
+        // Independent of the guide staleness gate below: one cheap request,
+        // throttled to 15 minutes per server.
+        refreshCastAACProfile(trigger: "foreground")
         refreshGuideIfStale(reason: "foreground")
         checkEPGSourcesForChanges(reason: "foreground")
         // Restart the settle window, then queue the quiet VOD sweep behind it
@@ -6458,6 +6471,7 @@ struct MainTabView: View {
 
         debugLog("🟢 [Orchestrator] phase 1 done (channels), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, channels=\(channelStore.channels.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         refreshDispatcharrPermissions()
+        refreshCastAACProfile(trigger: "launch")
         if !channelStore.channels.isEmpty {
             // Try to short-circuit the expensive `loadAllEPG`
             // path by checking the SwiftData EPG cache first. On
