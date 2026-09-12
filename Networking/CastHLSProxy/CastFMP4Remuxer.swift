@@ -694,8 +694,12 @@ final class CastFMP4Remuxer {
                 aacObjectType = profile + 1 // ADTS profile is MPEG-4 audioObjectType - 1
                 aacFreqIndex = freqIndex
                 aacChannelConfig = chanConfig
-                let rate = Self.adtsSampleRates.indices.contains(freqIndex) ? Self.adtsSampleRates[freqIndex] : 48_000
-                audioFrameTicks = 1024 * Self.ticksPerSecond / Int64(rate)
+                // The frame duration has to match the track's declared
+                // sample rate, so both come from the one sanitized config.
+                let cfg = Self.sanitizedAACConfig(objectType: profile + 1,
+                                                  freqIndex: freqIndex,
+                                                  channelConfig: chanConfig)
+                audioFrameTicks = 1024 * Self.ticksPerSecond / Int64(cfg.sampleRate)
                 maybeEmitInit()
             }
             if initSent, frameLen > headerLen {
@@ -711,6 +715,59 @@ final class CastFMP4Remuxer {
             p += frameLen
         }
         if p < data.count { audioCarry = Array(data[p...]) }
+    }
+
+    /// Audio config for the AAC sample entry, validated against what the
+    /// web receiver's parser will accept.
+    struct AACTrackConfig: Equatable {
+        let objectType: Int
+        let freqIndex: Int
+        let channelConfig: Int
+        let sampleRate: Int
+        /// mp4a `channelcount`, kept consistent with `channelConfig`.
+        let channels: Int
+        /// The 2-byte MPEG-4 AudioSpecificConfig for the esds.
+        let asc: [UInt8]
+    }
+
+    /// ADTS channel counts per channelConfiguration (ISO 14496-3 Table
+    /// 1.19); index 7 is 7.1, so it is 8 channels, not 7.
+    private static let aacChannelCounts = [0, 1, 2, 3, 4, 5, 6, 8]
+
+    /// Turn the three ADTS header config fields into an
+    /// AudioSpecificConfig the receiver will actually parse.
+    ///
+    /// The receiver is a Chromium page, and Chromium re-parses the ASC we
+    /// write (media/formats/mp4/aac.cc) while parsing `moov`. Three values
+    /// there are fatal to the WHOLE init segment, not just to the audio
+    /// track, so a verbatim copy of the ADTS header is not safe:
+    ///
+    ///  - `channelConfiguration` 0 means "the layout is in a program
+    ///    config element", which is what ffmpeg's AAC encoder emits for
+    ///    layouts outside Table 1.19 (2.1, 3.1, 6.1, 7.0 and friends), so
+    ///    a transcoding server hands it to us for real channels. Chromium
+    ///    hits `RCHECK(channel_config_ != 0)` in SkipGASpecificConfig and
+    ///    fails the append with "stream parsing failed". Nothing in the
+    ///    ADTS header recovers the real layout, so the track is declared
+    ///    stereo; the decoder still reads the PCE out of the raw frames.
+    ///  - `samplingFrequencyIndex` 13 and 14 are reserved and 15 is the
+    ///    24-bit explicit-rate escape, which a 2-byte ASC has no room
+    ///    for; all three fail Chromium's frequency table lookup. They fall
+    ///    back to 48 kHz (index 3), the rate the rest of the remux
+    ///    already assumed for an out-of-range index.
+    ///  - `audioObjectType` must land in 1...4. ADTS profile + 1 always
+    ///    does, but 5 (HE-AAC) and 29 (HE-AACv2) would need extension
+    ///    fields a 2-byte ASC cannot carry, so anything else becomes 2
+    ///    (AAC-LC).
+    static func sanitizedAACConfig(objectType: Int, freqIndex: Int, channelConfig: Int) -> AACTrackConfig {
+        let aot = (1...4).contains(objectType) ? objectType : 2
+        let index = adtsSampleRates.indices.contains(freqIndex) ? freqIndex : 3
+        let config = (1...7).contains(channelConfig) ? channelConfig : 2
+        let asc: [UInt8] = [UInt8((aot << 3) | (index >> 1)),
+                            UInt8(((index & 1) << 7) | (config << 3))]
+        return AACTrackConfig(objectType: aot, freqIndex: index, channelConfig: config,
+                              sampleRate: adtsSampleRates[index],
+                              channels: aacChannelCounts[config], asc: asc)
     }
 
     private static let adtsSampleRates = [
@@ -923,15 +980,21 @@ final class CastFMP4Remuxer {
         let channels: Int
         let asc: [UInt8]
         if let transASC = transcodeASC {
+            // AudioToolbox hands back a real AudioSpecificConfig for the
+            // stereo AAC-LC it was configured to produce; that one is
+            // authoritative and is not second-guessed here.
             asc = transASC
             sampleRate = transcodeSampleRate
             channels = 2
         } else {
-            sampleRate = Self.adtsSampleRates.indices.contains(aacFreqIndex)
-                ? Self.adtsSampleRates[aacFreqIndex] : 48_000
-            channels = max(1, aacChannelConfig)
-            asc = [UInt8((aacObjectType << 3) | (aacFreqIndex >> 1)),
-                   UInt8(((aacFreqIndex & 1) << 7) | (aacChannelConfig << 3))]
+            // Passthrough: the ADTS header's three config fields cannot go
+            // into the ASC verbatim (see `sanitizedAACConfig`).
+            let cfg = Self.sanitizedAACConfig(objectType: aacObjectType,
+                                              freqIndex: aacFreqIndex,
+                                              channelConfig: aacChannelConfig)
+            asc = cfg.asc
+            sampleRate = cfg.sampleRate
+            channels = cfg.channels
         }
         // ES_Descriptor(3) > DecoderConfig(4) > DecoderSpecificInfo(5) + SLConfig(6).
         var dsi: [UInt8] = [0x05, UInt8(asc.count)]
@@ -959,7 +1022,7 @@ final class CastFMP4Remuxer {
         mp4aBody.append(Data(count: 8)) // reserved
         mp4aBody.append(Self.u16(channels)); mp4aBody.append(Self.u16(16)) // channels, samplesize
         mp4aBody.append(Self.u32(0)) // pre_defined/reserved
-        mp4aBody.append(Self.u32(sampleRate << 16)) // 16.16 sample rate
+        mp4aBody.append(Self.fixed16_16(sampleRate)) // 16.16 sample rate
         mp4aBody.append(esds)
         let mp4a = Self.box("mp4a", mp4aBody)
 
@@ -997,7 +1060,7 @@ final class CastFMP4Remuxer {
         body.append(Data(count: 8)) // reserved
         body.append(u16(max(1, c.channels))); body.append(u16(16)) // channels, samplesize
         body.append(u32(0)) // pre_defined/reserved
-        body.append(u32(c.sampleRate << 16)) // 16.16 sample rate
+        body.append(fixed16_16(c.sampleRate)) // 16.16 sample rate
         body.append(configBox)
         return box(c.codec == .eac3 ? "ec-3" : "ac-3", body)
     }
@@ -1070,6 +1133,13 @@ final class CastFMP4Remuxer {
     private static func u32(_ v: Int) -> Data {
         let u = UInt32(truncatingIfNeeded: v)
         return Data([UInt8((u >> 24) & 0xFF), UInt8((u >> 16) & 0xFF), UInt8((u >> 8) & 0xFF), UInt8(u & 0xFF)])
+    }
+
+    /// 16.16 fixed point. `u32(rate << 16)` silently truncates once the
+    /// rate passes 65535 (96 kHz AAC shifted left by 16 overflows 32
+    /// bits and lands on 30464 Hz), so the integer part is clamped.
+    private static func fixed16_16(_ v: Int) -> Data {
+        u16(max(0, min(0xFFFF, v))) + u16(0)
     }
 
     private static func u64(_ v: UInt64) -> Data {

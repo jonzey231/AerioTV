@@ -232,5 +232,82 @@ do {
            "video-only master names no audio codec")
 }
 
+// MARK: 8. AudioSpecificConfig sanitizing for the web receiver's parser
+
+do {
+    // Chromium re-parses the ASC we put in the esds while parsing moov
+    // (media/formats/mp4/aac.cc). Three values there fail the whole init
+    // append with "Append: stream parsing failed", so the builder must
+    // never emit them, whatever the ADTS header said.
+
+    // Plain AAC-LC 48 kHz stereo rides through untouched.
+    let stereo = CastFMP4Remuxer.sanitizedAACConfig(objectType: 2, freqIndex: 3, channelConfig: 2)
+    expectEq(stereo.asc, [0x11, 0x90], "AAC-LC 48k stereo ASC unchanged")
+    expectEq(stereo.sampleRate, 48_000, "48k sample rate")
+    expectEq(stereo.channels, 2, "stereo channel count")
+
+    // channelConfiguration 0 means "layout is in a program config
+    // element", which ffmpeg's AAC encoder emits for layouts outside
+    // Table 1.19 (2.1, 3.1, 6.1, 7.0). Chromium's SkipGASpecificConfig
+    // does RCHECK(channel_config_ != 0), so 0 must never reach the ASC.
+    let pce = CastFMP4Remuxer.sanitizedAACConfig(objectType: 2, freqIndex: 3, channelConfig: 0)
+    expectEq(pce.channelConfig, 2, "PCE-signalled layout (config 0) declared stereo")
+    expectEq(pce.channels, 2, "mp4a channelcount matches the ASC, not max(1, 0)")
+    expectEq(pce.asc, [0x11, 0x90], "config 0 never reaches the ASC")
+
+    // Reserved (13, 14) and escape (15) frequency indexes fail
+    // Chromium's frequency table lookup; 15's 24-bit explicit rate does
+    // not fit a 2-byte ASC at all. All fall back to index 3 / 48 kHz,
+    // which is what the frame-duration math already assumed.
+    for bad in [13, 14, 15, 99] {
+        let c = CastFMP4Remuxer.sanitizedAACConfig(objectType: 2, freqIndex: bad, channelConfig: 2)
+        expectEq(c.freqIndex, 3, "frequency index \(bad) falls back to 48 kHz index")
+        expectEq(c.sampleRate, 48_000, "frequency index \(bad) sample rate")
+    }
+
+    // audioObjectType must land in 1...4; 5 (HE-AAC) and 29 (HE-AACv2)
+    // need extension fields a 2-byte ASC cannot carry.
+    for bad in [0, 5, 29, 31] {
+        let c = CastFMP4Remuxer.sanitizedAACConfig(objectType: bad, freqIndex: 3, channelConfig: 2)
+        expectEq(c.objectType, 2, "object type \(bad) falls back to AAC-LC")
+    }
+    expectEq(CastFMP4Remuxer.sanitizedAACConfig(objectType: 1, freqIndex: 3, channelConfig: 2).objectType, 1,
+             "AAC Main (1) is in range and survives")
+
+    // channelConfiguration 7 is 7.1, so eight channels, not seven.
+    expectEq(CastFMP4Remuxer.sanitizedAACConfig(objectType: 2, freqIndex: 3, channelConfig: 7).channels, 8,
+             "config 7 is 7.1 (8 channels)")
+    // 44.1 kHz mono, to prove the index/rate pairing is not hardcoded.
+    let mono441 = CastFMP4Remuxer.sanitizedAACConfig(objectType: 2, freqIndex: 4, channelConfig: 1)
+    expectEq(mono441.sampleRate, 44_100, "index 4 is 44.1 kHz")
+    expectEq(mono441.channels, 1, "mono channel count")
+
+    // Exhaustive: over every value the 2-bit ADTS profile, 4-bit
+    // frequency index and 3-bit channel configuration fields can carry,
+    // the emitted ASC must decode back to values Chromium accepts.
+    var allSafe = true
+    for aot in 0...31 {
+        for fi in 0...15 {
+            for ch in 0...7 {
+                let c = CastFMP4Remuxer.sanitizedAACConfig(objectType: aot, freqIndex: fi, channelConfig: ch)
+                guard c.asc.count == 2 else { allSafe = false; continue }
+                let decodedAOT = Int(c.asc[0]) >> 3
+                let decodedFreq = ((Int(c.asc[0]) & 0x07) << 1) | (Int(c.asc[1]) >> 7)
+                let decodedChan = (Int(c.asc[1]) >> 3) & 0x0F
+                // The 3 low bits are GASpecificConfig: frameLengthFlag,
+                // dependsOnCoreCoder, extensionFlag, all zero.
+                let gaBits = Int(c.asc[1]) & 0x07
+                if !(1...4).contains(decodedAOT) { allSafe = false }
+                if decodedFreq > 12 { allSafe = false }
+                if decodedChan < 1 || decodedChan > 7 { allSafe = false }
+                if gaBits != 0 { allSafe = false }
+                if decodedAOT != c.objectType || decodedFreq != c.freqIndex
+                    || decodedChan != c.channelConfig { allSafe = false }
+            }
+        }
+    }
+    expect(allSafe, "every ADTS header value yields a Chromium-parseable 2-byte ASC")
+}
+
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)
