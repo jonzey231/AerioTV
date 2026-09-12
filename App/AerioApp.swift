@@ -1838,6 +1838,11 @@ struct RootView: View {
         // Collect credentials to save to Keychain asynchronously after the merge,
         // keeping the main-thread work (SwiftData insert) fast.
         var pendingCredentials: [(key: String, value: String)] = []
+        /// 2026-09-12 lag hunt: the save below ran even when the merge changed
+        /// nothing, and the @Query republish it triggered re-evaluated RootView
+        /// and the entire MainTabView tree (measured: 2426 ms and 2363 ms main
+        /// thread blocks, one per launch, plus a fresh MainTabView instance).
+        var didMutate = false
 
         for remote in remoteServers {
             if let local = localByID[remote.id] {
@@ -1845,6 +1850,7 @@ struct RootView: View {
                 let localDate = local.lastConnected ?? local.createdAt
                 let remoteDate = remote.lastConnected ?? remote.createdAt
                 if replace || remoteDate > localDate {
+                    didMutate = true
                     local.name = remote.name
                     local.baseURL = remote.baseURL
                     local.username = remote.username
@@ -1970,6 +1976,7 @@ struct RootView: View {
                 if !remote.apiKey.isEmpty {
                     pendingCredentials.append(("apiKey_\(remote.id.uuidString)", remote.apiKey))
                 }
+                didMutate = true
                 modelContext.insert(newServer)
                 DebugLogger.shared.log("SyncManager: added server \(remote.name) from iCloud (active=\(shouldActivate), hasCreds=\(!remote.password.isEmpty || !remote.apiKey.isEmpty))",
                                        category: "Sync", level: .info)
@@ -2036,7 +2043,13 @@ struct RootView: View {
             }
         }
 
-        try? modelContext.save()
+        // Equal-value guard: no write, no save, no @Query republish, so the
+        // server merge can no longer rebuild the tab tree.
+        if didMutate {
+            try? modelContext.save()
+        } else {
+            debugLog("🟢 RootView: merge changed nothing, skipping save")
+        }
 
         // Save credentials to Keychain (must stay on main thread — Security
         // framework can trigger dispatch_assert_queue when called off-main).

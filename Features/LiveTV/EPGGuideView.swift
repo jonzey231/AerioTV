@@ -608,12 +608,20 @@ final class GuideStore: ObservableObject {
     /// the freshness check would pass on stale rows from a deleted server
     /// and the network fetch would be skipped, leaving the guide empty
     /// because the channel IDs no longer match.
+    /// Replays of the completed-fetch shortcut in this launch. Logged so a
+    /// second caller per launch is visible rather than inferred.
+    private var replayCount = 0
+
     func loadFromCache(modelContext: ModelContext, channels: [ChannelDisplayItem], serverID: String) async -> Bool {
         // Completed-fetch shortcut. Match on serverID so a playlist
         // switch still forces a real read.
         beginDisplaying(serverID: serverID)
         if let cached = lastLoadFromCacheResult, cached.serverID == serverID {
-            debugLog("📺 GuideStore.loadFromCache: idempotent replay (serverID=\(serverID), fresh=\(cached.isFresh), programs already loaded=\(programs.count) channels)")
+            replayCount += 1
+            debugLog("📺 GuideStore.loadFromCache: idempotent replay #\(replayCount) (serverID=\(serverID), fresh=\(cached.isFresh), programs already loaded=\(programs.count) channels)")
+            // Names the run loop turn that follows, which session12 could not
+            // attribute (items c and e of the 2026-09-12 list).
+            MainThreadWatchdog.shared.notePublish("loadFromCache replay #\(replayCount)")
             return cached.isFresh
         }
         // In-flight shortcut — see `inFlightLoadTask` doc comment.
@@ -3329,6 +3337,11 @@ final class GuideStore: ObservableObject {
         // had applied to EPGCache. Replicating the same propagation
         // here keeps both data sources visually identical.
         var updated = self.programs
+        /// 2026-09-12: a warm relaunch re-applies categories that are already
+        /// on every programme, and the publish alone cost a 704 ms run loop
+        /// turn plus a 17222-entry memo rebuild. Nothing is published unless a
+        /// value actually changes.
+        var didChange = false
         // Rerun flag applies even to channels that got no categories back, so
         // walk the union of both result sets (mikec79: REPEAT on the guide).
         for cid in Set(byChannel.keys).union(repeatChannels) {
@@ -3352,6 +3365,9 @@ final class GuideStore: ObservableObject {
                                        isLiveBroadcast: old.isLiveBroadcast,
                                        isPremiere: old.isPremiere, isFinale: old.isFinale,
                                        isRepeat: old.isRepeat || repeatChannels.contains(cid))
+            if progs[idx].category != old.category || progs[idx].isRepeat != old.isRepeat {
+                didChange = true
+            }
 
             // Title-matched propagation across the rest of the
             // channel's programs. Skip the now-airing index (just
@@ -3363,6 +3379,7 @@ final class GuideStore: ObservableObject {
                 for j in progs.indices where j != idx {
                     let p = progs[j]
                     guard p.title == nowTitle, p.category.isEmpty else { continue }
+                    didChange = true
                     progs[j] = GuideProgram(channelID: p.channelID,
                                              title: p.title,
                                              description: p.description,
@@ -3379,6 +3396,12 @@ final class GuideStore: ObservableObject {
             }
 
             updated[cid] = progs
+        }
+        guard didChange else {
+            debugLog("📺 category-apply: nothing changed, no publish")
+            // The channel-card stripe is cheap and idempotent; still applied.
+            ChannelStore.shared.applyXMLTVCategories(byChannel, serverID: serverID)
+            return
         }
         guard commitPrograms(updated, for: serverID, source: "category-apply") else { return }
 
@@ -4437,6 +4460,7 @@ final class GuideStore: ObservableObject {
             }
             debugLog("📺 GuideStore.seedEPGCache: seeded \(built.count) entries (background)")
         }.value
+        MainThreadWatchdog.shared.notePublish("seedEPGCache return")
     }
 
     // MARK: - Helpers

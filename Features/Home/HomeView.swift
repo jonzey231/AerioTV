@@ -3966,6 +3966,29 @@ struct TVNavCircleButtonStyle: ButtonStyle {
 }
 #endif
 
+/// Builds its content only once the tab has been selected at least once, then
+/// keeps it. A tab that has never been opened costs nothing when a store it
+/// observes publishes (2026-09-12).
+private struct LazyTabContent<Content: View>: View {
+    let isSelected: Bool
+    @ViewBuilder var content: () -> Content
+    @State private var everSelected = false
+
+    var body: some View {
+        Group {
+            if everSelected || isSelected {
+                content()
+            } else {
+                Color.appBackground
+            }
+        }
+        .onChange(of: isSelected) { _, now in
+            if now, !everSelected { everSelected = true }
+        }
+        .onAppear { if isSelected { everSelected = true } }
+    }
+}
+
 struct MainTabView: View {
     @AppStorage("defaultTab") private var defaultTabRaw = AppTab.liveTV.rawValue
     @ObservedObject private var theme = ThemeManager.shared
@@ -5849,15 +5872,26 @@ struct MainTabView: View {
             // ingested) hides the tab entirely, matching the dynamic
             // behaviour of Favorites and DVR.
             if showVODTab {
-                MoviesView(vodStore: vodStore, isPlaying: $isPlaying,
-                           isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested,
-                           isSelected: selectedTab == .movies)
+                // Lazy until first shown (2026-09-12 lag hunt): both VOD tabs
+                // observe vodStore, so the launch-time snapshot restore
+                // publishes (5035 movies, 3063 series) used to build and lay
+                // out tab content the user was not looking at. Measured as a
+                // 3032 ms run loop turn after `publish vod.series 3063 items`
+                // while the Live TV tab was on screen. Once a tab has been
+                // selected it stays built, so tab-switch latency is unchanged.
+                LazyTabContent(isSelected: selectedTab == .movies) {
+                    MoviesView(vodStore: vodStore, isPlaying: $isPlaying,
+                               isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested,
+                               isSelected: selectedTab == .movies)
+                }
                     .tabItem { Label(AppTab.movies.title, systemImage: AppTab.movies.icon) }
                     .tag(AppTab.movies)
 
+                LazyTabContent(isSelected: selectedTab == .tvShows) {
                 MoviesView(vodStore: vodStore, isPlaying: $isPlaying,
                            isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested,
                            isSelected: selectedTab == .tvShows, kind: .series)
+                }
                     .tabItem {
                         Label(AppTab.tvShows.title, systemImage: AppTab.tvShows.icon)
                             .symbolRenderingMode(.monochrome)

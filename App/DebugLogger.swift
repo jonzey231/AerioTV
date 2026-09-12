@@ -752,6 +752,10 @@ enum InputProbe {
             debugLog("[INPUT] \(old.name) superseded after \(ms(CACurrentMediaTime() - old.start))ms (next press arrived first)")
         }
         pending = Pending(name: name, start: CACurrentMediaTime())
+        // Labels the run loop turn this press causes, so a long turn that no
+        // publish explains is attributed to the input instead of going
+        // unattributed (2026-09-12 item e).
+        MainThreadWatchdog.shared.notePublish("input \(name)")
         // End of this runloop turn = the handler (and the SwiftUI update it
         // triggered) has finished on the main thread.
         DispatchQueue.main.async {
