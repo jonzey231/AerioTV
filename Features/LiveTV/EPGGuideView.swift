@@ -1110,29 +1110,66 @@ final class GuideStore: ObservableObject {
     /// corrections land the same day.
     nonisolated static let gridCoverageTTL: TimeInterval = 12 * 3600
 
-    /// True when a chunk equal to or wider than `start...end` was fetched
-    /// inside the TTL. A 60 s slack absorbs the forward drift of `now`-derived
-    /// chunk edges between launches.
+    /// One chunk is one UTC day.
+    nonisolated static let gridChunkSeconds: TimeInterval = 86_400
+
+    /// FIXED UTC day grid (Android `dayFloorMs`, Logan 2026-09-12). Chunk edges
+    /// must NOT be derived from `now`: edges that drift by the wall clock give
+    /// every launch a brand new set of start times, so the saved coverage never
+    /// matches the walk, every chunk is refetched and the record grows without
+    /// bound (field log: 360 chunks restored, 89 of 89 refetched, 450 saved).
+    /// Every chunk and every coverage key is aligned to this grid instead.
+    nonisolated static func gridDayFloor(_ d: Date) -> Date {
+        let s = d.timeIntervalSince1970
+        return Date(timeIntervalSince1970: (s / gridChunkSeconds).rounded(.down) * gridChunkSeconds)
+    }
+
+    nonisolated static func gridDayCeil(_ d: Date) -> Date {
+        let floor = gridDayFloor(d)
+        return floor == d ? d : floor.addingTimeInterval(gridChunkSeconds)
+    }
+
+    /// True when the aligned day holding `start` was fetched inside the TTL and
+    /// that entry reaches `end`. Keyed on the aligned day, so the match no
+    /// longer depends on two launches happening to pick the same second.
     private func gridChunkIsCovered(start: Date, end: Date, now: Date) -> Bool {
         guard !forceFullGridReload else { return false }
+        let key = Self.gridDayFloor(start)
         return gridCoverage.contains {
-            $0.start <= start.addingTimeInterval(60)
+            Self.gridDayFloor($0.start) == key
                 && $0.end >= end.addingTimeInterval(-60)
                 && now.timeIntervalSince($0.fetchedAt) < Self.gridCoverageTTL
         }
     }
 
-    /// Record a fetched chunk, replacing any entry with the same edges.
+    /// Record a fetched chunk under its aligned day key, replacing whatever
+    /// that day held (at most ONE entry per day, so relaunches cannot pile up
+    /// near-duplicate rows).
     private func recordGridCoverage(start: Date, end: Date, programCount: Int) {
-        gridCoverage.removeAll {
-            abs($0.start.timeIntervalSince(start)) < 60 && abs($0.end.timeIntervalSince(end)) < 60
-        }
-        gridCoverage.append(EPGGridCoverage.Chunk(start: start, end: end,
+        let key = Self.gridDayFloor(start)
+        gridCoverage.removeAll { Self.gridDayFloor($0.start) == key }
+        gridCoverage.append(EPGGridCoverage.Chunk(start: key, end: end,
                                                   fetchedAt: Date(), programCount: programCount))
+    }
+
+    /// Collapse to one newest entry per aligned day before writing, so a record
+    /// carried over from an older build cannot keep growing.
+    private func dedupedGridCoverage() -> [EPGGridCoverage.Chunk] {
+        var byDay: [Date: EPGGridCoverage.Chunk] = [:]
+        for chunk in gridCoverage {
+            let key = Self.gridDayFloor(chunk.start)
+            if let held = byDay[key], held.fetchedAt >= chunk.fetchedAt { continue }
+            var aligned = chunk
+            aligned.start = key
+            aligned.end = max(chunk.end, key.addingTimeInterval(Self.gridChunkSeconds))
+            byDay[key] = aligned
+        }
+        return byDay.values.sorted { $0.start < $1.start }
     }
 
     private func persistGridCoverage() {
         guard let identity = gridCoverageIdentity else { return }
+        gridCoverage = dedupedGridCoverage()
         EPGGridCoverage.save(identity: identity, chunks: gridCoverage)
     }
 
@@ -1187,7 +1224,10 @@ final class GuideStore: ObservableObject {
     /// outside the current range.
     private func pruneOutsideGridWindow(historyStart: Date, forwardEnd: Date, serverID: String) async {
         let before = gridCoverage.count
-        gridCoverage.removeAll { $0.end <= historyStart || $0.start >= forwardEnd }
+        let rangeStart = Self.gridDayFloor(historyStart)
+        let rangeEnd = Self.gridDayCeil(forwardEnd)
+        gridCoverage.removeAll { $0.end <= rangeStart || $0.start >= rangeEnd }
+        gridCoverage = dedupedGridCoverage()
         let droppedChunks = before - gridCoverage.count
 
         var trimmed: [String: [GuideProgram]] = [:]
@@ -1983,14 +2023,17 @@ final class GuideStore: ObservableObject {
         guard end > from.addingTimeInterval(60) else { return }
         forwardExtensionInFlight = true
         defer { forwardExtensionInFlight = false }
+        // Aligned to the same fixed UTC day grid as the launch walk, so a jump
+        // and a launch walk share coverage keys instead of fighting over them.
         var chunks: [(Date, Date)] = []
-        var fStart = from
-        while fStart < end {
-            let fEnd = min(end, fStart.addingTimeInterval(86_400))
+        var fStart = Self.gridDayFloor(from)
+        let jumpEnd = Self.gridDayCeil(end)
+        while fStart < jumpEnd {
+            let fEnd = fStart.addingTimeInterval(Self.gridChunkSeconds)
             chunks.append((fStart, fEnd))
             fStart = fEnd
         }
-        debugLog("📺 [EPG grid window] jump: \(chunks.count) forward chunk(s) to \(Self.chunkStamp(end))")
+        debugLog("📺 [EPG grid window] jump: \(chunks.count) forward chunk(s) to \(Self.chunkStamp(jumpEnd))")
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                  auth: .apiKey(server.effectiveApiKey),
                                  userAgent: server.effectiveUserAgent,
@@ -2053,26 +2096,34 @@ final class GuideStore: ObservableObject {
             ? now.addingTimeInterval(TimeInterval(Self.allAvailableMaxDaysAhead) * 86_400)
             : max(windowEnd, now.addingTimeInterval(TimeInterval(playlistDays) * 86_400))
         // The live window is fetched unconditionally on every load (the base
-        // grid just committed it), so record it rather than let a later walk
-        // ask for it again.
-        recordGridCoverage(start: baseStart, end: baseEnd,
-                           programCount: residentProgramCount(from: baseStart, to: baseEnd))
-        // Chunks: history newest-first (catch-up depth users reach first),
-        // then forward. One day each.
+        // grid just committed it), so record whichever aligned days it fully
+        // covers rather than let a later walk ask for them again.
+        var covered = Self.gridDayCeil(baseStart)
+        while covered.addingTimeInterval(Self.gridChunkSeconds) <= baseEnd {
+            let dayEnd = covered.addingTimeInterval(Self.gridChunkSeconds)
+            recordGridCoverage(start: covered, end: dayEnd,
+                               programCount: residentProgramCount(from: covered, to: dayEnd))
+            covered = dayEnd
+        }
+        // Chunks: whole aligned UTC days across the range, history newest-first
+        // (catch-up depth users reach first), then forward. Fixed edges are what
+        // make the saved coverage reusable on the next launch.
+        let today = Self.gridDayFloor(now)
+        let rangeStart = Self.gridDayFloor(historyStart)
+        let rangeEnd = Self.gridDayCeil(forwardEnd)
         var historyChunks: [(Date, Date)] = []
-        var hEnd = baseStart
-        while hEnd > historyStart {
-            let hStart = max(historyStart, hEnd.addingTimeInterval(-86_400))
-            historyChunks.append((hStart, hEnd))
-            hEnd = hStart
-        }
         var forwardChunks: [(Date, Date)] = []
-        var fStart = baseEnd
-        while fStart < forwardEnd {
-            let fEnd = min(forwardEnd, fStart.addingTimeInterval(86_400))
-            forwardChunks.append((fStart, fEnd))
-            fStart = fEnd
+        var day = rangeStart
+        while day < rangeEnd {
+            let dayEnd = day.addingTimeInterval(Self.gridChunkSeconds)
+            if day < today {
+                historyChunks.append((day, dayEnd))
+            } else {
+                forwardChunks.append((day, dayEnd))
+            }
+            day = dayEnd
         }
+        historyChunks.reverse()
         let historyHours = Int(historySecs / 3600)
         let forwardHours = Int(forwardEnd.timeIntervalSince(now) / 3600)
         guard !historyChunks.isEmpty || !forwardChunks.isEmpty else {
@@ -2103,6 +2154,7 @@ final class GuideStore: ObservableObject {
             debugLog("📺 [EPG source=dispatcharr-api grid window] \(chunks.count) chunk(s): guideDays=\(playlistDays), history \(historyHours)h, forward to +\(forwardHours)h")
             walk = await fetchGridChunks(chunks, api: api, maps: maps, serverID: serverID)
         }
+        debugLog("📺 grid window: \(walk.fetched) of \(walk.visited) chunk(s) fetched (\(walk.cached) cached)")
         debugLog("📺 [EPG grid window] \(walk.fetched) of \(walk.visited) chunk(s) fetched (\(walk.cached) cached), history \(historyHours)h, forward +\(forwardHours)h")
         // An explicit refresh forced this walk to ignore coverage; the walk has
         // now rewritten it, so later walks in this session are incremental again.

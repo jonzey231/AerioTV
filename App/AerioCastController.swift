@@ -2345,8 +2345,10 @@ final class AirPlayMonitor: ObservableObject {
 /// Remote companion). It sits above the bottom tab bar on every tab for as
 /// long as a session is live, so choosing a device never moves the user off
 /// the page they were on, and tapping it opens the applicable remote controls
-/// in a sheet. Sized off the Android CastMiniController (dp map 1:1 to points
-/// on phone): 40pt art box, 12/8 padding, title over an accent status line.
+/// in a sheet. Sized off the Android CastMiniController/CastTransportCard (dp
+/// map 1:1 to points on phone): inset floating card, 16 pt side margins, 8 pt
+/// above the tab bar, 16 pt corners, 40 pt art box with 6 pt corners, 12/8
+/// inner padding, bold title over an accent status line, play/pause and X.
 struct RemoteSessionCard: View {
 
     enum Transport {
@@ -2421,7 +2423,22 @@ struct RemoteSessionCard: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.bar)
+        // Android CastTransportCard: an INSET rounded card floating above the
+        // tab bar, never a full-width banner touching the screen edges
+        // (Logan 2026-09-12). 16 pt side margins, ~8 pt of air above the tab
+        // bar, 16 pt corners, elevated fill with a thin accent hairline.
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.regularMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(ThemeManager.shared.accent.opacity(0.10), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
         .contentShape(Rectangle())
         .onTapGesture {
             debugLog("[Cast] card tap")

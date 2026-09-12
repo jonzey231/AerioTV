@@ -3353,7 +3353,7 @@ final class NowPlayingManager: ObservableObject {
         // While a cast session is live a channel tap CASTS the channel (the
         // phone shows nothing locally but the card update) -- including the
         // session that connected with nothing playing, where the card says
-        // "Pick a channel below".
+        // "Select a Channel".
         if isLive, AerioCastController.shared.isCasting {
             debugLog("🎮 NowPlaying.startPlaying: routing \(item.name) to the cast receiver")
             AerioCastController.shared.castPickedChannel(item)
@@ -5205,7 +5205,7 @@ struct MainTabView: View {
                 // the invitation, not as a channel.
                 title: content?.title ?? "Casting to \(device)",
                 status: content == nil
-                    ? "Pick a channel below"
+                    ? "Select a Channel"
                     : [content?.subtitle, "Casting to \(device)"]
                         .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
                 artURL: content?.artURL,
@@ -5221,7 +5221,7 @@ struct MainTabView: View {
                 title: companionClient.nowPlaying.isEmpty
                     ? "Controlling \(device)" : companionClient.nowPlaying,
                 status: companionClient.nowPlaying.isEmpty
-                    ? "Pick a channel below" : "Controlling \(device)",
+                    ? "Select a Channel" : "Controlling \(device)",
                 isPlaying: companionClient.remoteIsPlaying,
                 onTap: { showRemoteControls = true },
                 onTogglePlayPause: { companionClient.togglePlayPause() },
