@@ -3640,6 +3640,14 @@ struct AVPlayerMultiviewTile: View {
             itemReadyObs?.invalidate()
             itemReadyObs = nil
         }
+        #if os(iOS)
+        // Remote-session card (2026-09-12): AirPlay state for the card comes
+        // off whichever AVPlayer is currently feeding output. The audio tile
+        // is the one that can own an external route.
+        if MultiviewStore.shared.audioTileID == tileID {
+            AirPlayMonitor.shared.attach(avPlayer)
+        }
+        #endif
         // Live truth at this instant, never a captured snapshot.
         avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)
         // VOD resume (Continue Watching): the store carries the offset
@@ -3850,6 +3858,9 @@ struct AVPlayerMultiviewTile: View {
         driver = nil
         player?.pause()
         player = nil
+        #if os(iOS)
+        AirPlayMonitor.shared.detach()
+        #endif
         if remuxer != nil, !isVOD, !isDVR, catchup == nil, let releasedKey = sessionRetainKey {
             // This upstream is now in the provider's asynchronous
             // teardown; a re-open of it inside the next few seconds is

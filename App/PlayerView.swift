@@ -5681,6 +5681,9 @@ struct NativeHLSPlayerScreen: View {
             #endif
             player?.pause()
             player = nil
+            #if os(iOS)
+            AirPlayMonitor.shared.detach()
+            #endif
             // Detach remuxer callbacks BEFORE stop(): stop() only enqueues
             // teardown, so a main-queued late onReady/onError could still
             // land after this view is gone and start an orphan player or
@@ -5790,6 +5793,12 @@ struct NativeHLSPlayerScreen: View {
         // AirPlay live rides exactly this HLS path -- never the cast URL.
         avPlayer.allowsExternalPlayback = true
         avPlayer.usesExternalPlaybackWhileExternalScreenIsActive = true
+        #if os(iOS)
+        // Remote-session card (2026-09-12): the card has to know when the
+        // receiver actually took the video, and AirPlay's only honest signal
+        // is this player's isExternalPlaybackActive.
+        AirPlayMonitor.shared.attach(avPlayer)
+        #endif
         avPlayer.play()
         player = avPlayer
 

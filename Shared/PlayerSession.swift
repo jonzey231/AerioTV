@@ -617,6 +617,18 @@ final class PlayerSession: ObservableObject {
             CompanionClient.shared.setChannel(androidID, title: item.name)
             return true
         }
+        // Rule 1 / rule 5 (Logan 2026-09-12): same gate for Google Cast, and
+        // for the same reason -- begin() spins the tile pipeline up before
+        // startPlaying runs, so without this the phone would play the channel
+        // locally behind the card.
+        if isLive, AerioCastController.shared.isCasting {
+            DebugLogger.shared.log(
+                "[Cast] begin: routing \(item.name) to the receiver",
+                category: "Playback", level: .info
+            )
+            AerioCastController.shared.castPickedChannel(item)
+            return true
+        }
         #endif
 
         let store = MultiviewStore.shared

@@ -23,6 +23,7 @@
 //
 
 #if os(iOS)
+import AVFoundation
 import Foundation
 import GoogleCast
 import Network
@@ -340,8 +341,9 @@ final class AerioCastController: NSObject, ObservableObject {
         return MultiviewStore.shared.tiles.first?.item
     }
 
-    /// The channel-list cover's row tap: load it on the already-connected
-    /// receiver.
+    /// A channel tap while a session is already connected (guide row, VOD
+    /// play, or the awaiting-pick state): load it on the receiver. No local
+    /// playback starts (rule 5, Logan 2026-09-12).
     func castPickedChannel(_ item: ChannelDisplayItem) {
         guard let content = Self.castContent(for: item) else {
             surfaceCastFailure("This channel has no castable stream")
@@ -812,11 +814,15 @@ extension AerioCastController: GCKSessionManagerListener {
             }
             return
         }
-        guard !skipResume,
-              let content = castingContent,
-              let item = ChannelStore.shared.channels.first(where: { $0.id == content.mediaID })
-        else { return }
-        _ = PlayerSession.shared.begin(item: item, server: ChannelStore.shared.activeServer)
+        // Rule 4 (Logan 2026-09-12): "when I cancel casting, do not
+        // automatically start playing it on the phone. If I close it, it
+        // should just close." The old behavior resumed the cast channel
+        // locally here (Android-parity "bring it back to my phone"); that is
+        // deliberately gone, for EVERY end reason. `skipResume` (the sleep
+        // timer's one-shot) is now redundant but stays read so the timer's
+        // intent is still expressed.
+        _ = skipResume
+        debugLog("[Cast] stop: session ended, no local resume")
     }
 }
 
@@ -1050,7 +1056,6 @@ final class CompanionClient: NSObject, ObservableObject {
         // hidden while casting; this guards the programmatic path too.
         guard !AerioCastController.shared.isCasting else { return }
         disconnect(userInitiated: false)
-        remoteMinimized = false
         currentTV = tv
         generation += 1
         let gen = generation
@@ -1300,10 +1305,9 @@ final class CompanionClient: NSObject, ObservableObject {
         sleepTimerTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(minutes) * 60 * 1_000_000_000)
             guard !Task.isCancelled, let self, self.isControlling else { return }
-            Self.clog("sleep timer fired -> pausing TV + minimizing remote")
+            Self.clog("sleep timer fired -> pausing TV")
             self.pause()
             self.sleepEndsAt = nil
-            self.remoteMinimized = true
         }
     }
 
@@ -1319,11 +1323,6 @@ final class CompanionClient: NSObject, ObservableObject {
         PlayerSession.shared.stop()
     }
 
-    /// True while the remote cover is minimized so the user can browse the
-    /// guide (Channels button); channel taps still route to the TV. Cleared
-    /// on connect and whenever a channel is sent, so the remote pops back.
-    @Published var remoteMinimized = false
-
     /// Shared diagnostic breadcrumb for the companion remote. Gated behind the
     /// user's debug-logging pref (DebugLogger); safe to leave in Release so a
     /// user hitting a bug can flip logging on, reproduce, and send the file.
@@ -1335,7 +1334,6 @@ final class CompanionClient: NSObject, ObservableObject {
         controllingChannelID = androidChannelID
         if let title, !title.isEmpty { nowPlaying = title }
         sendJSON(["cmd": "setChannel", "channelId": androidChannelID])
-        remoteMinimized = false
         Self.clog("-> TV setChannel \(androidChannelID) title=\(title ?? "-")")
     }
 
@@ -1442,9 +1440,6 @@ struct RemoteControlScreen: View {
     /// Non-nil for the companion transport (full options: scrubber + Options
     /// sheet). nil for basic cast (web receiver has no control namespace).
     var companion: CompanionClient? = nil
-    /// Non-nil shows a "Channels" button that minimizes this remote back to
-    /// the guide (stay connected, browse, tap a channel to send it to the TV).
-    var onBrowse: (() -> Void)? = nil
     /// Non-nil for the basic-cast transport (task #267): shows the same
     /// Options button as the companion remote, opening CastOptionsSheet
     /// (Switch Stream / Record / Sleep Timer / proxy Stream Info) -- the
@@ -1456,28 +1451,6 @@ struct RemoteControlScreen: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            if let onBrowse {
-                VStack {
-                    HStack {
-                        Button(action: onBrowse) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "square.grid.2x2")
-                                Text("Channels")
-                            }
-                            .font(.callout.weight(.semibold))
-                            .foregroundStyle(Color.accentColor)
-                            .padding(.vertical, 8)
-                            .padding(.horizontal, 14)
-                            .background(Capsule().fill(Color.white.opacity(0.08)))
-                        }
-                        .accessibilityLabel("Browse channels")
-                        Spacer()
-                    }
-                    .padding(.top, 12)
-                    .padding(.horizontal, 20)
-                    Spacer()
-                }
-            }
             VStack(spacing: 18) {
                 Spacer()
                 if let art = artURL, let url = URL(string: art) {
@@ -2204,8 +2177,9 @@ struct CastPickerSheet: View {
         // discovery results can never grow the Google Cast section.
         .onAppear { castDevices.start() }
         .onDisappear { castDevices.stop() }
-        // Freshly connected on either transport -> the picker's job is done;
-        // the remote cover (HomeView) takes over.
+        // Freshly connected on either transport -> the picker's job is done.
+        // The user stays on the page they were on; the remote-session card
+        // above the tab bar takes over (rule 1, Logan 2026-09-12).
         .onChange(of: companion.isControlling) { _, controlling in
             if controlling { dismiss() }
         }
@@ -2213,54 +2187,6 @@ struct CastPickerSheet: View {
             if case .connected = state { dismiss() }
         }
         .presentationDetents([.medium])
-    }
-}
-
-/// Connected-but-empty cast cover (Logan 2026-09-11): the guide pill can
-/// start a session with nothing playing, and a web receiver with no media
-/// loaded falls to its idle screen and dies. Rather than refusing the cast
-/// (the old behavior: onConnected called stopCasting, so the receiver
-/// "launched then died instantly"), keep the session and ask which channel
-/// to send. Picking a row loads it through the same HLS-proxy path as the
-/// in-player chrome, and the regular RemoteControlScreen cover takes over.
-struct CastChannelPickCover: View {
-    @ObservedObject private var castController = AerioCastController.shared
-    @ObservedObject private var channelStore = ChannelStore.shared
-    @State private var search = ""
-
-    private var channels: [ChannelDisplayItem] {
-        let all = channelStore.channels
-        let query = search.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { return all }
-        return all.filter { $0.name.localizedCaseInsensitiveContains(query) }
-    }
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    ForEach(channels) { item in
-                        CompactChannelRow(item: item,
-                                          isAlreadyAdded: false,
-                                          isDisabled: false) {
-                            castController.castPickedChannel(item)
-                        }
-                    }
-                } header: {
-                    Text("Pick a channel to cast")
-                }
-            }
-            .searchable(text: $search, prompt: "Search channels")
-            .navigationTitle("Casting to \(castController.connectedDeviceName ?? "TV")")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Stop casting", role: .destructive) {
-                        castController.stopCasting()
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -2328,6 +2254,185 @@ struct CompanionPickerSheet: View {
         .presentationDetents([.medium])
     }
 }
+
+// MARK: - AirPlay session monitor (remote-session card parity, 2026-09-12)
+
+/// AirPlay has no session object of our own: AVFoundation owns the route, and
+/// the only honest signal that the TV took over is `isExternalPlaybackActive`
+/// on the AVPlayer the engine built. This wraps that signal (plus the route
+/// name off the audio session) so the ONE remote-session card can represent
+/// AirPlay next to Google Cast and the companion transport.
+@MainActor
+final class AirPlayMonitor: ObservableObject {
+
+    static let shared = AirPlayMonitor()
+
+    @Published private(set) var isExternal = false
+    @Published private(set) var deviceName: String?
+    @Published private(set) var isPlaying = true
+
+    private weak var player: AVPlayer?
+    private var externalObservation: NSKeyValueObservation?
+    private var rateObservation: NSKeyValueObservation?
+    private var routeObserver: NSObjectProtocol?
+
+    /// Called by every iOS AVPlayer engine site right after the player is
+    /// built. One player at a time: a new session replaces the old.
+    func attach(_ player: AVPlayer) {
+        detach()
+        self.player = player
+        externalObservation = player.observe(\.isExternalPlaybackActive,
+                                            options: [.initial, .new]) { p, _ in
+            let active = p.isExternalPlaybackActive
+            Task { @MainActor [weak self] in self?.apply(active) }
+        }
+        rateObservation = player.observe(\.timeControlStatus, options: [.initial, .new]) { p, _ in
+            let playing = p.timeControlStatus != .paused
+            Task { @MainActor [weak self] in
+                if self?.isPlaying != playing { self?.isPlaying = playing }
+            }
+        }
+        routeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor [weak self] in self?.refreshName() }
+        }
+    }
+
+    func detach() {
+        externalObservation = nil
+        rateObservation = nil
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+        routeObserver = nil
+        player = nil
+        apply(false)
+    }
+
+    func togglePlayPause() {
+        guard let player else { return }
+        player.timeControlStatus == .paused ? player.play() : player.pause()
+    }
+
+    /// The card's X. AirPlay has nothing to "disconnect", so closing ends the
+    /// session outright, and it must NOT fall back to the phone's screen
+    /// (rule 4: "if I close it, it should just close").
+    func stop() {
+        debugLog("[Cast] stop: session ended, no local resume (AirPlay)")
+        player?.allowsExternalPlayback = false
+        detach()
+        PlayerSession.shared.stop()
+        NowPlayingManager.shared.stop()
+    }
+
+    private func apply(_ active: Bool) {
+        if isExternal != active {
+            isExternal = active
+            debugLog("[Cast] card \(active ? "show" : "hide") (AirPlay)")
+        }
+        refreshName()
+    }
+
+    private func refreshName() {
+        let name = AVAudioSession.sharedInstance().currentRoute.outputs
+            .first(where: { $0.portType == .airPlay })?.portName
+        if deviceName != name { deviceName = name }
+    }
+}
+
+// MARK: - Remote session card (Logan 2026-09-12)
+
+/// The ONE card for all three transports (Google Cast, AirPlay, AerioTV
+/// Remote companion). It sits above the bottom tab bar on every tab for as
+/// long as a session is live, so choosing a device never moves the user off
+/// the page they were on, and tapping it opens the applicable remote controls
+/// in a sheet. Sized off the Android CastMiniController (dp map 1:1 to points
+/// on phone): 40pt art box, 12/8 padding, title over an accent status line.
+struct RemoteSessionCard: View {
+
+    enum Transport {
+        case cast, airPlay, companion
+
+        var glyph: String {
+            switch self {
+            case .cast: return "sparkles.tv"
+            case .airPlay: return "airplay.video"
+            case .companion: return "tv.and.mediabox"
+            }
+        }
+    }
+
+    let transport: Transport
+    let title: String
+    let status: String
+    var artURL: String? = nil
+    let isPlaying: Bool
+    let onTap: () -> Void
+    let onTogglePlayPause: () -> Void
+    let onStop: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(0.08))
+                if let artURL, let url = URL(string: artURL) {
+                    AsyncImage(url: url) { image in
+                        image.resizable().scaledToFit()
+                    } placeholder: {
+                        Image(systemName: transport.glyph)
+                            .foregroundStyle(ThemeManager.shared.accent)
+                    }
+                    .frame(width: 36, height: 36)
+                } else {
+                    Image(systemName: transport.glyph)
+                        .font(.system(size: 22))
+                        .foregroundStyle(ThemeManager.shared.accent)
+                }
+            }
+            .frame(width: 40, height: 40)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(ThemeManager.shared.accent)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button(action: onTogglePlayPause) {
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(ThemeManager.shared.accent)
+                    .frame(width: 40, height: 40)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isPlaying ? "Pause" : "Play")
+            Button(action: onStop) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 40, height: 40)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Stop")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.bar)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            debugLog("[Cast] card tap")
+            onTap()
+        }
+        .onAppear { debugLog("[Cast] card show") }
+        .onDisappear { debugLog("[Cast] card hide") }
+        .accessibilityElement(children: .contain)
+    }
+}
+
 #endif
 
 // MARK: - Companion HOST (tvOS) -- phones control THIS Apple TV
