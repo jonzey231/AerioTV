@@ -276,6 +276,12 @@ final class DebugLogger: @unchecked Sendable {
     /// it from the app.
     func clearLogs() {
         queue.async {
+            // Drop the replay ring too: a deliberate clear must not be
+            // undone by the purge-recovery replay on the next line.
+            self.ring.removeAll()
+            self.ringStart = 0
+            self.lastValidationAt = .distantPast
+            self.needsRevalidation = false
             for url in Self.allLogFileURLs() {
                 try? FileManager.default.removeItem(at: url)
             }
@@ -511,7 +517,7 @@ final class DebugLogger: @unchecked Sendable {
             let header = """
 
             ════════════════════════════════════════════════════════
-            Aerio Debug Session — \(self.timestampFormatter.string(from: Date()))
+            Aerio Debug Session: \(self.timestampFormatter.string(from: Date()))
             App Version : \(version) (\(build))
             Device      : \(deviceModel) (\(machine))
             System      : \(systemInfo)
@@ -519,7 +525,20 @@ final class DebugLogger: @unchecked Sendable {
             ════════════════════════════════════════════════════════
 
             """
+            // Purge forensics (2026-09-12): record what the file system
+            // actually had at launch, BEFORE the first append recreates
+            // anything, so a vanished log is visible in the next session.
+            let logPath = self.logFileURL?.path
+            let present = logPath.map { FileManager.default.fileExists(atPath: $0) } ?? false
+            var bytes = 0
+            if let logPath, let attrs = try? FileManager.default.attributesOfItem(atPath: logPath),
+               let size = attrs[.size] as? Int { bytes = size }
+            let archivePresent = self.logFileURL.map {
+                FileManager.default.fileExists(atPath: $0.deletingLastPathComponent()
+                    .appendingPathComponent("aerio_debug_logs_archive.txt").path)
+            } ?? false
             self.appendToFile(header)
+            self.appendToFile("[\(self.timestampFormatter.string(from: Date()))] [LOG] file present=\(present) size=\(bytes) archive=\(archivePresent)\n")
         }
         logConnectionSnapshot()
     }
@@ -554,7 +573,7 @@ final class DebugLogger: @unchecked Sendable {
                              source: String? = nil) -> String {
         let ts  = timestampFormatter.string(from: Date())
         var line = "[\(ts)] \(level.icon) [\(level.rawValue.padding(toLength: 9, withPad: " ", startingAt: 0))] [\(category)] \(message)"
-        if let src = source { line += "  — \(src)" }
+        if let src = source { line += "  | \(src)" }
         return line + "\n"
     }
 
@@ -574,48 +593,110 @@ final class DebugLogger: @unchecked Sendable {
             return
         }
 
-        // Rotate if the file has grown beyond the limit.
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-           let size = attrs[.size] as? Int, size > maxFileSize {
-            rotateLog(at: url)
+        // 2026-09-12 (Archie field capture from the Apple TV): the log
+        // file AND its rotated archive vanished from Library/Caches
+        // while the app kept running. tvOS purges Caches under storage
+        // pressure with no notification, so every line written after
+        // the purge used to land in a file nobody looked at, or worse,
+        // the in-flight state said "exists" and the append silently
+        // went nowhere. The write path now revalidates the file (at
+        // most once per second, so a firehose line costs nothing) and
+        // recreates it with the in-memory ring replayed on top, so a
+        // purge costs at most the last second instead of the session.
+        let now = Date()
+        var mustValidate = needsRevalidation
+        if !mustValidate, now.timeIntervalSince(lastValidationAt) >= Self.validationInterval {
+            mustValidate = true
         }
 
-        let exists = FileManager.default.fileExists(atPath: url.path)
-        if exists {
-            // v1.7.x diag: capture FileHandle errors so a sandboxing /
-            // permissions failure (the original try? swallowed both the
-            // open and the write) gets a clear stdout marker. Failures
-            // print at most once per session so we still notice them but
-            // do not flood the console.
-            do {
-                let handle = try FileHandle(forWritingTo: url)
-                defer { try? handle.close() }
-                handle.seekToEndOfFile()
-                handle.write(data)
-                if !appendDiagFirstWriteLogged {
-                    appendDiagFirstWriteLogged = true
-                    print("[DebugLogger][diag] first append OK: \(data.count) B at \(url.path)")
-                }
-            } catch {
-                if !appendDiagFailureLogged {
-                    appendDiagFailureLogged = true
-                    print("[DebugLogger][diag] appendToFile FileHandle error at \(url.path): \(error.localizedDescription) (further failures suppressed)")
-                }
+        if mustValidate {
+            lastValidationAt = now
+            needsRevalidation = false
+            let exists = FileManager.default.fileExists(atPath: url.path)
+            if !exists {
+                recreateFile(at: url)
+            } else if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                      let size = attrs[.size] as? Int, size > maxFileSize {
+                // Rotation is part of the same once-per-second check so
+                // the steady-state line cost is one write, no stat.
+                rotateLog(at: url)
             }
+        }
+
+        // Record the line in the ring BEFORE the write so a failed write
+        // followed by a recreate still replays it.
+        appendToRing(text)
+
+        do {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            handle.seekToEndOfFile()
+            handle.write(data)
+            if !appendDiagFirstWriteLogged {
+                appendDiagFirstWriteLogged = true
+                print("[DebugLogger][diag] first append OK: \(data.count) B at \(url.path)")
+            }
+        } catch {
+            // The file went away (or turned unwritable) between the
+            // validation above and this write: force a revalidation on
+            // the very next line instead of waiting out the interval.
+            needsRevalidation = true
+            if !appendDiagFailureLogged {
+                appendDiagFailureLogged = true
+                print("[DebugLogger][diag] appendToFile FileHandle error at \(url.path): \(error.localizedDescription) (further failures suppressed)")
+            }
+        }
+    }
+
+    // MARK: - Purge recovery
+
+    /// How often the write path is allowed to stat the log file. Every
+    /// line would mean one syscall per debugLog on the firehose.
+    private static let validationInterval: TimeInterval = 1.0
+    /// Maximum lines kept in memory for replay after a purge.
+    private static let ringCapacity = 2_000
+
+    private var lastValidationAt: Date = .distantPast
+    /// Set when a write fails, so the next line revalidates immediately
+    /// rather than after the interval.
+    private var needsRevalidation = false
+    /// Ring of the most recent log lines (each already newline-terminated).
+    /// Queue-confined: only touched from `queue`, so no lock is needed.
+    private var ring: [String] = []
+    private var ringStart = 0
+
+    private func appendToRing(_ text: String) {
+        if ring.count < Self.ringCapacity {
+            ring.append(text)
         } else {
-            // First-ever write: create the file. Use do/catch so a
-            // sandbox / disk-full / unwritable-parent error surfaces.
-            do {
-                try data.write(to: url, options: .atomic)
-                if !appendDiagFirstWriteLogged {
-                    appendDiagFirstWriteLogged = true
-                    print("[DebugLogger][diag] created \(url.path) with \(data.count) B")
-                }
-            } catch {
-                if !appendDiagFailureLogged {
-                    appendDiagFailureLogged = true
-                    print("[DebugLogger][diag] create FAILED at \(url.path): \(error.localizedDescription) (further failures suppressed)")
-                }
+            ring[ringStart] = text
+            ringStart = (ringStart + 1) % Self.ringCapacity
+        }
+    }
+
+    private func ringContents() -> [String] {
+        guard ring.count == Self.ringCapacity else { return ring }
+        return Array(ring[ringStart...]) + Array(ring[..<ringStart])
+    }
+
+    /// Recreate a log file that disappeared under us, seeding it with the
+    /// buffered lines so the recovered file is not an empty hole.
+    private func recreateFile(at url: URL) {
+        let buffered = ringContents()
+        var seed = "[\(timestampFormatter.string(from: Date()))] [LOG] file recreated (previous file missing)\n"
+        if !buffered.isEmpty {
+            seed += "[\(timestampFormatter.string(from: Date()))] [LOG] replayed \(buffered.count) buffered lines\n"
+            seed += buffered.joined()
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try (seed.data(using: .utf8) ?? Data()).write(to: url, options: .atomic)
+        } catch {
+            needsRevalidation = true
+            if !appendDiagFailureLogged {
+                appendDiagFailureLogged = true
+                print("[DebugLogger][diag] recreate FAILED at \(url.path): \(error.localizedDescription) (further failures suppressed)")
             }
         }
     }
@@ -636,7 +717,7 @@ final class DebugLogger: @unchecked Sendable {
             .appendingPathComponent("aerio_debug_logs_archive.txt")
         try? FileManager.default.removeItem(at: archiveURL)
         try? FileManager.default.moveItem(at: url, to: archiveURL)
-        let note = "[\(timestampFormatter.string(from: Date()))] ℹ️ [INFO    ] [Logger] Log rotated — previous log saved as aerio_debug_logs_archive.txt\n"
+        let note = "[\(timestampFormatter.string(from: Date()))] ℹ️ [INFO    ] [Logger] Log rotated, previous log saved as aerio_debug_logs_archive.txt\n"
         try? note.data(using: .utf8)?.write(to: url, options: .atomic)
     }
 
