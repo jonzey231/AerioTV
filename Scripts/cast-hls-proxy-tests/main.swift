@@ -195,5 +195,42 @@ do {
              "pts slightly behind wrap point stays in epoch")
 }
 
+// MARK: 7. AC-3 passthrough sample-entry config + playlist CODECS
+
+do {
+    // Synthesized AC-3 syncframe header: 48 kHz (fscod 0), 384 kbps
+    // (frmsizecod 28 -> bit_rate_code 14), bsid 8, bsmod 0, acmod 7 (3/2)
+    // with LFE -> 5.1, 1536 bytes per frame.
+    var frame: [UInt8] = [0x0B, 0x77, 0x00, 0x00, 0x1C, 0x40, 0xE1]
+    frame.append(contentsOf: [UInt8](repeating: 0, count: 1536 - frame.count))
+    guard let config = CastAudioTranscoder.parseAC3SampleEntryConfig(.ac3, frame, 0) else {
+        expect(false, "AC-3 sample entry config parsed")
+        exit(1)
+    }
+    expectEq(config.fscod, 0, "dac3 fscod")
+    expectEq(config.bsid, 8, "dac3 bsid")
+    expectEq(config.bsmod, 0, "dac3 bsmod")
+    expectEq(config.acmod, 7, "dac3 acmod")
+    expectEq(config.lfeon, 1, "dac3 lfeon")
+    expectEq(config.bitRateCode, 14, "dac3 bit_rate_code")
+    expectEq(config.sampleRate, 48_000, "AC-3 sample rate")
+    expectEq(config.channels, 6, "AC-3 channel count (5.1)")
+    expectEq(config.samplesPerFrame, 1536, "AC-3 samples per frame")
+    expectEq(config.codecsAttribute, "ac-3", "AC-3 CODECS attribute")
+
+    let store = CastHLSSegmentStore()
+    let gen = store.beginGeneration()
+    store.setInitSegment(generation: gen, data: Data("init".utf8))
+    expect(store.masterPlaylistText().contains(",mp4a.40.2\""), "master defaults to the AAC codec")
+    store.setAudioCodecsAttribute("ac-3")
+    let master = store.masterPlaylistText()
+    expect(master.contains(",ac-3\""), "master names ac-3 for a passthrough")
+    expect(!master.contains("mp4a"), "master drops the AAC codec for a passthrough")
+    store.setAudioCodecsAttribute(nil)
+    let videoOnly = store.masterPlaylistText()
+    expect(!videoOnly.contains("mp4a") && !videoOnly.contains("ac-3"),
+           "video-only master names no audio codec")
+}
+
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)
