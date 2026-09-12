@@ -238,6 +238,32 @@ final class VODStore: ObservableObject {
 
     /// The quiet background sweep (Logan 2026-09-12). One at a time.
     private var backgroundSweepTask: Task<Void, Never>?
+    /// Instrumented publish for the sweep's progressive writes (Logan
+    /// 2026-09-12). session8 shows D-pad presses taking 648 ms (14:54:14.373 ->
+    /// 14:54:15.039) and 869 ms (14:54:15.558 -> 14:54:16.427) while
+    /// `loadMovies` was walking 69 categories, with `[HANG]` 620 ms and 797 ms
+    /// in the same seconds and no breadcrumb. These two helpers put a
+    /// `[PUBLISH]` line and a render breadcrumb on every VOD library write, so
+    /// the next log says whether those stalls are the VOD publishes or the
+    /// per-item construction around them.
+    private func publishMovies(_ items: [VODDisplayItem], _ why: String) {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        MainThreadWatchdog.shared.begin("publish vod.movies")
+        movies = items
+        MainThreadWatchdog.shared.end("publish vod.movies")
+        MainThreadWatchdog.shared.notePublish("publish vod.movies \(items.count) items (\(why))")
+        debugLog("[PUBLISH] vod.movies \(items.count) items took \(Int((CFAbsoluteTimeGetCurrent() - t0) * 1000))ms (\(why))")
+    }
+
+    private func publishSeries(_ items: [VODDisplayItem], _ why: String) {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        MainThreadWatchdog.shared.begin("publish vod.series")
+        series = items
+        MainThreadWatchdog.shared.end("publish vod.series")
+        MainThreadWatchdog.shared.notePublish("publish vod.series \(items.count) items (\(why))")
+        debugLog("[PUBLISH] vod.series \(items.count) items took \(Int((CFAbsoluteTimeGetCurrent() - t0) * 1000))ms (\(why))")
+    }
+
     /// Restore-only launch path: publish the persisted snapshots and touch
     /// nothing on the network.
     ///
@@ -268,6 +294,7 @@ final class VODStore: ObservableObject {
             lastMoviesServerName = server.name
             currentMoviesServerID = server.id
             MainThreadWatchdog.shared.end("publish vod.movies")
+            MainThreadWatchdog.shared.notePublish("publish vod.movies \(snap.items.count) items")
             debugLog("[PUBLISH] vod.movies \(snap.items.count) items took \(Int((CFAbsoluteTimeGetCurrent() - t0) * 1000))ms (snapshot restore)")
             debugLog("[VOD-CACHE] restored \(snap.items.count) movies from \(Int(Date().timeIntervalSince(snap.at)))s ago (launch, no network)")
             TMDBArtCache.shared.enrich(snap.items, isMovie: true)
@@ -284,6 +311,7 @@ final class VODStore: ObservableObject {
             lastSeriesServerName = server.name
             currentSeriesServerID = server.id
             MainThreadWatchdog.shared.end("publish vod.series")
+            MainThreadWatchdog.shared.notePublish("publish vod.series \(snap.items.count) items")
             debugLog("[PUBLISH] vod.series \(snap.items.count) items took \(Int((CFAbsoluteTimeGetCurrent() - t0) * 1000))ms (snapshot restore)")
             debugLog("[VOD-CACHE] restored \(snap.items.count) series from \(Int(Date().timeIntervalSince(snap.at)))s ago (launch, no network)")
             TMDBArtCache.shared.enrich(snap.items, isMovie: false)
@@ -863,7 +891,7 @@ final class VODStore: ObservableObject {
                         // Continue Watching hero fell back meanwhile).
                         let growing = accumulated.count >= movies.count
                         if isLoadingMovies {
-                            if growing { movies = accumulated }
+                            if growing { publishMovies(accumulated, "sweep first batch") }
                             isLoadingMovies = false
                             lastProgressivePublish = Date()
                         } else if growing, Date().timeIntervalSince(lastProgressivePublish) >= 5 {
@@ -872,7 +900,7 @@ final class VODStore: ObservableObject {
                             // the sweep finished. Publish at most every 5 s,
                             // far from the per-batch churn that tripped the
                             // tvOS AttributeGraph crash.
-                            movies = accumulated
+                            publishMovies(accumulated, "sweep progressive")
                             lastProgressivePublish = Date()
                         }
                         if accumulated.count >= totalCap { break }
@@ -914,7 +942,7 @@ final class VODStore: ObservableObject {
             if accumulated.isEmpty, let lastError {
                 moviesError = lastError.errorDescription
             }
-            movies = accumulated
+            publishMovies(accumulated, "sweep complete")
             isLoadingMovies = false
             hasLoadedMovies = true
             debugLog("🎬 VODStore.loadMovies: done, \(accumulated.count) movies across \(enabledMovieCats.count) categories")
@@ -1119,11 +1147,11 @@ final class VODStore: ObservableObject {
                         }
                         // Same partial-over-full guard as the movie sweep.
                         if isLoadingSeries {
-                            if accumulated.count >= series.count { series = accumulated }
+                            if accumulated.count >= series.count { publishSeries(accumulated, "sweep first batch") }
                             isLoadingSeries = false
                         } else if accumulated.count >= series.count,
                                   Date().timeIntervalSince(lastSeriesProgressivePublish) >= 5 {
-                            series = accumulated
+                            publishSeries(accumulated, "sweep progressive")
                             lastSeriesProgressivePublish = Date()
                         }
                         if accumulated.count >= totalCap { break }
@@ -1158,7 +1186,7 @@ final class VODStore: ObservableObject {
             if accumulated.isEmpty, let lastError {
                 seriesError = lastError.errorDescription
             }
-            series = accumulated
+            publishSeries(accumulated, "sweep complete")
             isLoadingSeries = false
             hasLoadedSeries = true
             debugLog("📺 VODStore.loadSeries: done, \(accumulated.count) series across \(enabledSeriesCats.count) enabled categories")

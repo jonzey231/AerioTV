@@ -69,12 +69,63 @@ final class MainThreadWatchdog: @unchecked Sendable {
     }
 
     private func breadcrumbDescription() -> String {
-        lock.lock(); let open = openBreadcrumbs; lock.unlock()
-        guard !open.isEmpty else { return "none" }
+        lock.lock()
+        let open = openBreadcrumbs
+        let render = pendingRenderLabel
+        let renderAt = pendingRenderAt
+        let stage = mainRunLoopStage
+        lock.unlock()
         let now = CFAbsoluteTimeGetCurrent()
-        return open.map { "\($0.label) (open \(Int(($0.at.distance(to: now)) * 1000))ms)" }
-            .joined(separator: " < ")
+        var parts = open.map { "\($0.label) (open \(Int(($0.at.distance(to: now)) * 1000))ms)" }
+        if let render {
+            parts.append("rendering after \(render) (\(Int((renderAt.distance(to: now)) * 1000))ms ago)")
+        }
+        parts.append("runloop=\(stage)")
+        return parts.joined(separator: " < ")
     }
+
+    // MARK: Main run loop attribution
+    //
+    // Why breadcrumbs alone read "none" in session8: every one of our own
+    // publishes completes in 0 ms (the [PUBLISH] lines prove it) and the cost
+    // lands LATER, inside SwiftUI's invalidation and the Core Animation commit
+    // for that run loop turn, which no `begin`/`end` pair around the assignment
+    // can cover. A main run loop observer closes that gap: `notePublish` opens a
+    // breadcrumb that the observer clears at the next `beforeWaiting`, so a hang
+    // during the render pass that a publish caused is attributed to that
+    // publish, and the observer also records which run loop stage main was in.
+    private var runLoopObserver: CFRunLoopObserver?
+    private var pendingRenderLabel: String?
+    private var pendingRenderAt: CFAbsoluteTime = 0
+
+    /// Call right after any `@Published` write big enough to matter. The label
+    /// stays attached until the run loop goes idle again.
+    func notePublish(_ label: String) {
+        lock.lock()
+        pendingRenderLabel = label
+        pendingRenderAt = CFAbsoluteTimeGetCurrent()
+        lock.unlock()
+    }
+
+    private func installRunLoopObserver() {
+        let activities = CFRunLoopActivity.beforeWaiting.rawValue | CFRunLoopActivity.afterWaiting.rawValue
+        let observer = CFRunLoopObserverCreateWithHandler(nil, activities, true, 0) { [weak self] _, activity in
+            guard let self else { return }
+            self.lock.lock()
+            if activity == .beforeWaiting {
+                // The turn that followed the publish has finished.
+                self.pendingRenderLabel = nil
+                self.mainRunLoopStage = "idle"
+            } else {
+                self.mainRunLoopStage = "working"
+            }
+            self.lock.unlock()
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+        runLoopObserver = observer
+    }
+
+    private var mainRunLoopStage = "unknown"
 
     // MARK: Detection
 
@@ -87,6 +138,7 @@ final class MainThreadWatchdog: @unchecked Sendable {
         t.setEventHandler { [weak self] in self?.ping() }
         t.resume()
         timer = t
+        DispatchQueue.main.async { [weak self] in self?.installRunLoopObserver() }
         debugLog("[HANG] detector armed: main-thread pings every 250ms, reporting blocks > \(Int(Self.hangThreshold * 1000))ms")
     }
 

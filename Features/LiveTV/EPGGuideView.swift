@@ -498,6 +498,19 @@ final class GuideStore: ObservableObject {
             debugLog("📺 GuideStore: REJECTED empty \(source) write — keeping the existing guide")
             return false
         }
+        // Identical-content guard (Logan 2026-09-12). session8 shows the launch
+        // publishing the whole map four times - cache-load 15885,
+        // resident-page-in 22188, dispatcharr-grid 22323, category-apply 18431 -
+        // and a publish costs a SwiftUI invalidation of every observer even when
+        // the content did not move. The signature is a cheap hash walk over the
+        // map (no allocation), so a no-op write now costs the hash instead of a
+        // render pass. `category-apply` on a warm relaunch is exactly that.
+        let incomingSignature = Self.contentSignature(dict)
+        if let current = residentSignature, current == incomingSignature, !programs.isEmpty {
+            debugLog("[PUBLISH] guide.programs skipped, content unchanged (\(source))")
+            return true
+        }
+        residentSignature = incomingSignature
         // [PUBLISH] instrumentation + off-main release (Logan 2026-09-12).
         //
         // Measured from session7.txt: every `[MEM] commitPrograms begin` is
@@ -519,6 +532,8 @@ final class GuideStore: ObservableObject {
         let outgoing = programs
         programs = dict
         MainThreadWatchdog.shared.end("publish guide.programs \(source)")
+        // Attribute the render pass this publish is about to cause.
+        MainThreadWatchdog.shared.notePublish("publish guide.programs \(programCount) items (\(source))")
         Task.detached(priority: .background) {
             // Sole purpose: keep the old map alive until this background task
             // ends, so its release happens here and not on the main thread.
@@ -688,9 +703,13 @@ final class GuideStore: ObservableObject {
                 // Resident cap: read (and therefore publish) only the days the
                 // guide can draw at launch. `effectiveWindowHours` still
                 // governs what the cache HOLDS; see `residentHistorySeconds`.
-                let windowStart = now.addingTimeInterval(-min(historySecs, GuideStore.residentHistorySeconds))
-                let windowEnd = now.addingTimeInterval(min(Double(effectiveWindowHours) * 3600,
-                                                          GuideStore.residentForwardSeconds))
+                // Day-aligned, matching what `residentWindow` will record and
+                // what `ensureResidentRange` asks for.
+                let windowStart = GuideStore.gridDayFloor(
+                    now.addingTimeInterval(-min(historySecs, GuideStore.residentHistorySeconds)))
+                let windowEnd = GuideStore.gridDayCeil(
+                    now.addingTimeInterval(min(Double(effectiveWindowHours) * 3600,
+                                               GuideStore.residentForwardSeconds)))
                 let descriptor = FetchDescriptor<EPGProgram>(
                     predicate: #Predicate<EPGProgram> {
                         $0.serverID == serverID && $0.endTime > windowStart && $0.startTime < windowEnd
@@ -761,8 +780,15 @@ final class GuideStore: ObservableObject {
             // already happened off-main.
             self.commitPrograms(Self.drawableOnly(loaded.dict), for: serverID, source: "cache-load")
             let residentNow = Date()
-            self.residentWindow = (residentNow.addingTimeInterval(-GuideStore.residentHistorySeconds),
-                                   residentNow.addingTimeInterval(GuideStore.residentForwardSeconds))
+            // Day-ALIGNED bounds. `ensureResidentRange` floors/ceils its request
+            // to the same UTC day grid, so an unaligned window made the guide's
+            // first `onChange(of: horizontalOffset)` always look like a miss:
+            // session8 shows exactly that, a `resident-page-in` publish of 6303
+            // programmes at 14:53:50 on a launch that needed none.
+            self.residentWindow = (
+                Self.gridDayFloor(residentNow.addingTimeInterval(-GuideStore.residentHistorySeconds)),
+                Self.gridDayCeil(residentNow.addingTimeInterval(GuideStore.residentForwardSeconds))
+            )
             debugLog("📺 GuideStore.loadFromCache: resident window \(Self.chunkStamp(self.residentWindow!.start)) to \(Self.chunkStamp(self.residentWindow!.end)) (the cache still holds the full \(effectiveWindowHours / 24)-day span)")
             // Record how old the loaded data actually is (newest cached
             // fetch), so the warm-foreground staleness check (issue #24)
@@ -904,6 +930,32 @@ final class GuideStore: ObservableObject {
     /// changed nothing (the common Xtream case: the bulk XMLTV yields nothing
     /// and the per-channel fallback is refused) does not rewrite 322k rows.
     private var lastSavedSignature: [String: Int] = [:]
+
+    /// Order-INDEPENDENT content signature for the publish guard. Dictionary
+    /// iteration order is not stable between two snapshots, so a plain `Hasher`
+    /// walk (like `programsSignature` below, which only gates disk writes)
+    /// cannot be compared across calls. XOR-folding per-channel hashes can.
+    /// Includes the fields a publish can legitimately change on identical
+    /// timings - category, repeat flag, description length - so a real
+    /// `category-apply` still publishes.
+    nonisolated static func contentSignature(_ snapshot: [String: [GuideProgram]]) -> Int {
+        var fold = 0
+        for (channelID, progs) in snapshot {
+            var h = Hasher()
+            h.combine(channelID)
+            h.combine(progs.count)
+            for gp in progs {
+                h.combine(Int(gp.start.timeIntervalSince1970))
+                h.combine(Int(gp.end.timeIntervalSince1970))
+                h.combine(gp.title)
+                h.combine(gp.category)
+                h.combine(gp.isRepeat)
+                h.combine(gp.description.count)
+            }
+            fold ^= h.finalize()
+        }
+        return fold
+    }
 
     private func programsSignature(_ snapshot: [String: [GuideProgram]]) -> Int {
         var h = Hasher()
@@ -1162,6 +1214,9 @@ final class GuideStore: ObservableObject {
     private var gridCoverage: [EPGGridCoverage.Chunk] = []
     /// Playlist identity `gridCoverage` belongs to.
     private var gridCoverageIdentity: String?
+    /// Signature of the currently published `programs`, so `commitPrograms` can
+    /// drop a write whose content is identical.
+    private var residentSignature: Int?
     /// Container captured by `loadFromCache`, so the coverage paths can prune
     /// or drop cached rows without threading a `ModelContext` through the
     /// background walk.
@@ -1238,6 +1293,8 @@ final class GuideStore: ObservableObject {
     /// cache restore and at the end of every sweep.
     func pruneBeyondCatchupReach(channels: [ChannelDisplayItem], serverID: String) async {
         guard let container = cachedContainer, !channels.isEmpty else { return }
+        MainThreadWatchdog.shared.begin("pruneBeyondCatchupReach")
+        defer { MainThreadWatchdog.shared.end("pruneBeyondCatchupReach") }
         // Cap at 30 days to match `ChannelDisplayItem.canReplay`.
         var reach: [String: Int] = [:]
         var maxDays = 0
@@ -1285,18 +1342,28 @@ final class GuideStore: ObservableObject {
         gridCoverage.removeAll { $0.end <= coverageCutoff }
         let droppedChunks = beforeChunks - gridCoverage.count
         if droppedChunks > 0 { persistGridCoverage() }
-        // Resident map: drop the same programmes so memory and disk agree.
-        var trimmed: [String: [GuideProgram]] = [:]
-        var droppedResident = 0
-        for (channelID, list) in programs {
-            let days = reach[channelID] ?? 0
-            let cutoff = days > 0
-                ? now.addingTimeInterval(-TimeInterval(days) * 86_400)
-                : now.addingTimeInterval(-Self.noCatchupHistorySeconds)
-            let kept = list.filter { $0.end >= cutoff }
-            droppedResident += list.count - kept.count
-            if !kept.isEmpty { trimmed[channelID] = kept }
-        }
+        // Resident map: drop the same programmes so memory and disk agree. The
+        // filter runs off the main actor (session8: the sibling
+        // `pruneOutsideGridWindow` filter was inside a 1004 ms [HANG] at
+        // 14:54:12.903); main only commits the result.
+        let snapshot = programs
+        let noCatchupSecs = Self.noCatchupHistorySeconds
+        let trim: (dict: [String: [GuideProgram]], dropped: Int) = await Task.detached(priority: .utility) {
+            var trimmed: [String: [GuideProgram]] = [:]
+            var dropped = 0
+            for (channelID, list) in snapshot {
+                let days = reach[channelID] ?? 0
+                let cutoff = days > 0
+                    ? now.addingTimeInterval(-TimeInterval(days) * 86_400)
+                    : now.addingTimeInterval(-noCatchupSecs)
+                let kept = list.filter { $0.end >= cutoff }
+                dropped += list.count - kept.count
+                if !kept.isEmpty { trimmed[channelID] = kept }
+            }
+            return (trimmed, dropped)
+        }.value
+        let trimmed = trim.dict
+        let droppedResident = trim.dropped
         if droppedResident > 0 {
             _ = commitPrograms(trimmed, for: serverID, source: "catchup-reach-prune")
             if var window = residentWindow {
@@ -1486,6 +1553,8 @@ final class GuideStore: ObservableObject {
     /// bound, in memory and on disk, and coverage entries that fall entirely
     /// outside the current range.
     private func pruneOutsideGridWindow(historyStart: Date, forwardEnd: Date, serverID: String) async {
+        MainThreadWatchdog.shared.begin("pruneOutsideGridWindow")
+        defer { MainThreadWatchdog.shared.end("pruneOutsideGridWindow") }
         let before = gridCoverage.count
         let rangeStart = Self.gridDayFloor(historyStart)
         let rangeEnd = Self.gridDayCeil(forwardEnd)
@@ -1493,14 +1562,22 @@ final class GuideStore: ObservableObject {
         gridCoverage = dedupedGridCoverage()
         let droppedChunks = before - gridCoverage.count
 
-        var trimmed: [String: [GuideProgram]] = [:]
-        var droppedPrograms = 0
-        for (channelID, list) in programs {
-            let kept = list.filter { $0.end >= historyStart }
-            droppedPrograms += list.count - kept.count
-            if !kept.isEmpty { trimmed[channelID] = kept }
-        }
-        if droppedPrograms > 0 { programs = trimmed }
+        // Off the main actor: this filter over the whole resident map was inside
+        // the 1004 ms [HANG] at 14:54:12.903 in session8.
+        let snapshot = programs
+        let trim: (dict: [String: [GuideProgram]], dropped: Int) = await Task.detached(priority: .utility) {
+            var trimmed: [String: [GuideProgram]] = [:]
+            var dropped = 0
+            for (channelID, list) in snapshot {
+                let kept = list.filter { $0.end >= historyStart }
+                dropped += list.count - kept.count
+                if !kept.isEmpty { trimmed[channelID] = kept }
+            }
+            return (trimmed, dropped)
+        }.value
+        let trimmed = trim.dict
+        let droppedPrograms = trim.dropped
+        if droppedPrograms > 0 { _ = commitPrograms(trimmed, for: serverID, source: "history-bound-prune") }
 
         if droppedPrograms > 0, let container = cachedContainer {
             await Task.detached(priority: .utility) {
@@ -2296,7 +2373,11 @@ final class GuideStore: ObservableObject {
         let readEnd = Self.gridDayCeil(wantEnd)
         guard readStart < window.start || readEnd > window.end else { return }
         residentPagingInFlight = true
-        defer { residentPagingInFlight = false }
+        MainThreadWatchdog.shared.begin("ensureResidentRange")
+        defer {
+            residentPagingInFlight = false
+            MainThreadWatchdog.shared.end("ensureResidentRange")
+        }
         let existingStart = window.start
         let existingEnd = window.end
         let pageStart = CFAbsoluteTimeGetCurrent()
@@ -2307,8 +2388,16 @@ final class GuideStore: ObservableObject {
             readStart < existingStart ? (readStart, existingStart) : nil,
             readEnd > existingEnd ? (existingEnd, readEnd) : nil
         ].compactMap { $0 }
+        // Merge base goes INTO the detached task: the 2026-09-12 session8 log
+        // measured this page-in at 667 ms
+        // ("ensureResidentRange: paged in 6303 programme(s) ... in 667ms",
+        // 14:53:50.171) with [HANG] 614 ms and 554 ms on either side of it,
+        // because the merge and the per-channel sort ran on the main actor.
+        // Now the task returns the finished map and main only commits it.
+        let base = programs
         let fetched: (dict: [String: [GuideProgram]], count: Int) = await Task.detached(priority: .userInitiated) {
-            var dict: [String: [GuideProgram]] = [:]
+            var dict: [String: [GuideProgram]] = base
+            var touched: Set<String> = []
             var total = 0
             for (spanStart, spanEnd) in spans {
                 let descriptor = FetchDescriptor<EPGProgram>(
@@ -2329,6 +2418,7 @@ final class GuideStore: ObservableObject {
                     }
                     if rows.isEmpty { break }
                     for ep in rows {
+                        touched.insert(ep.channelID)
                         dict[ep.channelID, default: []].append(
                             GuideProgram(channelID: ep.channelID, title: ep.title,
                                          description: ep.programDescription,
@@ -2347,6 +2437,8 @@ final class GuideStore: ObservableObject {
                     if rows.count < pageSize { break }
                 }
             }
+            // Sort only the channels that gained programmes.
+            for cid in touched { dict[cid]?.sort { $0.start < $1.start } }
             return (dict, total)
         }.value
         // Widen the window even when the cache had nothing for those days, so
@@ -2357,14 +2449,7 @@ final class GuideStore: ObservableObject {
             debugLog("📺 GuideStore.ensureResidentRange: cache had no programmes for the new span; window now \(Self.chunkStamp(window.start)) to \(Self.chunkStamp(window.end))")
             return
         }
-        var merged = programs
-        for (channelID, list) in fetched.dict {
-            var existing = merged[channelID] ?? []
-            existing.append(contentsOf: list)
-            existing.sort { $0.start < $1.start }
-            merged[channelID] = existing
-        }
-        _ = commitPrograms(merged, for: serverID, source: "resident-page-in")
+        _ = commitPrograms(fetched.dict, for: serverID, source: "resident-page-in")
         debugLog("📺 GuideStore.ensureResidentRange: paged in \(fetched.count) programme(s) across \(fetched.dict.count) channel(s) in \(Int((CFAbsoluteTimeGetCurrent() - pageStart) * 1000))ms; window now \(Self.chunkStamp(window.start)) to \(Self.chunkStamp(window.end))")
     }
 
@@ -4272,6 +4357,8 @@ final class GuideStore: ObservableObject {
     /// per-program gradient"). Callers inside the Guide view that
     /// don't care about completion can ignore the await.
     func seedEPGCache(channels: [ChannelDisplayItem], server: ServerConnection?) async {
+        MainThreadWatchdog.shared.begin("seedEPGCache")
+        defer { MainThreadWatchdog.shared.end("seedEPGCache") }
         guard let server else { return }
 
         // Dedupe — see `lastSeedEPGCacheSignature` doc. On warm

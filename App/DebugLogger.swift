@@ -691,12 +691,23 @@ enum TabProbe {
         guard !flushScheduled else { return }
         flushScheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            // Guide rows get their own [RENDER] line (Logan 2026-09-12): the
+            // question "did a publish re-evaluate 20 visible cells or all 903
+            // rows" has to be answerable by grepping one tag.
+            let renderKeys = ["GuideProgramCell", "GuideChannelRow", "ChannelRow"]
+            let renderLine = counts.sorted { $0.key < $1.key }
+                .filter { renderKeys.contains($0.key) }
+                .map { "\($0.key)=\($0.value)" + (distinct[$0.key].map { " (\($0.count) distinct)" } ?? "") }
+                .joined(separator: " ")
             let line = counts.sorted { $0.key < $1.key }.map {
                 "\($0.key)=\($0.value)" + (distinct[$0.key].map { " (\($0.count) distinct)" } ?? "")
             }.joined(separator: " ")
             counts.removeAll(); distinct.removeAll()
             flushScheduled = false
             debugLog("[TAB] bodies/1s: \(line)")
+            if !renderLine.isEmpty {
+                debugLog("[RENDER] rows evaluated in the last second: \(renderLine)")
+            }
         }
     }
 }
