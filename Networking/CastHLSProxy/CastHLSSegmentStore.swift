@@ -55,6 +55,11 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         let data: Data
         let durationTicks: Int64
         let discontinuity: Bool
+        /// This segment's accumulated media START within its generation, in
+        /// 90 kHz ticks (0 for the generation's first segment). Added
+        /// 2026-09-12 so the playlist can carry an absolute
+        /// EXT-X-PROGRAM-DATE-TIME per segment; see `mediaPlaylistText`.
+        let mediaStartTicks: Int64
     }
 
     /// Guards the store; also what held segment fetches wait on.
@@ -71,6 +76,25 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     /// EXT-X-DISCONTINUITY-SEQUENCE: count of flagged segments that have
     /// fully rolled out of the ring.
     private var discontinuitySequence = 0
+
+    /// Wall-clock anchor per generation: `Date()` captured when that
+    /// generation's FIRST segment is stored. A generation's segment at
+    /// media offset `mediaStartTicks` therefore sits at
+    /// `anchor + mediaStartTicks / 90000` on an absolute clock, which is
+    /// what EXT-X-PROGRAM-DATE-TIME advertises. Evicted alongside the
+    /// generation's init segment.
+    private var generationAnchors: [Int: Date] = [:]
+
+    /// ISO-8601 with milliseconds and a UTC offset, the only shape HLS
+    /// allows for EXT-X-PROGRAM-DATE-TIME (RFC 8216 section 4.3.2.6).
+    /// nonisolated(unsafe): every read happens inside `mediaPlaylistText`,
+    /// which holds `condition`, so the formatter is never touched
+    /// concurrently.
+    nonisolated(unsafe) private static let programDateFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 
     private let log: (String) -> Void
 
@@ -102,6 +126,7 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         condition.lock()
         ring.removeAll()
         inits.removeAll()
+        generationAnchors.removeAll()
         segmentsInGeneration = 0
         mediaTicksInGeneration = 0
         storeOpen = false
@@ -141,13 +166,26 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         condition.unlock()
     }
 
-    func addSegment(generation gen: Int, data: Data, durationTicks: Int64) {
+    /// Returns the sequence number the playlist will advertise for this
+    /// segment, or nil when a stale generation was gated out. The sender
+    /// log's per-segment timeline line names it (see
+    /// `CastHLSProxySession.startIngestLocked`), so the proxy log and the
+    /// playlist can be lined up by seq instead of by guesswork.
+    @discardableResult
+    func addSegment(generation gen: Int, data: Data, durationTicks: Int64) -> Int? {
         condition.lock()
         defer { condition.unlock() }
-        guard gen == generation else { return } // stale ingest racing a channel change
+        guard gen == generation else { return nil } // stale ingest racing a channel change
+        // First segment of this generation: stamp the wall-clock anchor
+        // every later segment's EXT-X-PROGRAM-DATE-TIME is derived from.
+        if generationAnchors[gen] == nil { generationAnchors[gen] = Date() }
+        // `mediaTicksInGeneration` is still the total BEFORE this segment,
+        // which is exactly this segment's accumulated media start.
         let entry = SegmentEntry(seq: nextSeq, generation: gen, data: data,
                                  durationTicks: durationTicks,
-                                 discontinuity: pendingDiscontinuity)
+                                 discontinuity: pendingDiscontinuity,
+                                 mediaStartTicks: mediaTicksInGeneration)
+        let publishedSeq = nextSeq
         nextSeq += 1
         pendingDiscontinuity = false
         ring.append(entry)
@@ -158,12 +196,16 @@ final class CastHLSSegmentStore: @unchecked Sendable {
             if !ring.contains(where: { $0.generation == evicted.generation }),
                evicted.generation != generation {
                 inits.removeValue(forKey: evicted.generation)
+                // The anchor is only ever read for a segment still in the
+                // window, so it dies with its generation's last segment.
+                generationAnchors.removeValue(forKey: evicted.generation)
             }
         }
         segmentsInGeneration += 1
         mediaTicksInGeneration += durationTicks
         // Wake any held fetch for the sequence just published.
         condition.broadcast()
+        return publishedSeq
     }
 
     /// Init segment for `gen`, or nil when no longer retained.
@@ -256,11 +298,34 @@ final class CastHLSSegmentStore: @unchecked Sendable {
             text += "#EXT-X-DISCONTINUITY-SEQUENCE:\(discontinuitySequence)\n"
         }
         var lastGen = -1
-        for seg in window {
+        for (index, seg) in window.enumerated() {
             // The tag stays attached to its segment for as long as the
             // segment is in the window; DISCONTINUITY-SEQUENCE above only
             // accounts for flagged segments that have rolled out.
             if seg.discontinuity { text += "#EXT-X-DISCONTINUITY\n" }
+            // EXT-X-PROGRAM-DATE-TIME on the window's first segment, and
+            // again immediately after every discontinuity (each one
+            // restarts the media timeline, so the following segment needs
+            // its own generation's anchor).
+            //
+            // Why it exists (added 2026-09-12): with
+            // manifest.hls.sequenceMode=false Shaka takes segment
+            // TIMESTAMPS from the media (our tfdt boxes) and segment
+            // POSITIONS from the playlist (accumulated EXTINF from 0), and
+            // without an absolute clock nothing reconciles the two. On the
+            // 15:10:03 Google TV Streamer session Shaka assumed the window
+            // started at media time 0, chose a start position of 2.439 s
+            // (11.311 s window minus the 9 s presentation delay) before a
+            // single byte of media was appended, then had to relocate to
+            // 0.016 s (the first audio sample's own time,
+            // MediaGapJumped=1) and sat at -58 ms in BUFFERING for 45 s.
+            // PROGRAM-DATE-TIME gives it the absolute clock that ties the
+            // playlist position to the segments' own timestamps.
+            if index == 0 || seg.discontinuity, let anchor = generationAnchors[seg.generation] {
+                let offset = Double(seg.mediaStartTicks) / Double(CastFMP4Remuxer.ticksPerSecond)
+                let stamp = Self.programDateFormatter.string(from: anchor.addingTimeInterval(offset))
+                text += "#EXT-X-PROGRAM-DATE-TIME:\(stamp)\n"
+            }
             if seg.generation != lastGen {
                 text += "#EXT-X-MAP:URI=\"init\(seg.generation).mp4\"\n"
                 lastGen = seg.generation

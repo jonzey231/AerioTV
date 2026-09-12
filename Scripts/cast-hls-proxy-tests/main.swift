@@ -120,9 +120,15 @@ do {
     // Contiguous sequence numbering across the splice: seg0..seg4.
     for n in 0...4 { expect(lines.contains("seg\(n).m4s"), "seg\(n) advertised") }
     expect(!text.contains("seg5.m4s"), "stale-generation segment claimed no sequence number")
-    // The discontinuity tag must sit immediately before gen2's MAP+first segment.
+    // The discontinuity tag must sit immediately before gen2's
+    // PROGRAM-DATE-TIME (added 2026-09-12: every discontinuity restarts
+    // the media timeline, so the segment after it needs its own
+    // generation's wall-clock anchor; see section 12) and then its
+    // MAP + first segment.
     if let di = lines.firstIndex(of: "#EXT-X-DISCONTINUITY") {
-        expectEq(lines[di + 1], "#EXT-X-MAP:URI=\"init\(gen2).mp4\"", "discontinuity precedes new MAP")
+        expect(lines[di + 1].hasPrefix("#EXT-X-PROGRAM-DATE-TIME:"),
+               "discontinuity precedes the new generation's PROGRAM-DATE-TIME")
+        expectEq(lines[di + 2], "#EXT-X-MAP:URI=\"init\(gen2).mp4\"", "discontinuity precedes new MAP")
     } else {
         expect(false, "discontinuity index")
     }
@@ -597,6 +603,167 @@ do {
     }
     expect(allSafe, "every ADTS header value yields a Chromium-parseable 2-byte ASC")
 }
+
+// MARK: 12. EXT-X-PROGRAM-DATE-TIME and the per-segment timeline callback
+//
+// Added 2026-09-12 on Logan's order after the Google TV Streamer session
+// at 15:10:03: with manifest.hls.sequenceMode=false Shaka takes segment
+// TIMESTAMPS from the media (our tfdt boxes) and segment POSITIONS from
+// the playlist (accumulated EXTINF from 0), and nothing reconciles the
+// two without an absolute clock. Shaka assumed the window began at media
+// time 0, chose a start position of 2.439 s (11.311 s window minus the
+// 9 s presentation delay) before any media was appended, relocated to
+// 0.016 s once it saw the buffer (MediaGapJumped=1), and then sat at
+// -58 ms in BUFFERING for 45 s. These tests pin the two things that let
+// us see and fix that: the absolute clock in the playlist, and the
+// per-segment timeline numbers in the proxy log.
+
+/// Every EXT-X-PROGRAM-DATE-TIME value in a playlist, in order.
+@MainActor func programDateTimes(_ playlist: String) -> [String] {
+    playlist.split(separator: "\n").compactMap { line in
+        line.hasPrefix("#EXT-X-PROGRAM-DATE-TIME:")
+            ? String(line.dropFirst("#EXT-X-PROGRAM-DATE-TIME:".count))
+            : nil
+    }
+}
+
+@MainActor func parseISO(_ value: String) -> Date? {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return f.date(from: value)
+}
+
+do {
+    let store = CastHLSSegmentStore()
+    let ticks3s: Int64 = 3 * 90_000
+    let gen = store.beginGeneration()
+    store.setInitSegment(generation: gen, data: Data("init".utf8))
+    for _ in 0..<3 { store.addSegment(generation: gen, data: Data([1]), durationTicks: ticks3s) }
+
+    let first = store.mediaPlaylistText()
+    let stamps = programDateTimes(first)
+    expectEq(stamps.count, 1, "one EXT-X-PROGRAM-DATE-TIME, on the window's first segment")
+    guard let firstStamp = stamps.first, let firstDate = parseISO(firstStamp) else {
+        expect(false, "EXT-X-PROGRAM-DATE-TIME parses as ISO-8601 with fractional seconds")
+        exit(1)
+    }
+    expect(true, "EXT-X-PROGRAM-DATE-TIME parses as ISO-8601 with fractional seconds")
+    // The tag must precede the segment it stamps, and sit inside the
+    // window's first segment's block (i.e. before the first EXTINF).
+    let lines = first.split(separator: "\n").map(String.init)
+    if let pdtIndex = lines.firstIndex(where: { $0.hasPrefix("#EXT-X-PROGRAM-DATE-TIME:") }),
+       let extinfIndex = lines.firstIndex(where: { $0.hasPrefix("#EXTINF:") }) {
+        expect(pdtIndex < extinfIndex, "PROGRAM-DATE-TIME precedes the first EXTINF")
+    } else {
+        expect(false, "PROGRAM-DATE-TIME precedes the first EXTINF")
+    }
+
+    // Slide the window: windowSize is 5, so six more segments roll the
+    // first four out of the 5-segment window, and the advertised
+    // PROGRAM-DATE-TIME must advance by exactly those segments' durations.
+    for _ in 0..<6 { store.addSegment(generation: gen, data: Data([1]), durationTicks: ticks3s) }
+    let slid = store.mediaPlaylistText()
+    guard let slidStamp = programDateTimes(slid).first, let slidDate = parseISO(slidStamp) else {
+        expect(false, "PROGRAM-DATE-TIME still present after the window slid")
+        exit(1)
+    }
+    // 9 segments stored, a 5-segment window: seq 4 is the window head, so
+    // four 3 s segments rolled off.
+    expect(slid.contains("#EXT-X-MEDIA-SEQUENCE:4"), "window head advanced to seq 4")
+    let advanced = slidDate.timeIntervalSince(firstDate)
+    expect(abs(advanced - 12.0) < 0.050,
+           "PROGRAM-DATE-TIME advanced by the rolled-off durations (12.000s, got \(String(format: "%.3f", advanced))s)")
+}
+
+// A playlist built across a discontinuity carries a SECOND
+// PROGRAM-DATE-TIME right after the EXT-X-DISCONTINUITY: the new
+// generation restarts its media timeline at 0, so the segment after the
+// tag needs its own generation's wall-clock anchor.
+do {
+    let store = CastHLSSegmentStore()
+    let ticks3s: Int64 = 3 * 90_000
+    let gen1 = store.beginGeneration()
+    store.setInitSegment(generation: gen1, data: Data("i1".utf8))
+    for _ in 0..<2 { store.addSegment(generation: gen1, data: Data([1]), durationTicks: ticks3s) }
+    let gen2 = store.beginGeneration()
+    store.setInitSegment(generation: gen2, data: Data("i2".utf8))
+    for _ in 0..<2 { store.addSegment(generation: gen2, data: Data([2]), durationTicks: ticks3s) }
+
+    let text = store.mediaPlaylistText()
+    let lines = text.split(separator: "\n").map(String.init)
+    expectEq(programDateTimes(text).count, 2, "two PROGRAM-DATE-TIMEs across a splice")
+    if let discIndex = lines.firstIndex(of: "#EXT-X-DISCONTINUITY") {
+        expect(discIndex + 1 < lines.count
+               && lines[discIndex + 1].hasPrefix("#EXT-X-PROGRAM-DATE-TIME:"),
+               "PROGRAM-DATE-TIME immediately follows EXT-X-DISCONTINUITY")
+    } else {
+        expect(false, "PROGRAM-DATE-TIME immediately follows EXT-X-DISCONTINUITY")
+    }
+    expect(programDateTimes(text).allSatisfy { parseISO($0) != nil },
+           "both PROGRAM-DATE-TIMEs parse as ISO-8601")
+}
+
+// onSegmentComposition against the real transport stream: the numbers the
+// proxy log prints must be non-negative (a negative presentation time is
+// exactly the audio-below-zero failure section 9 covers) and the playlist
+// timeline (segmentStartSeconds) must accumulate to the emitted durations.
+@MainActor func runSegmentCompositionChecks() {
+    guard let bytes = continuityFixtureTS() else {
+        print("SKIP onSegmentComposition timeline (no ffmpeg fixture)")
+        return
+    }
+    struct Composition {
+        let video: Int, audio: Int
+        let vdts: Double, vpts: Double, apts: Double, start: Double
+    }
+    var compositions: [Composition] = []
+    var durations: [Int64] = []
+    let remuxer = CastFMP4Remuxer()
+    remuxer.onSegmentComposition = { v, a, vdts, vpts, apts, start in
+        compositions.append(Composition(video: v, audio: a, vdts: vdts, vpts: vpts,
+                                        apts: apts, start: start))
+    }
+    remuxer.onMediaSegment = { _, ticks in durations.append(ticks) }
+    var offset = 0
+    while offset < bytes.count {
+        let n = min(64 * 1024, bytes.count - offset)
+        try? remuxer.feed(bytes.subdata(in: offset..<(offset + n)))
+        offset += n
+    }
+    expect(compositions.count >= 6,
+           "onSegmentComposition fires for every segment (\(compositions.count))")
+    expectEq(compositions.count, durations.count,
+             "one composition callback per emitted segment")
+    guard compositions.count >= 6, compositions.count == durations.count else { return }
+
+    expect(compositions.allSatisfy { $0.vpts >= 0 },
+           "firstVideoPTSSeconds is non-negative for every segment")
+    expect(compositions.allSatisfy { $0.apts >= 0 },
+           "firstAudioPTSSeconds is non-negative for every segment (fixture has audio throughout)")
+    expect(compositions.allSatisfy { $0.vdts >= 0 && $0.video > 0 && $0.audio > 0 },
+           "every segment reports samples on both tracks at a non-negative DTS")
+    // The first segment of a generation starts the playlist timeline at 0.
+    expect(abs(compositions[0].start) < 1e-9, "the first segment starts the playlist timeline at 0")
+    // segmentStartSeconds accumulates to the sum of the emitted durations,
+    // within one 90 kHz tick.
+    let tick = 1.0 / Double(CastFMP4Remuxer.ticksPerSecond)
+    var running: Int64 = 0
+    var accumulates = true
+    for (index, c) in compositions.enumerated() {
+        if abs(c.start - Double(running) / Double(CastFMP4Remuxer.ticksPerSecond)) > tick {
+            accumulates = false
+        }
+        running += durations[index]
+    }
+    expect(accumulates, "segmentStartSeconds accumulates to the sum of the emitted durations")
+    let total = Double(running) / Double(CastFMP4Remuxer.ticksPerSecond)
+    let lastEnd = compositions[compositions.count - 1].start
+        + Double(durations[durations.count - 1]) / Double(CastFMP4Remuxer.ticksPerSecond)
+    expect(abs(total - lastEnd) <= tick,
+           "the last segment ends at the total emitted duration")
+}
+
+runSegmentCompositionChecks()
 
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

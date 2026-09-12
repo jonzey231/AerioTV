@@ -136,6 +136,18 @@ final class AerioCastController: NSObject, ObservableObject {
     private var pending: Content?
     private var castStateObserver: NSObjectProtocol?
 
+    /// One-way diagnostic namespace: the receiver web app broadcasts a
+    /// JSON player-state snapshot on it, the sender only listens. Exists
+    /// because the receiver page's own console prints NOTHING that reaches
+    /// logcat on a Google TV Streamer, so on the 15:10:03 2026-09-12
+    /// session we could not see the buffered ranges or the seek range that
+    /// decide whether Shaka's chosen playhead is reachable. Logan's order:
+    /// "I need you to not guess. Add something in logging so you can see
+    /// it." Same namespace string on Android (core/cast/).
+    private static let receiverDebugNamespace = "urn:x-cast:com.aeriotv.receiver.debug"
+    /// Attached on session start, dropped on session end.
+    private var receiverDebugChannel: GCKGenericChannel?
+
     /// Initialise GCKCastContext once. Call from app launch on the main thread.
     func start() {
         guard !started else { return }
@@ -732,6 +744,13 @@ extension AerioCastController: GCKSessionManagerListener {
             _ = try? await center.requestAuthorization(options: [.alert, .sound])
         }
         session.remoteMediaClient?.add(self)
+        // Listen for the receiver's diagnostic snapshots (see
+        // `receiverDebugNamespace`). Purely read-only; nothing is ever
+        // sent on this channel.
+        let debugChannel = GCKGenericChannel(namespace: Self.receiverDebugNamespace)
+        debugChannel.delegate = self
+        session.add(debugChannel)
+        receiverDebugChannel = debugChannel
         // Cast takes precedence over an active companion session: tear that
         // down first so the two remote covers can never both be live (review
         // 2026-07-16). Companion Disconnect leaves the Android TV playing.
@@ -784,6 +803,14 @@ extension AerioCastController: GCKSessionManagerListener {
             debugLog("[CAST] session ended involuntarily: \(error.map(String.init(describing:)) ?? "?")")
         }
         pending = nil
+        // The receiver is gone, so its debug channel goes with it; remove
+        // it from the session while one is still reachable, then drop the
+        // reference either way.
+        if let debugChannel = receiverDebugChannel {
+            GCKCastContext.sharedInstance().sessionManager.currentCastSession?.remove(debugChannel)
+            debugChannel.delegate = nil
+            receiverDebugChannel = nil
+        }
         // The cast card must not outlive the session; a local resume below
         // publishes its own via PlayerSession.
         NowPlayingBridge.shared.teardown()
@@ -873,6 +900,84 @@ extension AerioCastController: GCKRemoteMediaClientListener {
         default: playing = true // playing / buffering / loading all read as "on"
         }
         MainActor.assumeIsolated { self.remoteIsPlaying = playing }
+    }
+}
+
+// MARK: - GCKGenericChannelDelegate (receiver debug telemetry)
+//
+// The receiver web app broadcasts one JSON snapshot of its player state
+// per event on `receiverDebugNamespace`; this logs it as ONE line so the
+// sender log alone shows what Shaka believed about its own buffer. Added
+// 2026-09-12 after the Google TV Streamer session where the receiver sat
+// at position -58 ms in BUFFERING for 45 s and nothing on the device
+// could tell us where the buffered range or the seek range actually was.
+// Keys the receiver sends: ev, t, buffered (array of [start, end]
+// pairs), ready, state, rate, seek ([start, end] or null), bufTime, bw,
+// hist, err. Any field the receiver omits logs as `?`.
+
+extension AerioCastController: GCKGenericChannelDelegate {
+
+    nonisolated func cast(_ channel: GCKGenericChannel,
+                          didReceiveTextMessage message: String,
+                          withNamespace protocolNamespace: String) {
+        // GCK delivers channel callbacks on the main thread, but this is a
+        // diagnostic path and `MainActor.assumeIsolated` would TRAP if that
+        // ever stopped being true. Hopping costs a log line's latency and
+        // cannot take the app down.
+        Task { @MainActor [message] in logReceiverDebug(message) }
+    }
+
+    /// Never throws and never logs anything but the single line: a
+    /// malformed snapshot must not cost us the rest of the session.
+    private func logReceiverDebug(_ message: String) {
+        guard let data = message.data(using: .utf8),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return
+        }
+        func string(_ key: String) -> String {
+            if let s = json[key] as? String { return s }
+            if let n = json[key] as? NSNumber { return n.stringValue }
+            return "?"
+        }
+        func decimals(_ key: String, _ places: Int) -> String {
+            guard let n = json[key] as? NSNumber else { return "?" }
+            return String(format: "%.\(places)f", n.doubleValue)
+        }
+        // Chromium reports a two-track SourceBuffer's buffered ranges as
+        // the INTERSECTION of the tracks, so these pairs are what the
+        // proxy log's buffStart must fall inside.
+        var buffered = "?"
+        if let ranges = json["buffered"] as? [[Any]] {
+            let pairs = ranges.compactMap { pair -> String? in
+                guard pair.count >= 2,
+                      let a = pair[0] as? NSNumber, let b = pair[1] as? NSNumber else { return nil }
+                return String(format: "[%.3f-%.3f]", a.doubleValue, b.doubleValue)
+            }
+            buffered = pairs.isEmpty ? "none" : pairs.joined()
+        }
+        var seek = "?"
+        if json["seek"] is NSNull {
+            seek = "none"
+        } else if let pair = json["seek"] as? [Any], pair.count >= 2,
+                  let a = pair[0] as? NSNumber, let b = pair[1] as? NSNumber {
+            seek = String(format: "[%.3f-%.3f]", a.doubleValue, b.doubleValue)
+        } else if json["seek"] == nil {
+            seek = "?"
+        }
+        var bandwidth = "?"
+        if let bw = json["bw"] as? NSNumber { bandwidth = String(Int(bw.doubleValue)) }
+        var error = "?"
+        if json["err"] is NSNull { error = "none" } else if json["err"] != nil { error = string("err") }
+        var history = "?"
+        if let entries = json["hist"] as? [Any], let last = entries.last {
+            history = String(describing: last)
+        } else if json["hist"] != nil {
+            history = string("hist")
+        }
+        debugLog("[Cast] receiver: ev=\(string("ev")) t=\(decimals("t", 3)) "
+            + "buffered=\(buffered) ready=\(string("ready")) state=\(string("state")) "
+            + "rate=\(string("rate")) seek=\(seek) bufTime=\(decimals("bufTime", 2)) "
+            + "bw=\(bandwidth) hist=\(history) err=\(error)")
     }
 }
 

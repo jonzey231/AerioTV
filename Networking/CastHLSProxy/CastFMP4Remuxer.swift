@@ -109,6 +109,35 @@ final class CastFMP4Remuxer {
     /// `durationTicks` is the segment's video span in 90 kHz ticks.
     var onMediaSegment: ((Data, Int64) -> Void)?
 
+    /// Per segment: the numbers needed to do the playhead-vs-buffer
+    /// arithmetic from the sender log alone.
+    ///
+    /// Added 2026-09-12 on Logan's order ("I need you to not guess. Add
+    /// something in logging so you can see it."): with
+    /// manifest.hls.sequenceMode=false the receiver takes segment
+    /// timestamps from the MEDIA (our tfdt boxes) and segment positions
+    /// from the PLAYLIST (accumulated EXTINF from 0), and on the
+    /// 15:10:03 Google TV Streamer session those two timelines only
+    /// agreed by luck: Shaka picked a start position of 2.439 s (window
+    /// end 11.311 s minus the 9 s presentation delay) BEFORE any media
+    /// was appended, then relocated to 0.016 s once it saw the buffer
+    /// (MediaGapJumped=1) and pinned at -58 ms in BUFFERING forever. The
+    /// receiver page prints nothing that reaches logcat, so these are
+    /// the only numbers we can actually read.
+    ///
+    /// All four Doubles are SECONDS RELATIVE TO `timelineBase`, i.e.
+    /// exactly what lands in the tfdt boxes divided by the 90 kHz tick
+    /// rate. `firstVideoPTSSeconds` is the video track's earliest
+    /// presentation time; `max(firstVideoPTSSeconds,
+    /// firstAudioPTSSeconds)` is where a two-track SourceBuffer's
+    /// buffered range actually BEGINS, because Chromium reports the
+    /// INTERSECTION of the tracks' ranges, not their union.
+    /// `firstAudioPTSSeconds` is -1.0 when the segment has no audio.
+    var onSegmentComposition: ((_ videoSamples: Int, _ audioSamples: Int,
+                                _ firstVideoDTSSeconds: Double, _ firstVideoPTSSeconds: Double,
+                                _ firstAudioPTSSeconds: Double,
+                                _ segmentStartSeconds: Double) -> Void)?
+
     private let targetSegmentTicks: Int64
     private let log: (String) -> Void
     /// Injectable for the CLI tests (AudioToolbox codecs are not
@@ -251,6 +280,15 @@ final class CastFMP4Remuxer {
     private var audioCarry: [UInt8] = []
     private var lastVideoDuration: Int64 = 3_000 // ~30 fps fallback for the first delta
     private var sequenceNumber = 0
+
+    /// Running total of the `durationTicks` already emitted by this
+    /// remuxer, i.e. the next segment's accumulated media START within
+    /// the generation. One remuxer is built per generation
+    /// (`CastHLSProxySession.startIngestLocked`), so the first segment of
+    /// a generation reports 0. This is the PLAYLIST timeline (accumulated
+    /// EXTINF from 0); the tfdt numbers above are the MEDIA timeline, and
+    /// the whole point of logging both is that nothing reconciles them.
+    private var emittedMediaTicks: Int64 = 0
 
     /// Feed raw TS bytes off the wire. Throws `CastUnsupportedCodecError`
     /// as soon as the PMT declares a codec the remux cannot carry.
@@ -847,8 +885,30 @@ final class CastFMP4Remuxer {
         }
         let segment = buildMediaSegment(video: videoQueue, videoDurations: durations, audio: segAudio)
         let durationTicks = cutDTS - segStart
+        // Timeline snapshot for the composition callback, taken BEFORE
+        // the queues are cleared. These are the same values the tfdt
+        // boxes carry (see `buildMoof`), expressed in seconds relative to
+        // `timelineBase`, plus this segment's position on the playlist
+        // timeline; the sender log needs both to tell whether Shaka's
+        // chosen playhead can possibly be inside the buffered range.
+        let videoSamples = videoQueue.count
+        let audioSamples = segAudio.count
+        let firstVideoDTSSeconds = Double(videoQueue[0].dts - timelineBase) / Double(Self.ticksPerSecond)
+        let firstVideoPTSSeconds = Double(videoQueue[0].pts - timelineBase) / Double(Self.ticksPerSecond)
+        // -1.0 is the "no audio in this segment" sentinel; a real value
+        // is never negative because samples below `timelineBasePTS` are
+        // dropped at queue time and `timelineBasePTS >= timelineBase`.
+        let firstAudioPTSSeconds = segAudio.first
+            .map { Double($0.pts - timelineBase) / Double(Self.ticksPerSecond) } ?? -1.0
+        let segmentStartSeconds = Double(emittedMediaTicks) / Double(Self.ticksPerSecond)
+        emittedMediaTicks += durationTicks
         videoQueue.removeAll(keepingCapacity: true)
         audioQueue = keepAudio
+        // Fired BEFORE onMediaSegment so the per-segment timeline line is
+        // logged ahead of anything the store/session does with the bytes.
+        onSegmentComposition?(videoSamples, audioSamples,
+                              firstVideoDTSSeconds, firstVideoPTSSeconds,
+                              firstAudioPTSSeconds, segmentStartSeconds)
         onMediaSegment?(segment, durationTicks)
     }
 

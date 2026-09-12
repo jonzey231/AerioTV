@@ -127,6 +127,13 @@ final class CastHLSProxySession: @unchecked Sendable {
     private var segmentsLogged = 0
     private var rollupBytes = 0
     private var rollupTicks: Int64 = 0
+    /// Timeline snapshot handed over by `CastFMP4Remuxer.onSegmentComposition`,
+    /// which fires immediately before `onMediaSegment` on the same ingest
+    /// queue. Held on the session (not in a captured local) so Swift 6
+    /// concurrency checking has a single owner for it.
+    private var pendingComposition: (video: Int, audio: Int,
+                                     vdts: Double, vpts: Double, apts: Double,
+                                     start: Double)?
 
     // Stats surface for the cast Options sheet (task #267): the latest
     // completed per-8-segment rollup is STORED, not just logged, plus a
@@ -399,11 +406,43 @@ final class CastHLSProxySession: @unchecked Sendable {
             }
             self.log("init segment ready gen=\(gen) (\(data.count) B)")
         }
+        // Per-segment timeline snapshot, stashed by the composition
+        // callback (which fires first) and logged below once the store has
+        // handed back the sequence number the playlist will advertise.
+        // Added 2026-09-12: with sequenceMode=false the receiver aligns
+        // the playlist timeline (t=) against the segments' own timestamps
+        // (vdts/vpts/apts), and on the 15:10:03 Google TV Streamer session
+        // those disagreed by 16 ms with no way to see it from either log.
+        pendingComposition = nil
+        remuxer.onSegmentComposition = { [weak self] video, audio, vdts, vpts, apts, start in
+            guard let self, self.ingestEpoch == epoch else { return }
+            self.pendingComposition = (video, audio, vdts, vpts, apts, start)
+        }
         remuxer.onMediaSegment = { [weak self] data, durationTicks in
             guard let self, self.ingestEpoch == epoch else { return }
             // The store's generation gate is the authority; this epoch
             // check just spares dead work after a teardown race.
-            self.store?.addSegment(generation: gen, data: data, durationTicks: durationTicks)
+            let publishedSeq = self.store?.addSegment(generation: gen, data: data,
+                                                      durationTicks: durationTicks)
+            if let c = self.pendingComposition {
+                self.pendingComposition = nil
+                let dur = Double(durationTicks) / Double(CastFMP4Remuxer.ticksPerSecond)
+                // buffStart is max(vpts, apts): Chromium reports a
+                // two-track SourceBuffer's buffered range as the
+                // INTERSECTION of the tracks, so the later of the two
+                // earliest presentation times is where the range actually
+                // begins. A video-only segment reports apts=-1.000 and
+                // buffStart falls back to vpts.
+                let buffStart = max(c.vpts, c.apts)
+                self.log("seg=\(publishedSeq.map(String.init) ?? "?") "
+                    + "t=\(String(format: "%.2f", c.start))s "
+                    + "dur=\(String(format: "%.2f", dur))s "
+                    + "vdts=\(String(format: "%.3f", c.vdts)) "
+                    + "vpts=\(String(format: "%.3f", c.vpts)) "
+                    + "apts=\(String(format: "%.3f", c.apts)) "
+                    + "buffStart=\(String(format: "%.3f", buffStart)) "
+                    + "video=\(c.video) audio=\(c.audio) \(data.count) B")
+            }
             self.segmentsLogged += 1
             self.totalSegmentsProduced += 1
             self.rollupBytes += data.count
