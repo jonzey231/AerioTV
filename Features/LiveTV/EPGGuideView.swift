@@ -1154,7 +1154,18 @@ final class GuideStore: ObservableObject {
     /// One publish re-renders the tab roots and every channel row (iPhone List
     /// evaluates ALL row bodies per render), so the sweep publishes in batches
     /// rather than per chunk.
-    nonisolated static let backgroundSweepPublishEvery = 4
+    ///
+    /// Raised from 4 to 24 on 2026-09-12. At 4, a 91-day sweep published the
+    /// WHOLE programme map 23 times; the tvOS log shows one such publish every
+    /// ~9 s for four and a half minutes (atvlogs/session5.txt 02:30:11 through
+    /// 02:34:39), each one a `pub:guide.programs=1` re-render, and the iPhone
+    /// log shows the same cadence landing in the middle of a cast session
+    /// (iphlogs/session5.txt 02:28:00 through 02:29:02, RSS 336-345 MB). The
+    /// sweep's first chunk is today, and it still publishes on its own, so the
+    /// day the user is looking at is corrected immediately; the remaining 90
+    /// days are off screen and cost nothing by waiting. 24 gives four further
+    /// publishes instead of twenty-two.
+    nonisolated static let backgroundSweepPublishEvery = 24
 
     /// How long a fetched chunk stays trusted. Long enough that relaunches
     /// within a day cost nothing, short enough that a provider's late EPG
@@ -2477,24 +2488,45 @@ final class GuideStore: ObservableObject {
             // straddle the day edge come back with this chunk's own response
             // (the grid returns everything overlapping the window), so stripping
             // by overlap loses nothing.
-            var base: [String: [GuideProgram]] = [:]
-            base.reserveCapacity(staged.count)
-            for (channelID, list) in staged {
-                let kept = list.filter { $0.end <= day || $0.start >= dayEnd }
-                if !kept.isEmpty { base[channelID] = kept }
-            }
+            //
+            // The strip runs INSIDE the detached task, together with the merge
+            // (2026-09-12). It used to run here, on the @MainActor: rebuilding
+            // `base` walks every channel and every programme the store holds,
+            // which on Logan's playlist with Guide Days = All Available is 757
+            // channels and ~64k programmes, once per chunk, 91 times in a
+            // sweep. Field log atvlogs/session5.txt shows what that cost: from
+            // the sweep's start (02:30:11) to its end (02:34:39) the gap
+            // between `[MEM] commitPrograms begin` and the next main-thread
+            // tally grew from 1.0 s to 4.0 s, RSS climbed 172 MB -> 257 MB
+            // (three full copies of the programme map alive at once: `staged`
+            // on main, `base`, and the merge result), and a D-pad press at
+            // 02:36:25 took 5.82 s from `began` to `ended`. Handing the map to
+            // the background task and dropping the main actor's reference
+            // first keeps ONE copy live and leaves the main thread free.
+            let stagedIn = staged
+            staged = [:]
             let result = await Task.detached(priority: .background) {
-                GuideStore.mergeGridPrograms(fetched, into: base,
-                                             tvgIDToChannelIDs: maps.tvgIDToChannelIDs,
-                                             intIDToChannelID: maps.intIDToChannelID,
-                                             uuidToChannelID: maps.uuidToChannelID,
-                                             windowStart: day, windowEnd: dayEnd)
+                var base: [String: [GuideProgram]] = [:]
+                base.reserveCapacity(stagedIn.count)
+                for (channelID, list) in stagedIn {
+                    let kept = list.filter { $0.end <= day || $0.start >= dayEnd }
+                    if !kept.isEmpty { base[channelID] = kept }
+                }
+                return GuideStore.mergeGridPrograms(fetched, into: base,
+                                                    tvgIDToChannelIDs: maps.tvgIDToChannelIDs,
+                                                    intIDToChannelID: maps.intIDToChannelID,
+                                                    uuidToChannelID: maps.uuidToChannelID,
+                                                    windowStart: day, windowEnd: dayEnd)
             }.value
             staged = result.dict
             merged += result.matched
             unpublished += 1
-            // Batched publishes: see `backgroundSweepPublishEvery`.
-            if unpublished >= Self.backgroundSweepPublishEvery || backgroundSweepRemaining.isEmpty {
+            // Batched publishes: see `backgroundSweepPublishEvery`. The FIRST
+            // chunk is today, the day the guide is showing, so it publishes on
+            // its own the moment it lands; every later chunk is off screen and
+            // coalesces into a much larger batch.
+            let isFirstChunk = swept == 1
+            if isFirstChunk || unpublished >= Self.backgroundSweepPublishEvery || backgroundSweepRemaining.isEmpty {
                 guard commitPrograms(staged, for: serverID, source: "dispatcharr-grid-resweep") else {
                     backgroundSweepTask = nil
                     return

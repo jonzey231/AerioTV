@@ -6526,6 +6526,24 @@ struct MainTabView: View {
                         if heldSec > 0 {
                             debugLog("🟢 [Orchestrator] phase 2 EPG: held background fetchUpcoming \(heldSec)s for active playback")
                         }
+                        // Wait for the app to settle before spending the
+                        // launch on a refresh nobody asked for (2026-09-12).
+                        // The tile check above only holds while a stream is
+                        // playing, so on a plain relaunch this ran straight
+                        // away and landed on top of the guide's first paint.
+                        // Apple TV log atvlogs/session5.txt: the app launched
+                        // at 02:25:06.978 and the guide rendered at
+                        // 02:25:11.633, and this refresh then pulled 4.9 MB of
+                        // epgdata (02:25:13.765) plus the grid and republished
+                        // the entire programme map at 02:25:14.697, taking RSS
+                        // from 56 MB to 156 MB while the user was trying to
+                        // press a button. Nothing here is load-bearing: the
+                        // cache is fresh, and this pass only refreshes
+                        // category tints and backfills programIDs. The settle
+                        // gate is the same one the VOD and DVR sweeps use, so
+                        // all three quiet passes now start after the guide is
+                        // on screen rather than across it.
+                        await AppSettleGate.shared.awaitSettled(reason: "EPG cache-fresh refresh")
                         let fetchStart = Date()
                         let didRefresh = await guideStore.fetchUpcoming(
                             channels: channelStore.channels,

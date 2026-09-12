@@ -207,6 +207,29 @@ final class CastFMP4Remuxer {
     /// receiver's timeline starts near zero.
     private var timelineBase: Int64 = -1
 
+    /// First queued video PRESENTATION time (dts + composition offset).
+    ///
+    /// Audio is gated on this, not on `timelineBase`. The Cast receiver
+    /// appends our muxed segments in MSE 'sequence' AppendMode (Shaka's
+    /// HLS default; Chromium logs the multitrack warning on every one of
+    /// our loads), and in that mode Chromium ignores tfdt and anchors the
+    /// whole append on the PRESENTATION timestamp of the first coded
+    /// frame, which is our first video sample. Any audio between
+    /// `timelineBase` and that presentation time therefore lands before
+    /// zero and Chromium throws it away, logging on the Google TV
+    /// Streamer (2026-09-12 02:27:57, iPhone session):
+    ///
+    ///   Dropping audio frame (DTS -24000us PTS -24000us,-2667us) that is
+    ///     outside append window [0us, ...]
+    ///   Truncating audio buffer which overlaps append window start.
+    ///
+    /// The truncated frame is then the one that fails to decode
+    /// ("Failed to send audio packet for decoding ... timestamp=0",
+    /// "audio decoder fallback after initial decode error"), costing the
+    /// load a decoder swap and a reseek. Measured on dumped segments:
+    /// audio started 56 ms before the first video presentation time.
+    private var timelineBasePTS: Int64 = -1
+
     // MARK: pending segment
 
     private struct VideoSample {
@@ -475,7 +498,12 @@ final class CastFMP4Remuxer {
 
         let dts = videoClock.unwrap(dts33)
         let pts = Self.unwrapPTSAgainstDTS(pts33, dts)
-        if timelineBase < 0 { timelineBase = dts }
+        if timelineBase < 0 {
+            timelineBase = dts
+            // The composition offset of the first sample is what the
+            // receiver anchors on; see `timelineBasePTS`.
+            timelineBasePTS = pts
+        }
 
         if keyframe, let first = videoQueue.first, dts - first.dts >= targetSegmentTicks {
             finalizeSegment(cutDTS: dts)
@@ -582,7 +610,7 @@ final class CastFMP4Remuxer {
                 maybeEmitInit()
             }
             if framePTS < 0 { framePTS = audioClock.unwrap(pts33) }
-            if initSent, timelineBase >= 0 {
+            if initSent, timelineBasePTS >= 0, framePTS >= timelineBasePTS {
                 audioQueue.append(AudioSample(data: Array(data[p..<next]), pts: framePTS))
             }
             framePTS += Int64(info.samplesPerFrame) * Self.ticksPerSecond / Int64(info.sampleRate)
@@ -635,8 +663,9 @@ final class CastFMP4Remuxer {
                 }, { [weak self] frame, pts in
                     guard let self else { return }
                     // Same gate as the passthrough path: audio only queues
-                    // once the init exists and video anchored the timeline.
-                    if self.initSent, self.timelineBase >= 0 {
+                    // once the init exists and video anchored the timeline,
+                    // and never before the first video PRESENTATION time.
+                    if self.initSent, self.timelineBasePTS >= 0, pts >= self.timelineBasePTS {
                         self.audioQueue.append(AudioSample(data: frame, pts: pts))
                     }
                 })
@@ -707,7 +736,7 @@ final class CastFMP4Remuxer {
                 // by the fixed 1024-sample frame duration. Re-anchoring on
                 // every PES keeps drift bounded to one PES worth of frames.
                 if framePTS < 0 { framePTS = audioClock.unwrap(pts33) }
-                if timelineBase >= 0 {
+                if timelineBasePTS >= 0, framePTS >= timelineBasePTS {
                     audioQueue.append(AudioSample(data: Array(data[(p + headerLen)..<(p + frameLen)]), pts: framePTS))
                 }
                 framePTS += audioFrameTicks
@@ -880,7 +909,14 @@ final class CastFMP4Remuxer {
             trafs.append(Self.box(
                 "traf",
                 Self.fullBox("tfhd", 0, 0x020000, Self.u32(Self.audioTrackID)),
-                Self.fullBox("tfdt", 1, 0, Self.u64(UInt64(max(0, firstAudio.pts - timelineBase)))),
+                // No clamp: samples earlier than `timelineBasePTS` are
+                // dropped at queue time, and `timelineBasePTS` is never
+                // below `timelineBase`, so this is always >= 0 and always
+                // the truth. Clamping to 0 declared a segment as starting
+                // earlier than it does and overlapped the NEXT segment's
+                // audio by the same amount, which is a backwards append
+                // one segment into the cast.
+                Self.fullBox("tfdt", 1, 0, Self.u64(UInt64(firstAudio.pts - timelineBase))),
                 audioTrun(audio, dataOffset: audioDataOffset)))
         }
         return Self.box("moof", mfhd, Self.concat(trafs))

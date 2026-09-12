@@ -237,11 +237,26 @@ final class AerioCastController: NSObject, ObservableObject {
     }
 
     /// End the current cast session (returns playback to the phone).
+    ///
+    /// The media session is stopped FIRST, and only then is the Cast session
+    /// ended. Ending the session alone tears the receiver app down out from
+    /// under a playing HTMLMediaElement: the Google TV Streamer log for the
+    /// card's X (2026-09-12 02:29:26) shows CastV2.Receiver.Stop.In and
+    /// "Stopping app" with no media request of type STOP anywhere in the
+    /// session, and the audio outlived the video surface long enough for
+    /// Logan to hear it ("audio kept playing in the background"). A MEDIA
+    /// STOP makes the receiver unload the element and release its decoders
+    /// in the normal order before the app goes away.
     func stopCasting() {
         // Parity with Android's graceful latch (commit dce3074): GCK documents
         // a nil error for intentional ends, but our own stops are latched too
         // so a deliberate teardown can never masquerade as a drop.
         userRequestedStop = true
+        // Best effort and deliberately not awaited: the session teardown below
+        // must happen even if the receiver never answers, and a wedged
+        // receiver is exactly when the user reaches for the X.
+        GCKCastContext.sharedInstance().sessionManager
+            .currentCastSession?.remoteMediaClient?.stop()
         GCKCastContext.sharedInstance().sessionManager.endSessionAndStopCasting(true)
     }
 
@@ -2490,10 +2505,10 @@ struct RemoteSessionCard: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        // The SAME surface the channel list cards draw (Logan 2026-09-12:
-        // "match the channel cards", not a near-black glass slab): theme card
-        // fill, 12 pt corners, the 4% accent wash and the 10% accent hairline
-        // from ChannelListView's row background.
+        // The SAME material the tab bar below draws (Logan 2026-09-12: "the
+        // coloring should match the nav bar"): system Liquid Glass tinted
+        // near-black, 12 pt corners, subtle white hairline. No accent wash:
+        // the accent stays on the status line and the buttons.
         .background { Self.cardSurface }
         .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
         // Same horizontal margin as the list cards.
@@ -2508,17 +2523,34 @@ struct RemoteSessionCard: View {
         .accessibilityElement(children: .contain)
     }
 
-    /// 12 pt: the channel list card's radius.
+    /// 12 pt: the channel list card's radius, kept here so the card still
+    /// lines up with the lists it floats over.
     private static let radius: CGFloat = 12
+
+    /// The tab bar's own tone: near-black over the glass backdrop, so the
+    /// card and the bar read as one material instead of two tiles.
+    private static let glassTint = Color.black.opacity(0.45)
+    /// The bar's hairline is a faint white, not an accent line.
+    private static let hairline = Color.white.opacity(0.10)
 
     @ViewBuilder
     private static var cardSurface: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        shape
-            .fill(Color.cardBackground)
-            .overlay { shape.fill(Color.accentPrimary.opacity(0.04)) }
-            .overlay { shape.strokeBorder(Color.accentPrimary.opacity(0.10), lineWidth: 1) }
-            .shadow(color: .black.opacity(0.25), radius: 10, y: 3)
+        Group {
+            if #available(iOS 26.0, *) {
+                // Same call MinimizedTabButton uses for the minimized bar
+                // pill, so the card picks up the identical Liquid Glass.
+                Color.clear
+                    .glassEffect(.regular, in: shape)
+                    .overlay { shape.fill(glassTint) }
+            } else {
+                shape
+                    .fill(.regularMaterial)
+                    .overlay { shape.fill(glassTint) }
+            }
+        }
+        .overlay { shape.strokeBorder(hairline, lineWidth: 1) }
+        .shadow(color: .black.opacity(0.25), radius: 10, y: 3)
     }
 
 }

@@ -232,6 +232,226 @@ do {
            "video-only master names no audio codec")
 }
 
+// MARK: 9. segment-run continuity against a real transport stream
+//
+// Added 2026-09-12 after Logan's "launches now but it's frozen" on a
+// Google TV Streamer. The failure was reproduced in a real Chromium
+// MediaSource: the Cast receiver appends our muxed segments in MSE
+// 'sequence' AppendMode (Shaka's HLS default; Chromium logs the
+// multitrack warning on every one of our loads). In that mode Chromium
+// ignores tfdt and re-anchors each append on the PRESENTATION timestamp
+// of the first coded frame, so two properties of the emitted bytes
+// decide whether the receiver plays or freezes:
+//
+//  1. No audio may sit before the first video presentation time. Audio
+//     that does lands before zero and Chromium drops and truncates it
+//     ("Dropping audio frame (DTS -24000us ...)", "Truncating audio
+//     buffer which overlaps append window start"), and the truncated
+//     frame then fails to decode and costs the load a decoder swap.
+//  2. Both tracks must run continuously across consecutive segments, so
+//     no hole can open between appends. In Chromium a run of eight of
+//     these segments buffers as ONE range in both 'segments' and
+//     'sequence' mode; with a segment missing, sequence mode turns the
+//     honest 6 s hole into a 0.147 s one the video renderer never
+//     crosses while the audio plays straight through it.
+//
+// Skips itself when ffmpeg is absent so a machine without Homebrew
+// still runs the rest of the suite.
+
+/// One segment's per-track span, in 90 kHz ticks, read back out of the
+/// moof: tfdt, tfdt + the trun sample durations, and the minimum
+/// presentation time.
+struct TrackSpan {
+    var start: Int64 = 0
+    var end: Int64 = 0
+    var minPTS: Int64 = 0
+}
+
+func be32(_ b: [UInt8], _ o: Int) -> Int64 {
+    (Int64(b[o]) << 24) | (Int64(b[o + 1]) << 16) | (Int64(b[o + 2]) << 8) | Int64(b[o + 3])
+}
+
+func boxType(_ b: [UInt8], _ o: Int) -> String {
+    String(bytes: b[(o + 4)..<(o + 8)], encoding: .ascii) ?? ""
+}
+
+/// Children of a box body, as (type, bodyStart, boxEnd).
+func boxChildren(_ b: [UInt8], _ start: Int, _ end: Int) -> [(String, Int, Int)] {
+    var out: [(String, Int, Int)] = []
+    var o = start
+    while o + 8 <= end {
+        var size = Int(be32(b, o))
+        if size == 0 { size = end - o }
+        if size < 8 || o + size > end { break }
+        out.append((boxType(b, o), o + 8, o + size))
+        o += size
+    }
+    return out
+}
+
+/// Per-track spans of one media segment, keyed by track id.
+func segmentSpans(_ segment: Data) -> [Int: TrackSpan] {
+    let b = [UInt8](segment)
+    var result: [Int: TrackSpan] = [:]
+    for (type, start, end) in boxChildren(b, 0, b.count) where type == "moof" {
+        for (trafType, trafStart, trafEnd) in boxChildren(b, start, end) where trafType == "traf" {
+            var trackID = -1
+            var span = TrackSpan()
+            var total: Int64 = 0
+            var minPTS = Int64.max
+            for (childType, childStart, _) in boxChildren(b, trafStart, trafEnd) {
+                switch childType {
+                case "tfhd":
+                    trackID = Int(be32(b, childStart + 4))
+                case "tfdt":
+                    span.start = b[childStart] == 1
+                        ? (be32(b, childStart + 4) << 32) | be32(b, childStart + 8)
+                        : be32(b, childStart + 4)
+                case "trun":
+                    let version = Int(b[childStart])
+                    let flags = Int(be32(b, childStart) & 0xFF_FFFF)
+                    let count = Int(be32(b, childStart + 4))
+                    var p = childStart + 8
+                    if flags & 0x1 != 0 { p += 4 }   // data offset
+                    if flags & 0x4 != 0 { p += 4 }   // first sample flags
+                    var decode: Int64 = 0
+                    for _ in 0..<count {
+                        var duration: Int64 = 0
+                        if flags & 0x100 != 0 { duration = be32(b, p); p += 4 }
+                        if flags & 0x200 != 0 { p += 4 } // size
+                        if flags & 0x400 != 0 { p += 4 } // flags
+                        if flags & 0x800 != 0 {
+                            let raw = be32(b, p)
+                            // version 1 composition offsets are signed.
+                            let cto = version == 1 ? Int64(Int32(truncatingIfNeeded: raw)) : raw
+                            minPTS = min(minPTS, decode + cto)
+                            p += 4
+                        } else {
+                            minPTS = min(minPTS, decode)
+                        }
+                        decode += duration
+                        total += duration
+                    }
+                default:
+                    break
+                }
+            }
+            if trackID > 0 {
+                span.end = span.start + total
+                span.minPTS = span.start + (minPTS == Int64.max ? 0 : minPTS)
+                result[trackID] = span
+            }
+        }
+    }
+    return result
+}
+
+@MainActor func runSegmentContinuityChecks() {
+    let ffmpeg = "/opt/homebrew/bin/ffmpeg"
+    guard FileManager.default.isExecutableFile(atPath: ffmpeg) else {
+        print("SKIP segment-run continuity (no ffmpeg at \(ffmpeg))")
+        return
+    }
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("cast-hls-continuity", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let ts = dir.appendingPathComponent("bframes.ts")
+    if !FileManager.default.fileExists(atPath: ts.path) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffmpeg)
+        process.arguments = [
+            "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=40",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=40",
+            // B-frames on purpose: the composition offset of the first
+            // sample is what the receiver anchors a sequence-mode append
+            // on, and it is what used to push our audio below zero.
+            "-c:v", "libx264", "-preset", "veryfast", "-bf", "3", "-g", "90", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
+            "-f", "mpegts", ts.path,
+        ]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+    }
+    guard let bytes = try? Data(contentsOf: ts), !bytes.isEmpty else {
+        print("SKIP segment-run continuity (ffmpeg produced no fixture)")
+        return
+    }
+
+    var segments: [Data] = []
+    let remuxer = CastFMP4Remuxer()
+    remuxer.onMediaSegment = { data, _ in segments.append(data) }
+    var offset = 0
+    while offset < bytes.count {
+        let n = min(64 * 1024, bytes.count - offset)
+        try? remuxer.feed(bytes.subdata(in: offset..<(offset + n)))
+        offset += n
+    }
+    expect(segments.count >= 6, "a real transport stream yields at least 6 segments (\(segments.count))")
+    guard segments.count >= 6 else { return }
+
+    // One AAC frame at 48 kHz: the largest quantization error the audio
+    // partition can carry at a segment boundary.
+    let frameTicks = 1024 * CastFMP4Remuxer.ticksPerSecond / 48_000
+    var previousVideoEnd: Int64 = -1
+    var previousAudioEnd: Int64 = -1
+    var audioNeverPrecedesVideo = true
+    var videoContiguous = true
+    var audioContiguous = true
+    var audioKeepsUp = true
+    for (index, segment) in segments.enumerated() {
+        let spans = segmentSpans(segment)
+        guard let video = spans[1], let audio = spans[2] else {
+            expect(false, "segment \(index) carries both trafs")
+            return
+        }
+        if index == 0 {
+            // Property 1: a sequence-mode append anchors on video.minPTS,
+            // so any audio below it is dropped or truncated by Chromium.
+            if audio.start < video.minPTS { audioNeverPrecedesVideo = false }
+        } else {
+            // Property 2: no holes between appends, in either track.
+            if video.start != previousVideoEnd { videoContiguous = false }
+            if audio.start != previousAudioEnd { audioContiguous = false }
+        }
+        // The audio partition trails the video cut by at most a few
+        // frames; more than that and the seam starts accumulating.
+        if video.end - audio.end >= frameTicks * 9 { audioKeepsUp = false }
+        previousVideoEnd = video.end
+        previousAudioEnd = audio.end
+    }
+    expect(audioNeverPrecedesVideo, "no audio before the first video presentation time")
+    expect(videoContiguous, "video runs contiguously across every segment boundary")
+    expect(audioContiguous, "audio runs contiguously across every segment boundary")
+    expect(audioKeepsUp, "audio never trails the video cut by more than the frame quantum")
+}
+
+runSegmentContinuityChecks()
+
+// MARK: 10. near-future segment fetches are held, not 404ed
+//
+// A 404 makes Shaka drop the segment and re-sync to the live edge, which
+// skips segments; see the continuity notes above for why a skipped
+// segment freezes the picture.
+
+do {
+    let store = CastHLSSegmentStore()
+    let ticks: Int64 = 3 * 90_000
+    let gen = store.beginGeneration()
+    store.setInitSegment(generation: gen, data: Data("i".utf8))
+    for _ in 0..<3 { store.addSegment(generation: gen, data: Data([1]), durationTicks: ticks) }
+    // nextSeq is 3; 3, 4 and 5 are inside the hold window, 6 is not.
+    let held = Date()
+    expectEq(store.awaitSegment(seq: 5, timeout: 0.3), nil, "two past the edge is held until timeout")
+    expect(Date().timeIntervalSince(held) >= 0.25, "two past the edge actually waited")
+    let fast = Date()
+    expectEq(store.awaitSegment(seq: 6, timeout: 5), nil, "three past the edge 404s fast")
+    expect(Date().timeIntervalSince(fast) < 0.2, "no hold beyond the future window")
+}
+
+
 // MARK: 8. AudioSpecificConfig sanitizing for the web receiver's parser
 
 do {

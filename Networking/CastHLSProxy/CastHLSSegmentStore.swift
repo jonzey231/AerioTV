@@ -33,10 +33,21 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     /// playlist advertised.
     static let ringSize = 8
 
-    /// Bound on holding a segment GET that names the imminent next
-    /// sequence (the receiver racing the live edge); segments land every
-    /// ~3 s, so 6 s covers a slow cut without pinning threads.
+    /// Bound on holding a segment GET that names a sequence the ingest
+    /// has not published yet (the receiver racing the live edge);
+    /// segments land every ~3 s, so 6 s covers a slow cut without
+    /// pinning threads.
     static let nextSegmentWait: TimeInterval = 6.0
+
+    /// How far past the newest published sequence a fetch may name and
+    /// still be held rather than 404ed. A 404 is not a harmless retry for
+    /// this receiver: Shaka drops the segment and re-syncs to the live
+    /// edge, which SKIPS segments, and a skipped segment in MSE
+    /// 'sequence' AppendMode leaves a hole in the buffered range too
+    /// small for the gap jumper to notice and too large for the video
+    /// renderer to cross (measured in Chromium: 0.147 s). Two segments of
+    /// slack cost nothing and remove the trigger.
+    static let maxFutureSegments = 2
 
     private struct SegmentEntry {
         let seq: Int
@@ -150,18 +161,17 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         return inits[gen]
     }
 
-    /// Segment `seq`'s bytes. A fetch naming the imminent NEXT sequence
-    /// (newest+1, the receiver racing the live edge) is held up to
-    /// `timeout` for the ingest to publish it instead of 404ing;
-    /// anything already evicted from the ring or further in the future
-    /// fails immediately.
+    /// Segment `seq`'s bytes. A fetch naming a sequence the ingest has
+    /// not published yet, up to `maxFutureSegments` past the newest one,
+    /// is held up to `timeout` instead of 404ing; anything already
+    /// evicted from the ring or further in the future fails immediately.
     func awaitSegment(seq: Int, timeout: TimeInterval = CastHLSSegmentStore.nextSegmentWait) -> Data? {
         let deadline = Date(timeIntervalSinceNow: timeout)
         condition.lock()
         defer { condition.unlock() }
         while true {
             if let entry = ring.first(where: { $0.seq == seq }) { return entry.data }
-            guard storeOpen, seq == nextSeq else { return nil }
+            guard storeOpen, seq >= nextSeq, seq <= nextSeq + Self.maxFutureSegments else { return nil }
             guard Date() < deadline else { return nil }
             if !condition.wait(until: deadline) { return nil }
         }

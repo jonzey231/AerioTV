@@ -40,6 +40,22 @@ final class CastHLSProxyServer: @unchecked Sendable {
     /// Diagnostic: log the receiver's FIRST playlist fetch loudly; it is
     /// the proof the Cast device reached the phone at all.
     private let firstPlaylistServed = OSAllocatedUnfairLockFlag()
+    /// Diagnostic: dump the master and media playlist TEXT once each, so
+    /// a failing cast can be read back from the log without the device.
+    private let masterTextLogged = OSAllocatedUnfairLockFlag()
+    private let playlistTextLogged = OSAllocatedUnfairLockFlag()
+    /// Requests served this session, for the log rate limit below.
+    private let requestCounter = AtomicRequestCounter()
+
+    /// Requests logged verbatim at the start of a session before the rate
+    /// limit kicks in (enough to cover master + playlist + init + the
+    /// first handful of segments, which is the whole startup handshake a
+    /// failed cast has to be diagnosed from).
+    private static let verboseRequests = 12
+
+    /// After `verboseRequests`, only non-200 responses and every Nth
+    /// request are logged, so a long cast does not flood.
+    private static let requestLogEvery = 50
 
     private(set) var boundPort: UInt16 = 0
 
@@ -122,16 +138,25 @@ final class CastHLSProxyServer: @unchecked Sendable {
         }
         let body: Data?
         let mime: String
+        // Wait time is only meaningful for a segment fetch that was held
+        // at the live edge; it is the single most useful number when the
+        // receiver errors out (a long wait means the ingest, not the
+        // receiver, is the problem).
+        var waitMs = -1
         switch path {
         case "/master.m3u8":
-            body = Data(store.masterPlaylistText().utf8)
+            let text = store.masterPlaylistText()
+            body = Data(text.utf8)
             mime = Self.mimePlaylist
+            if masterTextLogged.trySet() { log("master playlist: \(Self.escaped(text))") }
         case "/live.m3u8":
-            body = Data(store.mediaPlaylistText().utf8)
+            let text = store.mediaPlaylistText()
+            body = Data(text.utf8)
             mime = Self.mimePlaylist
             if firstPlaylistServed.trySet() {
                 log("receiver fetched the playlist for the first time (\(Self.host(of: peer)))")
             }
+            if playlistTextLogged.trySet() { log("media playlist: \(Self.escaped(text))") }
         case let p where p.hasPrefix("/init") && p.hasSuffix(".mp4"):
             let gen = Int(p.dropFirst(5).dropLast(4))
             body = gen.flatMap { store.initSegment(generation: $0) }
@@ -140,12 +165,16 @@ final class CastHLSProxyServer: @unchecked Sendable {
             let seq = Int(p.dropFirst(4).dropLast(4))
             // Concurrent serve queue, so holding the live-edge fetch here
             // blocks nobody else.
+            let began = Date()
             body = seq.flatMap { store.awaitSegment(seq: $0) }
+            waitMs = Int(Date().timeIntervalSince(began) * 1000)
             mime = Self.mimeSegment
         default:
             body = nil
             mime = "text/plain"
         }
+        logRequest(method: method, path: path, status: body == nil ? 404 : 200,
+                   bytes: body?.count ?? 0, waitMs: waitMs)
         if let body {
             send(connection, status: "200 OK", contentType: mime,
                  body: method == "HEAD" ? Data() : body, declaredLength: body.count)
@@ -171,9 +200,45 @@ final class CastHLSProxyServer: @unchecked Sendable {
         })
     }
 
+    /// One line per request: the only record of what the Cast receiver
+    /// actually asked for and got. Added 2026-09-12 after an iPhone cast
+    /// froze on a Google TV Streamer and the phone log could not say
+    /// whether the receiver had fetched a segment at all, while the
+    /// Android proxy's identical log made the answer obvious (it had
+    /// fetched seg0, seg1, then seg4, then nothing).
+    ///
+    /// Rate limit: the first `verboseRequests` of a session verbatim
+    /// (master, playlist, init, the opening segments), then only non-200s
+    /// and every `requestLogEvery`th request.
+    private func logRequest(method: String, path: String, status: Int, bytes: Int, waitMs: Int) {
+        let n = requestCounter.next()
+        guard n <= Self.verboseRequests || status != 200 || n % Self.requestLogEvery == 0 else { return }
+        let wait = waitMs > 0 ? " wait=\(waitMs)ms" : ""
+        log("\(method) \(path) \(status) \(bytes) B\(wait)")
+    }
+
+    /// Playlist text on ONE log line: newlines escaped so the log keeps
+    /// it as a single readable record.
+    private static func escaped(_ text: String) -> String {
+        text.replacingOccurrences(of: "\n", with: "\\n")
+    }
+
     private static func host(of endpoint: NWEndpoint) -> String {
         if case .hostPort(let host, _) = endpoint { return "\(host)" }
         return "unknown"
+    }
+}
+
+/// Monotonic request counter for the serve queue's log rate limit.
+private final class AtomicRequestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        value += 1
+        return value
     }
 }
 
