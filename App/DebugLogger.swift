@@ -928,3 +928,317 @@ final class FrameProbe: NSObject {
     }
 }
 #endif
+
+// MARK: - Main Thread Sampling Profiler
+//
+// Why this exists (2026-09-12): the Apple TV guide spends 236-523 ms of main
+// run loop time on EVERY D-pad DOWN press (n=16, median 248 ms), plus 1322 ms
+// "after seedEPGCache return" and 974 ms "after loadFromCache replay #1", and
+// none of our own [SLOW] breadcrumbs fire at all (nothing over 30 ms). So the
+// time is inside SwiftUI/UIKit work we do not own and cannot instrument by
+// hand. xctrace cannot attach to the Apple TV from this Mac (attach by name,
+// by pid, and launch all fail), so the profiler has to live in the app.
+//
+// Shape: the MainThreadWatchdog run loop observer already brackets every main
+// turn (afterWaiting -> beforeWaiting). It tells this class when a turn opens
+// and closes. A dedicated sampling thread waits 100 ms after a turn opens; if
+// that same turn is still open it samples the MAIN thread every 10 ms until it
+// closes, using thread_suspend + thread_get_state(ARM_THREAD_STATE64) and a
+// manual frame-pointer walk into a preallocated buffer. Nothing is allocated,
+// locked or logged while main is suspended (any of those can deadlock against
+// a malloc or os_unfair_lock main itself is holding). Symbolication with
+// dladdr and the aggregation happen after the turn ends, on the sampler
+// thread, so main never pays for them.
+//
+// Permission note: thread_get_state on a suspended thread IS permitted for
+// threads of one's OWN task on tvOS and iOS device builds. The restriction
+// people hit is cross-task (task_for_pid), which needs entitlements we do not
+// have and do not need here. No entitlement, no debugger, no get-task-allow
+// is required for self-inspection.
+//
+// Permanent, but gated on exactly the same switch the watchdog uses
+// (DebugLogger.isEnabled / Developer Settings > Debug Logging). With the
+// logger off the sampler thread is never even created.
+#if arch(arm64)
+final class MainThreadProfiler: @unchecked Sendable {
+    static let shared = MainThreadProfiler()
+
+    /// A turn must exceed this before sampling starts.
+    private static let slowTurnThreshold: TimeInterval = 0.100
+    /// Sampling period once armed.
+    private static let samplePeriod: TimeInterval = 0.010
+    /// Deepest frame-pointer walk per sample.
+    private static let maxFrames = 48
+    /// Sample ceiling per turn (48 * 600 * 8 bytes = 230 KB, a 6 s turn).
+    private static let maxSamples = 600
+    /// Reports per rolling minute.
+    private static let maxProfilesPerMinute = 20
+    /// Frames listed per report.
+    private static let topFrames = 12
+    private static let topLeaves = 5
+
+    // MARK: Shared state
+    //
+    // Written by main (the run loop observer), read by the sampler thread.
+    // `turnSeq` is the handshake: it increments on every turn close, so the
+    // sampler can tell "still the turn I armed for" from "a later turn" with a
+    // single scalar read and no lock. Scalar loads/stores of a UInt64 on arm64
+    // are atomic; the only consumer is a liveness check, so ordering slop of
+    // one sampling period is harmless.
+    private var turnSeq: UInt64 = 0
+    private var turnOpen: Bool = false
+    private var turnStart: CFAbsoluteTime = 0
+    private let reportLock = NSLock()
+    private var reportMs: Int = 0
+    private var reportLabel: String?
+
+    // MARK: Sampling buffers (preallocated once, reused forever)
+
+    private let frames: UnsafeMutablePointer<UInt64>
+    private let frameCounts: UnsafeMutablePointer<Int32>
+    private var sampleCount = 0
+
+    // MARK: Main thread identity / stack bounds
+
+    private var mainMachThread: mach_port_t = 0
+    private var stackLow: UInt64 = 0
+    private var stackHigh: UInt64 = 0
+
+    private let wake = DispatchSemaphore(value: 0)
+    private var started = false
+    private var profileTimes: [CFAbsoluteTime] = []
+
+    private init() {
+        frames = UnsafeMutablePointer<UInt64>.allocate(capacity: Self.maxFrames * Self.maxSamples)
+        frames.initialize(repeating: 0, count: Self.maxFrames * Self.maxSamples)
+        frameCounts = UnsafeMutablePointer<Int32>.allocate(capacity: Self.maxSamples)
+        frameCounts.initialize(repeating: 0, count: Self.maxSamples)
+    }
+
+    // MARK: Lifecycle
+
+    /// Call from the main thread, once, when the watchdog arms its observer.
+    /// No-op unless Debug Logging is on.
+    func startIfEnabled() {
+        guard !started, DebugLogger.shared.isEnabled else { return }
+        started = true
+        // mach_thread_self() returns a right that the caller owns; this one is
+        // deliberately kept for the life of the process.
+        mainMachThread = mach_thread_self()
+        let top = UInt64(UInt(bitPattern: pthread_get_stackaddr_np(pthread_self())))
+        let size = UInt64(pthread_get_stacksize_np(pthread_self()))
+        stackHigh = top
+        stackLow = top > size ? top - size : 0
+        let t = Thread { [weak self] in self?.sampleLoop() }
+        t.name = "com.aerio.mainprofiler"
+        t.stackSize = 512 * 1024
+        t.qualityOfService = .userInteractive
+        t.start()
+        debugLog("[PROFILE] main-thread sampler armed: turns > \(Int(Self.slowTurnThreshold * 1000))ms sampled every \(Int(Self.samplePeriod * 1000))ms, \(Self.maxFrames) frames")
+    }
+
+    // MARK: Observer hooks (main thread only)
+
+    /// Run loop afterWaiting: a new main turn has begun.
+    func noteTurnStart(_ now: CFAbsoluteTime) {
+        guard started else { return }
+        turnStart = now
+        turnOpen = true
+        wake.signal()
+    }
+
+    /// Run loop beforeWaiting: the turn has finished. `ms` and `label` are the
+    /// same values the [HANG] line reports.
+    func noteTurnEnd(ms: Int, label: String?) {
+        guard started else { return }
+        turnOpen = false
+        reportLock.lock()
+        reportMs = ms
+        reportLabel = label
+        reportLock.unlock()
+        turnSeq &+= 1
+    }
+
+    // MARK: Sampler thread
+
+    private func sampleLoop() {
+        while true {
+            wake.wait()
+            // Drain any extra signals from fast turns we will not sample.
+            let seq = turnSeq
+            Thread.sleep(forTimeInterval: Self.slowTurnThreshold)
+            guard turnOpen, turnSeq == seq else { continue }
+
+            sampleCount = 0
+            while turnOpen, turnSeq == seq, sampleCount < Self.maxSamples {
+                captureOneSample()
+                Thread.sleep(forTimeInterval: Self.samplePeriod)
+            }
+            let captured = sampleCount
+            guard captured > 0 else { continue }
+            // Wait for the close to publish ms/label if it has not landed yet.
+            var spins = 0
+            while turnSeq == seq, spins < 200 {
+                Thread.sleep(forTimeInterval: 0.005)
+                spins += 1
+            }
+            reportLock.lock()
+            let ms = reportMs
+            let label = reportLabel
+            reportLock.unlock()
+            guard allowProfile() else { continue }
+            report(samples: captured, turnMs: ms, label: label)
+        }
+    }
+
+    /// Suspend main, read its register state, walk the frame-pointer chain into
+    /// the preallocated buffer, resume. Absolutely no allocation, locking,
+    /// logging or ObjC/Swift runtime calls between suspend and resume.
+    private func captureOneSample() {
+        let thread = mainMachThread
+        guard thread != 0 else { return }
+        let slot = frames + (sampleCount * Self.maxFrames)
+        var depth: Int32 = 0
+
+        guard thread_suspend(thread) == KERN_SUCCESS else { return }
+
+        var state = arm_thread_state64_t()
+        var count = mach_msg_type_number_t(MemoryLayout<arm_thread_state64_t>.size / MemoryLayout<UInt32>.size)
+        let kr = withUnsafeMutablePointer(to: &state) { statePtr -> kern_return_t in
+            statePtr.withMemoryRebound(to: natural_t.self, capacity: Int(count)) { raw in
+                thread_get_state(thread, thread_state_flavor_t(ARM_THREAD_STATE64), raw, &count)
+            }
+        }
+        if kr == KERN_SUCCESS {
+            let pc = UInt64(state.__pc)
+            let lr = UInt64(state.__lr)
+            var fp = UInt64(state.__fp)
+            if pc != 0 { slot[Int(depth)] = pc; depth += 1 }
+            if lr != 0, depth < Int32(Self.maxFrames) { slot[Int(depth)] = lr; depth += 1 }
+            var previousFP: UInt64 = 0
+            while depth < Int32(Self.maxFrames),
+                  fp != 0,
+                  fp > previousFP,                       // chain must climb
+                  fp % 16 == 0,                          // AAPCS64 alignment
+                  fp >= stackLow,
+                  fp + 16 <= stackHigh {
+                let record = UnsafeRawPointer(bitPattern: UInt(fp))
+                guard let record else { break }
+                let nextFP = record.load(fromByteOffset: 0, as: UInt64.self)
+                let retAddr = record.load(fromByteOffset: 8, as: UInt64.self)
+                if retAddr == 0 { break }
+                slot[Int(depth)] = retAddr
+                depth += 1
+                previousFP = fp
+                fp = nextFP
+            }
+        }
+
+        thread_resume(thread)
+
+        guard depth > 0 else { return }
+        frameCounts[sampleCount] = depth
+        sampleCount += 1
+    }
+
+    // MARK: Rate limiting
+
+    private func allowProfile() -> Bool {
+        let now = CFAbsoluteTimeGetCurrent()
+        profileTimes.removeAll { now - $0 > 60 }
+        guard profileTimes.count < Self.maxProfilesPerMinute else { return false }
+        profileTimes.append(now)
+        return true
+    }
+
+    // MARK: Symbolication + aggregation (sampler thread, main already running)
+
+    private func report(samples: Int, turnMs: Int, label: String?) {
+        var inclusive: [String: Int] = [:]
+        var leaves: [String: Int] = [:]
+        var symbolCache: [UInt64: String] = [:]
+        var seenInSample = Set<String>()
+
+        for s in 0..<samples {
+            let depth = Int(frameCounts[s])
+            guard depth > 0 else { continue }
+            let slot = frames + (s * Self.maxFrames)
+            seenInSample.removeAll(keepingCapacity: true)
+            for f in 0..<depth {
+                let addr = slot[f]
+                let name: String
+                if let cached = symbolCache[addr] {
+                    name = cached
+                } else {
+                    let resolved = Self.symbolize(addr)
+                    symbolCache[addr] = resolved
+                    name = resolved
+                }
+                // Inclusive: count a function once per sample even if recursive.
+                if seenInSample.insert(name).inserted {
+                    inclusive[name, default: 0] += 1
+                }
+                if f == 0 { leaves[name, default: 0] += 1 }
+            }
+        }
+
+        let suffix = label.map { " \($0)" } ?? ""
+        debugLog("[PROFILE] turn \(turnMs)ms\(suffix): \(samples) samples")
+        for (name, n) in inclusive.sorted(by: { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }).prefix(Self.topFrames) {
+            debugLog("  \(Self.pct(n, samples))  \(name)")
+        }
+        debugLog("[PROFILE]   leaves:")
+        for (name, n) in leaves.sorted(by: { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }).prefix(Self.topLeaves) {
+            debugLog("  \(Self.pct(n, samples))  \(name)")
+        }
+    }
+
+    private static func pct(_ n: Int, _ total: Int) -> String {
+        let p = total > 0 ? Int((Double(n) / Double(total) * 100).rounded()) : 0
+        return String(format: "%2d%%", min(p, 100))
+    }
+
+    /// dladdr-based symbolication. CoreSymbolication is not available to us, so
+    /// a debug build yields Swift-mangled names; demangle through
+    /// swift_demangle when the runtime exposes it (it does on device, it is
+    /// public in libswiftCore), otherwise print the mangled name as-is.
+    private static func symbolize(_ addr: UInt64) -> String {
+        var info = Dl_info()
+        guard dladdr(UnsafeRawPointer(bitPattern: UInt(addr)), &info) != 0 else {
+            return String(format: "0x%llx (unknown)", addr)
+        }
+        let image: String
+        if let fname = info.dli_fname {
+            let path = String(cString: fname)
+            image = (path as NSString).lastPathComponent
+        } else {
+            image = "?"
+        }
+        guard let sname = info.dli_sname else {
+            let offset = addr - UInt64(UInt(bitPattern: info.dli_fbase))
+            return String(format: "%@ +0x%llx (%@)", "<no symbol>", offset, image)
+        }
+        let raw = String(cString: sname)
+        return "\(demangle(raw)) (\(image))"
+    }
+
+    private typealias SwiftDemangleFn = @convention(c) (
+        UnsafePointer<CChar>?, Int, UnsafeMutablePointer<CChar>?, UnsafeMutablePointer<Int>?, UInt32
+    ) -> UnsafeMutablePointer<CChar>?
+
+    private static let demangler: SwiftDemangleFn? = {
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "swift_demangle") else { return nil }
+        return unsafeBitCast(sym, to: SwiftDemangleFn.self)
+    }()
+
+    private static func demangle(_ name: String) -> String {
+        guard name.hasPrefix("$s") || name.hasPrefix("_$s") || name.hasPrefix("$S"),
+              let fn = demangler else { return name }
+        return name.withCString { cstr -> String in
+            guard let out = fn(cstr, strlen(cstr), nil, nil, 0) else { return name }
+            defer { free(out) }
+            return String(cString: out)
+        }
+    }
+}
+#endif

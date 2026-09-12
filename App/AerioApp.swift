@@ -138,13 +138,26 @@ final class MainThreadWatchdog: @unchecked Sendable {
                     if ms >= 100 {
                         debugLog("[HANG] main runloop turn \(ms)ms\(label.map { " after \($0)" } ?? "")")
                     }
+                    // Hand the closed turn to the sampling profiler, which is
+                    // already holding the stacks it sampled during it.
+                    #if arch(arm64)
+                    MainThreadProfiler.shared.noteTurnEnd(ms: ms, label: label.map { "after \($0)" })
+                    #endif
                 }
             } else {
                 self.turnStart = now
+                #if arch(arm64)
+                MainThreadProfiler.shared.noteTurnStart(now)
+                #endif
             }
         }
         CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
         runLoopObserver = observer
+        // Same gate as every other watchdog output: nothing is created unless
+        // Developer Settings > Debug Logging is on.
+        #if arch(arm64)
+        MainThreadProfiler.shared.startIfEnabled()
+        #endif
     }
 
     private var mainRunLoopStage = "unknown"
