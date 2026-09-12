@@ -4360,7 +4360,9 @@ struct MainTabView: View {
         var epgStage = SyncStage(id: "epg", label: "Loading EPG")
         if channelsReady && epgReady {
             let channelCount = channelStore.channels.count
-            let programCount = guideStore.programs.values.reduce(0) { $0 + $1.count }
+            // Cached count, not a scan: `loadingStages` is evaluated from the
+            // initial-sync cover's body (2026-09-12 render-path fix).
+            let programCount = guideStore.loadedProgramCount
             let detail: String
             if programCount > 0 {
                 detail = "\(channelCount) channels · \(programCount) programs"

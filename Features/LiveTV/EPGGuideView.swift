@@ -217,8 +217,56 @@ final class GuideStore: ObservableObject {
 
     @Published var programs: [String: [GuideProgram]] = [:] {  // channelID → programs
         // Task #188: any EPG mutation invalidates the focus-path memo below.
-        didSet { programChannelMemo.removeAll() }
+        didSet {
+            programChannelMemo.removeAll()
+            loadedEdges = nil
+        }
     }
+
+    /// Furthest-back and furthest-forward programme edges of the resident map,
+    /// computed ONCE per EPG write and reused by every render afterwards.
+    ///
+    /// 2026-09-12 profile (session15): `loadedForwardDays()` was 100% of a
+    /// 235 ms DOWN-press turn and 83% of a 3884 ms turn, because
+    /// `EPGGuideView.hoursForward` called it from a view body and it scanned
+    /// every resident programme list (plus `windowEnd` / `totalDuration` /
+    /// `totalGridWidth`, which all derive from `hoursForward`, so the scan ran
+    /// several times per render). Edges are absolute dates, so they do not
+    /// depend on "now" and survive until `programs` actually changes; the day
+    /// counts below are then pure arithmetic.
+    private var loadedEdges: (minStart: Date, maxEnd: Date, count: Int)?
+
+    /// One pass over the resident map, at most once per EPG write. Not
+    /// `@Published` state, so filling it from a view body cannot invalidate
+    /// anything.
+    private func loadedProgramEdges() -> (minStart: Date, maxEnd: Date, count: Int) {
+        if let cached = loadedEdges { return cached }
+        var minStart = Date.distantFuture
+        var maxEnd = Date.distantPast
+        var count = 0
+        for list in programs.values {
+            count += list.count
+            if let first = list.first, first.start < minStart { minStart = first.start }
+            if let last = list.last, last.end > maxEnd { maxEnd = last.end }
+        }
+        let edges = (minStart: minStart, maxEnd: maxEnd, count: count)
+        loadedEdges = edges
+        return edges
+    }
+
+    /// Total resident programme count (O(1) after the first call following an
+    /// EPG write). Render paths that only want the number must use this instead
+    /// of `programs.values.reduce`.
+    var loadedProgramCount: Int { loadedProgramEdges().count }
+
+    /// Furthest forward programme end currently loaded (O(1) after the first
+    /// call following an EPG write). `Date.distantPast` when nothing is loaded.
+    var loadedMaxProgramEnd: Date { loadedProgramEdges().maxEnd }
+
+    /// Furthest back programme start currently loaded (O(1) after the first
+    /// call following an EPG write). `Date.distantFuture` when nothing is
+    /// loaded.
+    var loadedMinProgramStart: Date { loadedProgramEdges().minStart }
     /// Task #188: programID -> channelID memo for the D-pad focus hot path.
     /// `channelID(ofProgram:)` is an O(channels) scan (string prefix + list
     /// membership per candidate) that ran on EVERY focus change and up to
@@ -1191,11 +1239,10 @@ final class GuideStore: ObservableObject {
 
     /// Furthest forward edge of the programmes actually loaded, for All
     /// Available where the extent follows the data rather than a count.
+    /// O(1) at render time: reads the cached edge instead of rescanning the
+    /// resident programme map (2026-09-12 render-path fix).
     func loadedForwardDays() -> Int {
-        var maxEnd = Date.distantPast
-        for list in programs.values where !list.isEmpty {
-            if let last = list.last, last.end > maxEnd { maxEnd = last.end }
-        }
+        let maxEnd = loadedMaxProgramEnd
         guard maxEnd > Date() else { return 1 }
         let days = Int(ceil(maxEnd.timeIntervalSinceNow / 86_400))
         return min(GuideStore.allAvailableMaxDaysAhead, max(1, days))
@@ -1203,10 +1250,7 @@ final class GuideStore: ObservableObject {
 
     /// Furthest back edge of the programmes actually loaded (All Available).
     func loadedBackDays() -> Int {
-        var minStart = Date.distantFuture
-        for list in programs.values {
-            if let first = list.first, first.start < minStart { minStart = first.start }
-        }
+        let minStart = loadedMinProgramStart
         guard minStart < Date() else { return 1 }
         let days = Int(ceil(-minStart.timeIntervalSinceNow / 86_400))
         return min(GuideStore.allAvailableMaxDaysBack, max(1, days))
@@ -4651,10 +4695,9 @@ struct EPGGuideView: View {
            server.type == .dispatcharrAPI, server.dispatcharrVersionAtLeast("0.30.0") {
             return GuideStore.activeForwardDays()
         }
-        var maxEnd = Date.distantPast
-        for list in guideStore.programs.values {
-            if let last = list.last, last.end > maxEnd { maxEnd = last.end }
-        }
+        // Cached edge, not a scan over the resident programme map
+        // (2026-09-12 render-path fix).
+        let maxEnd = guideStore.loadedMaxProgramEnd
         let days = Int(ceil(maxEnd.timeIntervalSinceNow / 86_400))
         return min(14, max(1, days))
     }
