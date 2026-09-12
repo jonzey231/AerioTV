@@ -1314,7 +1314,10 @@ struct MoviesView: View {
                     AnyView(Text("No results").font(.labelMedium).foregroundColor(.textTertiary))
                 } : nil,
                 railLetters: railLetters,
-                railTarget: { letter in firstGridID(for: letter).map { String($0.dropFirst("grid-".count)) } }
+                railTarget: { letter in firstGridID(for: letter).map { String($0.dropFirst("grid-".count)) } },
+                footer: TMDBPosters.isEnabled
+                    ? { AnyView(TMDBAttributionView(style: .long)) }
+                    : nil
             )
         }
     }
@@ -1638,6 +1641,17 @@ struct MoviesView: View {
                                         key: GridTopKey.self,
                                         value: g.frame(in: .named("moviesScroll")).minY.rounded())
                                 })
+                            // TMDB asks for the logo and the required line
+                            // wherever their data or images are shown, so it
+                            // rides under the library grid as well as on the
+                            // detail page. Appended only: no focus or scroll
+                            // behavior changes.
+                            if TMDBPosters.isEnabled {
+                                TMDBAttributionView(style: .long)
+                                    .padding(.horizontal, 18)
+                                    .padding(.leading, contentLeadingInset)
+                                    .padding(.bottom, 24)
+                            }
                         }
                     }
 

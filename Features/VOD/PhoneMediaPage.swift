@@ -67,6 +67,9 @@ struct PhoneMediaPage: View {
     var railLetters: Set<String> = []
     /// Id of the first grid item for a rail letter.
     var railTarget: (String) -> String? = { _ in nil }
+    /// Optional content appended below the grid, e.g. the TMDB attribution on
+    /// the pages that render TMDB artwork and metadata.
+    var footer: (() -> AnyView)? = nil
 
     private final class ScrollBox {
         let phoneRail = DVRPhoneRailState()
@@ -135,6 +138,10 @@ struct PhoneMediaPage: View {
                                             key: GridTopKey.self,
                                             value: g.frame(in: .named("pageScroll")).minY.rounded())
                                     })
+                                if let footer {
+                                    footer()
+                                        .padding(.horizontal, 16)
+                                }
                             }
                             Color.clear.frame(height: 96)
                         }

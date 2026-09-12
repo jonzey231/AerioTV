@@ -513,6 +513,16 @@ struct TVShowsView: View {
                     .focusSection()
                     #endif
 
+                    // TMDB asks for the logo and the required line wherever
+                    // their data or images are shown, so it rides under the
+                    // library grid as well as on the detail page. Appended
+                    // only: no focus or scroll behavior changes.
+                    if TMDBPosters.isEnabled {
+                        TMDBAttributionView(style: .long)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 24)
+                    }
+
                     #if os(iOS)
                     // Bottom content padding for the under-bar extension
                     // (ignoresSafeArea below) - last poster row scrolls

@@ -483,11 +483,45 @@ GPL-3.0-or-later.
 
 ### Third-party components
 
-AerioTV links MPVKit (mpv and FFmpeg, LGPL-3.0-or-later as bundled), the
-proprietary Google Cast SDK, SwiftDraw (MIT), and Protobuf (BSD-3-Clause). See
+AerioTV links MPVKit (mpv v0.41.0 and FFmpeg 8.x, LGPL-3.0-or-later as
+bundled), which also bundles libass (ISC), FreeType (FTL), HarfBuzz (MIT),
+FriBidi (LGPL-2.1-or-later), libunibreak (zlib), OpenSSL (Apache-2.0), GnuTLS,
+GMP, Nettle and Hogweed (LGPL), libplacebo (LGPL-2.1-or-later), shaderc and
+MoltenVK (Apache-2.0), Little CMS (MIT), libdovi (MIT), dav1d (BSD-2-Clause),
+libuavs3d (BSD-3-Clause), libbluray (LGPL-2.1-or-later) and libuchardet
+(MPL-1.1 / GPL-2.0 / LGPL-2.1); the proprietary Google Cast SDK; SwiftDraw
+(zlib); and Protocol Buffers (BSD-3-Clause). Protobuf here is Google's
+Objective-C Protocol Buffers 3.29.6, BSD-3-Clause, pulled in transitively by
+the Cast SDK, not `apple/swift-protobuf`. See
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the full list, exact
 build configuration, and where to obtain corresponding source. The same
 information is in the app under Settings > About > Open Source Licenses.
+
+MPVKit is linked as a dynamic XCFramework and can be replaced with a modified
+build, as section 4 of the LGPL requires. To receive the corresponding MPVKit,
+mpv, or FFmpeg source directly, open an issue at
+[github.com/jonzey231/AerioTV/issues](https://github.com/jonzey231/AerioTV/issues).
+
+The Google Cast SDK for iOS is proprietary and is used under the Google APIs
+Terms of Service and the Google Cast SDK Additional Developer Terms of Service.
+Linking it with this GPL-licensed program is permitted by an additional
+permission under GPL section 7; see
+[LICENSE-EXCEPTIONS.md](LICENSE-EXCEPTIONS.md).
+
+This product includes software developed by the OpenSSL Project for use in the
+OpenSSL Toolkit (https://www.openssl.org/). OpenSSL 3.3.5 is used under the
+Apache License, Version 2.0. MoltenVK (The Brenwill Workshop Ltd. and the
+Khronos Group) and shaderc (The Khronos Group) are used under the Apache
+License, Version 2.0. Full text:
+https://www.apache.org/licenses/LICENSE-2.0
+
+### TMDB attribution
+
+This product uses the TMDB API but is not endorsed or certified by TMDB.
+
+Artwork and metadata come from [TMDB](https://www.themoviedb.org) under the
+TMDB API Terms of Use. The TMDB logo is used per
+[TMDB's logo and attribution guidance](https://www.themoviedb.org/about/logos-attribution).
 
 ## Support
 
