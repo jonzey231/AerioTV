@@ -979,6 +979,17 @@ final class TuneTimeline: @unchecked Sendable {
         stages.removeAll(keepingCapacity: true)
     }
 
+    /// True while a tune is armed and has not reached first frame yet. Read by
+    /// the background EPG re-sweep (Logan 2026-09-12), which must not spend
+    /// network or CPU between a channel press and the first frame. The same
+    /// 60 s sanity bound `firstFrame()` uses applies, so a tune that silently
+    /// died can never hold the sweep off forever.
+    var isTuning: Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let pressAt else { return false }
+        return CACurrentMediaTime() - pressAt < 60
+    }
+
     /// Record a stage, first occurrence per tune only.
     func mark(_ stage: String) {
         lock.lock(); defer { lock.unlock() }

@@ -107,6 +107,14 @@ enum EPGGridCoverage {
         var identity: String
         var chunks: [Chunk]
         var at: Date
+        /// Sorted "id:updated_at" over the server's EPG sources at the time the
+        /// chunks were written ("id:none" for a source with no stamp, e.g. a
+        /// dummy source). Dispatcharr's `ProgramData` carries no `updated_at`
+        /// and a source refresh replaces that source's programs wholesale, so
+        /// the source stamps are the only cheap change signal the API gives.
+        /// Optional so a record written by an older build still decodes; a nil
+        /// fingerprint simply reads as "unknown" and the sweep runs once.
+        var sourcesFingerprint: String?
     }
 
     private static var fileURL: URL {
@@ -123,23 +131,24 @@ enum EPGGridCoverage {
     /// Decodes off the main actor. `identityChanged` is true when a record
     /// exists but belongs to another playlist identity, which is the caller's
     /// signal to drop the cached programs too.
-    static func load(identity: String) async -> (chunks: [Chunk], identityChanged: Bool) {
+    static func load(identity: String) async -> (chunks: [Chunk], identityChanged: Bool, sourcesFingerprint: String?) {
         let url = fileURL
-        return await Task.detached(priority: .userInitiated) { () -> (chunks: [Chunk], identityChanged: Bool) in
-            guard let data = try? Data(contentsOf: url) else { return ([], false) }
+        return await Task.detached(priority: .userInitiated) { () -> (chunks: [Chunk], identityChanged: Bool, sourcesFingerprint: String?) in
+            guard let data = try? Data(contentsOf: url) else { return ([], false, nil) }
             guard let record = try? JSONDecoder().decode(Record.self, from: data) else {
                 // Unreadable record: treat as an identity change so the guide
                 // is rebuilt from the server rather than trusted blind.
-                return ([], true)
+                return ([], true, nil)
             }
-            guard record.identity == identity else { return ([], true) }
-            return (record.chunks, false)
+            guard record.identity == identity else { return ([], true, nil) }
+            return (record.chunks, false, record.sourcesFingerprint)
         }.value
     }
 
-    static func save(identity: String, chunks: [Chunk]) {
+    static func save(identity: String, chunks: [Chunk], sourcesFingerprint: String?) {
         let url = fileURL
-        let record = Record(identity: identity, chunks: chunks, at: Date())
+        let record = Record(identity: identity, chunks: chunks, at: Date(),
+                            sourcesFingerprint: sourcesFingerprint)
         Task.detached(priority: .utility) {
             do {
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
@@ -1105,6 +1114,48 @@ final class GuideStore: ObservableObject {
     /// coverage and refetches every chunk.
     private var forceFullGridReload = false
 
+    // MARK: Background EPG re-sweep state
+    //
+    // Logan 2026-09-12: he refreshes EPG sources in Dispatcharr every few
+    // hours, so a changed source fingerprint must NEVER cost the user a
+    // foreground reload. Launch and guide open always serve from the cached
+    // chunks; the fingerprint is only a gate on a quiet background re-sweep
+    // that replaces one day at a time so a program that moved to another day
+    // stops showing its old time without anybody waiting for it.
+
+    /// Fingerprint of the EPG sources the cached chunks were fetched under.
+    private var gridCoverageSourcesFingerprint: String?
+    /// Fingerprint observed by the most recent gate check, adopted only when a
+    /// sweep completes (an interrupted sweep must be retried, not forgotten).
+    private var pendingSweepFingerprint: String?
+    /// When the gate last asked the server for its source list.
+    private var lastEPGSourceGateCheckAt: Date?
+    /// The sources list is unreadable on this server: log once, then fall back
+    /// to the 12 h chunk TTL for freshness.
+    private var loggedEPGSourcesUnreadable = false
+    /// The running sweep, so a playlist switch or an explicit Refresh can stop
+    /// it and a second trigger cannot start a duplicate.
+    private var backgroundSweepTask: Task<Void, Never>?
+    /// Days the current sweep has still to re-fetch, in sweep order (today,
+    /// then forward, then history). Kept so a pause can resume where it left
+    /// off instead of starting over.
+    private var backgroundSweepRemaining: [Date] = []
+
+    /// Gate re-check cadence in the foreground.
+    nonisolated static let epgSourceGateInterval: TimeInterval = 15 * 60
+    /// How long after launch or a foreground return the app is considered
+    /// settled enough to start sweeping (the guide has painted from cache by
+    /// then, and a tune started with it is past first frame).
+    nonisolated static let backgroundSweepSettleDelay: TimeInterval = 20
+    /// Pause between chunk requests. Deliberately lazy: the sweep is a
+    /// correctness backstop, not something anybody is waiting on.
+    nonisolated static let backgroundSweepChunkPause: TimeInterval = 1.5
+    /// How many swept chunks may merge into the staging dict before a publish.
+    /// One publish re-renders the tab roots and every channel row (iPhone List
+    /// evaluates ALL row bodies per render), so the sweep publishes in batches
+    /// rather than per chunk.
+    nonisolated static let backgroundSweepPublishEvery = 4
+
     /// How long a fetched chunk stays trusted. Long enough that relaunches
     /// within a day cost nothing, short enough that a provider's late EPG
     /// corrections land the same day.
@@ -1170,7 +1221,8 @@ final class GuideStore: ObservableObject {
     private func persistGridCoverage() {
         guard let identity = gridCoverageIdentity else { return }
         gridCoverage = dedupedGridCoverage()
-        EPGGridCoverage.save(identity: identity, chunks: gridCoverage)
+        EPGGridCoverage.save(identity: identity, chunks: gridCoverage,
+                             sourcesFingerprint: gridCoverageSourcesFingerprint)
     }
 
     /// The user asked for fresh data (Edit Playlist > Refresh, Refresh EPG
@@ -1179,6 +1231,8 @@ final class GuideStore: ObservableObject {
     func invalidateGridCoverage() {
         forceFullGridReload = true
         gridCoverage = []
+        gridCoverageSourcesFingerprint = nil
+        cancelBackgroundGridSweep(reason: "explicit refresh")
         EPGGridCoverage.clear()
         debugLog("[EPG grid window] coverage invalidated by an explicit refresh; the next walk refetches every chunk")
     }
@@ -1193,12 +1247,14 @@ final class GuideStore: ObservableObject {
         let result = await EPGGridCoverage.load(identity: identity)
         gridCoverageIdentity = identity
         gridCoverage = result.chunks
+        gridCoverageSourcesFingerprint = result.sourcesFingerprint
         guard result.identityChanged else {
             debugLog("[EPG grid window] coverage restored: \(result.chunks.count) chunk(s) for \(serverID.prefix(8))")
             return
         }
         EPGGridCoverage.clear()
         gridCoverage = []
+        gridCoverageSourcesFingerprint = nil
         programs = [:]
         lastLoadFromCacheResult = nil
         await Task.detached(priority: .userInitiated) {
@@ -2074,13 +2130,11 @@ final class GuideStore: ObservableObject {
                                              windowEnd: Date) async {
         guard let maps = lastDispatcharrMaps, maps.serverID == server.id.uuidString else { return }
         let serverID = server.id.uuidString
-        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                 auth: .apiKey(server.effectiveApiKey),
-                                 userAgent: server.effectiveUserAgent,
-                                 authMode: server.dispatcharrHeaderMode,
-                                 serverID: server.id,
-                                 savedUsername: server.dispatcharrCredentialType == .usernamePassword
-                                     ? server.username : nil)
+        let api = dispatcharrAPI(for: server)
+        // Captured before the walk clears the flag: a user-initiated Refresh
+        // refetches every chunk in the foreground, which makes the background
+        // re-sweep redundant for this round.
+        let wasForcedReload = forceFullGridReload
         let now = Date()
         // Guide Days (Logan 2026-09-11): the playlist's own setting governs
         // BOTH directions. History keeps its >5000-channel clamp; forward is
@@ -2160,6 +2214,21 @@ final class GuideStore: ObservableObject {
         // now rewritten it, so later walks in this session are incremental again.
         forceFullGridReload = false
         await pruneOutsideGridWindow(historyStart: historyStart, forwardEnd: forwardEnd, serverID: serverID)
+        // Source-change gate (Logan 2026-09-12). One request for the source
+        // list: an explicit Refresh just rewrote every chunk in the foreground
+        // so it simply ADOPTS the current fingerprint, while an ordinary load
+        // hands the gate to the quiet background re-sweep.
+        if wasForcedReload {
+            if let probe = await fetchEPGSourcesFingerprint(server: server) {
+                gridCoverageSourcesFingerprint = probe.fingerprint
+                pendingSweepFingerprint = nil
+                lastEPGSourceGateCheckAt = Date()
+                debugLog("[EPG grid window] explicit refresh adopted the current sources fingerprint (\(probe.count) sources)")
+            }
+        } else {
+            await considerBackgroundGridSweep(server: server, channels: channels,
+                                              reason: "guide load", force: true)
+        }
         persistGridCoverage()
     }
 
@@ -2239,6 +2308,221 @@ final class GuideStore: ObservableObject {
         }
         debugLog("📺 grid window extension done: \(total) programmes merged over \(result.fetched) fetched chunk(s) of \(chunks.count)")
         return result
+    }
+
+    // MARK: - Background EPG re-sweep (Dispatcharr source changes)
+
+    /// Sorted "id:updated_at" over the server's EPG sources. A source with no
+    /// stamp (a dummy source never refreshes) contributes "id:none", so adding
+    /// or removing one still changes the fingerprint.
+    nonisolated static func epgSourcesFingerprint(_ sources: [DispatcharrEPGSource]) -> String {
+        sources.map { src -> String in
+            let stamp = src.updatedAt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return "\(src.id):\(stamp.isEmpty ? "none" : stamp)"
+        }
+        .sorted()
+        .joined(separator: ",")
+    }
+
+    private func dispatcharrAPI(for server: ServerConnection) -> DispatcharrAPI {
+        DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                       auth: .apiKey(server.effectiveApiKey),
+                       userAgent: server.effectiveUserAgent,
+                       authMode: server.dispatcharrHeaderMode,
+                       serverID: server.id,
+                       savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                           ? server.username : nil)
+    }
+
+    /// One request: the EPG source list, reduced to its fingerprint. nil when
+    /// the list is unreadable, which is logged once per session and leaves the
+    /// 12 h chunk TTL as the only freshness mechanism.
+    private func fetchEPGSourcesFingerprint(server: ServerConnection) async -> (fingerprint: String, count: Int)? {
+        do {
+            let sources = try await dispatcharrAPI(for: server).getEPGSources()
+            loggedEPGSourcesUnreadable = false
+            return (Self.epgSourcesFingerprint(sources), sources.count)
+        } catch {
+            if !loggedEPGSourcesUnreadable {
+                loggedEPGSourcesUnreadable = true
+                debugLog("[EPG grid window] sources list unreadable (\(error.localizedDescription)); falling back to the 12 h chunk TTL")
+            }
+            return nil
+        }
+    }
+
+    /// The gate. Fetches the source list, compares it with the fingerprint the
+    /// cached chunks were written under, and starts the background sweep only
+    /// when something actually changed. Throttled to
+    /// `epgSourceGateInterval`, so the 5-minute foreground sweep hook and the
+    /// foreground edge can both call it freely.
+    ///
+    /// Never drops coverage and never blocks the guide: the cached chunks stay
+    /// on screen either way (Logan 2026-09-12).
+    func considerBackgroundGridSweep(server: ServerConnection,
+                                     channels: [ChannelDisplayItem],
+                                     reason: String,
+                                     force: Bool = false) async {
+        guard server.type == .dispatcharrAPI, server.dispatcharrVersionAtLeast("0.30.0") else { return }
+        guard let maps = lastDispatcharrMaps, maps.serverID == server.id.uuidString else { return }
+        if backgroundSweepTask != nil { return }
+        if !force, let last = lastEPGSourceGateCheckAt,
+           Date().timeIntervalSince(last) < Self.epgSourceGateInterval { return }
+        guard let probe = await fetchEPGSourcesFingerprint(server: server) else { return }
+        lastEPGSourceGateCheckAt = Date()
+        if let cached = gridCoverageSourcesFingerprint, cached == probe.fingerprint {
+            debugLog("[EPG grid window] sources unchanged, background sweep skipped")
+            return
+        }
+        debugLog("[EPG grid window] sources changed (\(probe.count) sources, gate: \(reason)); scheduling background re-sweep")
+        pendingSweepFingerprint = probe.fingerprint
+        startBackgroundGridSweep(server: server, channels: channels, maps: maps)
+    }
+
+    func cancelBackgroundGridSweep(reason: String) {
+        guard backgroundSweepTask != nil else { return }
+        backgroundSweepTask?.cancel()
+        backgroundSweepTask = nil
+        debugLog("[EPG grid window] background re-sweep cancelled (\(reason))")
+    }
+
+    /// Sweep order: today first (what the guide is showing), then forward days
+    /// ascending, then history newest-first. Same fixed UTC day grid as the
+    /// launch walk, so each swept day lands on the coverage key it replaces.
+    private func backgroundSweepDays() -> [Date] {
+        let now = Date()
+        let playlistDays = Self.guideDaysRaw()
+        let forwardDays = playlistDays == 0 ? Self.allAvailableMaxDaysAhead : playlistDays
+        let historySecs = Self.activeRetentionSeconds()
+        let today = Self.gridDayFloor(now)
+        let rangeStart = Self.gridDayFloor(now.addingTimeInterval(-historySecs))
+        let rangeEnd = Self.gridDayCeil(now.addingTimeInterval(TimeInterval(forwardDays) * 86_400))
+        var forward: [Date] = []
+        var history: [Date] = []
+        var day = rangeStart
+        while day < rangeEnd {
+            if day > today { forward.append(day) } else if day < today { history.append(day) }
+            day = day.addingTimeInterval(Self.gridChunkSeconds)
+        }
+        history.reverse()
+        return [today] + forward + history
+    }
+
+    private func startBackgroundGridSweep(server: ServerConnection,
+                                          channels: [ChannelDisplayItem],
+                                          maps: DispatcharrGridMaps) {
+        let serverID = server.id.uuidString
+        backgroundSweepRemaining = backgroundSweepDays()
+        let api = dispatcharrAPI(for: server)
+        // Background priority on purpose: this competes with nothing.
+        backgroundSweepTask = Task(priority: .background) { [weak self] in
+            await self?.runBackgroundGridSweep(api: api, maps: maps, serverID: serverID)
+        }
+    }
+
+    /// True while the sweep must hold still: a tune is between press and first
+    /// frame, or the app is not in the foreground.
+    private var backgroundSweepShouldPause: Bool {
+        if TuneTimeline.shared.isTuning { return true }
+        return UIApplication.shared.applicationState != .active
+    }
+
+    /// Re-fetch one day per request, pausing between them, replacing that day's
+    /// programs as each chunk lands. A day the server answers empty is left
+    /// alone: an empty answer is a failed fetch far more often than it is a day
+    /// with no programming, and blanking a day on screen is the one outcome
+    /// worse than a stale one.
+    private func runBackgroundGridSweep(api: DispatcharrAPI,
+                                        maps: DispatcharrGridMaps,
+                                        serverID: String) async {
+        let startedWith = backgroundSweepRemaining.count
+        debugLog("[EPG grid window] background re-sweep starting: \(startedWith) day(s), \(Int(Self.backgroundSweepChunkPause * 1000))ms apart")
+        // Settle first: the guide paints from cache, and a tune started with
+        // the launch is past first frame, before the first request goes out.
+        try? await Task.sleep(for: .seconds(Self.backgroundSweepSettleDelay))
+        var staged = programs_snapshotForMerge()
+        var unpublished = 0
+        var swept = 0
+        var merged = 0
+        while !backgroundSweepRemaining.isEmpty {
+            if Task.isCancelled { break }
+            guard displayedServerID == nil || displayedServerID == serverID else {
+                debugLog("[EPG grid window] background re-sweep stopped: the guide now displays another playlist")
+                backgroundSweepTask = nil
+                return
+            }
+            // Pause (do not abandon): resume on the same remaining list.
+            while backgroundSweepShouldPause {
+                if Task.isCancelled { break }
+                try? await Task.sleep(for: .seconds(5))
+            }
+            if Task.isCancelled { break }
+            let day = backgroundSweepRemaining.removeFirst()
+            let dayEnd = day.addingTimeInterval(Self.gridChunkSeconds)
+            let fetched: [DispatcharrCurrentProgram]
+            do {
+                fetched = try await api.getEPGGrid(start: day, end: dayEnd, lowPriority: true)
+            } catch {
+                debugLog("[EPG grid window] background re-sweep chunk \(Self.chunkStamp(day)) failed (\(error.localizedDescription)); stopping, will retry on the next gate")
+                break
+            }
+            swept += 1
+            guard !fetched.isEmpty else {
+                debugLog("[EPG grid window] background re-sweep chunk \(Self.chunkStamp(day)): server returned nothing, keeping the cached day")
+                try? await Task.sleep(for: .seconds(Self.backgroundSweepChunkPause))
+                continue
+            }
+            // REPLACE the day rather than merge into it: a sporting event moved
+            // to another day must not leave its old entry behind. Programs that
+            // straddle the day edge come back with this chunk's own response
+            // (the grid returns everything overlapping the window), so stripping
+            // by overlap loses nothing.
+            var base: [String: [GuideProgram]] = [:]
+            base.reserveCapacity(staged.count)
+            for (channelID, list) in staged {
+                let kept = list.filter { $0.end <= day || $0.start >= dayEnd }
+                if !kept.isEmpty { base[channelID] = kept }
+            }
+            let result = await Task.detached(priority: .background) {
+                GuideStore.mergeGridPrograms(fetched, into: base,
+                                             tvgIDToChannelIDs: maps.tvgIDToChannelIDs,
+                                             intIDToChannelID: maps.intIDToChannelID,
+                                             uuidToChannelID: maps.uuidToChannelID,
+                                             windowStart: day, windowEnd: dayEnd)
+            }.value
+            staged = result.dict
+            merged += result.matched
+            unpublished += 1
+            // Batched publishes: see `backgroundSweepPublishEvery`.
+            if unpublished >= Self.backgroundSweepPublishEvery || backgroundSweepRemaining.isEmpty {
+                guard commitPrograms(staged, for: serverID, source: "dispatcharr-grid-resweep") else {
+                    backgroundSweepTask = nil
+                    return
+                }
+                unpublished = 0
+                staged = programs_snapshotForMerge()
+            }
+            recordGridCoverage(start: day, end: dayEnd, programCount: fetched.count)
+            try? await Task.sleep(for: .seconds(Self.backgroundSweepChunkPause))
+        }
+        if unpublished > 0 {
+            _ = commitPrograms(staged, for: serverID, source: "dispatcharr-grid-resweep")
+        }
+        let finished = backgroundSweepRemaining.isEmpty && !Task.isCancelled
+        if finished, let fingerprint = pendingSweepFingerprint {
+            // Only a COMPLETED sweep adopts the fingerprint; an interrupted one
+            // leaves the old value so the next gate check sweeps again.
+            gridCoverageSourcesFingerprint = fingerprint
+            pendingSweepFingerprint = nil
+        }
+        persistGridCoverage()
+        if finished, let container = cachedContainer {
+            // Persist the corrected programs so the next launch serves them
+            // from cache instead of re-sweeping for the same change.
+            saveToCache(modelContext: ModelContext(container), serverID: serverID)
+        }
+        debugLog("[EPG grid window] background re-sweep \(finished ? "complete" : "interrupted"): \(swept) of \(startedWith) day(s), \(merged) program(s) merged")
+        backgroundSweepTask = nil
     }
 
     private static func chunkStamp(_ d: Date) -> String {

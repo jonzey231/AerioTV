@@ -129,6 +129,7 @@ final class VODStore: ObservableObject {
     /// server (if any) repopulates via `refresh()`; with no server
     /// remaining, everything stays empty.
     func clear() {
+        cancelBackgroundSweep(reason: "playlist cleared")
         moviesTask?.cancel(); moviesTask = nil
         seriesTask?.cancel(); seriesTask = nil
         movieSearchTask?.cancel(); movieSearchTask = nil
@@ -226,6 +227,153 @@ final class VODStore: ObservableObject {
         guard limit > 0, age < limit else { return false }
         debugLog("[VOD-CACHE] \(kind) snapshot is \(Int(age / 60)) min old (< \(Int(limit / 3600)) h); skipping launch sweep")
         return true
+    }
+
+    /// Change-probe baselines the restored snapshots were written under, and
+    /// the probe values the running sweep should persist with its results.
+    private var restoredMoviesProbe: (count: Int?, newest: String?)?
+    private var restoredSeriesProbe: (count: Int?, newest: String?)?
+    private var pendingMoviesProbe: (count: Int?, newest: String?)?
+    private var pendingSeriesProbe: (count: Int?, newest: String?)?
+
+    /// The quiet background sweep (Logan 2026-09-12). One at a time.
+    private var backgroundSweepTask: Task<Void, Never>?
+    /// Restore-only launch path: publish the persisted snapshots and touch
+    /// nothing on the network.
+    ///
+    /// The VOD library now follows the EPG cache rule exactly (Logan
+    /// 2026-09-12): the snapshot IS what the tabs show at launch, and the
+    /// network sweep is a quiet background pass that starts once the app has
+    /// settled. The orchestrator therefore calls this instead of a foreground
+    /// `loadMovies` / `loadSeries`, and `scheduleBackgroundSweep` does the rest.
+    ///
+    /// `currentMoviesServerID` / `currentSeriesServerID` are set only when a
+    /// snapshot actually restored: the VOD tabs' `onAppear` uses them as the
+    /// "already tried this server" guard, and on a first install (no snapshot)
+    /// that guard must stay open so opening the tab still fetches.
+    func restoreSnapshots(servers: [ServerConnection]) async {
+        let vodServers = servers.filter { $0.supportsVOD && $0.vodEnabled }
+        let activeServer = servers.first(where: { $0.isActive })
+        guard let server = vodServers.first(where: { $0.isActive }) ?? (activeServer == nil ? vodServers.first : nil) else { return }
+        let identity = VODLibraryCache.identity(for: server)
+        if movies.isEmpty, let snap = await VODLibraryCache.load(kind: .movie, identity: identity) {
+            movies = snap.items
+            movieCategories = snap.categories
+            isLoadingMovies = false
+            hasLoadedMovies = true
+            restoredMoviesAt = snap.at
+            restoredMoviesProbe = (snap.remoteCount, snap.remoteNewest)
+            lastMoviesServerName = server.name
+            currentMoviesServerID = server.id
+            debugLog("[VOD-CACHE] restored \(snap.items.count) movies from \(Int(Date().timeIntervalSince(snap.at)))s ago (launch, no network)")
+            TMDBArtCache.shared.enrich(snap.items, isMovie: true)
+        }
+        if series.isEmpty, let snap = await VODLibraryCache.load(kind: .series, identity: identity) {
+            series = snap.items
+            seriesCategories = snap.categories
+            isLoadingSeries = false
+            hasLoadedSeries = true
+            restoredSeriesAt = snap.at
+            restoredSeriesProbe = (snap.remoteCount, snap.remoteNewest)
+            lastSeriesServerName = server.name
+            currentSeriesServerID = server.id
+            debugLog("[VOD-CACHE] restored \(snap.items.count) series from \(Int(Date().timeIntervalSince(snap.at)))s ago (launch, no network)")
+            TMDBArtCache.shared.enrich(snap.items, isMovie: false)
+        }
+    }
+
+    /// Why a background sweep ran (or did not).
+    private enum SweepGate: String {
+        /// The cadence setting (Every Launch / Daily / Weekly) says it is due.
+        case cadence
+        /// Dispatcharr's cheap change probe says the library moved, so sweep
+        /// early even though the cadence window has not elapsed.
+        case changed
+        /// Nothing to do this time.
+        case skipped
+    }
+
+    /// Schedule the quiet sweep. Starts about `AppSettleGate.settleDelay`
+    /// seconds after launch or a foreground return, once the guide has
+    /// rendered and any tune is past first frame; pauses mid-run whenever
+    /// either of those stops being true.
+    func scheduleBackgroundSweep(servers: [ServerConnection], reason: String) {
+        guard !servers.isEmpty else { return }
+        // One sweep at a time: a foreground return while a sweep is still
+        // walking pages is not a reason to start a second walk.
+        if let task = backgroundSweepTask, !task.isCancelled {
+            debugLog("[VOD] background sweep: already running, \(reason) ignored")
+            return
+        }
+        backgroundSweepTask = Task(priority: .background) { [weak self] in
+            await self?.runBackgroundSweep(servers: servers, reason: reason)
+            self?.backgroundSweepTask = nil
+        }
+    }
+
+    func cancelBackgroundSweep(reason: String) {
+        guard backgroundSweepTask != nil else { return }
+        backgroundSweepTask?.cancel()
+        backgroundSweepTask = nil
+        debugLog("[VOD] background sweep cancelled (\(reason))")
+    }
+
+    private func runBackgroundSweep(servers: [ServerConnection], reason: String) async {
+        await AppSettleGate.shared.awaitSettled(reason: "VOD sweep (\(reason))")
+        guard !Task.isCancelled else { return }
+        let vodServers = servers.filter { $0.supportsVOD && $0.vodEnabled }
+        let activeServer = servers.first(where: { $0.isActive })
+        guard let server = vodServers.first(where: { $0.isActive }) ?? (activeServer == nil ? vodServers.first : nil) else {
+            debugLog("[VOD] background sweep: gate=skipped reason=\(reason) (no VOD server)")
+            return
+        }
+        // (a) Cadence still applies for every provider type.
+        let moviesDueByCadence = !(!movies.isEmpty && snapshotIsFresh(restoredMoviesAt, kind: "movies"))
+        let seriesDueByCadence = !(!series.isEmpty && snapshotIsFresh(restoredSeriesAt, kind: "series"))
+        // (b) Dispatcharr only: one tiny request per kind can promote a
+        // not-yet-due sweep when the library actually moved.
+        var moviesChanged = false
+        var seriesChanged = false
+        if server.type == .dispatcharrAPI {
+            let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                     auth: .apiKey(server.effectiveApiKey),
+                                     userAgent: server.effectiveUserAgent,
+                                     authMode: server.dispatcharrHeaderMode)
+            if server.dispatcharrVODMoviesEnabled, let probe = try? await api.probeVODMovies() {
+                pendingMoviesProbe = (probe.count, probe.newestCreatedAt)
+                moviesChanged = Self.probeSaysChanged(baseline: restoredMoviesProbe, probe: probe)
+            }
+            if server.dispatcharrVODSeriesEnabled, let probe = try? await api.probeVODSeries() {
+                pendingSeriesProbe = (probe.count, probe.newestCreatedAt)
+                seriesChanged = Self.probeSaysChanged(baseline: restoredSeriesProbe, probe: probe)
+            }
+        }
+        let sweepMovies = moviesDueByCadence || moviesChanged
+        let sweepSeries = seriesDueByCadence || seriesChanged
+        let gate: SweepGate = !sweepMovies && !sweepSeries
+            ? .skipped
+            : ((moviesChanged || seriesChanged) && !(moviesDueByCadence || seriesDueByCadence) ? .changed : .cadence)
+        debugLog("[VOD] background sweep: gate=\(gate.rawValue) reason=\(reason) movies=\(sweepMovies ? (moviesChanged ? "changed" : "due") : "skip") series=\(sweepSeries ? (seriesChanged ? "changed" : "due") : "skip")")
+        guard gate != .skipped else { return }
+        if sweepMovies {
+            guard !Task.isCancelled else { return }
+            await loadMovies(servers: servers, background: true)
+        }
+        if sweepSeries {
+            guard !Task.isCancelled else { return }
+            await loadSeries(servers: servers, background: true)
+        }
+    }
+
+    /// A changed count or a newer top row means sweep now. An unknown
+    /// baseline (snapshot written before the probe existed) is NOT a change:
+    /// the cadence setting stays in charge there.
+    private static func probeSaysChanged(baseline: (count: Int?, newest: String?)?,
+                                         probe: DispatcharrAPI.VODChangeProbe) -> Bool {
+        guard let baseline, baseline.count != nil || baseline.newest != nil else { return false }
+        if let was = baseline.count, let now = probe.count, was != now { return true }
+        if let was = baseline.newest, let now = probe.newestCreatedAt, was != now { return true }
+        return false
     }
 
     func refreshMoviesAndWait(servers: [ServerConnection], honorCache: Bool = false) async {
@@ -456,8 +604,12 @@ final class VODStore: ObservableObject {
         return VODDisplayItem(series: show)
     }
 
-    private func loadMovies(servers: [ServerConnection], honorCache: Bool = false) async {
-        debugLog("🎬 VODStore.loadMovies: starting, servers=\(servers.count) honorCache=\(honorCache)")
+    /// `background: true` is the quiet sweep: low-priority requests, a short
+    /// pause between pages, a hold whenever a tune is before first frame or
+    /// the app is not in the foreground, and no spinner over restored content.
+    private func loadMovies(servers: [ServerConnection], honorCache: Bool = false,
+                            background: Bool = false) async {
+        debugLog("🎬 VODStore.loadMovies: starting, servers=\(servers.count) honorCache=\(honorCache) background=\(background)")
         let activeServer = servers.first(where: { $0.isActive })
         // Active server exists but doesn't support VOD (e.g. M3U) — clear and bail silently.
         if let active = activeServer, !active.supportsVOD {
@@ -512,7 +664,9 @@ final class VODStore: ObservableObject {
             movieCategories = []
         }
         currentMoviesServerID = server.id
-        isLoadingMovies = true
+        // A background sweep never raises the spinner over content that is
+        // already on screen; the restored list stays visible untouched.
+        isLoadingMovies = !(background && !movies.isEmpty)
         // `defer` guarantees `isRefillingMovies` returns to false on
         // every exit path — normal loop completion, circuit-breaker
         // abort, `Task.isCancelled` early return, per-server-type
@@ -661,7 +815,10 @@ final class VODStore: ObservableObject {
                 let before = accumulated.count
                 do {
                     // getVODMoviesStream pins the `|movie` type on the name.
-                    for try await batch in api.getVODMoviesStream(category: cat.name, itemCap: perCatCap) {
+                    let stream = background
+                        ? api.getVODMoviesStreamLowPriority(category: cat.name, itemCap: perCatCap)
+                        : api.getVODMoviesStream(category: cat.name, itemCap: perCatCap)
+                    for try await batch in stream {
                         guard !Task.isCancelled else { isLoadingMovies = false; return }
                         for m in batch {
                             guard seenUUIDs.insert(m.uuid).inserted else { continue }
@@ -711,6 +868,14 @@ final class VODStore: ObservableObject {
                             lastProgressivePublish = Date()
                         }
                         if accumulated.count >= totalCap { break }
+                        // Quiet sweep pacing: a short pause between pages, and
+                        // a hold while a tune is before first frame or the app
+                        // is backgrounded. The pause is what keeps a 50-page
+                        // walk from behaving like a foreground load.
+                        if background {
+                            try? await Task.sleep(for: .milliseconds(500))
+                            await AppSettleGate.shared.awaitResumeIfPaused()
+                        }
                     }
                 } catch let err as APIError {
                     // One category failing must not abort the whole sweep.
@@ -745,7 +910,10 @@ final class VODStore: ObservableObject {
             isLoadingMovies = false
             hasLoadedMovies = true
             debugLog("🎬 VODStore.loadMovies: done, \(accumulated.count) movies across \(enabledMovieCats.count) categories")
-            VODLibraryCache.save(kind: .movie, identity: cacheIdentity, items: accumulated, categories: movieCategories)
+            VODLibraryCache.save(kind: .movie, identity: cacheIdentity, items: accumulated, categories: movieCategories,
+                                 remoteCount: pendingMoviesProbe?.count, remoteNewest: pendingMoviesProbe?.newest)
+            restoredMoviesProbe = pendingMoviesProbe ?? restoredMoviesProbe
+            restoredMoviesAt = Date()
             // TMDB art pass from the store, not the tab: tvOS builds a tab's
             // content on first selection, so a view-driven trigger only ran
             // once the user visited the tab (log 2026-09-04 22:48).
@@ -778,8 +946,10 @@ final class VODStore: ObservableObject {
         hasLoadedMovies = true
     }
 
-    private func loadSeries(servers: [ServerConnection], honorCache: Bool = false) async {
-        debugLog("📺 VODStore.loadSeries: starting, servers=\(servers.count) honorCache=\(honorCache)")
+    /// See `loadMovies` for what `background` changes.
+    private func loadSeries(servers: [ServerConnection], honorCache: Bool = false,
+                            background: Bool = false) async {
+        debugLog("📺 VODStore.loadSeries: starting, servers=\(servers.count) honorCache=\(honorCache) background=\(background)")
         let activeServer = servers.first(where: { $0.isActive })
         if let active = activeServer, !active.supportsVOD {
             series = []; seriesCategories = []
@@ -824,7 +994,8 @@ final class VODStore: ObservableObject {
             seriesCategories = []
         }
         currentSeriesServerID = server.id
-        isLoadingSeries = true
+        // See loadMovies: no spinner over a restored list.
+        isLoadingSeries = !(background && !series.isEmpty)
         // See `isRefillingMovies` for the rationale. `defer`
         // guarantees we return to false on every exit path.
         isRefillingSeries = true
@@ -914,7 +1085,10 @@ final class VODStore: ObservableObject {
                 let before = accumulated.count
                 do {
                     // getVODSeriesStream pins the `|series` type on the name.
-                    for try await batch in api.getVODSeriesStream(category: cat.name, itemCap: perCatCap) {
+                    let stream = background
+                        ? api.getVODSeriesStreamLowPriority(category: cat.name, itemCap: perCatCap)
+                        : api.getVODSeriesStream(category: cat.name, itemCap: perCatCap)
+                    for try await batch in stream {
                         guard !Task.isCancelled else { isLoadingSeries = false; return }
                         for s in batch {
                             guard seenUUIDs.insert(s.uuid).inserted else { continue }
@@ -945,6 +1119,11 @@ final class VODStore: ObservableObject {
                             lastSeriesProgressivePublish = Date()
                         }
                         if accumulated.count >= totalCap { break }
+                        // See loadMovies: pace and hold the quiet sweep.
+                        if background {
+                            try? await Task.sleep(for: .milliseconds(500))
+                            await AppSettleGate.shared.awaitResumeIfPaused()
+                        }
                     }
                 } catch let err as APIError {
                     lastError = err
@@ -975,7 +1154,10 @@ final class VODStore: ObservableObject {
             isLoadingSeries = false
             hasLoadedSeries = true
             debugLog("📺 VODStore.loadSeries: done, \(accumulated.count) series across \(enabledSeriesCats.count) enabled categories")
-            VODLibraryCache.save(kind: .series, identity: cacheIdentity, items: accumulated, categories: seriesCategories)
+            VODLibraryCache.save(kind: .series, identity: cacheIdentity, items: accumulated, categories: seriesCategories,
+                                 remoteCount: pendingSeriesProbe?.count, remoteNewest: pendingSeriesProbe?.newest)
+            restoredSeriesProbe = pendingSeriesProbe ?? restoredSeriesProbe
+            restoredSeriesAt = Date()
             TMDBArtCache.shared.enrich(accumulated, isMovie: false)
             return
         }
@@ -4368,12 +4550,43 @@ struct MainTabView: View {
             if scenePhase == .active, PlayerSession.shared.mode == .idle {
                 refreshGuideIfStale(reason: "periodic sweep")
             }
+            if scenePhase == .active {
+                // Cheap (one request, throttled to 15 minutes inside
+                // GuideStore) and safe under playback: it only GATES a
+                // background re-sweep that pauses itself during a tune.
+                checkEPGSourcesForChanges(reason: "periodic sweep")
+            }
         }
     }
 
     private func refreshGuideIfStaleOnForeground(from oldPhase: ScenePhase, to newPhase: ScenePhase) {
         guard oldPhase != .active, newPhase == .active else { return }
         refreshGuideIfStale(reason: "foreground")
+        checkEPGSourcesForChanges(reason: "foreground")
+        // Restart the settle window, then queue the quiet VOD sweep behind it
+        // (it starts ~20 s from here, once the guide is painted and any tune is
+        // past first frame). The DVR poll keeps its own cadence.
+        AppSettleGate.shared.noteForegroundReturn()
+        vodStore.scheduleBackgroundSweep(servers: allServers, reason: "foreground")
+    }
+
+    /// Dispatcharr EPG source gate (Logan 2026-09-12). Logan re-ingests his EPG
+    /// sources every few hours, so a changed source must NOT cost the user a
+    /// foreground reload: the guide keeps serving the cached chunks and a quiet
+    /// background re-sweep replaces one day at a time. Every 15 minutes while
+    /// active (the throttle lives in GuideStore, so the 5-minute sweep calling
+    /// this is free) and on the foreground edge.
+    private func checkEPGSourcesForChanges(reason: String) {
+        guard let server = allServers.first(where: { $0.isActive }) ?? allServers.first else { return }
+        // Never race a cold-launch / server-change sync; that path runs its own
+        // gate check at the end of its grid walk.
+        guard !channelStore.isLoading, !channelStore.isEPGLoading else { return }
+        let channels = channelStore.channels
+        Task { @MainActor in
+            await GuideStore.shared.considerBackgroundGridSweep(server: server,
+                                                               channels: channels,
+                                                               reason: reason)
+        }
     }
 
     /// Shared staleness gate for the foreground edge AND the 5-minute
@@ -5916,11 +6129,23 @@ struct MainTabView: View {
         // then every 2 minutes while the app is foregrounded. This is
         // cheap: a single GET /api/channels/recordings/ per server.
         .task(id: dvrReconcileKey) {
-            // Run one reconcile immediately so the initial loading
-            // screen can dismiss as soon as it completes. Then enter
-            // the polling loop (every 2 minutes while foregrounded).
-            await reconcileAllDispatcharrRecordings()
+            // Recordings follow the EPG cache rule too (Logan 2026-09-12): the
+            // list is RESTORED from its persisted store and shown instantly,
+            // and the first network refresh waits for the same settle point the
+            // VOD and EPG sweeps use. The SwiftData store IS the DVR cache --
+            // every row the last reconcile wrote is already on disk, scoped to
+            // its server by `Recording.serverID`, so a second JSON mirror under
+            // AppCacheDirectory would only be a chance to disagree with it.
+            let restored = (try? modelContext.fetch(FetchDescriptor<Recording>()))?.count ?? 0
+            debugLog("[DVR] restored \(restored) recordings from cache")
+            // The loading cover must not wait on the network refresh any more:
+            // the restored list is what the DVR tab shows.
             didInitialDVRReconcile = true
+            await AppSettleGate.shared.awaitSettled(reason: "DVR refresh")
+            if Task.isCancelled { return }
+            await reconcileAllDispatcharrRecordings()
+            let after = (try? modelContext.fetch(FetchDescriptor<Recording>()))?.count ?? 0
+            debugLog("[DVR] background refresh: \(after) recordings")
             while !Task.isCancelled {
                 // Back off to 10 minutes while a live tile is playing
                 // (review 2026-09-11 section 6 proposal 5): the 2-minute
@@ -6361,17 +6586,15 @@ struct MainTabView: View {
             debugLog("🟢 [Orchestrator] BAILED: no servers, total elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
             return
         }
-        // Phase 2.5: reconcile DVR recordings before the VOD phases. It is a
-        // cheap single GET per server and usually already finished by the
-        // parallel dvrReconcileKey task, so awaiting it here is idempotent;
-        // its job is to guarantee VOD (the heaviest cold-start load, and the
-        // main churn behind the tvOS 26.5 AttributeGraph crash) stays strictly
-        // last, after channels, EPG, AND recordings have settled, so it never
-        // competes with the Live TV guide or the DVR tab.
-        debugLog("🟢 [Orchestrator] phase 2.5 BEGIN: recordings, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
-        await reconcileAllDispatcharrRecordings()
-        debugLog("🟢 [Orchestrator] phase 2.5 done (recordings), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
-        // v1.7.x: settle delay before the VOD phases. The tvOS 26.5 SwiftUI
+        // The guide has rendered (from cache or from the network): that is one
+        // of the three conditions the shared settle gate waits on before any
+        // quiet background refresh may start (Logan 2026-09-12).
+        AppSettleGate.shared.noteGuideRendered()
+        // Recordings are NOT reconciled here any more. The DVR list is restored
+        // from its persisted store at launch and its first network refresh runs
+        // in the background after the settle point, the same rule VOD follows
+        // below (the dvrReconcileKey task owns that).
+        // (Historical note, kept because it explains the settle rule: the tvOS 26.5 SwiftUI
         // AttributeGraph "different namespace" crash fires when SELECT events
         // flood the guide's display list WHILE VOD is publishing its @Published
         // storm. Phase 2 (EPG) just finished, which dismisses the "Setting Up"
@@ -6381,13 +6604,15 @@ struct MainTabView: View {
         // (and any cold-start frustration-mashing subside) before VOD mutates
         // @Published state again. VOD is rarely the first tab opened and On
         // Demand shows its own spinner, so the delay is invisible in practice.
-        try? await Task.sleep(for: .seconds(3))
-        debugLog("🟢 [Orchestrator] phase 3 BEGIN: VOD movies, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
-        await vodStore.refreshMoviesAndWait(servers: allServers, honorCache: true)
-        debugLog("🟢 [Orchestrator] phase 3 done (movies), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, movies=\(vodStore.movies.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
-        debugLog("🟢 [Orchestrator] phase 4 BEGIN: VOD series, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
-        await vodStore.refreshSeriesAndWait(servers: allServers, honorCache: true)
-        debugLog("🟢 [Orchestrator] phase 4 done (series), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, series=\(vodStore.series.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
+        debugLog("🟢 [Orchestrator] phase 3 BEGIN: VOD snapshot restore, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
+        await vodStore.restoreSnapshots(servers: allServers)
+        debugLog("🟢 [Orchestrator] phase 3 done (restore), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, movies=\(vodStore.movies.count), series=\(vodStore.series.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
+        // Phase 4 is no longer a foreground sweep: the snapshots above are what
+        // the tabs show, and the network walk is a quiet background pass that
+        // starts once the app has settled (guide rendered, any tune past first
+        // frame, ~20 s in). The 3 s settle delay that used to guard the tvOS
+        // AttributeGraph crash is subsumed by the settle gate's 20 s.
+        vodStore.scheduleBackgroundSweep(servers: allServers, reason: "launch")
         debugLog("🟢 [Orchestrator] END, total elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
     }
 

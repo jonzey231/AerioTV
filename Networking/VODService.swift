@@ -1965,6 +1965,14 @@ enum VODLibraryCache {
         var items: [VODDisplayItem]
         var categories: [VODCategory]
         var at: Date
+        /// Dispatcharr change probe recorded with the sweep that wrote this
+        /// snapshot: the collection count and the newest row's `created_at`.
+        /// The background sweep re-probes and sweeps early when either moved,
+        /// regardless of the cadence setting (Logan 2026-09-12). Optional
+        /// because snapshots written before the probe existed have neither,
+        /// and an unknown baseline must NOT read as "changed".
+        var remoteCount: Int? = nil
+        var remoteNewest: String? = nil
     }
 
     private static func fileURL(kind: VODItemType) -> URL {
@@ -1990,10 +1998,12 @@ enum VODLibraryCache {
         }.value
     }
 
-    static func save(kind: VODItemType, identity: String, items: [VODDisplayItem], categories: [VODCategory]) {
+    static func save(kind: VODItemType, identity: String, items: [VODDisplayItem], categories: [VODCategory],
+                     remoteCount: Int? = nil, remoteNewest: String? = nil) {
         guard !items.isEmpty else { return }
         let url = fileURL(kind: kind)
-        let snap = Snapshot(identity: identity, items: items, categories: categories, at: Date())
+        let snap = Snapshot(identity: identity, items: items, categories: categories, at: Date(),
+                            remoteCount: remoteCount, remoteNewest: remoteNewest)
         Task.detached(priority: .utility) {
             do {
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

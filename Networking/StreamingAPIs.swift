@@ -2221,7 +2221,15 @@ struct DispatcharrAPI {
     /// Fetches the EPG grid from `/api/epg/grid/` — returns -1h to +24h of programs.
     /// The response is `{"data": [...]}` with program objects containing tvg_id, title,
     /// start_time, end_time, etc. One request replaces the multi-step approach.
-    func getEPGGrid(start: Date? = nil, end: Date? = nil) async throws -> [DispatcharrCurrentProgram] {
+    ///
+    /// `lowPriority` is for the background EPG re-sweep (Logan 2026-09-12): it
+    /// must never compete with a tune or the user's own guide load. Foundation's
+    /// async `data(for:)` hands back no `URLSessionTask`, so `task.priority`
+    /// cannot be set from here; `networkServiceType = .background` is the
+    /// request-level equivalent and is what the system actually consults when it
+    /// schedules the transfer.
+    func getEPGGrid(start: Date? = nil, end: Date? = nil,
+                    lowPriority: Bool = false) async throws -> [DispatcharrCurrentProgram] {
         // Dispatcharr 0.30 (PR #1643): `start` / `end` select an absolute
         // ISO 8601 window (either may be omitted; max 395 days). Older
         // servers ignore the parameters and answer the default -1h..+24h.
@@ -2250,6 +2258,7 @@ struct DispatcharrAPI {
         // (the call is non-fatal: bulk grid failure falls through
         // to lazy per-cell on the Guide tab).
         request.timeoutInterval = 180
+        if lowPriority { request.networkServiceType = .background }
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
 
         // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
@@ -4506,11 +4515,21 @@ struct DispatcharrEPGSource: Decodable, Identifiable {
     let isActive: Bool?
     let hasChannels: Bool?
 
+    /// Time of this source's last successful refresh, as Dispatcharr sends it
+    /// (kept as the raw string: it is only ever compared, never parsed). The
+    /// grid cache fingerprints these so a re-ingested source invalidates the
+    /// cached chunks without redownloading the whole window. `ProgramData`
+    /// itself has no `updated_at`, and a refresh replaces a source's programs
+    /// wholesale, so the source stamp is the only change signal the API gives.
+    /// Optional: dummy sources never refresh and older builds may omit it.
+    let updatedAt: String?
+
     enum CodingKeys: String, CodingKey {
         case id, name, url
         case sourceType = "source_type"
         case isActive = "is_active"
         case hasChannels = "has_channels"
+        case updatedAt = "updated_at"
     }
 }
 
@@ -6044,5 +6063,139 @@ enum FastISO8601 {
         let days = era * 146097 + doe - 719468
         let secs = Double(days) * 86400 + Double(hour * 3600 + minute * 60 + second) + fraction - Double(offset)
         return Date(timeIntervalSince1970: secs)
+    }
+}
+
+// MARK: - Quiet VOD background sweep support (Logan 2026-09-12)
+//
+// The VOD library now follows the EPG cache rule: the snapshot serves
+// instantly at launch and the network sweep runs later, quietly, in the
+// background. Two things the sweep needs that the foreground path does not:
+//
+//  1. A CHEAP CHANGE PROBE. One item per kind, newest first, so the sweep can
+//     tell "the library moved" from "nothing changed" without walking pages.
+//     `count` plus the newest `created_at` is enough: an add, a removal or a
+//     re-ingest moves one of the two.
+//  2. LOW-PRIORITY PAGE WALKS. Same paths and page size as the foreground
+//     streams, but with `networkServiceType = .background` so the OS and the
+//     server both treat the sweep as secondary to whatever is playing.
+//
+// Appended as an extension rather than folded into the existing members so the
+// foreground path stays byte-identical.
+extension DispatcharrAPI {
+
+    /// What the change probe learned about one library kind.
+    struct VODChangeProbe: Sendable, Equatable {
+        /// Server-reported total for the kind (nil when the endpoint answers
+        /// a bare array instead of a DRF page).
+        let count: Int?
+        /// `created_at` of the newest row, verbatim, so a stored value can be
+        /// compared as a string without date-parsing ambiguity.
+        let newestCreatedAt: String?
+    }
+
+    /// `GET /api/vod/movies/?page_size=1&ordering=-created_at`: the newest row
+    /// plus the collection count, one tiny request.
+    func probeVODMovies() async throws -> VODChangeProbe {
+        let page: DispatcharrResultsWrapper<DispatcharrVODMovie> =
+            try await vodProbePage(path: "/api/vod/movies/?page_size=1&ordering=-created_at")
+        return VODChangeProbe(count: page.count, newestCreatedAt: page.results.first?.createdAt)
+    }
+
+    /// Series equivalent of `probeVODMovies`.
+    func probeVODSeries() async throws -> VODChangeProbe {
+        let page: DispatcharrResultsWrapper<DispatcharrVODSeries> =
+            try await vodProbePage(path: "/api/vod/series/?page_size=1&ordering=-created_at")
+        return VODChangeProbe(count: page.count, newestCreatedAt: page.results.first?.createdAt)
+    }
+
+    private func vodProbePage<T: Decodable>(path: String) async throws -> DispatcharrResultsWrapper<T> {
+        var request = URLRequest(url: try buildURL(path: path))
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        // Never let the probe compete with playback.
+        request.networkServiceType = .background
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        return try Self.jsonDecoder.decode(DispatcharrResultsWrapper<T>.self, from: data)
+    }
+
+    /// Low-priority movie page walk for the background sweep. Same paths, page
+    /// size and item cap semantics as `getVODMoviesStream`; the requests are
+    /// marked background and the caller paces them.
+    func getVODMoviesStreamLowPriority(category: String? = nil,
+                                       itemCap: Int? = nil) -> AsyncThrowingStream<[DispatcharrVODMovie], Error> {
+        makeBackgroundPageStream(firstPath: Self.backgroundMoviesPath(category: category), itemCap: itemCap)
+    }
+
+    /// Series equivalent of `getVODMoviesStreamLowPriority`.
+    func getVODSeriesStreamLowPriority(category: String? = nil,
+                                       itemCap: Int? = nil) -> AsyncThrowingStream<[DispatcharrVODSeries], Error> {
+        makeBackgroundPageStream(firstPath: Self.backgroundSeriesPath(category: category), itemCap: itemCap)
+    }
+
+    /// Mirrors the private `moviesPath`: the `name|type` category filter
+    /// Dispatcharr's MovieFilter matches on.
+    private static func backgroundMoviesPath(category: String?) -> String {
+        guard let category, !category.isEmpty else { return "/api/vod/movies/?page_size=100" }
+        let typed = category.contains("|") ? category : "\(category)|movie"
+        let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
+        return "/api/vod/movies/?page_size=100&category=\(encoded)"
+    }
+
+    private static func backgroundSeriesPath(category: String?) -> String {
+        guard let category, !category.isEmpty else { return "/api/vod/series/?page_size=100" }
+        let typed = category.contains("|") ? category : "\(category)|series"
+        let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
+        return "/api/vod/series/?page_size=100&category=\(encoded)"
+    }
+
+    /// Page walk for the quiet sweep. Deliberately simpler than the foreground
+    /// `makePageStream`: one failure ends the stream (the sweep is a backstop,
+    /// the next gate retries), and every request is `.background` service type.
+    /// The structured producer task is cancelled on stream termination, the
+    /// same ownership rule the foreground stream uses.
+    private func makeBackgroundPageStream<T: Decodable & Sendable>(
+        firstPath: String,
+        itemCap: Int? = nil
+    ) -> AsyncThrowingStream<[T], Error> {
+        AsyncThrowingStream { [self] continuation in
+            let task = Task {
+                let pageItemCap = itemCap ?? Self.vodPaginationItemCap
+                guard var nextURL = try? buildURL(path: firstPath) else {
+                    continuation.finish(throwing: APIError.invalidURL)
+                    return
+                }
+                var totalYielded = 0
+                while true {
+                    if Task.isCancelled { continuation.finish(); return }
+                    var request = URLRequest(url: nextURL)
+                    headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+                    request.networkServiceType = .background
+                    do {
+                        let (data, response) = try await loggedData(for: request)
+                        try validate(response: response, data: data)
+                        // Flat array (non-paginated response).
+                        if let list = try? Self.jsonDecoder.decode([T].self, from: data) {
+                            if !list.isEmpty { continuation.yield(list) }
+                            continuation.finish(); return
+                        }
+                        let wrapped = try Self.jsonDecoder.decode(DispatcharrResultsWrapper<T>.self, from: data)
+                        if !wrapped.results.isEmpty {
+                            continuation.yield(wrapped.results)
+                            totalYielded += wrapped.results.count
+                        }
+                        if totalYielded >= pageItemCap { continuation.finish(); return }
+                        guard let next = wrapped.next, let url = URL(string: next),
+                              url.host == nextURL.host else {
+                            continuation.finish(); return
+                        }
+                        nextURL = url
+                    } catch {
+                        continuation.finish(throwing: error); return
+                    }
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 }

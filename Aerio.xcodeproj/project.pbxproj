@@ -59,6 +59,7 @@
 		240BCCC86B210B13A95FB87C /* RemoteControlSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4EDC8A716508CF4B4F1D2DA /* RemoteControlSettingsView.swift */; };
 		2527936283FB11BD5201E1DA /* Pods.xcodeproj in Resources */ = {isa = PBXBuildFile; fileRef = 2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */; };
 		27D98B92D7EF236E6D5C868D /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */; };
+		A1E5E7C0000000000000AA02 /* AppSettleGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E5E7C0000000000000AA01 /* AppSettleGate.swift */; };
 		294AE2B45D4A82E38B1D09C4 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */; };
 		29753AC438E1C47769F2874E /* LocalRecordingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */; };
 		2B3C4D5E6F708901ACE70010 /* NWHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */; };
@@ -125,6 +126,7 @@
 		87062C2D2515CB8999B9C4E6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5806A5B948B604B451A5F5C7 /* Assets.xcassets */; };
 		8AC25DFB7121C1AEBCE36729 /* ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E223D01D7BBD84EAD449D43 /* ThemeManager.swift */; };
 		8B904D93666027F576A836E1 /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */; };
+		A1E5E7C0000000000000AA03 /* AppSettleGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E5E7C0000000000000AA01 /* AppSettleGate.swift */; };
 		8CF1E8A8912F0A98110ABF07 /* Pods-Aerio_iOS-acknowledgements.plist in Resources */ = {isa = PBXBuildFile; fileRef = 5813F2DEADFF09175AADA42D /* Pods-Aerio_iOS-acknowledgements.plist */; };
 		8D2CF5152AE5713290F75C94 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */; };
 		8F5A030376AB114E38DAE4AD /* ReminderBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6123CC8F10ADF7063AE0E97 /* ReminderBannerView.swift */; };
@@ -464,6 +466,7 @@
 		E7BA4153D0B047D0BF40ACEE /* ProgramInfoView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProgramInfoView.swift; sourceTree = "<group>"; };
 		EA33B18A62A3411B6425B661 /* PlaylistModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistModels.swift; sourceTree = "<group>"; };
 		EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecordingCoordinator.swift; sourceTree = "<group>"; };
+		A1E5E7C0000000000000AA01 /* AppSettleGate.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppSettleGate.swift; sourceTree = "<group>"; };
 		F1A434E6ED5CFF73E3A9D731 /* AerioImageDecoding.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AerioImageDecoding.swift; path = AerioImageDecoding.swift; sourceTree = "<group>"; };
 		F249D5C39D90BC11107F3420 /* Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist"; sourceTree = "<group>"; };
 		F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConnectionViewModel.swift; sourceTree = "<group>"; };
@@ -969,6 +972,7 @@
 				62C0C151EAA6394D32003217 /* DeviceInfo.swift */,
 				B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */,
 				EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */,
+				A1E5E7C0000000000000AA01 /* AppSettleGate.swift */,
 				A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */,
 				A1B2C3D4E5F67890C10C0003 /* ClockFormat.swift */,
 				A1B2C3D4E5F67890E7A70003 /* EventTimeParser.swift */,
@@ -1321,6 +1325,7 @@
 				A41AA69146981E08D85F8439 /* DeviceInfo.swift in Sources */,
 				29753AC438E1C47769F2874E /* LocalRecordingSession.swift in Sources */,
 				27D98B92D7EF236E6D5C868D /* RecordingCoordinator.swift in Sources */,
+				A1E5E7C0000000000000AA02 /* AppSettleGate.swift in Sources */,
 				A1B2C3D4E5F67890CAFE0001 /* TVPressGesture.swift in Sources */,
 				A1B2C3D4E5F67890C10C0001 /* ClockFormat.swift in Sources */,
 				A1B2C3D4E5F67890E7A70001 /* EventTimeParser.swift in Sources */,
@@ -1449,6 +1454,7 @@
 				000A4A7BFF25A66945137BB3 /* DeviceInfo.swift in Sources */,
 				D50E5DFBD9787AC5568AD17A /* LocalRecordingSession.swift in Sources */,
 				8B904D93666027F576A836E1 /* RecordingCoordinator.swift in Sources */,
+				A1E5E7C0000000000000AA03 /* AppSettleGate.swift in Sources */,
 				A1B2C3D4E5F67890CAFE0002 /* TVPressGesture.swift in Sources */,
 				A1B2C3D4E5F67890C10C0002 /* ClockFormat.swift in Sources */,
 				A1B2C3D4E5F67890E7A70002 /* EventTimeParser.swift in Sources */,
