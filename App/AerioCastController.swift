@@ -123,6 +123,16 @@ final class AerioCastController: NSObject, ObservableObject {
         options.startDiscoveryAfterFirstTapOnCastButton = false
         GCKCastContext.setSharedInstanceWith(options)
         GCKCastContext.sharedInstance().sessionManager.add(self)
+        // The flag above only makes discovery ELIGIBLE to run without a
+        // GCKUICastButton; it does not by itself put a scanner on the wire.
+        // Nothing else asked for discovery at launch (the only startDiscovery()
+        // call lived in the in-player picker's CastDeviceList), so start it here
+        // for app lifetime, exactly like the companion mDNS browser. This is
+        // also what triggers the SDK's local-network permission use.
+        let discovery = GCKCastContext.sharedInstance().discoveryManager
+        discovery.add(self)
+        discovery.startDiscovery()
+        debugLog("[Cast] context configured appId=\(AerioCast.receiverAppID), discovery state=\(discovery.discoveryState.rawValue), devices=\(discovery.deviceCount)")
         // SDK 4.x has no GCKCastStateListener; cast availability changes arrive
         // via kGCKCastStateDidChangeNotification. The session listener below is
         // still the authority on the connected/connecting transitions.
@@ -438,6 +448,36 @@ final class AerioCastController: NSObject, ObservableObject {
         case .notConnected: state = .available
         default: state = .unavailable   // .noDevicesAvailable
         }
+    }
+}
+
+// MARK: - GCKDiscoveryManagerListener (app-lifetime discovery + logging)
+
+extension AerioCastController: GCKDiscoveryManagerListener {
+    // GCK delivers discovery callbacks on the main thread (SDK contract).
+    nonisolated func didStartDiscovery(forDeviceCategory deviceCategory: String) {
+        MainActor.assumeIsolated { logDiscovery("didStartDiscovery category=\(deviceCategory)") }
+    }
+
+    nonisolated func didUpdateDeviceList() {
+        MainActor.assumeIsolated { logDiscovery("didUpdateDeviceList") }
+    }
+
+    nonisolated func didInsert(_ device: GCKDevice, at index: UInt) {
+        let name = device.friendlyName ?? device.deviceID
+        MainActor.assumeIsolated { logDiscovery("didInsert \(name)") }
+    }
+
+    nonisolated func didRemove(_ device: GCKDevice, at index: UInt) {
+        let name = device.friendlyName ?? device.deviceID
+        MainActor.assumeIsolated { logDiscovery("didRemove \(name)") }
+    }
+
+    fileprivate func logDiscovery(_ what: String) {
+        let discovery = GCKCastContext.sharedInstance().discoveryManager
+        let names = (0..<discovery.deviceCount)
+            .map { discovery.device(at: $0).friendlyName ?? discovery.device(at: $0).deviceID }
+        debugLog("[Cast] \(what): discovery state=\(discovery.discoveryState.rawValue), devices=\(discovery.deviceCount) \(names)")
     }
 }
 
@@ -1783,6 +1823,7 @@ final class CastDeviceList: NSObject, ObservableObject, GCKDiscoveryManagerListe
         manager.add(self)
         manager.startDiscovery()
         reload()
+        debugLog("[Cast] picker start: discovery state=\(manager.discoveryState.rawValue), devices=\(manager.deviceCount)")
     }
 
     func stop() {
@@ -1794,6 +1835,7 @@ final class CastDeviceList: NSObject, ObservableObject, GCKDiscoveryManagerListe
         var list: [GCKDevice] = []
         for i in 0..<m.deviceCount { list.append(m.device(at: i)) }
         devices = list
+        debugLog("[Cast] picker list: discovery state=\(m.discoveryState.rawValue), devices=\(list.count) \(list.map { $0.friendlyName ?? $0.deviceID })")
     }
 
     func didUpdateDeviceList() {

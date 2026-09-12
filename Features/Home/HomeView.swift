@@ -5103,7 +5103,7 @@ struct MainTabView: View {
                 .padding(.trailing, 20)
                 .padding(.bottom, 52)
                 .accessibilityLabel("Return to remote")
-            } else if !companionClient.devices.isEmpty,
+            } else if !companionClient.devices.isEmpty || castController.state != .unavailable,
                !companionClient.isControlling,
                !castController.isCasting,
                nowPlaying.playingItem == nil || nowPlaying.isMinimized,
@@ -5137,7 +5137,16 @@ struct MainTabView: View {
                 }
             }
         }
-        .sheet(isPresented: $showCompanionPickerGlobal) { CompanionPickerSheet() }
+        // Task #225 follow-up: the global pill used to open the companion-ONLY
+        // CompanionPickerSheet, which has no Google Cast section and never
+        // starts Cast discovery, so Cast devices could never appear outside the
+        // in-player chrome (Logan's iPhone 17 Pro, 2026-09-11: "AerioTV devices"
+        // only while the Nothing Phone saw 11 Cast routes). Use the unified
+        // sectioned picker instead. No channel is playing from here, so the
+        // AirPlay section (an AVPlayer-session affordance) stays off.
+        .sheet(isPresented: $showCompanionPickerGlobal) {
+            CastPickerSheet(showGoogleCast: true, showAirPlay: false)
+        }
         #endif
         #if os(tvOS)
         // v1.6.12: GH #11 fix (v5).
