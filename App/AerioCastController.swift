@@ -408,10 +408,24 @@ final class AerioCastController: NSObject, ObservableObject {
         // output profile for THIS request, so the receiver gets stereo AAC
         // and the phone passes it through with no decode of its own. Local
         // playback is untouched and keeps AC-3.
-        let profileID = ChannelStore.shared.activeServer?.dispatcharrAACOutputProfileID
-        let profileURL = DispatcharrOutputProfile.applying(profileID: profileID, to: rawTS)
+        //
+        // 2026-09-12: the profile used to be applied to EVERY cast, even to
+        // receivers that decode AC-3 themselves. Dispatcharr's ffmpeg AAC
+        // encoder emits channel_configuration 0 (layout in a PCE) whenever
+        // the AC-3 source layout is outside Table 1.19, and the receiver's
+        // AAC decoder substitutes silence for every frame. So the profile
+        // is requested ONLY when the receiver cannot decode AC-3; a capable
+        // receiver ingests the PLAIN stream and the remuxer passes
+        // AC-3 / E-AC-3 through untouched.
         let allowAC3 = AerioCast.receiverDecodesAC3(session.device)
+        let profileID = allowAC3
+            ? nil : ChannelStore.shared.activeServer?.dispatcharrAACOutputProfileID
+        let profileURL = DispatcharrOutputProfile.applying(profileID: profileID, to: rawTS)
         let receiverName = session.device.friendlyName ?? lastDeviceName
+        let receiverModel = session.device.modelName ?? receiverName ?? "unknown"
+        debugLog("[Cast] audio plan: receiver=\(receiverModel) "
+            + "ac3=\(allowAC3 ? "yes" : "no") "
+            + "-> ingest=\(profileID.map { "profile \($0)" } ?? "plain")")
         debugLog("[Cast] load channel=\(content.title) "
             + "profile=\(profileID.map(String.init) ?? "none") "
             + "receiverAC3=\(allowAC3 ? "yes" : "no")")
@@ -578,10 +592,13 @@ final class AerioCastController: NSObject, ObservableObject {
         debugLog("[CAST-HLS] switch-stream reprime for \(item.name)")
         let headers = content.streamHeaders
         proxyLoadTask?.cancel()
-        let profileID = ChannelStore.shared.activeServer?.dispatcharrAACOutputProfileID
-        let profileURL = DispatcharrOutputProfile.applying(profileID: profileID, to: rawTS)
+        // Same audio plan as the initial load: the AAC output profile only
+        // for a receiver that cannot decode AC-3 itself.
         let allowAC3 = AerioCast.receiverDecodesAC3(
             GCKCastContext.sharedInstance().sessionManager.currentCastSession?.device)
+        let profileID = allowAC3
+            ? nil : ChannelStore.shared.activeServer?.dispatcharrAACOutputProfileID
+        let profileURL = DispatcharrOutputProfile.applying(profileID: profileID, to: rawTS)
         proxyLoadTask = Task { [weak self] in
             do {
                 _ = try await Self.startProxyWithProfileRetry(
