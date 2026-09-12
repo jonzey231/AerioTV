@@ -257,6 +257,8 @@ final class VODStore: ObservableObject {
         guard let server = vodServers.first(where: { $0.isActive }) ?? (activeServer == nil ? vodServers.first : nil) else { return }
         let identity = VODLibraryCache.identity(for: server)
         if movies.isEmpty, let snap = await VODLibraryCache.load(kind: .movie, identity: identity) {
+            let t0 = CFAbsoluteTimeGetCurrent()
+            MainThreadWatchdog.shared.begin("publish vod.movies")
             movies = snap.items
             movieCategories = snap.categories
             isLoadingMovies = false
@@ -265,10 +267,14 @@ final class VODStore: ObservableObject {
             restoredMoviesProbe = (snap.remoteCount, snap.remoteNewest)
             lastMoviesServerName = server.name
             currentMoviesServerID = server.id
+            MainThreadWatchdog.shared.end("publish vod.movies")
+            debugLog("[PUBLISH] vod.movies \(snap.items.count) items took \(Int((CFAbsoluteTimeGetCurrent() - t0) * 1000))ms (snapshot restore)")
             debugLog("[VOD-CACHE] restored \(snap.items.count) movies from \(Int(Date().timeIntervalSince(snap.at)))s ago (launch, no network)")
             TMDBArtCache.shared.enrich(snap.items, isMovie: true)
         }
         if series.isEmpty, let snap = await VODLibraryCache.load(kind: .series, identity: identity) {
+            let t0 = CFAbsoluteTimeGetCurrent()
+            MainThreadWatchdog.shared.begin("publish vod.series")
             series = snap.items
             seriesCategories = snap.categories
             isLoadingSeries = false
@@ -277,6 +283,8 @@ final class VODStore: ObservableObject {
             restoredSeriesProbe = (snap.remoteCount, snap.remoteNewest)
             lastSeriesServerName = server.name
             currentSeriesServerID = server.id
+            MainThreadWatchdog.shared.end("publish vod.series")
+            debugLog("[PUBLISH] vod.series \(snap.items.count) items took \(Int((CFAbsoluteTimeGetCurrent() - t0) * 1000))ms (snapshot restore)")
             debugLog("[VOD-CACHE] restored \(snap.items.count) series from \(Int(Date().timeIntervalSince(snap.at)))s ago (launch, no network)")
             TMDBArtCache.shared.enrich(snap.items, isMovie: false)
         }
@@ -6359,6 +6367,20 @@ struct MainTabView: View {
             )
         }
 
+        // VOD snapshot restore runs IN PARALLEL with the channel fetch
+        // (Logan 2026-09-12: "the app launches quickly but loading EPG, DVR,
+        // Movies and TV Shows is a different story").
+        //
+        // It is a pure disk read plus one publish per kind and needs nothing
+        // from channels or the guide, yet it used to sit behind phase 1 + 2.
+        // Field log session7.txt, the 14:19 launch: phase 1 (channels) took
+        // until 14:19:35.965, phase 3 began at 14:19:35.968, and the cached
+        // library only appeared at 14:19:39.856 (movies) and 14:19:43.837
+        // (series) - 17 s after launch for 5044 movies and 3066 series that
+        // were already on disk and marked "(launch, no network)". Kicking it
+        // here makes On Demand populated by the time the tab can be reached.
+        let vodRestoreHandle = Task { await vodStore.restoreSnapshots(servers: allServers) }
+
         // Wait for channels to finish loading.
         while channelStore.isLoading {
             try? await Task.sleep(for: .milliseconds(200))
@@ -6623,7 +6645,10 @@ struct MainTabView: View {
         // @Published state again. VOD is rarely the first tab opened and On
         // Demand shows its own spinner, so the delay is invisible in practice.
         debugLog("🟢 [Orchestrator] phase 3 BEGIN: VOD snapshot restore, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
-        await vodStore.restoreSnapshots(servers: allServers)
+        // Started alongside phase 1 above; this normally resolves immediately.
+        // The call is idempotent (each kind is guarded on `isEmpty`), so a
+        // second restore would be harmless anyway.
+        await vodRestoreHandle.value
         debugLog("🟢 [Orchestrator] phase 3 done (restore), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, movies=\(vodStore.movies.count), series=\(vodStore.series.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         // Phase 4 is no longer a foreground sweep: the snapshots above are what
         // the tabs show, and the network walk is a quiet background pass that

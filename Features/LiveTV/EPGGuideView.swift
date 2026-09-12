@@ -498,7 +498,34 @@ final class GuideStore: ObservableObject {
             debugLog("📺 GuideStore: REJECTED empty \(source) write — keeping the existing guide")
             return false
         }
+        // [PUBLISH] instrumentation + off-main release (Logan 2026-09-12).
+        //
+        // Measured from session7.txt: every `[MEM] commitPrograms begin` is
+        // followed by the next main-thread `[TAB]` flush ~4 s later instead of
+        // the scheduled 1 s (14:22:22.925 -> 14:22:27.019, 14:23:18.595 ->
+        // 14:23:22.664, 14:24:27.023 -> 14:24:30.849, 14:25:10.820 ->
+        // 14:25:14.533). So a whole-map publish costs roughly 3 s of BLOCKED
+        // MAIN THREAD, and the 91-day re-sweep fires six of them back to back.
+        // The dominant cost is not SwiftUI (the probe shows one body each for
+        // MainTabView / ChannelListView / DVRView): it is tearing down the
+        // OUTGOING map, ~90k `GuideProgram` structs with several String refs
+        // apiece, which the assignment does synchronously on main.
+        //
+        // Holding the outgoing value in a detached task moves that deallocation
+        // to a background thread; the main actor only swaps the buffer pointer.
+        let programCount = dict.values.reduce(0) { $0 + $1.count }
+        let publishStart = CFAbsoluteTimeGetCurrent()
+        MainThreadWatchdog.shared.begin("publish guide.programs \(source)")
+        let outgoing = programs
         programs = dict
+        MainThreadWatchdog.shared.end("publish guide.programs \(source)")
+        Task.detached(priority: .background) {
+            // Sole purpose: keep the old map alive until this background task
+            // ends, so its release happens here and not on the main thread.
+            _ = outgoing.count
+        }
+        let publishMs = Int((CFAbsoluteTimeGetCurrent() - publishStart) * 1000)
+        debugLog("[PUBLISH] guide.programs \(programCount) items across \(dict.count) channels took \(publishMs)ms (\(source))")
         return true
     }
 
@@ -658,8 +685,12 @@ final class GuideStore: ObservableObject {
                 let historySecs = channelCount > GuideStore.largePlaylistChannels
                     ? min(retentionSecs, GuideStore.largePlaylistHistorySecs)
                     : retentionSecs
-                let windowStart = now.addingTimeInterval(-historySecs)
-                let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
+                // Resident cap: read (and therefore publish) only the days the
+                // guide can draw at launch. `effectiveWindowHours` still
+                // governs what the cache HOLDS; see `residentHistorySeconds`.
+                let windowStart = now.addingTimeInterval(-min(historySecs, GuideStore.residentHistorySeconds))
+                let windowEnd = now.addingTimeInterval(min(Double(effectiveWindowHours) * 3600,
+                                                          GuideStore.residentForwardSeconds))
                 let descriptor = FetchDescriptor<EPGProgram>(
                     predicate: #Predicate<EPGProgram> {
                         $0.serverID == serverID && $0.endTime > windowStart && $0.startTime < windowEnd
@@ -729,6 +760,10 @@ final class GuideStore: ObservableObject {
             // plus two log lines. The 97k-row fetch + dict build
             // already happened off-main.
             self.commitPrograms(Self.drawableOnly(loaded.dict), for: serverID, source: "cache-load")
+            let residentNow = Date()
+            self.residentWindow = (residentNow.addingTimeInterval(-GuideStore.residentHistorySeconds),
+                                   residentNow.addingTimeInterval(GuideStore.residentForwardSeconds))
+            debugLog("📺 GuideStore.loadFromCache: resident window \(Self.chunkStamp(self.residentWindow!.start)) to \(Self.chunkStamp(self.residentWindow!.end)) (the cache still holds the full \(effectiveWindowHours / 24)-day span)")
             // Record how old the loaded data actually is (newest cached
             // fetch), so the warm-foreground staleness check (issue #24)
             // measures the real age of what the user is looking at, not
@@ -737,6 +772,13 @@ final class GuideStore: ObservableObject {
             debugLog("📺 GuideStore.loadFromCache: loaded \(loaded.programCount) programs across \(loaded.dict.count) channels (server \(serverID)) rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
             debugLog("📺 GuideStore.loadFromCache: newest fetch \(loaded.newestFetchAgoSec)s ago, threshold \(Int(stalenessThreshold))s, fresh=\(loaded.isFresh)")
             self.lastLoadFromCacheResult = (serverID: serverID, isFresh: loaded.isFresh)
+            // Catch-up reach prune after the restore (Logan 2026-09-12). Fired
+            // detached so the guide paints first; the delete runs off the main
+            // actor inside.
+            Task { [weak self] in
+                await self?.pruneBeyondCatchupReach(channels: ChannelStore.shared.channels,
+                                                    serverID: serverID)
+            }
             return loaded.isFresh
         }
         inFlightLoadTask = (serverID: serverID, task: fetchTask)
@@ -905,14 +947,27 @@ final class GuideStore: ObservableObject {
         // objects, +900 MB, jetsam. Deletes go by predicate without
         // materialising rows, past-key dedup only fetches the aired window,
         // and inserts run in chunks with a fresh context per chunk.
+        // [PUBLISH] timing for the chunked SwiftData write.
+        let saveStart = CFAbsoluteTimeGetCurrent()
         Task.detached(priority: .utility) {
             let now = Date()
             let retentionCutoff = now.addingTimeInterval(-retentionSecs)
+            // The delete must be bounded by what the snapshot can replace.
+            // Since the resident map holds only the days the guide can draw
+            // (see `residentForwardSeconds`), an unbounded "delete every future
+            // row" would throw away the 89 cached days the snapshot does not
+            // carry, and the next launch would have nothing to page in.
+            var snapshotEnd = now
+            for list in snapshot.values {
+                if let last = list.last, last.end > snapshotEnd { snapshotEnd = last.end }
+            }
             do {
                 let ctx = ModelContext(container)
                 ctx.autosaveEnabled = false
                 try ctx.delete(model: EPGProgram.self, where: #Predicate<EPGProgram> { $0.endTime < retentionCutoff })
-                try ctx.delete(model: EPGProgram.self, where: #Predicate<EPGProgram> { $0.serverID == serverID && $0.endTime > now })
+                try ctx.delete(model: EPGProgram.self, where: #Predicate<EPGProgram> {
+                    $0.serverID == serverID && $0.endTime > now && $0.startTime < snapshotEnd
+                })
                 try ctx.save()
             } catch {
                 debugLog("📺 GuideStore.saveToCache: batch delete failed: \(error)")
@@ -967,6 +1022,7 @@ final class GuideStore: ObservableObject {
                 }
             }
             try? ctx.save()
+            debugLog("[PUBLISH] swiftdata epg save \(count) items took \(Int((CFAbsoluteTimeGetCurrent() - saveStart) * 1000))ms (background context)")
             debugLog("📺 GuideStore.saveToCache: saved \(count) programs for server \(serverID) (background, chunked) rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         }
     }
@@ -1123,6 +1179,141 @@ final class GuideStore: ObservableObject {
     // that replaces one day at a time so a program that moved to another day
     // stops showing its old time without anybody waiting for it.
 
+    // MARK: Resident programme window
+    //
+    // Guide Days = All Available (shipped 7e2db11 the evening of 2026-09-11)
+    // took this playlist from a 24 h window to 91 days, and the lag Logan
+    // reported the next day started with it. What the cap fixes, measured in
+    // atvlogs/session7.txt: `loadFromCache` published 90,038 programmes across
+    // 809 channels at 14:19:26.771 and RSS went 120 MB -> 230 MB, and every
+    // later whole-map publish blocked the main thread about 3 s (each
+    // `[MEM] commitPrograms begin` is followed by the next main-thread `[TAB]`
+    // flush ~4 s later instead of the scheduled 1 s: 14:22:22.925 ->
+    // 14:22:27.019, 14:23:18.595 -> 14:23:22.664, 14:24:27.023 ->
+    // 14:24:30.849, 14:25:10.820 -> 14:25:14.533).
+    //
+    // So the published map now holds only the window the guide can draw
+    // (today plus or minus a day), exactly the model Android moved to
+    // (guideLaunchSpanDays + ensureGuideRange). The SwiftData cache still
+    // holds every day, and `ensureResidentRange` pages a day in from it when
+    // the user jumps or scrolls past the resident edge. Nothing about
+    // catch-up changes: it resolves timeshift URLs from the server.
+
+    /// How much aired guide data stays resident at launch.
+    nonisolated static let residentHistorySeconds: TimeInterval = 24 * 3600
+    /// How much future guide data stays resident at launch.
+    nonisolated static let residentForwardSeconds: TimeInterval = 48 * 3600
+    /// Page a further day in once the view's right edge is this close to the
+    /// resident edge, so the cells are there before the user reaches them.
+    nonisolated static let residentPagePadding: TimeInterval = 6 * 3600
+    // MARK: Catch-up reach
+    //
+    // Logan 2026-09-12: "delete EPG from the previous days that are no longer
+    // reachable for catch-up." An aired programme is only worth keeping while
+    // its channel can still replay it, which is exactly
+    // `ChannelDisplayItem.canReplay` (catchupDays, capped at 30 like the
+    // Dispatcharr server cap). Channels with no archive keep a day of recent
+    // past so the guide can still be scrolled back a little.
+
+    /// Kept for a channel the provider does not archive.
+    nonisolated static let noCatchupHistorySeconds: TimeInterval = 24 * 3600
+    /// Per-channel catch-up reach in days, from the last prune pass. Also the
+    /// history bound for the grid walk and the coverage prune.
+    private var catchupReachDays: [String: Int] = [:]
+    /// Max reach across the playlist, 0 when nothing archives.
+    private var maxCatchupReachDays = 0
+
+    /// History bound for the grid walk and the coverage prune: never further
+    /// back than the playlist can actually replay.
+    private func historyReachSeconds(default fallback: TimeInterval) -> TimeInterval {
+        guard maxCatchupReachDays > 0 else {
+            return min(fallback, Self.noCatchupHistorySeconds)
+        }
+        return min(fallback, TimeInterval(maxCatchupReachDays) * 86_400)
+    }
+
+    /// Delete cached programmes that have aired and can no longer be replayed,
+    /// and drop the coverage records for the days they were in so the sweep
+    /// never re-fetches them. Runs off the main actor; called after the launch
+    /// cache restore and at the end of every sweep.
+    func pruneBeyondCatchupReach(channels: [ChannelDisplayItem], serverID: String) async {
+        guard let container = cachedContainer, !channels.isEmpty else { return }
+        // Cap at 30 days to match `ChannelDisplayItem.canReplay`.
+        var reach: [String: Int] = [:]
+        var maxDays = 0
+        for ch in channels {
+            let days = min(ch.catchupDays, 30)
+            reach[ch.id] = days
+            if days > maxDays { maxDays = days }
+        }
+        catchupReachDays = reach
+        maxCatchupReachDays = maxDays
+        let now = Date()
+        // Group channels by reach so the delete is a handful of predicates
+        // rather than one per channel.
+        var idsByDays: [Int: Set<String>] = [:]
+        for (id, days) in reach { idsByDays[days, default: []].insert(id) }
+        let pruned = await Task.detached(priority: .utility) { () -> Int in
+            var removed = 0
+            for (days, ids) in idsByDays {
+                let cutoff = days > 0
+                    ? now.addingTimeInterval(-TimeInterval(days) * 86_400)
+                    : now.addingTimeInterval(-GuideStore.noCatchupHistorySeconds)
+                let ctx = ModelContext(container)
+                ctx.autosaveEnabled = false
+                let descriptor = FetchDescriptor<EPGProgram>(predicate: #Predicate<EPGProgram> {
+                    $0.serverID == serverID && $0.endTime < cutoff && ids.contains($0.channelID)
+                })
+                let count = (try? ctx.fetchCount(descriptor)) ?? 0
+                guard count > 0 else { continue }
+                do {
+                    try ctx.delete(model: EPGProgram.self, where: #Predicate<EPGProgram> {
+                        $0.serverID == serverID && $0.endTime < cutoff && ids.contains($0.channelID)
+                    })
+                    try ctx.save()
+                    removed += count
+                } catch {
+                    debugLog("[EPG grid window] catch-up prune delete failed: \(error.localizedDescription)")
+                }
+            }
+            return removed
+        }.value
+        // Coverage: a day entirely outside the playlist's maximum reach can
+        // never be shown again, so forget it and the sweep stops re-fetching it.
+        let coverageCutoff = Self.gridDayFloor(now.addingTimeInterval(-historyReachSeconds(default: Self.activeRetentionSeconds())))
+        let beforeChunks = gridCoverage.count
+        gridCoverage.removeAll { $0.end <= coverageCutoff }
+        let droppedChunks = beforeChunks - gridCoverage.count
+        if droppedChunks > 0 { persistGridCoverage() }
+        // Resident map: drop the same programmes so memory and disk agree.
+        var trimmed: [String: [GuideProgram]] = [:]
+        var droppedResident = 0
+        for (channelID, list) in programs {
+            let days = reach[channelID] ?? 0
+            let cutoff = days > 0
+                ? now.addingTimeInterval(-TimeInterval(days) * 86_400)
+                : now.addingTimeInterval(-Self.noCatchupHistorySeconds)
+            let kept = list.filter { $0.end >= cutoff }
+            droppedResident += list.count - kept.count
+            if !kept.isEmpty { trimmed[channelID] = kept }
+        }
+        if droppedResident > 0 {
+            _ = commitPrograms(trimmed, for: serverID, source: "catchup-reach-prune")
+            if var window = residentWindow {
+                window.start = max(window.start, now.addingTimeInterval(-historyReachSeconds(default: Self.residentHistorySeconds)))
+                residentWindow = window
+            }
+        }
+        guard pruned > 0 || droppedChunks > 0 || droppedResident > 0 else { return }
+        debugLog("[EPG grid window] pruned \(pruned) programs older than catch-up reach (max \(maxDays) days), \(droppedResident) resident, \(droppedChunks) coverage entry(ies)")
+    }
+
+    /// The span `programs` currently holds, nil before the first cache load.
+    /// Widened only by `ensureResidentRange`.
+    private var residentWindow: (start: Date, end: Date)?
+    /// One page-in at a time.
+    private var residentPagingInFlight = false
+
     /// Fingerprint of the EPG sources the cached chunks were fetched under.
     private var gridCoverageSourcesFingerprint: String?
     /// Fingerprint observed by the most recent gate check, adopted only when a
@@ -1166,6 +1357,11 @@ final class GuideStore: ObservableObject {
     /// days are off screen and cost nothing by waiting. 24 gives four further
     /// publishes instead of twenty-two.
     nonisolated static let backgroundSweepPublishEvery = 24
+
+    /// How many already-aired days a background re-sweep re-fetches. See
+    /// `backgroundSweepDays()` for why this is not the full history window.
+    nonisolated static let backgroundSweepHistoryDays = 2
+
 
     /// How long a fetched chunk stays trusted. Long enough that relaunches
     /// within a day cost nothing, short enough that a provider's late EPG
@@ -2080,6 +2276,98 @@ final class GuideStore: ObservableObject {
 
     /// Jump-to-day: fetch the grid forward through `end` (day chunks) when
     /// a Dispatcharr 0.30 server is active and that range is not loaded.
+    /// Widen the RESIDENT programme map from the SwiftData cache so the guide
+    /// can draw `start...end`. Reads only the days that are missing, merges
+    /// them in one publish, and never touches the network: the cache already
+    /// holds every day the window walk fetched. Called from the day-strip jump
+    /// and from the horizontal-scroll edge, so paging happens before the cells
+    /// come on screen.
+    func ensureResidentRange(from start: Date? = nil, through end: Date) async {
+        guard let container = cachedContainer,
+              let serverID = displayedServerID,
+              var window = residentWindow,
+              !residentPagingInFlight else { return }
+        let wantStart = min(start ?? window.start, window.start)
+        let wantEnd = max(end, window.end)
+        // Align to the same fixed day grid the coverage keys use, and page a
+        // whole day at a time: a per-hour page would publish the whole map
+        // several times for one scroll.
+        let readStart = Self.gridDayFloor(wantStart)
+        let readEnd = Self.gridDayCeil(wantEnd)
+        guard readStart < window.start || readEnd > window.end else { return }
+        residentPagingInFlight = true
+        defer { residentPagingInFlight = false }
+        let existingStart = window.start
+        let existingEnd = window.end
+        let pageStart = CFAbsoluteTimeGetCurrent()
+        // Read only the missing spans (before the resident start, after the
+        // resident end), off the main actor, in the same paged form as
+        // `loadFromCache`.
+        let spans: [(Date, Date)] = [
+            readStart < existingStart ? (readStart, existingStart) : nil,
+            readEnd > existingEnd ? (existingEnd, readEnd) : nil
+        ].compactMap { $0 }
+        let fetched: (dict: [String: [GuideProgram]], count: Int) = await Task.detached(priority: .userInitiated) {
+            var dict: [String: [GuideProgram]] = [:]
+            var total = 0
+            for (spanStart, spanEnd) in spans {
+                let descriptor = FetchDescriptor<EPGProgram>(
+                    predicate: #Predicate<EPGProgram> {
+                        $0.serverID == serverID && $0.endTime > spanStart && $0.startTime < spanEnd
+                    },
+                    sortBy: [SortDescriptor(\.startTime)]
+                )
+                var offset = 0
+                let pageSize = 20_000
+                while true {
+                    var page = descriptor
+                    page.fetchOffset = offset
+                    page.fetchLimit = pageSize
+                    let rows: [EPGProgram] = autoreleasepool {
+                        let ctx = ModelContext(container)
+                        return (try? ctx.fetch(page)) ?? []
+                    }
+                    if rows.isEmpty { break }
+                    for ep in rows {
+                        dict[ep.channelID, default: []].append(
+                            GuideProgram(channelID: ep.channelID, title: ep.title,
+                                         description: ep.programDescription,
+                                         start: ep.startTime, end: ep.endTime,
+                                         category: ep.category,
+                                         programID: ep.programID,
+                                         subTitle: ep.subTitle, season: ep.season,
+                                         episode: ep.episode, isNew: ep.isNew,
+                                         isLiveBroadcast: ep.isLiveBroadcast,
+                                         isPremiere: ep.isPremiere, isFinale: ep.isFinale,
+                                         isRepeat: ep.isRepeat,
+                                         posterURL: ep.posterURL.isEmpty ? nil : ep.posterURL))
+                        total += 1
+                    }
+                    offset += rows.count
+                    if rows.count < pageSize { break }
+                }
+            }
+            return (dict, total)
+        }.value
+        // Widen the window even when the cache had nothing for those days, so
+        // a quiet day is not re-read on every scroll tick.
+        window = (min(window.start, readStart), max(window.end, readEnd))
+        residentWindow = window
+        guard fetched.count > 0 else {
+            debugLog("📺 GuideStore.ensureResidentRange: cache had no programmes for the new span; window now \(Self.chunkStamp(window.start)) to \(Self.chunkStamp(window.end))")
+            return
+        }
+        var merged = programs
+        for (channelID, list) in fetched.dict {
+            var existing = merged[channelID] ?? []
+            existing.append(contentsOf: list)
+            existing.sort { $0.start < $1.start }
+            merged[channelID] = existing
+        }
+        _ = commitPrograms(merged, for: serverID, source: "resident-page-in")
+        debugLog("📺 GuideStore.ensureResidentRange: paged in \(fetched.count) programme(s) across \(fetched.dict.count) channel(s) in \(Int((CFAbsoluteTimeGetCurrent() - pageStart) * 1000))ms; window now \(Self.chunkStamp(window.start)) to \(Self.chunkStamp(window.end))")
+    }
+
     func ensureForwardWindow(through end: Date, channels: [ChannelDisplayItem],
                              servers: [ServerConnection]) async {
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first,
@@ -2152,8 +2440,11 @@ final class GuideStore: ObservableObject {
         // days * 24 h. The base grid (-1h..+24h) has already painted.
         let playlistDays = Self.guideDaysRaw()
         let allAvailable = playlistDays == 0
-        let historySecs: TimeInterval = channels.count > Self.largePlaylistChannels
+        let rawHistorySecs: TimeInterval = channels.count > Self.largePlaylistChannels
             ? Self.largePlaylistHistorySecs : Self.activeRetentionSeconds()
+        // Never fetch further back than the playlist can replay (Logan
+        // 2026-09-12): a day nothing archives is a day nobody can open.
+        let historySecs = historyReachSeconds(default: rawHistorySecs)
         let historyStart = now.addingTimeInterval(-historySecs)
         let baseStart = now.addingTimeInterval(-3600)
         let baseEnd = now.addingTimeInterval(24 * 3600)
@@ -2225,6 +2516,11 @@ final class GuideStore: ObservableObject {
         // now rewritten it, so later walks in this session are incremental again.
         forceFullGridReload = false
         await pruneOutsideGridWindow(historyStart: historyStart, forwardEnd: forwardEnd, serverID: serverID)
+        // Catch-up reach prune on the launch guide load. This is the first point
+        // where `channels` (and therefore every channel's catchupDays) is known:
+        // `loadFromCache` runs in parallel with the channel fetch, so its own
+        // prune call is a no-op on a cold launch.
+        await pruneBeyondCatchupReach(channels: channels, serverID: serverID)
         // Source-change gate (Logan 2026-09-12). One request for the source
         // list: an explicit Refresh just rewrote every chunk in the foreground
         // so it simply ADOPTS the current fingerprint, while an ordinary load
@@ -2404,7 +2700,7 @@ final class GuideStore: ObservableObject {
         let now = Date()
         let playlistDays = Self.guideDaysRaw()
         let forwardDays = playlistDays == 0 ? Self.allAvailableMaxDaysAhead : playlistDays
-        let historySecs = Self.activeRetentionSeconds()
+        let historySecs = historyReachSeconds(default: Self.activeRetentionSeconds())
         let today = Self.gridDayFloor(now)
         let rangeStart = Self.gridDayFloor(now.addingTimeInterval(-historySecs))
         let rangeEnd = Self.gridDayCeil(now.addingTimeInterval(TimeInterval(forwardDays) * 86_400))
@@ -2416,7 +2712,30 @@ final class GuideStore: ObservableObject {
             day = day.addingTimeInterval(Self.gridChunkSeconds)
         }
         history.reverse()
-        return [today] + forward + history
+        // History is almost immutable: a day that has already aired does not
+        // change when Dispatcharr refreshes a source, and re-fetching it costs
+        // a request plus a full-map merge for nothing.
+        //
+        // Evidence (session7.txt, the 14:19 launch): the gate fired at
+        // 14:19:56.012 ("sources changed (7 sources, gate: guide load)") and
+        // the sweep then ran 91 days from 14:19:56.020 to 14:25:14.556,
+        // 5 min 18 s of continuous fetch + merge + publish starting 30 s after
+        // launch, merging 65,570 programs to correct at most a day or two.
+        // Logan refreshes his EPG sources every few hours, so the fingerprint
+        // legitimately differs on EVERY launch and this ran every time.
+        //
+        // Keeping a two-day history tail still catches a provider correcting
+        // last night's schedule (which catch-up plays back); everything older
+        // stays on the cached chunk and is refreshed only by an explicit
+        // Refresh, which still walks the full window.
+        let historyTail = Array(history.prefix(Self.backgroundSweepHistoryDays))
+        // The sweep covers the WHOLE cached forward range (Logan 2026-09-12:
+        // full cache kept, and a low-resource sweep scans for changes after
+        // settle). Days outside the resident window do not publish: see
+        // `persistSweptDay`, which merges them straight into the on-disk store
+        // off the main actor, so the resident cap holds while the cache stays
+        // correct all the way out to the last cached day.
+        return [today] + forward + historyTail
     }
 
     private func startBackgroundGridSweep(server: ServerConnection,
@@ -2470,6 +2789,14 @@ final class GuideStore: ObservableObject {
             if Task.isCancelled { break }
             let day = backgroundSweepRemaining.removeFirst()
             let dayEnd = day.addingTimeInterval(Self.gridChunkSeconds)
+            // A day the published map does not hold must not be merged into it:
+            // that is what would pull the whole cached span back into memory.
+            // It goes to the on-disk store instead, off the main actor, with no
+            // publish, and is paged in later by `ensureResidentRange`.
+            let isResidentDay: Bool = {
+                guard let w = residentWindow else { return true }
+                return day < w.end && dayEnd > w.start
+            }()
             let fetched: [DispatcharrCurrentProgram]
             do {
                 fetched = try await api.getEPGGrid(start: day, end: dayEnd, lowPriority: true)
@@ -2480,6 +2807,14 @@ final class GuideStore: ObservableObject {
             swept += 1
             guard !fetched.isEmpty else {
                 debugLog("[EPG grid window] background re-sweep chunk \(Self.chunkStamp(day)): server returned nothing, keeping the cached day")
+                try? await Task.sleep(for: .seconds(Self.backgroundSweepChunkPause))
+                continue
+            }
+            if !isResidentDay {
+                let written = await persistSweptDay(fetched, maps: maps, serverID: serverID,
+                                                    day: day, dayEnd: dayEnd)
+                merged += written
+                recordGridCoverage(start: day, end: dayEnd, programCount: fetched.count)
                 try? await Task.sleep(for: .seconds(Self.backgroundSweepChunkPause))
                 continue
             }
@@ -2548,6 +2883,8 @@ final class GuideStore: ObservableObject {
             pendingSweepFingerprint = nil
         }
         persistGridCoverage()
+        // Catch-up reach prune at the end of every sweep (Logan 2026-09-12).
+        await pruneBeyondCatchupReach(channels: ChannelStore.shared.channels, serverID: serverID)
         if finished, let container = cachedContainer {
             // Persist the corrected programs so the next launch serves them
             // from cache instead of re-sweeping for the same change.
@@ -2555,6 +2892,68 @@ final class GuideStore: ObservableObject {
         }
         debugLog("[EPG grid window] background re-sweep \(finished ? "complete" : "interrupted"): \(swept) of \(startedWith) day(s), \(merged) program(s) merged")
         backgroundSweepTask = nil
+    }
+
+    /// Write one swept day straight into the SwiftData cache, with no publish.
+    ///
+    /// Used for every day outside the resident window (Logan 2026-09-12: keep
+    /// the full cache, let a low-resource sweep scan for changes). The merge and
+    /// the store write both run off the main actor; the main actor sees nothing
+    /// but the returned count. Same REPLACE semantics the resident path uses:
+    /// the day's existing rows are deleted before the fresh ones go in, so a
+    /// programme that moved to another day does not leave its old entry behind.
+    private func persistSweptDay(_ fetched: [DispatcharrCurrentProgram],
+                                 maps: DispatcharrGridMaps,
+                                 serverID: String,
+                                 day: Date, dayEnd: Date) async -> Int {
+        guard let container = cachedContainer else { return 0 }
+        return await Task.detached(priority: .background) {
+            // Empty base: `mergeGridPrograms` clamps to the window, so the
+            // result is exactly this day's programmes.
+            let merged = GuideStore.mergeGridPrograms(fetched, into: [:],
+                                                     tvgIDToChannelIDs: maps.tvgIDToChannelIDs,
+                                                     intIDToChannelID: maps.intIDToChannelID,
+                                                     uuidToChannelID: maps.uuidToChannelID,
+                                                     windowStart: day, windowEnd: dayEnd)
+            guard merged.matched > 0 else { return 0 }
+            var ctx = ModelContext(container)
+            ctx.autosaveEnabled = false
+            try? ctx.delete(model: EPGProgram.self, where: #Predicate<EPGProgram> {
+                $0.serverID == serverID && $0.endTime > day && $0.startTime < dayEnd
+            })
+            try? ctx.save()
+            var written = 0
+            var chunk = 0
+            ctx = ModelContext(container)
+            ctx.autosaveEnabled = false
+            for (channelID, list) in merged.dict {
+                for gp in list {
+                    ctx.insert(EPGProgram(channelID: channelID, title: gp.title,
+                                          description: gp.description,
+                                          startTime: gp.start, endTime: gp.end,
+                                          category: gp.category, serverID: serverID,
+                                          programID: gp.programID,
+                                          subTitle: gp.subTitle, season: gp.season,
+                                          episode: gp.episode, isNew: gp.isNew,
+                                          isLiveBroadcast: gp.isLiveBroadcast,
+                                          isPremiere: gp.isPremiere, isFinale: gp.isFinale,
+                                          isRepeat: gp.isRepeat))
+                    written += 1
+                    chunk += 1
+                    // Fresh context per chunk: the same memory discipline
+                    // `saveToCache` uses, so a 60-day sweep never holds more
+                    // than one chunk of managed objects.
+                    if chunk >= 5_000 {
+                        try? ctx.save()
+                        ctx = ModelContext(container)
+                        ctx.autosaveEnabled = false
+                        chunk = 0
+                    }
+                }
+            }
+            try? ctx.save()
+            return written
+        }.value
     }
 
     private static func chunkStamp(_ d: Date) -> String {
@@ -4165,8 +4564,14 @@ struct EPGGuideView: View {
     /// clock returns to now (Logan 2026-09-06).
     private func jump(to date: Date) {
         jumpTarget = date
-        Task { await guideStore.ensureForwardWindow(through: date.addingTimeInterval(12 * 3600),
-                                                    channels: channels, servers: servers) }
+        Task {
+            // Cache first (instant, no network), then the network walk for days
+            // the cache genuinely does not hold.
+            await guideStore.ensureResidentRange(from: date.addingTimeInterval(-12 * 3600),
+                                                 through: date.addingTimeInterval(36 * 3600))
+            await guideStore.ensureForwardWindow(through: date.addingTimeInterval(12 * 3600),
+                                                 channels: channels, servers: servers)
+        }
         let target = min(0, max(maxHorizontalOffset, -xOffset(for: date) + pixelsPerHour * 0.1))
         debugLog("[GUIDE] jump to \(date) offset=\(Int(target)) forward=\(Int(hoursForward))h")
         withAnimation(.easeInOut(duration: 0.35)) { horizontalOffset = target }
@@ -4539,6 +4944,12 @@ struct EPGGuideView: View {
             // line is on screen ends the jump on its own; the clock returns
             // to the live time and the grid width settles back.
             .onChange(of: horizontalOffset) { _, offset in
+                // Page the next cached day in before the user scrolls onto it
+                // (the resident map holds today plus or minus a day; see
+                // `GuideStore.residentForwardSeconds`).
+                let visibleEnd = windowStart.addingTimeInterval(
+                    Double(-offset + visibleProgramWidth) / Double(pixelsPerHour) * 3600)
+                Task { await guideStore.ensureResidentRange(through: visibleEnd.addingTimeInterval(GuideStore.residentPagePadding)) }
                 guard jumpTarget != nil, -offset <= xOffset(for: Date()) else { return }
                 debugLog("[GUIDE] jump ended: scrolled back to now")
                 jumpTarget = nil
@@ -6128,6 +6539,7 @@ private struct GuideChannelButton: View {
     @AppStorage("ui.showChannelNames") private var showChannelNames = true
 
     var body: some View {
+        let _ = TabProbe.body("GuideChannelRow", key: channel.id)
         #if os(tvOS)
         // Non-focusable label on tvOS — users select program cells to play.
         // This prevents focus from jumping to the channel column when scrolling down.
@@ -6752,6 +7164,11 @@ private struct GuideProgramButton: View {
     #endif
 
     var body: some View {
+        // [RENDER] per-cell body counter (Logan 2026-09-12). TabProbe flushes
+        // one "[TAB] bodies/1s" line with the count and the number of DISTINCT
+        // cells, so the next field log says whether a publish re-evaluated 20
+        // visible cells or the whole grid.
+        let _ = TabProbe.body("GuideProgramCell", key: prog.id)
         #if os(tvOS)
         cellContent
             // tvOS: SwiftUI-native focusable cell (not a UIKit press overlay,

@@ -908,7 +908,27 @@ final class CastFMP4Remuxer {
         if let firstAudio = audio.first {
             trafs.append(Self.box(
                 "traf",
-                Self.fullBox("tfhd", 0, 0x020000, Self.u32(Self.audioTrackID)),
+                // flags 0x020000 default-base-is-moof, 0x000020
+                // default-sample-flags. The audio trun carries no
+                // per-sample flags, so without the tfhd default the
+                // receiver's parser does not treat our AAC frames as
+                // random access points and logs, once per frame (Google TV
+                // Streamer, 2026-09-12 14:22:20.237):
+                //
+                //   Bytestream with audio frame PTS 22666us and DTS
+                //   22666us indicated the frame is not a random access
+                //   point (key frame). All audio frames are expected to be
+                //   key frames for the current audio codec.
+                //
+                // The first packet after the load's seek is then a non-key
+                // packet, which is the "Failed to send audio packet for
+                // decoding" that costs every load a FFmpegAudioDecoder ->
+                // MediaCodecAudioDecoder swap and a reseek. 0x02000000 is
+                // sample_depends_on = 2 ("does not depend on others") with
+                // sample_is_non_sync_sample clear, which is the truth for
+                // every AAC and AC-3 frame.
+                Self.fullBox("tfhd", 0, 0x020020,
+                             Self.u32(Self.audioTrackID), Self.u32(0x0200_0000)),
                 // No clamp: samples earlier than `timelineBasePTS` are
                 // dropped at queue time, and `timelineBasePTS` is never
                 // below `timelineBase`, so this is always >= 0 and always

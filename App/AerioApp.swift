@@ -11,81 +11,126 @@ import Network
 import Network
 #endif
 
-// MARK: - Main Thread Watchdog (DEBUG)
-/// Periodically pings the main thread from a background thread.
-/// Logs warnings at 50ms (slow), 500ms (hang), and 3s (frozen).
-#if DEBUG
-private final class MainThreadWatchdog: @unchecked Sendable {
+// MARK: - Main Thread Hang Detector
+/// Permanent main-thread hang detector (Logan 2026-09-12: "Apple TV lag is
+/// still awful", 20-30 s for a click to register). It pings the main thread
+/// from a background thread every 250 ms and writes every block longer than
+/// `hangThreshold` to the DEBUG LOG (not `print`), so the next field log names
+/// the stall without a profiler attached.
+///
+/// Why it was rewritten: the previous version was `#if DEBUG` only and used
+/// `print`, so nothing about a hang ever reached `aerio_debug_logs.txt`. The
+/// 2026-09-12 session (atvlogs/session7.txt) had to be read by INFERRING
+/// stalls from the `[TAB] bodies/1s` flush drifting to 13-16 s apart
+/// (14:20:58 -> 14:21:14 -> 14:21:31) because no hang line existed.
+///
+/// Attribution without symbolication: every expensive main-actor operation
+/// wraps itself in `MainThreadWatchdog.trace("label") { ... }`, and a hang
+/// line reports the breadcrumb that was open when the block started. A
+/// post-unblock `Thread.callStackSymbols` snapshot is still logged for a long
+/// freeze, which is cheap and occasionally names the frame directly.
+final class MainThreadWatchdog: @unchecked Sendable {
     static let shared = MainThreadWatchdog()
+
+    /// Anything above this is a visible stutter on tvOS (one dropped frame is
+    /// 16 ms; 250 ms is a press that "did not register").
+    private static let hangThreshold: TimeInterval = 0.25
+    /// Above this the log also carries a stack snapshot taken once main frees up.
+    private static let freezeThreshold: TimeInterval = 2.0
+
     private var timer: DispatchSourceTimer?
-    private var consecutiveSlowPings = 0
+    private let lock = NSLock()
+    private var openBreadcrumbs: [(label: String, at: CFAbsoluteTime)] = []
+    private var started = false
+
+    // MARK: Breadcrumbs
+
+    /// Marks a main-actor operation so a hang can name it. Cheap: two locked
+    /// array mutations per call, no allocation beyond the label.
+    func begin(_ label: String) {
+        lock.lock(); openBreadcrumbs.append((label, CFAbsoluteTimeGetCurrent())); lock.unlock()
+    }
+
+    func end(_ label: String) {
+        lock.lock()
+        if let idx = openBreadcrumbs.lastIndex(where: { $0.label == label }) {
+            openBreadcrumbs.remove(at: idx)
+        }
+        lock.unlock()
+    }
+
+    /// Scoped form. Use around any whole-map publish, SwiftData save, or other
+    /// known-heavy main-actor block.
+    @discardableResult
+    static func trace<T>(_ label: String, _ body: () throws -> T) rethrows -> T {
+        shared.begin(label)
+        defer { shared.end(label) }
+        return try body()
+    }
+
+    private func breadcrumbDescription() -> String {
+        lock.lock(); let open = openBreadcrumbs; lock.unlock()
+        guard !open.isEmpty else { return "none" }
+        let now = CFAbsoluteTimeGetCurrent()
+        return open.map { "\($0.label) (open \(Int(($0.at.distance(to: now)) * 1000))ms)" }
+            .joined(separator: " < ")
+    }
+
+    // MARK: Detection
 
     func start() {
-        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
-        t.schedule(deadline: .now() + 2, repeating: 0.5)
-        t.setEventHandler { [weak self] in
-            self?.ping()
-        }
+        guard !started else { return }
+        started = true
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        // Leeway keeps the timer from waking the CPU on its own schedule.
+        t.schedule(deadline: .now() + 2, repeating: 0.25, leeway: .milliseconds(50))
+        t.setEventHandler { [weak self] in self?.ping() }
         t.resume()
         timer = t
-        print("[WATCHDOG] Started — pinging main thread every 0.5s")
+        debugLog("[HANG] detector armed: main-thread pings every 250ms, reporting blocks > \(Int(Self.hangThreshold * 1000))ms")
     }
 
     private var pingCount = 0
 
     private func ping() {
         pingCount += 1
-        let n = pingCount
         let start = CFAbsoluteTimeGetCurrent()
+        // Snapshot the breadcrumbs BEFORE the ping: whatever is open now is
+        // what the main thread is (or is about to be) busy with.
+        let crumbsAtStart = breadcrumbDescription()
         let sem = DispatchSemaphore(value: 0)
-        DispatchQueue.main.async {
-            sem.signal()
-        }
-        let result = sem.wait(timeout: .now() + 5.0)
+        DispatchQueue.main.async { sem.signal() }
+        // No timeout: a 30 s freeze must be reported as 30 s, not as ">5 s".
+        sem.wait()
         let elapsed = CFAbsoluteTimeGetCurrent() - start
-
-        if result == .timedOut {
-            consecutiveSlowPings += 1
-            print("[WATCHDOG] 🚨🚨🚨 MAIN THREAD FROZEN >5s! ping#\(n) — UI is completely unresponsive")
-            logMainThreadBacktrace()
-        } else if elapsed > 0.2 {
-            consecutiveSlowPings += 1
-            print("[WATCHDOG] 🔴 HANG: ping#\(n) took \(String(format: "%.1f", elapsed * 1000))ms — UI visibly stuck")
-            logMainThreadBacktrace()
-        } else if elapsed > 0.05 {
-            consecutiveSlowPings += 1
-            print("[WATCHDOG] 🟡 Slow: ping#\(n) took \(String(format: "%.0f", elapsed * 1000))ms (\(consecutiveSlowPings) consecutive)")
-        } else {
-            if consecutiveSlowPings > 0 {
-                print("[WATCHDOG] ✅ Recovered after \(consecutiveSlowPings) slow ping(s) — ping#\(n): \(String(format: "%.1f", elapsed * 1000))ms")
-            }
-            consecutiveSlowPings = 0
-        }
+        guard elapsed > Self.hangThreshold else { return }
+        let ms = Int(elapsed * 1000)
+        debugLog("[HANG] main thread blocked \(ms)ms (ping#\(pingCount), breadcrumbs: \(crumbsAtStart))")
+        if elapsed > Self.freezeThreshold { logMainThreadBacktrace(afterMs: ms) }
     }
 
+    /// Written on main, read on the watchdog thread behind the semaphore
+    /// handshake below, so the unchecked access is ordered.
     nonisolated(unsafe) static var lastStackTrace: [String] = []
 
-    private func logMainThreadBacktrace() {
-        // Capture main thread stack once it unblocks
+    private func logMainThreadBacktrace(afterMs: Int) {
         let sem = DispatchSemaphore(value: 0)
         DispatchQueue.main.async {
             MainThreadWatchdog.lastStackTrace = Thread.callStackSymbols
             sem.signal()
         }
-        if sem.wait(timeout: .now() + 2.0) == .success {
-            let trace = MainThreadWatchdog.lastStackTrace
-            if !trace.isEmpty {
-                print("[WATCHDOG] Main thread stack (post-unblock):")
-                for (i, frame) in trace.prefix(15).enumerated() {
-                    print("[WATCHDOG]   \(i): \(frame)")
-                }
-            }
-        } else {
-            print("[WATCHDOG] Main thread still blocked — could not capture stack")
+        let trace = sem.wait(timeout: .now() + 2.0) == .success ? MainThreadWatchdog.lastStackTrace : []
+        guard !trace.isEmpty else {
+            debugLog("[HANG] main thread still blocked after \(afterMs)ms, no stack captured")
+            return
+        }
+        // Post-unblock snapshot: the offending frame is usually still on the
+        // stack when the block is a long synchronous loop.
+        for (i, frame) in trace.prefix(12).enumerated() {
+            debugLog("[HANG]   \(i): \(frame)")
         }
     }
 }
-#endif
 
 #if os(iOS)
 /// Process-wide holder for the interface-orientation mask the app reports
@@ -384,9 +429,9 @@ struct AerioApp: App {
                     // Every session opens with the device/build/connection
                     // block, not just the one where logging was enabled.
                     DebugLogger.shared.logSessionStart()
-                    #if DEBUG
+                    // Permanent, not DEBUG-only: the hang lines are the only
+                    // record of a stall in a field log (Logan 2026-09-12).
                     MainThreadWatchdog.shared.start()
-                    #endif
                     // Playback diagnostics — memory-warning subscriber
                     // logs a snapshot of tile state + process metrics
                     // when iOS sends a pressure notification. Runs in

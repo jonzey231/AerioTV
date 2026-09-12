@@ -78,14 +78,23 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         self.log = log
     }
 
-    /// Segments committed since the last `beginGeneration`; the sender
-    /// gates loadMedia on this reaching 2.
+    /// Segments committed since the last `beginGeneration`.
     private(set) var segmentsInGeneration = 0
 
-    var currentSegmentsInGeneration: Int {
+    /// MEDIA DURATION committed since the last `beginGeneration`, in 90 kHz
+    /// ticks. The load gate is a duration, not a segment count: our cuts
+    /// land on keyframes, not on the 3 s target, and on a real broadcast
+    /// feed the first three segments were 5.005 s, 4.338 s and 3.170 s
+    /// (iPhone proxy log, 2026-09-12 14:22:19.361), so a 3-segment gate
+    /// made the user wait 11.5 s for 12.5 s of media where 9 s would do.
+    private(set) var mediaTicksInGeneration: Int64 = 0
+
+    /// Both gate inputs read under one lock, so the count and the duration
+    /// can never disagree about the same segment.
+    var currentReadyState: (segments: Int, mediaTicks: Int64) {
         condition.lock()
         defer { condition.unlock() }
-        return segmentsInGeneration
+        return (segmentsInGeneration, mediaTicksInGeneration)
     }
 
     /// Fails any held live-edge fetch on session teardown.
@@ -94,6 +103,7 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         ring.removeAll()
         inits.removeAll()
         segmentsInGeneration = 0
+        mediaTicksInGeneration = 0
         storeOpen = false
         condition.broadcast()
         condition.unlock()
@@ -118,6 +128,7 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         generation += 1
         pendingDiscontinuity = !ring.isEmpty
         segmentsInGeneration = 0
+        mediaTicksInGeneration = 0
         if oldGen > 0 {
             log("splice oldGen=\(oldGen) newGen=\(generation) lastSeq=\(nextSeq - 1) firstNewSeq=\(nextSeq)")
         }
@@ -150,6 +161,7 @@ final class CastHLSSegmentStore: @unchecked Sendable {
             }
         }
         segmentsInGeneration += 1
+        mediaTicksInGeneration += durationTicks
         // Wake any held fetch for the sequence just published.
         condition.broadcast()
     }

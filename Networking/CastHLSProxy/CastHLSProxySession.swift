@@ -53,23 +53,27 @@ final class CastHLSProxySession: @unchecked Sendable {
 
     static let shared = CastHLSProxySession()
 
-    /// loadMedia is gated on this many segments so the receiver starts a
-    /// safe distance BEHIND the live edge (an empty live playlist is a
-    /// hard receiver error, not a retry).
+    /// loadMedia is gated on this much MEDIA DURATION so the receiver
+    /// starts a safe distance BEHIND the live edge (an empty live playlist
+    /// is a hard receiver error, not a retry), and on at least
+    /// `readyMinSegments` segments so a single long segment cannot satisfy
+    /// it on its own.
     ///
-    /// Raised from 2 to 3 on 2026-09-12. With two ~4 s segments the
-    /// receiver began 8 s from the live edge, HLS's own rule is three
-    /// target durations, and the Google TV Streamer ran the buffer dry
-    /// 8 s in. It then re-synced to the live edge instead of fetching the
-    /// next segment and never fetched another segment again, because a
-    /// skipped segment in MSE 'sequence' AppendMode leaves a 0.147 s hole
-    /// the video renderer will not cross while the audio track plays
-    /// straight through it: Logan's "launches now but it's frozen".
-    /// Starting three segments back removes the underrun that starts the
-    /// whole chain.
-    private static let readySegments = 3
+    /// A duration, not a segment count (2026-09-12). Two ~4 s segments
+    /// started the receiver 8 s from the edge and the Google TV Streamer
+    /// ran the buffer dry 8 s in, then re-synced to the live edge instead
+    /// of fetching the next segment and stalled on the skip. A 3-SEGMENT
+    /// gate fixed that but overshot the other way: our cuts land on
+    /// keyframes, and a real broadcast feed's first three segments were
+    /// 5.005 s, 4.338 s and 3.170 s, so the gate held the load for 11.5 s
+    /// after the ingest connected (iPhone proxy log 14:22:07.382 init
+    /// ready, 14:22:18.879 load sent). Nine seconds of media is three of
+    /// our 3 s targets, is what the receiver page also starts behind the
+    /// edge, and is reached by two segments on a feed like that.
+    private static let readyMediaTicks: Int64 = 9 * CastFMP4Remuxer.ticksPerSecond
+    private static let readyMinSegments = 2
 
-    /// Bound on the wait for `readySegments`: three ~3 s segments plus
+    /// Bound on the wait for `readyMediaTicks`: nine seconds of media plus
     /// provider join latency; past this the channel is declared
     /// uncastable and the user told. First terminal error wins.
     private static let readyTimeout: TimeInterval = 25.0
@@ -253,8 +257,8 @@ final class CastHLSProxySession: @unchecked Sendable {
             // A superseding channel flip cancels this task; the flip's own
             // startChannel already re-pointed the ingest, so just leave.
             if Task.isCancelled { throw CancellationError() }
-            let (err, count, connectedAt): (Error?, Int, Date?) = queue.sync {
-                (terminalError, store?.currentSegmentsInGeneration ?? 0, lastIngestConnectAt)
+            let (err, ready, connectedAt): (Error?, (segments: Int, mediaTicks: Int64), Date?) = queue.sync {
+                (terminalError, store?.currentReadyState ?? (segments: 0, mediaTicks: 0), lastIngestConnectAt)
             }
             // A (re)connect is progress: guarantee `postConnectGrace` of
             // runway from the moment bytes started flowing, else a slow
@@ -267,7 +271,13 @@ final class CastHLSProxySession: @unchecked Sendable {
                 stopIfStillActive(rawTSURL)
                 throw err
             }
-            if count >= Self.readySegments {
+            if ready.segments >= Self.readyMinSegments,
+               ready.mediaTicks >= Self.readyMediaTicks {
+                let seconds = Double(ready.mediaTicks) / Double(CastFMP4Remuxer.ticksPerSecond)
+                log(String(format: "ready with %d segments, %.2fs media (gate %.0fs / %d segments)",
+                           ready.segments, seconds,
+                           Double(Self.readyMediaTicks) / Double(CastFMP4Remuxer.ticksPerSecond),
+                           Self.readyMinSegments))
                 return URL(string: "http://\(lanIP):\(port)/master.m3u8")!
             }
             try? await Task.sleep(nanoseconds: 100_000_000)

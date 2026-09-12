@@ -96,10 +96,14 @@ do {
     let gen1 = store.beginGeneration()
     store.setInitSegment(generation: gen1, data: Data("init1-avcC".utf8))
     for _ in 0..<3 { store.addSegment(generation: gen1, data: Data("seg".utf8), durationTicks: ticks3s) }
-    expectEq(store.currentSegmentsInGeneration, 3, "segment count in generation 1")
+    expectEq(store.currentReadyState.segments, 3, "segment count in generation 1")
+    // The ready gate is a duration, so the store must total media time too.
+    expectEq(store.currentReadyState.mediaTicks, 3 * ticks3s,
+             "media ticks in generation 1")
 
     let gen2 = store.beginGeneration()
-    expectEq(store.currentSegmentsInGeneration, 0, "generation bump resets ready count")
+    expectEq(store.currentReadyState.segments, 0, "generation bump resets ready count")
+    expectEq(store.currentReadyState.mediaTicks, 0, "generation bump resets ready media time")
     // A stale gen-1 publisher must not claim a sequence number.
     store.addSegment(generation: gen1, data: Data("stale".utf8), durationTicks: ticks3s)
     store.setInitSegment(generation: gen2, data: Data("init2".utf8))
@@ -346,12 +350,12 @@ func segmentSpans(_ segment: Data) -> [Int: TrackSpan] {
     return result
 }
 
-@MainActor func runSegmentContinuityChecks() {
+/// The shared real-transport-stream fixture: H.264 with B-frames plus
+/// AAC-LC in MPEG-TS, built once per machine and cached in the temp dir.
+/// nil when ffmpeg is not installed.
+func continuityFixtureTS() -> Data? {
     let ffmpeg = "/opt/homebrew/bin/ffmpeg"
-    guard FileManager.default.isExecutableFile(atPath: ffmpeg) else {
-        print("SKIP segment-run continuity (no ffmpeg at \(ffmpeg))")
-        return
-    }
+    guard FileManager.default.isExecutableFile(atPath: ffmpeg) else { return nil }
     let dir = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("cast-hls-continuity", isDirectory: true)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -375,8 +379,13 @@ func segmentSpans(_ segment: Data) -> [Int: TrackSpan] {
         try? process.run()
         process.waitUntilExit()
     }
-    guard let bytes = try? Data(contentsOf: ts), !bytes.isEmpty else {
-        print("SKIP segment-run continuity (ffmpeg produced no fixture)")
+    guard let bytes = try? Data(contentsOf: ts), !bytes.isEmpty else { return nil }
+    return bytes
+}
+
+@MainActor func runSegmentContinuityChecks() {
+    guard let bytes = continuityFixtureTS() else {
+        print("SKIP segment-run continuity (no ffmpeg fixture)")
         return
     }
 
@@ -451,6 +460,66 @@ do {
     expect(Date().timeIntervalSince(fast) < 0.2, "no hold beyond the future window")
 }
 
+
+// MARK: 11. the audio traf declares its samples as sync samples
+//
+// Chromium's parser reads sample flags from the trun, then the tfhd
+// default, then the trex default. Our audio trun carries no per-sample
+// flags, so the tfhd default is what decides whether the receiver treats
+// an AAC frame as a random access point. Without it Chromium logs, once
+// per frame, "indicated the frame is not a random access point (key
+// frame)" and the first packet after the load's seek fails to decode
+// (Google TV Streamer, 2026-09-12 14:22:20.237 and .246).
+
+/// default_sample_flags of one traf's tfhd, or nil when the box does not
+/// carry the field at all.
+func audioTfhdDefaultSampleFlags(_ segment: Data, trackID: Int64) -> Int64? {
+    let b = [UInt8](segment)
+    for (type, mStart, mEnd) in boxChildren(b, 0, b.count) where type == "moof" {
+        for (t2, tStart, tEnd) in boxChildren(b, mStart, mEnd) where t2 == "traf" {
+            for (t3, pStart, pEnd) in boxChildren(b, tStart, tEnd) where t3 == "tfhd" {
+                guard pEnd - pStart >= 8 else { continue }
+                let boxFlags = (Int64(b[pStart + 1]) << 16) | (Int64(b[pStart + 2]) << 8) | Int64(b[pStart + 3])
+                guard be32(b, pStart + 4) == trackID else { continue }
+                // Optional fields in ISO order; we never set the earlier
+                // ones, but skip them properly so the reader stays honest.
+                var o = pStart + 8
+                if boxFlags & 0x01 != 0 { o += 8 }
+                if boxFlags & 0x02 != 0 { o += 4 }
+                if boxFlags & 0x08 != 0 { o += 4 }
+                if boxFlags & 0x10 != 0 { o += 4 }
+                guard boxFlags & 0x20 != 0, o + 4 <= pEnd else { return nil }
+                return be32(b, o)
+            }
+        }
+    }
+    return nil
+}
+
+do {
+    // Two AAC frames is enough: the flags live in the tfhd, not per sample.
+    let remuxer = CastFMP4Remuxer()
+    var segment = Data()
+    remuxer.onMediaSegment = { data, _ in if segment.isEmpty { segment = data } }
+    if let fixture = continuityFixtureTS() {
+        var offset = 0
+        while offset < fixture.count, segment.isEmpty {
+            let n = min(64 * 1024, fixture.count - offset)
+            try? remuxer.feed(fixture.subdata(in: offset..<(offset + n)))
+            offset += n
+        }
+    }
+    if segment.isEmpty {
+        print("SKIP audio sync-sample flags (no fixture segment)")
+    } else if let flags = audioTfhdDefaultSampleFlags(segment, trackID: 2) {
+        // bit 16 is sample_is_non_sync_sample; it must be clear.
+        expect(flags & 0x0001_0000 == 0, "audio samples are declared sync samples")
+        // bits 25-24 are sample_depends_on; 2 is "does not depend on others".
+        expectEq(Int((flags >> 24) & 0x03), 2, "audio samples depend on no others")
+    } else {
+        expect(false, "the audio tfhd sets default-sample-flags")
+    }
+}
 
 // MARK: 8. AudioSpecificConfig sanitizing for the web receiver's parser
 
