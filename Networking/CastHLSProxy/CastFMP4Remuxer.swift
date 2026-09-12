@@ -188,6 +188,10 @@ final class CastFMP4Remuxer {
     private var aacObjectType = 0
     private var aacFreqIndex = -1
     private var aacChannelConfig = 0
+
+    /// Latched once so the PCE strip is announced a single time instead of
+    /// for every frame of the connection.
+    private var aacPCELogged = false
     private var initSent = false
 
     // MARK: audio transcode
@@ -757,15 +761,50 @@ final class CastFMP4Remuxer {
                 | ((Int(data[p + 5]) >> 5) & 0x07)
             if frameLen < 7 || p + frameLen > data.count { break } // partial frame: carry
             let headerLen = protectionAbsent ? 7 : 9
+            // channel_configuration 0 means the layout lives in a
+            // program_config_element at the start of the raw_data_block,
+            // which is exactly what Dispatcharr's AAC output profile
+            // emits (ffmpeg `-c:a aac -ac 2`, "Using a PCE to encode
+            // channel layout"). Two things break downstream: an
+            // AudioSpecificConfig cannot express config 0 at all, and the
+            // Google TV Streamer's C2SoftAacDec refuses every frame that
+            // still carries the PCE (measured: 5388 lines of "error
+            // 0x0005, substituting silence" in one session). Both are
+            // fixed losslessly here, per frame: derive the real channel
+            // count from the element for the ASC, and drop the element
+            // off the front of the block. No transcode, no re-encode.
+            var payloadStart = p + headerLen
+            var effectiveChanConfig = chanConfig
+            if chanConfig == 0,
+               let pce = Self.parseAACPCE(data, offset: p + headerLen, end: p + frameLen) {
+                // The PCE ends byte-aligned relative to the block start
+                // (`parseAACPCE` refuses to report one that does not), so
+                // the elements after it begin on a byte boundary and the
+                // rest of the block copies over verbatim: no bit
+                // shifting, and the block's existing id_syn_ele 7
+                // terminator plus its byte alignment still terminate the
+                // shortened block correctly.
+                payloadStart = p + headerLen + pce.lengthBytes
+                effectiveChanConfig = Self.aacChannelConfig(forCount: pce.channels)
+                if !aacPCELogged {
+                    aacPCELogged = true
+                    log("AAC PCE stripped: layout \(pce.channels) ch -> config \(effectiveChanConfig)")
+                }
+            }
+            if payloadStart >= p + frameLen {
+                // A frame that is nothing but a PCE carries no audio.
+                p += frameLen
+                continue
+            }
             if aacFreqIndex < 0 {
                 aacObjectType = profile + 1 // ADTS profile is MPEG-4 audioObjectType - 1
                 aacFreqIndex = freqIndex
-                aacChannelConfig = chanConfig
+                aacChannelConfig = effectiveChanConfig
                 // The frame duration has to match the track's declared
                 // sample rate, so both come from the one sanitized config.
                 let cfg = Self.sanitizedAACConfig(objectType: profile + 1,
                                                   freqIndex: freqIndex,
-                                                  channelConfig: chanConfig)
+                                                  channelConfig: effectiveChanConfig)
                 audioFrameTicks = 1024 * Self.ticksPerSecond / Int64(cfg.sampleRate)
                 maybeEmitInit()
             }
@@ -775,7 +814,7 @@ final class CastFMP4Remuxer {
                 // every PES keeps drift bounded to one PES worth of frames.
                 if framePTS < 0 { framePTS = audioClock.unwrap(pts33) }
                 if timelineBasePTS >= 0, framePTS >= timelineBasePTS {
-                    audioQueue.append(AudioSample(data: Array(data[(p + headerLen)..<(p + frameLen)]), pts: framePTS))
+                    audioQueue.append(AudioSample(data: Array(data[payloadStart..<(p + frameLen)]), pts: framePTS))
                 }
                 framePTS += audioFrameTicks
             }
@@ -800,6 +839,130 @@ final class CastFMP4Remuxer {
     /// ADTS channel counts per channelConfiguration (ISO 14496-3 Table
     /// 1.19); index 7 is 7.1, so it is 8 channels, not 7.
     private static let aacChannelCounts = [0, 1, 2, 3, 4, 5, 6, 8]
+
+    /// A program_config_element found at the start of a raw_data_block.
+    ///
+    /// `lengthBytes` is the element's size measured from the block start,
+    /// which is always a whole number of bytes: the PCE byte-aligns
+    /// relative to the block start before `comment_field_bytes`, and the
+    /// comment itself is a whole number of bytes after it (ISO/IEC
+    /// 14496-3 4.4.1.1). That is what lets the PCE be removed with a
+    /// byte-wise copy instead of shifting the whole remaining payload
+    /// left bit by bit; `parseAACPCE` refuses to report a PCE that does
+    /// not end aligned, so the byte-wise caller can never corrupt a frame.
+    struct AACPCEInfo: Equatable {
+        /// Channels the declared layout adds up to: CPE 2, SCE 1, LFE 1.
+        let channels: Int
+        /// PCE size in bytes, measured from the raw_data_block start.
+        let lengthBytes: Int
+        /// True when the first front element is a channel_pair_element,
+        /// i.e. the element the stripped frame will start with is the
+        /// stereo pair a channel_configuration of 2 implies.
+        let firstIsCPE: Bool
+    }
+
+    /// Parse the program_config_element at `offset`, or return nil when
+    /// the raw_data_block does not start with one.
+    ///
+    /// Dispatcharr's "Web Player (AAC Audio)" output profile (ffmpeg
+    /// `-c:a aac -ac 2`) emits ADTS frames whose channel_configuration is
+    /// 0 with the real layout carried in a PCE at the start of the
+    /// raw_data_block. An AudioSpecificConfig cannot carry config 0
+    /// (Chromium's SkipGASpecificConfig does RCHECK(channel_config_ != 0))
+    /// and the Google TV Streamer's C2SoftAacDec rejects every frame that
+    /// still contains the PCE. Parsing the element gives the remuxer both
+    /// halves of the lossless fix: the real channel count for the ASC,
+    /// and the exact byte length to drop off the front of each frame.
+    ///
+    /// Field order is ISO/IEC 14496-3 4.4.1.1.
+    static func parseAACPCE(_ data: [UInt8], offset: Int, end: Int) -> AACPCEInfo? {
+        guard offset < end, end <= data.count else { return nil }
+        var bit = 0 // bit position RELATIVE to the raw_data_block start
+        let limit = (end - offset) * 8
+        // -1 means "ran past the end of the block"; every caller that can
+        // act on that checks for it.
+        func read(_ n: Int) -> Int {
+            guard bit + n <= limit else { return -1 }
+            var v = 0
+            for _ in 0..<n {
+                let byte = Int(data[offset + (bit >> 3)])
+                v = (v << 1) | ((byte >> (7 - (bit & 7))) & 1)
+                bit += 1
+            }
+            return v
+        }
+        // id_syn_ele: PCE is 0x5. Anything else is a normal element and
+        // the frame passes through untouched.
+        guard read(3) == 5 else { return nil }
+        _ = read(4) // element_instance_tag
+        _ = read(2) // object_type
+        _ = read(4) // sampling_frequency_index
+        let numFront = read(4)
+        let numSide = read(4)
+        let numBack = read(4)
+        let numLFE = read(2)
+        let numAssoc = read(3)
+        let numCC = read(4)
+        guard numCC >= 0 else { return nil }
+        // Each mixdown flag is followed by its index only when present.
+        if read(1) == 1 { _ = read(4) } // mono_mixdown_element_number
+        if read(1) == 1 { _ = read(4) } // stereo_mixdown_element_number
+        if read(1) == 1 { _ = read(3) } // matrix_mixdown_idx + pseudo_surround
+        var channels = 0
+        var firstIsCPE = false
+        var firstSeen = false
+        // front, side and back elements each carry is_cpe + a 4-bit tag;
+        // a channel_pair_element is two channels, a single is one.
+        for count in [numFront, numSide, numBack] {
+            for _ in 0..<count {
+                let isCPE = read(1)
+                _ = read(4) // element tag
+                guard isCPE >= 0 else { return nil }
+                if !firstSeen {
+                    firstSeen = true
+                    firstIsCPE = isCPE == 1
+                }
+                channels += isCPE == 1 ? 2 : 1
+            }
+        }
+        for _ in 0..<numLFE {
+            _ = read(4) // lfe_element_tag: one channel each
+            channels += 1
+        }
+        for _ in 0..<numAssoc { _ = read(4) } // assoc_data: no channels
+        for _ in 0..<numCC {
+            _ = read(1) // cc_element_is_ind_sw
+            _ = read(4) // valid_cc_element_tag
+        }
+        guard bit <= limit else { return nil }
+        // byte_align() is relative to the raw_data_block start, which is
+        // exactly where `bit` is counted from.
+        if bit & 7 != 0 { _ = read(8 - (bit & 7)) }
+        let commentBytes = read(8)
+        guard commentBytes >= 0, bit + commentBytes * 8 <= limit else { return nil }
+        bit += commentBytes * 8
+        // Spec-guaranteed, asserted anyway: a PCE that did not end on a
+        // byte boundary could not be dropped with a byte-wise copy.
+        guard bit & 7 == 0, channels > 0 else { return nil }
+        return AACPCEInfo(channels: channels, lengthBytes: bit >> 3, firstIsCPE: firstIsCPE)
+    }
+
+    /// The inverse of `aacChannelCounts`: the channel_configuration that
+    /// declares `count` channels, or 0 when Table 1.19 has no entry for
+    /// that count (7 channels is the only gap, since config 7 is 7.1). 0
+    /// is then handed to the config sanitizer, which substitutes stereo.
+    static func aacChannelConfig(forCount count: Int) -> Int {
+        switch count {
+        case 1: return 1
+        case 2: return 2
+        case 3: return 3
+        case 4: return 4
+        case 5: return 5
+        case 6: return 6
+        case 8: return 7
+        default: return 0
+        }
+    }
 
     /// Turn the three ADTS header config fields into an
     /// AudioSpecificConfig the receiver will actually parse.

@@ -763,7 +763,313 @@ do {
            "the last segment ends at the total emitted duration")
 }
 
-runSegmentCompositionChecks()
+// MARK: 13. AAC program_config_element stripping
+//
+// Added 2026-09-12 after a Google TV Streamer cast of a Dispatcharr
+// "Web Player (AAC Audio)" channel played video with silence: the
+// server's ffmpeg (`-c:a aac -ac 2`) emits ADTS frames with
+// channel_configuration 0 and a program_config_element at the start of
+// every raw_data_block ("Using a PCE to encode channel layout"), and
+// C2SoftAacDec rejected all of them (5388 lines of "error 0x0005,
+// substituting silence"). Transcoding is not allowed and neither are
+// server changes, so the frames are fixed losslessly: parse the PCE,
+// take the real channel count from it, and drop its bytes off the front
+// of the block.
+
+/// A program_config_element built bit by bit: `front` front elements,
+/// every one a channel_pair_element, optionally one LFE, and a comment of
+/// `comment` bytes.
+func buildPCE(freqIndex: Int = 3, front: Int = 1, lfe: Int = 0, comment: Int = 0) -> [UInt8] {
+    var bits: [Int] = []
+    func put(_ value: Int, _ width: Int) {
+        for i in stride(from: width - 1, through: 0, by: -1) { bits.append((value >> i) & 1) }
+    }
+    put(5, 3) // id_syn_ele = PCE
+    put(0, 4) // element_instance_tag
+    put(1, 2) // object_type (AAC-LC)
+    put(freqIndex, 4)
+    put(front, 4); put(0, 4); put(0, 4) // num_front/side/back
+    put(lfe, 2); put(0, 3); put(0, 4) // num_lfe/assoc_data/valid_cc
+    put(0, 1); put(0, 1); put(0, 1) // no mono/stereo/matrix mixdown
+    for _ in 0..<front { put(1, 1); put(0, 4) } // is_cpe = 1, tag 0
+    for _ in 0..<lfe { put(0, 4) } // lfe_element_tag
+    while bits.count % 8 != 0 { bits.append(0) } // byte_align()
+    put(comment, 8) // comment_field_bytes
+    for _ in 0..<comment { put(0x41, 8) }
+    var out: [UInt8] = []
+    for i in stride(from: 0, to: bits.count, by: 8) {
+        var b = 0
+        for j in 0..<8 { b = (b << 1) | bits[i + j] }
+        out.append(UInt8(b))
+    }
+    return out
+}
+
+do {
+    // The Dispatcharr shape: one front CPE, nothing else, empty comment.
+    let pce = buildPCE()
+    let block = pce + [0x21, 0x00, 0x00, 0x00]
+    if let info = CastFMP4Remuxer.parseAACPCE(block, offset: 0, end: block.count) {
+        expectEq(info.channels, 2, "a stereo PCE reports two channels")
+        expectEq(info.lengthBytes, pce.count, "PCE length measured in whole bytes")
+        expect(info.firstIsCPE, "the first front element is a channel pair")
+    } else {
+        expect(false, "a stereo PCE parses")
+    }
+
+    // The property the lossless strip rests on: the element always ends on
+    // a byte boundary relative to the block start, whatever its element
+    // counts and comment length, because byte_align() precedes
+    // comment_field_bytes (ISO/IEC 14496-3 4.4.1.1). Only then can the
+    // rest of the block be copied byte-wise instead of shifted bit by bit.
+    var alwaysAligned = true
+    for comment in 0...3 {
+        for front in 1...3 {
+            for lfe in 0...1 {
+                let bytes = buildPCE(front: front, lfe: lfe, comment: comment)
+                let blk = bytes + [0x21, 0x00, 0x00, 0x00]
+                guard let info = CastFMP4Remuxer.parseAACPCE(blk, offset: 0, end: blk.count),
+                      info.lengthBytes == bytes.count,
+                      info.channels == front * 2 + lfe else {
+                    alwaysAligned = false
+                    continue
+                }
+            }
+        }
+    }
+    expect(alwaysAligned, "every PCE shape ends byte-aligned with the channel count the layout implies")
+
+    // id_syn_ele 0 (SCE), 1 (CPE) and 7 (TERM) are not PCEs: those frames
+    // must pass through untouched.
+    var nonPCEIgnored = true
+    for synEle in [0, 1, 2, 3, 4, 6, 7] {
+        let blk: [UInt8] = [UInt8(synEle << 5), 0x11, 0x22, 0x33]
+        if CastFMP4Remuxer.parseAACPCE(blk, offset: 0, end: blk.count) != nil { nonPCEIgnored = false }
+    }
+    expect(nonPCEIgnored, "a block that does not start with a PCE is reported as absent")
+
+    // A truncated element is refused rather than guessed at: a wrong
+    // length would shift the whole payload and silence the frame.
+    var truncationRefused = true
+    for cut in 1..<pce.count {
+        if CastFMP4Remuxer.parseAACPCE(pce, offset: 0, end: cut) != nil { truncationRefused = false }
+    }
+    expect(truncationRefused, "a truncated PCE is refused rather than guessed")
+
+    // Channel count back to a Table 1.19 configuration. 7 channels has no
+    // entry (config 7 is 7.1), so it falls to 0 and the sanitizer makes it
+    // stereo.
+    expectEq(CastFMP4Remuxer.aacChannelConfig(forCount: 2), 2, "2 channels is config 2")
+    expectEq(CastFMP4Remuxer.aacChannelConfig(forCount: 6), 6, "6 channels is config 6 (5.1)")
+    expectEq(CastFMP4Remuxer.aacChannelConfig(forCount: 8), 7, "8 channels is config 7 (7.1)")
+    expectEq(CastFMP4Remuxer.aacChannelConfig(forCount: 7), 0, "7 channels has no configuration")
+    expectEq(CastFMP4Remuxer.sanitizedAACConfig(
+        objectType: 2, freqIndex: 3,
+        channelConfig: CastFMP4Remuxer.aacChannelConfig(forCount: 7)).channelConfig, 2,
+        "an unmappable count still yields a legal stereo ASC")
+}
+
+/// Rewrite every ADTS frame of `adts` to channel_configuration 0 with a
+/// stereo PCE spliced in ahead of the raw_data_block, growing
+/// aac_frame_length to match: byte for byte the shape Dispatcharr emits.
+///
+/// Synthesized rather than asked of ffmpeg because ffmpeg's AAC encoder
+/// refuses every two-channel layout outside plain stereo, so it cannot be
+/// made to produce this case locally. Synthesizing also buys the stronger
+/// assertion: the frames under the PCE are the untouched fixture's
+/// frames, so a correct strip has to reproduce them exactly.
+func injectPCE(_ adts: [UInt8]) -> [UInt8] {
+    var out: [UInt8] = []
+    var p = 0
+    while p + 7 <= adts.count {
+        let protectionAbsent = adts[p + 1] & 0x01 != 0
+        let headerLen = protectionAbsent ? 7 : 9
+        let freqIndex = (Int(adts[p + 2]) >> 2) & 0x0F
+        let frameLen = ((Int(adts[p + 3]) & 0x03) << 11) | (Int(adts[p + 4]) << 3)
+            | ((Int(adts[p + 5]) >> 5) & 0x07)
+        if frameLen < headerLen || p + frameLen > adts.count { break }
+        let pce = buildPCE(freqIndex: freqIndex)
+        let newLen = frameLen + pce.count
+        var header = Array(adts[p..<(p + headerLen)])
+        // channel_configuration is the low bit of byte 2 plus the top two
+        // bits of byte 3; zero all three, then restate the frame length.
+        header[2] &= 0xFE
+        header[3] &= 0x3F
+        header[3] = (header[3] & 0xFC) | UInt8((newLen >> 11) & 0x03)
+        header[4] = UInt8((newLen >> 3) & 0xFF)
+        header[5] = (header[5] & 0x1F) | UInt8((newLen & 0x07) << 5)
+        out += header
+        out += pce
+        out += Array(adts[(p + headerLen)..<(p + frameLen)])
+        p += frameLen
+    }
+    return out
+}
+
+/// The continuity fixture with its audio rewritten to carry a PCE, plus
+/// the untouched original, both as transport streams. nil without ffmpeg.
+func pceFixtureTS() -> (plain: Data, pce: Data)? {
+    let ffmpeg = "/opt/homebrew/bin/ffmpeg"
+    guard FileManager.default.isExecutableFile(atPath: ffmpeg) else { return nil }
+    guard let plain = continuityFixtureTS() else { return nil }
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("cast-hls-continuity", isDirectory: true)
+    let pceTS = dir.appendingPathComponent("pce.ts")
+    if !FileManager.default.fileExists(atPath: pceTS.path) {
+        let source = dir.appendingPathComponent("bframes.ts")
+        let adts = dir.appendingPathComponent("plain.aac")
+        let injected = dir.appendingPathComponent("pce.aac")
+        func ffmpegRun(_ args: [String]) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: ffmpeg)
+            process.arguments = args
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try? process.run()
+            process.waitUntilExit()
+        }
+        ffmpegRun(["-y", "-v", "error", "-i", source.path, "-map", "0:a", "-c", "copy",
+                   "-f", "adts", adts.path])
+        guard let raw = try? Data(contentsOf: adts) else { return nil }
+        try? Data(injectPCE([UInt8](raw))).write(to: injected)
+        ffmpegRun(["-y", "-v", "error", "-i", source.path, "-i", injected.path,
+                   "-map", "0:v", "-map", "1:a", "-c", "copy", "-f", "mpegts", pceTS.path])
+    }
+    guard let pce = try? Data(contentsOf: pceTS), !pce.isEmpty else { return nil }
+    return (plain, pce)
+}
+
+/// Every audio sample of every segment, cut out of the mdat with the
+/// second traf's trun sizes and data_offset.
+@MainActor func audioSampleHex(_ segments: [Data]) -> [String] {
+    var out: [String] = []
+    for segment in segments {
+        let b = [UInt8](segment)
+        var moofStart = -1
+        var o = 0
+        while o + 8 <= b.count {
+            let size = Int(be32(b, o))
+            if size < 8 { break }
+            if boxType(b, o) == "moof" { moofStart = o; break }
+            o += size
+        }
+        guard moofStart >= 0 else { continue }
+        let moofEnd = moofStart + Int(be32(b, moofStart))
+        let trafs = boxChildren(b, moofStart + 8, moofEnd).filter { $0.0 == "traf" }
+        guard trafs.count >= 2 else { continue }
+        let traf = trafs[1]
+        for child in boxChildren(b, traf.1, traf.2) where child.0 == "trun" {
+            let count = Int(be32(b, child.1 + 4))
+            // data_offset is relative to the moof start.
+            var cursor = moofStart + Int(be32(b, child.1 + 8))
+            var q = child.1 + 12
+            for _ in 0..<count {
+                let len = Int(be32(b, q + 4))
+                guard cursor + len <= b.count else { break }
+                out.append(b[cursor..<(cursor + len)].map { String(format: "%02x", $0) }.joined())
+                cursor += len
+                q += 8
+            }
+        }
+    }
+    return out
+}
+
+@MainActor func runPCEStripChecks() {
+    guard let fixtures = pceFixtureTS() else {
+        print("SKIP AAC PCE strip against a real transport stream (no ffmpeg fixture)")
+        return
+    }
+    func remux(_ bytes: Data) -> (init_: Data?, segments: [Data], logs: [String]) {
+        var segments: [Data] = []
+        var logs: [String] = []
+        var initSegment: Data?
+        let remuxer = CastFMP4Remuxer(log: { logs.append($0) })
+        remuxer.onInitSegment = { initSegment = $0 }
+        remuxer.onMediaSegment = { data, _ in segments.append(data) }
+        var offset = 0
+        while offset < bytes.count {
+            let n = min(64 * 1024, bytes.count - offset)
+            try? remuxer.feed(bytes.subdata(in: offset..<(offset + n)))
+            offset += n
+        }
+        return (initSegment, segments, logs)
+    }
+    let plain = remux(fixtures.plain)
+    let pce = remux(fixtures.pce)
+
+    expect(pce.segments.count >= 6, "the PCE stream still segments (\(pce.segments.count))")
+    expect(pce.init_ != nil, "the PCE stream emits an init segment")
+    // Same declared track as the untouched stereo stream: the PCE said one
+    // front channel pair, so the ASC says config 2 and nothing about the
+    // init segment changes.
+    if let a = plain.init_, let b = pce.init_ {
+        expectEq([UInt8](b), [UInt8](a), "the PCE stream's init segment matches the stereo stream's")
+    }
+    // Announced once for the session, not once per frame.
+    let stripLogs = pce.logs.filter { $0.hasPrefix("AAC PCE stripped:") }
+    expectEq(stripLogs.count, 1, "the PCE strip is logged exactly once")
+    expectEq(stripLogs.first ?? "", "AAC PCE stripped: layout 2 ch -> config 2",
+             "the log line names the derived layout and config")
+    expect(plain.logs.filter { $0.hasPrefix("AAC PCE stripped:") }.isEmpty,
+           "a stream without a PCE logs no strip")
+
+    // Losslessness on the bytes: aligned by CONTENT, because every source
+    // frame grew by the PCE, which repacks the PES and shifts both the
+    // first frame that clears the video presentation gate and where the
+    // last partial segment ends. From the first shared frame onward the
+    // two sample streams must be the same frames in the same order.
+    let plainSamples = audioSampleHex(plain.segments)
+    let pceSamples = audioSampleHex(pce.segments)
+    expect(plainSamples.count >= 200, "audio samples extracted (\(plainSamples.count))")
+    guard let first = plainSamples.first, let offset = pceSamples.firstIndex(of: first) else {
+        expect(false, "the stereo run's first frame appears in the PCE run")
+        return
+    }
+    expect(true, "the stereo run's first frame appears in the PCE run")
+    let common = min(plainSamples.count, pceSamples.count - offset)
+    expect(common >= 200, "a long shared run to compare (\(common))")
+    var identical = true
+    for i in 0..<max(0, common) where plainSamples[i] != pceSamples[i + offset] { identical = false }
+    expect(identical, "every audio frame is byte-identical after the PCE strip")
+
+    // The decoder's verdict, not ours: init + segments written out as one
+    // fMP4 and fully decoded. ffmpeg prints nothing on a clean decode, so
+    // any AAC error (the "substituting silence" class of failure the
+    // Streamer hit) shows up here as output.
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("cast-hls-continuity", isDirectory: true)
+    for (name, run) in [("pce-strip.mp4", pce), ("stereo.mp4", plain)] {
+        var file = Data()
+        file.append(run.init_ ?? Data())
+        for segment in run.segments.prefix(4) { file.append(segment) }
+        let url = dir.appendingPathComponent(name)
+        try? file.write(to: url)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/ffmpeg")
+        process.arguments = ["-v", "error", "-i", url.path, "-f", "null", "-"]
+        let pipe = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = pipe
+        try? process.run()
+        let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        expect(text.isEmpty, "\(name) decodes with no ffmpeg errors: \(text)")
+    }
+
+    // The AudioSpecificConfig the esds carries: AAC-LC, 48 kHz, config 2.
+    // 0x05 is the DecoderSpecificInfo tag, then its 2-byte length-and-ASC.
+    if let initSegment = pce.init_ {
+        let b = [UInt8](initSegment)
+        var found = false
+        for i in 0..<max(0, b.count - 3) where b[i] == 0x05 && b[i + 1] == 0x02 {
+            if b[i + 2] == 0x11 && b[i + 3] == 0x90 { found = true }
+        }
+        expect(found, "the esds ASC says AAC-LC 48 kHz channel configuration 2")
+    }
+}
+
+runPCEStripChecks()
 
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

@@ -49,26 +49,6 @@ enum AerioCast {
     static let kindLive = "live"
     static let kindVOD = "vod"
 
-    /// Whether this receiver's own decoders handle AC-3 / E-AC-3, in
-    /// which case the cast proxy passes the source audio through
-    /// untouched instead of transcoding it. The Cast SDK exposes no codec
-    /// capability, so this is a model-name decision: TV-attached targets
-    /// (Chromecast Ultra, Chromecast with Google TV, Google TV Streamer,
-    /// Android TV receivers) decode it; the smart displays and the
-    /// audio-only / early Chromecasts do not, and a model we do not
-    /// recognize is treated as "no" so the AudioToolbox transcode covers
-    /// it.
-    static func receiverDecodesAC3(_ device: GCKDevice?) -> Bool {
-        let model = (device?.modelName ?? "").lowercased()
-        guard !model.isEmpty else { return false }
-        let refuses = ["nest hub", "nest audio", "nest mini", "chromecast audio",
-                       "google home", "home mini", "home max", "smart display"]
-        if refuses.contains(where: { model.contains($0) }) { return false }
-        let decodes = ["chromecast ultra", "chromecast with google tv", "google tv streamer",
-                       "android tv", "google tv", "shield", "bravia", "aquos", "philips tv",
-                       "tcl", "hisense", "onn", "fire tv"]
-        return decodes.contains(where: { model.contains($0) })
-    }
 }
 
 /// Observable Cast state for the player chrome to react to.
@@ -145,6 +125,48 @@ final class AerioCastController: NSObject, ObservableObject {
     /// "I need you to not guess. Add something in logging so you can see
     /// it." Same namespace string on Android (core/cast/).
     private static let receiverDebugNamespace = "urn:x-cast:com.aeriotv.receiver.debug"
+    /// MEASURED receiver MSE codec support for this session, reported by the
+    /// receiver web app on `receiverDebugNamespace` (see receiver.html):
+    /// keys "ac-3", "ec-3", "mp4a.40.2", "avc1.64002A". nil until the first
+    /// caps message arrives; cleared when the session ends.
+    ///
+    /// This replaced a model allow-list that called a Google TV Streamer
+    /// AC-3 capable. Its platform players are; the web receiver's MSE is
+    /// NOT, and the receiver's own Chromium proved it (2026-09-12 15:52:40):
+    /// isTypeSupported("video/mp4; codecs=\"avc1.64002A,ac-3\"") returned
+    /// false and the plain AC-3 load died with Shaka error 3015 on both
+    /// senders. The audio plan below uses the measurement only.
+    private var receiverCaps: [String: Bool]?
+    /// Last measurement logged, so the copy that rides every telemetry
+    /// snapshot does not repeat the line.
+    private var loggedCaps: [String: Bool]?
+
+    /// True only when the receiver MEASURED AC-3 or E-AC-3 support. No caps
+    /// yet (a first load can race READY) reads as false, which selects the
+    /// AAC output profile: every receiver we have measured supports AAC.
+    private var receiverDecodesAC3: Bool {
+        guard let caps = receiverCaps else { return false }
+        return caps["ac-3"] == true || caps["ec-3"] == true
+    }
+
+    /// Stores the `mse` object from a receiver debug message (the dedicated
+    /// `type: "caps"` message sent on READY, and the copy that rides every
+    /// telemetry snapshot).
+    fileprivate func noteReceiverCaps(_ json: [String: Any]) {
+        guard let mse = json["mse"] as? [String: Any], !mse.isEmpty else { return }
+        var parsed: [String: Bool] = [:]
+        for (key, value) in mse {
+            if let b = value as? Bool { parsed[key] = b } else if let n = value as? NSNumber { parsed[key] = n.boolValue }
+        }
+        guard !parsed.isEmpty else { return }
+        receiverCaps = parsed
+        guard loggedCaps != parsed else { return }
+        loggedCaps = parsed
+        func cap(_ key: String) -> String { parsed[key] == true ? "yes" : "no" }
+        debugLog("[Cast] receiver caps: ac-3=\(cap("ac-3")) ec-3=\(cap("ec-3")) "
+            + "aac=\(cap("mp4a.40.2")) h264=\(cap("avc1.64002A"))")
+    }
+
     /// Attached on session start, dropped on session end.
     private var receiverDebugChannel: GCKGenericChannel?
 
@@ -414,17 +436,23 @@ final class AerioCastController: NSObject, ObservableObject {
         // encoder emits channel_configuration 0 (layout in a PCE) whenever
         // the AC-3 source layout is outside Table 1.19, and the receiver's
         // AAC decoder substitutes silence for every frame. So the profile
-        // is requested ONLY when the receiver cannot decode AC-3; a capable
+        // is requested ONLY when the receiver can decode AC-3 in MSE; that
         // receiver ingests the PLAIN stream and the remuxer passes
         // AC-3 / E-AC-3 through untouched.
-        let allowAC3 = AerioCast.receiverDecodesAC3(session.device)
+        //
+        // 2026-09-12 session16: "can decode" is the receiver's own
+        // MediaSource.isTypeSupported measurement (`receiverCaps`), not a
+        // model allow-list. The list called the Streamer capable and the
+        // plain stream died with Shaka 3015.
+        if receiverCaps == nil { debugLog("[Cast] caps not received, defaulting to profile") }
+        let allowAC3 = receiverDecodesAC3
         let profileID = allowAC3
             ? nil : ChannelStore.shared.activeServer?.dispatcharrAACOutputProfileID
         let profileURL = DispatcharrOutputProfile.applying(profileID: profileID, to: rawTS)
         let receiverName = session.device.friendlyName ?? lastDeviceName
         let receiverModel = session.device.modelName ?? receiverName ?? "unknown"
         debugLog("[Cast] audio plan: receiver=\(receiverModel) "
-            + "ac3=\(allowAC3 ? "yes" : "no") "
+            + "ac3=\(allowAC3 ? "yes" : "no") (\(receiverCaps == nil ? "no caps" : "measured")) "
             + "-> ingest=\(profileID.map { "profile \($0)" } ?? "plain")")
         debugLog("[Cast] load channel=\(content.title) "
             + "profile=\(profileID.map(String.init) ?? "none") "
@@ -593,9 +621,8 @@ final class AerioCastController: NSObject, ObservableObject {
         let headers = content.streamHeaders
         proxyLoadTask?.cancel()
         // Same audio plan as the initial load: the AAC output profile only
-        // for a receiver that cannot decode AC-3 itself.
-        let allowAC3 = AerioCast.receiverDecodesAC3(
-            GCKCastContext.sharedInstance().sessionManager.currentCastSession?.device)
+        // for a receiver whose MSE did not measure AC-3 support.
+        let allowAC3 = receiverDecodesAC3
         let profileID = allowAC3
             ? nil : ChannelStore.shared.activeServer?.dispatcharrAACOutputProfileID
         let profileURL = DispatcharrOutputProfile.applying(profileID: profileID, to: rawTS)
@@ -828,6 +855,8 @@ extension AerioCastController: GCKSessionManagerListener {
             debugChannel.delegate = nil
             receiverDebugChannel = nil
         }
+        receiverCaps = nil
+        loggedCaps = nil
         // The cast card must not outlive the session; a local resume below
         // publishes its own via PlayerSession.
         NowPlayingBridge.shared.teardown()
@@ -951,6 +980,10 @@ extension AerioCastController: GCKGenericChannelDelegate {
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return
         }
+        noteReceiverCaps(json)
+        // The dedicated caps message carries no player state; it is fully
+        // handled above and must not print a row of "?" fields.
+        if json["type"] as? String == "caps" { return }
         func string(_ key: String) -> String {
             if let s = json[key] as? String { return s }
             if let n = json[key] as? NSNumber { return n.stringValue }
