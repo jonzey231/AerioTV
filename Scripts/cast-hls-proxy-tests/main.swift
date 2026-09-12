@@ -779,6 +779,42 @@ do {
 /// A program_config_element built bit by bit: `front` front elements,
 /// every one a channel_pair_element, optionally one LFE, and a comment of
 /// `comment` bytes.
+/// Build a PCE from explicit element lists. `front`/`side`/`back` are
+/// (is_cpe, tag) pairs, `lfeTags` are LFE instance tags. The default is
+/// the Dispatcharr stereo shape: one front CPE, nothing else.
+func buildPCEElements(
+    freqIndex: Int = 3,
+    front: [(Int, Int)] = [(1, 0)],
+    side: [(Int, Int)] = [],
+    back: [(Int, Int)] = [],
+    lfeTags: [Int] = [],
+    comment: Int = 0
+) -> [UInt8] {
+    var bits: [Int] = []
+    func put(_ value: Int, _ width: Int) {
+        for i in stride(from: width - 1, through: 0, by: -1) { bits.append((value >> i) & 1) }
+    }
+    put(5, 3) // id_syn_ele = PCE
+    put(0, 4) // element_instance_tag
+    put(1, 2) // object_type (AAC-LC)
+    put(freqIndex, 4)
+    put(front.count, 4); put(side.count, 4); put(back.count, 4)
+    put(lfeTags.count, 2); put(0, 3); put(0, 4) // num_lfe/assoc_data/valid_cc
+    put(0, 1); put(0, 1); put(0, 1) // no mono/stereo/matrix mixdown
+    for (isCPE, tag) in front + side + back { put(isCPE, 1); put(tag, 4) }
+    for tag in lfeTags { put(tag, 4) } // lfe_element_tag
+    while bits.count % 8 != 0 { bits.append(0) } // byte_align()
+    put(comment, 8) // comment_field_bytes
+    for _ in 0..<comment { put(0x41, 8) }
+    var out: [UInt8] = []
+    for i in stride(from: 0, to: bits.count, by: 8) {
+        var b = 0
+        for j in 0..<8 { b = (b << 1) | bits[i + j] }
+        out.append(UInt8(b))
+    }
+    return out
+}
+
 func buildPCE(freqIndex: Int = 3, front: Int = 1, lfe: Int = 0, comment: Int = 0) -> [UInt8] {
     var bits: [Int] = []
     func put(_ value: Int, _ width: Int) {
@@ -859,6 +895,32 @@ do {
     // Channel count back to a Table 1.19 configuration. 7 channels has no
     // entry (config 7 is 7.1), so it falls to 0 and the sanitizer makes it
     // stereo.
+    // Table 1.19 is an element ORDER plus tags, not a channel count. The
+    // layout ffmpeg emits for "5.1(side)" (measured: front CPE(0) +
+    // SCE(0), side SCE(1), back CPE(1), no LFE element) adds up to six
+    // channels and still matches no configuration, so it must report 0
+    // and be refused rather than stripped and declared as config 6, which
+    // ffmpeg's aac and aac_fixed decoders reject on 189 of 189 frames and
+    // the Google TV Streamer's C2SoftAacDec on 4360 of 4360.
+    let ffmpeg51Side = buildPCEElements(
+        front: [(1, 0), (0, 0)], side: [(0, 1)], back: [(1, 1)])
+    let side51Block = ffmpeg51Side + [0x21, 0x00, 0x00, 0x00]
+    let side51 = CastFMP4Remuxer.parseAACPCE(side51Block, offset: 0, end: side51Block.count)
+    expectEq(side51?.channels ?? -1, 6, "ffmpeg's 5.1(side) PCE declares six channels")
+    expectEq(side51?.impliedChannelConfig ?? -1, 0,
+        "ffmpeg's 5.1(side) element order matches no channel_configuration")
+    let real51 = buildPCEElements(
+        front: [(0, 0), (1, 0)], back: [(1, 1)], lfeTags: [0])
+    let real51Block = real51 + [0x21, 0x00, 0x00, 0x00]
+    let real51Info = CastFMP4Remuxer.parseAACPCE(real51Block, offset: 0, end: real51Block.count)
+    expectEq(real51Info?.impliedChannelConfig ?? -1, 6,
+        "a PCE that restates Table 1.19's 5.1 order is config 6 and strips safely")
+    let stereoPCE = CastFMP4Remuxer.parseAACPCE(
+        buildPCEElements() + [0x21, 0x00, 0x00, 0x00], offset: 0,
+        end: buildPCEElements().count + 4)
+    expectEq(stereoPCE?.impliedChannelConfig ?? -1, 2,
+        "the Dispatcharr stereo PCE is config 2")
+
     expectEq(CastFMP4Remuxer.aacChannelConfig(forCount: 2), 2, "2 channels is config 2")
     expectEq(CastFMP4Remuxer.aacChannelConfig(forCount: 6), 6, "6 channels is config 6 (5.1)")
     expectEq(CastFMP4Remuxer.aacChannelConfig(forCount: 8), 7, "8 channels is config 7 (7.1)")
@@ -1009,7 +1071,7 @@ func pceFixtureTS() -> (plain: Data, pce: Data)? {
     // Announced once for the session, not once per frame.
     let stripLogs = pce.logs.filter { $0.hasPrefix("AAC PCE stripped:") }
     expectEq(stripLogs.count, 1, "the PCE strip is logged exactly once")
-    expectEq(stripLogs.first ?? "", "AAC PCE stripped: layout 2 ch -> config 2",
+    expectEq(stripLogs.first ?? "", "AAC PCE stripped: layout 2 ch matches config 2",
              "the log line names the derived layout and config")
     expect(plain.logs.filter { $0.hasPrefix("AAC PCE stripped:") }.isEmpty,
            "a stream without a PCE logs no strip")

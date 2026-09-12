@@ -604,7 +604,7 @@ final class CastFMP4Remuxer {
         } else if let source = audioSource {
             try onTranscodeAudioPES(source, payload, pts33: pts33)
         } else {
-            onADTSAudioPES(payload, pts33: pts33)
+            try onADTSAudioPES(payload, pts33: pts33)
         }
     }
 
@@ -736,7 +736,7 @@ final class CastFMP4Remuxer {
         if p < data.count { audioCarry = Array(data[p...]) }
     }
 
-    private func onADTSAudioPES(_ payload: [UInt8], pts33: Int64) {
+    private func onADTSAudioPES(_ payload: [UInt8], pts33: Int64) throws {
         var data: [UInt8]
         if audioCarry.isEmpty {
             data = payload
@@ -784,11 +784,46 @@ final class CastFMP4Remuxer {
                 // shifting, and the block's existing id_syn_ele 7
                 // terminator plus its byte alignment still terminate the
                 // shortened block correctly.
+                // A channel_configuration implies the element types,
+                // their order AND their instance tags, not just a channel
+                // count, so the PCE can only be dropped when its element
+                // list is exactly the one some entry of Table 1.19
+                // implies. Deriving the config from the channel count
+                // alone was measured to destroy the audio outright:
+                // ffmpeg's "5.1(side)" PCE declares CPE(0), SCE(0),
+                // SCE(1), CPE(1) and no LFE element, and those frames
+                // presented as config 6 are rejected frame for frame by
+                // the Google TV Streamer's C2SoftAacDec (decoderErr
+                // 0x0005, 4360 times in one session) and by ffmpeg's own
+                // aac and aac_fixed decoders ("channel element 1.0 is not
+                // allocated", 189 of 189 frames).
+                let implied = pce.impliedChannelConfig
+                if implied == 0 {
+                    // Nothing lossless is left. Reordering the elements
+                    // into Table 1.19 order is not an option: they are
+                    // bit-packed, so re-serializing them needs a full AAC
+                    // syntax parser to find each element's bit length, and
+                    // ffmpeg's layout has no LFE element to reorder in the
+                    // first place. Emitting the PCE inside the ASC instead
+                    // (legal per 14496-3 1.6.2.1 when
+                    // channelConfiguration is 0) does not help either:
+                    // Chromium's SkipDecoderGASpecificConfig does
+                    // RCHECK(channel_config_ != 0) before it would ever
+                    // read a PCE out of the ASC (media/formats/mp4/aac.cc,
+                    // main as of 2026-09-12), so a config-0 ASC fails the
+                    // whole append with or without the element. Refuse by
+                    // name so the failure points at the profile instead of
+                    // casting silence.
+                    throw CastUnsupportedCodecError(
+                        codecName: "AAC with a \(pce.channels)-channel program_config_element "
+                            + "layout that no channel_configuration describes",
+                        stream: .audio)
+                }
                 payloadStart = p + headerLen + pce.lengthBytes
-                effectiveChanConfig = Self.aacChannelConfig(forCount: pce.channels)
+                effectiveChanConfig = implied
                 if !aacPCELogged {
                     aacPCELogged = true
-                    log("AAC PCE stripped: layout \(pce.channels) ch -> config \(effectiveChanConfig)")
+                    log("AAC PCE stripped: layout \(pce.channels) ch matches config \(implied)")
                 }
             }
             if payloadStart >= p + frameLen {
@@ -859,6 +894,61 @@ final class CastFMP4Remuxer {
         /// i.e. the element the stripped frame will start with is the
         /// stereo pair a channel_configuration of 2 implies.
         let firstIsCPE: Bool
+        /// The element list the PCE declares, in bitstream order, as
+        /// (id_syn_ele, instance tag) pairs: 0 SCE, 1 CPE, 3 LFE.
+        var elements: [(Int, Int)] = []
+
+        static func == (a: AACPCEInfo, b: AACPCEInfo) -> Bool {
+            a.channels == b.channels && a.lengthBytes == b.lengthBytes
+                && a.firstIsCPE == b.firstIsCPE
+                && a.elements.count == b.elements.count
+                && zip(a.elements, b.elements).allSatisfy { $0 == $1 }
+        }
+
+        /// The channel_configuration that describes this layout exactly,
+        /// or 0 when no entry of Table 1.19 does.
+        ///
+        /// A channel_configuration is not just a channel count: it implies
+        /// the raw_data_block's element types, their order AND their
+        /// instance tags (ISO/IEC 14496-3 Table 1.19). Claiming one for a
+        /// layout whose elements differ makes every frame undecodable, and
+        /// that is measured, not theoretical: ffmpeg's "5.1(side)" PCE
+        /// declares CPE(0), SCE(0), SCE(1), CPE(1) with no LFE element at
+        /// all, and those frames presented as channel_configuration 6
+        /// (which implies SCE(0), CPE(0), CPE(1), LFE(0)) are rejected
+        /// frame for frame by the Google TV Streamer's C2SoftAacDec
+        /// ("aacDecoder_DecodeFrame decoderErr = 0x0005 / Invalid AAC
+        /// stream", 4360 times in one session) and by both of ffmpeg's own
+        /// decoders ("channel element 1.0 is not allocated", 189 of 189
+        /// frames, aac and aac_fixed alike).
+        ///
+        /// ffmpeg only reaches for a PCE when the layout is absent from
+        /// Table 1.19 ("Using a PCE to encode channel layout"), so in
+        /// practice this is 0 for everything ffmpeg emits a PCE for. It is
+        /// still checked rather than assumed: other encoders write a PCE
+        /// that merely restates a standard layout, and those strip safely.
+        var impliedChannelConfig: Int {
+            for (config, implied) in AACPCEInfo.table119 {
+                if elements.count == implied.count,
+                   zip(elements, implied).allSatisfy({ $0 == $1 }) {
+                    return config
+                }
+            }
+            return 0
+        }
+
+        /// ISO/IEC 14496-3 Table 1.19: the element list each
+        /// channel_configuration implies, in raw_data_block order, with
+        /// the instance tags the table fixes. 0 SCE, 1 CPE, 3 LFE.
+        static let table119: [(Int, [(Int, Int)])] = [
+            (1, [(0, 0)]),
+            (2, [(1, 0)]),
+            (3, [(0, 0), (1, 0)]),
+            (4, [(0, 0), (1, 0), (0, 1)]),
+            (5, [(0, 0), (1, 0), (1, 1)]),
+            (6, [(0, 0), (1, 0), (1, 1), (3, 0)]),
+            (7, [(0, 0), (1, 0), (1, 1), (1, 2), (3, 0)]),
+        ]
     }
 
     /// Parse the program_config_element at `offset`, or return nil when
@@ -911,22 +1001,26 @@ final class CastFMP4Remuxer {
         var channels = 0
         var firstIsCPE = false
         var firstSeen = false
+        var elements: [(Int, Int)] = []
         // front, side and back elements each carry is_cpe + a 4-bit tag;
         // a channel_pair_element is two channels, a single is one.
         for count in [numFront, numSide, numBack] {
             for _ in 0..<count {
                 let isCPE = read(1)
-                _ = read(4) // element tag
-                guard isCPE >= 0 else { return nil }
+                let tag = read(4) // element_instance_tag
+                guard isCPE >= 0, tag >= 0 else { return nil }
                 if !firstSeen {
                     firstSeen = true
                     firstIsCPE = isCPE == 1
                 }
+                elements.append((isCPE == 1 ? 1 : 0, tag))
                 channels += isCPE == 1 ? 2 : 1
             }
         }
         for _ in 0..<numLFE {
-            _ = read(4) // lfe_element_tag: one channel each
+            let tag = read(4) // lfe_element_tag: one channel each
+            guard tag >= 0 else { return nil }
+            elements.append((3, tag))
             channels += 1
         }
         for _ in 0..<numAssoc { _ = read(4) } // assoc_data: no channels
@@ -944,7 +1038,9 @@ final class CastFMP4Remuxer {
         // Spec-guaranteed, asserted anyway: a PCE that did not end on a
         // byte boundary could not be dropped with a byte-wise copy.
         guard bit & 7 == 0, channels > 0 else { return nil }
-        return AACPCEInfo(channels: channels, lengthBytes: bit >> 3, firstIsCPE: firstIsCPE)
+        return AACPCEInfo(
+            channels: channels, lengthBytes: bit >> 3, firstIsCPE: firstIsCPE,
+            elements: elements)
     }
 
     /// The inverse of `aacChannelCounts`: the channel_configuration that

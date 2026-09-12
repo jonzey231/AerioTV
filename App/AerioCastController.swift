@@ -528,7 +528,6 @@ final class AerioCastController: NSObject, ObservableObject {
     /// enough). Shown in the cast alert and logged.
     private static func castFailureMessage(_ error: Error, receiverName: String?,
                                            isDispatcharr: Bool) -> String {
-        let receiver = receiverName ?? "this Google Cast device"
         if let codec = error as? CastUnsupportedCodecError {
             let name = codec.codecName
                 .replacingOccurrences(of: " video", with: "")
@@ -537,8 +536,8 @@ final class AerioCastController: NSObject, ObservableObject {
             case .video:
                 return "This channel's video is \(name), which Google Cast receivers cannot play."
             case .audio:
-                return "This channel's audio is \(name) and \(receiver) cannot decode it. "
-                    + "Dispatcharr 0.30 or newer provides an AAC output profile that AerioTV uses automatically."
+                return "This channel's audio is a surround layout the receiver cannot decode. "
+                    + "Add a stereo AAC output profile named AerioTV Cast in Dispatcharr (see the README)."
             }
         }
         let seconds = CastHLSProxySession.readyTimeoutSeconds

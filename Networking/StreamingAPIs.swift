@@ -1352,7 +1352,13 @@ struct DispatcharrOutputProfile: Sendable {
     /// Whole row as lowercased JSON, for the "-c:a aac" fallback match.
     let searchText: String
 
-    /// Name of the built-in profile, matched exactly first.
+    /// Name of the profile the user is asked to create for casting (see
+    /// the README). Preferred over anything else the server offers;
+    /// matched case-insensitively and trimmed.
+    static let preferredCastProfileName = "AerioTV Cast"
+
+    /// Name of the built-in profile, used when the server has no
+    /// `preferredCastProfileName` profile.
     static let webPlayerAACName = "Web Player (AAC Audio)"
 
     /// Tolerant of both the DRF paginated wrapper and a flat array.
@@ -1380,14 +1386,20 @@ struct DispatcharrOutputProfile: Sendable {
         }
     }
 
-    /// The profile a cast session should request: the active profile named
-    /// exactly "Web Player (AAC Audio)", else any active profile whose
-    /// command / parameters ask for an AAC audio encoder.
+    /// The profile a cast session should request, in preference order over
+    /// the active profiles: the one named "AerioTV Cast"
+    /// (case-insensitive, trimmed), else the built-in "Web Player (AAC
+    /// Audio)", else any profile whose command / parameters ask for both
+    /// an AAC audio encoder and a stereo downmix.
     static func aacProfile(in profiles: [DispatcharrOutputProfile]) -> DispatcharrOutputProfile? {
-        if let exact = profiles.first(where: { $0.isActive && $0.name == webPlayerAACName }) {
-            return exact
+        let active = profiles.filter { $0.isActive }
+        func named(_ name: String) -> DispatcharrOutputProfile? {
+            active.first { $0.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare(name) == .orderedSame }
         }
-        return profiles.first { $0.isActive && $0.searchText.contains("-c:a aac") }
+        if let preferred = named(preferredCastProfileName) { return preferred }
+        if let builtIn = named(webPlayerAACName) { return builtIn }
+        return active.first { $0.searchText.contains("-c:a aac") && $0.searchText.contains("-ac 2") }
     }
 
     /// Query parameter Dispatcharr reads to pick an output profile for
@@ -2612,7 +2624,11 @@ struct DispatcharrAPI {
         return (true, picked.id)
     }
 
-    /// Persist the AAC cast output profile id on `server`. Kept MainActor
+    /// Persist the AAC cast output profile id on `server`. Always
+    /// re-resolves against the CURRENT server list rather than trusting a
+    /// stored id, so a profile the user creates after setup (an "AerioTV
+    /// Cast" profile added in Dispatcharr) is picked up on the next EPG
+    /// load or launch, as is a stored id the server no longer has. Kept MainActor
     /// so the SwiftData row is only ever touched there; the network read
     /// happens before the write.
     @MainActor

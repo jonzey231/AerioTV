@@ -1741,11 +1741,14 @@ final class GuideStore: ObservableObject {
                 server.dispatcharrServerVersion = version
             }
             debugLog("📺 GuideStore.fetchUpcoming: primed Dispatcharr version=\(server.dispatcharrServerVersion.isEmpty ? "?" : server.dispatcharrServerVersion) for \(server.name)")
-            // Same one-shot prime for the cast AAC output profile id, so a
-            // cast started before the launch refresh lands still has it.
-            if server.dispatcharrAACOutputProfileID == nil {
-                await DispatcharrAPI.captureAACOutputProfile(for: server, using: api)
-            }
+            // Same prime for the cast AAC output profile id, so a cast
+            // started before the launch refresh lands still has it. Done on
+            // every EPG load, not only when the stored id is missing: the
+            // pick is re-resolved against the current server list, so a
+            // profile the user creates after setup (an "AerioTV Cast"
+            // profile added in Dispatcharr) is picked up here, as is a
+            // stored id the server no longer has.
+            await DispatcharrAPI.captureAACOutputProfile(for: server, using: api)
         }
 
         let didRefresh: Bool
