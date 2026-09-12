@@ -12,6 +12,8 @@ struct GuideJumpSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var dayOffset = 0
     @State private var slot: Slot = .sameTime
+    /// Bumped to ask the day row to re-center Today (Back to Now).
+    @State private var recenterToken = 0
 
     enum Slot: CaseIterable {
         case sameTime, morning, afternoon, evening, prime, late
@@ -112,7 +114,7 @@ struct GuideJumpSheet: View {
             HStack(spacing: 16) {
                 Button("Go") { onPick(target) }
                     .buttonStyle(MoviesPillStyle(isSelected: true))
-                Button("Back to Now") { onPick(nil) }
+                Button("Back to Now") { backToNow() }
                     .buttonStyle(MoviesPillStyle(isSelected: false))
             }
             .focusSection()
@@ -125,13 +127,21 @@ struct GuideJumpSheet: View {
         NavigationStack {
             Form {
                 Section("Day") {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(dayOffsets, id: \.self) { o in
-                                chip(dayLabel(o), selected: dayOffset == o) { dayOffset = o }
+                    // Guide Days can load many days back, so the row would open
+                    // pinned to the furthest past day (Logan 2026-09-11): open
+                    // centered on Today, and re-center it on Back to Now.
+                    ScrollViewReader { proxy in
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(dayOffsets, id: \.self) { o in
+                                    chip(dayLabel(o), selected: dayOffset == o) { dayOffset = o }
+                                        .id(o)
+                                }
                             }
+                            .padding(.vertical, 2)
                         }
-                        .padding(.vertical, 2)
+                        .onAppear { centerToday(proxy, animated: false) }
+                        .onChange(of: recenterToken) { _, _ in centerToday(proxy, animated: true) }
                     }
                     .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
                 }
@@ -150,7 +160,7 @@ struct GuideJumpSheet: View {
                     Button { onPick(target) } label: {
                         HStack { Spacer(); Text("Go to \(summary)").bold(); Spacer() }
                     }
-                    Button { onPick(nil) } label: {
+                    Button { backToNow() } label: {
                         HStack { Spacer(); Text("Back to Now"); Spacer() }
                     }
                 }
@@ -164,6 +174,34 @@ struct GuideJumpSheet: View {
         .presentationDetents([.medium])
         #endif
     }
+
+    /// Back to Now resets the selection and re-centers Today before handing
+    /// off, so the sheet is already on Today if it is shown again.
+    private func backToNow() {
+        dayOffset = 0
+        slot = .sameTime
+        recenterToken += 1
+        onPick(nil)
+    }
+
+    #if !os(tvOS)
+    /// Centers Today's pill once the row has been laid out. The first pass runs
+    /// on the next runloop turn; a short retry covers the sheet's presentation
+    /// animation, where the initial pass can land before the pills have frames.
+    private func centerToday(_ proxy: ScrollViewProxy, animated: Bool) {
+        let scroll = {
+            if animated {
+                withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(0, anchor: .center) }
+            } else {
+                proxy.scrollTo(0, anchor: .center)
+            }
+        }
+        DispatchQueue.main.async(execute: scroll)
+        if !animated {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: scroll)
+        }
+    }
+    #endif
 
     #if os(tvOS)
     private func pillRow<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
