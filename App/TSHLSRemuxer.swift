@@ -378,6 +378,18 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     }
     private var connectedAt: Date?
     private var ingestedBytes: Int64 = 0
+    /// A non-200 ingest response whose (small) JSON body we are buffering
+    /// before failing, plus its Retry-After. Dispatcharr answers every
+    /// live-proxy 503 with {"error": "<reason>"}, and that reason is the
+    /// difference between "the proxy is still tearing down the previous
+    /// session for this channel, the same URL works in a second" and
+    /// "the server already tried this channel's streams and has none",
+    /// which need opposite recoveries. Only 503 is buffered; every other
+    /// status still fails the moment the response head lands. Touched
+    /// only on the URLSession delegate queue.
+    private var errorStatusCode: Int?
+    private var errorRetryAfter: Double?
+    private var errorBody = Data()
 
     // MARK: State
 
@@ -1536,6 +1548,21 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
                     didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            // 503 carries the server's own explanation in its body, and the
+            // tile's recovery depends on WHICH 503 this is (Logan
+            // 2026-09-12: never assume the cause, and fail over when the
+            // server says it has no stream). Allow the tiny body through so
+            // the failure reason can quote Dispatcharr verbatim.
+            if http.statusCode == 503 {
+                errorStatusCode = 503
+                errorBody.removeAll()
+                if let header = http.value(forHTTPHeaderField: "Retry-After"),
+                   let secs = Double(header.trimmingCharacters(in: .whitespaces)) {
+                    errorRetryAfter = secs
+                }
+                completionHandler(.allow)
+                return
+            }
             queue.async { [weak self] in self?.fail(.ingestFailed("HTTP \(http.statusCode)")) }
             completionHandler(.cancel)
             return
@@ -1547,6 +1574,15 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        // Error body, not media: buffer it and fail as soon as the JSON
+        // parses (or the body grows past anything Dispatcharr would send).
+        if errorStatusCode != nil {
+            errorBody.append(data)
+            if ingestErrorReason() != nil || errorBody.count > 8192 {
+                failWithIngestError()
+            }
+            return
+        }
         // "First byte" marker (review 2026-09-11, marker inventory): the
         // log had NOTHING between `ingest started` and the PAT parse, so
         // connect + TLS + the upstream open (220 to 2532 ms) could not be
@@ -1572,6 +1608,13 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        // The buffered error response ended (a body too short to trip the
+        // parse above, or no body at all): report it now, never as a
+        // clean EOF.
+        if errorStatusCode != nil {
+            failWithIngestError()
+            return
+        }
         guard let error, (error as NSError).code != NSURLErrorCancelled else {
             // Clean EOF. For event (catch-up / local-file) playlists this
             // IS the happy ending: finalize with ENDLIST so AVPlayer gets
@@ -1585,6 +1628,41 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
             return
         }
         queue.async { [weak self] in self?.fail(.ingestFailed(error.localizedDescription)) }
+    }
+
+    /// Dispatcharr's reason string out of the buffered body
+    /// ({"error": "<reason>"}), nil while the body is still partial or
+    /// is not the JSON shape we expect.
+    private func ingestErrorReason() -> String? {
+        guard !errorBody.isEmpty,
+              let object = try? JSONSerialization.jsonObject(with: errorBody),
+              let dict = object as? [String: Any],
+              let reason = dict["error"] as? String else { return nil }
+        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Fails the buffered error response with the server's own words
+    /// attached, in the " | " field form the tile parses (see
+    /// AVPlayerMultiviewTile.parse503). "waited" rides along for the log
+    /// only: it is the server telling us how long it spent trying this
+    /// channel's streams itself.
+    private func failWithIngestError() {
+        guard let code = errorStatusCode else { return }
+        errorStatusCode = nil
+        var text = "HTTP \(code)"
+        if let reason = ingestErrorReason() { text += " | reason=\(reason)" }
+        if let retryAfter = errorRetryAfter { text += " | retryAfter=\(retryAfter)" }
+        if let object = try? JSONSerialization.jsonObject(with: errorBody),
+           let dict = object as? [String: Any], let waited = dict["waited"] as? String {
+            text += " | waited=\(waited)"
+        }
+        errorBody.removeAll()
+        errorRetryAfter = nil
+        // No cancel here: the tile's error path tears the pipeline down
+        // (stop() cancels the task), and ingestTask is not ours to touch
+        // from the delegate queue.
+        queue.async { [weak self] in self?.fail(.ingestFailed(text)) }
     }
 }
 
@@ -2281,6 +2359,12 @@ struct AVPlayerMultiviewTile: View {
     /// swap-back), which takes a few seconds; three 1s retries all landed
     /// inside that window (FS1, Logan 2026-09-02).
     @State private var serverBusyRetries = 0
+    /// Same-URL retries spent on Dispatcharr's "Channel is stopping,
+    /// retry shortly" 503 (Logan 2026-09-12). That 503 is the proxy
+    /// tearing down the PREVIOUS session for this channel - a cast that
+    /// just ended, a fast flip back - so the same URL is the right URL;
+    /// it only needs the teardown to drain. Reset on a user tune.
+    @State private var channelStoppingRetries = 0
     /// Live Rewind armed for this tile: the remuxer was created with a
     /// spill window (solo live + setting on), so the driver runs in
     /// rewind-window mode and LiveRewindEngine mirrors the window for
@@ -2515,6 +2599,7 @@ struct AVPlayerMultiviewTile: View {
         .onChange(of: streamURL) { oldURL, newURL in
             mismatchAutoRetries = 0
             serverBusyRetries = 0
+            channelStoppingRetries = 0
             standingRetries = 0
             teardownToken = UUID()
             // User-initiated tune: the incoming channel starts its own
@@ -2609,12 +2694,16 @@ struct AVPlayerMultiviewTile: View {
     /// A live tile is never permanently abandoned (review 2026-09-11
     /// section 2 proposal 3). Cancelled by `teardownToken` on teardown
     /// or a channel change, so nothing survives the tile.
-    private func scheduleStandingRetry(_ reason: String) {
+    private func scheduleStandingRetry(_ reason: String, serverReason: String? = nil) {
         let delay = standingRetries < Self.standingRetryDelays.count
             ? Self.standingRetryDelays[standingRetries] : 60
         standingRetries += 1
         stop()
-        statusText = reason.contains("503") ? "Too many connections. Reconnecting..." : "Reconnecting..."
+        // Copy rule (Logan 2026-09-12): quote the server when it said
+        // something, and say nothing about a cause when it did not. The
+        // old line claimed "Too many connections" for every 503, which
+        // Dispatcharr never states.
+        statusText = serverReason.map { Self.serverStatus($0, "Reconnecting...") } ?? "Reconnecting..."
         let token = teardownToken
         debugLog("[AVP-MV] standing retry #\(standingRetries) in \(delay)s (\(reason)) channel=\(channelName)")
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
@@ -2719,15 +2808,23 @@ struct AVPlayerMultiviewTile: View {
     /// DispatcharrAPI.changeStream), so tearing it down here would only
     /// cost us the connection and revert the channel to its default.
     @MainActor
-    private func stepFailover(server: ServerConnection, channelPK: Int, channelUUID: String) async {
+    private func stepFailover(server: ServerConnection, channelPK: Int, channelUUID: String,
+                              serverReason: String? = nil,
+                              restartPipeline: Bool = false) async {
         guard let api = SwitchStreamFlow.makeAPI(server: server) else { return }
+        // Every status line in the walk quotes the server's reason when we
+        // have one (the 503 entry point) and says nothing about a cause
+        // when we do not (the silent-stream entry point).
+        let say: (String) -> Void = { tail in
+            statusText = serverReason.map { Self.serverStatus($0, tail) } ?? tail
+        }
         var ids: [Int]
         if let cached = LiveFailoverStreamCache.cached(channelPK) {
             ids = cached
         } else {
             guard let fetched = try? await api.getChannelStreams(channelID: channelPK) else {
                 debugLog("[FAILOVER] channel=\(channelName) stream list unavailable; staying on the retry path")
-                statusText = "Reconnecting..."
+                say("Reconnecting...")
                 return
             }
             ids = fetched.map(\.id)
@@ -2735,7 +2832,7 @@ struct AVPlayerMultiviewTile: View {
         }
         guard tileError == nil, !tileStopped, !firstByteSeen else { return }
         guard ids.count >= 2 else {
-            statusText = "Reconnecting..."
+            say("Reconnecting...")
             debugLog("[FAILOVER] channel=\(channelName) single stream; staying on the retry path")
             return
         }
@@ -2757,10 +2854,12 @@ struct AVPlayerMultiviewTile: View {
         }
         guard let target = next else {
             debugLog("[FAILOVER] channel=\(channelName) exhausted \(ids.count) streams")
-            scheduleStandingRetry("no first byte in \(Int(Self.firstByteDeadline))s")
+            scheduleStandingRetry("no first byte in \(Int(Self.firstByteDeadline))s",
+                                  serverReason: serverReason)
             // scheduleStandingRetry's generic copy is wrong here: the
-            // streams all answered, none of them delivered.
-            statusText = "Channel unavailable. Retrying..."
+            // streams all answered, none of them delivered. With a server
+            // reason in hand, its own words stay in front of the user.
+            if serverReason == nil { statusText = "Channel unavailable. Retrying..." }
             return
         }
         failoverSteps += 1
@@ -2771,17 +2870,99 @@ struct AVPlayerMultiviewTile: View {
         } catch {
             debugLog("[FAILOVER] channel=\(channelName) change_stream to id=\(target) failed: "
                 + error.localizedDescription)
-            statusText = "Reconnecting..."
+            say("Reconnecting...")
             return
         }
         guard tileError == nil, !tileStopped, !firstByteSeen else { return }
         failoverCurrentStreamID = target
-        statusText = "Trying another stream..."
+        say("Trying another stream...")
         // No owner= field here: change_stream already logs the server's
         // own owner flag ([SwitchStream] change_stream ... owner=).
         debugLog("[FAILOVER] channel=\(channelName) stream \(step)/\(ids.count) id=\(target) "
-            + "reason=no first byte in \(Int(Self.firstByteDeadline))s")
+            + "reason=\(serverReason ?? "no first byte in \(Int(Self.firstByteDeadline))s")")
+        // The silent-stream entry point deliberately LEAVES the ingest
+        // open (Dispatcharr swaps the upstream in place behind it). The
+        // 503 entry point has no connection at all - the response WAS the
+        // failure - so that one needs a fresh pipeline, which arms its own
+        // first-byte deadline inside start().
+        if restartPipeline {
+            stop()
+            let token = teardownToken
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                guard token == teardownToken else {
+                    debugLog("[FAILOVER] post-switch start dropped (channel changed or tile gone)")
+                    return
+                }
+                start()
+            }
+            return
+        }
         armFirstByteDeadline()
+    }
+
+    // MARK: - Dispatcharr 503 reasons (Logan 2026-09-12)
+
+    /// Same-URL waits allowed on "Channel is stopping, retry shortly".
+    private static let channelStoppingMaxRetries = 5
+    /// Cap on the server's Retry-After, so a generous header cannot park
+    /// a live tile on a spinner.
+    private static let channelStoppingMaxDelay: Double = 3
+
+    /// Pulls Dispatcharr's own explanation out of an ingest-failure
+    /// reason built by TSHLSRemuxer.failWithIngestError. nil for anything
+    /// that is not a live ingest 503 - notably the VOD "range fetch HTTP
+    /// 503" text, whose terminal card is unrelated.
+    private static func parse503(_ reason: String) -> (serverReason: String?, retryAfter: Double?)? {
+        guard reason.contains("ingest failed: HTTP 503") else { return nil }
+        var serverReason: String?
+        var retryAfter: Double?
+        for field in reason.components(separatedBy: " | ") {
+            if field.hasPrefix("reason=") {
+                let text = String(field.dropFirst("reason=".count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty { serverReason = text }
+            } else if field.hasPrefix("retryAfter=") {
+                retryAfter = Double(field.dropFirst("retryAfter=".count))
+            }
+        }
+        return (serverReason, retryAfter)
+    }
+
+    /// The server's sentence, quoted verbatim apart from its first letter
+    /// and a trailing period, then what the tile is doing about it.
+    private static func serverStatus(_ serverReason: String, _ tail: String) -> String {
+        var text = serverReason.trimmingCharacters(in: .whitespacesAndNewlines)
+        while text.hasSuffix(".") { text = String(text.dropLast()) }
+        guard let first = text.first else { return tail }
+        return "Server: \(first.uppercased())\(text.dropFirst()). \(tail)"
+    }
+
+    /// A 503 the server explained as "nothing available here" (no
+    /// available streams, a specific upstream error_reason it already
+    /// waited on, or resources unavailable). A backoff ladder cannot
+    /// help: Dispatcharr has already walked this channel's streams
+    /// itself. So run the existing failover walk right now where we are
+    /// allowed to drive change_stream, and the standing slow retry where
+    /// we are not.
+    private func handle503Unavailable(reason: String, serverReason: String) {
+        guard let server = failoverServer(),
+              let pk = dispatcharrChannelPK,
+              let uuid = dispatcharrChannelUUID else {
+            debugLog("[FAILOVER] 503 reason=\"\(serverReason)\" -> standing retry channel=\(channelName)")
+            scheduleStandingRetry(reason, serverReason: serverReason)
+            return
+        }
+        guard !failoverInFlight else { return }
+        debugLog("[FAILOVER] 503 reason=\"\(serverReason)\" -> next stream channel=\(channelName)")
+        failoverInFlight = true
+        if failoverStartedAt == nil { failoverStartedAt = Date() }
+        stop()
+        statusText = Self.serverStatus(serverReason, "Trying another stream...")
+        Task { @MainActor in
+            defer { failoverInFlight = false }
+            await stepFailover(server: server, channelPK: pk, channelUUID: uuid,
+                               serverReason: serverReason, restartPipeline: true)
+        }
     }
 
     /// `/status.streamID` with a 3 s cap. The change_stream flow only
@@ -2918,6 +3099,50 @@ struct AVPlayerMultiviewTile: View {
             }
             return
         }
+        // A live 503 that Dispatcharr EXPLAINED (Logan 2026-09-12: never
+        // assume the cause in the copy, and fail over when the server says
+        // it has no stream). Two different servers hide behind one status
+        // code, and they need opposite recoveries:
+        //   "Channel is stopping, retry shortly" (Retry-After: 1) is the
+        //   proxy tearing down the previous session for THIS channel - a
+        //   cast that just ended, a fast channel flip - and the same URL
+        //   works as soon as that drains.
+        //   "No available streams for this channel", a specific upstream
+        //   error_reason with the server's own "waited", or "Channel
+        //   resources unavailable" means the server already tried this
+        //   channel's streams, so waiting buys nothing and the client
+        //   walks to another stream instead.
+        // The 502/503 ladder below stays for a bare, unexplained 503.
+        if !isVOD, !isDVR, catchup == nil, tileError == nil,
+           let info = Self.parse503(reason) {
+            if let serverReason = info.serverReason {
+                if serverReason.lowercased().contains("is stopping") {
+                    if channelStoppingRetries < Self.channelStoppingMaxRetries {
+                        let delay = min(max(info.retryAfter ?? 1, 1), Self.channelStoppingMaxDelay)
+                        channelStoppingRetries += 1
+                        debugLog("[AVP-MV] 503 reason=\"\(serverReason)\"; same-URL retry "
+                            + "\(channelStoppingRetries)/\(Self.channelStoppingMaxRetries) in \(delay)s "
+                            + "channel=\(channelName)")
+                        stop()
+                        statusText = "Reconnecting..."
+                        let token = teardownToken
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                            guard token == teardownToken else {
+                                debugLog("[AVP-MV] stale channel-stopping retry dropped")
+                                return
+                            }
+                            start()
+                        }
+                        return
+                    }
+                    // Waited out the whole budget and the previous session
+                    // is still there: treat it as an unavailable channel
+                    // and go looking for another stream.
+                }
+                handle503Unavailable(reason: reason, serverReason: serverReason)
+                return
+            }
+        }
         let serverBusy = reason.contains("HTTP 503") || reason.contains("HTTP 502")
         if serverBusy, serverBusyRetries < Self.serverBusyDelays.count, tileError == nil {
             // Widened from [1.5, 3, 5, 8] (review 2026-09-11 section 2
@@ -2929,10 +3154,10 @@ struct AVPlayerMultiviewTile: View {
             serverBusyRetries += 1
             debugLog("[AVP-MV] server busy (\(reason)); retry \(serverBusyRetries)/\(Self.serverBusyDelays.count) in \(delay)s title=\(channelName)")
             stop()
-            // Say what 503 actually means on a Dispatcharr live proxy
-            // (review section 2 proposal 5): the tile used to show a
-            // generic "Retrying...".
-            statusText = reason.contains("HTTP 503") ? "Too many connections. Reconnecting..." : "Retrying..."
+            // No cause in the copy (Logan 2026-09-12). This ladder is now
+            // only reached by a 502, or by a 503 that carried no reason at
+            // all; an explained 503 is handled above and never guesses.
+            statusText = "Reconnecting..."
             let token = teardownToken
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 guard token == teardownToken else { return }
