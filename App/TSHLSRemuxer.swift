@@ -412,6 +412,43 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var patPacket: Data?
     private var pmtPacket: Data?
     private var codecGatePassed = false
+    /// Elementary PIDs the PMT declared as audio, and the first audio
+    /// stream type it declared. The TS arm never touches the audio
+    /// bytes, but it has to know which PID they ride so a segment cut
+    /// never lands INSIDE an audio PES (see heldAudio).
+    private var audioPIDs = Set<Int>()
+    private var audioStreamType: UInt8 = 0
+    /// Packets of the audio PES currently in flight, withheld from the
+    /// open segment until the PES is complete.
+    ///
+    /// Why (Logan 2026-09-12, ESPN HD): Dispatcharr's "Web Player (AAC
+    /// Audio)" output profile re-muxes with ffmpeg, whose mpegts muxer
+    /// accumulates audio up to pes_payload_size (2930 B) before it
+    /// writes a PES. Measured on a matching local encode: AAC = one PES
+    /// every ~170 ms carrying ~8 ADTS frames across 16 TS packets, with
+    /// a NON-ZERO PES_packet_length (~2800); AC-3 off the provider's own
+    /// mux = one 32 ms syncframe per PES in 9 packets. Cutting a segment
+    /// at a video keyframe used to slice whichever audio PES was in
+    /// flight, so every 2.5 s segment ended with a PES whose declared
+    /// length never arrives and the next began with an orphan
+    /// continuation carrying no PUSI. CoreMedia discards both, which is
+    /// ~85-170 ms of AAC missing per segment (audible as audio
+    /// "constantly cutting in and out") against <=32 ms of AC-3, and the
+    /// resulting stalls are what trained this channel's learned live-edge
+    /// hold-back up to 12 s and pushed tune-to-first-frame to 16.7 s.
+    /// Holding the PES and carrying it whole into the next segment loses
+    /// nothing: TS PIDs are independent streams and the PES keeps its own
+    /// PTS.
+    private var heldAudio: [Data] = []
+    /// Corruption guard: a PES this long is not a PES. ~24 kB of payload,
+    /// an order of magnitude past ffmpeg's 2930 B cap.
+    private let heldAudioPacketCap = 140
+    private var adtsLogged = false
+    private var adtsSampleRate = 0
+    private var lastAudioPESPTS = -1.0
+    private var lastAudioPESFrames = 0
+    private var audioGapWarnings = 0
+    private var lastAudioGapLogAt = Date.distantPast
     /// Non-nil after the PMT declared HEVC: the fMP4 arm (Apple HLS rule
     /// 1.5 - HEVC only rides fMP4 segments; the TS passthrough below is
     /// the H.264 arm). Bytes route to it INSTEAD of the TS segmenter, the
@@ -763,7 +800,108 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
 
         guard !awaitingFirstKeyframe else { return }
+
+        // Audio rides a hold buffer so a whole PES always lands in one
+        // segment (rationale at the heldAudio declaration).
+        if audioPIDs.contains(pid) {
+            if pusi {
+                flushHeldAudio()
+                heldAudio = [p]
+            } else if !heldAudio.isEmpty {
+                heldAudio.append(p)
+                // Never withhold unboundedly: a PES start we missed or a
+                // corrupt length would otherwise park audio forever.
+                if heldAudio.count >= heldAudioPacketCap { flushHeldAudio() }
+            } else {
+                // Continuation of a PES that started before this segment
+                // opened (or before the PMT was read): pass it through.
+                currentSegment.append(p)
+            }
+            return
+        }
+
         currentSegment.append(p)
+    }
+
+    /// Append the completed audio PES to the open segment and read its
+    /// ADTS telemetry on the way past.
+    private func flushHeldAudio() {
+        guard !heldAudio.isEmpty else { return }
+        inspectAudioPES(heldAudio)
+        for packet in heldAudio { currentSegment.append(packet) }
+        heldAudio.removeAll(keepingCapacity: true)
+    }
+
+    /// One-time AAC shape line plus a continuity check on audio PES
+    /// timestamps. Reads only; the bytes go out untouched.
+    private func inspectAudioPES(_ packets: [Data]) {
+        guard audioStreamType == 0x0F, let first = packets.first else { return }
+        var es = [UInt8]()
+        es.reserveCapacity(packets.count * 184)
+        for (index, packet) in packets.enumerated() {
+            guard var off = payloadStart(packet) else { continue }
+            if index == 0 {
+                guard off + 8 < 188,
+                      packet[off] == 0x00, packet[off + 1] == 0x00, packet[off + 2] == 0x01
+                else { return }
+                off += 9 + Int(packet[off + 8])
+                guard off < 188 else { return }
+            }
+            es.append(contentsOf: packet[off..<188])
+        }
+
+        var frames = 0
+        var profile = 0
+        var rate = 0
+        var channels = 0
+        var i = 0
+        while i + 7 <= es.count {
+            guard es[i] == 0xFF, (es[i + 1] & 0xF0) == 0xF0 else { i += 1; continue }
+            let frameLen = (Int(es[i + 3] & 0x03) << 11)
+                | (Int(es[i + 4]) << 3)
+                | (Int(es[i + 5]) >> 5)
+            guard frameLen > 7, es.count - i >= frameLen else { break }
+            if frames == 0 {
+                profile = (Int(es[i + 2]) >> 6) + 1
+                let freqIndex = (Int(es[i + 2]) >> 2) & 0x0F
+                let rates = [96000, 88200, 64000, 48000, 44100, 32000,
+                             24000, 22050, 16000, 12000, 11025, 8000, 7350]
+                rate = freqIndex < rates.count ? rates[freqIndex] : 0
+                channels = ((Int(es[i + 2]) & 0x01) << 2) | (Int(es[i + 3]) >> 6)
+            }
+            frames += 1
+            i += frameLen
+        }
+        guard frames > 0, rate > 0 else { return }
+
+        if !adtsLogged {
+            adtsLogged = true
+            adtsSampleRate = rate
+            debugLog("[TS-REMUX] AAC: profile=\(profile) sr=\(rate) ch=\(channels) frames/PES=\(frames)")
+        }
+
+        // Consecutive PES timestamps must advance by exactly the frames
+        // the previous PES carried. A bigger step is missing audio (the
+        // symptom that sent us here); a smaller one is an overlap.
+        if let pts = extractPTS(first) {
+            let frameSeconds = 1024.0 / Double(rate)
+            if lastAudioPESPTS >= 0, lastAudioPESFrames > 0 {
+                let expected = Double(lastAudioPESFrames) * frameSeconds
+                let drift = pts - lastAudioPESPTS - expected
+                if abs(drift) > frameSeconds, abs(drift) < 10 {
+                    audioGapWarnings += 1
+                    let now = Date()
+                    if now.timeIntervalSince(lastAudioGapLogAt) > 10 {
+                        lastAudioGapLogAt = now
+                        debugLog(String(format:
+                            "[TS-REMUX] WARNING audio PTS gap %+.0f ms (%.1f frames) at pts %.3f, %d so far",
+                            drift * 1000, drift / frameSeconds, pts, audioGapWarnings))
+                    }
+                }
+            }
+            lastAudioPESPTS = pts
+            lastAudioPESFrames = frames
+        }
     }
 
     /// Rotate a malformed IDR AU's AUD in front of its SPS/PPS, in
@@ -843,6 +981,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
         var foundVideo: (pid: Int, type: UInt8)?
         var audioTypes: [UInt8] = []
+        var foundAudioPIDs = Set<Int>()
 
         while offset + 4 < sectionEnd {
             let streamType = p[offset]
@@ -853,6 +992,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 if foundVideo == nil { foundVideo = (esPID, streamType) }
             case 0x81, 0x87, 0x0F, 0x03, 0x04, 0x11: // AC-3 / E-AC-3 / AAC / MP2 / LATM
                 audioTypes.append(streamType)
+                foundAudioPIDs.insert(esPID)
             default:
                 break
             }
@@ -878,6 +1018,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             return
         }
         codecGatePassed = true
+        audioPIDs = foundAudioPIDs
+        audioStreamType = audioTypes.first ?? 0
         let audioDesc = audioTypes.map { String(format: "0x%02X", $0) }.joined(separator: ",")
         debugLog("[TS-REMUX] PMT: H.264 video PID \(videoPID), audio types [\(audioDesc)] -> codec gate PASSED")
     }
@@ -938,6 +1080,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // AVPlayer tolerates that on PSI PIDs.
         if let pat = patPacket { currentSegment.append(pat) }
         if let pmt = pmtPacket { currentSegment.append(pmt) }
+        // heldAudio is deliberately NOT flushed here: an audio PES still
+        // in flight when the cut landed belongs whole to THIS segment,
+        // and flushes into it as soon as its last packet arrives.
         currentStartPTS = pts
     }
 
