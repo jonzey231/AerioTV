@@ -483,8 +483,10 @@ final class GuideStore: ObservableObject {
         // to plain `GuideProgram` structs on the bg context; only
         // the resulting Sendable dict (plus counts) comes back.
         let container = modelContext.container
-        let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
-        let effectiveWindowHours = epgWindowHours > 0 ? epgWindowHours : 36
+        // Guide Days (Logan 2026-09-11): the playlist's own setting governs
+        // the window in BOTH directions; Settings > Network no longer has a
+        // "Guide Window" preference.
+        let effectiveWindowHours = GuideStore.activeForwardDays() * 24
         // Catch-up: load retained history too, not just the last hour.
         let retentionSecs = GuideStore.activeRetentionSeconds()
         let channelCount = channels.count
@@ -912,14 +914,59 @@ final class GuideStore: ObservableObject {
     /// removed, so a no-op foreground doesn't churn the guide. Aired programs
     /// sit below "now" in the grid and are never visible, so the trim is
     /// invisible to the user. Runs on warm foreground.
-    /// Catch-up (task: Android parity): how many days of ALREADY-AIRED
-    /// programming the active server keeps (Edit Server > Guide History,
-    /// default 7, clamped 1...30 to match the Dispatcharr server cap).
-    /// Everything that used to hard-code the 1-hour history horizon now
-    /// derives from this so aired programmes stay replayable.
-    static func activeRetentionDays() -> Int {
+    /// Guide Days (Edit Playlist > Guide Days, default 7): how many days of
+    /// guide data this playlist loads, BACK and AHEAD (Logan 2026-09-11).
+    /// Stored raw: 0 = "All Available", otherwise 1...14. A legacy stored 30
+    /// reads as All Available.
+    static func guideDaysRaw() -> Int {
         let d = ChannelStore.shared.activeServer?.epgRetentionDays ?? 7
-        return min(max(d, 1), 30)
+        if d <= 0 || d >= 30 { return 0 }
+        return min(max(d, 1), 14)
+    }
+
+    /// True when the playlist asks for everything the server carries.
+    static var guideDaysIsAllAvailable: Bool { guideDaysRaw() == 0 }
+
+    /// Hard bounds for All Available so a huge server cannot run forever.
+    nonisolated static let allAvailableMaxDaysBack = 30
+    nonisolated static let allAvailableMaxDaysAhead = 60
+
+    /// Catch-up (task: Android parity): how many days of ALREADY-AIRED
+    /// programming the active server keeps. Everything that used to
+    /// hard-code the 1-hour history horizon derives from this so aired
+    /// programmes stay replayable. All Available uses the 30-day bound.
+    static func activeRetentionDays() -> Int {
+        let raw = guideDaysRaw()
+        return raw == 0 ? allAvailableMaxDaysBack : raw
+    }
+
+    /// Days of guide data to load AHEAD. All Available uses the 60-day bound.
+    static func activeForwardDays() -> Int {
+        let raw = guideDaysRaw()
+        return raw == 0 ? allAvailableMaxDaysAhead : raw
+    }
+
+    /// Furthest forward edge of the programmes actually loaded, for All
+    /// Available where the extent follows the data rather than a count.
+    func loadedForwardDays() -> Int {
+        var maxEnd = Date.distantPast
+        for list in programs.values where !list.isEmpty {
+            if let last = list.last, last.end > maxEnd { maxEnd = last.end }
+        }
+        guard maxEnd > Date() else { return 1 }
+        let days = Int(ceil(maxEnd.timeIntervalSinceNow / 86_400))
+        return min(GuideStore.allAvailableMaxDaysAhead, max(1, days))
+    }
+
+    /// Furthest back edge of the programmes actually loaded (All Available).
+    func loadedBackDays() -> Int {
+        var minStart = Date.distantFuture
+        for list in programs.values {
+            if let first = list.first, first.start < minStart { minStart = first.start }
+        }
+        guard minStart < Date() else { return 1 }
+        let days = Int(ceil(-minStart.timeIntervalSinceNow / 86_400))
+        return min(GuideStore.allAvailableMaxDaysBack, max(1, days))
     }
 
     static func activeRetentionSeconds() -> TimeInterval {
@@ -981,10 +1028,9 @@ final class GuideStore: ObservableObject {
 
         let now = Date()
         let windowStart = now.addingTimeInterval(-3600)
-        // Use the user's EPG window setting (default 36 hours).
-        // 0 means "All available" — use 14 days as a practical maximum.
-        let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
-        let effectiveWindowHours = epgWindowHours > 0 ? epgWindowHours : 36
+        // Guide Days (Logan 2026-09-11): the playlist's Guide Days setting
+        // (1...30, default 7) drives the window forward as well as back.
+        let effectiveWindowHours = GuideStore.activeForwardDays() * 24
         let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
 
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first else {
@@ -993,6 +1039,29 @@ final class GuideStore: ObservableObject {
         }
         debugLog("📺 GuideStore.fetchUpcoming: server=\(server.name), type=\(server.type), channels=\(channels.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         beginDisplaying(serverID: server.id.uuidString)
+
+        // Android parity (Logan 2026-09-11): if the stored Dispatcharr server
+        // version is blank when the EPG loads, fetch version + permissions
+        // once, persist them, and gate this same run's grid window pass on
+        // the fresh value. Launch-time refreshDispatcharrPermissions() is a
+        // detached task and can lose the race with the first EPG load, which
+        // would silently drop the 0.30 window pass for that run.
+        if server.type == .dispatcharrAPI, server.dispatcharrServerVersion.isEmpty {
+            let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                     auth: .apiKey(server.effectiveApiKey),
+                                     userAgent: server.effectiveUserAgent,
+                                     authMode: server.dispatcharrHeaderMode,
+                                     serverID: server.id,
+                                     savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                                         ? server.username : nil)
+            let version = (try? await api.fetchVersion()) ?? nil
+            if let user = try? await api.fetchCurrentUser() {
+                _ = server.applyDispatcharrPermissions(from: user, version: version)
+            } else if let version, !version.isEmpty {
+                server.dispatcharrServerVersion = version
+            }
+            debugLog("📺 GuideStore.fetchUpcoming: primed Dispatcharr version=\(server.dispatcharrServerVersion.isEmpty ? "?" : server.dispatcharrServerVersion) for \(server.name)")
+        }
 
         let didRefresh: Bool
         switch server.type {
@@ -1655,9 +1724,9 @@ final class GuideStore: ObservableObject {
     }
 
     /// Dispatcharr 0.30 window extension: the base grid paints the default
-    /// -1h..+24h fast; this then fills history back to the Guide History
-    /// setting (6 h on very large playlists) and forward to the guide
-    /// window, one day per request through `start`/`end`, merging via the
+    /// -1h..+24h fast; this then fills history back to the playlist's Guide
+    /// Days setting (6 h on very large playlists) and forward the same
+    /// number of days, one day per request through `start`/`end`, merging via the
     /// same matcher and committing each chunk. Replaces the upstream XMLTV
     /// layering on servers that support the window (no third-party fetch,
     /// no LAN-only 403s).
@@ -1708,36 +1777,67 @@ final class GuideStore: ObservableObject {
                                  savedUsername: server.dispatcharrCredentialType == .usernamePassword
                                      ? server.username : nil)
         let now = Date()
+        // Guide Days (Logan 2026-09-11): the playlist's own setting governs
+        // BOTH directions. History keeps its >5000-channel clamp; forward is
+        // days * 24 h. The base grid (-1h..+24h) has already painted.
+        let playlistDays = Self.guideDaysRaw()
+        let allAvailable = playlistDays == 0
         let historySecs: TimeInterval = channels.count > Self.largePlaylistChannels
             ? Self.largePlaylistHistorySecs : Self.activeRetentionSeconds()
         let historyStart = now.addingTimeInterval(-historySecs)
         let baseStart = now.addingTimeInterval(-3600)
         let baseEnd = now.addingTimeInterval(24 * 3600)
+        let forwardEnd = allAvailable
+            ? now.addingTimeInterval(TimeInterval(Self.allAvailableMaxDaysAhead) * 86_400)
+            : max(windowEnd, now.addingTimeInterval(TimeInterval(playlistDays) * 86_400))
         // Chunks: history newest-first (catch-up depth users reach first),
         // then forward. One day each.
-        var chunks: [(Date, Date)] = []
+        var historyChunks: [(Date, Date)] = []
         var hEnd = baseStart
         while hEnd > historyStart {
             let hStart = max(historyStart, hEnd.addingTimeInterval(-86_400))
-            chunks.append((hStart, hEnd))
+            historyChunks.append((hStart, hEnd))
             hEnd = hStart
         }
+        var forwardChunks: [(Date, Date)] = []
         var fStart = baseEnd
-        while fStart < windowEnd {
-            let fEnd = min(windowEnd, fStart.addingTimeInterval(86_400))
-            chunks.append((fStart, fEnd))
+        while fStart < forwardEnd {
+            let fEnd = min(forwardEnd, fStart.addingTimeInterval(86_400))
+            forwardChunks.append((fStart, fEnd))
             fStart = fEnd
         }
-        guard !chunks.isEmpty else { return }
-        debugLog("📺 [EPG source=dispatcharr-api grid window] \(chunks.count) chunk(s): history \(Int(historySecs / 3600))h, forward to +\(Int(windowEnd.timeIntervalSince(now) / 3600))h")
-        await fetchGridChunks(chunks, api: api, maps: maps, serverID: server.id.uuidString)
+        guard !historyChunks.isEmpty || !forwardChunks.isEmpty else { return }
+        if allAvailable {
+            // All Available (Logan 2026-09-11): walk one-day chunks until a
+            // direction runs dry (two consecutive empty chunks), bounded at
+            // 30 days back / 60 days ahead so a huge server cannot run
+            // forever. The >5000-channel history clamp still applies.
+            debugLog("📺 [EPG source=dispatcharr-api grid window] all available: up to \(historyChunks.count) history + \(forwardChunks.count) forward chunk(s), history clamp \(Int(historySecs / 3600))h")
+            let backDays = await fetchGridChunks(historyChunks, api: api, maps: maps,
+                                                 serverID: server.id.uuidString,
+                                                 stopAfterConsecutiveEmpty: 2)
+            let aheadDays = await fetchGridChunks(forwardChunks, api: api, maps: maps,
+                                                  serverID: server.id.uuidString,
+                                                  stopAfterConsecutiveEmpty: 2)
+            debugLog("📺 grid window: all available, back \(backDays)d ahead \(aheadDays)d")
+            return
+        }
+        let chunks = historyChunks + forwardChunks
+        debugLog("📺 [EPG source=dispatcharr-api grid window] \(chunks.count) chunk(s): guideDays=\(playlistDays), history \(Int(historySecs / 3600))h, forward to +\(Int(forwardEnd.timeIntervalSince(now) / 3600))h")
+        _ = await fetchGridChunks(chunks, api: api, maps: maps, serverID: server.id.uuidString)
     }
 
     /// Fetch, merge and commit grid chunks in order; records the furthest
     /// forward edge reached so a later jump does not refetch it.
+    /// Returns the number of one-day chunks that actually carried programmes
+    /// before the walk stopped (the loaded depth, for All Available).
+    @discardableResult
     private func fetchGridChunks(_ chunks: [(Date, Date)], api: DispatcharrAPI,
-                                 maps: DispatcharrGridMaps, serverID: String) async {
+                                 maps: DispatcharrGridMaps, serverID: String,
+                                 stopAfterConsecutiveEmpty: Int? = nil) async -> Int {
         var total = 0
+        var consecutiveEmpty = 0
+        var covered = 0
         // Publish sparingly: every chunk used to replace `programs`, and one
         // publish re-renders the tab roots and every channel row (probe
         // 2026-09-06: 656 row bodies twice a second for the ~25 s of a
@@ -1747,7 +1847,7 @@ final class GuideStore: ObservableObject {
         var staged = programs_snapshotForMerge()
         var unpublished = 0
         for (i, (start, end)) in chunks.enumerated() {
-            guard displayedServerID == nil || displayedServerID == serverID else { return }
+            guard displayedServerID == nil || displayedServerID == serverID else { return covered }
             let programs: [DispatcharrCurrentProgram]
             do {
                 programs = try await api.getEPGGrid(start: start, end: end)
@@ -1755,7 +1855,16 @@ final class GuideStore: ObservableObject {
                 debugLog("📺 grid window chunk failed (\(error.localizedDescription)); stopping extension")
                 break
             }
-            if programs.isEmpty { continue }
+            if programs.isEmpty {
+                consecutiveEmpty += 1
+                if let limit = stopAfterConsecutiveEmpty, consecutiveEmpty >= limit {
+                    debugLog("📺 grid window: \(limit) empty chunk(s) in a row, direction done")
+                    break
+                }
+                continue
+            }
+            consecutiveEmpty = 0
+            covered = i + 1
             let base = staged
             let merged = await Task.detached(priority: .utility) {
                 GuideStore.mergeGridPrograms(programs, into: base,
@@ -1770,7 +1879,7 @@ final class GuideStore: ObservableObject {
             debugLog("📺 grid window chunk \(Self.chunkStamp(start))..\(Self.chunkStamp(end)): \(programs.count) from server, \(merged.matched) matched")
             let isForward = end > Date()
             if isForward || unpublished >= 6 || i == chunks.count - 1 {
-                guard commitPrograms(staged, for: serverID, source: "dispatcharr-grid-window") else { return }
+                guard commitPrograms(staged, for: serverID, source: "dispatcharr-grid-window") else { return covered }
                 unpublished = 0
                 staged = programs_snapshotForMerge()
             }
@@ -1781,6 +1890,7 @@ final class GuideStore: ObservableObject {
             _ = commitPrograms(staged, for: serverID, source: "dispatcharr-grid-window")
         }
         debugLog("📺 grid window extension done: \(total) programmes merged over \(chunks.count) chunk(s)")
+        return covered
     }
 
     private static func chunkStamp(_ d: Date) -> String {
@@ -2680,15 +2790,12 @@ final class GuideStore: ObservableObject {
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first else { return }
         let now = Date()
         let windowStart = now.addingTimeInterval(-3600)
-        // Respect the user's EPG window setting (Settings → EPG
-        // window hours). Previously hardcoded to 3 hours, which
-        // meant even when the user configured a 24- or 36-hour
-        // window, per-cell fetches only ever retrieved 3 hours
-        // and the guide appeared sparse past that (GH #3 symptom
-        // "Not respecting the Time from Settings"). 0 = "All
-        // available" — cap at 14 days as a practical maximum.
-        let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
-        let effectiveWindowHours = epgWindowHours > 0 ? min(epgWindowHours, 14 * 24) : 36
+        // Respect the playlist's Guide Days setting (Edit Playlist >
+        // Guide Days, 1...14 or All Available, default 7). Previously 3
+        // hours, which meant per-cell fetches only ever retrieved 3
+        // hours and the guide appeared sparse past that (GH #3 symptom
+        // "Not respecting the Time from Settings").
+        let effectiveWindowHours = GuideStore.activeForwardDays() * 24
         let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
 
         // Capture server properties before entering sendable closure
@@ -3324,12 +3431,12 @@ struct EPGGuideView: View {
 
     // Time window: 1h back + user-configured hours forward.
     //
-    // `hoursForward` reads `epgWindowHours` from Settings → "EPG
-    // Window" (see SettingsView.swift: options are 6/12/24/36/48/72
-    // and "All available" = 0). The same `raw > 0 ? raw : 36`
-    // formula is used by the EPG *fetch* layer in three places in
-    // this file (effectiveWindowHours), so rendering matches the
-    // data actually downloaded.
+    // `hoursForward` derives from the playlist's Guide Days setting
+    // (Edit Playlist > Guide Days, 1...30, default 7). The EPG *fetch*
+    // layer uses the same value in three places in this file
+    // (effectiveWindowHours), so rendering matches the data actually
+    // downloaded. The old Settings > Network "Guide Window" preference
+    // was removed 2026-09-11 (Logan).
     //
     // Before this was a computed property the grid was hardcoded to
     // 3h forward regardless of the Settings picker — users saw
@@ -3345,12 +3452,13 @@ struct EPGGuideView: View {
     // which lists ALL retained aired programmes.
     /// Days the Jump To sheet offers ahead. A Dispatcharr 0.30+ server keeps
     /// many days and the guide fetches the jumped day on demand
-    /// (ensureForwardWindow), so offer two weeks there (Logan 2026-09-10);
-    /// other sources are limited to what is loaded.
+    /// (ensureForwardWindow), so offer the playlist's Guide Days there
+    /// (Logan 2026-09-11); other sources are limited to what is loaded.
     private var loadedEpgDaysAhead: Int {
+        if GuideStore.guideDaysIsAllAvailable { return guideStore.loadedForwardDays() }
         if let server = servers.first(where: { $0.isActive }) ?? servers.first,
            server.type == .dispatcharrAPI, server.dispatcharrVersionAtLeast("0.30.0") {
-            return 14
+            return GuideStore.activeForwardDays()
         }
         var maxEnd = Date.distantPast
         for list in guideStore.programs.values {
@@ -3371,13 +3479,16 @@ struct EPGGuideView: View {
         return min(max(base, needed), retention)
     }
     private var hoursForward: TimeInterval {
-        let raw = UserDefaults.standard.integer(forKey: "epgWindowHours")
-        let setting = TimeInterval(raw > 0 ? raw : 36)
+        // All Available: the extent follows the programmes actually loaded,
+        // not a fixed day count (Logan 2026-09-11).
+        let days = GuideStore.guideDaysIsAllAvailable
+            ? guideStore.loadedForwardDays() : GuideStore.activeForwardDays()
+        let setting = TimeInterval(days * 24)
         // Jump-to-day (Roman via Discord, 2026-09-06): the grid grows to
         // hold the target day so the timeline can scroll there.
         guard let target = jumpTarget else { return setting }
         let needed = (target.timeIntervalSinceNow / 3600) + 12
-        return min(max(setting, needed), 14 * 24)
+        return min(max(setting, needed), TimeInterval(GuideStore.activeForwardDays() * 24))
     }
     /// Jump-to-day target; nil = the live timeline anchored on now.
     @State private var jumpTarget: Date?
@@ -4740,7 +4851,10 @@ struct EPGGuideView: View {
                     // Days follow the EPG actually loaded (Logan 2026-09-10):
                     // back no further than the grid's history window, ahead
                     // to the last programme end in the store.
-                    GuideJumpSheet(daysBack: min(14, GuideStore.activeRetentionDays()), daysAhead: loadedEpgDaysAhead) { date in
+                    GuideJumpSheet(daysBack: GuideStore.guideDaysIsAllAvailable
+                                           ? guideStore.loadedBackDays()
+                                           : GuideStore.activeRetentionDays(),
+                                   daysAhead: loadedEpgDaysAhead) { date in
                         showJumpSheet = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                             if let date { jump(to: date) } else { snapToNow() }

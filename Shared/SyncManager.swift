@@ -147,7 +147,6 @@ final class SyncManager: ObservableObject {
     private let syncDoubleKeys  = ["networkTimeout"]
     private let syncIntKeys = [
         "maxRetries", "bgRefreshIntervalMins", "bgRefreshHour", "bgRefreshMinute",
-        "epgWindowHours"
     ]
     // `favoriteChannelIDs` carries the membership Set; `favoriteOrder`
     // carries the user's manual drag-reorder positions from the iOS

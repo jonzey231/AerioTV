@@ -28,7 +28,6 @@ struct NetworkSettingsView: View {
     @AppStorage("networkTimeout")          private var networkTimeout      = 15.0
     @AppStorage("maxRetries")              private var maxRetries          = 3
     @AppStorage("streamBufferSize")        private var streamBufferSize    = "default"
-    @AppStorage("epgWindowHours")           private var epgWindowHours      = 36          // default 36 hours
     /// Tint EPG program cells by their category (Sports / Movies /
     /// Kids / News). Mirrors the `CategoryColor.enabledKey` constant
     /// — default `true`, so the category palette is on out of the box
@@ -117,24 +116,9 @@ struct NetworkSettingsView: View {
                     }
                 }
 
-                SettingsSection("EPG Window", style: .plain) {
-                    let options: [(label: String, hours: Int)] = [
-                        ("6 hours",  6),
-                        ("12 hours", 12),
-                        ("24 hours", 24),
-                        ("36 hours", 36),
-                        ("48 hours", 48),
-                        ("72 hours", 72),
-                        ("All available", 0),
-                    ]
-                    ForEach(options, id: \.hours) { opt in
-                        TVSettingsSelectionRow(
-                            label: opt.label,
-                            isSelected: epgWindowHours == opt.hours,
-                            action: { epgWindowHours = opt.hours }
-                        )
-                    }
-                }
+                // Guide Window removed 2026-09-11 (Logan): the playlist's
+                // own Guide Days setting (Edit Playlist) now drives the
+                // guide window in both directions.
 
                 // Category-colour palette + EPG cache controls moved
                 // to `AppearanceSettingsView` in v1.6.8 — Settings →
@@ -213,41 +197,9 @@ struct NetworkSettingsView: View {
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
 
-                // MARK: EPG Window
-                Section {
-                    let options: [(label: String, hours: Int)] = [
-                        ("6 hours",  6),
-                        ("12 hours", 12),
-                        ("24 hours", 24),
-                        ("36 hours", 36),
-                        ("48 hours", 48),
-                        ("72 hours", 72),
-                        ("All available", 0),
-                    ]
-                    ForEach(options, id: \.hours) { opt in
-                        Button {
-                            epgWindowHours = opt.hours
-                        } label: {
-                            HStack {
-                                Text(opt.label)
-                                    .font(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                                Spacer()
-                                if epgWindowHours == opt.hours {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(theme.accent)
-                                }
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    }
-                } header: {
-                    Text("EPG Window").sectionHeaderStyle()
-                } footer: {
-                    Text("How far ahead to download program guide data. Larger windows take longer to download but show more upcoming programs.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
-                }
+                // Guide Window removed 2026-09-11 (Logan): the playlist's
+                // own Guide Days setting (Edit Playlist) now drives the
+                // guide window in both directions.
 
                 // Category-colour palette + EPG cache controls moved
                 // to `AppearanceSettingsView` in v1.6.8 — Settings →

@@ -339,17 +339,17 @@ struct EditServerPage: View {
                         }
                     }
 
-                    // Guide History (catch-up retention)
-                    SettingsSection("Guide History", style: .eyebrowCard) {
-                        Picker("Guide History", selection: $server.epgRetentionDays) {
+                    // Guide Days (window back AND ahead; Logan 2026-09-11)
+                    SettingsSection("Guide Days", style: .eyebrowCard) {
+                        Picker("Guide Days", selection: $server.epgRetentionDays) {
                             Text("1 day").tag(1)
                             Text("3 days").tag(3)
                             Text("7 days (default)").tag(7)
                             Text("14 days").tag(14)
-                            Text("30 days").tag(30)
+                            Text("All Available").tag(0)
                         }
                         .pickerStyle(.segmented)
-                        Text("How many days of already-aired guide data to keep for this playlist. Past shows on channels with catch-up can be replayed from the guide. Longer history means a larger guide cache.")
+                        Text("How many days of guide data to load, back and ahead. Dispatcharr only; other sources show what their guide carries.")
                             .font(.system(size: 22))
                             .foregroundColor(.textTertiary)
                             .padding(.top, 4)

@@ -180,7 +180,10 @@ final class ServerConnection {
     /// catch-up "Watch" action hangs off, so the cache must retain them
     /// after the upstream feed stops covering them (feeds carry little or
     /// no history). 7-day default matches the common provider catch-up
-    /// window; user-configurable in Edit Server ("Guide History").
+    /// window; user-configurable in Edit Playlist ("Guide Days"), which also
+    /// drives how many days AHEAD the guide loads (Logan 2026-09-11).
+    /// 0 = "All Available" (walk until the server runs dry, bounded at 30
+    /// days back / 60 ahead); a legacy stored 30 reads as All Available.
     /// Inline default = SwiftData lightweight migration, same pattern as
     /// every post-v1.6 field on this model.
     var epgRetentionDays: Int = 7

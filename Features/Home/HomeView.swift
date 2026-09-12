@@ -1338,8 +1338,10 @@ final class ChannelStore: ObservableObject {
     func primeXMLTVFromURL(_ url: URL, headers: [String: String] = [:]) async -> Bool {
         let now = Date()
         let windowStart = now.addingTimeInterval(-3600)
-        let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
-        let effectiveWindowHours = epgWindowHours > 0 ? epgWindowHours : 36
+        // Guide Days (Logan 2026-09-11): the playlist's Guide Days setting
+        // bounds this prime as well; the Settings > Network "Guide Window"
+        // preference is gone.
+        let effectiveWindowHours = GuideStore.activeForwardDays() * 24
         let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
 
         // Snapshot channels + server on the main actor before
