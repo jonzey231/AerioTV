@@ -227,6 +227,23 @@ final class GuideStore: ObservableObject {
     /// steady state into a dictionary hit. Grows only with programmes the
     /// user actually focuses; cleared on every EPG write.
     var programChannelMemo: [String: String] = [:]
+
+    /// Fill the memo in ONE pass over the resident map instead of paying an
+    /// O(channels x programmes) scan per focus move (2026-09-12 lag hunt: a
+    /// mid-session `category-apply` publish clears the memo via the didSet
+    /// above, and every focus move after it re-scanned up to 903 channels).
+    /// One pass over ~17k programmes is cheaper than two such scans, and it
+    /// happens at most once per EPG write.
+    func rebuildProgramChannelMemoIfNeeded() {
+        guard programChannelMemo.isEmpty, !programs.isEmpty else { return }
+        var memo: [String: String] = [:]
+        memo.reserveCapacity(programs.values.reduce(0) { $0 + $1.count })
+        for (chID, list) in programs {
+            for prog in list { memo[prog.id] = chID }
+        }
+        programChannelMemo = memo
+        debugLog("[SLOW] guide.memoRebuild \(memo.count) programme ids")
+    }
     @Published var isLoading = false
 
     /// Wall-clock age of the currently-loaded EPG data: the newest
@@ -4680,8 +4697,9 @@ struct EPGGuideView: View {
     /// the LIVE / NEW / REPEAT tags, so rows are shorter.
     @AppStorage("liveTVLayout") private var liveTVLayout = "basic"
     private var previewMode: Bool { liveTVLayout == "preview" }
-    @State private var previewProgram: GuideProgram?
-    @State private var previewChannel: ChannelDisplayItem?
+    // previewProgram / previewChannel used to live here as @State. Writing
+    // them on every focus move re-evaluated the entire grid; they now live in
+    // GuidePreviewState, which only the banner observes (2026-09-12).
     // Preview rows hold title, subtitle and the badge row (Logan 2026-09-06:
     // 80 pt clipped the badges against the subtitle).
     private var rowHeight: CGFloat { previewMode ? 96 : 110 }
@@ -4742,10 +4760,10 @@ struct EPGGuideView: View {
             .onAppear { seedPreviewIfNeeded() }
             // The Channel Preview banner is drawn by ChannelListView above the
             // pill row (focus order: rows, pills, banner, tab bar; Logan
-            // 2026-09-05). The guide only reports the focused programme.
-            .onChange(of: previewProgram?.id) { _, _ in
-                onPreviewProgramChange?(previewProgram, previewChannel)
-            }
+            // 2026-09-05). The guide reports the focused programme straight
+            // into GuidePreviewState, which ONLY the banner observes, so a
+            // focus move no longer re-renders the grid or its host
+            // (2026-09-12 lag hunt).
             #endif
             .task(id: channels.count) {
                 guard !channels.isEmpty else { return }
@@ -5136,11 +5154,12 @@ struct EPGGuideView: View {
                 // to the snap target instead of flashing the off-screen cell
                 // the engine landed on (recording 2026-09-05 15:18).
                 let reportPreview: @MainActor (String) -> Void = { id in
-                    guard previewMode, let chID,
-                          let prog = guideStore.programs[chID]?.first(where: { $0.id == id }),
-                          let ch = channels.first(where: { $0.id == chID }) else { return }
-                    previewProgram = prog
-                    previewChannel = ch
+                    Slow.time("focus.reportPreview") {
+                        guard previewMode, let chID,
+                              let prog = guideStore.programs[chID]?.first(where: { $0.id == id }),
+                              let ch = channels.first(where: { $0.id == chID }) else { return }
+                        GuidePreviewState.shared.set(prog, ch)
+                    }
                 }
                 #endif
                 defer { lastFocusedChannelForSnap = chID }
@@ -5155,7 +5174,9 @@ struct EPGGuideView: View {
                 }
                 let anchor = viewportAnchorTime
                 let progs = guideStore.programs[chID] ?? []
-                guard let landed = progs.first(where: { $0.id == pid }) else { return }
+                LiveCensus.noteScan(progs.count)
+                guard let landed = Slow.time("focus.landedLookup", { progs.first(where: { $0.id == pid }) })
+                else { return }
                 // Engine already picked the anchor-column cell: nothing to do.
                 if landed.start <= anchor && anchor < landed.end {
                     #if os(tvOS)
@@ -5163,8 +5184,9 @@ struct EPGGuideView: View {
                     #endif
                     return
                 }
-                guard let target = programID(forChannel: chID, containing: anchor),
-                      target != pid else {
+                guard let target = Slow.time("focus.anchorLookup", {
+                          programID(forChannel: chID, containing: anchor)
+                      }), target != pid else {
                     #if os(tvOS)
                     reportPreview(pid)
                     #endif
@@ -5177,7 +5199,7 @@ struct EPGGuideView: View {
                 debugLog("🧭 [GuideFocus] column snap ch=\(chID) landed=\(landed.start) -> anchor cell")
                 Task { @MainActor in
                     for _ in 0..<4 {
-                        focusedProgramID = target
+                        Slow.time("focus.columnSnapWrite") { focusedProgramID = target }
                         try? await Task.sleep(nanoseconds: 60_000_000)
                         if focusedProgramID == target { break }
                     }
@@ -5577,8 +5599,19 @@ struct EPGGuideView: View {
     /// The programme cell on `channelID` containing `date`, if composed data
     /// covers it.
     private func programID(forChannel channelID: String, containing date: Date) -> String? {
-        (guideStore.programs[channelID] ?? [])
-            .first { $0.start <= date && date < $0.end }?.id
+        // Binary search, not a linear .first (2026-09-12): every write path in
+        // GuideStore keeps each channel's programmes start-sorted, and with the
+        // resident window at 72 h a channel carries a few hundred entries that
+        // this ran over on every focus move and up to ~5x per horizontal press.
+        let list = guideStore.programs[channelID] ?? []
+        guard !list.isEmpty else { return nil }
+        var lo = 0, hi = list.count - 1, found = -1
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            if list[mid].start <= date { found = mid; lo = mid + 1 } else { hi = mid - 1 }
+        }
+        guard found >= 0, date < list[found].end else { return nil }
+        return list[found].id
     }
 
     /// The channel that owns programme `pid`. Programme ids are prefixed
@@ -5764,10 +5797,14 @@ struct EPGGuideView: View {
 
     private func channelID(ofProgram pid: String) -> String? {
         if let hit = guideStore.programChannelMemo[pid] { return hit }
-        let resolved = channels.first { ch in
+        Slow.time("focus.memoRebuild") { guideStore.rebuildProgramChannelMemoIfNeeded() }
+        if let hit = guideStore.programChannelMemo[pid] { return hit }
+        // Fallback scan: a programme id the resident map does not carry.
+        LiveCensus.noteScan(channels.count)
+        let resolved = Slow.time("focus.channelIDScan") { channels.first { ch in
             pid.hasPrefix("\(ch.id)-") &&
                 (guideStore.programs[ch.id]?.contains { $0.id == pid } ?? false)
-        }?.id
+        }?.id }
         if let resolved { guideStore.programChannelMemo[pid] = resolved }
         return resolved
     }
@@ -5815,7 +5852,7 @@ struct EPGGuideView: View {
             guard let target = programID(forChannel: chID, containing: anchor), target != pid else { return }
             debugLog("[GuideFocus] clock exit: retarget \(pid) -> \(target)")
             for _ in 0..<4 {
-                focusedProgramID = target
+                Slow.time("focus.clockExitWrite") { focusedProgramID = target }
                 try? await Task.sleep(nanoseconds: 60_000_000)
                 if focusedProgramID == target { break }
             }
@@ -6100,6 +6137,30 @@ struct EPGGuideView: View {
         return channel.name
     }
 
+    /// Start-sorted slice of `list` overlapping [from, to). Counts the
+    /// comparisons it makes into the [RENDER] line's "programs scanned".
+    private func visibleSlice(of list: [GuideProgram], from: Date, to: Date) -> [GuideProgram] {
+        guard !list.isEmpty else { return [] }
+        func lowerBound(_ date: Date) -> Int {
+            var lo = 0, hi = list.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if list[mid].start < date { lo = mid + 1 } else { hi = mid }
+            }
+            return lo
+        }
+        var startIdx = lowerBound(from)
+        let endIdx = lowerBound(to)
+        var walked = 0
+        while startIdx > 0, list[startIdx - 1].end > from {
+            startIdx -= 1
+            walked += 1
+        }
+        LiveCensus.noteScan(walked + 2 * Int(log2(Double(list.count)).rounded(.up)))
+        guard startIdx < endIdx else { return [] }
+        return Array(list[startIdx..<endIdx])
+    }
+
     private func programRow(for channel: ChannelDisplayItem) -> some View {
         ZStack(alignment: .leading) {
             Color.appBackground.opacity(0.5)
@@ -6121,8 +6182,14 @@ struct EPGGuideView: View {
             // SortDescriptor, mergeProgramInto re-sorts touched lists), and
             // .filter preserves order -- the old per-row per-pass .sorted was
             // a pure allocation + O(n log n) tax on the render path.
-            let sortedProgs = progs
-                .filter { $0.end > filterStart && $0.start < filterEnd }
+            // 2026-09-12: binary-search the window instead of filtering the
+            // whole per-channel list on every render pass. The lists are
+            // start-sorted (see above), and with the resident window at 72 h a
+            // channel carries a few hundred entries while only 3 to 8 are
+            // visible, so this row build is now O(log n + visible) rather than
+            // O(n). The backward walk picks up a long programme that started
+            // before the window and still overlaps it.
+            let sortedProgs = visibleSlice(of: progs, from: filterStart, to: filterEnd)
 
             if sortedProgs.isEmpty {
                 // No VISIBLE guide cells - truly EPG-less channels AND channels
@@ -6222,10 +6289,10 @@ struct EPGGuideView: View {
     /// Before any cell has focus, the banner shows what is on the first
     /// channel now (never an empty banner over a full guide).
     private func seedPreviewIfNeeded() {
-        guard previewMode, previewProgram == nil, let ch = channels.first,
+        guard previewMode, GuidePreviewState.shared.program == nil,
+              let ch = channels.first,
               let live = guideStore.liveProgram(for: ch.id) else { return }
-        previewProgram = live
-        previewChannel = ch
+        GuidePreviewState.shared.set(live, ch)
     }
     #endif
 

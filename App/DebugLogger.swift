@@ -811,6 +811,21 @@ enum InputProbe {
     }
 }
 
+/// Scoped main-thread stopwatch (Logan 2026-09-12: name the work, do not
+/// guess). Logs `[SLOW] <label> Nms` only when the block exceeds `threshold`,
+/// so the steady state costs one CACurrentMediaTime pair and nothing is logged.
+@MainActor
+enum Slow {
+    @discardableResult
+    static func time<T>(_ label: String, threshold: Double = 0.03, _ body: () -> T) -> T {
+        let t0 = CACurrentMediaTime()
+        let out = body()
+        let dt = CACurrentMediaTime() - t0
+        if dt >= threshold { debugLog("[SLOW] \(label) \(Int((dt * 1000).rounded()))ms") }
+        return out
+    }
+}
+
 /// Live view/layer census. `cell` / `row` are incremented from onAppear and
 /// decremented from onDisappear, so the number is what EXISTS, not what was
 /// evaluated (the [TAB]/[RENDER] body counters already cover evaluation).
@@ -821,6 +836,10 @@ enum LiveCensus {
     static func cellAppeared() { cells += 1 }
     static func cellDisappeared() { cells = max(0, cells - 1) }
     static func rowAppeared() { rows += 1 }
+    /// Programs compared while building each row's visible-cell slice. Shows
+    /// whether the per-row lookup over the resident 72 h map is the cost.
+    static var progsScanned = 0
+    static func noteScan(_ n: Int) { progsScanned += n }
     static func rowDisappeared() { rows = max(0, rows - 1) }
 
     /// Total CALayers under the key window. Walked once per second only.
@@ -899,7 +918,9 @@ final class FrameProbe: NSObject {
         let worstMS = Int((worst * 1000).rounded())
         let lastMS = Int((lastInterval * 1000).rounded())
         frames = 0; slowFrames = 0; worst = 0
-        debugLog("[RENDER] live cells \(LiveCensus.cells), live rows \(LiveCensus.rows), layers ~\(LiveCensus.layerCount()), frames \(f)/s, last frame \(lastMS)ms, worst \(worstMS)ms, frames over 100ms: \(slow)")
+        let scanned = LiveCensus.progsScanned
+        LiveCensus.progsScanned = 0
+        debugLog("[RENDER] live cells \(LiveCensus.cells), live rows \(LiveCensus.rows), layers ~\(LiveCensus.layerCount()), frames \(f)/s, last frame \(lastMS)ms, worst \(worstMS)ms, frames over 100ms: \(slow), programs scanned \(scanned)")
     }
 }
 #endif

@@ -8,6 +8,53 @@ import SwiftUI
 /// `GuideProgram` the cell already holds, handed over synchronously on the
 /// focus change, so the banner never waits on anything. Only the artwork
 /// arrives later, fading in over the text; a miss leaves the slot empty.
+/// Focused-programme state for the Channel Preview banner, lifted OUT of both
+/// EPGGuideView's and ChannelListView's `@State` (Logan 2026-09-12 lag hunt).
+///
+/// Before: every focus move wrote `previewProgram` on EPGGuideView, which
+/// re-evaluated the whole grid, and then forwarded the same value to
+/// ChannelListView's `@State`, which re-evaluated ChannelListView AND the grid
+/// inside it a second time. session11 measured that as 7 rows and 24 cells
+/// re-evaluated 11 times per second while holding Down, with CADisplayLink
+/// frames of 852 to 2035 ms. The banner is the only view that needs the
+/// programme, so only the banner observes it now.
+@MainActor
+final class GuidePreviewState: ObservableObject {
+    static let shared = GuidePreviewState()
+    @Published private(set) var program: GuideProgram?
+    @Published private(set) var channel: ChannelDisplayItem?
+    /// Flips at most once per guide session (nothing focused -> something
+    /// focused). The host's layout gate observes ONLY this, so a focus move
+    /// between two programmes no longer re-renders the host.
+    @Published private(set) var hasProgram = false
+
+    /// Equal-value writes still notify every observer (memory:
+    /// feedback_published_write_on_equal_value), so each field is guarded.
+    func set(_ p: GuideProgram?, _ c: ChannelDisplayItem?) {
+        if program?.id != p?.id { program = p }
+        if channel?.id != c?.id { channel = c }
+        if hasProgram != (p != nil) { hasProgram = (p != nil) }
+    }
+}
+
+/// Thin observer so the banner re-renders on a focus move and its host does
+/// not.
+struct GuidePreviewBannerHost: View {
+    @ObservedObject private var state = GuidePreviewState.shared
+    let shortTimeFormatter: DateFormatter
+    var onSelectDescription: (() -> Void)? = nil
+    var onDescriptionFocusChange: ((Bool) -> Void)? = nil
+    var focusRequest: Binding<Bool> = .constant(false)
+
+    var body: some View {
+        GuidePreviewBanner(program: state.program, channel: state.channel,
+                           shortTimeFormatter: shortTimeFormatter,
+                           onSelectDescription: onSelectDescription,
+                           onDescriptionFocusChange: onDescriptionFocusChange,
+                           focusRequest: focusRequest)
+    }
+}
+
 struct GuidePreviewBanner: View {
     let program: GuideProgram?
     let channel: ChannelDisplayItem?

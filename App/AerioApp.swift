@@ -112,6 +112,7 @@ final class MainThreadWatchdog: @unchecked Sendable {
         let observer = CFRunLoopObserverCreateWithHandler(nil, activities, true, 0) { [weak self] _, activity in
             guard let self else { return }
             self.lock.lock()
+            let label = self.pendingRenderLabel
             if activity == .beforeWaiting {
                 // The turn that followed the publish has finished.
                 self.pendingRenderLabel = nil
@@ -120,19 +121,42 @@ final class MainThreadWatchdog: @unchecked Sendable {
                 self.mainRunLoopStage = "working"
             }
             self.lock.unlock()
+            // Direct turn timing (2026-09-12). The 250ms ping under-reported:
+            // it runs on a utility queue and measures from the moment it
+            // actually got CPU, so a block that also starved the watchdog
+            // thread is invisible, and session11 showed 1.5-2.0s CADisplayLink
+            // frames with no matching [HANG]. The run loop observer runs ON
+            // main and cannot be starved by main's own work, so a long layout /
+            // focus / commit turn is always reported, and named when a publish
+            // label is still attached.
+            let now = CFAbsoluteTimeGetCurrent()
+            if activity == .beforeWaiting {
+                let start = self.turnStart
+                self.turnStart = 0
+                if start > 0 {
+                    let ms = Int((now - start) * 1000)
+                    if ms >= 100 {
+                        debugLog("[HANG] main runloop turn \(ms)ms\(label.map { " after \($0)" } ?? "")")
+                    }
+                }
+            } else {
+                self.turnStart = now
+            }
         }
         CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
         runLoopObserver = observer
     }
 
     private var mainRunLoopStage = "unknown"
+    /// Set at afterWaiting, read at beforeWaiting. Main-thread only.
+    private var turnStart: CFAbsoluteTime = 0
 
     // MARK: Detection
 
     func start() {
         guard !started else { return }
         started = true
-        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .userInitiated))
         // Leeway keeps the timer from waking the CPU on its own schedule.
         t.schedule(deadline: .now() + 2, repeating: 0.25, leeway: .milliseconds(50))
         t.setEventHandler { [weak self] in self?.ping() }

@@ -367,8 +367,11 @@ struct ChannelListView: View {
     @AppStorage("liveTVLayout") private var liveTVLayout = "basic"
     #if os(tvOS)
     /// Channel Preview banner state, reported by the guide (focused cell).
-    @State private var previewProgram: GuideProgram?
-    @State private var previewChannel: ChannelDisplayItem?
+    /// Mirrors GuidePreviewState.hasProgram only (nil -> non-nil, at most once
+    /// per guide session). The focused PROGRAMME itself is no longer held here:
+    /// writing it on every focus move re-rendered this view and the whole guide
+    /// inside it (2026-09-12 lag hunt).
+    @State private var hasPreviewProgram = false
     @State private var bannerInfoTarget: ProgramInfoTarget?
     /// Global tops of the guide host and the guide itself: the sidebar pane
     /// is padded by the difference so it starts at the time row.
@@ -546,7 +549,7 @@ struct ChannelListView: View {
                 // the shared chain: a first attempt sat on the List view's
                 // chain, which the Guide never renders (trace 13:13).
                 .onReceive(NotificationCenter.default.publisher(for: .aerioLiveTVEntryFromTop)) { _ in
-                    if previewMode, previewProgram != nil {
+                    if previewMode, hasPreviewProgram {
                         bannerFocusRequest = true
                     } else {
                         NotificationCenter.default.post(name: .guideScrollToTop, object: nil)
@@ -1048,11 +1051,13 @@ struct ChannelListView: View {
                                 .padding(.bottom, 2)
                         }
                         if previewMode {
-                            GuidePreviewBanner(program: previewProgram, channel: previewChannel,
-                                               shortTimeFormatter: ClockFormat.guideShort(),
+                            GuidePreviewBannerHost(shortTimeFormatter: ClockFormat.guideShort(),
                                                onSelectDescription: { openBannerInfo() },
                                                onDescriptionFocusChange: { bannerDescriptionFocused = $0 },
                                                focusRequest: $bannerFocusRequest)
+                                .onReceive(GuidePreviewState.shared.$hasProgram) { has in
+                                    if hasPreviewProgram != has { hasPreviewProgram = has }
+                                }
                                 .transaction { $0.animation = nil }
                                 .sheet(item: $bannerInfoTarget) { ProgramInfoView(target: $0) }
                                 .focusSection()
@@ -1950,21 +1955,16 @@ struct ChannelListView: View {
         )
     }
 
-    /// tvOS Channel Preview only; nil elsewhere so the guide skips the report.
-    private var previewProgramHandler: ((GuideProgram?, ChannelDisplayItem?) -> Void)? {
-        #if os(tvOS)
-        return { prog, ch in
-            previewProgram = prog
-            previewChannel = ch
-        }
-        #else
-        return nil
-        #endif
-    }
+    /// The guide now writes GuidePreviewState directly, so there is nothing to
+    /// forward. Kept as nil on both platforms so the guide's optional callback
+    /// stays unused rather than re-introducing a host-level @State write on the
+    /// focus path.
+    private var previewProgramHandler: ((GuideProgram?, ChannelDisplayItem?) -> Void)? { nil }
 
     #if os(tvOS)
     private func openBannerInfo() {
-        guard let prog = previewProgram, let ch = previewChannel else { return }
+        guard let prog = GuidePreviewState.shared.program,
+              let ch = GuidePreviewState.shared.channel else { return }
         bannerInfoTarget = ProgramInfoTarget(
             channelName: ch.name, title: prog.title, start: prog.start, end: prog.end,
             description: prog.description, category: prog.category, programID: prog.programID,
