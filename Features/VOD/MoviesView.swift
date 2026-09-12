@@ -372,7 +372,12 @@ struct MoviesView: View {
     /// Content offset past which the tab bar hides: top inset (60) + hero
     /// (420) + carousel catcher and spacing. Below it the hero is still on
     /// screen and Up from any hero button reaches the pill natively.
-    private let heroHideThreshold: CGFloat = 560
+    /// The Continue Watching header (24 pt semibold) plus the shelf gap
+    /// under it pushes the hero down by this much (Logan 2026-09-11).
+    private var heroHeaderBlockHeight: CGFloat { 37 }
+    private var heroHideThreshold: CGFloat {
+        560 + (heroIsContinueWatching ? heroHeaderBlockHeight : 0)
+    }
     /// Offsets beyond roughly one screen use the position scroll (an
     /// animated reader scroll crawled through every row from deep in the
     /// grid); shorter hops use the reader scroll, which animates in step
@@ -1015,6 +1020,13 @@ struct MoviesView: View {
     /// Logan 2026-09-04).
     @State private var heroBackdrops: [String: URL] = [:]
 
+    /// True when the hero is the Continue Watching hero (at least one page
+    /// carries a WatchProgress row) rather than the single library fallback
+    /// page (newest addition / first title), which is never labeled.
+    private var heroIsContinueWatching: Bool {
+        heroPages.contains { $0.progress != nil }
+    }
+
     private var heroPagesKey: String {
         let progress = movieProgress.prefix(12).map { "\($0.vodID)|\($0.positionMs)" }.joined(separator: ",")
         return "\(progress)#\(libraryItems.count)#\(recentlyAdded.first?.id ?? "")#\(effectiveHiddenGroups.count)#\(isLoadingLibrary)"
@@ -1453,14 +1465,21 @@ struct MoviesView: View {
                             // poster row is gone from this tab.
                             let pages = heroPages
                             if !pages.isEmpty {
-                                #if os(iOS)
-                                if UIDevice.current.userInterfaceIdiom == .phone {
+                                // Section header above the hero (Logan
+                                // 2026-09-11), styled and inset exactly like
+                                // the shelf titles below ("Watchlist"), with a
+                                // shelf's title-to-cards gap under it. Only
+                                // for the Continue Watching hero: the library
+                                // fallback page (newest addition) carries no
+                                // progress and was never labeled.
+                                VStack(alignment: .leading, spacing: shelfTitleSpacing) {
+                                if heroIsContinueWatching {
                                     Text("Continue Watching")
                                         .font(.headlineSmall)
                                         .foregroundColor(.textPrimary)
                                         .padding(.horizontal, 16)
+                                        .padding(.leading, contentLeadingInset)
                                 }
-                                #endif
                                 MoviesHeroCarousel(
                                     pages: pages,
                                     headers: dispatcharrHeaders,
@@ -1524,6 +1543,7 @@ struct MoviesView: View {
                                 #if os(tvOS)
                                 .focusSection()
                                 #endif
+                                }
                             }
 
                             let watchlist = watchlistItems

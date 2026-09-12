@@ -231,6 +231,26 @@ struct DVRView: View {
         return done.first
     }
 
+    /// Title for the section header above the hero, matching the phone
+    /// deck's wording (Logan 2026-09-11).
+    private var continueWatchingTitle: String {
+        let cw = continueWatching
+        return (!cw.isEmpty && cw.allSatisfy(\.isInProgress)) ? "Recording Now" : "Continue Watching"
+    }
+
+    /// True when the hero is the Continue Watching hero (a capture running,
+    /// or a finished recording with a saved position short of the end)
+    /// rather than the library fallback pick (the newest finished
+    /// recording), which carries no progress and is never labeled.
+    private var heroIsContinueWatching: Bool {
+        #if os(tvOS)
+        guard let lead = heroPages.first else { return false }
+        #else
+        guard let lead = heroRecording else { return false }
+        #endif
+        return continueWatching.contains { $0.id == lead.id }
+    }
+
     private var headers: [String: String] { activeServer?.authHeaders ?? [:] }
 
     #if os(tvOS)
@@ -693,6 +713,16 @@ struct DVRView: View {
                 }
                 #else
                 if let hero = heroRecording {
+                    // Section header above the hero (Logan 2026-09-11), styled
+                    // and inset exactly like the shelf titles below, with a
+                    // shelf's title-to-cards gap under it. Not focusable.
+                    VStack(alignment: .leading, spacing: 8) {
+                    if heroIsContinueWatching {
+                        Text(continueWatchingTitle)
+                            .font(.headlineSmall)
+                            .foregroundColor(.textPrimary)
+                            .padding(.horizontal, sectionInset)
+                    }
                     #if os(tvOS)
                     // Down from the tab bar lands on whatever is geometrically
                     // below the DVR pill (trace 2026-09-05 01:31: the second
@@ -726,6 +756,7 @@ struct DVRView: View {
                             onInfo: { showInfo(hero) },
                             menu: { menuItems(for: hero) })
                     #endif
+                    }
                 }
                 #endif
                 if !recordingNow.isEmpty {
@@ -860,7 +891,11 @@ struct DVRView: View {
         .padding(.horizontal, sectionInset)
     }
 
-    private var heroHideThreshold: CGFloat { heroRecording != nil ? 620 : 260 }
+    /// The Continue Watching header (24 pt semibold) plus the 8 pt shelf gap
+    /// under it pushes the hero down by 37 pt (Logan 2026-09-11).
+    private var heroHideThreshold: CGFloat {
+        (heroRecording != nil ? 620 : 260) + (heroIsContinueWatching ? 37 : 0)
+    }
 
     private var sectionSpacing: CGFloat {
         #if os(tvOS)
@@ -1527,13 +1562,9 @@ struct DVRHero<Menu: View>: View {
                 }
                 .font(.system(size: metaSize - 2, weight: .bold))
                 .foregroundColor(.red)
-            } else if progress > 0 {
-                #if os(tvOS)
-                Text("Continue watching")
-                    .font(.system(size: metaSize - 2, weight: .bold))
-                    .foregroundColor(.accentPrimary)
-                #endif
             }
+            // The page's "Continue Watching" section header above the hero
+            // replaces the in-card label (Logan 2026-09-11).
             Text(recording.programTitle.isEmpty ? "Recording" : recording.programTitle)
                 .font(titleFont)
                 .foregroundColor(.textPrimary)
