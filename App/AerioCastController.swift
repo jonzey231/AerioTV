@@ -2368,12 +2368,18 @@ struct RemoteSessionCard: View {
     let status: String
     var artURL: String? = nil
     let isPlaying: Bool
+    /// Android parity (CastMiniController.showTransport): hidden while nothing
+    /// is playing on the other screen yet, since there is nothing to pause.
+    var showTransport: Bool = true
     let onTap: () -> Void
     let onTogglePlayPause: () -> Void
     let onStop: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
+            // Android CastMiniController's leading tile: 40 pt, 6 pt corners,
+            // the page background behind a 22 pt accent-tinted transport glyph
+            // (or 36 pt art when the session has some).
             ZStack {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(Color.primary.opacity(0.08))
@@ -2402,15 +2408,17 @@ struct RemoteSessionCard: View {
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            Button(action: onTogglePlayPause) {
-                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(ThemeManager.shared.accent)
-                    .frame(width: 40, height: 40)
-                    .contentShape(Rectangle())
+            if showTransport {
+                Button(action: onTogglePlayPause) {
+                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(ThemeManager.shared.accent)
+                        .frame(width: 40, height: 40)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isPlaying ? "Pause" : "Play")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isPlaying ? "Pause" : "Play")
             Button(action: onStop) {
                 Image(systemName: "xmark")
                     .font(.system(size: 15, weight: .semibold))
@@ -2425,20 +2433,15 @@ struct RemoteSessionCard: View {
         .padding(.vertical, 8)
         // Android CastTransportCard: an INSET rounded card floating above the
         // tab bar, never a full-width banner touching the screen edges
-        // (Logan 2026-09-12). 16 pt side margins, ~8 pt of air above the tab
-        // bar, 16 pt corners, elevated fill with a thin accent hairline.
-        .background {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.regularMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(ThemeManager.shared.accent.opacity(0.10), lineWidth: 1)
-                }
-                .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        // (Logan 2026-09-12). 12 pt side margins (the card's own clearance above
+        // the bar is owned by RemoteSessionCardDock), 20 pt corners like the
+        // Android card, and the SAME glass the iOS 26/27 tab bar underneath it
+        // draws, so it reads as part of that bar instead of a foreign panel
+        // (Logan: "match the nav bar coloring/design so it looks like it
+        // belongs"). Pre-26 keeps the material fill.
+        .background { Self.cardSurface }
+        .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
+        .padding(.horizontal, 12)
         .contentShape(Rectangle())
         .onTapGesture {
             debugLog("[Cast] card tap")
@@ -2447,6 +2450,33 @@ struct RemoteSessionCard: View {
         .onAppear { debugLog("[Cast] card show") }
         .onDisappear { debugLog("[Cast] card hide") }
         .accessibilityElement(children: .contain)
+    }
+
+    /// 20 pt like the Android card, which also reads close to the iOS 26/27
+    /// floating tab bar's own corner.
+    private static let radius: CGFloat = 20
+
+    /// Liquid Glass on iOS 26+ (the measured match for the system bar, same
+    /// call `MinimizedTabButton` uses for the minimized pill), `.regularMaterial`
+    /// below it. The Android card's 1 pt accent hairline is kept in both.
+    @ViewBuilder
+    private static var cardSurface: some View {
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        if #available(iOS 26.0, *) {
+            shape
+                .fill(.clear)
+                .glassEffect(.regular, in: shape)
+                .overlay {
+                    shape.strokeBorder(ThemeManager.shared.accent.opacity(0.10), lineWidth: 1)
+                }
+        } else {
+            shape
+                .fill(.regularMaterial)
+                .overlay {
+                    shape.strokeBorder(ThemeManager.shared.accent.opacity(0.10), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
+        }
     }
 }
 

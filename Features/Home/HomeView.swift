@@ -5076,15 +5076,20 @@ struct MainTabView: View {
         #endif
         // safeAreaInset on the outer ZStack pushes the entire TabView (including its tab bar)
         // upward so the tab bar sits above the mini player bar and remains tappable.
+        //
+        // 2026-09-12: that claim does NOT hold for the cast card. The iOS 26/27
+        // TabView is UITabBarController-backed and lays its UITabBar at the
+        // bottom of its OWN bounds, and every tab's scroll view carries
+        // `ignoresSafeArea(.container, edges: .bottom)` (GH #20 follow-up), so
+        // an inset added out here reserved nothing either the bar or the lists
+        // respected: the card rendered ON TOP of the tab labels (Logan's
+        // iPhone, iOS 27). The card is now an overlay lifted by the MEASURED
+        // tab bar height instead (see RemoteSessionCardDock). The mini player
+        // bar keeps the inset: it is mutually exclusive with the card (rule 5)
+        // and its long-standing geometry is not part of this change.
         #if os(iOS)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
-                // Rule 2 (Logan 2026-09-12): ONE small card above the bottom
-                // nav bar on every tab while a Google Cast, AirPlay or
-                // companion session is live. Tap opens the remote controls
-                // sheet (rule 3); the X ends the session and just closes
-                // (rule 4). Styled off the Android CastMiniController.
-                remoteSessionCard
                 // v1.6.13: only iPhone uses the bottom MiniPlayerBar.
                 // iPad uses a top-right corner mini (handled inside the
                 // body's main ZStack — see the iPad GeometryReader
@@ -5100,6 +5105,16 @@ struct MainTabView: View {
                     MiniPlayerBar(item: item, nowPlaying: nowPlaying, dragOffset: $miniPlayerDragOffset)
                 }
             }
+        }
+        // Rule 2 (Logan 2026-09-12): ONE small card ABOVE the bottom nav bar on
+        // every tab while a Google Cast, AirPlay or companion session is live.
+        // Tap opens the remote controls sheet (rule 3); the X ends the session
+        // and just closes (rule 4). Styled off the Android CastTransportCard /
+        // CastMiniController. The dock pins it 8 pt above the measured tab bar,
+        // 12 pt in from both screen edges, and publishes its height so the tabs
+        // can scroll their last row clear of it.
+        .overlay(alignment: .bottom) {
+            RemoteSessionCardDock { remoteSessionCard }
         }
         // Task #225 follow-up: the global pill used to open the companion-ONLY
         // CompanionPickerSheet, which has no Google Cast section and never
@@ -5210,6 +5225,8 @@ struct MainTabView: View {
                         .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
                 artURL: content?.artURL,
                 isPlaying: castController.remoteIsPlaying,
+                // Android parity: no transport button until something plays.
+                showTransport: content != nil,
                 onTap: { showRemoteControls = true },
                 onTogglePlayPause: { castController.remoteTogglePlayPause() },
                 onStop: { castController.stopCasting() }
@@ -5223,6 +5240,7 @@ struct MainTabView: View {
                 status: companionClient.nowPlaying.isEmpty
                     ? "Select a Channel" : "Controlling \(device)",
                 isPlaying: companionClient.remoteIsPlaying,
+                showTransport: !companionClient.nowPlaying.isEmpty,
                 onTap: { showRemoteControls = true },
                 onTogglePlayPause: { companionClient.togglePlayPause() },
                 onStop: { companionClient.disconnect() }
@@ -5603,6 +5621,11 @@ struct MainTabView: View {
         .id(tvTabViewIdentity)
         #endif
         .tint(theme.accent)
+        // Cast card clearance: the tabs' scroll views get a bottom content
+        // inset equal to the card's height while a session is live.
+        #if os(iOS)
+        .aerioRemoteCardContentInset()
+        #endif
         // Tab switch latency probe (Logan 2026-09-06, "visual hang").
         .onChange(of: selectedTab) { _, _ in
             #if os(iOS)
@@ -7757,6 +7780,121 @@ final class TabBarCollapseState: ObservableObject {
         }
         walk(root)
         return out
+    }
+}
+
+/// Geometry for the remote-session (cast) card, measured from the LIVE view
+/// hierarchy instead of guessed. The card used to ride a `safeAreaInset` on the
+/// outer ZStack, which the UITabBarController-backed TabView ignores (it puts
+/// its bar at the bottom of its own bounds) and which every tab's
+/// `ignoresSafeArea(.container, edges: .bottom)` scroll view ignores too, so the
+/// card landed ON the tab labels (Logan's iPhone, iOS 27, 2026-09-12).
+@MainActor
+final class RemoteSessionCardMetrics: ObservableObject {
+    static let shared = RemoteSessionCardMetrics()
+
+    /// Clearance between the card and the tab bar (Logan 2026-09-12).
+    static let gap: CGFloat = 8
+
+    /// Top edge of the system tab bar in WINDOW coordinates, 0 until measured.
+    @Published private(set) var tabBarTopInWindow: CGFloat = 0
+
+    /// Card height including its own margins, for the tabs' bottom content
+    /// inset so the last row can scroll clear of the card.
+    @Published private(set) var contentInset: CGFloat = 0
+
+    private var window: UIWindow? {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first { $0.isKeyWindow }
+    }
+
+    /// Reads the bar's UNTRANSFORMED top edge: `TabBarCollapseState` collapses
+    /// the bar with a layer transform AND moves its anchor point, so `frame`
+    /// and `center` both lie while it is minimized. Deriving the origin from
+    /// `layer.position` and `layer.anchorPoint` keeps the card still during a
+    /// collapse instead of sliding it down with the shrinking bar.
+    func measureTabBar() {
+        guard let window,
+              let bar = Self.firstTabBar(in: window),
+              let superview = bar.superview,
+              bar.bounds.height > 0 else { return }
+        let layer = bar.layer
+        let originY = layer.position.y - layer.anchorPoint.y * bar.bounds.height
+        let top = superview.convert(CGPoint(x: 0, y: originY), to: window).y
+        guard top > 0 else { return }
+        if abs(top - tabBarTopInWindow) > 0.5 { tabBarTopInWindow = top }
+    }
+
+    func setCardHeight(_ height: CGFloat) {
+        let value = height > 1 ? height : 0
+        if abs(value - contentInset) > 0.5 { contentInset = value }
+    }
+
+    private static func firstTabBar(in root: UIView) -> UITabBar? {
+        if let bar = root as? UITabBar { return bar }
+        for sub in root.subviews {
+            if let bar = firstTabBar(in: sub) { return bar }
+        }
+        return nil
+    }
+}
+
+/// Pins the cast card 8 pt above the measured tab bar on every tab. A
+/// `GeometryReader` gives the dock's own bottom edge in window coordinates, so
+/// the lift is `(dock bottom - bar top) + 8` and needs no assumption about
+/// whether the container is safe-area inset.
+private struct RemoteSessionCardDock<Content: View>: View {
+    @ObservedObject private var metrics = RemoteSessionCardMetrics.shared
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        GeometryReader { geo in
+            let dockBottom = geo.frame(in: .global).maxY
+            let barTop = metrics.tabBarTopInWindow
+            // Not measured yet: fall back to the stock 49 pt bar plus the home
+            // indicator so the first frame is never ON the bar.
+            let lift = barTop > 0
+                ? max(RemoteSessionCardMetrics.gap, dockBottom - barTop + RemoteSessionCardMetrics.gap)
+                : 49 + geo.safeAreaInsets.bottom + RemoteSessionCardMetrics.gap
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                content
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                        RemoteSessionCardMetrics.shared.setCardHeight(height)
+                    }
+                    .padding(.bottom, lift)
+            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
+            .onAppear { metrics.measureTabBar() }
+            .onChange(of: geo.size) { _, _ in metrics.measureTabBar() }
+            .task {
+                // The bar may not be in the hierarchy yet on the first frame.
+                metrics.measureTabBar()
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                metrics.measureTabBar()
+            }
+        }
+        .ignoresSafeArea(.container, edges: .bottom)
+        .allowsHitTesting(true)
+    }
+}
+
+/// Bottom content inset the cast card needs so a list's last row can scroll
+/// clear of it. Applied ONCE on the TabView: `contentMargins` rides the
+/// environment, so every tab's scroll view picks it up, and it is 0 whenever no
+/// card is showing (no behavior change without a session).
+private struct RemoteCardContentInset: ViewModifier {
+    @ObservedObject private var metrics = RemoteSessionCardMetrics.shared
+    func body(content: Content) -> some View {
+        content.contentMargins(.bottom, metrics.contentInset, for: .scrollContent)
+    }
+}
+
+extension View {
+    func aerioRemoteCardContentInset() -> some View {
+        modifier(RemoteCardContentInset())
     }
 }
 

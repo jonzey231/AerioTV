@@ -4022,20 +4022,50 @@ struct TVRemoteInputView: UIViewRepresentable {
 /// `configuredTimeOffsetFromLive`, 6 (the default) to 18.
 enum LiveEdgeHoldback {
     private static let defaultsKey = "playback.liveEdgeHoldback"
+    /// When each key was last learned (epoch seconds). A SEPARATE dictionary so
+    /// the value format above is untouched: an install written by an older
+    /// build has values and no stamps, which reads as expired (below).
+    private static let learnedAtKey = "playback.liveEdgeHoldbackAt"
     static let base = 6.0
+    /// Learned hold-back expires after 30 minutes (Logan 2026-09-12). It only
+    /// ever grew before, so one bad night pinned a channel forever: an AAC bug
+    /// trained ESPN HD to 12 s and every later tune joined 12 s back even
+    /// though the feed was fine. A fresh stall re-learns it exactly as before.
+    static let ttl: TimeInterval = 30 * 60
 
     static func offset(for key: String) -> Double {
         let map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]
-        return map?[key] ?? base
+        guard let learned = map?[key], learned > base else { return base }
+        let stamps = UserDefaults.standard.dictionary(forKey: learnedAtKey) as? [String: Double]
+        let age = stamps?[key].map { Date().timeIntervalSince1970 - $0 }
+        // Missing stamp (pre-2026-09-12 value) or older than the TTL: discard
+        // and fall back to the base computation at the call site.
+        guard let age, age >= 0, age < ttl else {
+            debugLog(String(format: "[HOLDBACK] learned %.0fs expired (age %.0fm), using base %.0fs",
+                            learned, (age ?? .greatestFiniteMagnitude) / 60, base))
+            return base
+        }
+        return learned
     }
 
     static func record(_ seconds: Double, for key: String) {
         var map = (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]) ?? [:]
-        map[key] = min(18, max(base, seconds))
+        var stamps = (UserDefaults.standard.dictionary(forKey: learnedAtKey) as? [String: Double]) ?? [:]
+        let value = min(18, max(base, seconds))
+        map[key] = value
+        // Stamp every learn (a raise OR a re-confirm by another stall) so the
+        // 30-minute clock restarts while a channel keeps stalling.
+        let now = Date().timeIntervalSince1970
+        stamps[key] = now
         // Bounded: one entry per channel the user has stalled on, and a
         // playlist change rotates keys out on its own.
-        if map.count > 200 { map.removeAll() }
+        if map.count > 200 { map.removeAll(); stamps.removeAll() }
+        stamps = stamps.filter { map[$0.key] != nil }
         UserDefaults.standard.set(map, forKey: defaultsKey)
+        UserDefaults.standard.set(stamps, forKey: learnedAtKey)
+        debugLog(String(format: "[HOLDBACK] learned %.0fs at %@ (expires in %.0fm)",
+                        value, ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: now)),
+                        ttl / 60))
     }
 }
 
