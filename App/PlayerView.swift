@@ -4037,15 +4037,41 @@ enum LiveEdgeHoldback {
         let map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]
         guard let learned = map?[key], learned > base else { return base }
         let stamps = UserDefaults.standard.dictionary(forKey: learnedAtKey) as? [String: Double]
-        let age = stamps?[key].map { Date().timeIntervalSince1970 - $0 }
-        // Missing stamp (pre-2026-09-12 value) or older than the TTL: discard
-        // and fall back to the base computation at the call site.
-        guard let age, age >= 0, age < ttl else {
+        let stamp = stamps?[key]
+        // No stamp at all (a value written by a pre-2026-09-12 build): there is
+        // no age to print. The old code turned the missing stamp into
+        // .greatestFiniteMagnitude and logged an absurd "age 2996155224770...m"
+        // on the Apple TV, and it did that on EVERY tune because the value was
+        // never cleared. Say what actually happened, once.
+        guard let stamp else {
+            debugLog(String(format: "[HOLDBACK] learned %.0fs has no stamp, treating as expired, using base %.0fs",
+                            learned, base))
+            forget(key)
+            return base
+        }
+        let age = Date().timeIntervalSince1970 - stamp
+        // Expired (or a stamp from the future, e.g. the clock moved back):
+        // discard and fall back to the base computation at the call site.
+        guard age >= 0, age < ttl else {
+            // Cap the printed age so a nonsense stamp can never produce a
+            // nonsense number; the clear below stops it repeating next tune.
+            let minutes = min(max(age, 0) / 60, 9999)
             debugLog(String(format: "[HOLDBACK] learned %.0fs expired (age %.0fm), using base %.0fs",
-                            learned, (age ?? .greatestFiniteMagnitude) / 60, base))
+                            learned, minutes, base))
+            forget(key)
             return base
         }
         return learned
+    }
+
+    /// Drop one stale learned value with its stamp, so the expiry line above
+    /// logs once instead of on every tune of that channel.
+    private static func forget(_ key: String) {
+        var map = (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]) ?? [:]
+        var stamps = (UserDefaults.standard.dictionary(forKey: learnedAtKey) as? [String: Double]) ?? [:]
+        guard map.removeValue(forKey: key) != nil || stamps.removeValue(forKey: key) != nil else { return }
+        UserDefaults.standard.set(map, forKey: defaultsKey)
+        UserDefaults.standard.set(stamps, forKey: learnedAtKey)
     }
 
     static func record(_ seconds: Double, for key: String) {

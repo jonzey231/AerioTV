@@ -5219,17 +5219,21 @@ struct MainTabView: View {
                 // Rule 1: a session connected with nothing playing reads as
                 // the invitation, not as a channel.
                 title: content?.title ?? "Casting to \(device)",
-                status: content == nil
-                    ? "Select a Channel"
-                    : [content?.subtitle, "Casting to \(device)"]
-                        .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
+                // Android card: program on its own middle line, the accent
+                // status line last.
+                programTitle: content?.subtitle,
+                status: content == nil ? "Select a Channel" : "Casting to \(device)",
                 artURL: content?.artURL,
                 isPlaying: castController.remoteIsPlaying,
                 // Android parity: no transport button until something plays.
                 showTransport: content != nil,
                 onTap: { showRemoteControls = true },
                 onTogglePlayPause: { castController.remoteTogglePlayPause() },
-                onStop: { castController.stopCasting() }
+                // X = stop playback on the TV AND close the card.
+                onStop: {
+                    debugLog("[Remote] X: stop + close")
+                    castController.stopCasting()
+                }
             )
         case .companion:
             let device = companionClient.connectedTVName ?? "TV"
@@ -5243,7 +5247,10 @@ struct MainTabView: View {
                 showTransport: !companionClient.nowPlaying.isEmpty,
                 onTap: { showRemoteControls = true },
                 onTogglePlayPause: { companionClient.togglePlayPause() },
-                onStop: { companionClient.disconnect() }
+                // X = stop playback on the TV AND close the card, same as the
+                // other two transports. "Disconnect" (leave the TV playing)
+                // lives in the controls sheet.
+                onStop: { companionClient.stopPlaybackAndDisconnect() }
             )
         case .airPlay:
             let device = airPlay.deviceName ?? "AirPlay"
@@ -5251,13 +5258,17 @@ struct MainTabView: View {
             RemoteSessionCard(
                 transport: .airPlay,
                 title: item?.name ?? "AirPlay",
-                status: [item?.currentProgram, "Playing on \(device)"]
-                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
+                programTitle: item?.currentProgram,
+                status: "Playing on \(device)",
                 artURL: item?.logoURL?.absoluteString,
                 isPlaying: airPlay.isPlaying,
                 onTap: { showRemoteControls = true },
                 onTogglePlayPause: { airPlay.togglePlayPause() },
-                onStop: { airPlay.stop() }
+                // X = stop playback on the TV AND close the card.
+                onStop: {
+                    debugLog("[Remote] X: stop + close")
+                    airPlay.stop()
+                }
             )
         case nil:
             EmptyView()
@@ -5296,12 +5307,18 @@ struct MainTabView: View {
                 artURL: nil,
                 statusText: "Controlling \(companionClient.connectedTVName ?? "TV")",
                 isPlaying: companionClient.remoteIsPlaying,
-                stopLabel: "Disconnect",
+                stopLabel: "Stop and close",
                 onTogglePlayPause: { companionClient.togglePlayPause() },
                 onChannelUp: { companionClient.flipChannel(1) },
                 onChannelDown: { companionClient.flipChannel(-1) },
+                // Same semantic as the card's X: stop the TV, then close.
                 onStop: {
-                    companionClient.disconnect()
+                    companionClient.stopPlaybackAndDisconnect()
+                    showRemoteControls = false
+                },
+                // Companion-only: drop the link, TV keeps playing.
+                onDisconnect: {
+                    companionClient.disconnectLeavingTVPlaying()
                     showRemoteControls = false
                 },
                 companion: companionClient  // full options (scrubber + sheet)
@@ -7793,8 +7810,9 @@ final class TabBarCollapseState: ObservableObject {
 final class RemoteSessionCardMetrics: ObservableObject {
     static let shared = RemoteSessionCardMetrics()
 
-    /// Clearance between the card and the tab bar (Logan 2026-09-12).
-    static let gap: CGFloat = 8
+    /// Clearance between the card and the tab bar (Logan 2026-09-12): a small
+    /// 6 pt gap, matching the Android card, not a void.
+    static let gap: CGFloat = 6
 
     /// Top edge of the system tab bar in WINDOW coordinates, 0 until measured.
     @Published private(set) var tabBarTopInWindow: CGFloat = 0

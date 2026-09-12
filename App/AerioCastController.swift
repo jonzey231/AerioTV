@@ -1352,6 +1352,41 @@ final class CompanionClient: NSObject, ObservableObject {
     func seekToWall(_ ms: Int64) { sendJSON(["cmd": "seekWall", "targetWallMs": ms]) }
     func goLive() { sendJSON(["cmd": "goLive"]) }
 
+    /// The card's X for the companion transport (Logan 2026-09-12): stop what
+    /// the TV is playing AND close the card, the same as Cast and AirPlay. The
+    /// stop frame has to reach the TV before the socket goes away, so the
+    /// disconnect rides the send completion (with a short fallback in case the
+    /// completion never fires on a half-dead socket).
+    func stopPlaybackAndDisconnect() {
+        debugLog("[Remote] X: stop + close")
+        guard let socket,
+              let data = try? JSONSerialization.data(withJSONObject: ["cmd": "stop"]),
+              let text = String(data: data, encoding: .utf8) else {
+            disconnect()
+            return
+        }
+        var closed = false
+        let close: @MainActor () -> Void = { [weak self] in
+            guard !closed else { return }
+            closed = true
+            self?.disconnect()
+        }
+        socket.send(.string(text)) { _ in
+            Task { @MainActor in close() }
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            close()
+        }
+    }
+
+    /// Companion-only "Disconnect" (controls sheet): drop the link and hide the
+    /// card, but leave the TV playing what it is playing.
+    func disconnectLeavingTVPlaying() {
+        debugLog("[Remote] disconnect, TV keeps playing")
+        disconnect()
+    }
+
     /// Channel up/down: walk ChannelStore for the next Dispatcharr channel
     /// (companion ids only translate for Dispatcharr sources).
     func flipChannel(_ delta: Int) {
@@ -1437,6 +1472,10 @@ struct RemoteControlScreen: View {
     var onChannelUp: () -> Void
     var onChannelDown: () -> Void
     var onStop: () -> Void
+    /// Companion transport only (Logan 2026-09-12): drop the connection and
+    /// hide the card while the TV KEEPS PLAYING. The X above is the other
+    /// semantic (stop the TV as well), so both need to exist here.
+    var onDisconnect: (() -> Void)? = nil
     /// Non-nil for the companion transport (full options: scrubber + Options
     /// sheet). nil for basic cast (web receiver has no control namespace).
     var companion: CompanionClient? = nil
@@ -1499,7 +1538,12 @@ struct RemoteControlScreen: View {
                     }
                     transportButton("xmark", label: stopLabel, action: onStop)
                 }
-                .padding(.bottom, 48)
+                if let onDisconnect {
+                    Button("Disconnect (leave TV playing)", action: onDisconnect)
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+                Spacer().frame(height: 48)
             }
             .padding(.horizontal, 24)
         }
@@ -2346,9 +2390,11 @@ final class AirPlayMonitor: ObservableObject {
 /// long as a session is live, so choosing a device never moves the user off
 /// the page they were on, and tapping it opens the applicable remote controls
 /// in a sheet. Sized off the Android CastMiniController/CastTransportCard (dp
-/// map 1:1 to points on phone): inset floating card, 16 pt side margins, 8 pt
-/// above the tab bar, 16 pt corners, 40 pt art box with 6 pt corners, 12/8
-/// inner padding, bold title over an accent status line, play/pause and X.
+/// map 1:1 to points on phone) and finished like the channel list rows
+/// (Logan 2026-09-12): theme card fill with the 10% accent hairline, 12 pt
+/// corners, 16 pt side margins (the list's own margin), 6 pt above the tab
+/// bar, 44 pt art tile, and THREE lines -- channel name, program, then the
+/// accent status line -- with accent play/pause and X trailing.
 struct RemoteSessionCard: View {
 
     enum Transport {
@@ -2365,6 +2411,9 @@ struct RemoteSessionCard: View {
 
     let transport: Transport
     let title: String
+    /// Middle line: the program on the other screen (Android
+    /// CastMiniController.programmeTitle). Blank hides the line.
+    var programTitle: String? = nil
     let status: String
     var artURL: String? = nil
     let isPlaying: Bool
@@ -2377,31 +2426,39 @@ struct RemoteSessionCard: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // Android CastMiniController's leading tile: 40 pt, 6 pt corners,
-            // the page background behind a 22 pt accent-tinted transport glyph
-            // (or 36 pt art when the session has some).
+            // Leading tile, Android CastMiniController: the channel logo, or
+            // the transport glyph when nothing is playing yet.
             ZStack {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.primary.opacity(0.08))
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.black.opacity(0.25))
                 if let artURL, let url = URL(string: artURL) {
                     AsyncImage(url: url) { image in
                         image.resizable().scaledToFit()
                     } placeholder: {
                         Image(systemName: transport.glyph)
+                            .font(.system(size: 20))
                             .foregroundStyle(ThemeManager.shared.accent)
                     }
-                    .frame(width: 36, height: 36)
+                    .frame(width: 38, height: 38)
                 } else {
                     Image(systemName: transport.glyph)
-                        .font(.system(size: 22))
+                        .font(.system(size: 20))
                         .foregroundStyle(ThemeManager.shared.accent)
                 }
             }
-            .frame(width: 40, height: 40)
+            .frame(width: 44, height: 44)
+            // THREE lines like the Android card: channel bold, program, then
+            // the accent status line ("Controlling <TV>" / "Casting to <TV>").
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
+                if let programTitle, !programTitle.isEmpty {
+                    Text(programTitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 Text(status)
                     .font(.caption)
                     .foregroundStyle(ThemeManager.shared.accent)
@@ -2411,19 +2468,21 @@ struct RemoteSessionCard: View {
             if showTransport {
                 Button(action: onTogglePlayPause) {
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(ThemeManager.shared.accent)
-                        .frame(width: 40, height: 40)
+                        .frame(width: 38, height: 40)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(isPlaying ? "Pause" : "Play")
             }
+            // X is accent-colored on Android too, and it always ends the
+            // session (see HomeView: stop on the TV, then close the card).
             Button(action: onStop) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 40, height: 40)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(ThemeManager.shared.accent)
+                    .frame(width: 38, height: 40)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -2431,17 +2490,14 @@ struct RemoteSessionCard: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        // Android CastTransportCard: an INSET rounded card floating above the
-        // tab bar, never a full-width banner touching the screen edges
-        // (Logan 2026-09-12). 12 pt side margins (the card's own clearance above
-        // the bar is owned by RemoteSessionCardDock), 20 pt corners like the
-        // Android card, and the SAME glass the iOS 26/27 tab bar underneath it
-        // draws, so it reads as part of that bar instead of a foreign panel
-        // (Logan: "match the nav bar coloring/design so it looks like it
-        // belongs"). Pre-26 keeps the material fill.
+        // The SAME surface the channel list cards draw (Logan 2026-09-12:
+        // "match the channel cards", not a near-black glass slab): theme card
+        // fill, 12 pt corners, the 4% accent wash and the 10% accent hairline
+        // from ChannelListView's row background.
         .background { Self.cardSurface }
         .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
-        .padding(.horizontal, 12)
+        // Same horizontal margin as the list cards.
+        .padding(.horizontal, 16)
         .contentShape(Rectangle())
         .onTapGesture {
             debugLog("[Cast] card tap")
@@ -2452,32 +2508,19 @@ struct RemoteSessionCard: View {
         .accessibilityElement(children: .contain)
     }
 
-    /// 20 pt like the Android card, which also reads close to the iOS 26/27
-    /// floating tab bar's own corner.
-    private static let radius: CGFloat = 20
+    /// 12 pt: the channel list card's radius.
+    private static let radius: CGFloat = 12
 
-    /// Liquid Glass on iOS 26+ (the measured match for the system bar, same
-    /// call `MinimizedTabButton` uses for the minimized pill), `.regularMaterial`
-    /// below it. The Android card's 1 pt accent hairline is kept in both.
     @ViewBuilder
     private static var cardSurface: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        if #available(iOS 26.0, *) {
-            shape
-                .fill(.clear)
-                .glassEffect(.regular, in: shape)
-                .overlay {
-                    shape.strokeBorder(ThemeManager.shared.accent.opacity(0.10), lineWidth: 1)
-                }
-        } else {
-            shape
-                .fill(.regularMaterial)
-                .overlay {
-                    shape.strokeBorder(ThemeManager.shared.accent.opacity(0.10), lineWidth: 1)
-                }
-                .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
-        }
+        shape
+            .fill(Color.cardBackground)
+            .overlay { shape.fill(Color.accentPrimary.opacity(0.04)) }
+            .overlay { shape.strokeBorder(Color.accentPrimary.opacity(0.10), lineWidth: 1) }
+            .shadow(color: .black.opacity(0.25), radius: 10, y: 3)
     }
+
 }
 
 #endif
@@ -2766,6 +2809,11 @@ final class CompanionHost: NSObject, ObservableObject {
             // Seek past the head (>= window length) routes to the live edge.
             let window = LiveRewindEngine.shared.headWallMs - LiveRewindEngine.shared.tailWallMs
             ps?.seekAction?(Int32(clamping: window))
+        case "stop":
+            // The phone's card X (Logan 2026-09-12): stop playback on THIS TV.
+            // The phone drops the link right after, so nothing needs a reply.
+            DebugLogger.shared.log("[Companion] host stop: ending playback", category: "Companion")
+            PlayerSession.shared.exit()
         case "getState":
             break // the state reply below answers it
         default:
