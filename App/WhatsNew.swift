@@ -610,56 +610,212 @@ enum WhatsNewStore {
 
 struct WhatsNewSheet: View {
     let release: WhatsNewRelease
-    let onDismiss: () -> Void
     let onPermanentlyDisable: () -> Void
 
-    /// Driven by the parent's `.sheet(isPresented:)` — we still need
-    /// to flip it to false from inside the buttons so the action
-    /// callbacks fire and the modal closes in one tap.
+    /// Driven by the parent's `.sheet(isPresented:)`. Flipping it to
+    /// false from inside the "Never show again" button closes the modal
+    /// in one tap after the opt-out callback fires. Every other way out
+    /// (swipe down on iOS, Menu/Back on tvOS) is handled by
+    /// `WhatsNewSheetModifier`, which marks the version seen.
     @Binding var isPresented: Bool
 
+    #if os(tvOS)
+    /// tvOS focus targets. Every bullet row is focusable so Up/Down
+    /// drives the `ScrollView` with the remote; the first row owns
+    /// default focus so the first Down press scrolls instead of
+    /// hunting for the nearest focusable control. There is deliberately
+    /// no Done/close button (Logan 2026-09-12): Menu/Back dismisses the
+    /// cover, wired in `WhatsNewSheetModifier` via `onExitCommand`.
+    private enum TVTarget: Hashable {
+        case bullet(Int)
+        case disable
+    }
+
+    @FocusState private var tvFocus: TVTarget?
+    #endif
+
     var body: some View {
+        #if os(tvOS)
+        tvBody
+        #else
+        phoneBody
+        #endif
+    }
+
+    // MARK: Subviews
+
+    #if !os(tvOS)
+    /// iPhone/iPad: a standard system sheet. `NavigationStack` + large
+    /// title + inset-grouped `List` gives the native look and makes the
+    /// content scroll for free once the bullets overflow the detent
+    /// (the current release ships six multi-line bullets, which already
+    /// overflow `.medium` on iPhone). No toolbar button: the sheet is
+    /// dismissed with a swipe down (Logan 2026-09-12), so the drag
+    /// indicator is the only affordance.
+    private var phoneBody: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(Array(release.bullets.enumerated()), id: \.offset) { _, bullet in
+                        bulletRow(bullet)
+                    }
+                } header: {
+                    Text(release.title)
+                } footer: {
+                    Text("AerioTV \(release.version)")
+                }
+
+                if let url = release.releaseURL {
+                    Section {
+                        Link(destination: url) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.up.forward.app")
+                                Text("Read full release notes")
+                            }
+                            .font(.subheadline.weight(.medium))
+                        }
+                    }
+                }
+
+                // Last row of the list: the ONLY control on the sheet
+                // (Logan 2026-09-12). There is no Dismiss/Done button;
+                // swiping the sheet down closes it and marks the version
+                // seen, wired in `WhatsNewSheetModifier`.
+                Section {
+                    // Permanent opt-out for all future updates.
+                    // Sets `whatsNew.permanentlyDisabled` so `shouldShow`'s
+                    // first guard short-circuits forever on this device.
+                    Button {
+                        onPermanentlyDisable()
+                        isPresented = false
+                    } label: {
+                        Text("Never show again for any future updates.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, minHeight: 36)
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(Color.clear)
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("What's New")
+            .navigationBarTitleDisplayMode(.large)
+        }
+        .preferredColorScheme(ThemeManager.shared.resolvedColorScheme)
+    }
+
+    /// One bullet as a native list row. Bullets stay short by policy
+    /// (see the data comment at the top of this file) but wrap cleanly
+    /// when they do not.
+    private func bulletRow(_ bullet: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(Color.accentPrimary)
+                .font(bulletIconFont)
+            Text(bullet)
+                .font(bulletTextFont)
+                .foregroundStyle(.primary)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 2)
+    }
+    #endif
+
+    #if os(tvOS)
+    /// Apple TV: still a `fullScreenCover` (the focus engine misbehaves
+    /// with a plain `.sheet` here), but the bullets now live in a
+    /// `ScrollView` of focusable rows so a long release scrolls with the
+    /// remote instead of being clipped. The header stays pinned above
+    /// the scroller; the two actions sit at the end of the scroll
+    /// content so Down always has somewhere to go and nothing traps
+    /// focus.
+    private var tvBody: some View {
         VStack(spacing: 0) {
             header
                 .padding(.top, headerTopPadding)
 
-            bulletList
-                .padding(.horizontal, contentHorizontalPadding)
-                .padding(.top, 24)
-
-            #if !os(tvOS)
-            if let url = release.releaseURL {
-                Link(destination: url) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.up.forward.app")
-                        Text("Read full release notes")
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(Array(release.bullets.enumerated()), id: \.offset) { index, bullet in
+                        tvBulletRow(bullet, isFocused: tvFocus == .bullet(index))
+                            .focusable()
+                            .focused($tvFocus, equals: .bullet(index))
                     }
-                    .font(.subheadline.weight(.medium))
+
+                    tvActionButtons
+                        .padding(.top, 24)
                 }
-                .padding(.top, 18)
-            }
-            #endif
-
-            Spacer(minLength: 16)
-
-            actionButtons
                 .padding(.horizontal, contentHorizontalPadding)
-                .padding(.bottom, bottomPadding)
+                .padding(.vertical, 24)
+            }
+            .defaultFocus($tvFocus, .bullet(0))
         }
-        #if os(tvOS)
-        .frame(maxWidth: 900)
+        .frame(maxWidth: 1000)
         .padding(.horizontal, 60)
         .padding(.vertical, 40)
         .background(Color.cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        #else
-        .frame(maxWidth: .infinity)
-        .background(Color(.systemBackground))
-        #endif
         .preferredColorScheme(ThemeManager.shared.resolvedColorScheme)
     }
 
-    // MARK: Subviews
+    /// Focusable, non-actionable bullet row. `.focusable()` rather than a
+    /// `Button` keeps Select inert while still giving the focus engine a
+    /// target on every line, which is what makes Up/Down scroll. The
+    /// focus visual is the codebase's 2 pt accent ring on a 14 pt
+    /// rounded rect (rows are not pills; pills are for action buttons
+    /// and choice chips per the standing rule).
+    private func tvBulletRow(_ bullet: String, isFocused: Bool) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(Color.accentPrimary)
+                .font(bulletIconFont)
+            Text(bullet)
+                .font(bulletTextFont)
+                .foregroundStyle(.primary)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(isFocused ? Color.elevatedBackground : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.accentPrimary, lineWidth: isFocused ? 2 : 0)
+        )
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+
+    /// The single control on the cover, and the last focusable item in
+    /// the scroll content. No Dismiss/Done button (Logan 2026-09-12):
+    /// Menu/Back closes the cover and marks the version seen.
+    private var tvActionButtons: some View {
+        VStack(spacing: 14) {
+            // Permanent opt-out for all future updates.
+            // Sets `whatsNew.permanentlyDisabled` so `shouldShow`'s
+            // first guard short-circuits forever on this device.
+            Button {
+                onPermanentlyDisable()
+                isPresented = false
+            } label: {
+                Text("Never show again for any future updates.")
+                    .font(.subheadline)
+                    .foregroundStyle(tvFocus == .disable ? .primary : .secondary)
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.accentPrimary, lineWidth: tvFocus == .disable ? 3 : 0)
+                    )
+                    .animation(.easeInOut(duration: 0.15), value: tvFocus == .disable)
+            }
+            .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
+            .focused($tvFocus, equals: .disable)
+        }
+    }
 
     private var header: some View {
         VStack(spacing: 10) {
@@ -675,147 +831,21 @@ struct WhatsNewSheet: View {
         }
         .padding(.horizontal, contentHorizontalPadding)
     }
-
-    private var bulletList: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            ForEach(release.bullets, id: \.self) { bullet in
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Color.accentPrimary)
-                        .font(bulletIconFont)
-                    Text(bullet)
-                        .font(bulletTextFont)
-                        .foregroundStyle(.primary)
-                        .multilineTextAlignment(.leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-        }
-    }
-
-    private var actionButtons: some View {
-        VStack(spacing: 10) {
-            // Primary: per-version dismiss. Marks the current version
-            // as seen; the next update's notes will still surface.
-            Button {
-                onDismiss()
-                isPresented = false
-            } label: {
-                Text("Dismiss")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity, minHeight: primaryButtonHeight)
-                    #if os(tvOS)
-                    // Apply the cyan fill on the LABEL (not the
-                    // outer Button) so `TVNoHighlightButtonStyle`'s
-                    // focus cue (scale + brightness + accent shadow)
-                    // composes cleanly. The default tvOS focus halo
-                    // — a heavy white ring + bright surround —
-                    // washed out the cyan fill and made "Dismiss"
-                    // unreadable on focus. This matches the focus
-                    // treatment used across the rest of the app's
-                    // tvOS chrome (settings rows, transport bar
-                    // buttons, group pills).
-                    .background(Color.accentPrimary)
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    #endif
-            }
-            #if os(tvOS)
-            .buttonStyle(TVNoHighlightButtonStyle())
-            #else
-            .buttonStyle(.borderedProminent)
-            #endif
-
-            // Secondary: permanent opt-out for all future updates.
-            // Sets `whatsNew.permanentlyDisabled` so `shouldShow`'s
-            // first guard short-circuits forever on this device.
-            Button {
-                onPermanentlyDisable()
-                isPresented = false
-            } label: {
-                Text("Never show again for any future updates.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 36)
-            }
-            #if os(tvOS)
-            // Same no-halo treatment as the primary — without it,
-            // the OS overlays the bright white pill that triggered
-            // the unreadable-button report. Scale + brightness from
-            // `TVNoHighlightButtonStyle` is enough to indicate focus
-            // on a text-only button.
-            .buttonStyle(TVNoHighlightButtonStyle())
-            #else
-            .buttonStyle(.plain)
-            #endif
-        }
-    }
+    #endif
 
     // MARK: Platform sizing
 
-    private var iconSize: CGFloat {
-        #if os(tvOS)
-        return 56
-        #else
-        return 36
-        #endif
-    }
-
-    private var titleFont: Font {
-        #if os(tvOS)
-        return .system(size: 38, weight: .bold)
-        #else
-        return .title2.bold()
-        #endif
-    }
-
-    private var bulletIconFont: Font {
-        #if os(tvOS)
-        return .system(size: 24)
-        #else
-        return .body
-        #endif
-    }
-
-    private var bulletTextFont: Font {
-        #if os(tvOS)
-        return .system(size: 24)
-        #else
-        return .body
-        #endif
-    }
-
-    private var contentHorizontalPadding: CGFloat {
-        #if os(tvOS)
-        return 24
-        #else
-        return 28
-        #endif
-    }
-
-    private var headerTopPadding: CGFloat {
-        #if os(tvOS)
-        return 24
-        #else
-        return 32
-        #endif
-    }
-
-    private var bottomPadding: CGFloat {
-        #if os(tvOS)
-        return 24
-        #else
-        return 24
-        #endif
-    }
-
-    private var primaryButtonHeight: CGFloat {
-        #if os(tvOS)
-        return 60
-        #else
-        return 44
-        #endif
-    }
+    #if os(tvOS)
+    private var iconSize: CGFloat { 56 }
+    private var titleFont: Font { .system(size: 38, weight: .bold) }
+    private var bulletIconFont: Font { .system(size: 24) }
+    private var bulletTextFont: Font { .system(size: 24) }
+    private var contentHorizontalPadding: CGFloat { 24 }
+    private var headerTopPadding: CGFloat { 24 }
+    #else
+    private var bulletIconFont: Font { .body }
+    private var bulletTextFont: Font { .body }
+    #endif
 }
 
 // MARK: - Modifier
@@ -855,23 +885,41 @@ private struct WhatsNewSheetModifier: ViewModifier {
                     Color.black.opacity(0.85).ignoresSafeArea()
                     WhatsNewSheet(
                         release: release,
-                        onDismiss: { WhatsNewStore.markSeen() },
                         onPermanentlyDisable: { WhatsNewStore.disable() },
                         isPresented: $isPresented
                     )
                 }
+                // There is no Done/close button on the cover
+                // (Logan 2026-09-12), so Menu/Back is the dismiss path
+                // and it is wired explicitly rather than relying on the
+                // system's implicit cover dismissal. Treat it as the
+                // per-version acknowledge, same as "Dismiss".
+                .onExitCommand {
+                    WhatsNewStore.markSeen()
+                    isPresented = false
+                }
             }
         }
         #else
-        return content.sheet(isPresented: $isPresented) {
+        // `onDismiss:` is what makes the swipe-down gesture an
+        // acknowledge: with no Dismiss button on the sheet, the drag is
+        // the normal way out, so it must stamp the current version as
+        // seen exactly like tapping Dismiss used to.
+        return content.sheet(isPresented: $isPresented, onDismiss: { WhatsNewStore.markSeen() }) {
             if let release {
                 WhatsNewSheet(
                     release: release,
-                    onDismiss: { WhatsNewStore.markSeen() },
                     onPermanentlyDisable: { WhatsNewStore.disable() },
                     isPresented: $isPresented
                 )
-                .presentationDetents([.medium, .large])
+                // `.large` always; `.medium` is offered only when the
+                // release is short enough to read without scrolling at
+                // half height. The current release's six bullets
+                // overflow `.medium` on iPhone, so it resolves to
+                // `.large` alone there.
+                .presentationDetents(
+                    release.bullets.count <= 4 ? [.medium, .large] : [.large]
+                )
                 .presentationDragIndicator(.visible)
             }
         }
