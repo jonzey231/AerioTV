@@ -47,6 +47,27 @@ enum AerioCast {
     static let keyKind = "aerioKind"
     static let kindLive = "live"
     static let kindVOD = "vod"
+
+    /// Whether this receiver's own decoders handle AC-3 / E-AC-3, in
+    /// which case the cast proxy passes the source audio through
+    /// untouched instead of transcoding it. The Cast SDK exposes no codec
+    /// capability, so this is a model-name decision: TV-attached targets
+    /// (Chromecast Ultra, Chromecast with Google TV, Google TV Streamer,
+    /// Android TV receivers) decode it; the smart displays and the
+    /// audio-only / early Chromecasts do not, and a model we do not
+    /// recognize is treated as "no" so the AudioToolbox transcode covers
+    /// it.
+    static func receiverDecodesAC3(_ device: GCKDevice?) -> Bool {
+        let model = (device?.modelName ?? "").lowercased()
+        guard !model.isEmpty else { return false }
+        let refuses = ["nest hub", "nest audio", "nest mini", "chromecast audio",
+                       "google home", "home mini", "home max", "smart display"]
+        if refuses.contains(where: { model.contains($0) }) { return false }
+        let decodes = ["chromecast ultra", "chromecast with google tv", "google tv streamer",
+                       "android tv", "google tv", "shield", "bravia", "aquos", "philips tv",
+                       "tcl", "hisense", "onn", "fire tv"]
+        return decodes.contains(where: { model.contains($0) })
+    }
 }
 
 /// Observable Cast state for the player chrome to react to.
@@ -348,26 +369,39 @@ final class AerioCastController: NSObject, ObservableObject {
     /// playlist is a hard receiver error, not a retry.
     private func load(_ content: Content, on session: GCKCastSession) {
         proxyLoadTask?.cancel()
-        debugLog("[Cast] load channel=\(content.title) url=proxy playlist (from live TS ingest)")
         guard content.kind == .live, let rawTS = content.streamURL else {
             // No proxyable stream: nothing the web receiver could play.
             surfaceCastFailure("This channel has no castable stream")
             return
         }
         let headers = content.streamHeaders
+        // Cast audio (2026-09-12): ask Dispatcharr for its built-in AAC
+        // output profile for THIS request, so the receiver gets stereo AAC
+        // and the phone passes it through with no decode of its own. Local
+        // playback is untouched and keeps AC-3.
+        let profileID = ChannelStore.shared.activeServer?.dispatcharrAACOutputProfileID
+        let profileURL = DispatcharrOutputProfile.applying(profileID: profileID, to: rawTS)
+        let allowAC3 = AerioCast.receiverDecodesAC3(session.device)
+        let receiverName = session.device.friendlyName ?? lastDeviceName
+        debugLog("[Cast] load channel=\(content.title) "
+            + "profile=\(profileID.map(String.init) ?? "none") "
+            + "receiverAC3=\(allowAC3 ? "yes" : "no")")
         proxyLoadTask = Task { [weak self] in
             let playlistURL: URL
             do {
-                playlistURL = try await CastHLSProxySession.shared.startChannel(
-                    rawTSURL: rawTS, headers: headers)
-            } catch let error as CastUnsupportedCodecError {
-                self?.surfaceCastFailure("Can't cast this channel: \(error.codecName) needs transcoding")
-                self?.stopCasting()
-                return
+                playlistURL = try await Self.startProxyWithProfileRetry(
+                    url: profileURL, headers: headers, allowAC3Passthrough: allowAC3,
+                    onProfileRetry: { [weak self] code in
+                        self?.surfaceCastFailure("Dispatcharr could not start the AAC output profile "
+                            + "for this channel (HTTP \(code)). Trying the original audio.")
+                    })
             } catch is CancellationError {
                 return
             } catch {
-                self?.surfaceCastFailure("Can't cast this channel: \(error)")
+                self?.surfaceCastFailure(Self.castFailureMessage(
+                    error, receiverName: receiverName, isDispatcharr: profileURL.path.contains("/proxy/ts/")))
+                debugLog("[Cast] load channel=\(content.title) "
+                    + "profile=\(profileID.map(String.init) ?? "none") audio=unknown mode=refused")
                 // The proxy is already torn down; a session left up would
                 // show a live cast cover over a dead playlist (zombie
                 // "Casting" UI, seen live 2026-08-14). End it; the session
@@ -375,6 +409,10 @@ final class AerioCastController: NSObject, ObservableObject {
                 self?.stopCasting()
                 return
             }
+            let summary = CastHLSProxySession.shared.audioSummary()
+            debugLog("[Cast] load channel=\(content.title) "
+                + "profile=\(profileID.map(String.init) ?? "none") "
+                + "audio=\(summary?.codec ?? "none") mode=\(summary?.mode ?? "unknown")")
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
                 // Re-fetch the session: the connect may have churned while
@@ -384,6 +422,72 @@ final class AerioCastController: NSObject, ObservableObject {
                       self.castingContent?.mediaID == content.mediaID else { return }
                 self.loadProxyPlaylist(playlistURL, content: content, on: live)
             }
+        }
+    }
+
+    /// Start the proxy on `url`, and on exactly ONE class of failure (the
+    /// server refusing the feed with 503, or no bytes at all inside the
+    /// ready window) retry WITHOUT the output_profile parameter, so a
+    /// broken profile falls back to the plain feed instead of costing the
+    /// user the channel. Anything else propagates on the first attempt.
+    private static func startProxyWithProfileRetry(
+        url: URL, headers: [String: String], allowAC3Passthrough: Bool,
+        onProfileRetry: @escaping (Int) -> Void) async throws -> URL {
+        do {
+            return try await CastHLSProxySession.shared.startChannel(
+                rawTSURL: url, headers: headers, allowAC3Passthrough: allowAC3Passthrough)
+        } catch {
+            guard DispatcharrOutputProfile.carriesProfile(url) else { throw error }
+            let code: Int
+            switch error {
+            case CastHLSProxyError.upstreamUnavailable(let status): code = status
+            case CastHLSProxyError.timedOut: code = 503
+            default: throw error
+            }
+            let plain = DispatcharrOutputProfile.removingProfile(from: url)
+            debugLog("[Cast] output profile start failed (\(code)); retrying once without it")
+            await MainActor.run { onProfileRetry(code) }
+            return try await CastHLSProxySession.shared.startChannel(
+                rawTSURL: plain, headers: headers, allowAC3Passthrough: allowAC3Passthrough)
+        }
+    }
+
+    /// Specific refusal wording for every way a cast start can fail
+    /// (Logan 2026-09-12: "cannot cast this channel" is not detailed
+    /// enough). Shown in the cast alert and logged.
+    private static func castFailureMessage(_ error: Error, receiverName: String?,
+                                           isDispatcharr: Bool) -> String {
+        let receiver = receiverName ?? "this Google Cast device"
+        if let codec = error as? CastUnsupportedCodecError {
+            let name = codec.codecName
+                .replacingOccurrences(of: " video", with: "")
+                .replacingOccurrences(of: " audio", with: "")
+            switch codec.stream {
+            case .video:
+                return "This channel's video is \(name), which Google Cast receivers cannot play."
+            case .audio:
+                return "This channel's audio is \(name) and \(receiver) cannot decode it. "
+                    + "Dispatcharr 0.30 or newer provides an AAC output profile that AerioTV uses automatically."
+            }
+        }
+        let seconds = CastHLSProxySession.readyTimeoutSeconds
+        switch error {
+        case CastHLSProxyError.timedOut:
+            return isDispatcharr
+                ? "Dispatcharr did not send any data for this channel within \(seconds) seconds."
+                : "The server did not send any data for this channel within \(seconds) seconds."
+        case CastHLSProxyError.upstreamUnavailable(let code):
+            return isDispatcharr
+                ? "Dispatcharr could not start this channel (HTTP \(code))."
+                : "The server could not start this channel (HTTP \(code))."
+        case CastHLSProxyError.ingestUnreachable:
+            return "This channel's stream could not be reached from this iPhone."
+        case CastHLSProxyError.noLANAddress:
+            return "Casting needs Wi-Fi: a Google Cast device cannot reach this iPhone over cellular."
+        case CastHLSProxyError.serverFailed:
+            return "AerioTV could not start the local cast server on this iPhone."
+        default:
+            return "This channel could not be cast: \(error)"
         }
     }
 
@@ -445,10 +549,15 @@ final class AerioCastController: NSObject, ObservableObject {
         debugLog("[CAST-HLS] switch-stream reprime for \(item.name)")
         let headers = content.streamHeaders
         proxyLoadTask?.cancel()
+        let profileID = ChannelStore.shared.activeServer?.dispatcharrAACOutputProfileID
+        let profileURL = DispatcharrOutputProfile.applying(profileID: profileID, to: rawTS)
+        let allowAC3 = AerioCast.receiverDecodesAC3(
+            GCKCastContext.sharedInstance().sessionManager.currentCastSession?.device)
         proxyLoadTask = Task { [weak self] in
             do {
-                _ = try await CastHLSProxySession.shared.startChannel(
-                    rawTSURL: rawTS, headers: headers)
+                _ = try await Self.startProxyWithProfileRetry(
+                    url: profileURL, headers: headers, allowAC3Passthrough: allowAC3,
+                    onProfileRetry: { _ in })
             } catch is CancellationError {
             } catch {
                 self?.surfaceCastFailure("The stream switch interrupted casting: \(error)")

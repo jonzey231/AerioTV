@@ -47,6 +47,29 @@ struct CastESFrameInfo {
     let channels: Int
 }
 
+/// Bitstream fields an AC-3 / E-AC-3 passthrough needs to write the
+/// `dac3` / `dec3` sample-entry box. Receivers that decode AC-3 pick
+/// their decoder from that box plus the playlist CODECS attribute, so the
+/// values are read from the first syncframe rather than assumed.
+struct CastAC3SampleEntryConfig {
+    let codec: CastAudioSourceCodec
+    let fscod: Int
+    let bsid: Int
+    let bsmod: Int
+    let acmod: Int
+    let lfeon: Int
+    /// AC-3 `bit_rate_code` (frmsizecod >> 1); unused for E-AC-3.
+    let bitRateCode: Int
+    /// E-AC-3 `data_rate` in kbit/s; unused for AC-3.
+    let dataRateKbps: Int
+    let sampleRate: Int
+    let channels: Int
+    let samplesPerFrame: Int
+
+    /// RFC 6381 codec name for the HLS CODECS attribute.
+    var codecsAttribute: String { codec == .eac3 ? "ec-3" : "ac-3" }
+}
+
 /// PTS flow: the source frame's unwrapped 90 kHz ticks anchor an exact
 /// rational ladder, and every emitted AAC packet is stamped
 /// anchor + n * 1024 * 90000 / sampleRate, computed from the anchor each
@@ -134,6 +157,53 @@ final class CastAudioTranscoder: CastAudioTranscoding {
             return off + 1 < data.count && data[off] == 0x0B && data[off + 1] == 0x77
         case .mp2:
             return off + 1 < data.count && data[off] == 0xFF && data[off + 1] & 0xE0 == 0xE0
+        }
+    }
+
+    /// Full bitstream config for the passthrough sample entry. Returns
+    /// nil for anything that is not a parseable AC-3 / E-AC-3 syncframe
+    /// at `off` (the caller scans on, exactly like the framer does).
+    static func parseAC3SampleEntryConfig(_ codec: CastAudioSourceCodec,
+                                          _ data: [UInt8], _ off: Int) -> CastAC3SampleEntryConfig? {
+        guard let info = parseFrameHeader(codec, data, off), off + 6 <= data.count else { return nil }
+        switch codec {
+        case .ac3:
+            guard off + 7 <= data.count else { return nil }
+            let fscod = (Int(data[off + 4]) >> 6) & 0x03
+            let frmsizecod = Int(data[off + 4]) & 0x3F
+            let bsid = (Int(data[off + 5]) >> 3) & 0x1F
+            let bsmod = Int(data[off + 5]) & 0x07
+            let acmod = (Int(data[off + 6]) >> 5) & 0x07
+            // Same variable-field walk parseAC3Header does for lfeon.
+            var bit = 3
+            if acmod & 0x01 != 0, acmod != 1 { bit += 2 }
+            if acmod & 0x04 != 0 { bit += 2 }
+            if acmod == 2 { bit += 2 }
+            let lfeon = (Int(data[off + 6]) >> (7 - bit)) & 1
+            return CastAC3SampleEntryConfig(
+                codec: .ac3, fscod: fscod, bsid: bsid, bsmod: bsmod, acmod: acmod, lfeon: lfeon,
+                bitRateCode: frmsizecod >> 1, dataRateKbps: 0,
+                sampleRate: info.sampleRate, channels: info.channels,
+                samplesPerFrame: info.samplesPerFrame)
+        case .eac3:
+            let b4 = Int(data[off + 4])
+            let fscod = (b4 >> 6) & 0x03
+            let acmod = (b4 >> 1) & 0x07
+            let lfeon = b4 & 0x01
+            let bsid = off + 5 < data.count ? (Int(data[off + 5]) >> 3) & 0x1F : 16
+            // bsmod sits behind E-AC-3's variable mixing metadata; 0
+            // (complete main) is what every muxer writes for a broadcast
+            // main program and what receivers assume.
+            let dataRate = info.samplesPerFrame > 0
+                ? info.frameLength * 8 * info.sampleRate / info.samplesPerFrame / 1000
+                : 0
+            return CastAC3SampleEntryConfig(
+                codec: .eac3, fscod: fscod, bsid: bsid, bsmod: 0, acmod: acmod, lfeon: lfeon,
+                bitRateCode: 0, dataRateKbps: dataRate,
+                sampleRate: info.sampleRate, channels: info.channels,
+                samplesPerFrame: info.samplesPerFrame)
+        case .mp2:
+            return nil
         }
     }
 

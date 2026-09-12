@@ -4021,6 +4021,9 @@ struct MainTabView: View {
                 changed = true
             }
             if server.applyDispatcharrPermissions(from: user, version: version ?? nil) { changed = true }
+            // Cast audio: learn this server's AAC output profile id on the
+            // same launch refresh (used only while casting).
+            await DispatcharrAPI.captureAACOutputProfile(for: server, using: api)
             debugLog("[PERMS] \(server.name): level=\(server.dispatcharrUserLevel) dvr=\(server.dispatcharrEffectiveDVRAccess.rawValue) catchup=\(server.dispatcharrCatchupEnabled) movies=\(server.dispatcharrVODMoviesEnabled) series=\(server.dispatcharrVODSeriesEnabled) version=\(server.dispatcharrServerVersion.isEmpty ? "?" : server.dispatcharrServerVersion)\(changed ? " (changed)" : "")")
         }
     }

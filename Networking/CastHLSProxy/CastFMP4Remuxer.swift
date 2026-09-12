@@ -17,7 +17,11 @@ import Foundation
 /// phone instead of refusing; this still fires for audio outside that
 /// family and for transcodable audio the device cannot decode.
 struct CastUnsupportedCodecError: Error, CustomStringConvertible {
+    /// Which elementary stream refused; the sender words a different
+    /// message for each (video can never be re-encoded, audio can).
+    enum Stream { case video, audio }
     let codecName: String
+    var stream: Stream = .audio
     var description: String { "cast HLS proxy cannot serve \(codecName)" }
 }
 
@@ -82,6 +86,13 @@ final class CastFMP4Remuxer {
         0x81: .ac3, 0x87: .eac3, 0x03: .mp2, 0x04: .mp2,
     ]
 
+    /// What to do with audio the web receiver's MSE cannot decode.
+    /// `allowAC3Passthrough` flips AC-3 / E-AC-3 to a pure passthrough
+    /// (no decode, no encode, original channel layout) and is set by the
+    /// sender only for receivers that actually decode it; everything else
+    /// keeps the AudioToolbox transcode as the fallback.
+    private let allowAC3Passthrough: Bool
+
     /// Speaker-layout label for the Stream Info audio path. Total decoded
     /// channels (LFE included) to the familiar x.1 names.
     private static func channelLabel(_ channels: Int) -> String {
@@ -107,11 +118,13 @@ final class CastFMP4Remuxer {
                                     @escaping (_ data: [UInt8], _ ptsTicks: Int64) -> Void) -> CastAudioTranscoding
 
     init(targetSegmentTicks: Int64 = 3 * CastFMP4Remuxer.ticksPerSecond,
+         allowAC3Passthrough: Bool = false,
          log: @escaping (String) -> Void = { _ in },
          transcoderFactory: ((CastAudioSourceCodec,
                               @escaping (_ asc: [UInt8], _ sampleRate: Int) -> Void,
                               @escaping (_ data: [UInt8], _ ptsTicks: Int64) -> Void) -> CastAudioTranscoding)? = nil) {
         self.targetSegmentTicks = targetSegmentTicks
+        self.allowAC3Passthrough = allowAC3Passthrough
         self.log = log
         self.transcoderFactory = transcoderFactory ?? { source, onConfig, onFrame in
             CastAudioTranscoder(source: source, onEncoderConfig: onConfig, onAACFrame: onFrame, log: log)
@@ -164,6 +177,24 @@ final class CastFMP4Remuxer {
     /// PMT parse, refined with the channel layout once the transcode
     /// sees its first frame header.
     private(set) var audioPathDescription: String?
+    /// Non-nil when the PMT's AC-3 / E-AC-3 audio rides through
+    /// untouched (receiver decodes it); mutually exclusive with
+    /// `audioSource`.
+    private var audioPassthrough: CastAudioSourceCodec?
+    /// First passthrough syncframe's bitstream config; gates the init
+    /// segment and writes the dac3 / dec3 box.
+    private var passthroughConfig: CastAC3SampleEntryConfig?
+    private var passthroughLogged = false
+
+    /// RFC 6381 codec name for the audio the receiver will be handed, so
+    /// the playlist's CODECS attribute names the right decoder. nil for a
+    /// video-only mux.
+    var audioCodecsAttribute: String? {
+        if audioPID < 0 { return nil }
+        if let passthroughConfig { return passthroughConfig.codecsAttribute }
+        if let audioPassthrough { return audioPassthrough == .eac3 ? "ec-3" : "ac-3" }
+        return "mp4a.40.2"
+    }
     /// Where the source audio clock should continue; a jump past the
     /// discontinuity threshold flushes the codecs (splice/reconnect).
     private var expectedSrcAudioPTS: Int64 = -1
@@ -317,23 +348,31 @@ final class CastFMP4Remuxer {
         // user-visible cast failure with the codec name.
         if video >= 0, videoType != Self.streamTypeH264 {
             throw CastUnsupportedCodecError(
-                codecName: Self.streamTypeNames[videoType] ?? String(format: "video stream_type 0x%02X", videoType))
+                codecName: Self.streamTypeNames[videoType] ?? String(format: "video stream_type 0x%02X", videoType),
+                stream: .video)
         }
         if audio >= 0, audioType != Self.streamTypeAACADTS {
-            // The AC-3 family routes through the on-phone transcode
-            // instead of refusing (the web receiver cannot decode it and
-            // HDMI passthrough is a lottery). Everything else refuses.
+            // The AC-3 family either passes through (receiver decodes it)
+            // or routes through the on-phone transcode. Everything else
+            // refuses.
             guard let source = Self.transcodeSources[audioType] else {
                 throw CastUnsupportedCodecError(
-                    codecName: Self.streamTypeNames[audioType] ?? String(format: "audio stream_type 0x%02X", audioType))
+                    codecName: Self.streamTypeNames[audioType] ?? String(format: "audio stream_type 0x%02X", audioType),
+                    stream: .audio)
             }
-            audioSource = source
+            if allowAC3Passthrough, source == .ac3 || source == .eac3 {
+                audioPassthrough = source
+            } else {
+                audioSource = source
+            }
         }
-        if video < 0 { throw CastUnsupportedCodecError(codecName: "no video stream in PMT") }
+        if video < 0 { throw CastUnsupportedCodecError(codecName: "no video stream in PMT", stream: .video) }
         videoPID = video
         audioPID = audio // may stay -1: video-only mux is fine
         if audio < 0 {
             audioPathDescription = "none (video only)"
+        } else if let source = audioPassthrough {
+            audioPathDescription = "\(source.displayName) passthrough"
         } else if let source = audioSource {
             audioPathDescription = "\(source.displayName) -> AAC stereo"
         } else {
@@ -490,11 +529,66 @@ final class CastFMP4Remuxer {
     // MARK: audio path
 
     private func onAudioPES(_ payload: [UInt8], pts33: Int64) throws {
-        if let source = audioSource {
+        if let source = audioPassthrough {
+            onAC3PassthroughPES(source, payload, pts33: pts33)
+        } else if let source = audioSource {
             try onTranscodeAudioPES(source, payload, pts33: pts33)
         } else {
             onADTSAudioPES(payload, pts33: pts33)
         }
+    }
+
+    /// AC-3 / E-AC-3 passthrough: frame the elementary stream exactly like
+    /// the transcode path does, but queue the whole syncframes as audio
+    /// samples. No decode, no encode, original channel layout; the init
+    /// segment carries an ac-3 / ec-3 sample entry (dac3 / dec3) and the
+    /// playlist names the matching CODECS value, so a receiver that
+    /// decodes AC-3 picks the right decoder.
+    private func onAC3PassthroughPES(_ source: CastAudioSourceCodec, _ payload: [UInt8], pts33: Int64) {
+        var data: [UInt8]
+        if audioCarry.isEmpty {
+            data = payload
+        } else {
+            data = audioCarry
+            data.append(contentsOf: payload)
+        }
+        audioCarry = []
+        var p = 0
+        var framePTS: Int64 = -1
+        while p < data.count {
+            guard let info = CastAudioTranscoder.parseFrameHeader(source, data, p) else {
+                if data.count - p < 8 { break } // possibly a truncated header: carry it
+                p += 1 // scan to syncword (junk between frames happens on splices)
+                continue
+            }
+            let next = p + info.frameLength
+            if next > data.count { break } // partial frame: carry
+            // Reject a false sync inside frame data, same rule the
+            // transcode framer uses.
+            if next + 1 < data.count, !CastAudioTranscoder.looksLikeSync(source, data, next) {
+                p += 1
+                continue
+            }
+            if passthroughConfig == nil,
+               let config = CastAudioTranscoder.parseAC3SampleEntryConfig(source, data, p) {
+                passthroughConfig = config
+                audioFrameTicks = Int64(info.samplesPerFrame) * Self.ticksPerSecond / Int64(info.sampleRate)
+                audioPathDescription = "\(source.displayName) \(Self.channelLabel(info.channels)) passthrough"
+                if !passthroughLogged {
+                    log("audio passthrough active: \(source.displayName) \(info.channels)ch "
+                        + "\(info.sampleRate)Hz, codecs=\(config.codecsAttribute)")
+                    passthroughLogged = true
+                }
+                maybeEmitInit()
+            }
+            if framePTS < 0 { framePTS = audioClock.unwrap(pts33) }
+            if initSent, timelineBase >= 0 {
+                audioQueue.append(AudioSample(data: Array(data[p..<next]), pts: framePTS))
+            }
+            framePTS += Int64(info.samplesPerFrame) * Self.ticksPerSecond / Int64(info.sampleRate)
+            p = next
+        }
+        if p < data.count { audioCarry = Array(data[p...]) }
     }
 
     /// Transcode path: frame the elementary stream (AC-3/E-AC-3/MP2
@@ -634,6 +728,8 @@ final class CastFMP4Remuxer {
         let audioReady: Bool
         if audioPID < 0 {
             audioReady = true
+        } else if audioPassthrough != nil {
+            audioReady = passthroughConfig != nil
         } else if audioSource != nil {
             audioReady = transcodeASC != nil
         } else {
@@ -812,6 +908,14 @@ final class CastFMP4Remuxer {
     }
 
     private func audioTrak() -> Data {
+        // Passthrough path: an ac-3 / ec-3 sample entry carrying the
+        // source bitstream's own config, so nothing is re-encoded.
+        if let config = passthroughConfig {
+            return Self.trak(trackID: Self.audioTrackID, width: 0, height: 0, volume: 0x0100,
+                             handler: "soun", handlerName: "SoundHandler",
+                             mediaHeader: Self.fullBox("smhd", 0, 0, Self.u16(0), Self.u16(0)),
+                             sampleEntry: Self.ac3SampleEntry(config))
+        }
         // Transcode path: the encoder's own AudioSpecificConfig is the
         // asc, and the track is what the encoder emits (AAC-LC stereo),
         // not what the source mux carried.
@@ -863,6 +967,39 @@ final class CastFMP4Remuxer {
                          handler: "soun", handlerName: "SoundHandler",
                          mediaHeader: Self.fullBox("smhd", 0, 0, Self.u16(0), Self.u16(0)),
                          sampleEntry: mp4a)
+    }
+
+    /// `ac-3` (dac3) or `ec-3` (dec3) sample entry for the passthrough
+    /// path. dac3 is ETSI TS 102 366 Annex F.4:
+    /// fscod(2) bsid(5) bsmod(3) acmod(3) lfeon(1) bit_rate_code(5)
+    /// reserved(5). dec3 is F.6 with a single independent substream:
+    /// data_rate(13) num_ind_sub(3) then fscod(2) bsid(5) reserved(1)
+    /// asvc(1) bsmod(3) acmod(3) lfeon(1) reserved(3) num_dep_sub(4)
+    /// reserved(1).
+    private static func ac3SampleEntry(_ c: CastAC3SampleEntryConfig) -> Data {
+        var specific = Data()
+        if c.codec == .eac3 {
+            let rate = max(0, min(0x1FFF, c.dataRateKbps))
+            specific.append(UInt8((rate >> 5) & 0xFF))
+            specific.append(UInt8(((rate & 0x1F) << 3) | 0)) // num_ind_sub = 0 (one substream)
+            specific.append(UInt8((c.fscod << 6) | (c.bsid << 1))) // reserved(1) = 0
+            specific.append(UInt8((0 << 7) | (c.bsmod << 4) | (c.acmod << 1) | c.lfeon)) // asvc = 0
+            specific.append(0) // reserved(3), num_dep_sub(4) = 0, reserved(1)
+        } else {
+            specific.append(UInt8((c.fscod << 6) | (c.bsid << 1) | (c.bsmod >> 2)))
+            specific.append(UInt8(((c.bsmod & 0x03) << 6) | (c.acmod << 3)
+                | (c.lfeon << 2) | ((c.bitRateCode >> 3) & 0x03)))
+            specific.append(UInt8((c.bitRateCode & 0x07) << 5))
+        }
+        let configBox = box(c.codec == .eac3 ? "dec3" : "dac3", specific)
+        var body = Data(capacity: 64 + configBox.count)
+        body.append(Data(count: 6)); body.append(u16(1)) // reserved, data_reference_index
+        body.append(Data(count: 8)) // reserved
+        body.append(u16(max(1, c.channels))); body.append(u16(16)) // channels, samplesize
+        body.append(u32(0)) // pre_defined/reserved
+        body.append(u32(c.sampleRate << 16)) // 16.16 sample rate
+        body.append(configBox)
+        return box(c.codec == .eac3 ? "ec-3" : "ac-3", body)
     }
 
     private static func trak(trackID: Int, width: Int, height: Int, volume: Int,

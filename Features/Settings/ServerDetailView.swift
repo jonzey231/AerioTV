@@ -702,6 +702,8 @@ struct ServerDetailView: View {
                         SyncManager.shared.pushServers(servers, immediate: true)
                     }
                     server.applyDispatcharrPermissions(from: user, version: info.version)
+                    // Cast audio: same read as the version / permissions.
+                    await DispatcharrAPI.captureAACOutputProfile(for: server, using: levelAPI)
                 }
             case .m3uPlaylist:
                 guard let url = URL(string: server.baseURL) else { throw APIError.invalidURL }

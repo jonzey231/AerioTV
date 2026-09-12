@@ -1333,6 +1333,99 @@ struct XtreamSeriesItem: Decodable, Identifiable {
     }
 }
 
+/// One row of `/api/core/outputprofiles/` (DRF router basename
+/// `outputprofile`). Only the cast path reads these: Dispatcharr 0.30
+/// seeds a locked, active "Web Player (AAC Audio)" profile whose command
+/// is `-c:v copy -c:a aac -b:a 192k -ac 2 -f mpegts`, and asking for it
+/// per request (`?output_profile=<id>`) is how a cast session gets
+/// stereo AAC without the phone decoding anything.
+///
+/// Parsed by hand from JSON rather than `Decodable`: `parameters` has
+/// been a string on some builds and an object on others, and all this
+/// code needs from it is a substring search for "-c:a aac". The flattened
+/// `searchText` therefore carries the whole row's JSON, lowercased.
+struct DispatcharrOutputProfile: Sendable {
+    let id: Int
+    let name: String
+    let isActive: Bool
+    let locked: Bool
+    /// Whole row as lowercased JSON, for the "-c:a aac" fallback match.
+    let searchText: String
+
+    /// Name of the built-in profile, matched exactly first.
+    static let webPlayerAACName = "Web Player (AAC Audio)"
+
+    /// Tolerant of both the DRF paginated wrapper and a flat array.
+    static func parse(_ data: Data) -> [DispatcharrOutputProfile]? {
+        let root = try? JSONSerialization.jsonObject(with: data)
+        let rows: [[String: Any]]
+        if let list = root as? [[String: Any]] {
+            rows = list
+        } else if let wrapper = root as? [String: Any],
+                  let list = wrapper["results"] as? [[String: Any]] {
+            rows = list
+        } else {
+            return nil
+        }
+        return rows.compactMap { row in
+            guard let id = row["id"] as? Int else { return nil }
+            let text = (try? JSONSerialization.data(withJSONObject: row))
+                .flatMap { String(data: $0, encoding: .utf8) }?.lowercased() ?? ""
+            return DispatcharrOutputProfile(
+                id: id,
+                name: row["name"] as? String ?? "",
+                isActive: row["is_active"] as? Bool ?? true,
+                locked: row["locked"] as? Bool ?? false,
+                searchText: text)
+        }
+    }
+
+    /// The profile a cast session should request: the active profile named
+    /// exactly "Web Player (AAC Audio)", else any active profile whose
+    /// command / parameters ask for an AAC audio encoder.
+    static func aacProfile(in profiles: [DispatcharrOutputProfile]) -> DispatcharrOutputProfile? {
+        if let exact = profiles.first(where: { $0.isActive && $0.name == webPlayerAACName }) {
+            return exact
+        }
+        return profiles.first { $0.isActive && $0.searchText.contains("-c:a aac") }
+    }
+
+    /// Query parameter Dispatcharr reads to pick an output profile for
+    /// THIS request only. Other viewers of the same channel keep the
+    /// server default; the server runs one transcode per (channel,
+    /// profile) and shares it.
+    static let queryParameter = "output_profile"
+
+    /// Add `?output_profile=<id>` to a Dispatcharr live proxy URL. Only
+    /// `/proxy/ts/` URLs are touched (XC / M3U panels have no such
+    /// concept), and a nil id or an unparseable URL returns the input
+    /// unchanged.
+    static func applying(profileID: Int?, to url: URL) -> URL {
+        guard let profileID,
+              url.path.contains("/proxy/ts/"),
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var items = (components.queryItems ?? []).filter { $0.name != queryParameter }
+        items.append(URLQueryItem(name: queryParameter, value: String(profileID)))
+        components.queryItems = items
+        return components.url ?? url
+    }
+
+    /// Drop the parameter again for the one retry a broken profile gets.
+    static func removingProfile(from url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let items = components.queryItems else { return url }
+        let kept = items.filter { $0.name != queryParameter }
+        components.queryItems = kept.isEmpty ? nil : kept
+        return components.url ?? url
+    }
+
+    /// True when `url` already carries an output profile request.
+    static func carriesProfile(_ url: URL) -> Bool {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?.contains(where: { $0.name == queryParameter }) ?? false
+    }
+}
+
 // MARK: - Dispatcharr Native API
 struct DispatcharrAPI {
     enum Auth {
@@ -2471,6 +2564,74 @@ struct DispatcharrAPI {
         let (data, response) = try await dataWithJWTRetry(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return try? JSONDecoder().decode(VersionBody.self, from: data).version
+    }
+
+    /// `/api/core/outputprofiles/` -> the server's FFmpeg output profiles
+    /// (Dispatcharr 0.30 seeds a locked, active "Web Player (AAC Audio)"
+    /// one: `-c:v copy -c:a aac -b:a 192k -ac 2 -f mpegts`). Casting
+    /// requests that profile per request so the receiver gets stereo AAC
+    /// and the phone passes the audio through with no transcode of its
+    /// own. nil = the fetch failed or the endpoint does not exist (older
+    /// servers), which is NOT the same as "the server has no AAC
+    /// profile": the caller keeps whatever it already persisted.
+    func fetchOutputProfiles() async -> [DispatcharrOutputProfile]? {
+        guard let url = try? buildURL(path: "/api/core/outputprofiles/") else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 10
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        guard let (data, response) = try? await dataWithJWTRetry(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return DispatcharrOutputProfile.parse(data)
+    }
+
+    /// Fetch the profile list and pick this server's AAC cast output
+    /// profile. `known` is false when the list could not be read (old
+    /// server, transient failure), in which case the caller keeps
+    /// whatever it already persisted; `known` true with a nil id means the
+    /// server genuinely has no AAC profile.
+    func fetchAACOutputProfile() async -> (known: Bool, id: Int?) {
+        guard let profiles = await fetchOutputProfiles() else {
+            debugLog("[Cast] output profile list unavailable; keeping the stored id")
+            return (false, nil)
+        }
+        guard let picked = DispatcharrOutputProfile.aacProfile(in: profiles) else {
+            debugLog("[Cast] no AAC output profile on this server")
+            return (true, nil)
+        }
+        debugLog("[Cast] AAC output profile id=\(picked.id) name=\(picked.name)")
+        return (true, picked.id)
+    }
+
+    /// Persist the AAC cast output profile id on `server`. Kept MainActor
+    /// so the SwiftData row is only ever touched there; the network read
+    /// happens before the write.
+    @MainActor
+    @discardableResult
+    static func captureAACOutputProfile(for server: ServerConnection,
+                                       using api: DispatcharrAPI) async -> Int? {
+        guard server.type == .dispatcharrAPI else { return nil }
+        let result = await api.fetchAACOutputProfile()
+        guard result.known else { return server.dispatcharrAACOutputProfileID }
+        server.applyDispatcharrAACOutputProfile(result.id)
+        return result.id
+    }
+
+    /// Capture point helper for call sites that hold a `ServerConnection`
+    /// but no API instance. Mirrors how those sites build a DispatcharrAPI
+    /// for the version / permissions read.
+    @MainActor
+    @discardableResult
+    static func captureAACOutputProfile(for server: ServerConnection) async -> Int? {
+        guard server.type == .dispatcharrAPI else { return nil }
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode,
+                                 serverID: server.id,
+                                 savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                                     ? server.username : nil)
+        return await captureAACOutputProfile(for: server, using: api)
     }
 
     /// value here is only used cosmetically to render the stage's

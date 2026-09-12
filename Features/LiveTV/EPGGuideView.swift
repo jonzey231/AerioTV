@@ -1292,6 +1292,11 @@ final class GuideStore: ObservableObject {
                 server.dispatcharrServerVersion = version
             }
             debugLog("📺 GuideStore.fetchUpcoming: primed Dispatcharr version=\(server.dispatcharrServerVersion.isEmpty ? "?" : server.dispatcharrServerVersion) for \(server.name)")
+            // Same one-shot prime for the cast AAC output profile id, so a
+            // cast started before the launch refresh lands still has it.
+            if server.dispatcharrAACOutputProfileID == nil {
+                await DispatcharrAPI.captureAACOutputProfile(for: server, using: api)
+            }
         }
 
         let didRefresh: Bool

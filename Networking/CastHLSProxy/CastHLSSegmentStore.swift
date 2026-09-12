@@ -181,11 +181,30 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     func masterPlaylistText() -> String {
         condition.lock()
         let initData = inits[generation]
+        let audio = audioCodecsAttribute
         condition.unlock()
-        let codecs = initData.flatMap { Self.avcCodecString(from: $0) } ?? "avc1.640028"
+        var codecs = initData.flatMap { Self.avcCodecString(from: $0) } ?? "avc1.640028"
+        // The audio codec MUST match what the segments carry (mp4a.40.2
+        // for AAC, ac-3 / ec-3 for a passthrough) or the receiver picks
+        // the wrong decoder and plays video with no sound.
+        if let audio { codecs += ",\(audio)" }
         return "#EXTM3U\n"
-            + "#EXT-X-STREAM-INF:BANDWIDTH=12000000,CODECS=\"\(codecs),mp4a.40.2\",CLOSED-CAPTIONS=NONE\n"
+            + "#EXT-X-STREAM-INF:BANDWIDTH=12000000,CODECS=\"\(codecs)\",CLOSED-CAPTIONS=NONE\n"
             + "live.m3u8\n"
+    }
+
+    /// Audio codec name for the master playlist's CODECS attribute, set
+    /// by the session from the remuxer once the audio path is known
+    /// ("mp4a.40.2", "ac-3", "ec-3", or nil for a video-only mux).
+    /// Defaults to AAC: the passthrough remux is the exception, and a
+    /// playlist fetched before the first init segment must still name a
+    /// plausible codec.
+    private var audioCodecsAttribute: String? = "mp4a.40.2"
+
+    func setAudioCodecsAttribute(_ value: String?) {
+        condition.lock()
+        audioCodecsAttribute = value
+        condition.unlock()
     }
 
     /// avc1.PPCCLL from the avcC box inside an init segment (profile,

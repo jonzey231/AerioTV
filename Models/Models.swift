@@ -246,6 +246,15 @@ final class ServerConnection {
     /// Server version string from /api/core/version/ ("" = unknown).
     var dispatcharrServerVersion: String = ""
 
+    /// Id of this server's AAC cast output profile from
+    /// /api/core/outputprofiles/ (Dispatcharr 0.30 seeds a locked,
+    /// active "Web Player (AAC Audio)" profile). nil = not learned yet
+    /// or the server has none, in which case a cast session requests no
+    /// profile and the phone falls back to AC-3 passthrough or its own
+    /// AudioToolbox transcode. Captured wherever the server version is
+    /// captured; local playback never requests it.
+    var dispatcharrAACOutputProfileID: Int?
+
     /// v1.7.x: the Channel Profile id(s) assigned to the connected
     /// Dispatcharr user (`channel_profiles` on /api/accounts/users/me/),
     /// stored comma-joined for SwiftData stability. A Channel Profile is
@@ -443,6 +452,16 @@ final class ServerConnection {
         set(\.dispatcharrVODSeriesEnabled, user.vodSeriesEnabled)
         if let version, !version.isEmpty { set(\.dispatcharrServerVersion, version) }
         return changed
+    }
+
+    /// Persist the AAC cast output profile id learned from
+    /// /api/core/outputprofiles/. Returns true when it changed, so
+    /// callers can decide whether to push the row to iCloud.
+    @discardableResult
+    func applyDispatcharrAACOutputProfile(_ id: Int?) -> Bool {
+        guard dispatcharrAACOutputProfileID != id else { return false }
+        dispatcharrAACOutputProfileID = id
+        return true
     }
 
     /// Whether the server is at least `minimum` (semver, "0.30.0"). False

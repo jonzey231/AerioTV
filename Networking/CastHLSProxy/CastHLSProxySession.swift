@@ -31,6 +31,10 @@ enum CastHLSProxyError: Error, CustomStringConvertible {
     case ingestUnreachable
     /// Segments never materialized inside the ready window.
     case timedOut
+    /// The upstream answered an HTTP error before a single byte of media
+    /// (503 = the server could not start this feed, e.g. a broken output
+    /// profile); the sender retries once without the profile parameter.
+    case upstreamUnavailable(Int)
 
     var description: String {
         switch self {
@@ -38,6 +42,7 @@ enum CastHLSProxyError: Error, CustomStringConvertible {
         case .serverFailed: return "local HTTP server failed to start"
         case .ingestUnreachable: return "stream unreachable"
         case .timedOut: return "the stream never started"
+        case .upstreamUnavailable(let code): return "the server refused the stream (HTTP \(code))"
         }
     }
 }
@@ -57,6 +62,9 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// provider join latency; past this the channel is declared
     /// uncastable and the user told. First terminal error wins.
     private static let readyTimeout: TimeInterval = 25.0
+
+    /// The ready bound, for the sender's user-facing "no data" message.
+    static var readyTimeoutSeconds: Int { Int(readyTimeout) }
 
     /// A slow provider can eat the whole `readyTimeout` in one failed
     /// connect (15 s request timeout + backoff) and then recover on the
@@ -96,6 +104,9 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// Monotonic token; a scheduled reconnect from a superseded channel
     /// or a stopped session must not fire.
     private var ingestEpoch = 0
+    /// Receiver decodes AC-3: the remuxer then passes AC-3 / E-AC-3
+    /// through instead of running the AudioToolbox transcode.
+    private var allowAC3Passthrough = false
 
     // Per-generation log rollup state.
     private var segmentsLogged = 0
@@ -124,6 +135,24 @@ final class CastHLSProxySession: @unchecked Sendable {
         let audioPath: String?
         let lastRollupKbps: Int?
         let lastRollupAvgSegmentSeconds: Double?
+    }
+
+    /// Audio codec + mode for the sender's one-line cast log. nil when no
+    /// proxy session is up.
+    func audioSummary() -> (codec: String?, mode: String)? {
+        queue.sync {
+            guard let remuxer else { return nil }
+            let codec = remuxer.audioCodecsAttribute
+            let mode: String
+            if codec == nil {
+                mode = "none"
+            } else if codec == "mp4a.40.2", remuxer.audioPathDescription?.contains("->") == true {
+                mode = "transcode"
+            } else {
+                mode = "passthrough"
+            }
+            return (codec, mode)
+        }
     }
 
     /// Snapshot for the cast Options sheet; nil when no proxy session is
@@ -156,7 +185,8 @@ final class CastHLSProxySession: @unchecked Sendable {
     ///
     /// Throws `CastUnsupportedCodecError` for a mux the proxy cannot
     /// serve and `CastHLSProxyError` for infrastructure failures.
-    func startChannel(rawTSURL: URL, headers: [String: String]) async throws -> URL {
+    func startChannel(rawTSURL: URL, headers: [String: String],
+                      allowAC3Passthrough: Bool = false) async throws -> URL {
         // The Chromecast fetches over the LAN; 127.0.0.1 would only ever
         // work for the phone itself.
         guard let lanIP = Self.wifiLANAddress() else {
@@ -182,6 +212,7 @@ final class CastHLSProxySession: @unchecked Sendable {
                 self.server = server
             }
             let isChannelChange = self.activeURL != nil
+            self.allowAC3Passthrough = allowAC3Passthrough
             self.stopIngestLocked()
             self.activeURL = rawTSURL
             self.terminalError = nil
@@ -334,10 +365,14 @@ final class CastHLSProxySession: @unchecked Sendable {
         rollupBytes = 0
         rollupTicks = 0
 
-        let remuxer = CastFMP4Remuxer(log: { [weak self] in self?.log($0) })
+        let remuxer = CastFMP4Remuxer(allowAC3Passthrough: allowAC3Passthrough,
+                                      log: { [weak self] in self?.log($0) })
         remuxer.onInitSegment = { [weak self] data in
             guard let self, self.ingestEpoch == epoch else { return }
             self.store?.setInitSegment(generation: gen, data: data)
+            // The playlist's CODECS attribute must name the audio the
+            // segments actually carry (AAC, ac-3 or ec-3).
+            self.store?.setAudioCodecsAttribute(remuxer.audioCodecsAttribute)
             if let avc = CastHLSSegmentStore.avcCodecString(from: data) {
                 self.videoCodecDescription = "H.264 (\(avc))"
             }
@@ -404,6 +439,16 @@ final class CastHLSProxySession: @unchecked Sendable {
             onFinished: { [weak self] failureReason in
                 guard let self, self.ingestEpoch == epoch else { return }
                 if let failureReason { self.log("ingest ended: \(failureReason)") }
+                // HTTP 503 before a single byte means the server could not
+                // start this feed at all (a broken output profile is the
+                // usual cause). Terminal right away rather than after the
+                // backoff ladder, so the sender can retry without the
+                // output_profile parameter while the user is still waiting.
+                if !self.everConnected, failureReason == "http=503" {
+                    self.terminalError = CastHLSProxyError.upstreamUnavailable(503)
+                    self.stopIngestLocked()
+                    return
+                }
                 self.scheduleReconnectLocked(url: url, headers: headers, closingEpoch: epoch)
             })
         ingest = connection
