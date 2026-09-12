@@ -330,11 +330,61 @@ final class CastFMP4Remuxer {
         }
     }
 
-    /// Release the transcode codecs (no-op for passthrough muxes). The
-    /// session calls this once per ingest connection.
+    /// Per-connection teardown the session calls once per ingest
+    /// connection, before the next generation begins: emit the pending
+    /// TAIL (see `flushGenerationTail`), then release the transcode codecs
+    /// (a no-op for passthrough muxes). The tail is flushed FIRST so any
+    /// audio the transcoder has already handed back is still in the queue.
     func release() {
+        flushGenerationTail()
         transcoder?.release()
         transcoder = nil
+    }
+
+    /// Emit this generation's pending tail as one last segment, with both
+    /// tracks ending together.
+    ///
+    /// Measured at two channel changes (session22.txt 17:23:50 and
+    /// 17:25:14): the receiver reported a 122-123 ms hole in its buffered
+    /// range at every splice, then flapped between seeking and BUFFERING
+    /// and gap-jumped. Provider audio trails its video in the mux, so when
+    /// the cut keyframe arrived the audio for the last ~120 ms of the
+    /// outgoing segment had not been demuxed yet; it stayed queued for a
+    /// segment the channel change then threw away. Generation 7's last
+    /// segment therefore declared 4.004 s of EXTINF while its audio
+    /// covered only 3.901 s (gen 7 seg 10: t=40.04, audio 39.927 plus 188
+    /// frames of 21.33 ms = 43.938 against a playlist end of 44.044), and
+    /// Shaka placed generation 8 at the PLAYLIST position, 103 ms past
+    /// where the audio actually stopped. Chromium reports a two-track
+    /// SourceBuffer as the INTERSECTION of its tracks, so that shortfall
+    /// plus the new generation's own start offset is the hole.
+    ///
+    /// The fix is to declare only what both tracks carry: trim the video
+    /// tail back to the audio end, emit the held audio with it, and let
+    /// the segment's EXTINF be that common end. The next generation then
+    /// starts where this one really stopped.
+    private func flushGenerationTail() {
+        guard initSent, let lastVideo = videoQueue.last else { return }
+        let videoEnd = lastVideo.dts + lastVideoDuration
+        let audioEnd = audioQueue.last.map { $0.pts + audioFrameTicks } ?? -1
+        var cut = videoEnd
+        if audioEnd >= 0, audioEnd < videoEnd {
+            // Video samples that begin at or after the audio end carry no
+            // audio at all; dropping them is what keeps the declared
+            // duration honest for BOTH tracks. One sample always stays so
+            // the segment still opens on its keyframe.
+            while videoQueue.count > 1, videoQueue[videoQueue.count - 1].dts >= audioEnd {
+                videoQueue.removeLast()
+            }
+            cut = max(audioEnd, videoQueue[videoQueue.count - 1].dts + 1)
+        }
+        let ticks = Double(Self.ticksPerSecond)
+        let videoEndSeconds = Double(videoEnd - timelineBase) / ticks
+        let audioEndSeconds = audioEnd < 0 ? -1.0 : Double(audioEnd - timelineBase) / ticks
+        let trimmedMs = Double(videoEnd - cut) * 1000.0 / ticks
+        log(String(format: "splice tail: video end %.3f audio end %.3f trimmed %.1f ms",
+                   videoEndSeconds, audioEndSeconds, trimmedMs))
+        finalizeSegment(cutDTS: cut)
     }
 
     // MARK: TS packet / PSI parsing

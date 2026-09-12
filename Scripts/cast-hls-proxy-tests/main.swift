@@ -441,6 +441,122 @@ func continuityFixtureTS() -> Data? {
 
 runSegmentContinuityChecks()
 
+// MARK: 9b. the channel-change splice leaves ONE contiguous range
+//
+// Measured on the Google TV Streamer (session22.txt, 17:23:50 and
+// 17:25:14): at every channel change the receiver reported a 122-123 ms
+// hole in its buffered range ("buffered=[38.072-43.937][44.060-51.358]"),
+// then flapped between seeking and BUFFERING and gap-jumped. The old
+// generation's audio stopped 103 ms before the EXTINF total its playlist
+// declared, because provider audio trails its video in the mux and the
+// audio for the outgoing segment's last ~120 ms was still queued for a
+// segment the channel change threw away. Shaka parses our
+// EXT-X-DISCONTINUITY with sequenceMode false and places the next
+// generation at the accumulated EXTINF position, so that shortfall is a
+// hole in the track INTERSECTION Chromium reports.
+
+/// A transport stream whose AUDIO timestamps trail its video by
+/// `audioLagSeconds` at the same position in the mux, which is what every
+/// measured provider feed looks like (session22.txt, gen 7: a segment
+/// starting at video dts 40.040 carried audio from 39.927). Built by
+/// offsetting the VIDEO input, so no timestamp is negative. 60 fps with
+/// one B-frame of reorder matches the measured feed's 16 to 34 ms
+/// presentation-over-decode offset, which with the 21.33 ms audio frame
+/// quantum is the irreducible part of the seam.
+func audioLagFixtureTS() -> Data? {
+    let ffmpeg = "/opt/homebrew/bin/ffmpeg"
+    guard FileManager.default.isExecutableFile(atPath: ffmpeg) else { return nil }
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("cast-hls-continuity", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let ts = dir.appendingPathComponent("audiolag60.ts")
+    if !FileManager.default.fileExists(atPath: ts.path) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffmpeg)
+        process.arguments = [
+            "-y", "-v", "error",
+            "-itsoffset", "0.12",
+            "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=60:duration=30",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=30",
+            "-c:v", "libx264", "-preset", "veryfast", "-bf", "1", "-g", "120", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
+            "-f", "mpegts", ts.path,
+        ]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+    }
+    guard let bytes = try? Data(contentsOf: ts), !bytes.isEmpty else { return nil }
+    return bytes
+}
+
+/// One ingest connection: feed `limit` bytes in wire-sized chunks, then
+/// the per-connection teardown the session always runs.
+@MainActor func ingestOneConnection(_ bytes: Data, limit: Int) -> (segments: [Data], durations: [Int64]) {
+    var segments: [Data] = []
+    var durations: [Int64] = []
+    let remuxer = CastFMP4Remuxer()
+    remuxer.onMediaSegment = { data, ticks in
+        segments.append(data)
+        durations.append(ticks)
+    }
+    var offset = 0
+    while offset < limit {
+        let n = min(64 * 1024, limit - offset)
+        try? remuxer.feed(bytes.subdata(in: offset..<(offset + n)))
+        offset += n
+    }
+    remuxer.release()
+    return (segments, durations)
+}
+
+@MainActor func runSpliceContinuityChecks() {
+    guard let bytes = audioLagFixtureTS() else {
+        print("SKIP channel-change splice continuity (no ffmpeg fixture)")
+        return
+    }
+    let frameTicks = 1024 * CastFMP4Remuxer.ticksPerSecond / 48_000
+
+    // The channel change lands mid-segment: the ingest stops partway
+    // through the stream, the session begins a new generation, and a fresh
+    // remuxer serves it (one remuxer per ingest connection).
+    let genA = ingestOneConnection(bytes, limit: Int(Double(bytes.count) * 0.6))
+    let genB = ingestOneConnection(bytes, limit: Int(Double(bytes.count) * 0.4))
+    expect(genA.segments.count >= 3, "generation A produced segments (\(genA.segments.count))")
+    expect(genB.segments.count >= 2, "generation B produced segments (\(genB.segments.count))")
+    guard genA.segments.count >= 3, genB.segments.count >= 2 else { return }
+
+    let playlistEndA = genA.durations.reduce(0, +)
+    let lastA = segmentSpans(genA.segments[genA.segments.count - 1])
+    let firstB = segmentSpans(genB.segments[0])
+    guard let videoA = lastA[1], let audioA = lastA[2],
+          let videoB = firstB[1], let audioB = firstB[2] else {
+        expect(false, "both generations carry both trafs at the seam")
+        return
+    }
+    // The old range ends at min(video end, audio end) and the new one
+    // starts at max(video start, audio start), because Chromium reports a
+    // two-track SourceBuffer as the INTERSECTION of its tracks.
+    let oldEnd = min(videoA.end, audioA.end)
+    let newStart = playlistEndA + max(videoB.minPTS, audioB.start)
+    let holeMs = Double(newStart - oldEnd) * 1000.0 / Double(CastFMP4Remuxer.ticksPerSecond)
+    print(String(format: "SPLICE HOLE %.1f ms (playlist end %ld, video end %ld, audio end %ld)",
+                 holeMs, playlistEndA, videoA.end, audioA.end))
+    // The generation's tail must end both tracks together, or the playlist
+    // promises media one of them does not have.
+    expect(abs(videoA.end - audioA.end) <= frameTicks,
+           "the generation tail ends video and audio within one audio frame "
+           + "(video \(videoA.end), audio \(audioA.end))")
+    // ONE contiguous range across the splice: 40 ms is inside what a
+    // single video reorder delay and a single audio frame allow, and far
+    // below the 122 ms hole the receiver flapped on.
+    expect(Double(newStart - oldEnd) < Double(CastFMP4Remuxer.ticksPerSecond) * 0.04,
+           String(format: "the splice hole is %.1f ms, under the 40 ms quantum", holeMs))
+}
+
+runSpliceContinuityChecks()
+
 // MARK: 10. near-future segment fetches are held, not 404ed
 //
 // A 404 makes Shaka drop the segment and re-sync to the live edge, which

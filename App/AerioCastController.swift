@@ -1023,10 +1023,41 @@ extension AerioCastController: GCKGenericChannelDelegate {
         } else if json["hist"] != nil {
             history = string("hist")
         }
-        debugLog("[Cast] receiver: ev=\(string("ev")) t=\(decimals("t", 3)) "
+        // Anything the receiver adds later still reaches the log: the known
+        // keys keep their order and formatting, then every remaining top-level
+        // key prints generically. "type"/"mse" belong to the caps path above
+        // and would only repeat it here.
+        let known: Set<String> = [
+            "ev", "t", "buffered", "ready", "state", "rate",
+            "seek", "bufTime", "bw", "hist", "err", "type", "mse",
+        ]
+        var extras = ""
+        for key in json.keys.sorted() where !known.contains(key) {
+            let value = json[key]
+            let text: String
+            switch value {
+            case is NSNull, nil:
+                text = "null"
+            case let s as String:
+                text = s
+            case let n as NSNumber:
+                text = n.stringValue
+            default:
+                if let data = try? JSONSerialization.data(withJSONObject: value as Any),
+                   let compact = String(data: data, encoding: .utf8) {
+                    text = compact
+                } else {
+                    text = String(describing: value as Any)
+                }
+            }
+            extras += " \(key)=\(text)"
+        }
+        var line = "[Cast] receiver: ev=\(string("ev")) t=\(decimals("t", 3)) "
             + "buffered=\(buffered) ready=\(string("ready")) state=\(string("state")) "
             + "rate=\(string("rate")) seek=\(seek) bufTime=\(decimals("bufTime", 2)) "
-            + "bw=\(bandwidth) hist=\(history) err=\(error)")
+            + "bw=\(bandwidth) hist=\(history) err=\(error)" + extras
+        if line.count > 1000 { line = String(line.prefix(997)) + "..." }
+        debugLog(line)
     }
 }
 
