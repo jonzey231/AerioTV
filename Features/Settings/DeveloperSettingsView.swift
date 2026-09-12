@@ -336,7 +336,7 @@ struct DeveloperSettingsView: View {
                     Text("AVPlayer Engine (Test)")
                         .sectionHeaderStyle()
                 } footer: {
-                    Text("Experimental engine router: live channels whose URL is genuine HLS (.m3u8, typically Xtream Codes sources) play through Apple's native AVPlayer for true HDR/Dolby Vision output, Dolby Atmos passthrough, and AirPlay. Channels are presented in the system player without the app's custom chrome, channel flipping, or multiview. Raw MPEG-TS streams (Dispatcharr) are unaffected; AVPlayer cannot play them. Takes effect on the next channel start.")
+                    Text("Experimental engine router: live channels whose URL is genuine HLS (.m3u8, typically Xtream Codes sources) play through Apple's native AVPlayer for true HDR (PQ) output, surround sound passthrough, and AirPlay. Channels are presented in the system player without the app's custom chrome, channel flipping, or multiview. Raw MPEG-TS streams (Dispatcharr) are unaffected; AVPlayer cannot play them. Takes effect on the next channel start.")
                         .font(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .padding(.top, 4)

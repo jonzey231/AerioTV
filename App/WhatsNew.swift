@@ -209,7 +209,7 @@ enum WhatsNewStore {
                 "Apple TV: one unified player for live, rewind, and catch-up - hold left/right to scrub with smooth acceleration",
                 "iPhone: swipe between channel groups with a fluid drag animation, and the list now fills the whole screen under the tab bar",
                 "Better playback errors: see what actually went wrong, auto-reconnect every 5 seconds, and a Retry control in the player",
-                "Fixed no-audio on some Dolby Atmos receivers and other audio reliability improvements"
+                "Fixed no-audio on some surround sound receivers and other audio reliability improvements"
             ],
             releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.11")
         ),
@@ -265,7 +265,7 @@ enum WhatsNewStore {
                 "Add favorites right from the guide by tapping the star on a channel, now available on iPad as well",
                 "Live TV groups can be sorted Default, A-Z, or in your own manual order, and the channels inside follow the order you choose",
                 "Recordings now show full program details so episodes are easier to tell apart",
-                "Apple TV: fixed a crash when scrolling the Live TV guide, and fixed no audio when Dolby Atmos is enabled in tvOS Settings"
+                "Apple TV: fixed a crash when scrolling the Live TV guide, and fixed no audio when surround sound output is enabled in tvOS Settings"
             ],
             releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.6")
         ),

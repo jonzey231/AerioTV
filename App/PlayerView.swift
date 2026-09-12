@@ -5433,8 +5433,8 @@ struct UnifiedPlayerChrome: View {
 /// Full-screen native AVPlayer playback for genuine HLS streams, presented
 /// when the Developer "AVPlayer for HLS Streams" toggle routes a .m3u8 URL
 /// here instead of the mpv pipeline (see PlayerSession.begin). Uses
-/// AVPlayerViewController for the system transport/chrome: native HDR and
-/// Dolby Vision output, Atmos passthrough, AirPlay, and the standard
+/// AVPlayerViewController for the system transport/chrome: native HDR (PQ)
+/// output, surround sound passthrough, AirPlay, and the standard
 /// scrubbing UI come along for free, which is the whole point of the test.
 /// Deliberately NOT integrated with the app's custom chrome, channel-flip,
 /// or multiview; this is an engine evaluation surface, not a replacement.

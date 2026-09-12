@@ -24,7 +24,7 @@
 //   - Audio is PASSTHROUGH: AC-3 ('ac-3' + dac3), E-AC-3 ('ec-3' + dec3),
 //     or ADTS AAC ('mp4a' + esds). No transcode: AVPlayer hands the
 //     compressed bitstream to the system pipeline, which is exactly the
-//     Atmos/5.1 win the remux engine exists for. (The cast path MUST
+//     surround sound win the remux engine exists for. (The cast path MUST
 //     transcode because a Chromecast web receiver cannot decode AC-3.)
 //   - HDR needs no explicit handling here: transfer characteristics
 //     (PQ/HLG) and mastering metadata travel in the HEVC VUI and SEI,
@@ -123,6 +123,9 @@ final class LiveFMP4Remuxer {
     /// AAC: 1024 samples, at the track sample rate).
     private var audioFrameTicks: Int64 = 0
     private var audioCarry: [UInt8] = []
+    /// Timeline stamp for the next audio frame the splitters will emit,
+    /// carried across PES boundaries (see onAudioPES).
+    private var audioNextPTS: Int64 = -1
 
     // MARK: timeline + queues
 
@@ -317,11 +320,18 @@ final class LiveFMP4Remuxer {
 
     private func onAudioPES(_ payload: [UInt8], pts33: Int64) {
         let pts = audioClock.unwrap(pts33)
+        // The PES PTS stamps the first frame that STARTS in this PES. When
+        // the previous PES ended mid-frame, the frame the splitters decode
+        // first started back there and must keep the timeline it was
+        // already on, or it (and every frame behind it in this PES) lands
+        // one frame duration late. Resync to the stream's own PTS whenever
+        // the carry is clean, which is every PES for an ffmpeg mux.
+        if audioCarry.isEmpty || audioNextPTS < 0 { audioNextPTS = pts }
         audioCarry.append(contentsOf: payload)
         switch audioStreamType {
-        case 0x81: splitSyncframes(basePTS: pts, eac3: false)
-        case 0x87: splitSyncframes(basePTS: pts, eac3: true)
-        case 0x0F: splitADTS(basePTS: pts)
+        case 0x81: splitSyncframes(basePTS: audioNextPTS, eac3: false)
+        case 0x87: splitSyncframes(basePTS: audioNextPTS, eac3: true)
+        case 0x0F: splitADTS(basePTS: audioNextPTS)
         default: break
         }
     }
@@ -341,7 +351,7 @@ final class LiveFMP4Remuxer {
             guard let size = frameSize, size >= 8 else { i += 1; continue }
             guard audioCarry.count - i >= size else { break } // partial tail
             if audioConfig == nil {
-                configureDolby(Array(audioCarry[i..<(i + size)]), eac3: eac3)
+                configureAC3(Array(audioCarry[i..<(i + size)]), eac3: eac3)
                 guard audioConfig != nil else { i += size; continue }
                 maybeEmitInit()
             }
@@ -349,6 +359,7 @@ final class LiveFMP4Remuxer {
             pts += audioFrameTicks
             i += size
         }
+        audioNextPTS = pts
         audioCarry.removeFirst(i)
         trimAudioCarry()
     }
@@ -385,6 +396,7 @@ final class LiveFMP4Remuxer {
             pts += audioFrameTicks
             i += frameLen
         }
+        audioNextPTS = pts
         audioCarry.removeFirst(i)
         trimAudioCarry()
     }
@@ -394,7 +406,7 @@ final class LiveFMP4Remuxer {
         if audioCarry.count > 64 * 1024 { audioCarry.removeAll(keepingCapacity: true) }
     }
 
-    // MARK: Dolby frame headers
+    // MARK: AC-3 / E-AC-3 frame headers
 
     /// AC-3 (ETSI TS 102 366 4.3): frame bytes from fscod + frmsizecod.
     private static let ac3BitrateKbps = [
@@ -424,7 +436,7 @@ final class LiveFMP4Remuxer {
     }
 
     /// Parse the first syncframe's BSI for the sample entry + dac3/dec3.
-    private func configureDolby(_ frame: [UInt8], eac3: Bool) {
+    private func configureAC3(_ frame: [UInt8], eac3: Bool) {
         var r = BitReader90k(Array(frame.dropFirst(2))) // past 0x0B77
         do {
             if eac3 {
@@ -736,8 +748,20 @@ final class LiveFMP4Remuxer {
         var body = Data(capacity: 16 + audio.count * 8)
         body.append(Self.u32(audio.count))
         body.append(Self.u32(dataOffset))
-        for a in audio {
-            body.append(Self.u32(Int(audioFrameTicks)))
+        // Per-sample durations off the real timestamps, not a blanket
+        // 1024/sample-rate: when frames are missing mid-segment, a fixed
+        // duration silently pulls everything after the hole early (the
+        // segment's tfdt only re-anchors the FIRST sample), which reads as
+        // audio sliding against video inside the segment. The gap now
+        // shows up as one long sample instead. Clamped so a discontinuity
+        // cannot write an absurd duration.
+        for (index, a) in audio.enumerated() {
+            var duration = audioFrameTicks
+            if index + 1 < audio.count {
+                let delta = audio[index + 1].pts - a.pts
+                if delta > 0, delta <= audioFrameTicks * 8 { duration = delta }
+            }
+            body.append(Self.u32(Int(duration)))
             body.append(Self.u32(a.data.count))
         }
         return Self.fullBox("trun", 0, 0x000301, body)

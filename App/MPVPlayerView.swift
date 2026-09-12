@@ -2440,10 +2440,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var lastAudioReconfigAt: CFAbsoluteTime = 0
         private var audioReconfigCount: Int64 = 0
 
-        /// Issue #36 (no audio when the tvOS output is Dolby Atmos): one-shot
-        /// post-restart audio health check + stereo-downmix fallback. Reset
-        /// per stream in handleStartFile(); re-armed by audio route changes
-        /// so toggling Atmos mid-app recovers without a restart.
+        /// Issue #36 (no audio when the tvOS output is set to spatial
+        /// surround): one-shot post-restart audio health check +
+        /// stereo-downmix fallback. Reset per stream in handleStartFile();
+        /// re-armed by audio route changes so toggling that output mid-app
+        /// recovers without a restart.
         private var audioHealthCheckScheduled = false
         private var audioStereoFallbackApplied = false
 
@@ -3610,11 +3611,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             debugLog("[MPV-AIRPLAY] Route changed: reason=\(reasonStr), airPlay=\(hasAirPlay), outputs=\(outputs)")
             #endif
 
-            // Issue #36: toggling Dolby Atmos in tvOS Settings while the app
-            // runs arrives as a route configuration change. Re-run the audio
-            // health check (re-armed) so a dead audio chain, or one stuck on
-            // the stereo fallback after the user turned Atmos back off,
-            // recovers without an app restart.
+            // Issue #36: toggling the spatial surround output in tvOS
+            // Settings while the app runs arrives as a route configuration
+            // change. Re-run the audio health check (re-armed) so a dead audio
+            // chain, or one stuck on the stereo fallback after the user turned
+            // that output back off, recovers without an app restart.
             #if os(tvOS)
             switch reason {
             case .routeConfigurationChange, .categoryChange, .newDeviceAvailable, .oldDeviceUnavailable:
@@ -5203,7 +5204,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // fallback churning. Every audio behavior in this app (6ch LPCM
             // surround, the stereo-downmix fallback, underrun tuning) was
             // built and verified on audiounit; ao_avfoundation adoption is
-            // its own project (it is also the Atmos/E-AC-3 JOC extension
+            // its own project (it is also the E-AC-3 JOC extension
             // point), not a silent default flip.
             checkError(mpv_set_option_string(mpv, "ao", "audiounit"))
 
@@ -6729,7 +6730,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         }
                         // Issue #36: verify the audio chain actually opened
                         // (it silently fails when the tvOS output is set to
-                        // Dolby Atmos) once the startup transient is past.
+                        // spatial surround) once the startup transient is past.
                         if !self.audioHealthCheckScheduled {
                             self.audioHealthCheckScheduled = true
                             self.mpvQueue.asyncAfter(deadline: .now() + 2.5) { [weak self] in
@@ -6851,7 +6852,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #endif
         }
 
-        /// Issue #36: with the tvOS audio output set to Dolby Atmos, mpv's
+        /// Issue #36: with the tvOS audio output set to spatial surround, mpv's
         /// AVFoundation audio output can fail to open against the spatial
         /// hardware layout. Playback then continues silently: the audio
         /// decoder never produces (audio-params/channel-count stays 0, the
@@ -6861,7 +6862,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// (it is the diagnostic we ask issue reporters for), and when the
         /// audio chain is dead it forces a stereo downmix, which the audio
         /// output can always open; tvOS then applies its own spatialization,
-        /// so Atmos-capable setups still get surround rendering instead of
+        /// so spatial-capable setups still get surround rendering instead of
         /// silence. One fallback attempt per stream.
         ///
         /// Must be called on mpvQueue.
@@ -6882,7 +6883,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Two dead-chain shapes get the stereo fallback (one attempt per
             // stream); anything else is healthy and left alone:
             //  - codec set, but 0 decoded channels / no ao (#36): the chain
-            //    came up and failed against the Atmos output layout.
+            //    came up and failed against the spatial output layout.
             //  - codec=nil AND ao=nil (#51): the audiounit ao failed so early
             //    against the receiver's spatial layout (log showed
             //    route=HDMIOutput/32ch, session 48000Hz/32ch) that mpv
@@ -6906,7 +6907,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             audioStereoFallbackApplied = true
             let failureShape = codec == nil ? "audio disabled after ao init failure"
                 : (aoDead ? "no audio output" : "0 channels")
-            debugLog("[AUDIO-FALLBACK] \(streamTag) audio chain failed to open (\(failureShape)); forcing stereo downmix + audio chain reinit (Dolby Atmos output workaround)")
+            debugLog("[AUDIO-FALLBACK] \(streamTag) audio chain failed to open (\(failureShape)); forcing stereo downmix + audio chain reinit (spatial surround output workaround)")
             mpv_set_property_string(mpv, "audio-channels", "stereo")
             // Cycle the audio track so the audio output reopens cleanly with
             // the new layout.

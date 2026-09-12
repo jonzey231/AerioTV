@@ -130,7 +130,7 @@ Complete corresponding source: https://github.com/jonzey231/AerioTV
             id: "libdovi",
             name: "libdovi",
             licenseName: "MIT",
-            blurb: "Version: libdovi-build 3.3.2. Parses Dolby Vision RPU metadata so mpv can map dynamic HDR. quietvoid, github.com/quietvoid/dovi_tool. Dolby Vision is a Dolby Laboratories technology; this library handles the metadata only. The copyright notice and permission notice are reproduced below.",
+            blurb: "Version: libdovi-build 3.3.2. Parses the dynamic HDR RPU metadata carried alongside an HDR (PQ) stream so mpv can map it. quietvoid, github.com/quietvoid/dovi_tool. This library handles the metadata only. The copyright notice and permission notice are reproduced below.",
             licenseText: mitText),
         OSSComponent(
             id: "dav1d",
