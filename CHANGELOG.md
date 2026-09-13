@@ -83,6 +83,7 @@ guide and channel tunes.
   channel's timeline, and the receiver no longer refuses the stream over
   an audio description it could not read.
 - Multiview on iPhone and iPad: X closes the selected stream.
+- Multiview: the tile menu on Apple TV no longer reopens on its own.
 - On-demand titles ending in a bare year no longer keep it in the name.
 - Apple TV: leaving the player chrome no longer re-arms the fade timer,
   and the last grid row's captions no longer sit under the screen edge.
