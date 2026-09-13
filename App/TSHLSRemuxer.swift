@@ -1295,6 +1295,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 : URL(string: "http://127.0.0.1:\(localPort)/live.m3u8")!
             TuneTimeline.shared.mark("remuxReady")
             debugLog("[TS-REMUX] READY on seg\(readyThreshold - 1) -> \(url.absoluteString)")
+            debugLog("[TS-REMUX] \(pacingStateDescription)")
             DispatchQueue.main.async { [weak self] in self?.onReady?(url) }
         }
         // Start (or advance) the paced live edge. The first call, in the
@@ -1382,16 +1383,29 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// time. Bursts miss the deadline by whole seconds, not by 0.25 s.
     private let pacedGrace = 0.25
 
-    /// Pacing applies to the LIVE playlist only. Live Rewind spill (the
-    /// whole disk window is the seekable range) and the catch-up / DVR
-    /// EVENT and ENDLIST renderings are untouched. In-process delivery is
-    /// excluded as well: its segments are inlined as data URIs, so there
-    /// are no segment GETs to read the player's position from and the
-    /// starvation guard (rule 3) could not be honored there.
+    /// Pacing applies to the LIVE playlist, which on this app is normally
+    /// the SPILL rendering: every live tune arms a 1800 s Live Rewind
+    /// window, so `spilled` is non-empty from the first segment and the
+    /// live playlist is the spilled list (2026-09-13 device log: the live
+    /// playlist grew from 280 B to 2 KB across one tune). An earlier gate
+    /// excluded the spill branch and so disabled pacing on every tune.
+    /// What is genuinely excluded is the rewind / timeshift playlist
+    /// ITSELF: catch-up and DVR render EXT-X-PLAYLIST-TYPE:EVENT
+    /// (`eventPlaylist`) or an ENDLIST (`playlistComplete`), and those are
+    /// never a live join. In-process delivery is excluded too: its
+    /// segments are inlined as data URIs, so there are no segment GETs to
+    /// read the player's position from and the starvation guard (rule 3)
+    /// could not be honored there.
     private var pacingApplies: Bool {
-        readySignaled && !eventPlaylist && !playlistComplete
-            && !inProcessDelivery
-            && !(spillDir != nil && !spilled.isEmpty)
+        readySignaled && !eventPlaylist && !playlistComplete && !inProcessDelivery
+    }
+
+    /// Reason string for the one-shot READY log line.
+    private var pacingStateDescription: String {
+        if eventPlaylist { return "pacing off: event playlist (catch-up/DVR)" }
+        if playlistComplete { return "pacing off: completed playlist" }
+        if inProcessDelivery { return "pacing off: in-process delivery (inlined segments)" }
+        return "pacing active"
     }
 
     /// Advance the paced live edge for `now`. Called on `queue` from
@@ -1469,17 +1483,21 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // advertised there (a 30-minute window would be a 1 GB playlist).
         // Live-edge pacing clamps the LIVE window to the paced edge; the
         // spill (Live Rewind) window is rendered whole, as always.
-        let live: [(seq: Int, data: Data, duration: Double)]
-        if pacingApplies, let advertised = pacedAdvertisedSeq {
-            live = segments.filter { $0.seq <= advertised }
-        } else {
-            live = segments
+        // Live-edge pacing clamps the HEAD of whichever live window is
+        // rendered (RAM window or Live Rewind spill window) to the paced
+        // edge. Clamping the head only: the rewind depth behind the player
+        // is untouched, so the seekable range keeps its full 1800 s.
+        let edgeCap: Int? = pacingApplies ? pacedAdvertisedSeq : nil
+        func capped<T>(_ items: [T], _ seq: (T) -> Int) -> [T] {
+            guard let cap = edgeCap else { return items }
+            return items.filter { seq($0) <= cap }
         }
         let window: [(seq: Int, duration: Double)] = inProcessDelivery
-            ? live.suffix(inlineWindowSegments).map { (seq: $0.seq, duration: $0.duration) }
+            ? segments.suffix(inlineWindowSegments).map { (seq: $0.seq, duration: $0.duration) }
             : (spillDir != nil && !spilled.isEmpty)
-                ? spilled.map { (seq: $0.seq, duration: $0.duration) }
-                : live.suffix(liveWindowSegments).map { (seq: $0.seq, duration: $0.duration) }
+                ? capped(spilled, { $0.seq }).map { (seq: $0.seq, duration: $0.duration) }
+                : capped(segments, { $0.seq }).suffix(liveWindowSegments)
+                    .map { (seq: $0.seq, duration: $0.duration) }
         guard let first = window.first else {
             return "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:\(Int(pinnedTargetDuration.rounded(.up)))\n#EXT-X-MEDIA-SEQUENCE:0\n"
         }
