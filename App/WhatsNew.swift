@@ -57,6 +57,15 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.32",
+            title: "What's new in 1.8.32",
+            bullets: [
+                "Live feeds that arrive in bursts rebuild a buffer sized to the gap they measured",
+                "A feed that keeps stalling now rejoins from the local buffer instead of stalling again"
+            ],
+            releaseURL: nil
+        ),
+        WhatsNewRelease(
             version: "1.8.31",
             title: "What's new in 1.8.31",
             bullets: [
@@ -66,7 +75,7 @@ enum WhatsNewStore {
                 "Apple TV: faster launch, smoother guide scrolling and quicker channel tunes",
                 "Guide, Movies and DVR open from cache and refresh quietly in the background",
                 "Live TV rides out server busy replies and moves to another stream on its own",
-                "Live channels that arrive in bursts now rebuild a bigger buffer after a stall, and rejoin from the local buffer when a feed keeps stalling",
+                "Live channels that arrive in bursts now rebuild a bigger buffer after a stall instead of stalling again",
                 "Multiview: the tile menu on Apple TV no longer reopens on its own"
             ],
             releaseURL: nil

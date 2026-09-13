@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.8.32 - 2026-09-13
+
+A follow-up to 1.8.31 for live feeds that deliver in bursts.
+
+### Fixed
+
+- Live playback on feeds that deliver in bursts. After a stall the player
+  now rebuilds a buffer sized to the gap it actually measured, and if the
+  feed stalls again within a minute it rejoins from the local buffer with
+  the hold-back it has learned instead of stalling over and over.
+
 ## v1.8.31 - 2026-09-13
 
 The media-center release: Movies, TV Shows and DVR rebuilt on iPhone,
@@ -75,7 +86,7 @@ guide and channel tunes.
 - Apple TV: a stall no longer moves the playhead backward, and a single
   nudge recovers playback that was waiting on data it already had.
 - Live channels that arrive in bursts now rebuild a bigger buffer after a
-  stall, and rejoin from the local buffer when a feed keeps stalling.
+  stall instead of stalling again.
 - Apple TV audio on the remux path: a segment boundary could slice an
   audio frame in half. Frames are now held and written whole.
 - The same Apple TV could appear twice in the remote picker.
