@@ -4234,6 +4234,23 @@ final class AVPlayerProgressDriver {
     private var minimizeStallsWaitTicks = 0
     private var minimizeStallsWaitBaseSegments = 0
     private var nudgedThisWaitStreak = false
+    /// Stall resume gate (2026-09-13, atv_skip2.txt 13:02-13:06). A bursty
+    /// feed stalled six times in two minutes because every resume went out
+    /// with ~2 s buffered: the nudge below fired the moment ONE segment had
+    /// landed, so the next upstream gap (4.8 s there) emptied the buffer
+    /// again. After a "buffer ran empty" stall the resume now waits for the
+    /// worst observed delivery gap plus 2 s, capped at 8 s, with a 25 s hard
+    /// timeout after which it resumes with whatever it has. Skipped outright
+    /// when the feed is measured below real time.
+    private var stallGateSince: Date?
+    private var stallGateTarget = 0.0
+    /// Hold-back the learner raised DURING this session. Before 2026-09-13 a
+    /// learned raise only took effect at the next tune of the channel, so a
+    /// session that was stalling kept playing 2 to 4 s from the edge while
+    /// the learner walked 6 -> 18 s for a tune that might never come. It is
+    /// now also the floor for Return to Live in the current session (it is
+    /// NOT part of the post-stall resume gate: see armStallResumeGate).
+    private var sessionHoldback = 0.0
     private var freezeTimer: Timer?
     /// Escalation sink for a fatal/persistent stream error the errorLog
     /// surfaces (e.g. a rejected playlist or a failed blocking reload that
@@ -4574,6 +4591,7 @@ final class AVPlayerProgressDriver {
             object: item, queue: .main) { [weak self] _ in
             let ms = Int((CACurrentMediaTime() - (self?.launchStart ?? 0)) * 1000)
             debugLog("[AVP-STREAM] STALL at +\(ms)ms (buffer ran empty)")
+            self?.armStallResumeGate()
         })
 
         // Periodic summary (15s), mpv [STREAM-SUMMARY] cadence: report
@@ -4647,6 +4665,7 @@ final class AVPlayerProgressDriver {
             // apart, must never accumulate into an engine bounce.
             playlistStaleSince = nil
             softErrorCount = 0
+            stallGateSince = nil
             if freezeConsecutiveTicks > 0 {
                 debugLog(String(format:
                     "[AVP-FREEZE] recovered after ~%ds frozen (pos %.1fs)",
@@ -4688,11 +4707,66 @@ final class AVPlayerProgressDriver {
         guard let loadedEnd = item.loadedTimeRanges.last?.timeRangeValue,
               (loadedEnd.end - item.currentTime()).seconds >= (liveTargetDuration?() ?? 2.0) else { return }
         let ahead = (loadedEnd.end - item.currentTime()).seconds
+        // Post-stall: hold until the cushion is real (or the 25 s fuse
+        // blows). The plain first-join case, where no stall has armed the
+        // gate, keeps the original playImmediately behavior.
+        if let since = stallGateSince {
+            let waited = Date().timeIntervalSince(since)
+            if ahead < stallGateTarget, waited < AVPlayerProgressDriver.stallGateTimeout {
+                debugLog(String(format:
+                    "[AVP-NUDGE] holding %.0f s until %.1f s buffered (gap %.1f s), %.1f s loaded ahead",
+                    waited, stallGateTarget,
+                    TSHLSRemuxer.feedRateWindow.worstGap(), ahead))
+                return
+            }
+            if ahead < stallGateTarget {
+                debugLog(String(format:
+                    "[AVP-NUDGE] resume gate timed out after %.0f s with only %.1f s buffered (wanted %.1f s); resuming anyway",
+                    waited, ahead, stallGateTarget))
+            } else {
+                debugLog(String(format:
+                    "[AVP-NUDGE] resume gate satisfied after %.0f s: %.1f s buffered (wanted %.1f s)",
+                    waited, ahead, stallGateTarget))
+            }
+            stallGateSince = nil
+        }
         nudgedThisWaitStreak = true
         player.playImmediately(atRate: 1.0)
         debugLog(String(format:
             "[AVP-NUDGE] waiting %ds with %d new segments and %.1fs loaded ahead; playImmediately",
             minimizeStallsWaitTicks, newSegments, ahead))
+    }
+
+    /// Hard fuse on the resume gate: a feed that never delivers the cushion
+    /// must still produce a picture.
+    static let stallGateTimeout: TimeInterval = 25
+
+    private func learnedHoldback() -> Double {
+        liveHoldbackKey.map { LiveEdgeHoldback.offset(for: $0) } ?? LiveEdgeHoldback.base
+    }
+
+    /// Arm the post-stall resume gate. Target = worst observed delivery gap
+    /// plus 2 s, capped at 8 s (device run 2026-09-13: a target that also
+    /// carried the learned hold-back held picture for 18 s, which is worse
+    /// than the stall it prevents). The learned hold-back is deliberately
+    /// NOT part of this target; it still governs the next tune and Return
+    /// to Live. A feed measured below real time is not bursty, and no wait
+    /// fills a buffer the provider is not filling, so the gate is skipped
+    /// entirely there.
+    private func armStallResumeGate() {
+        guard isLive else { return }
+        let gap = TSHLSRemuxer.feedRateWindow.worstGap()
+        if let rate = TSHLSRemuxer.feedRateWindow.rateRatio(), rate < 0.9 {
+            stallGateSince = nil
+            debugLog(String(format: "[AVP-NUDGE] gate skipped: upstream rate %.2f", rate))
+            return
+        }
+        let target = min(8.0, gap + 2.0)
+        stallGateTarget = target
+        stallGateSince = Date()
+        debugLog(String(format:
+            "[AVP-NUDGE] holding after stall until %.1f s buffered (gap %.1f s), timeout %.0f s",
+            target, gap, AVPlayerProgressDriver.stallGateTimeout))
     }
 
     /// The remuxer's TARGETDURATION can grow during the first seconds of
@@ -4705,6 +4779,13 @@ final class AVPlayerProgressDriver {
     /// made the player seek backward and replay content (see
     /// `logPerfSummary`).
     private func maybeRaiseJoinOffset() {
+        // Deliberately NOT applied mid-stream (2026-09-13): raising
+        // configuredTimeOffsetFromLive makes AVPlayer refill to the new
+        // offset before it plays, a wait of up to the whole hold-back
+        // (18 s on the device run) that the 8 s resume gate cannot bound.
+        // The learned hold-back therefore stays a NEXT-TUNE setting, plus
+        // the Return to Live floor; only the first-30 s targetDuration
+        // correction below writes the offset.
         guard isLive, let provider = liveTargetDuration,
               let item = player.currentItem,
               CACurrentMediaTime() - launchStart < 30 else { return }
@@ -4786,8 +4867,12 @@ final class AVPlayerProgressDriver {
                 if next > base + 0.5 {
                     LiveEdgeHoldback.record(next, for: key)
                 }
+                // Applied to THIS session as well (2026-09-13): the raise is
+                // the session's target live-edge offset from here on, and the
+                // next empty-buffer moment writes it onto the item.
+                sessionHoldback = max(sessionHoldback, max(base, next))
                 debugLog(String(format:
-                    "[AVP-HOLDBACK] stall #%d: bursty feed (rate %.2f, worst gap %.1fs), live edge offset %.0fs -> %.0fs for the NEXT tune of this channel",
+                    "[AVP-HOLDBACK] stall #%d: bursty feed (rate %.2f, worst gap %.1fs), live edge offset %.0fs -> %.0fs for the NEXT tune of this channel and for Return to Live",
                     stalls, rate ?? -1, worstGap, base, max(base, next)))
             }
         }
@@ -5111,7 +5196,11 @@ final class AVPlayerProgressDriver {
             self?.store.behindLiveEdge = false
             let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
             guard end.isFinite else { return }
-            player.seek(to: CMTime(seconds: max(0, end - 1), preferredTimescale: 600))
+            // Never rejoin closer to the edge than this channel has taught
+            // us it can sustain (2026-09-13): landing 1 s back on a bursty
+            // feed just books the next stall.
+            let back = max(1.0, min(20.0, self?.sessionHoldback ?? 0))
+            player.seek(to: CMTime(seconds: max(0, end - back), preferredTimescale: 600))
             if player.timeControlStatus == .paused { player.play() }
         }
         store.replayFromStartAction = { [weak player] in

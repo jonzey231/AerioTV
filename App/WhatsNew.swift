@@ -67,6 +67,7 @@ enum WhatsNewStore {
                 "Apple TV: faster launch, smoother guide scrolling and quicker channel tunes",
                 "Guide, Movies and DVR open from cache and refresh quietly in the background",
                 "Live TV rides out server busy replies and moves to another stream on its own",
+                "Live channels that arrive in bursts now rebuild a bigger buffer after a stall instead of stalling again",
                 "Tap the App Version row in Settings to reopen What's New"
             ],
             releaseURL: nil
