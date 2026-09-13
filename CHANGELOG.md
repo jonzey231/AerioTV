@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.8.33 - 2026-09-13
+
+### Fixed
+
+- Apple TV Live TV: with the hero banner off, the mini player now sits
+  above the guide timeline instead of over the channel rows.
+- Apple TV Live TV: the group sidebar widens to fit your longest group
+  name.
+
 ## v1.8.32 - 2026-09-13
 
 A follow-up to 1.8.31 for live feeds that deliver in bursts.

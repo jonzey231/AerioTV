@@ -57,6 +57,15 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.33",
+            title: "What's new in 1.8.33",
+            bullets: [
+                "Apple TV Live TV: with the hero banner off, the mini player sits above the guide timeline",
+                "Apple TV Live TV: the group sidebar widens to fit your longest group name"
+            ],
+            releaseURL: nil
+        ),
+        WhatsNewRelease(
             version: "1.8.32",
             title: "What's new in 1.8.32",
             bullets: [
