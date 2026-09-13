@@ -109,6 +109,9 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// Serializes control (start/stop/reconnect bookkeeping) and ingest
     /// data; the remuxer is single-caller on this queue.
     private let queue = DispatchQueue(label: "com.aerio.casthls.session")
+    /// Backing store for `demuxedMasterURL`, written on `queue` when the
+    /// ready gate passes.
+    private var demuxedMasterURLStorage: URL?
 
     private var server: CastHLSProxyServer?
     private var store: CastHLSSegmentStore?
@@ -143,6 +146,10 @@ final class CastHLSProxySession: @unchecked Sendable {
     private var pendingComposition: (video: Int, audio: Int,
                                      vdts: Double, vpts: Double, apts: Double,
                                      start: Double)?
+    /// Demuxed renditions of the segment about to be published, handed
+    /// over by `CastFMP4Remuxer.onDemuxedMediaSegments` (which fires
+    /// immediately before `onMediaSegment` on the same ingest queue).
+    private var pendingDemuxed: (video: Data, audio: Data?, audioDurationTicks: Int64)?
 
     // Stats surface for the cast Options sheet (task #267): the latest
     // completed per-8-segment rollup is STORED, not just logged, plus a
@@ -294,6 +301,13 @@ final class CastHLSProxySession: @unchecked Sendable {
                            ready.segments, seconds,
                            Double(Self.readyMediaTicks) / Double(CastFMP4Remuxer.ticksPerSecond),
                            Self.readyMinSegments))
+                // Both masters hang off the same base: /master.m3u8 is the
+                // MUXED one (legacy, kept for one release) and
+                // /demuxed.m3u8 the two-rendition shape the SENDER must
+                // load. AerioCastController: point MediaInfo.contentURL at
+                // `demuxedMasterURL` below instead of this return value.
+                let demuxed = URL(string: "http://\(lanIP):\(port)/demuxed.m3u8")!
+                queue.sync { self.demuxedMasterURLStorage = demuxed }
                 return URL(string: "http://\(lanIP):\(port)/master.m3u8")!
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -303,6 +317,16 @@ final class CastHLSProxySession: @unchecked Sendable {
         stopIfStillActive(rawTSURL)
         throw CastHLSProxyError.timedOut
     }
+
+    /// The DEMUXED master playlist URL for the running proxy: separate
+    /// video and audio renditions, one SourceBuffer each, so the audio can
+    /// declare ac-3 / ec-3 honestly on a receiver that answers
+    /// isTypeSupported false for any muxed video/mp4 carrying those codecs
+    /// but TRUE for audio/mp4 with them. This is what the sender should
+    /// load from now on; the URL `startChannel` returns is the muxed
+    /// master, kept reachable for one release. nil until a `startChannel`
+    /// has passed its ready gate.
+    var demuxedMasterURL: URL? { queue.sync { demuxedMasterURLStorage } }
 
     /// Full teardown: ingest, ring, server socket, background keepalive.
     /// Called when the cast session ends (or a start fails).
@@ -415,6 +439,20 @@ final class CastHLSProxySession: @unchecked Sendable {
             }
             self.log("init segment ready gen=\(gen) (\(data.count) B)")
         }
+        remuxer.onDemuxedInitSegments = { [weak self] video, audio in
+            guard let self, self.ingestEpoch == epoch else { return }
+            self.store?.setDemuxedInitSegments(generation: gen, video: video, audio: audio)
+            self.log("demuxed init ready gen=\(gen) "
+                + "vinit=\(video.count) B ainit=\(audio?.count ?? 0) B")
+        }
+        // Stashed because the remuxer reports the demuxed pair immediately
+        // BEFORE the muxed segment, and the store claims the single
+        // sequence number all three renditions share at publish time.
+        pendingDemuxed = nil
+        remuxer.onDemuxedMediaSegments = { [weak self] video, audio, _, audioDurationTicks in
+            guard let self, self.ingestEpoch == epoch else { return }
+            self.pendingDemuxed = (video, audio, audioDurationTicks)
+        }
         // Per-segment timeline snapshot, stashed by the composition
         // callback (which fires first) and logged below once the store has
         // handed back the sequence number the playlist will advertise.
@@ -431,8 +469,13 @@ final class CastHLSProxySession: @unchecked Sendable {
             guard let self, self.ingestEpoch == epoch else { return }
             // The store's generation gate is the authority; this epoch
             // check just spares dead work after a teardown race.
+            let demuxed = self.pendingDemuxed
+            self.pendingDemuxed = nil
             let publishedSeq = self.store?.addSegment(generation: gen, data: data,
-                                                      durationTicks: durationTicks)
+                                                      durationTicks: durationTicks,
+                                                      videoData: demuxed?.video,
+                                                      audioData: demuxed?.audio,
+                                                      audioDurationTicks: demuxed?.audioDurationTicks)
             if let c = self.pendingComposition {
                 self.pendingComposition = nil
                 let dur = Double(durationTicks) / Double(CastFMP4Remuxer.ticksPerSecond)
@@ -450,7 +493,9 @@ final class CastHLSProxySession: @unchecked Sendable {
                     + "vpts=\(String(format: "%.3f", c.vpts)) "
                     + "apts=\(String(format: "%.3f", c.apts)) "
                     + "buffStart=\(String(format: "%.3f", buffStart)) "
-                    + "video=\(c.video) audio=\(c.audio) \(data.count) B")
+                    + "video=\(c.video) audio=\(c.audio) \(data.count) B "
+                    + "vseg=\(demuxed?.video.count ?? 0) B "
+                    + "aseg=\(demuxed?.audio?.count ?? 0) B")
             }
             self.segmentsLogged += 1
             self.totalSegmentsProduced += 1
@@ -509,10 +554,9 @@ final class CastHLSProxySession: @unchecked Sendable {
                 guard let self, self.ingestEpoch == epoch else { return }
                 if let failureReason { self.log("ingest ended: \(failureReason)") }
                 // HTTP 503 before a single byte means the server could not
-                // start this feed at all (a broken output profile is the
-                // usual cause). Terminal right away rather than after the
-                // backoff ladder, so the sender can retry without the
-                // output_profile parameter while the user is still waiting.
+                // start this feed at all. Terminal right away rather than
+                // after the backoff ladder, so the user is told while they
+                // are still waiting instead of at the ready deadline.
                 if !self.everConnected, failureReason == "http=503" {
                     self.terminalError = CastHLSProxyError.upstreamUnavailable(503)
                     self.stopIngestLocked()

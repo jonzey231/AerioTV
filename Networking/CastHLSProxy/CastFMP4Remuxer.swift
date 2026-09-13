@@ -59,6 +59,12 @@ protocol CastAudioTranscoding: AnyObject {
 final class CastFMP4Remuxer {
 
     static let ticksPerSecond: Int64 = 90_000
+
+    /// Which tracks a built init or media segment carries. `muxed` is the
+    /// legacy one-rendition shape kept for one release behind the old
+    /// master.m3u8 / live.m3u8 paths; the other two are the demuxed
+    /// renditions the sender loads (see `onDemuxedInitSegments`).
+    private enum Rendition { case muxed, videoOnly, audioOnly }
     private static let tsPacket = 188
     private static let ptsWrap: Int64 = 1 << 33
 
@@ -89,8 +95,9 @@ final class CastFMP4Remuxer {
     /// What to do with audio the web receiver's MSE cannot decode.
     /// `allowAC3Passthrough` flips AC-3 / E-AC-3 to a pure passthrough
     /// (no decode, no encode, original channel layout) and is set by the
-    /// sender only for receivers that actually decode it; everything else
-    /// keeps the AudioToolbox transcode as the fallback.
+    /// sender only for receivers that measured support for it; an AC-3
+    /// source without it is REFUSED by name rather than transcoded
+    /// (Logan 2026-09-13). MP2 still uses the AudioToolbox transcode.
     private let allowAC3Passthrough: Bool
 
     /// Speaker-layout label for the Stream Info audio path. Total decoded
@@ -108,6 +115,39 @@ final class CastFMP4Remuxer {
     var onInitSegment: ((Data) -> Void)?
     /// `durationTicks` is the segment's video span in 90 kHz ticks.
     var onMediaSegment: ((Data, Int64) -> Void)?
+
+    /// DEMUXED renditions of the init segment (2026-09-13), fired
+    /// immediately after `onInitSegment` from the same configuration: the
+    /// first Data is a video-only moov, the second an audio-only moov
+    /// carrying the ac-3 / ec-3 / mp4a sample entry, nil for a video-only
+    /// mux. Both keep the mehd/mvhd 24 h declared duration.
+    ///
+    /// Why demuxed: measured on the Google TV Streamer's Cast runtime,
+    /// isTypeSupported("video/mp4; codecs=\"avc1.64002A,ac-3\"") and
+    /// isTypeSupported("video/mp4; codecs=\"ac-3\"") are both false, but
+    /// isTypeSupported("audio/mp4; codecs=\"ac-3\"") is TRUE, and Emby's
+    /// web receiver plays AC-3 through MediaCodecAudioDecoder from a
+    /// SEPARATE audio SourceBuffer. One muxed rendition can therefore only
+    /// ever declare an AAC codec string, which is what forces the
+    /// server-side AAC output profile; two renditions let the audio
+    /// declare what it really is.
+    var onDemuxedInitSegments: ((Data, Data?) -> Void)?
+
+    /// DEMUXED renditions of the segment `onMediaSegment` is about to
+    /// receive, fired immediately before it, cut at exactly the same
+    /// boundary and carrying the same moof sequence number: the first Data
+    /// holds the video traf only, the second the audio traf only. When the
+    /// cut span carried no audio frame the audio rendition is STILL
+    /// emitted, as a zero-sample traf, so the two media playlists keep
+    /// identical sequence numbering; it is nil only for a video-only mux.
+    ///
+    /// The last Int64 is the sum of the segment's audio frame durations,
+    /// i.e. the audio rendition's own EXTINF. It may differ from the video
+    /// span by less than one audio frame, which HLS allows, and falls back
+    /// to the video span when the segment has no audio.
+    var onDemuxedMediaSegments: ((_ video: Data, _ audio: Data?,
+                                  _ videoDurationTicks: Int64,
+                                  _ audioDurationTicks: Int64) -> Void)?
 
     /// Per segment: the numbers needed to do the playhead-vs-buffer
     /// arithmetic from the sender log alone.
@@ -538,15 +578,24 @@ final class CastFMP4Remuxer {
                 stream: .video)
         }
         if audio >= 0, audioType != Self.streamTypeAACADTS {
-            // The AC-3 family either passes through (receiver decodes it)
-            // or routes through the on-phone transcode. Everything else
-            // refuses.
+            // The AC-3 family PASSES THROUGH to a receiver that measured
+            // support for it and is otherwise REFUSED by name (Logan
+            // 2026-09-13: no phone transcode of cast surround audio, and no
+            // server-side output profile either). MP2 still routes through
+            // the on-phone transcode: no MSE decodes it, and its patents
+            // have expired. Everything else refuses.
             guard let source = Self.transcodeSources[audioType] else {
                 throw CastUnsupportedCodecError(
                     codecName: Self.streamTypeNames[audioType] ?? String(format: "audio stream_type 0x%02X", audioType),
                     stream: .audio)
             }
-            if allowAC3Passthrough, source == .ac3 || source == .eac3 {
+            if source == .ac3 || source == .eac3 {
+                guard allowAC3Passthrough else {
+                    throw CastUnsupportedCodecError(
+                        codecName: Self.streamTypeNames[audioType]
+                            ?? String(format: "audio stream_type 0x%02X", audioType),
+                        stream: .audio)
+                }
                 audioPassthrough = source
             } else {
                 audioSource = source
@@ -1268,7 +1317,12 @@ final class CastFMP4Remuxer {
             audioReady = aacFreqIndex >= 0
         }
         guard audioReady else { return }
-        onInitSegment?(buildInitSegment())
+        onInitSegment?(buildInitSegment(.muxed))
+        // Demuxed renditions from the SAME configuration, so a receiver
+        // that refuses a muxed ac-3 codec string can still be handed the
+        // audio in its own SourceBuffer.
+        onDemuxedInitSegments?(buildInitSegment(.videoOnly),
+                               audioPID >= 0 ? buildInitSegment(.audioOnly) : nil)
         initSent = true
     }
 
@@ -1291,8 +1345,24 @@ final class CastFMP4Remuxer {
         for a in audioQueue {
             if a.pts < cutDTS { segAudio.append(a) } else { keepAudio.append(a) }
         }
-        let segment = buildMediaSegment(video: videoQueue, videoDurations: durations, audio: segAudio)
+        // One sequence number per emitted CUT, shared by all three
+        // renditions of it: the demuxed playlists must number identically.
+        sequenceNumber += 1
+        let segment = buildMediaSegment(video: videoQueue, videoDurations: durations,
+                                        audio: segAudio, rendition: .muxed)
+        let videoSegment = buildMediaSegment(video: videoQueue, videoDurations: durations,
+                                             audio: segAudio, rendition: .videoOnly)
+        let audioSegment = audioPID >= 0
+            ? buildMediaSegment(video: videoQueue, videoDurations: durations,
+                                audio: segAudio, rendition: .audioOnly)
+            : nil
         let durationTicks = cutDTS - segStart
+        // The audio rendition's EXTINF is what its frames actually cover; a
+        // segment with no audio frame borrows the video span so the two
+        // playlists stay aligned entry for entry.
+        let audioDurationTicks = segAudio.isEmpty
+            ? durationTicks
+            : Int64(segAudio.count) * max(1, audioFrameTicks)
         // Timeline snapshot for the composition callback, taken BEFORE
         // the queues are cleared. These are the same values the tfdt
         // boxes carry (see `buildMoof`), expressed in seconds relative to
@@ -1330,64 +1400,96 @@ final class CastFMP4Remuxer {
         onSegmentComposition?(videoSamples, audioSamples,
                               firstVideoDTSSeconds, firstVideoPTSSeconds,
                               firstAudioPTSSeconds, segmentStartSeconds)
+        // Demuxed pair first, so the store can stash it and publish all
+        // three renditions under the one sequence number `onMediaSegment`
+        // claims.
+        onDemuxedMediaSegments?(videoSegment, audioSegment, durationTicks, audioDurationTicks)
         onMediaSegment?(segment, durationTicks)
     }
 
     // MARK: fMP4 writing
 
-    private func buildInitSegment() -> Data {
-        let hasAudio = audioPID >= 0
-        let dims = (try? Self.parseSPSDimensions(sps!)) ?? (width: 1280, height: 720)
+    private func buildInitSegment(_ rendition: Rendition) -> Data {
+        let hasVideo = rendition != .audioOnly
+        let hasAudio = audioPID >= 0 && rendition != .videoOnly
         var out = Data(capacity: 1024)
         out.append(Self.box("ftyp", Self.bytes("iso5"), Self.u32(0), Self.bytes("iso5"), Self.bytes("iso6"), Self.bytes("mp41")))
-        var traks = [videoTrak(width: dims.width, height: dims.height)]
+        var traks: [Data] = []
+        if hasVideo {
+            let dims = (try? Self.parseSPSDimensions(sps!)) ?? (width: 1280, height: 720)
+            traks.append(videoTrak(width: dims.width, height: dims.height))
+        }
         if hasAudio { traks.append(audioTrak()) }
-        var trexes = [Self.trex(Self.videoTrackID)]
+        var trexes: [Data] = []
+        if hasVideo { trexes.append(Self.trex(Self.videoTrackID)) }
         if hasAudio { trexes.append(Self.trex(Self.audioTrackID)) }
+        // Track IDs never change between renditions, so an audio-only moov
+        // still declares track 2 and nextTrackID 3; the tfhd in every
+        // rendition's traf then names the track it always did.
         let moov = Self.box("moov",
                             Self.mvhd(nextTrackID: hasAudio ? 3 : 2),
                             Self.concat(traks),
                             Self.box("mvex", Self.mehd(), Self.concat(trexes)))
         out.append(moov)
-        log("init: mehd 24h, liveness recorded")
+        log("\(Self.logPrefix(rendition))init: mehd 24h, liveness recorded")
         return out
     }
 
-    private func buildMediaSegment(video: [VideoSample], videoDurations: [Int64], audio: [AudioSample]) -> Data {
-        let videoBytes = video.reduce(0) { $0 + $1.data.count }
-        let audioBytes = audio.reduce(0) { $0 + $1.data.count }
+    /// Rendition prefix for the per-init and per-segment log lines, so a
+    /// demuxed cast can be read back from one log.
+    private static func logPrefix(_ rendition: Rendition) -> String {
+        switch rendition {
+        case .muxed: return ""
+        case .videoOnly: return "video "
+        case .audioOnly: return "audio "
+        }
+    }
+
+    private func buildMediaSegment(video: [VideoSample], videoDurations: [Int64],
+                                   audio: [AudioSample], rendition: Rendition) -> Data {
+        let wantVideo = rendition != .audioOnly
+        let wantAudio = rendition != .videoOnly
+        let videoBytes = wantVideo ? video.reduce(0) { $0 + $1.data.count } : 0
+        let audioBytes = wantAudio ? audio.reduce(0) { $0 + $1.data.count } : 0
 
         // trun data_offset is from moof start; build the moof once with
         // placeholder offsets to learn its size, then rebuild with real
-        // ones (sizes are offset-independent). One sequence number per
-        // emitted segment, not per build pass.
-        sequenceNumber += 1
+        // ones (sizes are offset-independent). The sequence number is
+        // claimed once per cut by `finalizeSegment`, not per build pass and
+        // not per rendition, so all three renditions of one cut agree.
         var moof = buildMoof(video: video, videoDurations: videoDurations, audio: audio,
-                             videoDataOffset: 0, audioDataOffset: 0)
+                             rendition: rendition, videoDataOffset: 0, audioDataOffset: 0)
         let moofSize = moof.count
         moof = buildMoof(video: video, videoDurations: videoDurations, audio: audio,
+                         rendition: rendition,
                          videoDataOffset: moofSize + 8,
                          audioDataOffset: moofSize + 8 + videoBytes)
         var out = Data(capacity: moof.count + 8 + videoBytes + audioBytes)
         out.append(moof)
         out.append(Self.u32(8 + videoBytes + audioBytes))
         out.append(Self.bytes("mdat"))
-        for s in video { out.append(contentsOf: s.data) }
-        for a in audio { out.append(contentsOf: a.data) }
+        if wantVideo { for s in video { out.append(contentsOf: s.data) } }
+        if wantAudio { for a in audio { out.append(contentsOf: a.data) } }
         return out
     }
 
     private func buildMoof(video: [VideoSample], videoDurations: [Int64], audio: [AudioSample],
+                           rendition: Rendition,
                            videoDataOffset: Int, audioDataOffset: Int) -> Data {
         let mfhd = Self.fullBox("mfhd", 0, 0, Self.u32(sequenceNumber))
-        let videoTraf = Self.box(
-            "traf",
-            // default-base-is-moof so data_offset is moof-relative (CMAF).
-            Self.fullBox("tfhd", 0, 0x020000, Self.u32(Self.videoTrackID)),
-            Self.fullBox("tfdt", 1, 0, Self.u64(UInt64(video[0].dts - timelineBase))),
-            videoTrun(video, videoDurations, dataOffset: videoDataOffset))
-        var trafs = [videoTraf]
-        if let firstAudio = audio.first {
+        var trafs: [Data] = []
+        if rendition != .audioOnly {
+            trafs.append(Self.box(
+                "traf",
+                // default-base-is-moof so data_offset is moof-relative (CMAF).
+                Self.fullBox("tfhd", 0, 0x020000, Self.u32(Self.videoTrackID)),
+                Self.fullBox("tfdt", 1, 0, Self.u64(UInt64(video[0].dts - timelineBase))),
+                videoTrun(video, videoDurations, dataOffset: videoDataOffset)))
+        }
+        // The audio traf is emitted for the audio-only rendition even when
+        // the cut span carried no frame (a zero-sample trun), so the audio
+        // playlist has an entry at every sequence number the video one has.
+        if rendition != .videoOnly, !audio.isEmpty || rendition == .audioOnly {
             trafs.append(Self.box(
                 "traf",
                 // flags 0x020000 default-base-is-moof, 0x000020
@@ -1418,7 +1520,11 @@ final class CastFMP4Remuxer {
                 // earlier than it does and overlapped the NEXT segment's
                 // audio by the same amount, which is a backwards append
                 // one segment into the cast.
-                Self.fullBox("tfdt", 1, 0, Self.u64(UInt64(firstAudio.pts - timelineBase))),
+                // Falls back to the segment's video start when there is no
+                // audio frame to take it from, which is the only honest
+                // timestamp for an empty audio fragment.
+                Self.fullBox("tfdt", 1, 0,
+                             Self.u64(UInt64((audio.first?.pts ?? video[0].dts) - timelineBase))),
                 audioTrun(audio, dataOffset: audioDataOffset)))
         }
         return Self.box("moof", mfhd, Self.concat(trafs))

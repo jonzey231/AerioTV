@@ -12,6 +12,25 @@
 //    /init<G>.mp4    fMP4 init segment for ingest generation G
 //    /seg<N>.m4s     CMAF media segment, monotonic sequence N
 //
+//  and, since 2026-09-13, the DEMUXED shape the sender actually loads:
+//
+//    /demuxed.m3u8   master: EXT-X-MEDIA audio rendition + EXT-X-STREAM-INF
+//    /video.m3u8     video-only media playlist (vinit / vseg)
+//    /audio.m3u8     audio-only media playlist (ainit / aseg)
+//    /vinit<G>.mp4   video-only moov for generation G
+//    /ainit<G>.mp4   audio-only moov for generation G
+//    /vseg<N>.m4s    video traf only, sequence N
+//    /aseg<N>.m4s    audio traf only, sequence N
+//
+//  Why both: measured on the Google TV Streamer's Cast runtime,
+//  isTypeSupported("video/mp4; codecs=\"avc1.64002A,ac-3\"") is false and
+//  so is isTypeSupported("video/mp4; codecs=\"ac-3\""), but
+//  isTypeSupported("audio/mp4; codecs=\"ac-3\"") is TRUE. A single muxed
+//  rendition can therefore only ever declare AAC, which is what forces the
+//  server-side AAC output profile; a separate audio rendition appended into
+//  its own SourceBuffer is how Emby's web receiver reaches its hardware
+//  audio decoder. The muxed endpoints stay for one release.
+//
 //  Every response carries `Access-Control-Allow-Origin: *` because the
 //  receiver page's origin is Google's, not ours, and Chromium enforces
 //  CORS on MSE fetches. Mixed content (https receiver page fetching
@@ -29,6 +48,7 @@ final class CastHLSProxyServer: @unchecked Sendable {
 
     private static let mimePlaylist = "application/vnd.apple.mpegurl"
     private static let mimeMP4 = "video/mp4"
+    private static let mimeAudioMP4 = "audio/mp4"
     private static let mimeSegment = "video/iso.segment"
 
     private let store: CastHLSSegmentStore
@@ -44,6 +64,9 @@ final class CastHLSProxyServer: @unchecked Sendable {
     /// a failing cast can be read back from the log without the device.
     private let masterTextLogged = OSAllocatedUnfairLockFlag()
     private let playlistTextLogged = OSAllocatedUnfairLockFlag()
+    private let demuxedMasterTextLogged = OSAllocatedUnfairLockFlag()
+    private let videoPlaylistTextLogged = OSAllocatedUnfairLockFlag()
+    private let audioPlaylistTextLogged = OSAllocatedUnfairLockFlag()
     /// Requests served this session, for the log rate limit below.
     private let requestCounter = AtomicRequestCounter()
 
@@ -157,6 +180,44 @@ final class CastHLSProxyServer: @unchecked Sendable {
                 log("receiver fetched the playlist for the first time (\(Self.host(of: peer)))")
             }
             if playlistTextLogged.trySet() { log("media playlist: \(Self.escaped(text))") }
+        case "/demuxed.m3u8":
+            let text = store.demuxedMasterPlaylistText()
+            body = Data(text.utf8)
+            mime = Self.mimePlaylist
+            if demuxedMasterTextLogged.trySet() { log("demuxed master playlist: \(Self.escaped(text))") }
+        case "/video.m3u8":
+            let text = store.videoPlaylistText()
+            body = Data(text.utf8)
+            mime = Self.mimePlaylist
+            if firstPlaylistServed.trySet() {
+                log("receiver fetched the playlist for the first time (\(Self.host(of: peer)))")
+            }
+            if videoPlaylistTextLogged.trySet() { log("video playlist: \(Self.escaped(text))") }
+        case "/audio.m3u8":
+            let text = store.audioPlaylistText()
+            body = Data(text.utf8)
+            mime = Self.mimePlaylist
+            if audioPlaylistTextLogged.trySet() { log("audio playlist: \(Self.escaped(text))") }
+        case let p where p.hasPrefix("/vinit") && p.hasSuffix(".mp4"):
+            let gen = Int(p.dropFirst(6).dropLast(4))
+            body = gen.flatMap { store.videoInitSegment(generation: $0) }
+            mime = Self.mimeMP4
+        case let p where p.hasPrefix("/ainit") && p.hasSuffix(".mp4"):
+            let gen = Int(p.dropFirst(6).dropLast(4))
+            body = gen.flatMap { store.audioInitSegment(generation: $0) }
+            mime = Self.mimeAudioMP4
+        case let p where p.hasPrefix("/vseg") && p.hasSuffix(".m4s"):
+            let seq = Int(p.dropFirst(5).dropLast(4))
+            let began = Date()
+            body = seq.flatMap { store.awaitSegment(seq: $0, rendition: .video) }
+            waitMs = Int(Date().timeIntervalSince(began) * 1000)
+            mime = Self.mimeSegment
+        case let p where p.hasPrefix("/aseg") && p.hasSuffix(".m4s"):
+            let seq = Int(p.dropFirst(5).dropLast(4))
+            let began = Date()
+            body = seq.flatMap { store.awaitSegment(seq: $0, rendition: .audio) }
+            waitMs = Int(Date().timeIntervalSince(began) * 1000)
+            mime = Self.mimeSegment
         case let p where p.hasPrefix("/init") && p.hasSuffix(".mp4"):
             let gen = Int(p.dropFirst(5).dropLast(4))
             body = gen.flatMap { store.initSegment(generation: $0) }

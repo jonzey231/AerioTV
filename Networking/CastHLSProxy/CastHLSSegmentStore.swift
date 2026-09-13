@@ -49,12 +49,23 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     /// slack cost nothing and remove the trigger.
     static let maxFutureSegments = 2
 
+    /// Which rendition of a cut a request names. `muxed` is the legacy
+    /// one-SourceBuffer shape; the other two are the demuxed pair.
+    enum Rendition { case muxed, video, audio }
+
     private struct SegmentEntry {
         let seq: Int
         let generation: Int
         let data: Data
         let durationTicks: Int64
         let discontinuity: Bool
+        /// Demuxed renditions of the same cut, same sequence number. nil
+        /// only for a caller that did not report them (the CLI tests).
+        let videoData: Data?
+        let audioData: Data?
+        /// The audio rendition's own EXTINF; within one audio frame of
+        /// `durationTicks`.
+        let audioDurationTicks: Int64
     }
 
     /// Guards the store; also what held segment fetches wait on.
@@ -63,6 +74,9 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     /// False after `close`; wakes and fails any held segment fetch.
     private var storeOpen = true
     private var inits: [Int: Data] = [:]
+    /// Demuxed init segments per generation, evicted alongside `inits`.
+    private var videoInits: [Int: Data] = [:]
+    private var audioInits: [Int: Data] = [:]
     private var nextSeq = 0
     private var generation = 0
     /// First segment committed after `beginGeneration` gets the
@@ -102,6 +116,8 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         condition.lock()
         ring.removeAll()
         inits.removeAll()
+        videoInits.removeAll()
+        audioInits.removeAll()
         segmentsInGeneration = 0
         mediaTicksInGeneration = 0
         storeOpen = false
@@ -141,19 +157,32 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         condition.unlock()
     }
 
+    /// Demuxed init segments for `gen`. `audio` is nil for a video-only
+    /// mux, in which case the demuxed master carries no audio rendition.
+    func setDemuxedInitSegments(generation gen: Int, video: Data, audio: Data?) {
+        condition.lock()
+        videoInits[gen] = video
+        if let audio { audioInits[gen] = audio } else { audioInits.removeValue(forKey: gen) }
+        condition.unlock()
+    }
+
     /// Returns the sequence number the playlist will advertise for this
     /// segment, or nil when a stale generation was gated out. The sender
     /// log's per-segment timeline line names it (see
     /// `CastHLSProxySession.startIngestLocked`), so the proxy log and the
     /// playlist can be lined up by seq instead of by guesswork.
     @discardableResult
-    func addSegment(generation gen: Int, data: Data, durationTicks: Int64) -> Int? {
+    func addSegment(generation gen: Int, data: Data, durationTicks: Int64,
+                    videoData: Data? = nil, audioData: Data? = nil,
+                    audioDurationTicks: Int64? = nil) -> Int? {
         condition.lock()
         defer { condition.unlock() }
         guard gen == generation else { return nil } // stale ingest racing a channel change
         let entry = SegmentEntry(seq: nextSeq, generation: gen, data: data,
                                  durationTicks: durationTicks,
-                                 discontinuity: pendingDiscontinuity)
+                                 discontinuity: pendingDiscontinuity,
+                                 videoData: videoData, audioData: audioData,
+                                 audioDurationTicks: audioDurationTicks ?? durationTicks)
         let publishedSeq = nextSeq
         nextSeq += 1
         pendingDiscontinuity = false
@@ -165,6 +194,8 @@ final class CastHLSSegmentStore: @unchecked Sendable {
             if !ring.contains(where: { $0.generation == evicted.generation }),
                evicted.generation != generation {
                 inits.removeValue(forKey: evicted.generation)
+                videoInits.removeValue(forKey: evicted.generation)
+                audioInits.removeValue(forKey: evicted.generation)
             }
         }
         segmentsInGeneration += 1
@@ -181,16 +212,35 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         return inits[gen]
     }
 
+    func videoInitSegment(generation gen: Int) -> Data? {
+        condition.lock()
+        defer { condition.unlock() }
+        return videoInits[gen]
+    }
+
+    func audioInitSegment(generation gen: Int) -> Data? {
+        condition.lock()
+        defer { condition.unlock() }
+        return audioInits[gen]
+    }
+
     /// Segment `seq`'s bytes. A fetch naming a sequence the ingest has
     /// not published yet, up to `maxFutureSegments` past the newest one,
     /// is held up to `timeout` instead of 404ing; anything already
     /// evicted from the ring or further in the future fails immediately.
-    func awaitSegment(seq: Int, timeout: TimeInterval = CastHLSSegmentStore.nextSegmentWait) -> Data? {
+    func awaitSegment(seq: Int, rendition: Rendition = .muxed,
+                      timeout: TimeInterval = CastHLSSegmentStore.nextSegmentWait) -> Data? {
         let deadline = Date(timeIntervalSinceNow: timeout)
         condition.lock()
         defer { condition.unlock() }
         while true {
-            if let entry = ring.first(where: { $0.seq == seq }) { return entry.data }
+            if let entry = ring.first(where: { $0.seq == seq }) {
+                switch rendition {
+                case .muxed: return entry.data
+                case .video: return entry.videoData
+                case .audio: return entry.audioData
+                }
+            }
             guard storeOpen, seq >= nextSeq, seq <= nextSeq + Self.maxFutureSegments else { return nil }
             guard Date() < deadline else { return nil }
             if !condition.wait(until: deadline) { return nil }
@@ -223,6 +273,62 @@ final class CastHLSSegmentStore: @unchecked Sendable {
             + "live.m3u8\n"
     }
 
+    /// DEMUXED master playlist: the URL the sender must load (see
+    /// `CastHLSProxySession.demuxedMasterURL`). Two renditions, one
+    /// SourceBuffer each, so the audio can declare ac-3 / ec-3 honestly on
+    /// a receiver that answers isTypeSupported false for any muxed
+    /// video/mp4 carrying those codecs but TRUE for audio/mp4 with them
+    /// (measured on the Google TV Streamer, 2026-09-12).
+    ///
+    /// The audio codec comes from the AUDIO init's own sample entry, so it
+    /// can never disagree with the bytes, and falls back to the attribute
+    /// the session set. CLOSED-CAPTIONS=NONE for the same reason the muxed
+    /// master carries it: it keeps Shaka's Mp4CeaParser off the video
+    /// segments.
+    func demuxedMasterPlaylistText() -> String {
+        condition.lock()
+        let videoInit = videoInits[generation]
+        let audioInit = audioInits[generation]
+        let attribute = audioCodecsAttribute
+        condition.unlock()
+        let videoCodec = videoInit.flatMap { Self.avcCodecString(from: $0) } ?? "avc1.640028"
+        let audioCodec = audioInit.flatMap { Self.audioCodecString(from: $0) } ?? attribute
+        var text = "#EXTM3U\n"
+        if audioCodec != nil {
+            text += "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"Main\","
+                + "DEFAULT=YES,AUTOSELECT=YES,URI=\"audio.m3u8\"\n"
+        }
+        text += "#EXT-X-STREAM-INF:BANDWIDTH=12000000,CODECS=\"\(videoCodec)"
+        if let audioCodec { text += ",\(audioCodec)" }
+        text += "\""
+        if audioCodec != nil { text += ",AUDIO=\"aud\"" }
+        text += ",CLOSED-CAPTIONS=NONE\n"
+        text += "video.m3u8\n"
+        return text
+    }
+
+    /// RFC 6381 audio codec string from an init segment's audio sample
+    /// entry: ac-3 / ec-3 for the passthrough paths, mp4a.40.2 for AAC-LC
+    /// (the only AAC profile an ADTS IPTV mux carries in practice).
+    static func audioCodecString(from initSegment: Data) -> String? {
+        if contains(initSegment, "ac-3") { return "ac-3" }
+        if contains(initSegment, "ec-3") { return "ec-3" }
+        if contains(initSegment, "mp4a") { return "mp4a.40.2" }
+        return nil
+    }
+
+    private static func contains(_ data: Data, _ type: String) -> Bool {
+        let needle = [UInt8](type.utf8)
+        let bytes = [UInt8](data)
+        guard bytes.count >= needle.count else { return false }
+        for i in 0...(bytes.count - needle.count) {
+            var hit = true
+            for j in 0..<needle.count where bytes[i + j] != needle[j] { hit = false; break }
+            if hit { return true }
+        }
+        return false
+    }
+
     /// Audio codec name for the master playlist's CODECS attribute, set
     /// by the session from the remuxer once the audio path is known
     /// ("mp4a.40.2", "ac-3", "ec-3", or nil for a video-only mux).
@@ -250,13 +356,38 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         return nil
     }
 
-    func mediaPlaylistText() -> String {
+    func mediaPlaylistText() -> String { mediaPlaylistText(.muxed) }
+
+    /// The video-only media playlist the demuxed master's STREAM-INF
+    /// points at.
+    func videoPlaylistText() -> String { mediaPlaylistText(.video) }
+
+    /// The audio-only media playlist the demuxed master's EXT-X-MEDIA
+    /// points at. Identical sequence numbering, target duration and
+    /// discontinuity tags to `videoPlaylistText`; only the EXTINF values
+    /// differ, by less than one audio frame.
+    func audioPlaylistText() -> String { mediaPlaylistText(.audio) }
+
+    private func mediaPlaylistText(_ rendition: Rendition) -> String {
         condition.lock()
         defer { condition.unlock() }
+        let initPrefix: String
+        let segPrefix: String
+        switch rendition {
+        case .muxed: initPrefix = "init"; segPrefix = "seg"
+        case .video: initPrefix = "vinit"; segPrefix = "vseg"
+        case .audio: initPrefix = "ainit"; segPrefix = "aseg"
+        }
         let window = Array(ring.suffix(Self.windowSize))
         var text = "#EXTM3U\n#EXT-X-VERSION:7\n"
+        // Deliberately the max over BOTH renditions' spans, so the two
+        // demuxed playlists advertise the SAME target duration even though
+        // their EXTINF values differ by up to an audio frame.
         let targetSeconds = window
-            .map { Int((Double($0.durationTicks) / Double(CastFMP4Remuxer.ticksPerSecond)).rounded(.up)) }
+            .map {
+                Int((Double(max($0.durationTicks, $0.audioDurationTicks))
+                    / Double(CastFMP4Remuxer.ticksPerSecond)).rounded(.up))
+            }
             .max().map { max(1, $0) } ?? 4
         text += "#EXT-X-TARGETDURATION:\(targetSeconds)\n"
         text += "#EXT-X-MEDIA-SEQUENCE:\(window.first?.seq ?? nextSeq)\n"
@@ -285,12 +416,13 @@ final class CastHLSSegmentStore: @unchecked Sendable {
             // 0, which is where our tfdt timestamps already put them, and
             // the same playlist reached PLAYING (session10).
             if seg.generation != lastGen {
-                text += "#EXT-X-MAP:URI=\"init\(seg.generation).mp4\"\n"
+                text += "#EXT-X-MAP:URI=\"\(initPrefix)\(seg.generation).mp4\"\n"
                 lastGen = seg.generation
             }
-            let seconds = Double(seg.durationTicks) / Double(CastFMP4Remuxer.ticksPerSecond)
+            let ticks = rendition == .audio ? seg.audioDurationTicks : seg.durationTicks
+            let seconds = Double(ticks) / Double(CastFMP4Remuxer.ticksPerSecond)
             text += "#EXTINF:\(String(format: "%.3f", seconds)),\n"
-            text += "seg\(seg.seq).m4s\n"
+            text += "\(segPrefix)\(seg.seq).m4s\n"
         }
         // LIVE playlist: no EXT-X-ENDLIST, ever; the advancing
         // MEDIA-SEQUENCE is the manifest clock a progressive URL lacks.

@@ -1646,5 +1646,209 @@ runStraddleCensus()
 
 runInitLivenessChecks()
 
+// MARK: 13. DEMUXED renditions (2026-09-13)
+//
+// Measured on the Google TV Streamer's Cast runtime,
+// isTypeSupported("video/mp4; codecs=\"avc1.64002A,ac-3\"") and
+// isTypeSupported("video/mp4; codecs=\"ac-3\"") are both false, but
+// isTypeSupported("audio/mp4; codecs=\"ac-3\"") is TRUE, and Emby's web
+// receiver plays AC-3 through MediaCodecAudioDecoder from a separate audio
+// SourceBuffer. One muxed rendition can therefore only ever declare an AAC
+// codec string, which is what forces the server-side AAC output profile, so
+// the proxy now also serves the pair: vinit/vseg and ainit/aseg.
+//
+// The Android side runs the same renditions through ffprobe and through a
+// real headless Chromium's two SourceBuffers
+// (CastDemuxedRenditionTest). What is checked here is the part that has to
+// hold identically on both platforms: one traf per rendition segment, the
+// same moof sequence number across the three renditions of one cut,
+// identical playlist numbering, and an audio EXTINF within one frame of the
+// video one.
+
+/// Track IDs of every traf in a segment, in order.
+func trafTrackIDs(_ segment: Data) -> [Int64] {
+    let b = [UInt8](segment)
+    var out: [Int64] = []
+    for (type, mStart, mEnd) in boxChildren(b, 0, b.count) where type == "moof" {
+        for (t2, tStart, tEnd) in boxChildren(b, mStart, mEnd) where t2 == "traf" {
+            for (t3, pStart, _) in boxChildren(b, tStart, tEnd) where t3 == "tfhd" {
+                out.append(be32(b, pStart + 4))
+            }
+        }
+    }
+    return out
+}
+
+/// mfhd sequence_number of a segment.
+func moofSequenceNumber(_ segment: Data) -> Int64? {
+    let b = [UInt8](segment)
+    for (type, mStart, mEnd) in boxChildren(b, 0, b.count) where type == "moof" {
+        for (t2, pStart, _) in boxChildren(b, mStart, mEnd) where t2 == "mfhd" {
+            return be32(b, pStart + 4)
+        }
+    }
+    return nil
+}
+
+/// trun sample counts of a segment, in traf order.
+func trunSampleCounts(_ segment: Data) -> [Int64] {
+    let b = [UInt8](segment)
+    var out: [Int64] = []
+    for (type, mStart, mEnd) in boxChildren(b, 0, b.count) where type == "moof" {
+        for (t2, tStart, tEnd) in boxChildren(b, mStart, mEnd) where t2 == "traf" {
+            for (t3, pStart, _) in boxChildren(b, tStart, tEnd) where t3 == "trun" {
+                out.append(be32(b, pStart + 4))
+            }
+        }
+    }
+    return out
+}
+
+@MainActor func runDemuxedRenditionChecks() {
+    guard let bytes = continuityFixtureTS() else {
+        print("SKIP demuxed renditions (no ffmpeg fixture)")
+        return
+    }
+    var muxed: [Data] = []
+    var videoSegments: [Data] = []
+    var audioSegments: [Data] = []
+    var videoTicks: [Int64] = []
+    var audioTicks: [Int64] = []
+    var videoInit: Data?
+    var audioInit: Data?
+    let remuxer = CastFMP4Remuxer()
+    remuxer.onDemuxedInitSegments = { v, a in videoInit = v; audioInit = a }
+    remuxer.onDemuxedMediaSegments = { v, a, vTicks, aTicks in
+        videoSegments.append(v)
+        if let a { audioSegments.append(a) }
+        videoTicks.append(vTicks)
+        audioTicks.append(aTicks)
+    }
+    remuxer.onMediaSegment = { data, _ in muxed.append(data) }
+    var offset = 0
+    while offset < bytes.count {
+        let n = min(64 * 1024, bytes.count - offset)
+        try? remuxer.feed(bytes.subdata(in: offset..<(offset + n)))
+        offset += n
+    }
+    remuxer.release()
+
+    expect(videoInit != nil && audioInit != nil, "demuxed: both init segments emitted")
+    expect(videoSegments.count >= 3, "demuxed: segments produced (\(videoSegments.count))")
+    expectEq(videoSegments.count, audioSegments.count, "demuxed: one audio segment per video segment")
+
+    // The audio-only moov declares the audio track and nothing else; the
+    // video-only moov the reverse. A stray second trak is what would make
+    // the receiver's codec string a lie again.
+    if let videoInit, let audioInit {
+        let vTraks = boxChildren([UInt8](videoInit), 0, videoInit.count)
+            .filter { $0.0 == "moov" }
+            .flatMap { boxChildren([UInt8](videoInit), $0.1, $0.2) }
+            .filter { $0.0 == "trak" }
+        let aTraks = boxChildren([UInt8](audioInit), 0, audioInit.count)
+            .filter { $0.0 == "moov" }
+            .flatMap { boxChildren([UInt8](audioInit), $0.1, $0.2) }
+            .filter { $0.0 == "trak" }
+        expectEq(vTraks.count, 1, "demuxed: the video init declares one trak")
+        expectEq(aTraks.count, 1, "demuxed: the audio init declares one trak")
+        expectEq(CastHLSSegmentStore.audioCodecString(from: audioInit), "mp4a.40.2",
+                 "demuxed: the audio init's sample entry names the codec")
+        expect(CastHLSSegmentStore.audioCodecString(from: videoInit) == nil,
+               "demuxed: the video init carries no audio sample entry")
+        // The mehd/mvhd 24 h declared duration survives into BOTH
+        // renditions: without it Chromium reads liveness as kLive and pins
+        // the video renderer to one buffered frame.
+        expect(videoInit.range(of: Data("mehd".utf8)) != nil, "demuxed: the video init keeps mehd")
+        expect(audioInit.range(of: Data("mehd".utf8)) != nil, "demuxed: the audio init keeps mehd")
+    }
+
+    var oneTraf = true
+    var rightTrack = true
+    var sameSequence = true
+    for i in videoSegments.indices {
+        if trafTrackIDs(videoSegments[i]) != [1] { oneTraf = false; rightTrack = false }
+        if trafTrackIDs(audioSegments[i]) != [2] { oneTraf = false; rightTrack = false }
+        let seqs = [moofSequenceNumber(muxed[i]), moofSequenceNumber(videoSegments[i]),
+                    moofSequenceNumber(audioSegments[i])]
+        if Set(seqs).count != 1 { sameSequence = false }
+    }
+    expect(oneTraf, "demuxed: exactly one traf per rendition segment")
+    expect(rightTrack, "demuxed: each rendition names the track it always did")
+    expect(sameSequence, "demuxed: all three renditions of a cut share one moof sequence")
+
+    // Audio census per segment, the rule the muxed shape already obeys: the
+    // frames in the segment add up to the duration the playlist declares.
+    var frames: Int64 = 0
+    var ticks: Int64 = 0
+    for i in audioSegments.indices {
+        frames += trunSampleCounts(audioSegments[i]).reduce(0, +)
+        ticks += audioTicks[i]
+    }
+    let frameTicks = frames > 0 ? Double(ticks) / Double(frames) : 0
+    var censusOK = frames > 0
+    for i in audioSegments.indices {
+        let count = Double(trunSampleCounts(audioSegments[i]).reduce(0, +))
+        let expected = Double(audioTicks[i]) / max(1, frameTicks)
+        if abs(expected - count) > 1.0 { censusOK = false }
+    }
+    expect(censusOK, "demuxed: every audio segment carries the frames its EXTINF calls for")
+
+    // And the playlists the store builds from them.
+    let store = CastHLSSegmentStore()
+    let gen = store.beginGeneration()
+    store.setInitSegment(generation: gen, data: Data("i".utf8))
+    store.setDemuxedInitSegments(generation: gen, video: videoInit ?? Data(), audio: audioInit)
+    for i in muxed.indices {
+        _ = store.addSegment(generation: gen, data: muxed[i], durationTicks: videoTicks[i],
+                             videoData: videoSegments[i],
+                             audioData: i < audioSegments.count ? audioSegments[i] : nil,
+                             audioDurationTicks: audioTicks[i])
+    }
+    let master = store.demuxedMasterPlaylistText()
+    expect(master.contains("#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\""),
+           "demuxed master: advertises the audio rendition")
+    expect(master.contains("URI=\"audio.m3u8\"") && master.contains("AUDIO=\"aud\""),
+           "demuxed master: binds the audio group to the variant")
+    expect(master.contains(",mp4a.40.2\""), "demuxed master: CODECS names the audio honestly")
+    expect(master.contains("CLOSED-CAPTIONS=NONE"), "demuxed master: keeps Shaka's CEA parser off")
+    expect(master.hasSuffix("video.m3u8\n"), "demuxed master: points at the video rendition")
+
+    let videoPlaylist = store.videoPlaylistText()
+    let audioPlaylist = store.audioPlaylistText()
+    func matches(_ text: String, _ pattern: String) -> [String] {
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let ns = text as NSString
+        return re.matches(in: text, range: NSRange(location: 0, length: ns.length)).map {
+            ns.substring(with: $0.range(at: 1))
+        }
+    }
+    let vSeqs = matches(videoPlaylist, "vseg([0-9]+)\\.m4s")
+    let aSeqs = matches(audioPlaylist, "aseg([0-9]+)\\.m4s")
+    expect(!vSeqs.isEmpty, "demuxed playlists: the window is populated")
+    expectEq(vSeqs, aSeqs, "demuxed playlists: identical sequence numbering")
+    expectEq(matches(videoPlaylist, "#EXT-X-MEDIA-SEQUENCE:([0-9]+)"),
+             matches(audioPlaylist, "#EXT-X-MEDIA-SEQUENCE:([0-9]+)"),
+             "demuxed playlists: identical MEDIA-SEQUENCE")
+    expectEq(matches(videoPlaylist, "#EXT-X-TARGETDURATION:([0-9]+)"),
+             matches(audioPlaylist, "#EXT-X-TARGETDURATION:([0-9]+)"),
+             "demuxed playlists: identical TARGETDURATION")
+    expect(videoPlaylist.contains("#EXT-X-MAP:URI=\"vinit"), "demuxed playlists: video maps vinit")
+    expect(audioPlaylist.contains("#EXT-X-MAP:URI=\"ainit"), "demuxed playlists: audio maps ainit")
+    let vExtinf = matches(videoPlaylist, "#EXTINF:([0-9.]+)").compactMap(Double.init)
+    let aExtinf = matches(audioPlaylist, "#EXTINF:([0-9.]+)").compactMap(Double.init)
+    var extinfOK = vExtinf.count == aExtinf.count && !vExtinf.isEmpty
+    let frameSeconds = frameTicks / Double(CastFMP4Remuxer.ticksPerSecond)
+    for i in vExtinf.indices where i < aExtinf.count {
+        if abs(vExtinf[i] - aExtinf[i]) > frameSeconds + 0.001 { extinfOK = false }
+    }
+    expect(extinfOK, "demuxed playlists: EXTINF differs by less than one audio frame")
+
+    // The muxed endpoints stay reachable for one release.
+    expect(store.masterPlaylistText().contains("live.m3u8"), "muxed master still served")
+    expect(store.mediaPlaylistText().contains("seg"), "muxed media playlist still served")
+}
+
+runDemuxedRenditionChecks()
+
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

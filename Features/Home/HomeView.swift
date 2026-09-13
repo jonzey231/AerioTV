@@ -4282,18 +4282,10 @@ struct MainTabView: View {
         }
     }
 
-    /// Cast audio: re-resolve this server's stereo AAC output profile at
-    /// launch and on every foreground return, independent of the EPG load
-    /// (the cached-EPG path skipped it, so a relaunch kept casting with a
-    /// stale profile id). Rate limited to once per 15 minutes per server
-    /// inside `DispatcharrAPI.refreshAACOutputProfileIfDue`.
-    private func refreshCastAACProfile(trigger: String) {
-        guard let server = allServers.first(where: { $0.isActive }) ?? allServers.first,
-              server.type == .dispatcharrAPI else { return }
-        Task { @MainActor in
-            await DispatcharrAPI.refreshAACOutputProfileIfDue(for: server, trigger: trigger)
-        }
-    }
+    // Cast audio, 2026-09-13: the launch / foreground re-resolve of the
+    // Dispatcharr AAC output profile is GONE. Cast sessions ingest the plain
+    // stream and AC-3 / E-AC-3 passes through to the receiver, so there is no
+    // server-side profile to keep in sync.
 
     private func reconcileAllDispatcharrRecordings() async {
         // DVR access "none": the recordings endpoints answer 403; skip.
@@ -4634,7 +4626,6 @@ struct MainTabView: View {
         guard oldPhase != .active, newPhase == .active else { return }
         // Independent of the guide staleness gate below: one cheap request,
         // throttled to 15 minutes per server.
-        refreshCastAACProfile(trigger: "foreground")
         refreshGuideIfStale(reason: "foreground")
         checkEPGSourcesForChanges(reason: "foreground")
         // Restart the settle window, then queue the quiet VOD sweep behind it
@@ -6471,7 +6462,6 @@ struct MainTabView: View {
 
         debugLog("🟢 [Orchestrator] phase 1 done (channels), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, channels=\(channelStore.channels.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         refreshDispatcharrPermissions()
-        refreshCastAACProfile(trigger: "launch")
         if !channelStore.channels.isEmpty {
             // Try to short-circuit the expensive `loadAllEPG`
             // path by checking the SwiftData EPG cache first. On

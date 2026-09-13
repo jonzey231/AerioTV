@@ -131,19 +131,28 @@ final class AerioCastController: NSObject, ObservableObject {
     /// caps message arrives; cleared when the session ends.
     ///
     /// This replaced a model allow-list that called a Google TV Streamer
-    /// AC-3 capable. Its platform players are; the web receiver's MSE is
-    /// NOT, and the receiver's own Chromium proved it (2026-09-12 15:52:40):
-    /// isTypeSupported("video/mp4; codecs=\"avc1.64002A,ac-3\"") returned
-    /// false and the plain AC-3 load died with Shaka error 3015 on both
-    /// senders. The audio plan below uses the measurement only.
+    /// AC-3 capable. The allow-list was right about the platform players and
+    /// wrong about the web receiver's MSE in the MUXED shape: the receiver's
+    /// own Chromium answered isTypeSupported("video/mp4;
+    /// codecs=\"avc1.64002A,ac-3\"") false (2026-09-12 15:52:40) and that
+    /// load died with Shaka 3015.
+    ///
+    /// As of 2026-09-13 the receiver probes the DEMUXED shape instead, which
+    /// is what this sender now loads: isTypeSupported("audio/mp4;
+    /// codecs=\"ac-3\"") is TRUE on that same Streamer, so AC-3 / E-AC-3
+    /// passes through in its own audio/mp4 SourceBuffer. The keys are
+    /// unchanged; only the MIME the receiver measures them with changed.
     private var receiverCaps: [String: Bool]?
     /// Last measurement logged, so the copy that rides every telemetry
     /// snapshot does not repeat the line.
     private var loggedCaps: [String: Bool]?
 
-    /// True only when the receiver MEASURED AC-3 or E-AC-3 support. No caps
-    /// yet (a first load can race READY) reads as false, which selects the
-    /// AAC output profile: every receiver we have measured supports AAC.
+    /// True only when the receiver MEASURED AC-3 or E-AC-3 support, which it
+    /// now probes as `audio/mp4; codecs="ac-3"` (the DEMUXED shape the sender
+    /// loads) rather than the muxed `video/mp4` form that understated it. No
+    /// caps yet (a first load can race READY) reads as false, which refuses an
+    /// AC-3 channel by name rather than sending audio the receiver cannot
+    /// decode: the phone never transcodes cast audio.
     private var receiverDecodesAC3: Bool {
         guard let caps = receiverCaps else { return false }
         return caps["ac-3"] == true || caps["ec-3"] == true
@@ -170,6 +179,101 @@ final class AerioCastController: NSObject, ObservableObject {
     /// Attached on session start, dropped on session end.
     private var receiverDebugChannel: GCKGenericChannel?
 
+    // MARK: - Receiver type (native Android TV app vs web receiver)
+
+    /// Custom control namespace shared with the Android app (core/cast/CastControl).
+    /// Used here for two things only: the receiver-type handshake and the
+    /// in-place channel flip a running Cast Connect receiver needs.
+    private static let controlNamespace = "urn:x-cast:com.aeriotv.control"
+
+    /// Which receiver this session is talking to.
+    ///
+    /// The Cast SDK decides whether Cast Connect launched the native Android TV
+    /// app or the web receiver, but it exposes that decision nowhere public
+    /// (neither GCKCastSession nor its application metadata carries it). So the
+    /// sender asks the RECEIVER: it sends `hello` on connect and only the AerioTV
+    /// Android TV receiver answers `receiverInfo` / platform=android-tv-app. No
+    /// answer inside `targetProbeSeconds` means the web receiver, which needs the
+    /// phone-local HLS proxy and a directly playable contentURL.
+    enum ReceiverTarget { case unknown, androidTVApp, webReceiver }
+
+    private(set) var receiverTarget: ReceiverTarget = .unknown
+    private var controlChannel: GCKGenericChannel?
+    private var targetProbeTask: Task<Void, Never>?
+    /// A live load held until the receiver type is known. Guessing is not an
+    /// option in either direction: guessing web starts a proxy plus a server
+    /// transcode for a TV that can play the raw TS natively, and guessing native
+    /// black-screens a dongle.
+    private var deferredLoad: Content?
+    /// Last resort only: BOTH receivers answer the probe now (the web
+    /// receiver.html answers platform=web-receiver as of 2026-09-13), so the
+    /// timeout exists for a receiver too old to answer at all. It is long because
+    /// the only thing it has to outlast is a Cast Connect cold start of the
+    /// Android TV app on a slow device, and while it runs the UI stays in the
+    /// state a load-in-flight already shows rather than guessing a path.
+    private static let targetProbeSeconds: Double = 12
+    /// Re-send interval for the probe inside that window: the Cast Connect
+    /// receiver's message listener does not exist until its process has started,
+    /// so a single probe sent at connect can simply be dropped.
+    private static let probeRetrySeconds: Double = 1
+
+    /// Send `hello` (repeatedly) until a receiver names itself, or the window ends.
+    private func probeReceiverTarget() {
+        receiverTarget = .unknown
+        targetProbeTask?.cancel()
+        targetProbeTask = Task { @MainActor [weak self] in
+            var waited: Double = 0
+            while let self, self.receiverTarget == .unknown, waited < Self.targetProbeSeconds {
+                self.sendControl(["cmd": "hello"])
+                try? await Task.sleep(nanoseconds: UInt64(Self.probeRetrySeconds * 1_000_000_000))
+                if Task.isCancelled { return }
+                waited += Self.probeRetrySeconds
+            }
+            guard let self, !Task.isCancelled, self.receiverTarget == .unknown else { return }
+            debugLog("[Cast] receiver type handshake timed out after "
+                + "\(Int(Self.targetProbeSeconds))s with no answer")
+            self.resolveReceiverTarget(.webReceiver, answered: false)
+        }
+    }
+
+    /// Apply a receiver's own answer. An unrecognised platform is left unknown so
+    /// the timeout decides rather than a bad guess.
+    private func noteReceiverInfo(_ json: [String: Any]) {
+        switch json["platform"] as? String {
+        case "android-tv-app": resolveReceiverTarget(.androidTVApp)
+        case "web-receiver": resolveReceiverTarget(.webReceiver)
+        default: break
+        }
+    }
+
+    /// Latch the receiver type, log WHICH of the three outcomes happened, and
+    /// release any held load.
+    private func resolveReceiverTarget(_ target: ReceiverTarget, answered: Bool = true) {
+        guard receiverTarget != target else { return }
+        receiverTarget = target
+        if target == .androidTVApp {
+            debugLog("[Cast] target=android-tv-app, native playback (receiver answered)")
+        } else if answered {
+            debugLog("[Cast] target=web-receiver (receiver answered)")
+        } else {
+            debugLog("[Cast] target=web-receiver (no answer, handshake timed out)")
+        }
+        if let held = deferredLoad {
+            deferredLoad = nil
+            if let session = GCKCastContext.sharedInstance().sessionManager.currentCastSession {
+                load(held, on: session)
+            }
+        }
+    }
+
+    /// Fire-and-forget JSON on the control namespace. No-op with no channel.
+    private func sendControl(_ dict: [String: Any]) {
+        guard let channel = controlChannel,
+              let data = try? JSONSerialization.data(withJSONObject: dict),
+              let text = String(data: data, encoding: .utf8) else { return }
+        channel.sendTextMessage(text, error: nil)
+    }
+
     /// Initialise GCKCastContext once. Call from app launch on the main thread.
     func start() {
         guard !started else { return }
@@ -190,6 +294,21 @@ final class AerioCastController: NSObject, ObservableObject {
         // zero Cast devices listed even for the default media receiver ID
         // until this flag went false.
         options.startDiscoveryAfterFirstTapOnCastButton = false
+        // Cast Connect ON (Logan 2026-09-13), measured basis: the Cast web
+        // receiver's Chromium renderer presents only about 46 fps with
+        // double-vsync intervals on a Google TV Streamer at 720p60 and 1080p60,
+        // a ceiling every web-receiver app shares, while the native AerioTV
+        // Android TV app renders a full 60 fps. With this flag the framework
+        // launches that native app on any Android TV target that has AerioTV
+        // installed, and the TV tunes the channel ITSELF (no phone proxy,
+        // AC-3 passthrough as in normal playback).
+        // Targets without the app (legacy dongles, Nest displays) fall back to
+        // the web receiver on their own and keep the local HLS proxy path.
+        // No credentials: the Android TV receiver authenticates nothing; it
+        // validates the load against its own playlist and effective base.
+        let launchOptions = GCKLaunchOptions()
+        launchOptions.androidReceiverCompatible = true
+        options.launchOptions = launchOptions
         GCKCastContext.setSharedInstanceWith(options)
         GCKCastContext.sharedInstance().sessionManager.add(self)
         // The flag above only makes discovery ELIGIBLE to run without a
@@ -420,59 +539,72 @@ final class AerioCastController: NSObject, ObservableObject {
     /// playlist is a hard receiver error, not a retry.
     private func load(_ content: Content, on session: GCKCastSession) {
         proxyLoadTask?.cancel()
+        // Route by receiver type (2026-09-13). The native Android TV app gets the
+        // channel IDENTITY and tunes itself; a web receiver gets the phone-local
+        // proxy playlist. While the handshake is still in flight the load is HELD.
+        switch receiverTarget {
+        case .unknown:
+            deferredLoad = content
+            debugLog("[Cast] load held: receiver type not yet known")
+            return
+        case .androidTVApp:
+            loadNative(content, on: session)
+            return
+        case .webReceiver:
+            break
+        }
         guard content.kind == .live, let rawTS = content.streamURL else {
             // No proxyable stream: nothing the web receiver could play.
             surfaceCastFailure("This channel has no castable stream")
             return
         }
         let headers = content.streamHeaders
-        // Cast audio (2026-09-12): ask Dispatcharr for its built-in AAC
-        // output profile for THIS request, so the receiver gets stereo AAC
-        // and the phone passes it through with no decode of its own. Local
-        // playback is untouched and keeps AC-3.
+        // Cast audio (Logan 2026-09-13): AC-3 / E-AC-3 PASSES THROUGH to the
+        // web receiver and the Dispatcharr output-profile path is gone.
+        // Nothing server-side is asked for, nothing is transcoded on the
+        // phone, and local playback was never involved.
         //
-        // 2026-09-12: the profile used to be applied to EVERY cast, even to
-        // receivers that decode AC-3 themselves. Dispatcharr's ffmpeg AAC
-        // encoder emits channel_configuration 0 (layout in a PCE) whenever
-        // the AC-3 source layout is outside Table 1.19, and the receiver's
-        // AAC decoder substitutes silence for every frame. So the profile
-        // is requested ONLY when the receiver can decode AC-3 in MSE; that
-        // receiver ingests the PLAIN stream and the remuxer passes
-        // AC-3 / E-AC-3 through untouched.
+        // What changed: the proxy now serves a DEMUXED master (separate video
+        // and audio renditions, one SourceBuffer each), and a Google TV
+        // Streamer answers isTypeSupported('audio/mp4; codecs="ac-3"') true
+        // for exactly that shape while the old muxed video/mp4 form answered
+        // false (the measurement that used to force the AAC profile). Emby
+        // plays AC-3 through the same audio/mp4 path.
         //
-        // 2026-09-12 session16: "can decode" is the receiver's own
-        // MediaSource.isTypeSupported measurement (`receiverCaps`), not a
-        // model allow-list. The list called the Streamer capable and the
-        // plain stream died with Shaka 3015.
-        if receiverCaps == nil { debugLog("[Cast] caps not received, defaulting to profile") }
+        // So the ingest is ALWAYS the plain stream URL, and the only decision
+        // left is whether this receiver may have the AC-3 bitstream:
+        // `receiverCaps` ac-3 / ec-3, measured by the receiver itself. False
+        // plus an AC-3 source is refused by name rather than transcoded. AAC
+        // sources pass through as before (a channel_configuration 0 layout is
+        // still refused).
+        if receiverCaps == nil { debugLog("[Cast] caps not received, assuming no AC-3") }
         let allowAC3 = receiverDecodesAC3
-        let profileID = allowAC3
-            ? nil : ChannelStore.shared.activeServer?.dispatcharrAACOutputProfileID
-        let profileURL = DispatcharrOutputProfile.applying(profileID: profileID, to: rawTS)
         let receiverName = session.device.friendlyName ?? lastDeviceName
         let receiverModel = session.device.modelName ?? receiverName ?? "unknown"
+        func cap(_ key: String) -> String { receiverCaps?[key] == true ? "yes" : "no" }
         debugLog("[Cast] audio plan: receiver=\(receiverModel) "
-            + "ac3=\(allowAC3 ? "yes" : "no") (\(receiverCaps == nil ? "no caps" : "measured")) "
-            + "-> ingest=\(profileID.map { "profile \($0)" } ?? "plain")")
-        debugLog("[Cast] load channel=\(content.title) "
-            + "profile=\(profileID.map(String.init) ?? "none") "
-            + "receiverAC3=\(allowAC3 ? "yes" : "no")")
+            + "caps=\(receiverCaps == nil ? "none" : "measured") "
+            + "ac-3=\(cap("ac-3")) ec-3=\(cap("ec-3")) aac=\(cap("mp4a.40.2")) "
+            + "-> ingest=plain audio=\(allowAC3 ? "passthrough" : "aac-only")")
         proxyLoadTask = Task { [weak self] in
             let playlistURL: URL
             do {
-                playlistURL = try await Self.startProxyWithProfileRetry(
-                    url: profileURL, headers: headers, allowAC3Passthrough: allowAC3,
-                    onProfileRetry: { [weak self] code in
-                        self?.surfaceCastFailure("Dispatcharr could not start the AAC output profile "
-                            + "for this channel (HTTP \(code)). Trying the original audio.")
-                    })
+                _ = try await CastHLSProxySession.shared.startChannel(
+                    rawTSURL: rawTS, headers: headers, allowAC3Passthrough: allowAC3)
+                // The DEMUXED master is what the receiver loads: the audio
+                // rendition declares ac-3 / ec-3 honestly in its own
+                // audio/mp4 SourceBuffer. The muxed master stays served but
+                // nothing loads it.
+                guard let demuxed = CastHLSProxySession.shared.demuxedMasterURL else {
+                    throw CastHLSProxyError.serverFailed
+                }
+                playlistURL = demuxed
             } catch is CancellationError {
                 return
             } catch {
                 self?.surfaceCastFailure(Self.castFailureMessage(
-                    error, receiverName: receiverName, isDispatcharr: profileURL.path.contains("/proxy/ts/")))
-                debugLog("[Cast] load channel=\(content.title) "
-                    + "profile=\(profileID.map(String.init) ?? "none") audio=unknown mode=refused")
+                    error, receiverName: receiverName, isDispatcharr: rawTS.path.contains("/proxy/ts/")))
+                debugLog("[Cast] load channel=\(content.title) audio=unknown mode=refused")
                 // The proxy is already torn down; a session left up would
                 // show a live cast cover over a dead playlist (zombie
                 // "Casting" UI, seen live 2026-08-14). End it; the session
@@ -482,7 +614,6 @@ final class AerioCastController: NSObject, ObservableObject {
             }
             let summary = CastHLSProxySession.shared.audioSummary()
             debugLog("[Cast] load channel=\(content.title) "
-                + "profile=\(profileID.map(String.init) ?? "none") "
                 + "audio=\(summary?.codec ?? "none") mode=\(summary?.mode ?? "unknown")")
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
@@ -496,32 +627,11 @@ final class AerioCastController: NSObject, ObservableObject {
         }
     }
 
-    /// Start the proxy on `url`, and on exactly ONE class of failure (the
-    /// server refusing the feed with 503, or no bytes at all inside the
-    /// ready window) retry WITHOUT the output_profile parameter, so a
-    /// broken profile falls back to the plain feed instead of costing the
-    /// user the channel. Anything else propagates on the first attempt.
-    private static func startProxyWithProfileRetry(
-        url: URL, headers: [String: String], allowAC3Passthrough: Bool,
-        onProfileRetry: @escaping (Int) -> Void) async throws -> URL {
-        do {
-            return try await CastHLSProxySession.shared.startChannel(
-                rawTSURL: url, headers: headers, allowAC3Passthrough: allowAC3Passthrough)
-        } catch {
-            guard DispatcharrOutputProfile.carriesProfile(url) else { throw error }
-            let code: Int
-            switch error {
-            case CastHLSProxyError.upstreamUnavailable(let status): code = status
-            case CastHLSProxyError.timedOut: code = 503
-            default: throw error
-            }
-            let plain = DispatcharrOutputProfile.removingProfile(from: url)
-            debugLog("[Cast] output profile start failed (\(code)); retrying once without it")
-            await MainActor.run { onProfileRetry(code) }
-            return try await CastHLSProxySession.shared.startChannel(
-                rawTSURL: plain, headers: headers, allowAC3Passthrough: allowAC3Passthrough)
-        }
-    }
+    // Cast audio, 2026-09-13: the "retry once without the output_profile
+    // parameter" wrapper that used to sit between `load` and
+    // `CastHLSProxySession.startChannel` is GONE with the profile itself.
+    // There is one ingest URL now, the plain one, so a failure is a real
+    // failure and is surfaced as such.
 
     /// Specific refusal wording for every way a cast start can fail
     /// (Logan 2026-09-12: "cannot cast this channel" is not detailed
@@ -536,8 +646,10 @@ final class AerioCastController: NSObject, ObservableObject {
             case .video:
                 return "This channel's video is \(name), which Google Cast receivers cannot play."
             case .audio:
-                return "This channel's audio is a surround layout the receiver cannot decode. "
-                    + "Add a stereo AAC output profile named AerioTV Cast in Dispatcharr (see the README)."
+                if name.hasPrefix("AC-3") || name.hasPrefix("E-AC-3") {
+                    return "This receiver cannot decode this channel's surround audio (AC-3)."
+                }
+                return "This channel's audio is \(name), which the receiver cannot decode."
             }
         }
         let seconds = CastHLSProxySession.readyTimeoutSeconds
@@ -559,6 +671,63 @@ final class AerioCastController: NSObject, ObservableObject {
         default:
             return "This channel could not be cast: \(error)"
         }
+    }
+
+    /// Cast Connect path: hand the native AerioTV Android TV receiver the channel
+    /// identity only and let it tune like a local tap (its own ExoPlayer, its own
+    /// effective base, AC-3 passthrough). Nothing on the phone touches the stream:
+    /// no HLS proxy, no contentURL.
+    ///
+    /// The identity MUST be the Android app's own channel id, because the receiver
+    /// resolves the load against ITS playlist: Dispatcharr channels share the
+    /// server uuid, which is "disp:<uuid>" on Android (the same translation the LAN
+    /// companion remote uses). A channel with no Dispatcharr uuid (XC / M3U) has no
+    /// id the TV could resolve, so it is refused by name instead of black-screening.
+    private func loadNative(_ content: Content, on session: GCKCastSession) {
+        guard let client = session.remoteMediaClient else { return }
+        let item = ChannelStore.shared.channels.first { $0.id == content.mediaID }
+        guard let item, let androidID = CompanionClient.androidChannelID(for: item) else {
+            surfaceCastFailure("The AerioTV app on this TV cannot look up this channel. "
+                + "Only Dispatcharr channels can be cast to it.")
+            debugLog("[Cast] native load refused: no Dispatcharr id for \(content.title)")
+            return
+        }
+        // Any proxy left over from an earlier web-receiver session has no client.
+        Task.detached { CastHLSProxySession.shared.stop() }
+
+        let metadata = GCKMediaMetadata(metadataType: .generic)
+        metadata.setString(content.title, forKey: kGCKMetadataKeyTitle)
+        if let sub = content.subtitle, !sub.isEmpty {
+            metadata.setString(sub, forKey: kGCKMetadataKeySubtitle)
+        }
+        if let art = content.artURL, let url = URL(string: art) {
+            metadata.addImage(GCKImage(url: url, width: 480, height: 270))
+        }
+        // entity is what the receiver's Cast Connect load handler deep-links on,
+        // and it must match the scheme MainActivity parses; customData carries the
+        // identity, contentID repeats it as the fallback the receiver reads when
+        // customData is stripped. No contentURL: the receiver builds its own.
+        let builder = GCKMediaInformationBuilder(entity: "aeriotv://channel/\(androidID)")
+        builder.contentID = androidID
+        builder.streamType = .live
+        builder.contentType = "video/mp2t"
+        builder.metadata = metadata
+        builder.customData = [
+            AerioCast.keyMediaID: androidID,
+            AerioCast.keyKind: AerioCast.kindLive,
+        ]
+        let requestBuilder = GCKMediaLoadRequestDataBuilder()
+        requestBuilder.mediaInformation = builder.build()
+        requestBuilder.autoplay = true
+        let request = client.loadMedia(with: requestBuilder.build())
+        request.delegate = self
+        loadRequest = request
+        // Cast Connect does not re-deliver a second load() to an already-running
+        // receiver, so every tune also rides the reliable control channel, which
+        // re-tunes the TV in place with no relaunch (Android parity).
+        sendControl(["cmd": "setChannel", "channelId": androidID])
+        debugLog("[Cast] target=android-tv-app, native playback: channel=\(content.title) "
+            + "id=\(androidID) proxy=none profile=none")
     }
 
     private func loadProxyPlaylist(_ playlistURL: URL, content: Content, on session: GCKCastSession) {
@@ -619,17 +788,13 @@ final class AerioCastController: NSObject, ObservableObject {
         debugLog("[CAST-HLS] switch-stream reprime for \(item.name)")
         let headers = content.streamHeaders
         proxyLoadTask?.cancel()
-        // Same audio plan as the initial load: the AAC output profile only
-        // for a receiver whose MSE did not measure AC-3 support.
+        // Same audio plan as the initial load: the plain stream URL, with
+        // AC-3 / E-AC-3 passthrough gated on the receiver's own measurement.
         let allowAC3 = receiverDecodesAC3
-        let profileID = allowAC3
-            ? nil : ChannelStore.shared.activeServer?.dispatcharrAACOutputProfileID
-        let profileURL = DispatcharrOutputProfile.applying(profileID: profileID, to: rawTS)
         proxyLoadTask = Task { [weak self] in
             do {
-                _ = try await Self.startProxyWithProfileRetry(
-                    url: profileURL, headers: headers, allowAC3Passthrough: allowAC3,
-                    onProfileRetry: { _ in })
+                _ = try await CastHLSProxySession.shared.startChannel(
+                    rawTSURL: rawTS, headers: headers, allowAC3Passthrough: allowAC3)
             } catch is CancellationError {
             } catch {
                 self?.surfaceCastFailure("The stream switch interrupted casting: \(error)")
@@ -794,6 +959,14 @@ extension AerioCastController: GCKSessionManagerListener {
         debugChannel.delegate = self
         session.add(debugChannel)
         receiverDebugChannel = debugChannel
+        // Custom control channel: the receiver-type handshake and the in-place
+        // channel flip a running Cast Connect receiver needs. Attached BEFORE any
+        // load decision below, because that decision waits on the handshake.
+        let control = GCKGenericChannel(namespace: Self.controlNamespace)
+        control.delegate = self
+        session.add(control)
+        controlChannel = control
+        probeReceiverTarget()
         // Cast takes precedence over an active companion session: tear that
         // down first so the two remote covers can never both be live (review
         // 2026-07-16). Companion Disconnect leaves the Android TV playing.
@@ -854,6 +1027,15 @@ extension AerioCastController: GCKSessionManagerListener {
             debugChannel.delegate = nil
             receiverDebugChannel = nil
         }
+        if let control = controlChannel {
+            GCKCastContext.sharedInstance().sessionManager.currentCastSession?.remove(control)
+            control.delegate = nil
+            controlChannel = nil
+        }
+        targetProbeTask?.cancel()
+        targetProbeTask = nil
+        receiverTarget = .unknown
+        deferredLoad = nil
         receiverCaps = nil
         loggedCaps = nil
         // The cast card must not outlive the session; a local resume below
@@ -969,7 +1151,29 @@ extension AerioCastController: GCKGenericChannelDelegate {
         // diagnostic path and `MainActor.assumeIsolated` would TRAP if that
         // ever stopped being true. Hopping costs a log line's latency and
         // cannot take the app down.
-        Task { @MainActor [message] in logReceiverDebug(message) }
+        let ns = protocolNamespace
+        Task { @MainActor [message] in
+            if ns == Self.controlNamespace {
+                handleControlMessage(message)
+            } else {
+                logReceiverDebug(message)
+            }
+        }
+    }
+
+    /// Receiver -> sender on the control namespace. Only the handshake answer is
+    /// read here: transport and now-playing ride the Cast media status, and the
+    /// receiver's own track/speed pickers are the Android remote's surface.
+    private func handleControlMessage(_ message: String) {
+        guard let data = message.data(using: .utf8),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return
+        }
+        // The web receiver page spells the discriminator "type", the Android TV
+        // receiver spells it "cmd" like every other frame on this namespace.
+        let kind = (json["cmd"] as? String) ?? (json["type"] as? String)
+        guard kind == "receiverInfo" else { return }
+        noteReceiverInfo(json)
     }
 
     /// Never throws and never logs anything but the single line: a
