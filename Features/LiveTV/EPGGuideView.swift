@@ -4509,7 +4509,47 @@ final class GuideStore: ObservableObject {
 }
 
 // MARK: - EPG Guide View
+/// Per-focus-step bookkeeping that NO view body reads.
+///
+/// Every one of these used to be `@State` on `EPGGuideView`. A D-pad move
+/// writes three of them (lastFocusChangeAt, lastFocusedChannelForSnap, and on
+/// a snap verticalSnapInFlight twice), and each write invalidated the guide's
+/// own body, which rebuilds every visible channel row and program cell.
+/// Device trace 2026-09-13 11:58:52: `GuideChannelRow=42 (7 distinct)
+/// GuideProgramCell=174 (29 distinct)` in one second, i.e. six full-grid
+/// passes for roughly two presses, ending in `[HANG] main runloop turn
+/// 1246ms`.
+///
+/// A reference type held in `@State` is created once and never re-assigned, so
+/// mutating its properties is invisible to SwiftUI. All of these are read only
+/// from event handlers, never from a body, so nothing needs the invalidation.
+@MainActor
+final class GuideFocusScratch {
+    /// Task #185: channel of the previously focused programme, so the
+    /// vertical-move corrective snap can tell a channel change from a
+    /// same-row change (our own snap / restore, which must not loop).
+    var lastFocusedChannel: String?
+    /// Task #185: guards the corrective snap's own focus writes from
+    /// re-triggering a second snap while the first is still asserting.
+    var verticalSnapInFlight = false
+    /// When focus last moved; the Left handler uses it to tell a real move
+    /// from a press that the engine refused at the edge.
+    var lastFocusChangeAt = Date.distantPast
+    /// iOS #66: channel index a page move is currently asserting focus onto.
+    var pagePendingChannelIndex: Int?
+    /// Timeline offset before the most recent Right-step (hold-Right revert).
+    var preRightStepOffset: CGFloat?
+    /// When the offset above was last touched.
+    var preRightStepAt = Date.distantPast
+    /// A short Right step deferred to the press RELEASE.
+    var pendingRightStep = false
+}
+
 struct EPGGuideView: View {
+    /// Focus bookkeeping that no body reads. Held as a reference so writes
+    /// during a D-pad move do not invalidate the guide (see GuideFocusScratch).
+    @State private var focusScratch = GuideFocusScratch()
+
     let channels: [ChannelDisplayItem]
     let servers: [ServerConnection]
     let onSelectChannel: (ChannelDisplayItem) -> Void
@@ -4617,17 +4657,14 @@ struct EPGGuideView: View {
     /// programme, so the vertical-move corrective snap can tell a channel
     /// change (UP/DOWN, needs column correction) from a same-row change
     /// (our own snap / restore, must not loop).
-    @State private var lastFocusedChannelForSnap: String?
 
     /// iOS #66: channel index a page move is currently asserting focus onto.
     /// Rapid channel-key presses arrive while the previous write is still in
     /// flight and focusedProgramID reads nil between unfocus and focus - the
     /// exact bug the Android pager hit - so the next press chains off this
     /// instead of bailing.
-    @State private var pagePendingChannelIndex: Int?
     /// Task #185: guards the corrective snap's own focus writes from
     /// re-triggering a second snap while the first is still asserting.
-    @State private var verticalSnapInFlight = false
 
     /// #42: while a hold-Right (close corner mini) is in progress, pin the guide
     /// timeline so the still-held Right does not scroll the EPG forward after the
@@ -4639,14 +4676,11 @@ struct EPGGuideView: View {
     /// close-mini gesture delivers its press-down as a normal Right
     /// move BEFORE the 0.5s hold recognizes, so the guide scrolls one
     /// step it should not have; the holdBegan handler reverts to this.
-    @State private var preRightStepOffset: CGFloat?
     /// A short Right step deferred to the press RELEASE while the hold-Right
     /// (close mini) detector is armed, so the hold never scrolls first
     /// (Logan 2026-09-02). Dropped if the hold recognizes before release.
-    @State private var pendingRightStep = false
     /// When the offset above was last touched; lets repeats of one held press
     /// share a single capture while a fresh gesture re-captures.
-    @State private var preRightStepAt = Date.distantPast
 
     /// Namespace + imperative reset hook for the guide's focus
     /// scope. See ChannelListView's identical setup for the full
@@ -4978,7 +5012,6 @@ struct EPGGuideView: View {
     @State private var didSetInitialGuideOffset = false
     /// When focusedProgramID last changed: a Left whose engine move landed
     /// within the last quarter second is judged by its destination cell.
-    @State private var lastFocusChangeAt = Date.distantPast
 
     /// Captured `horizontalOffset` at the start of an active drag
     /// gesture. `DragGesture.Value.translation` is cumulative from
@@ -5202,8 +5235,8 @@ struct EPGGuideView: View {
             // column, snap to the cell that does. Same-channel changes (our
             // own snaps/restores/pans) are ignored so this can never loop.
             .onChange(of: focusedProgramID) { oldValue, newValue in
-                lastFocusChangeAt = Date()
-                guard let pid = newValue else { lastFocusedChannelForSnap = nil; return }
+                focusScratch.lastFocusChangeAt = Date()
+                guard let pid = newValue else { focusScratch.lastFocusedChannel = nil; return }
                 let chID = channelID(ofProgram: pid)
                 #if os(tvOS)
                 // Channel Preview: report from the guide's own focus binding,
@@ -5224,11 +5257,11 @@ struct EPGGuideView: View {
                     }
                 }
                 #endif
-                defer { lastFocusedChannelForSnap = chID }
+                defer { focusScratch.lastFocusedChannel = chID }
                 guard let chID,
-                      let previous = lastFocusedChannelForSnap,
+                      let previous = focusScratch.lastFocusedChannel,
                       previous != chID,
-                      !verticalSnapInFlight else {
+                      !focusScratch.verticalSnapInFlight else {
                     #if os(tvOS)
                     reportPreview(pid)
                     #endif
@@ -5257,7 +5290,7 @@ struct EPGGuideView: View {
                 #if os(tvOS)
                 reportPreview(target)
                 #endif
-                verticalSnapInFlight = true
+                focusScratch.verticalSnapInFlight = true
                 debugLog("🧭 [GuideFocus] column snap ch=\(chID) landed=\(landed.start) -> anchor cell")
                 Task { @MainActor in
                     for _ in 0..<4 {
@@ -5265,22 +5298,22 @@ struct EPGGuideView: View {
                         try? await Task.sleep(nanoseconds: 60_000_000)
                         if focusedProgramID == target { break }
                     }
-                    verticalSnapInFlight = false
+                    focusScratch.verticalSnapInFlight = false
                 }
             }
             #endif
             .onReceive(NotificationCenter.default.publisher(for: .guideRightHoldBegan)) { _ in
                 #if os(tvOS)
                 // The hold owns this press: the deferred short step is dropped.
-                pendingRightStep = false
+                focusScratch.pendingRightStep = false
                 // Freeze the EPG timeline for the duration of the close-mini hold.
                 // A safety backstop clears the pin if the release event is missed.
                 rightHoldPinningTimeline = true
                 // The hold's press-down already scrolled one step before
                 // recognition; put the timeline back where it was.
-                if let restore = preRightStepOffset {
+                if let restore = focusScratch.preRightStepOffset {
                     withAnimation(.easeOut(duration: 0.3)) { horizontalOffset = restore }
-                    preRightStepOffset = nil
+                    focusScratch.preRightStepOffset = nil
                     // The pre-recognition step already RETARGETED focus one
                     // column right; putting the offset back without moving
                     // focus left the focused cell visibly walked to the right
@@ -5305,8 +5338,8 @@ struct EPGGuideView: View {
                     rightHoldPinningTimeline = false
                     rightHoldSafetyTask?.cancel()
                     rightHoldSafetyTask = nil
-                } else if pendingRightStep {
-                    pendingRightStep = false
+                } else if focusScratch.pendingRightStep {
+                    focusScratch.pendingRightStep = false
                     if !rightHoldPinningTimeline { performRightStep() }
                 }
                 #endif
@@ -5732,7 +5765,7 @@ struct EPGGuideView: View {
             //  - otherwise (focus stayed put at the left edge, or the target
             //    starts off-screen): pan half an hour and let the ring ride
             //    the viewport (Task #185).
-            let movedRecently = Date().timeIntervalSince(lastFocusChangeAt) < 0.25
+            let movedRecently = Date().timeIntervalSince(focusScratch.lastFocusChangeAt) < 0.25
             if movedRecently, let pid = focusedProgramID,
                let chID = channelID(ofProgram: pid),
                let prog = guideStore.programs[chID]?.first(where: { $0.id == pid }) {
@@ -5769,7 +5802,7 @@ struct EPGGuideView: View {
             if !TVSearchOverlayState.shared.isUp
                 && NowPlayingManager.shared.isActive
                 && NowPlayingManager.shared.isMinimized {
-                pendingRightStep = true
+                focusScratch.pendingRightStep = true
                 break
             }
             performRightStep()
@@ -5787,11 +5820,11 @@ struct EPGGuideView: View {
             // more steps to the RIGHT of where the user started.
             // 0.35s of quiet = a new gesture; repeats arrive faster.
             let stepNow = Date()
-            if preRightStepOffset == nil
-                || stepNow.timeIntervalSince(preRightStepAt) > 0.35 {
-                preRightStepOffset = horizontalOffset
+            if focusScratch.preRightStepOffset == nil
+                || stepNow.timeIntervalSince(focusScratch.preRightStepAt) > 0.35 {
+                focusScratch.preRightStepOffset = horizontalOffset
             }
-            preRightStepAt = stepNow
+            focusScratch.preRightStepAt = stepNow
             withAnimation(.easeOut(duration: 0.3)) {
                 horizontalOffset = max(maxHorizontalOffset, horizontalOffset - pixelsPerHour * 0.5)
             }
@@ -5816,13 +5849,13 @@ struct EPGGuideView: View {
         // the first cut read focusedProgramID only, so every press after the
         // first bailed here.
         let curIdx: Int
-        if let pending = pagePendingChannelIndex {
+        if let pending = focusScratch.pagePendingChannelIndex {
             curIdx = pending
         } else if let pid = focusedProgramID,
                   let ch = channelID(ofProgram: pid),
                   let i = channels.firstIndex(where: { $0.id == ch }) {
             curIdx = i
-        } else if let ch = lastFocusedChannelForSnap,
+        } else if let ch = focusScratch.lastFocusedChannel,
                   let i = channels.firstIndex(where: { $0.id == ch }) {
             curIdx = i
         } else {
@@ -5832,10 +5865,10 @@ struct EPGGuideView: View {
         let target = min(max(down ? curIdx + visibleRows : curIdx - visibleRows, 0),
                          channels.count - 1)
         guard target != curIdx else { return }
-        pagePendingChannelIndex = target
+        focusScratch.pagePendingChannelIndex = target
         debugLog("🧭 [GuideFocus] page\(down ? "Down" : "Up") ch#\(curIdx) -> ch#\(target) rows=\(visibleRows)")
         Task { @MainActor in
-            defer { if pagePendingChannelIndex == target { pagePendingChannelIndex = nil } }
+            defer { if focusScratch.pagePendingChannelIndex == target { focusScratch.pagePendingChannelIndex = nil } }
             // Realize the target row FIRST: the rows live in a LazyVStack, so
             // a row a full page away is not composed and a focus write into
             // it is silently dropped (the other half of the one-press bug).
