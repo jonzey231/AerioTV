@@ -135,7 +135,9 @@ struct MultiviewTransportBar: View {
         )
     }
 
-    /// `×` icon button (destructive). Exits multiview entirely.
+    /// `×` icon button (destructive). Closes the selected (audio) tile;
+    /// closing the last tile stops playback. "Exit Multiview" (collapse
+    /// to the selected stream) is the Menu press, not this button.
     private var exitButton: some View {
         Button(role: .destructive) {
             chromeState.reportInteraction()
@@ -160,13 +162,8 @@ struct MultiviewTransportBar: View {
         #else
         .buttonStyle(.plain)
         #endif
-        #if os(tvOS)
-        .accessibilityLabel("Exit multiview")
-        .accessibilityHint("Leave multiview and keep the stream you were listening to")
-        #else
         .accessibilityLabel("Close selected stream")
         .accessibilityHint("Closes the stream that has audio; the last stream closes the player")
-        #endif
     }
 }
 

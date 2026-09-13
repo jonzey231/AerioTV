@@ -1271,6 +1271,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if inProcessDelivery, let first = segments.first?.seq {
             for k in deliveryBase64.keys where k >= 0 && k < first { deliveryBase64[k] = nil }
         }
+        advertisedWindowSeconds.set(segments.reduce(0) { $0 + $1.duration })
         // nextSeq, not segments.count: the count pins at maxBufferedSegments
         // once the window fills, and 12 % 5 != 0 silenced every close after
         // the first ten seconds of the 2026-08-25 UHD soak.
@@ -1353,6 +1354,17 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// 18:07: the value grew from 3 to 4 when a 3.92 s segment closed and
     /// the poll cadence went with it).
     let advertisedTargetDuration = DoubleBox(2.0)
+
+    /// Total seconds the LOCAL playlist currently advertises (the sum of
+    /// the segment durations the player can actually fetch).
+    ///
+    /// The join offset is read against this. At READY the playlist holds
+    /// exactly `readyThreshold` segments, so asking AVPlayer for a start
+    /// point 6 s back from the edge of a ~4 s playlist is an impossible
+    /// request: it answers -12640 "Cannot get that close to live" and
+    /// never becomes ready, which burns the whole 12 s watchdog before
+    /// the retry (field log 1.8.34, 2026-09-13 17:13:58 -> 17:14:10).
+    let advertisedWindowSeconds = DoubleBox(0)
 
     // MARK: Live-edge pacing (proxy burst join, 2026-09-13)
     //
@@ -4088,13 +4100,39 @@ struct AVPlayerMultiviewTile: View {
         let joinTargetDuration = isLiveTune ? (remuxer?.advertisedTargetDuration.get() ?? 0) : 0
         if isLiveTune {
             let floor = max(3 * joinTargetDuration, learned, LiveEdgeHoldback.base)
-            let offset = min(18.0, floor + streamBufferSeconds)
-            playerItem.configuredTimeOffsetFromLive =
-                CMTime(seconds: offset, preferredTimescale: 600)
+            let wanted = min(18.0, floor + streamBufferSeconds)
+            // The offset can only point INTO the playlist we have
+            // published. At READY that is `readyThreshold` segments (~4 s
+            // with 2 s segments), so a 6 s request is unservable: AVPlayer
+            // answers -12640 "Cannot get that close to live" and sits at
+            // `.unknown` until the 12 s watchdog tears the pipeline down
+            // and re-tunes from scratch. That is the slow first start in
+            // the 1.8.34 field log (2026-09-13: press 17:13:50, READY
+            // 17:13:58 on two segments with offset 6.0 s, -12640, retry
+            // 17:14:11, picture 17:14:12 - ~21 s for a tune the server
+            // answered in 5.3 s).
+            //
+            // Keep one target duration of playlist ahead of the start
+            // point, and when even that does not fit, set NO offset:
+            // AVPlayer's own hold-back then rides the window as it grows,
+            // which is always servable. Mid-playback the driver raises the
+            // offset again from `driverOffsetFloor`, so nothing is lost
+            // beyond the first seconds.
+            let window = isLiveTune ? (remuxer?.advertisedWindowSeconds.get() ?? 0) : 0
+            let servable = max(0, window - max(joinTargetDuration, 1.0))
+            let offset = min(wanted, servable)
+            if offset >= max(joinTargetDuration, 1.0) {
+                playerItem.configuredTimeOffsetFromLive =
+                    CMTime(seconds: offset, preferredTimescale: 600)
+            }
             debugLog(String(format:
-                "[AVP-MV] live edge offset %.1fs at join (3x targetDuration %.1f = %.1f, learned %.1f, floor %.1f, stream buffer %.1f) channel=%@",
-                offset, joinTargetDuration, 3 * joinTargetDuration, learned,
-                LiveEdgeHoldback.base, streamBufferSeconds, channelName))
+                "[AVP-MV] live edge offset %.1fs at join (wanted %.1f, playlist window %.1f, servable %.1f, 3x targetDuration %.1f = %.1f, learned %.1f, floor %.1f, stream buffer %.1f)%@ channel=%@",
+                offset, wanted, window, servable, joinTargetDuration,
+                3 * joinTargetDuration, learned, LiveEdgeHoldback.base,
+                streamBufferSeconds,
+                offset >= max(joinTargetDuration, 1.0)
+                    ? "" : " -> no offset set (AVPlayer hold-back rides the window)",
+                channelName))
             driverJoinOffset = offset
             driverOffsetFloor = max(learned, LiveEdgeHoldback.base) + streamBufferSeconds
         }

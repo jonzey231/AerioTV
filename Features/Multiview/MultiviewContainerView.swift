@@ -382,18 +382,19 @@ struct MultiviewContainerView: View {
                     MultiviewTransportBar(
                         store: store,
                         onAdd: { showAddSheet = true },
-                        // iPhone and iPad: the X closes the SELECTED stream
+                        // Every platform: the X closes the SELECTED stream
                         // (the audio tile). Collapsing to the audio tile
                         // instead read as "it closed the wrong one"
-                        // (Freyguy1975, Discord 2026-09-09). tvOS keeps the
-                        // Menu-press collapse with its confirmation.
-                        onExit: {
-                            #if os(tvOS)
-                            session.exitMultiviewKeepingAudioTile()
-                            #else
-                            session.closeAudioTile()
-                            #endif
-                        }
+                        // (Freyguy1975, Discord 2026-09-09) - it keeps
+                        // exactly the tile the user just selected and
+                        // removes the other one, the precise inverse of the
+                        // intent, because Select on a tile takes audio. That
+                        // fix landed on iPhone / iPad only; tvOS kept the
+                        // collapse and the same report came back from the
+                        // same tester on 1.8.34. The "Exit Multiview"
+                        // collapse verb still lives on the Menu press, with
+                        // its confirmation dialog.
+                        onExit: { session.closeAudioTile() }
                     )
                     .frame(height: chromeState.isVisible ? nil : 0)
                     .opacity(chromeState.isVisible ? 1 : 0)

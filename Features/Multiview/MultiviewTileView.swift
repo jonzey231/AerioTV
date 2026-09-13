@@ -92,28 +92,26 @@ struct MultiviewTileView: View {
 
     // MARK: - Selective mirrors of `progressStore`
     //
-    // The tile is no longer an observer of `progressStore`, so the few
-    // published values the BODY draws are mirrored into `@State` from
-    // explicit `.onReceive` subscriptions. Each mirror re-renders the
-    // tile only when its own value changes - never on the 0.5s clock.
+    // The tile does NOT observe `progressStore` (its 0.5s `currentMs`
+    // pump would rebuild the open context menu twice a second). The few
+    // low-frequency values the BODY draws are mirrored on `stores`,
+    // whose Combine subscriptions are wired ONCE in its init.
+    //
+    // These mirrors must never be `@State` fed by publishers built in
+    // `body`: `store.$x.removeDuplicates()` is a fresh, non-comparable
+    // publisher value on every body evaluation, so SwiftUI resubscribes
+    // on every update and `@Published` replays its current value into
+    // the handler. With the handler writing state the body reads, that
+    // is an unbounded update cycle - the tvOS Multiview lockup on the
+    // second tile (field trace 2026-09-13 17:14:30, main thread pinned
+    // in `GraphHost.flushTransactions` until force quit; it needed two
+    // tiles only because `menuRevision` was read exclusively inside
+    // `if !isSoleTile`, so at N=1 nothing depended on it).
 
     /// Mirrors `progressStore.reachedEOF` (VOD "Finished" overlay).
-    @State private var eofReached: Bool = false
+    private var eofReached: Bool { stores.eofReached }
     /// Mirrors `progressStore.liveResumeNotice` (GH #70 top notice).
-    @State private var liveResumeNotice: String? = nil
-    /// Mirrors `progressStore.streamStalled` (soft "Reconnecting…").
-    @State private var stalled: Bool = false
-    /// Bumped whenever a value the CONTEXT MENU / track dialogs read
-    /// changes (track lists, selected track, audio sync, pause state,
-    /// and the one-shot "driver has wired its actions" edge). Those
-    /// call sites keep reading `progressStore` directly; this counter
-    /// is what schedules the re-render so they can't go stale.
-    @State private var menuRevision: Int = 0
-    /// One-shot: the first `currentMs` tick after the engine wires its
-    /// command closures (`setAudioSyncAction` and friends are plain
-    /// stored closures, not `@Published`, so nothing else would ever
-    /// pull them into the menu).
-    @State private var didPrimeMenuAfterStart: Bool = false
+    private var liveResumeNotice: String? { stores.liveResumeNotice }
 
     /// iPadOS: focus state driven by `TVPressOverlay`'s UIKit focus
     /// callback. Unused on tvOS after the Button/ButtonStyle rewrite
@@ -493,11 +491,13 @@ struct MultiviewTileView: View {
         // can reach the system unhandled and suspend the app; keep an
         // eye on field reports). Context-menu at N=1 drops its actions
         // but keeps the attachment so focus behaviour is unchanged.
-        // The menu content reads `menuRevision` so a track-list /
-        // audio-sync / pause change still refreshes it; the 0.5s
-        // position pump deliberately does not.
+        // The tile observes `stores`, which republishes only the few
+        // menu-relevant values (pause state, track lists, selected
+        // track, audio sync), so a track-list / audio-sync / pause
+        // change still refreshes the menu; the 0.5s position pump
+        // deliberately does not.
         .contextMenu {
-            if !isSoleTile, menuRevision >= 0 { tileContextMenu }
+            if !isSoleTile { tileContextMenu }
         }
         // Relocate-mode D-pad swap is handled at the CONTAINER level
         // (`MultiviewContainerView`'s `.onMoveCommand`), not here.
@@ -599,17 +599,10 @@ struct MultiviewTileView: View {
         // Clock source: the driver's 0.5s currentMs pump (a per-init
         // Timer.publish never fires here - the 0.5s re-render replaces
         // it before its first tick; field find 2026-08-27).
-        .onReceive(progressStore.$currentMs) { _ in
-            checkDVREndApproaching()
-            // One-shot only: the pump must NOT re-render the tile, or
-            // the open context menu is rebuilt twice a second.
-            if !didPrimeMenuAfterStart {
-                didPrimeMenuAfterStart = true
-                menuRevision &+= 1
-            }
-        }
-        .onReceive(progressStore.$liveResumeNotice) { liveResumeNotice = $0 }
-        .modifier(MenuStateMirror(store: progressStore, revision: $menuRevision))
+        // `$currentMs` is a plain `Published.Publisher` (a stable value
+        // across body evaluations, so SwiftUI does not resubscribe) and
+        // the handler writes no state the body reads.
+        .onReceive(progressStore.$currentMs) { _ in checkDVREndApproaching() }
         // Playback-error overlay, also a SIBLING so its Retry / Remove
         // buttons are real focus targets on tvOS (same reasoning as the
         // Finished overlay above).
@@ -637,9 +630,7 @@ struct MultiviewTileView: View {
         // Move audio off a tile the moment it finishes (before the user
         // taps anything) so sound continues on another tile. No-op if
         // this isn't the audio tile or there's nowhere to hand off.
-        .onReceive(progressStore.$reachedEOF) { nowEOF in
-            guard nowEOF != eofReached else { return }
-            eofReached = nowEOF
+        .onChange(of: stores.eofReached) { _, nowEOF in
             if nowEOF, tile.kind == .vod {
                 reassignAudioIfFinishedTileWasAudio()
             }
@@ -654,9 +645,7 @@ struct MultiviewTileView: View {
         // Pre-terminal stall -> raise a soft "Reconnecting…" card ~45s before
         // the terminal-error path would, so a killed source shows feedback fast
         // instead of a frozen frame (2026-07-13).
-        .onReceive(progressStore.$streamStalled) { nowStalled in
-            guard nowStalled != stalled else { return }
-            stalled = nowStalled
+        .onChange(of: stores.streamStalled) { _, nowStalled in
             handleStreamStall(nowStalled)
         }
         .accessibilityLabel(a11yLabel)
@@ -1081,15 +1070,7 @@ struct MultiviewTileView: View {
             // Clock source: the driver's 0.5s currentMs pump (a per-init
             // Timer.publish never fires here - the 0.5s re-render replaces
             // it before its first tick; field find 2026-08-27).
-            .onReceive(progressStore.$currentMs) { _ in
-                checkDVREndApproaching()
-                if !didPrimeMenuAfterStart {
-                    didPrimeMenuAfterStart = true
-                    menuRevision &+= 1
-                }
-            }
-            .onReceive(progressStore.$liveResumeNotice) { liveResumeNotice = $0 }
-            .modifier(MenuStateMirror(store: progressStore, revision: $menuRevision))
+            .onReceive(progressStore.$currentMs) { _ in checkDVREndApproaching() }
             // Playback-error overlay, also OUTSIDE `tappableRegion` so
             // its Retry / Remove buttons receive taps directly.
             .overlay {
@@ -1099,18 +1080,14 @@ struct MultiviewTileView: View {
             }
             // Hand audio off the instant a VOD tile finishes (mirrors
             // the tvOS body). No-op unless this was the audio tile.
-            .onReceive(progressStore.$reachedEOF) { nowEOF in
-                guard nowEOF != eofReached else { return }
-                eofReached = nowEOF
+            .onChange(of: stores.eofReached) { _, nowEOF in
                 if nowEOF, tile.kind == .vod {
                     reassignAudioIfFinishedTileWasAudio()
                 }
             }
             // Pre-terminal stall -> soft "Reconnecting…" card (mirrors the
             // tvOS body); here the card's own Retry button is the affordance.
-            .onReceive(progressStore.$streamStalled) { nowStalled in
-                guard nowStalled != stalled else { return }
-                stalled = nowStalled
+            .onChange(of: stores.streamStalled) { _, nowStalled in
                 handleStreamStall(nowStalled)
             }
     }
@@ -2500,44 +2477,85 @@ private struct TileFocusBorder: View {
 // `MPVPlayerViewRepresentable.updateUIViewController` during
 // multi-tile transitions. Feature is on the backlog.
 
-// MARK: - Per-tile store ownership (no publishing)
+// MARK: - Per-tile store ownership
 
-/// Holder for a tile's `PlayerProgressStore` + `AttemptLogStore`.
+/// Holder for a tile's `PlayerProgressStore` + `AttemptLogStore`, plus
+/// the handful of LOW-FREQUENCY mirrors the tile body and its context
+/// menu need.
 ///
-/// It conforms to `ObservableObject` purely so `@StateObject` can own
-/// it, and it publishes NOTHING: no `@Published` property, no manual
-/// `objectWillChange.send()`. A view that holds it therefore never
-/// re-renders because of playback progress. Views that genuinely want
-/// progress updates (the chrome scrubber) observe the
-/// `PlayerProgressStore` itself, which is unchanged.
+/// The tile owns this object with `@StateObject` and therefore observes
+/// it - but it never observes `PlayerProgressStore` itself, so the
+/// driver's 0.5s `currentMs` pump can't re-evaluate the tile body (that
+/// rebuilt the open tvOS `.contextMenu` twice a second: a focus update
+/// per rebuild and ~2 leaked layers per second; field trace
+/// 2026-09-13).
+///
+/// Every subscription below is created ONCE, here, and kept in `bag`.
+/// That is deliberate and load-bearing: publishers built inside a view
+/// `body` (`$x.removeDuplicates()`, `$x.map(...)`) are new,
+/// non-comparable values on each evaluation, so SwiftUI resubscribes on
+/// every update and `@Published` immediately replays its current value.
+/// A handler that then writes state the body reads spins the update
+/// cycle forever - the Multiview lockup when a second tile was added
+/// (2026-09-13). Subscribing off the view graph cannot do that.
 final class PlayerTileStores: ObservableObject {
     let progress = PlayerProgressStore()
     let log = AttemptLogStore()
-}
 
-// MARK: - Menu-relevant state mirror
+    /// `progress.reachedEOF` (VOD "Finished" overlay).
+    @Published private(set) var eofReached: Bool = false
+    /// `progress.liveResumeNotice` (GH #70 top notice).
+    @Published private(set) var liveResumeNotice: String? = nil
+    /// `progress.streamStalled` (soft "Reconnecting…" card).
+    @Published private(set) var streamStalled: Bool = false
+    /// Bumped when a value the CONTEXT MENU / track dialogs read
+    /// changes (pause state, audio sync, selected track, track-list
+    /// counts) and once on the first position tick, when the engine has
+    /// wired its command closures (`setAudioSyncAction` and friends are
+    /// plain stored closures, not `@Published`, so nothing else would
+    /// ever pull them into the menu). Publishing it re-renders the tile,
+    /// which is what keeps the menu from going stale.
+    @Published private(set) var menuRevision: Int = 0
 
-/// Subscribes to only the low-frequency `PlayerProgressStore` values
-/// that the per-tile context menu and the track dialogs read, and bumps
-/// a revision counter when one of them actually changes.
-///
-/// The point is what it does NOT subscribe to: `currentMs`. The driver
-/// pumps that every 0.5s, and a tile re-render on that beat rebuilt the
-/// open tvOS `.contextMenu` twice a second (2026-09-13 field trace).
-private struct MenuStateMirror: ViewModifier {
-    let store: PlayerProgressStore
-    @Binding var revision: Int
+    private var bag = Set<AnyCancellable>()
 
-    func body(content: Content) -> some View {
-        content
-            .onReceive(store.$isPaused.removeDuplicates()) { _ in revision &+= 1 }
-            .onReceive(store.$audioSyncMs.removeDuplicates()) { _ in revision &+= 1 }
-            .onReceive(store.$currentAudioTrackID.removeDuplicates()) { _ in revision &+= 1 }
-            .onReceive(store.$currentSubtitleTrackID.removeDuplicates()) { _ in revision &+= 1 }
-            // Track LISTS are compared by count: the menu only gates on
-            // `count > 1` / `isEmpty`, and the dialogs re-read the live
-            // arrays when they open (their own @State flip re-renders).
-            .onReceive(store.$audioTracks.map(\.count).removeDuplicates()) { _ in revision &+= 1 }
-            .onReceive(store.$subtitleTracks.map(\.count).removeDuplicates()) { _ in revision &+= 1 }
+    init() {
+        progress.$reachedEOF
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] in self?.eofReached = $0 }
+            .store(in: &bag)
+        progress.$liveResumeNotice
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] in self?.liveResumeNotice = $0 }
+            .store(in: &bag)
+        progress.$streamStalled
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] in self?.streamStalled = $0 }
+            .store(in: &bag)
+
+        // Menu-relevant values. Track LISTS are compared by count: the
+        // menu only gates on `count > 1` / `isEmpty`, and the dialogs
+        // re-read the live arrays when they open. `currentMs` is
+        // deliberately absent.
+        let menuTriggers: [AnyPublisher<Void, Never>] = [
+            progress.$isPaused.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            progress.$audioSyncMs.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            progress.$currentAudioTrackID.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            progress.$currentSubtitleTrackID.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            progress.$audioTracks.map(\.count).removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            progress.$subtitleTracks.map(\.count).removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            // One-shot: the first real position tick, i.e. the engine
+            // has wired its command closures.
+            progress.$currentMs.dropFirst().first().map { _ in () }.eraseToAnyPublisher()
+        ]
+        for trigger in menuTriggers {
+            trigger
+                .dropFirst(0)
+                .sink { [weak self] in self?.menuRevision &+= 1 }
+                .store(in: &bag)
+        }
     }
 }
