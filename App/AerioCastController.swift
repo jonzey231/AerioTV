@@ -158,6 +158,41 @@ final class AerioCastController: NSObject, ObservableObject {
         return caps["ac-3"] == true || caps["ec-3"] == true
     }
 
+    /// How long the audio plan waits for caps a web receiver has not
+    /// volunteered yet (an explicit request is sent first). Short: this runs in
+    /// front of the load, and the fallback is only a refusal of AC-3.
+    private static let capsRequestWaitSeconds: Double = 3
+    /// Poll interval while waiting for that answer.
+    private static let capsPollSeconds: Double = 0.1
+
+    /// Ask the receiver for a FRESH capability measurement. Sent on both
+    /// namespaces because a page old enough to answer hello without `mse` may
+    /// only listen for this on the debug channel.
+    private func requestReceiverCaps() {
+        sendControl(["cmd": "caps"])
+        guard let channel = receiverDebugChannel,
+              let data = try? JSONSerialization.data(withJSONObject: ["cmd": "caps"]),
+              let text = String(data: data, encoding: .utf8) else { return }
+        channel.sendTextMessage(text, error: nil)
+    }
+
+    /// Caps for the audio plan: what the receiver already told us, and
+    /// otherwise ASK and wait up to `capsRequestWaitSeconds` before giving up.
+    /// On a Chromecast Ultra the only caps message was the one at READY, which
+    /// this sender's channel was attached too late to see.
+    private func awaitReceiverCaps() async -> [String: Bool]? {
+        if let caps = receiverCaps { return caps }
+        requestReceiverCaps()
+        var waited: Double = 0
+        while waited < Self.capsRequestWaitSeconds {
+            try? await Task.sleep(nanoseconds: UInt64(Self.capsPollSeconds * 1_000_000_000))
+            if Task.isCancelled { return receiverCaps }
+            waited += Self.capsPollSeconds
+            if let caps = receiverCaps { return caps }
+        }
+        return nil
+    }
+
     /// Stores the `mse` object from a receiver debug message (the dedicated
     /// `type: "caps"` message sent on READY, and the copy that rides every
     /// telemetry snapshot).
@@ -239,6 +274,13 @@ final class AerioCastController: NSObject, ObservableObject {
     /// Apply a receiver's own answer. An unrecognised platform is left unknown so
     /// the timeout decides rather than a bad guess.
     private func noteReceiverInfo(_ json: [String: Any]) {
+        // 2026-09-13 (Chromecast Ultra, log 02:38:56-02:39:02): the web receiver
+        // sent its caps ONCE at READY on the debug namespace, and this sender
+        // attached that channel after READY, so the audio plan ran with "caps
+        // not received, assuming no AC-3" and refused the stream. The hello
+        // reply is the one message always read before the plan, so the
+        // measurement now rides along with it.
+        noteReceiverCaps(json)
         switch json["platform"] as? String {
         case "android-tv-app": resolveReceiverTarget(.androidTVApp)
         case "web-receiver": resolveReceiverTarget(.webReceiver)
@@ -577,16 +619,21 @@ final class AerioCastController: NSObject, ObservableObject {
         // plus an AC-3 source is refused by name rather than transcoded. AAC
         // sources pass through as before (a channel_configuration 0 layout is
         // still refused).
-        if receiverCaps == nil { debugLog("[Cast] caps not received, assuming no AC-3") }
-        let allowAC3 = receiverDecodesAC3
         let receiverName = session.device.friendlyName ?? lastDeviceName
         let receiverModel = session.device.modelName ?? receiverName ?? "unknown"
-        func cap(_ key: String) -> String { receiverCaps?[key] == true ? "yes" : "no" }
-        debugLog("[Cast] audio plan: receiver=\(receiverModel) "
-            + "caps=\(receiverCaps == nil ? "none" : "measured") "
-            + "ac-3=\(cap("ac-3")) ec-3=\(cap("ec-3")) aac=\(cap("mp4a.40.2")) "
-            + "-> ingest=plain audio=\(allowAC3 ? "passthrough" : "aac-only")")
         proxyLoadTask = Task { [weak self] in
+            // The plan now WAITS for the measurement (asking for it if needed)
+            // instead of reading a nil that only meant "the message has not
+            // arrived on this channel yet".
+            let caps = await self?.awaitReceiverCaps()
+            if Task.isCancelled { return }
+            if caps == nil { debugLog("[Cast] caps not received, assuming no AC-3") }
+            let allowAC3 = caps?["ac-3"] == true || caps?["ec-3"] == true
+            func cap(_ key: String) -> String { caps?[key] == true ? "yes" : "no" }
+            debugLog("[Cast] audio plan: receiver=\(receiverModel) "
+                + "caps=\(caps == nil ? "none" : "measured") "
+                + "ac-3=\(cap("ac-3")) ec-3=\(cap("ec-3")) aac=\(cap("mp4a.40.2")) "
+                + "-> ingest=plain audio=\(allowAC3 ? "passthrough" : "aac-only")")
             let playlistURL: URL
             do {
                 _ = try await CastHLSProxySession.shared.startChannel(
@@ -1172,6 +1219,9 @@ extension AerioCastController: GCKGenericChannelDelegate {
         // The web receiver page spells the discriminator "type", the Android TV
         // receiver spells it "cmd" like every other frame on this namespace.
         let kind = (json["cmd"] as? String) ?? (json["type"] as? String)
+        // The receiver answers an explicit caps request on whichever namespace
+        // it was asked on, so the control channel can carry one too.
+        if kind == "caps" { noteReceiverCaps(json); return }
         guard kind == "receiverInfo" else { return }
         noteReceiverInfo(json)
     }
