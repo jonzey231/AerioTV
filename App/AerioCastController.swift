@@ -28,6 +28,7 @@ import Foundation
 import GoogleCast
 import Network
 import SwiftUI
+import UIKit
 import UserNotifications
 
 /// Receiver application id registered + published in the Google Cast SDK
@@ -294,6 +295,12 @@ final class AerioCastController: NSObject, ObservableObject {
         guard receiverTarget != target else { return }
         receiverTarget = target
         if target == .androidTVApp {
+            // Remember this device as one that runs the AerioTV Android TV app,
+            // so the picker can list it under "AerioTV on TV" next time.
+            if let id = GCKCastContext.sharedInstance()
+                .sessionManager.currentCastSession?.device.deviceID {
+                CastNativeDeviceRegistry.shared.markNative(id)
+            }
             debugLog("[Cast] target=android-tv-app, native playback (receiver answered)")
         } else if answered {
             debugLog("[Cast] target=web-receiver (receiver answered)")
@@ -1963,6 +1970,37 @@ final class CompanionClient: NSObject, ObservableObject {
     }
 }
 
+// MARK: - Native (AerioTV on TV) Cast device registry
+
+/// Cast devices that answered the `hello` handshake with
+/// platform=android-tv-app at least once, i.e. Cast Connect launched the
+/// AerioTV Android TV app there. The Cast SDK cannot tell us this before a
+/// session exists, so the picker remembers the answer and groups those
+/// devices separately from here on. Persisted in UserDefaults: it is a hint
+/// for sectioning, never a gate on playback.
+@MainActor
+final class CastNativeDeviceRegistry: ObservableObject {
+
+    static let shared = CastNativeDeviceRegistry()
+
+    private static let key = "cast.nativeDeviceIDs"
+
+    @Published private(set) var ids: Set<String>
+
+    private init() {
+        ids = Set(UserDefaults.standard.stringArray(forKey: Self.key) ?? [])
+    }
+
+    func isNative(_ deviceID: String) -> Bool { ids.contains(deviceID) }
+
+    func markNative(_ deviceID: String) {
+        guard !deviceID.isEmpty, !ids.contains(deviceID) else { return }
+        ids.insert(deviceID)
+        UserDefaults.standard.set(Array(ids), forKey: Self.key)
+        debugLog("[Cast] device \(deviceID) recorded as AerioTV on TV")
+    }
+}
+
 // MARK: - SwiftUI Cast button
 
 /// Wraps the SDK's GCKUICastButton (which owns discovery + the device chooser).
@@ -2018,10 +2056,15 @@ struct RemoteControlScreen: View {
     /// program / accent status, the live bar, a skip row, then the bottom
     /// row (collapse, big play/pause, channel list, X). Every action the old
     /// full-screen remote had is still wired.
+    /// Measured height of the compact content, so the small detent ends just
+    /// below the bottom row instead of leaving the blank band a fixed
+    /// fraction left behind (Logan's screenshot 2026-09-13).
+    @State private var contentHeight: CGFloat = 320
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            VStack(spacing: 12) {
+            VStack(spacing: 10) {
                 header
                 if let companion, companion.remoteState.canSeek {
                     rewindBar(companion)
@@ -2035,16 +2078,22 @@ struct RemoteControlScreen: View {
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(ThemeManager.shared.accent)
                 }
-                Spacer(minLength: 0)
             }
             .padding(.horizontal, 24)
-            .padding(.top, 14)
-            .padding(.bottom, 12)
+            // Top padding clears the drag indicator.
+            .padding(.top, 18)
+            .padding(.bottom, 8)
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { height in
+                let rounded = (height * 2).rounded() / 2
+                if abs(contentHeight - rounded) > 0.5 { contentHeight = rounded }
+            }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         // Small sheet over the page the user was on (the channel list stays
         // visible above it), draggable up to full height for the options.
-        .presentationDetents([.fraction(0.45), .large])
+        .presentationDetents([.height(contentHeight + Self.bottomInset), .large])
         .presentationDragIndicator(.visible)
         .presentationBackground(Color.black)
         .sheet(isPresented: $showOptions) {
@@ -2148,6 +2197,15 @@ struct RemoteControlScreen: View {
 
     /// ±30 s: the companion transport seeks its live-rewind buffer; the other
     /// transports flip nothing, so the buttons stay out of the way there.
+    /// Home-indicator inset: the detent height is the sheet's own height, so
+    /// the content must clear the safe area at the bottom.
+    private static var bottomInset: CGFloat {
+        let inset = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow?.safeAreaInsets.bottom }
+            .first ?? 0
+        return max(12, inset)
+    }
+
     private func seek(_ deltaMs: Int64) {
         guard let companion, companion.remoteState.canSeek else { return }
         companion.seekBy(deltaMs)
@@ -2684,8 +2742,37 @@ struct CastPickerSheet: View {
     @ObservedObject private var companion = CompanionClient.shared
     @ObservedObject private var castController = AerioCastController.shared
     @StateObject private var castDevices = CastDeviceList()
+    @ObservedObject private var nativeRegistry = CastNativeDeviceRegistry.shared
     @Environment(\.dismiss) private var dismiss
     @State private var code = ""
+
+    /// One Cast row, used by both the "AerioTV on TV" and "Google Cast"
+    /// sections so their behavior stays identical.
+    @ViewBuilder
+    private func castDeviceRow(_ device: GCKDevice) -> some View {
+        let connecting = castController.connectingDeviceID == device.deviceID
+        let otherConnecting = castController.connectingDeviceID != nil && !connecting
+        Button {
+            if !companion.isControlling { companion.disconnect() }
+            // Session start AND the channel to load live in one place now
+            // (guide pill parity with the in-player chrome).
+            castController.beginSession(with: device)
+        } label: {
+            HStack {
+                Label(device.friendlyName ?? "Cast device", systemImage: "sparkles.tv")
+                Spacer()
+                if connecting {
+                    Text("Connecting…").foregroundStyle(.secondary)
+                    ProgressView()
+                }
+            }
+        }
+        // Selection feedback (Logan 2026-09-11: the sheet looked inert after
+        // the tap): the tapped row spins, the rest dim until the attempt
+        // settles.
+        .disabled(otherConnecting)
+        .opacity(otherConnecting ? 0.4 : 1)
+    }
 
     var body: some View {
         NavigationStack {
@@ -2743,36 +2830,31 @@ struct CastPickerSheet: View {
                     }
                 }
                 if showGoogleCast {
+                    // Devices that have run the AerioTV Android TV app via
+                    // Cast Connect get their own section, so the better path
+                    // is the obvious one to pick.
+                    let nativeDevices = castDevices.devices.filter {
+                        nativeRegistry.isNative($0.deviceID)
+                    }
+                    if !nativeDevices.isEmpty {
+                        Section {
+                            ForEach(nativeDevices, id: \.deviceID) { device in
+                                castDeviceRow(device)
+                            }
+                        } header: {
+                            Text("AerioTV on TV")
+                        } footer: {
+                            Text("Plays in the AerioTV app on the TV: no phone processing, full quality.")
+                        }
+                    }
                     Section("Google Cast") {
                         if castDevices.devices.isEmpty {
                             Text("Searching for devices…")
                                 .foregroundStyle(.secondary)
                         }
-                        ForEach(castDevices.devices, id: \.deviceID) { device in
-                            let connecting = castController.connectingDeviceID == device.deviceID
-                            let otherConnecting = castController.connectingDeviceID != nil && !connecting
-                            Button {
-                                if !companion.isControlling { companion.disconnect() }
-                                // Session start AND the channel to load live
-                                // in one place now (guide pill parity with the
-                                // in-player chrome).
-                                castController.beginSession(with: device)
-                            } label: {
-                                HStack {
-                                    Label(device.friendlyName ?? "Cast device",
-                                          systemImage: "sparkles.tv")
-                                    Spacer()
-                                    if connecting {
-                                        Text("Connecting…").foregroundStyle(.secondary)
-                                        ProgressView()
-                                    }
-                                }
-                            }
-                            // Selection feedback (Logan 2026-09-11: the sheet
-                            // looked inert after the tap): the tapped row
-                            // spins, the rest dim until the attempt settles.
-                            .disabled(otherConnecting)
-                            .opacity(otherConnecting ? 0.4 : 1)
+                        ForEach(castDevices.devices.filter { !nativeRegistry.isNative($0.deviceID) },
+                                id: \.deviceID) { device in
+                            castDeviceRow(device)
                         }
                         if let error = castController.connectError {
                             Text(error)
