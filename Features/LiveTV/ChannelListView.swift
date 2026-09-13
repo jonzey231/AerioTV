@@ -1033,17 +1033,27 @@ struct ChannelListView: View {
                             onDismiss: { dismissGuideSidebar() },
                             onPreview: { token in
                                 guideSidebarPreviewTask?.cancel()
-                                // Huge playlists (Xtream panels, tens of thousands
-                                // of channels): every preview re-filters the whole
-                                // list and rebuilds the guide's rows on the main
-                                // thread, so a 90 ms preview while walking the
-                                // rail hung the Apple TV (2026-09-03). Preview
-                                // only once the user has paused on a group.
+                                // Already the active group: nothing to rebuild.
+                                guard token != selectedGroup else { return }
+                                // 250 ms debounce (Logan 2026-09-13) so fast
+                                // D-pad scrolling does not rebuild the grid for
+                                // every row passed. Huge playlists (Xtream
+                                // panels, tens of thousands of channels)
+                                // re-filter the whole list and rebuild the
+                                // guide's rows on the main thread, so they keep
+                                // the longer 450 ms settle (2026-09-03).
                                 let previewNs: UInt64 = channelStore.channels.count > GuideStore.largePlaylistChannels
-                                    ? 450_000_000 : 90_000_000
+                                    ? 450_000_000 : 250_000_000
                                 guideSidebarPreviewTask = Task { @MainActor in
                                     try? await Task.sleep(nanoseconds: previewNs)
                                     guard !Task.isCancelled else { return }
+                                    guard token != selectedGroup else { return }
+                                    debugLog("[GROUP] focus preview -> \(groupSidebarLabel(token))")
+                                    // Same code path as Select (which only adds
+                                    // the close): persistence, the guide window,
+                                    // the channel list and the focus model all
+                                    // key off `selectedGroup`. Focus stays in
+                                    // the rail: nothing here claims it.
                                     selectedGroup = token
                                 }
                             },

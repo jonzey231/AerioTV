@@ -172,6 +172,10 @@ struct ChannelListOverlay: View {
     /// Whether the leading group sidebar pane is showing.
     @State private var sidebarOpen = false
     @FocusState private var focusedRowID: String?
+    /// 250 ms debounce for the sidebar's focus preview, so fast D-pad
+    /// scrolling through the rail does not re-filter the channel column for
+    /// every row passed (Logan 2026-09-13).
+    @State private var groupPreviewTask: Task<Void, Never>?
 
     /// Mark the row the user is currently watching so it shows the "Watching"
     /// badge. Read from the shared now-playing manager (no id is passed in).
@@ -229,19 +233,40 @@ struct ChannelListOverlay: View {
                         onSelect: { token in
                             // Overlay-local: re-filter to the picked group and
                             // return to the list. The guide filter is untouched.
+                            // Select applies immediately: drop any pending
+                            // preview first.
+                            groupPreviewTask?.cancel()
                             activeGroup = token
                             sidebarOpen = false
                         },
                         // Back/Menu inside the rail closes the WHOLE overlay
                         // (Logan 2026-08-06: Right steps out one layer at a
                         // time; Back always exits fully).
-                        onDismiss: { onDismiss() }
+                        onDismiss: { onDismiss() },
+                        // Focusing a row previews its group live in the channel
+                        // column beside the rail, after a 250 ms settle. Focus
+                        // stays in the sidebar: nothing here claims it, and
+                        // `focusFirstRow` is gated on the rail being closed.
+                        onRowFocused: { token in
+                            groupPreviewTask?.cancel()
+                            guard token != activeGroup else { return }
+                            groupPreviewTask = Task { @MainActor in
+                                try? await Task.sleep(nanoseconds: 250_000_000)
+                                guard !Task.isCancelled else { return }
+                                guard token != activeGroup else { return }
+                                debugLog("[GROUP] focus preview -> \(groupSidebarLabel(token))")
+                                activeGroup = token
+                            }
+                        }
                     )
                     // The panel itself doesn't handle Right (only the guide
                     // pane does); add it here so Right steps back out of the
                     // rail to the channel list, matching GuideGroupSidebarPane.
                     .onMoveCommand { direction in
-                        if direction == .right { sidebarOpen = false }
+                        if direction == .right {
+                            groupPreviewTask?.cancel()
+                            sidebarOpen = false
+                        }
                     }
                     .transition(.move(edge: .leading).combined(with: .opacity))
                 }
@@ -260,6 +285,9 @@ struct ChannelListOverlay: View {
             if !open { focusFirstRow() }
         }
         .onChange(of: activeGroup) { _, _ in
+            // Only when the rail is closed: a focus preview must leave focus in
+            // the sidebar while the column beside it updates.
+            guard !sidebarOpen else { return }
             focusFirstRow()
         }
         .animation(.easeInOut(duration: 0.2), value: sidebarOpen)
