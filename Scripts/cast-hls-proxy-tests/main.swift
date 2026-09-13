@@ -22,60 +22,6 @@ var failures = 0
     }
 }
 
-// MARK: 1. AAC PTS ladder / re-anchor
-
-do {
-    var mapper = CastAudioTranscoder.AACPTSMapper(sampleRate: 44_100)
-    let frame: Int64 = 1024 * 90_000 // divided by 44100 per step, exact each time
-    // Anchor at a non-zero pts; ladder computed from anchor each frame.
-    let anchor: Int64 = 1_234_567
-    var raws: [Int64] = []
-    for n in 0..<1000 { raws.append(anchor + Int64(n) * frame / 44_100) }
-    var lastOut: Int64 = -1
-    var okLadder = true
-    for (n, raw) in raws.enumerated() {
-        let out = mapper.map(raw)
-        let expected = anchor + Int64(n) * frame / 44_100
-        if out != expected { okLadder = false }
-        if out <= lastOut { okLadder = false }
-        lastOut = out
-    }
-    expect(okLadder, "pts ladder exact at 44.1kHz over 1000 frames (no cumulative drift)")
-    // The 1000th frame: 1000*1024/44100 s = 23.219954... s = 2089795.9 ticks.
-    // Ladder value stays anchored (no per-frame rounding accumulation).
-    expectEq(mapper.map(anchor + 1000 * frame / 44_100), anchor + 1000 * frame / 44_100,
-             "ladder frame 1000 computed from anchor")
-    // Re-anchor: a jump of 600ms (54000 ticks) past the ladder re-anchors.
-    let jumped = anchor + 1001 * frame / 44_100 + 54_000
-    expectEq(mapper.map(jumped), jumped, "re-anchor on >500ms jump")
-    // And the next frame steps from the new anchor.
-    expectEq(mapper.map(jumped + frame / 44_100), jumped + frame / 44_100, "post-re-anchor step")
-    // A small deviation (< 500ms) does NOT re-anchor: output stays on ladder.
-    var m2 = CastAudioTranscoder.AACPTSMapper(sampleRate: 48_000)
-    _ = m2.map(0)
-    let step48: Int64 = 1024 * 90_000 / 48_000 // 1920
-    expectEq(m2.map(step48 + 40_000), step48, "jitter under threshold stays on ladder")
-}
-
-// MARK: 2. downmix coefficients
-
-do {
-    // One 5.1 frame: FL FR C LFE SL SR.
-    let pcm: [Int16] = [1000, 2000, 1000, 32000, 1000, 2000]
-    let out = CastAudioTranscoder.downmixToStereo(pcm, channels: 6)
-    // L = 1000 + 707 + 707 = 2414; R = 2000 + 707 + 1414 = 4121. LFE dropped.
-    expectEq(out, [2414, 4121], "5.1 downmix coefficients (LFE dropped)")
-    expectEq(CastAudioTranscoder.downmixToStereo([123, -456], channels: 2), [123, -456],
-             "stereo passthrough untouched")
-    expectEq(CastAudioTranscoder.downmixToStereo([777], channels: 1), [777, 777],
-             "mono duplicates")
-    // Clamp: FL near max plus center must clamp, not wrap.
-    let loud: [Int16] = [32000, -32000, 32000, 0, 0, 0]
-    let clamped = CastAudioTranscoder.downmixToStereo(loud, channels: 6)
-    expectEq(clamped[0], 32767, "positive clamp")
-    expectEq(clamped[1], Int16(-32000 + 22624), "negative side mixes normally")
-}
-
 // MARK: 3. master playlist codec string from synthetic avcC
 
 do {
@@ -229,7 +175,7 @@ do {
     // with LFE -> 5.1, 1536 bytes per frame.
     var frame: [UInt8] = [0x0B, 0x77, 0x00, 0x00, 0x1C, 0x40, 0xE1]
     frame.append(contentsOf: [UInt8](repeating: 0, count: 1536 - frame.count))
-    guard let config = CastAudioTranscoder.parseAC3SampleEntryConfig(.ac3, frame, 0) else {
+    guard let config = CastAudioFrameParser.parseAC3SampleEntryConfig(.ac3, frame, 0) else {
         expect(false, "AC-3 sample entry config parsed")
         exit(1)
     }

@@ -270,13 +270,13 @@
 		MKVFMP40000000000000000B2 /* MKVFMP4Remuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = MKVFMP40000000000000000B1 /* MKVFMP4Remuxer.swift */; };
 		MKVFMP40000000000000000B3 /* MKVFMP4Remuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = MKVFMP40000000000000000B1 /* MKVFMP4Remuxer.swift */; };
 		CASTHLSPROXY0000000000A1 /* CastFMP4Remuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F1 /* CastFMP4Remuxer.swift */; };
-		CASTHLSPROXY0000000000A2 /* CastAudioTranscoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F2 /* CastAudioTranscoder.swift */; };
 		CASTHLSPROXY0000000000A3 /* CastHLSSegmentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F3 /* CastHLSSegmentStore.swift */; };
+		CASTHLSPROXY0000000000A6 /* CastAudioFrameParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F6 /* CastAudioFrameParser.swift */; };
 		CASTHLSPROXY0000000000A4 /* CastHLSProxyServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F4 /* CastHLSProxyServer.swift */; };
 		CASTHLSPROXY0000000000A5 /* CastHLSProxySession.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F5 /* CastHLSProxySession.swift */; };
 		CASTHLSPROXY0000000000B1 /* CastFMP4Remuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F1 /* CastFMP4Remuxer.swift */; };
-		CASTHLSPROXY0000000000B2 /* CastAudioTranscoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F2 /* CastAudioTranscoder.swift */; };
 		CASTHLSPROXY0000000000B3 /* CastHLSSegmentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F3 /* CastHLSSegmentStore.swift */; };
+		CASTHLSPROXY0000000000B6 /* CastAudioFrameParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F6 /* CastAudioFrameParser.swift */; };
 		CASTHLSPROXY0000000000B4 /* CastHLSProxyServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F4 /* CastHLSProxyServer.swift */; };
 		CASTHLSPROXY0000000000B5 /* CastHLSProxySession.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F5 /* CastHLSProxySession.swift */; };
 		WHATSNEW00000000000ACE001 /* WhatsNew.swift in Sources */ = {isa = PBXBuildFile; fileRef = WHATSNEW00000000000ACE000 /* WhatsNew.swift */; };
@@ -482,8 +482,8 @@
 		LIVEFMP4000000000000000A1 /* LiveFMP4Remuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveFMP4Remuxer.swift; sourceTree = "<group>"; };
 		MKVFMP40000000000000000B1 /* MKVFMP4Remuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MKVFMP4Remuxer.swift; sourceTree = "<group>"; };
 		CASTHLSPROXY0000000000F1 /* CastFMP4Remuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastFMP4Remuxer.swift; sourceTree = "<group>"; };
-		CASTHLSPROXY0000000000F2 /* CastAudioTranscoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastAudioTranscoder.swift; sourceTree = "<group>"; };
 		CASTHLSPROXY0000000000F3 /* CastHLSSegmentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastHLSSegmentStore.swift; sourceTree = "<group>"; };
+		CASTHLSPROXY0000000000F6 /* CastAudioFrameParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastAudioFrameParser.swift; sourceTree = "<group>"; };
 		CASTHLSPROXY0000000000F4 /* CastHLSProxyServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastHLSProxyServer.swift; sourceTree = "<group>"; };
 		CASTHLSPROXY0000000000F5 /* CastHLSProxySession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastHLSProxySession.swift; sourceTree = "<group>"; };
 		WHATSNEW00000000000ACE000 /* WhatsNew.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WhatsNew.swift; sourceTree = "<group>"; };
@@ -568,8 +568,8 @@
 			isa = PBXGroup;
 			children = (
 				CASTHLSPROXY0000000000F1 /* CastFMP4Remuxer.swift */,
-				CASTHLSPROXY0000000000F2 /* CastAudioTranscoder.swift */,
 				CASTHLSPROXY0000000000F3 /* CastHLSSegmentStore.swift */,
+				CASTHLSPROXY0000000000F6 /* CastAudioFrameParser.swift */,
 				CASTHLSPROXY0000000000F4 /* CastHLSProxyServer.swift */,
 				CASTHLSPROXY0000000000F5 /* CastHLSProxySession.swift */,
 			);
@@ -1270,8 +1270,8 @@
 				LIVEFMP4000000000000000A2 /* LiveFMP4Remuxer.swift in Sources */,
 				MKVFMP40000000000000000B2 /* MKVFMP4Remuxer.swift in Sources */,
 				CASTHLSPROXY0000000000A1 /* CastFMP4Remuxer.swift in Sources */,
-				CASTHLSPROXY0000000000A2 /* CastAudioTranscoder.swift in Sources */,
 				CASTHLSPROXY0000000000A3 /* CastHLSSegmentStore.swift in Sources */,
+				CASTHLSPROXY0000000000A6 /* CastAudioFrameParser.swift in Sources */,
 				CASTHLSPROXY0000000000A4 /* CastHLSProxyServer.swift in Sources */,
 				CASTHLSPROXY0000000000A5 /* CastHLSProxySession.swift in Sources */,
 				EE1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */,
@@ -1399,8 +1399,8 @@
 				LIVEFMP4000000000000000A3 /* LiveFMP4Remuxer.swift in Sources */,
 				MKVFMP40000000000000000B3 /* MKVFMP4Remuxer.swift in Sources */,
 				CASTHLSPROXY0000000000B1 /* CastFMP4Remuxer.swift in Sources */,
-				CASTHLSPROXY0000000000B2 /* CastAudioTranscoder.swift in Sources */,
 				CASTHLSPROXY0000000000B3 /* CastHLSSegmentStore.swift in Sources */,
+				CASTHLSPROXY0000000000B6 /* CastAudioFrameParser.swift in Sources */,
 				CASTHLSPROXY0000000000B4 /* CastHLSProxyServer.swift in Sources */,
 				CASTHLSPROXY0000000000B5 /* CastHLSProxySession.swift in Sources */,
 				FF1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */,
