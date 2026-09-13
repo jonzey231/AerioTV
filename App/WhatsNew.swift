@@ -57,6 +57,21 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.31",
+            title: "What's new in 1.8.31",
+            bullets: [
+                "Movies, TV Shows and DVR redesigned on iPhone, iPad and Apple TV",
+                "Google Cast: send a channel to a Chromecast or Google TV, with surround sound where the TV supports it",
+                "iPhone: a compact cast card above the tab bar, tap it for controls",
+                "Control a TV lists Cast devices and TVs running AerioTV in one picker",
+                "Apple TV: faster launch, smoother guide scrolling and quicker channel tunes",
+                "Guide, Movies and DVR open from cache and refresh quietly in the background",
+                "Live TV rides out server busy replies and moves to another stream on its own",
+                "Tap the App Version row in Settings to reopen What's New"
+            ],
+            releaseURL: nil
+        ),
+        WhatsNewRelease(
             version: "1.8.30",
             title: "What's new in 1.8.30",
             bullets: [

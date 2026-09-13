@@ -1,5 +1,94 @@
 # Changelog
 
+## v1.8.31 - 2026-09-13
+
+The media-center release: Movies, TV Shows and DVR rebuilt on iPhone,
+iPad and Apple TV, Google Cast support with a web receiver that carries
+surround sound, and a long run of Apple TV speed work on launch, the
+guide and channel tunes.
+
+### Added
+
+- Google Cast: send a channel to a Chromecast, a Google TV or a TV with
+  Cast built in. On Android TV devices running AerioTV the hand-off is
+  native, so the TV runs the app itself. Everywhere else a web receiver
+  plays the stream, passing surround audio straight through when the TV
+  can decode it and converting to stereo when it cannot.
+- Control a TV: one picker that lists Cast devices, AirPlay targets and
+  TVs running AerioTV, with a separate section for TVs that take the
+  native hand-off. Discovery starts at launch, and the picker shows
+  connecting and error states instead of failing quietly.
+- iPhone: a compact cast card sits above the tab bar for Cast, AirPlay
+  and the AerioTV remote. Tap it for a controls sheet sized to its
+  content. X stops what is playing on the TV, Disconnect leaves the TV
+  playing and just ends the session here.
+- One media page for Movies, TV Shows and DVR on iPhone: a swipeable
+  card deck for Continue Watching, a poster grid with an alphabet rail,
+  inline search, and a Related strip on detail pages.
+- Apple TV: Search and Filter beside Sort on the DVR tab, an options
+  circle on hero cards and posters, category pills in Program Info for
+  recordings, and a resolution and frame rate badge on the player band.
+- Apple TV player chrome: six controls with Pause centered, Record,
+  Rewind, Forward, Multiview and Options, on one band that hides three
+  seconds after the last action. An optional remote hint strip explains
+  the buttons, resolved from your own remote map.
+- Guide Jump To: days grouped as Today, Upcoming and Previous with their
+  dates, time pills showing clock times, and up to two weeks ahead on
+  newer servers. Back to Now re-centers the grid.
+- Settings: tap the App Version row to reopen What's New at any time.
+- Player: a "data received" line appears under the loading spinner after
+  three seconds, so a slow tune is distinguishable from a dead one.
+- Notices: every third-party library is listed in the app and in the
+  repository, with TMDB attribution on the library pages.
+
+### Changed
+
+- Movies, TV Shows and DVR now open instantly from a saved copy and
+  refresh quietly in the background once the app has settled, instead of
+  making you wait on the provider. The same applies to the guide.
+- The guide keeps an incremental cache with per-day coverage, so a
+  second launch is served from it rather than re-downloaded. How far
+  back and ahead it reaches follows the playlist's Guide Days setting,
+  with an All Available option.
+- Live TV reads a busy server's own reason for a 503, waits as long as
+  it asks, and fails over when a stream returns nothing.
+- Apple TV live tuning joins closer to the edge, learns how far behind a
+  bursty feed needs to sit, and expires what it learned after thirty
+  minutes so a changed feed is not held back forever.
+- Apple TV: catch-up recordings are pruned on a schedule, and repeated
+  playback errors collapse into one line with a count.
+- iPhone: the tab bar collapses into the mini button as you scroll, and
+  the Control a TV button matches it in size and shading.
+- Channel list: the guide panel opens on the next program with aired
+  rows above it, no disclosure tap needed.
+- Copy: surround sound and HDR are described in plain terms.
+
+### Fixed
+
+- Apple TV launch stalls and guide lag: a guide focus move was
+  re-rendering the whole grid, off-screen tabs were built up front, and
+  guide work ran on the main thread. Launch, tab switches and guide
+  scrolling are all faster as a result.
+- Apple TV channel flips start right after the previous stream has
+  fully torn down, so a flip no longer stalls or plays the old channel's
+  tail.
+- Apple TV: a stall no longer moves the playhead backward, and a single
+  nudge recovers playback that was waiting on data it already had.
+- Apple TV audio on the remux path: a segment boundary could slice an
+  audio frame in half. Frames are now held and written whole.
+- The same Apple TV could appear twice in the remote picker.
+- A cast channel change now loads cleanly instead of continuing the old
+  channel's timeline, and the receiver no longer refuses the stream over
+  an audio description it could not read.
+- Multiview on iPhone and iPad: X closes the selected stream.
+- On-demand titles ending in a bare year no longer keep it in the name.
+- Apple TV: leaving the player chrome no longer re-arms the fade timer,
+  and the last grid row's captions no longer sit under the screen edge.
+- The debug log survives the system clearing caches: it recreates the
+  file and replays what it was holding.
+- Stream Info accuracy: display size, container frame rate and interlace
+  detection, all reset on a channel change.
+
 ## v1.8.30 - 2026-09-08
 
 Second media-center beta for the AVPlayer TestFlight testers: MKV
