@@ -1367,6 +1367,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if let start = burstHoldStart {
             let heldMs = Int(Date().timeIntervalSince(start) * 1000)
             let buffered = segments.reduce(0.0) { $0 + $1.duration }
+            burstHeldBufferedSeconds.set(buffered)
             debugLog(String(format:
                 "[TS-REMUX] READY held %d ms for burst (%d segments, %.1f s buffered, ingest %.1fx real time)",
                 heldMs, burstHoldSegments, buffered, burstHoldRate))
@@ -1434,6 +1435,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// 18:07: the value grew from 3 to 4 when a 3.92 s segment closed and
     /// the poll cadence went with it).
     let advertisedTargetDuration = DoubleBox(2.0)
+    /// Media seconds sitting in the playlist when a burst-held READY
+    /// fired, 0 when READY was instant. The tile reads it at join to size
+    /// the cushion: that media is already on disk, so joining deep into
+    /// it costs no wait and survives the proxy's 7 to 11 s delivery gaps.
+    let burstHeldBufferedSeconds = DoubleBox(0)
 
     private func playlistText() -> String {
         // Rewind mode: advertise the whole disk window; AVPlayer's
@@ -4035,7 +4041,24 @@ struct AVPlayerMultiviewTile: View {
         let joinTargetDuration = isLiveTune ? (remuxer?.advertisedTargetDuration.get() ?? 0) : 0
         if isLiveTune {
             let floor = max(3 * joinTargetDuration, learned, LiveEdgeHoldback.base)
-            let offset = min(18.0, floor + streamBufferSeconds)
+            var offset = min(18.0, floor + streamBufferSeconds)
+            // Burst cushion (device round 2026-09-13). Holding READY
+            // through the burst is only half the fix: the Dispatcharr
+            // proxy profile then delivers in chunks every 7 to 11 s, so a
+            // 6 s join lands at the edge with no cushion and the buffer
+            // ran empty at +8230 ms. The burst already put that media in
+            // the playlist, so joining deep into it costs no startup
+            // wait. The learner is untouched; this is a per-tune raise.
+            let burstBuffered = remuxer?.burstHeldBufferedSeconds.get() ?? 0
+            if burstBuffered > 0 {
+                let cushion = max(offset, min(burstBuffered - 2, 10))
+                if cushion > offset {
+                    offset = cushion
+                    debugLog(String(format:
+                        "[AVP-MV] burst cushion: offset %.1f s (burst %.1f s)",
+                        offset, burstBuffered))
+                }
+            }
             playerItem.configuredTimeOffsetFromLive =
                 CMTime(seconds: offset, preferredTimescale: 600)
             debugLog(String(format:
@@ -4774,9 +4797,10 @@ enum H264SPSTiming {
 /// one explicit seek to (seekable end - offset) if the player actually
 /// joined far from where we asked, and never outside the seekable range.
 enum LiveEdgeJoin {
-    /// Extra slack past the requested offset before an explicit move is
-    /// worth the seek. One target duration of drift is normal.
-    static let joinTolerance = 8.0
+    /// How far off the asked-for edge distance the playhead may sit, in
+    /// either direction, before the pin seeks. Sub-second drift is the
+    /// normal cost of segment granularity.
+    static let joinTolerance = 1.0
 
     /// Returns the seconds the playhead sits behind the live edge, or nil
     /// when the item has no usable seekable range yet.
@@ -4791,17 +4815,25 @@ enum LiveEdgeJoin {
         guard let range = item.seekableTimeRanges.last?.timeRangeValue else { return }
         let behind = (range.end - item.currentTime()).seconds
         guard behind.isFinite else { return }
-        guard behind > offset + joinTolerance else {
+        // BOTH directions (device round 2026-09-13): the burst-held join
+        // landed at -1.0 s behind the edge, i.e. PAST it, with no cushion
+        // at all, and the buffer ran empty 8 s later. Being too close to
+        // the edge is the more dangerous error on this feed, so the pin
+        // moves the playhead either way whenever it is more than a second
+        // off the asked-for distance.
+        let drift = behind - offset
+        guard abs(drift) > joinTolerance else {
             debugLog(String(format:
                 "[AVP-MV] join position %.1fs behind edge (asked %.1fs), no pin needed channel=%@",
                 behind, offset, channel))
             return
         }
-        let target = range.end - CMTime(seconds: offset, preferredTimescale: 600)
-        guard target >= range.start, target <= range.end else { return }
+        var target = range.end - CMTime(seconds: offset, preferredTimescale: 600)
+        if target < range.start { target = range.start }
+        if target > range.end { target = range.end }
         debugLog(String(format:
-            "[AVP-MV] join pin: %.1fs behind edge, seeking to edge - %.1fs channel=%@",
-            behind, offset, channel))
+            "[AVP-MV] join pin: %.1fs behind edge, seeking %@ to edge - %.1fs channel=%@",
+            behind, drift > 0 ? "forward" : "back", offset, channel))
         item.seek(to: target, toleranceBefore: .zero,
                   toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600),
                   completionHandler: nil)
