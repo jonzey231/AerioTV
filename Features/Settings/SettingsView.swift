@@ -53,6 +53,10 @@ struct SettingsView: View {
     @State private var clearICloudConfirmationVisible = false
     // Tracks whether the one-time swipe-hint peek has been shown.
     @State private var copiedAbout = false
+    /// Presents the What's New sheet on demand from the App Version
+    /// row. Independent of the launch-time presentation in RootView:
+    /// opening it here never changes the "seen" gating logic.
+    @State private var showWhatsNewFromAbout = false
     /// iPad About pane's Open Source Licenses sheet.
     @State private var showOSSLicensesPad = false
     @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = false
@@ -481,7 +485,7 @@ struct SettingsView: View {
                             .listRowBackground(Color.cardBackground)
                         infoRow("System",          value: aboutSystem)
                             .listRowBackground(Color.cardBackground)
-                        infoRow("App Version",     value: aboutVersion)
+                        appVersionRow
                             .listRowBackground(Color.cardBackground)
                         infoRow("First Installed", value: aboutInstallDate)
                             .listRowBackground(Color.cardBackground)
@@ -750,6 +754,49 @@ struct SettingsView: View {
             "Last Updated: \(aboutUpdateDate)"
         ].joined(separator: "\n")
     }
+
+    /// Whether a curated What's New entry exists for the running
+    /// build. When there isn't one the App Version row stays inert
+    /// text, exactly as before.
+    private var hasWhatsNew: Bool { WhatsNewStore.currentRelease != nil }
+
+#if !os(tvOS)
+    /// App Version row. When the running build ships release notes the
+    /// row becomes a quiet button that re-opens the same What's New
+    /// sheet the app shows after an update: version, then a "What's
+    /// New" label and a chevron. Launch-time presentation is untouched.
+    @ViewBuilder
+    private var appVersionRow: some View {
+        if hasWhatsNew {
+            Button {
+                showWhatsNewFromAbout = true
+            } label: {
+                HStack {
+                    Text("App Version")
+                        .font(.bodyMedium)
+                        .foregroundColor(.textSecondary)
+                    Spacer()
+                    Text(aboutVersion)
+                        .font(.bodyMedium)
+                        .foregroundColor(.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("What's New")
+                        .font(.caption)
+                        .foregroundColor(.textTertiary)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.textTertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .whatsNewSheet(isPresented: $showWhatsNewFromAbout)
+        } else {
+            infoRow("App Version", value: aboutVersion)
+        }
+    }
+#endif
 
     private func infoRow(_ label: String, value: String, isMonospaced: Bool = false) -> some View {
         HStack {
@@ -1171,7 +1218,7 @@ struct SettingsView: View {
                     .listRowBackground(Color.cardBackground)
                 infoRow("System",          value: aboutSystem)
                     .listRowBackground(Color.cardBackground)
-                infoRow("App Version",     value: aboutVersion)
+                appVersionRow
                     .listRowBackground(Color.cardBackground)
                 infoRow("First Installed", value: aboutInstallDate)
                     .listRowBackground(Color.cardBackground)
@@ -1520,7 +1567,7 @@ struct SettingsView: View {
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
                     tvAboutRow("System",          value: aboutSystem)
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAboutRow("App Version",     value: aboutVersion)
+                    tvAppVersionRow
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
                     tvAboutRow("First Installed", value: aboutInstallDate)
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
@@ -1575,6 +1622,43 @@ struct SettingsView: View {
 
     /// Non-nil presents the About-row QR sheet.
     @State private var tvQRLink: TVQRLink?
+
+    /// App Version row on Apple TV. Focusable when the build ships
+    /// release notes so the remote can select it and re-open the What's
+    /// New cover (Menu/Back closes it, same as at launch). Matches the
+    /// other focusable About rows.
+    @ViewBuilder
+    private var tvAppVersionRow: some View {
+        if hasWhatsNew {
+            Button {
+                showWhatsNewFromAbout = true
+            } label: {
+                HStack {
+                    Text("App Version")
+                        .font(.system(size: 26, weight: .medium))
+                        .foregroundColor(.textSecondary)
+                    Spacer()
+                    Text(aboutVersion)
+                        .font(.system(size: 26))
+                        .foregroundColor(.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("What's New")
+                        .font(.system(size: 22))
+                        .foregroundColor(.textTertiary)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 20))
+                        .opacity(0.5)
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 18)
+            }
+            .buttonStyle(.plain)
+            .whatsNewSheet(isPresented: $showWhatsNewFromAbout)
+        } else {
+            tvAboutRow("App Version", value: aboutVersion)
+        }
+    }
 
     private func tvAboutRow(_ label: String, value: String) -> some View {
         HStack {
