@@ -1035,7 +1035,7 @@ struct ChannelListView: View {
                                 guideSidebarPreviewTask?.cancel()
                                 // Already the active group: nothing to rebuild.
                                 guard token != selectedGroup else { return }
-                                // 250 ms debounce (Logan 2026-09-13) so fast
+                                // 150 ms debounce (Logan 2026-09-13) so fast
                                 // D-pad scrolling does not rebuild the grid for
                                 // every row passed. Huge playlists (Xtream
                                 // panels, tens of thousands of channels)
@@ -1043,7 +1043,7 @@ struct ChannelListView: View {
                                 // guide's rows on the main thread, so they keep
                                 // the longer 450 ms settle (2026-09-03).
                                 let previewNs: UInt64 = channelStore.channels.count > GuideStore.largePlaylistChannels
-                                    ? 450_000_000 : 250_000_000
+                                    ? 450_000_000 : 150_000_000
                                 guideSidebarPreviewTask = Task { @MainActor in
                                     try? await Task.sleep(nanoseconds: previewNs)
                                     guard !Task.isCancelled else { return }

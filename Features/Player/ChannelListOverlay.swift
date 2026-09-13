@@ -172,7 +172,7 @@ struct ChannelListOverlay: View {
     /// Whether the leading group sidebar pane is showing.
     @State private var sidebarOpen = false
     @FocusState private var focusedRowID: String?
-    /// 250 ms debounce for the sidebar's focus preview, so fast D-pad
+    /// 150 ms debounce for the sidebar's focus preview, so fast D-pad
     /// scrolling through the rail does not re-filter the channel column for
     /// every row passed (Logan 2026-09-13).
     @State private var groupPreviewTask: Task<Void, Never>?
@@ -244,14 +244,14 @@ struct ChannelListOverlay: View {
                         // time; Back always exits fully).
                         onDismiss: { onDismiss() },
                         // Focusing a row previews its group live in the channel
-                        // column beside the rail, after a 250 ms settle. Focus
+                        // column beside the rail, after a 150 ms settle. Focus
                         // stays in the sidebar: nothing here claims it, and
                         // `focusFirstRow` is gated on the rail being closed.
                         onRowFocused: { token in
                             groupPreviewTask?.cancel()
                             guard token != activeGroup else { return }
                             groupPreviewTask = Task { @MainActor in
-                                try? await Task.sleep(nanoseconds: 250_000_000)
+                                try? await Task.sleep(nanoseconds: 150_000_000)
                                 guard !Task.isCancelled else { return }
                                 guard token != activeGroup else { return }
                                 debugLog("[GROUP] focus preview -> \(groupSidebarLabel(token))")
