@@ -1164,16 +1164,16 @@ final class CompanionClient: NSObject, ObservableObject {
                 return "\(r.endpoint) txt=\(txt) if=\(r.interfaces.map { "\($0.type)" }.joined(separator: "+"))"
             }.joined(separator: " | ")
             DebugLogger.shared.log("companion browse results (\(results.count)): \(dump)")
-            let tvs: [TV] = results.compactMap { result in
+            let adverts: [Advert] = results.compactMap { result in
                 guard case .service(let name, _, _, _) = result.endpoint else { return nil }
-                var stableID = name
+                var txtID: String?
                 if case .bonjour(let txt) = result.metadata,
                    let id = txt.dictionary["id"], !id.isEmpty {
-                    stableID = id
+                    txtID = id
                 }
-                return TV(id: stableID, name: name, endpoint: result.endpoint)
+                return Advert(txtID: txtID, name: name, endpoint: result.endpoint)
             }.sorted { $0.name.lowercased() < $1.name.lowercased() }
-            Task { @MainActor [weak self] in self?.publishDevices(tvs) }
+            Task { @MainActor [weak self] in self?.publishDevices(adverts) }
         }
         // An NWBrowser that dies while the app is suspended reports .failed on
         // resume; without this handler the wedged instance also blocked
@@ -1228,18 +1228,93 @@ final class CompanionClient: NSObject, ObservableObject {
 
     private static func tvKey(_ tv: TV) -> String { "\(tv.id)|\(tv.name)" }
 
-    /// Collapse duplicate rows (one advert seen via several interfaces / a
-    /// re-registration sharing TXT id + name) and hide quarantined ghosts.
-    private func publishDevices(_ tvs: [TV]) {
-        var seen = Set<String>()
-        devices = tvs.filter { tv in
-            let key = Self.tvKey(tv)
-            guard !seen.contains(key) else { return false }
-            seen.insert(key)
-            if let died = deadTVs[key],
-               Date().timeIntervalSince(died) < Self.deadTVWindow { return false }
-            return true
+    /// One raw Bonjour advertisement, before duplicates are collapsed. Kept
+    /// separate from `TV` so the dedupe can see the TXT id and the endpoint
+    /// that the picker row itself never shows.
+    private struct Advert {
+        let txtID: String?
+        let name: String
+        let endpoint: NWEndpoint
+    }
+
+    /// Per-advertisement identity (NOT the device identity): two adverts for
+    /// the same device differ here, which is what lets the dedupe keep the one
+    /// that resolved most recently.
+    private static func advertKey(_ a: Advert) -> String {
+        "\(a.txtID ?? "-")|\(a.name)|\(a.endpoint)"
+    }
+
+    /// First time each advertisement was seen, so a group of duplicates can
+    /// keep the newest registration. Pruned to what the browse still reports.
+    private var advertSeen: [String: Date] = [:]
+
+    /// Collapse duplicate rows and hide quarantined ghosts.
+    ///
+    /// 2026-09-13: the "AerioTV Remote" section listed "Living Room Apple TV"
+    /// twice for one device. The old key was id + display name, and the id
+    /// falls back to the display name when an advert carries no TXT "id", so
+    /// a stale advert (no TXT id) and the fresh one (with TXT id) produced two
+    /// keys and two identical-looking rows. Identity is now the STABLE
+    /// identifier only: the TXT "id" record, which survives a rename, plus the
+    /// Bonjour instance name (the host name, which mDNS keeps unique per
+    /// network) so a TXT-less advert still lands in the same group. Several
+    /// interfaces for one device collapse the same way. The surviving row is
+    /// the advertisement that resolved most recently.
+    private func publishDevices(_ adverts: [Advert]) {
+        let now = Date()
+        var liveKeys = Set<String>()
+        for a in adverts {
+            let key = Self.advertKey(a)
+            liveKeys.insert(key)
+            if advertSeen[key] == nil { advertSeen[key] = now }
         }
+        advertSeen = advertSeen.filter { liveKeys.contains($0.key) }
+
+        var groupForTXTID: [String: Int] = [:]
+        var groupForHost: [String: Int] = [:]
+        var groups: [[Advert]] = []
+        for a in adverts {
+            var group: Int?
+            if let id = a.txtID { group = groupForTXTID[id] }
+            if group == nil { group = groupForHost[a.name] }
+            let index: Int
+            if let group {
+                index = group
+            } else {
+                groups.append([])
+                index = groups.count - 1
+            }
+            groups[index].append(a)
+            if let id = a.txtID { groupForTXTID[id] = index }
+            groupForHost[a.name] = index
+        }
+
+        var kept: [Advert] = []
+        for group in groups {
+            guard var winner = group.first else { continue }
+            for a in group.dropFirst() {
+                let aSeen = advertSeen[Self.advertKey(a)] ?? now
+                let wSeen = advertSeen[Self.advertKey(winner)] ?? now
+                // Most recently resolved wins; on a tie the advert carrying a
+                // TXT id is the better-identified one.
+                if aSeen > wSeen || (aSeen == wSeen && winner.txtID == nil && a.txtID != nil) {
+                    winner = a
+                }
+            }
+            for a in group where Self.advertKey(a) != Self.advertKey(winner) {
+                DebugLogger.shared.log(
+                    "[Remote] dropped duplicate advertisement \(a.name) \(a.endpoint)")
+            }
+            kept.append(winner)
+        }
+
+        devices = kept.map { TV(id: $0.txtID ?? $0.name, name: $0.name, endpoint: $0.endpoint) }
+            .filter { tv in
+                let key = Self.tvKey(tv)
+                if let died = deadTVs[key],
+                   Date().timeIntervalSince(died) < Self.deadTVWindow { return false }
+                return true
+            }
     }
 
     private func quarantine(_ tv: TV) {

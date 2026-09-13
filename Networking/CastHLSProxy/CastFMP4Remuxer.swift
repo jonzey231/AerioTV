@@ -1347,8 +1347,9 @@ final class CastFMP4Remuxer {
         let moov = Self.box("moov",
                             Self.mvhd(nextTrackID: hasAudio ? 3 : 2),
                             Self.concat(traks),
-                            Self.box("mvex", Self.concat(trexes)))
+                            Self.box("mvex", Self.mehd(), Self.concat(trexes)))
         out.append(moov)
+        log("init: mehd 24h, liveness recorded")
         return out
     }
 
@@ -1453,14 +1454,28 @@ final class CastFMP4Remuxer {
 
     // MARK: moov internals
 
+    /// A declared duration (here and in mehd) is what keeps Chromium out of
+    /// low-delay rendering: media/formats/mp4/mp4_stream_parser.cc reads
+    /// liveness as kRecorded when mvex/mehd fragment_duration > 0, or when
+    /// mvhd duration is neither 0 nor the all-ones "unknown" sentinel, and
+    /// kLive otherwise. kLive makes video_renderer_impl.cc pin
+    /// min_buffered_frames_ to 1 with no underflow growth, which presented
+    /// only ~46 of 60 frames on the Google TV Streamer. Version 1 so the
+    /// 24 hour duration fits: 86400 * 90000 ticks overflows 32 bits.
+    private static let declaredDurationTicks: UInt64 = 86_400 * UInt64(ticksPerSecond)
+
     private static func mvhd(nextTrackID: Int) -> Data {
-        fullBox("mvhd", 0, 0,
-                u32(0), u32(0), // creation, modification
-                u32(Int(ticksPerSecond)), u32(0), // timescale, duration (live: 0)
+        fullBox("mvhd", 1, 0,
+                u64(0), u64(0), // creation, modification
+                u32(Int(ticksPerSecond)), u64(declaredDurationTicks), // timescale, duration
                 u32(0x00010000), u16(0x0100), u16(0), u32(0), u32(0), // rate, volume, reserved
                 matrix(),
                 Data(count: 24), // pre_defined
                 u32(nextTrackID))
+    }
+
+    private static func mehd() -> Data {
+        fullBox("mehd", 1, 0, u64(declaredDurationTicks))
     }
 
     private static func matrix() -> Data {

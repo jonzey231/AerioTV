@@ -1574,5 +1574,77 @@ func straddlingCensusTS(videoFrames: Int, videoFrameTicks: Int64, gop: Int,
 
 runStraddleCensus()
 
+// MARK: 15. the init segment declares a duration (no Chromium low delay)
+//
+// Added 2026-09-13: Chromium logged "Video rendering in low delay mode" for
+// our stream and SurfaceFlinger presented only about 46 of 60 fps on the
+// Google TV Streamer. mp4_stream_parser.cc reads liveness as kLive unless
+// mvex/mehd fragment_duration > 0, or mvhd duration is neither 0 nor the
+// all-ones sentinel, and kLive pins video_renderer_impl.cc to one buffered
+// frame with no underflow growth. The init segment therefore declares 24 h
+// in both boxes.
+
+@MainActor func runInitLivenessChecks() {
+    let (bytes, _) = straddlingCensusTS(videoFrames: 90, videoFrameTicks: 3_000,
+                                        gop: 30, frameLen: 400, audioLagTicks: 0)
+    var initSegment: Data?
+    var logs: [String] = []
+    let remuxer = CastFMP4Remuxer(log: { logs.append($0) })
+    remuxer.onInitSegment = { initSegment = $0 }
+    remuxer.onMediaSegment = { _, _ in }
+    var offset = 0
+    while offset < bytes.count {
+        let n = min(64 * 1024, bytes.count - offset)
+        try? remuxer.feed(bytes.subdata(in: offset..<(offset + n)))
+        offset += n
+    }
+    guard let initSegment else {
+        expect(false, "the fixture emits an init segment")
+        return
+    }
+    let b = [UInt8](initSegment)
+    func find(_ type: String) -> Int? {
+        let t = [UInt8](type.utf8)
+        guard b.count >= 4 else { return nil }
+        for i in 0...(b.count - 4) where Array(b[i..<(i + 4)]) == t { return i }
+        return nil
+    }
+    func u64(at i: Int) -> UInt64 {
+        var v: UInt64 = 0
+        for k in 0..<8 { v = (v << 8) | UInt64(b[i + k]) }
+        return v
+    }
+    let expected: UInt64 = 86_400 * UInt64(CastFMP4Remuxer.ticksPerSecond)
+
+    // mehd sits inside mvex, ahead of the trex boxes.
+    guard let mehd = find("mehd"), let mvex = find("mvex"), let trex = find("trex") else {
+        expect(false, "the init segment carries mvex with mehd before trex")
+        return
+    }
+    expect(mvex < mehd && mehd < trex, "mehd sits inside mvex, before the trex boxes")
+    // type(4) version+flags(4), then the 64-bit fragment_duration.
+    expect(b[mehd + 4] == 1, "mehd is version 1 (64-bit fragment_duration)")
+    expectEq(u64(at: mehd + 8), expected, "mehd fragment_duration is 24 h in the movie timescale")
+
+    // mvhd version 1: type(4) version+flags(4) creation(8) modification(8)
+    // timescale(4) duration(8).
+    guard let mvhd = find("mvhd") else {
+        expect(false, "the init segment carries mvhd")
+        return
+    }
+    expect(b[mvhd + 4] == 1, "mvhd is version 1 (64-bit duration)")
+    var timescale: UInt32 = 0
+    for k in 0..<4 { timescale = (timescale << 8) | UInt32(b[mvhd + 24 + k]) }
+    expectEq(timescale, UInt32(CastFMP4Remuxer.ticksPerSecond), "mvhd timescale unchanged")
+    let declared = u64(at: mvhd + 28)
+    expectEq(declared, expected, "mvhd duration matches mehd (not the all-ones sentinel)")
+    expect(declared != UInt64.max, "mvhd duration is not the unknown-duration sentinel")
+
+    expectEq(logs.filter { $0 == "init: mehd 24h, liveness recorded" }.count, 1,
+             "the declared duration is logged once per generation")
+}
+
+runInitLivenessChecks()
+
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)
