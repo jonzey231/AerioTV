@@ -486,24 +486,6 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var errorSignaled = false
     /// Loopback requests logged so far (the first 24 per session).
     private var loggedRequests = 0
-    /// Playlist long-poll state (device round 2 2026-09-13). AVPlayer
-    /// backs its playlist polls off after unchanged reloads (3 s, then
-    /// 4 s on the device log), and on the Dispatcharr proxy profile the
-    /// segments that would have refilled the buffer closed 15 ms after a
-    /// poll: the next GET came 4.0 s later and the buffer ran empty in
-    /// between (16:31:50.777 GET, segs 5 and 6 at :50.792 and :50.929,
-    /// next GET :54.799, STALL :53.403). Holding an unchanged playlist
-    /// response until a segment closes turns that poll into a push.
-    private struct PlaylistWaiter {
-        let id = UUID()
-        let start = Date()
-        let path: String
-        let completion: (ServedResource) -> Void
-    }
-    private var playlistWaiters: [PlaylistWaiter] = []
-    private var lastServedPlaylistBody: String?
-    private var lastLongPollLogAt = Date.distantPast
-    private static let playlistLongPollSeconds = 1.5
     private var lastPollLogAt = Date.distantPast
     private var totalBytesIngested = 0
 
@@ -603,14 +585,6 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
             defer { if let completion { DispatchQueue.main.async(execute: completion) } }
             self.stopped = true
-            // Held playlist polls must not outlive the server, or their
-            // connections sit open until the client times out.
-            for w in self.playlistWaiters {
-                w.completion(ServedResource(status: 410, body: Data(),
-                                            contentType: "text/plain",
-                                            uti: "public.plain-text"))
-            }
-            self.playlistWaiters.removeAll()
             self.ingestTask?.cancel()
             self.urlSession?.invalidateAndCancel()
             self.listener?.cancel()
@@ -1295,7 +1269,6 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // nextSeq, not segments.count: the count pins at maxBufferedSegments
         // once the window fills, and 12 % 5 != 0 silenced every close after
         // the first ten seconds of the 2026-08-25 UHD soak.
-        releasePlaylistWaiters()
         if nextSeq == 1 { TuneTimeline.shared.mark("seg0") }
         if nextSeq == 1 || nextSeq % 5 == 0 {
             debugLog("[TS-REMUX] segment \(nextSeq - 1) closed (\(String(format: "%.2f", duration))s, \(data.count / 1024) KB), buffered \(segments.count)")
@@ -1619,12 +1592,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 completion(ServedResource(status: 410, body: Data(), contentType: "text/plain", uti: "public.plain-text"))
                 return
             }
-            if path.hasSuffix("live.m3u8") {
-                self.servePlaylist(path: path, completion: completion)
-                return
-            }
             let r: ServedResource
-            if path.hasSuffix("init.mp4"), let initSeg = self.fmp4InitSegment {
+            if path.hasSuffix("live.m3u8") {
+                r = ServedResource(status: 200, body: Data(self.playlistText().utf8),
+                                   contentType: "application/vnd.apple.mpegurl", uti: "public.m3u-playlist")
+            } else if path.hasSuffix("init.mp4"), let initSeg = self.fmp4InitSegment {
                 r = ServedResource(status: 200, body: initSeg, contentType: "video/mp4", uti: "public.mpeg-4")
             } else if path.hasPrefix("/seg"), path.hasSuffix(".ts"),
                       let seq = Int(path.dropFirst(4).dropLast(3)),
@@ -1643,67 +1615,16 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             // spent 15 s earlier, so "AVPlayer stopped fetching" and
             // "AVPlayer kept fetching" looked identical in the log
             // (session6.txt, exactly 24 GET lines, last at 17:58:40).
-            self.logAndComplete(path: path, r: r, completion: completion)
-        }
-    }
-
-    /// GET logging + completion, shared by the plain path and the
-    /// long-polled playlist path (on `queue`).
-    private func logAndComplete(path: String, r: ServedResource,
-                                completion: @escaping (ServedResource) -> Void) {
-        let isPlaylistPoll = path.hasSuffix("live.m3u8")
-        let throttledPoll = isPlaylistPoll
-            && Date().timeIntervalSince(lastPollLogAt) > 10
-        if loggedRequests < 24 || throttledPoll || r.status != 200 {
-            if throttledPoll { lastPollLogAt = Date() }
-            loggedRequests += 1
-            debugLog("[TS-REMUX] GET \(path) -> \(r.status) \(r.body.count) B (segments \(segments.first?.seq ?? -1)...\(segments.last?.seq ?? -1))")
-        }
-        completion(r)
-    }
-
-    /// Playlist request with long-poll. An unchanged playlist is HELD (the
-    /// completion is simply not called yet - nothing blocks `queue`, so
-    /// segment requests keep flowing) until the next segment closes or
-    /// 1.5 s passes.
-    private func servePlaylist(path: String, completion: @escaping (ServedResource) -> Void) {
-        let text = playlistText()
-        if let last = lastServedPlaylistBody, last == text, !playlistComplete, !segments.isEmpty {
-            let waiter = PlaylistWaiter(path: path, completion: completion)
-            playlistWaiters.append(waiter)
-            let id = waiter.id
-            queue.asyncAfter(deadline: .now() + Self.playlistLongPollSeconds) { [weak self] in
-                self?.releasePlaylistWaiters(only: id)
+            let isPlaylistPoll = path.hasSuffix("live.m3u8")
+            let throttledPoll = isPlaylistPoll
+                && Date().timeIntervalSince(self.lastPollLogAt) > 10
+            if self.loggedRequests < 24 || throttledPoll || r.status != 200 {
+                if throttledPoll { self.lastPollLogAt = Date() }
+                self.loggedRequests += 1
+                debugLog("[TS-REMUX] GET \(path) -> \(r.status) \(r.body.count) B (segments \(self.segments.first?.seq ?? -1)...\(self.segments.last?.seq ?? -1))")
             }
-            return
+            completion(r)
         }
-        completePlaylist(path: path, text: text, completion: completion)
-    }
-
-    private func completePlaylist(path: String, text: String,
-                                  completion: @escaping (ServedResource) -> Void) {
-        lastServedPlaylistBody = text
-        let r = ServedResource(status: 200, body: Data(text.utf8),
-                               contentType: "application/vnd.apple.mpegurl",
-                               uti: "public.m3u-playlist")
-        logAndComplete(path: path, r: r, completion: completion)
-    }
-
-    /// Release held playlist polls: `only` = one waiter's 1.5 s timeout,
-    /// nil = a segment closed, so everyone waiting is served now.
-    private func releasePlaylistWaiters(only: UUID? = nil) {
-        guard !playlistWaiters.isEmpty else { return }
-        let due = only.map { id in playlistWaiters.filter { $0.id == id } } ?? playlistWaiters
-        guard !due.isEmpty else { return }
-        playlistWaiters.removeAll { w in due.contains { $0.id == w.id } }
-        let text = playlistText()
-        let now = Date()
-        if now.timeIntervalSince(lastLongPollLogAt) >= 1, let first = due.first {
-            lastLongPollLogAt = now
-            let heldMs = Int(now.timeIntervalSince(first.start) * 1000)
-            debugLog("[TS-REMUX] playlist long-poll released after \(heldMs) ms (new seg \(segments.last?.seq ?? -1))")
-        }
-        for w in due { completePlaylist(path: w.path, text: text, completion: w.completion) }
     }
 
     private func respond(_ connection: NWConnection, path: String) {
@@ -4130,13 +4051,13 @@ struct AVPlayerMultiviewTile: View {
             // wait. The learner is untouched; this is a per-tune raise.
             let burstBuffered = remuxer?.burstHeldBufferedSeconds.get() ?? 0
             if burstBuffered > 0 {
-                offset = max(offset, min(burstBuffered - 2, 10))
-                // Logged on EVERY burst-held tune, raise or not (device
-                // round 2: the line's absence could not be told apart
-                // from the code never running).
-                debugLog(String(format:
-                    "[AVP-MV] burst cushion: offset %.1f s (burst %.1f s)",
-                    offset, burstBuffered))
+                let cushion = max(offset, min(burstBuffered - 2, 10))
+                if cushion > offset {
+                    offset = cushion
+                    debugLog(String(format:
+                        "[AVP-MV] burst cushion: offset %.1f s (burst %.1f s)",
+                        offset, burstBuffered))
+                }
             }
             playerItem.configuredTimeOffsetFromLive =
                 CMTime(seconds: offset, preferredTimescale: 600)
@@ -4207,8 +4128,8 @@ struct AVPlayerMultiviewTile: View {
                 if joinPinOffset > 0 {
                     let name = channelName
                     DispatchQueue.main.async {
-                        LiveEdgeJoin.pinWhenSeekable(item: item, offset: joinPinOffset,
-                                                     channel: name)
+                        LiveEdgeJoin.pin(item: item, offset: joinPinOffset,
+                                         channel: name)
                     }
                 }
             } else {
@@ -4889,51 +4810,11 @@ enum LiveEdgeJoin {
         return behind.isFinite ? behind : nil
     }
 
-    /// `seekableTimeRanges` is routinely EMPTY at readyToPlay (device
-    /// round 2 2026-09-13: not one pin line logged across three tunes
-    /// while the offset lines logged normally), so the pin retries on a
-    /// 250 ms tick for up to 3 s and then gives up out loud.
-    static let pinRetrySeconds = 0.25
-    static let pinRetryBudgetSeconds = 3.0
-
-    static func pinWhenSeekable(item: AVPlayerItem, offset: Double, channel: String,
-                                waited: Double = 0) {
-        if item.seekableTimeRanges.last?.timeRangeValue != nil {
-            pin(item: item, offset: offset, channel: channel)
-            return
-        }
-        guard waited < pinRetryBudgetSeconds else {
-            debugLog(String(format:
-                "[AVP-MV] join pin gave up: no seekable range after %.1fs channel=%@",
-                waited, channel))
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + pinRetrySeconds) {
-            guard item.status != .failed else { return }
-            pinWhenSeekable(item: item, offset: offset, channel: channel,
-                            waited: waited + pinRetrySeconds)
-        }
-    }
-
     /// One explicit seek to end-minus-offset at join.
     static func pin(item: AVPlayerItem, offset: Double, channel: String) {
         guard let range = item.seekableTimeRanges.last?.timeRangeValue else { return }
         let behind = (range.end - item.currentTime()).seconds
         guard behind.isFinite else { return }
-        // Clamp to what actually exists (device round 2: a learned 16.9 s
-        // hold-back against a 10 s window put the playhead at the front of
-        // the dump and CoreMedia answered -12640 "Cannot get that close to
-        // live" at 16:31:57.817). One second of the window stays ahead of
-        // the join point.
-        var offset = offset
-        let windowSeconds = range.duration.seconds
-        if windowSeconds.isFinite, offset > windowSeconds - 1.0 {
-            let clamped = max(0, windowSeconds - 1.0)
-            debugLog(String(format:
-                "[AVP-MV] join offset clamped %.1f s -> %.1f s (seekable window %.1f s) channel=%@",
-                offset, clamped, windowSeconds, channel))
-            offset = clamped
-        }
         // BOTH directions (device round 2026-09-13): the burst-held join
         // landed at -1.0 s behind the edge, i.e. PAST it, with no cushion
         // at all, and the buffer ran empty 8 s later. Being too close to
