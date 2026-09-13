@@ -7529,6 +7529,7 @@ private struct GuideProgramButton: View {
                                 description: prog.description,
                                 category: prog.category,
                                 programID: prog.programID,
+                                posterURLString: prog.posterURL,
                                 subTitle: prog.subTitle,
                                 season: prog.season,
                                 episode: prog.episode,
@@ -7738,6 +7739,7 @@ private struct GuideProgramButton: View {
                     ProgramInfoTarget(
                         channelName: channelItem.name, title: prog.title, start: prog.start, end: prog.end,
                         description: prog.description, category: prog.category, programID: prog.programID,
+                        posterURLString: prog.posterURL,
                         subTitle: prog.subTitle, season: prog.season, episode: prog.episode,
                         isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
                         isPremiere: prog.isPremiere, isFinale: prog.isFinale, isRepeat: prog.isRepeat))
@@ -7812,6 +7814,7 @@ private struct GuideProgramButton: View {
                         description: prog.description,
                         category: prog.category,
                         programID: prog.programID,
+                        posterURLString: prog.posterURL,
                         subTitle: prog.subTitle,
                         season: prog.season,
                         episode: prog.episode,

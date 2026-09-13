@@ -118,6 +118,14 @@ struct ProgramInfoTarget: Identifiable, Equatable {
     /// inline; lazy-load is a no-op in those cases.
     let programID: Int?
 
+    /// Program art straight from the EPG feed (XMLTV `<icon>`, Dispatcharr
+    /// grid icon). The guide cell and `GuidePreviewBanner` use this as the
+    /// FIRST link in their art chain, so Program Info must too: a program
+    /// whose title cannot be matched by TMDB (e.g. an XMLTV sports feed
+    /// sending "Tomorrow at 21:00 - Villarreal v Real Betis") has art in the
+    /// grid and had none in this sheet before it was threaded through.
+    let posterURLString: String?
+
     // EPG badge metadata (info-sheet badges + episode line). Defaults so
     // the callers that lack the data compile unchanged.
     let subTitle: String?
@@ -136,6 +144,7 @@ struct ProgramInfoTarget: Identifiable, Equatable {
 
     init(channelName: String, title: String, start: Date, end: Date,
          description: String, category: String, programID: Int? = nil,
+         posterURLString: String? = nil,
          subTitle: String? = nil, season: Int? = nil, episode: Int? = nil,
          isNew: Bool = false, isLiveBroadcast: Bool = false,
          isPremiere: Bool = false, isFinale: Bool = false, isRepeat: Bool = false,
@@ -147,6 +156,7 @@ struct ProgramInfoTarget: Identifiable, Equatable {
         self.description = description
         self.category = category
         self.programID = programID
+        self.posterURLString = posterURLString
         self.subTitle = subTitle
         self.season = season
         self.episode = episode
@@ -383,6 +393,7 @@ struct ProgramInfoView: View {
         #if os(tvOS)
         tvBody
             .task(id: target.id) {
+                seedFeedPosterIfNeeded()
                 await loadCategoryIfNeeded()
                 await loadTMDBPosterIfNeeded()
             }
@@ -402,6 +413,7 @@ struct ProgramInfoView: View {
                     }
             }
             .task(id: target.id) {
+                seedFeedPosterIfNeeded()
                 await loadCategoryIfNeeded()
                 await loadTMDBPosterIfNeeded()
             }
@@ -430,6 +442,7 @@ struct ProgramInfoView: View {
         .presentationDragIndicator(.visible)
         .presentationBackground(Color.appBackground)
         .task(id: target.id) {
+            seedFeedPosterIfNeeded()
             await loadCategoryIfNeeded()
             await loadTMDBPosterIfNeeded()
         }
@@ -636,6 +649,24 @@ struct ProgramInfoView: View {
             debugLog("📺 ProgramInfo lazy-load FAIL: pid=\(pid) error=\(error.localizedDescription)")
             // Swallow — the modal stays usable without pills.
         }
+    }
+
+    /// Feed art, first link in the chain and the same one
+    /// `GuidePreviewBanner.state(for:)` uses: an absolute icon URL from the
+    /// EPG entry wins outright, a relative one is resolved against the
+    /// active Dispatcharr base (and host-validated) exactly like the
+    /// detail-call poster below.
+    @MainActor
+    private func seedFeedPosterIfNeeded() {
+        guard posterURL == nil,
+              let raw = target.posterURLString?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return }
+        if let direct = URL(string: raw), direct.scheme != nil {
+            posterURL = direct
+        } else if let base = ChannelStore.shared.activeServer?.effectiveBaseURL, !base.isEmpty {
+            posterURL = VODService.resolveImageURL(raw, base: base, size: "w500")
+        }
+        debugLog("📺 ProgramInfo feed poster: \(posterURL?.absoluteString ?? "rejected/none")")
     }
 
     /// TMDB-by-title poster fallback. Runs after the server-poster
