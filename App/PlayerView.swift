@@ -4244,6 +4244,15 @@ final class AVPlayerProgressDriver {
     /// when the feed is measured below real time.
     private var stallGateSince: Date?
     private var stallGateTarget = 0.0
+    /// Repeat-stall rejoin (2026-09-13, atv_stalls3.txt 14:14-14:16). A feed
+    /// with 7 to 8 s silent gaps stalled nine times in 90 s: every gate hold
+    /// reached its cap, bought exactly one burst, and the next gap drained it.
+    /// The buffer was there the whole time - the local remux window held about
+    /// 24 s of the channel BEHIND the playhead - so on the SECOND empty-buffer
+    /// stall inside 60 s the playhead moves back into that window instead of
+    /// waiting at the edge for a cushion the provider never delivers.
+    private var lastStallAt: Date?
+    private var lastRejoinAt: Date?
     /// Hold-back the learner raised DURING this session. Before 2026-09-13 a
     /// learned raise only took effect at the next tune of the channel, so a
     /// session that was stalling kept playing 2 to 4 s from the edge while
@@ -4746,27 +4755,76 @@ final class AVPlayerProgressDriver {
     }
 
     /// Arm the post-stall resume gate. Target = worst observed delivery gap
-    /// plus 2 s, capped at 8 s (device run 2026-09-13: a target that also
-    /// carried the learned hold-back held picture for 18 s, which is worse
-    /// than the stall it prevents). The learned hold-back is deliberately
-    /// NOT part of this target; it still governs the next tune and Return
-    /// to Live. A feed measured below real time is not bursty, and no wait
-    /// fills a buffer the provider is not filling, so the gate is skipped
-    /// entirely there.
+    /// times 1.5 plus 2 s, capped at 12 s (raised from gap + 2 s capped at
+    /// 8 s on 2026-09-13: against 7 to 8 s gaps the old target was pinned at
+    /// the 8 s cap and covered barely one gap, so the very next gap stalled
+    /// again). The learned hold-back is deliberately NOT part of this target;
+    /// it still governs the next tune and Return to Live. A feed measured
+    /// below real time is not bursty, and no wait fills a buffer the provider
+    /// is not filling, so the gate is skipped entirely there.
+    ///
+    /// On the SECOND stall within 60 s the gate is not armed at all: see
+    /// `attemptRepeatStallRejoin`, which moves the playhead back into the
+    /// local window instead of waiting at the edge.
     private func armStallResumeGate() {
         guard isLive else { return }
+        let now = Date()
+        let repeated = lastStallAt.map { now.timeIntervalSince($0) < 60 } ?? false
+        lastStallAt = now
+        if repeated, attemptRepeatStallRejoin() {
+            // Reset the repeat window so a third stall goes through the gate
+            // again rather than chaining rejoins.
+            lastStallAt = nil
+            stallGateSince = nil
+            return
+        }
         let gap = TSHLSRemuxer.feedRateWindow.worstGap()
         if let rate = TSHLSRemuxer.feedRateWindow.rateRatio(), rate < 0.9 {
             stallGateSince = nil
             debugLog(String(format: "[AVP-NUDGE] gate skipped: upstream rate %.2f", rate))
             return
         }
-        let target = min(8.0, gap + 2.0)
+        let target = min(12.0, gap * 1.5 + 2.0)
         stallGateTarget = target
         stallGateSince = Date()
         debugLog(String(format:
             "[AVP-NUDGE] holding after stall until %.1f s buffered (gap %.1f s), timeout %.0f s",
             target, gap, AVPlayerProgressDriver.stallGateTimeout))
+    }
+
+    /// Repeat-stall rejoin. Seeks the playhead BACKWARD into the part of the
+    /// local remux window that is already buffered, by the hold-back this
+    /// channel has learned, and resumes immediately. Deliberately backward:
+    /// the single-stall rule (never move the playhead back) still holds, this
+    /// runs only when the same channel has emptied the buffer twice inside a
+    /// minute and the window behind the playhead is genuinely there.
+    /// At most one rejoin per 3 minutes so it cannot loop.
+    /// Returns true when it seeked.
+    @discardableResult
+    private func attemptRepeatStallRejoin() -> Bool {
+        guard isLive, let item = player.currentItem else { return false }
+        if let last = lastRejoinAt, Date().timeIntervalSince(last) < 180 { return false }
+        // What is ACTUALLY available behind the playhead, from the item's own
+        // seekable range (the remuxer's sliding window as AVPlayer sees it).
+        guard let range = item.seekableTimeRanges.last?.timeRangeValue else { return false }
+        let now = item.currentTime()
+        let behind = (now - range.start).seconds
+        guard behind.isFinite, behind > 0 else { return false }
+        let learned = learnedHoldback()
+        let cap = min(learned, behind - 1.0, 18.0)
+        // Not enough window to be worth a backward move.
+        guard cap >= 8.0 else { return false }
+        let back = max(8.0, cap)
+        let target = now - CMTime(seconds: back, preferredTimescale: 600)
+        guard target >= range.start else { return false }
+        lastRejoinAt = Date()
+        debugLog(String(format:
+            "[AVP-NUDGE] rejoin: seeking back %.0f s into the local window (learned %.0f s, window %.0f s)",
+            back, learned, behind))
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)) { [weak self] _ in
+            self?.player.playImmediately(atRate: 1.0)
+        }
+        return true
     }
 
     /// The remuxer's TARGETDURATION can grow during the first seconds of

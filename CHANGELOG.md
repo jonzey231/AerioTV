@@ -75,7 +75,7 @@ guide and channel tunes.
 - Apple TV: a stall no longer moves the playhead backward, and a single
   nudge recovers playback that was waiting on data it already had.
 - Live channels that arrive in bursts now rebuild a bigger buffer after a
-  stall instead of stalling again.
+  stall, and rejoin from the local buffer when a feed keeps stalling.
 - Apple TV audio on the remux path: a segment boundary could slice an
   audio frame in half. Frames are now held and written whole.
 - The same Apple TV could appear twice in the remote picker.
