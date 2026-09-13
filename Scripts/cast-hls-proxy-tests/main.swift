@@ -1240,5 +1240,339 @@ func pceFixtureTS() -> (plain: Data, pce: Data)? {
 
 runPCEStripChecks()
 
+
+// MARK: 14. audio frame census: nothing lost, nothing re-stamped
+//
+// Added 2026-09-13 after a live cast to the Google TV Streamer was
+// measured on the device: the media clock ratio read 1.0000 and Chromium
+// decoded 60 fps with zero drops, yet SurfaceFlinger presented about 47
+// fps and Chromium logged audio DEMUXER_UNDERFLOW. The proxy's
+// per-segment census was the tell: ESPNU 4.00 s segments carried 179 to
+// 189 AAC frames where 187.5 belong.
+//
+// Two defects produced that, and both are measured here:
+//
+//  1. The carried partial frame was re-stamped. A PES PTS describes the
+//     first access unit that COMMENCES in its payload, so a frame carried
+//     in from the previous PES must keep the running clock's time; riding
+//     the new PES PTS put it, and every follower, one frame late. On the
+//     real capture the mux makes this worse: every audio PES is stamped
+//     exactly 9600 ticks (five frames) after the one before it while
+//     about one PES in six carries six frames, so every such PES
+//     re-stamped a frame that had already been emitted.
+//  2. Audio that arrived after the cut keyframe was lost to the splicer.
+//     Provider audio trails its video, so a segment's last ~170 ms of
+//     audio was unparsed when the cut keyframe arrived, and those frames
+//     opened the NEXT segment below its own start. The cut now waits.
+//
+// The primary fixture is a real ESPNU capture of the Dispatcharr AAC
+// output profile; it is too large to check in, so the path is overridable
+// with CAST_TS_FIXTURE and the check skips when the capture is absent.
+// The synthetic fixture always runs: it packs audio PES at byte offsets
+// that ignore frame boundaries, which ffmpeg's own TS muxer never does.
+
+/// ADTS frames in a raw elementary stream, counted header by header.
+func countADTSFrames(_ b: [UInt8]) -> Int {
+    var p = 0
+    var n = 0
+    while p + 7 <= b.count {
+        if b[p] != 0xFF || (b[p + 1] & 0xF0) != 0xF0 { p += 1; continue }
+        let len = (Int(b[p + 3] & 0x03) << 11) | (Int(b[p + 4]) << 3) | (Int(b[p + 5]) >> 5)
+        if len <= 7 || p + len > b.count { p += 1; continue }
+        n += 1
+        p += len
+    }
+    return n
+}
+
+struct CensusResult {
+    var segments: [Data] = []
+    var durations: [Int64] = []
+    var audioCounts: [Int] = []
+    var logs: [String] = []
+}
+
+@MainActor func censusRemux(_ bytes: Data) -> CensusResult {
+    var result = CensusResult()
+    let remuxer = CastFMP4Remuxer(log: { result.logs.append($0) })
+    remuxer.onMediaSegment = { data, ticks in
+        result.segments.append(data)
+        result.durations.append(ticks)
+    }
+    remuxer.onSegmentComposition = { _, audio, _, _, _, _ in result.audioCounts.append(audio) }
+    var offset = 0
+    while offset < bytes.count {
+        let n = min(64 * 1024, bytes.count - offset)
+        try? remuxer.feed(bytes.subdata(in: offset..<(offset + n)))
+        offset += n
+    }
+    remuxer.release() // the generation's tail segment counts too
+    return result
+}
+
+/// Audio pts continuity across every segment boundary, plus the frames
+/// counted. Within a segment the trun's fixed durations make the timeline
+/// contiguous by construction, so the boundaries are what can break.
+@MainActor func censusChecks(_ label: String, _ result: CensusResult,
+                             inputFrames: Int, lossAllowance: Int, minSegments: Int) {
+    let frameTicks = 1024 * CastFMP4Remuxer.ticksPerSecond / 48_000
+    expect(result.segments.count >= minSegments,
+           "\(label): at least \(minSegments) segments (\(result.segments.count))")
+    guard result.segments.count >= minSegments else { return }
+
+    var contiguous = true
+    var previousEnd: Int64 = -1
+    var framesInBoxes = 0
+    for segment in result.segments {
+        guard let audio = segmentSpans(segment)[2] else { continue }
+        if previousEnd >= 0, abs(audio.start - previousEnd) > 1 { contiguous = false }
+        previousEnd = audio.end
+        framesInBoxes += Int((audio.end - audio.start) / frameTicks)
+    }
+    let output = result.audioCounts.reduce(0, +)
+    print("[census \(label)] input=\(inputFrames) output=\(output) segments=\(result.segments.count) "
+        + "per=\(result.audioCounts)")
+    expect(contiguous, "\(label): audio runs contiguously across every segment boundary")
+    expectEq(framesInBoxes, output, "\(label): every counted frame reached a segment")
+    expect(output >= inputFrames - lossAllowance,
+           "\(label): no audio frame lost (input \(inputFrames), output \(output), "
+         + "allowance \(lossAllowance))")
+    expect(output <= inputFrames, "\(label): output cannot exceed input")
+
+    // The emitted media is fully covered by audio: a lost frame shows up
+    // here as a shortfall even when the fixture's own ends are ragged.
+    let declared = result.durations.reduce(0, +)
+    let covered = Int64(output) * frameTicks
+    expect(covered >= declared - 2 * frameTicks,
+           String(format: "%@: audio covers %.3f s of the %.3f s declared", label,
+                  Double(covered) / 90_000.0, Double(declared) / 90_000.0))
+
+    // Per-segment census: every interior segment carries what its own
+    // duration calls for, to within the frame a boundary quantizes away.
+    var interiorOK = true
+    for (i, ticks) in result.durations.enumerated() {
+        if i == 0 || i == result.durations.count - 1 { continue }
+        let expected = Double(ticks) / Double(frameTicks)
+        let actual = Double(result.audioCounts[i])
+        if abs(expected - actual) > 1.5 { interiorOK = false }
+    }
+    expect(interiorOK, "\(label): every interior segment carries the frames its duration calls for")
+}
+
+// ---- the real capture ----
+
+@MainActor func runRealCaptureCensus() {
+    let ffmpeg = "/opt/homebrew/bin/ffmpeg"
+    let path = ProcessInfo.processInfo.environment["CAST_TS_FIXTURE"]
+        ?? "/private/tmp/claude-501/-Users-loganjones-Documents-xcode-iOSDev/4567b156-2e97-48d3-a8d7-44b0e9a3fd9a/scratchpad/espnu-aac-60s.ts"
+    guard FileManager.default.isExecutableFile(atPath: ffmpeg),
+          let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), !bytes.isEmpty else {
+        print("SKIP real-capture audio census (no capture at \(path))")
+        return
+    }
+    // The input frame count comes from the raw ADTS demux of the same
+    // stream, which is the provider's count by definition.
+    let adts = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("cast-hls-census-espnu.aac")
+    if !FileManager.default.fileExists(atPath: adts.path) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffmpeg)
+        process.arguments = ["-y", "-v", "error", "-i", path,
+                             "-map", "0:a:0", "-c", "copy", "-f", "adts", adts.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+    }
+    guard let demuxed = try? Data(contentsOf: adts) else {
+        print("SKIP real-capture audio census (ffmpeg could not demux the ADTS)")
+        return
+    }
+    let input = countADTSFrames([UInt8](demuxed))
+    // Only the audio before the first kept video keyframe may go missing:
+    // one GOP of 59.94 fps video is 2.002 s, i.e. 94 AAC frames, plus the
+    // handful parsed before the init segment existed.
+    censusChecks("espnu", censusRemux(bytes), inputFrames: input, lossAllowance: 100, minSegments: 12)
+}
+
+runRealCaptureCensus()
+
+// ---- a synthetic stream whose every audio PES straddles frames ----
+
+struct CensusTSWriter {
+    private var out = Data()
+    private var continuity: [Int: Int] = [:]
+
+    var bytes: Data { out }
+
+    mutating func psi(pid: Int, table: [UInt8]) {
+        var section = [UInt8](repeating: 0xFF, count: 184)
+        section[0] = 0 // pointer_field
+        for (i, b) in table.enumerated() { section[i + 1] = b }
+        packet(pid: pid, body: section, pusi: true, adaptation: false)
+    }
+
+    mutating func pes(pid: Int, payload: [UInt8]) {
+        var off = 0
+        var pusi = true
+        while off < payload.count {
+            let n = min(184, payload.count - off)
+            var body: [UInt8]
+            if n == 184 {
+                body = Array(payload[off..<(off + n)])
+            } else {
+                // Stuff the short final packet with an adaptation field,
+                // the way a real mux does.
+                let stuffing = 184 - n
+                body = [UInt8](repeating: 0xFF, count: 184)
+                body[0] = UInt8(stuffing - 1)
+                if stuffing >= 2 { body[1] = 0 }
+                for i in 0..<n { body[stuffing + i] = payload[off + i] }
+            }
+            packet(pid: pid, body: body, pusi: pusi, adaptation: n != 184)
+            pusi = false
+            off += n
+        }
+    }
+
+    private mutating func packet(pid: Int, body: [UInt8], pusi: Bool, adaptation: Bool) {
+        let cc = continuity[pid] ?? 0
+        continuity[pid] = (cc + 1) & 0x0F
+        var p = [UInt8](repeating: 0, count: 188)
+        p[0] = 0x47
+        p[1] = UInt8((pusi ? 0x40 : 0) | ((pid >> 8) & 0x1F))
+        p[2] = UInt8(pid & 0xFF)
+        p[3] = UInt8((adaptation ? 0x30 : 0x10) | cc)
+        for i in 0..<184 { p[4 + i] = body[i] }
+        out.append(contentsOf: p)
+    }
+}
+
+func censusPTSBytes(_ marker: Int, _ ts: Int64) -> [UInt8] {
+    [UInt8((marker << 4) | (Int((ts >> 30) & 0x07) << 1) | 1),
+     UInt8((ts >> 22) & 0xFF),
+     UInt8((Int((ts >> 15) & 0x7F) << 1) | 1),
+     UInt8((ts >> 7) & 0xFF),
+     UInt8((Int(ts & 0x7F) << 1) | 1)]
+}
+
+func censusPES(streamID: Int, payload: [UInt8], pts: Int64, dts: Int64?) -> [UInt8] {
+    let stamps = dts == nil ? censusPTSBytes(2, pts) : censusPTSBytes(3, pts) + censusPTSBytes(1, dts!)
+    var body: [UInt8] = [0, 0, 1, UInt8(streamID), 0, 0, 0x80, dts == nil ? 0x80 : 0xC0,
+                         UInt8(stamps.count)]
+    body.append(contentsOf: stamps)
+    body.append(contentsOf: payload)
+    let length = body.count - 6
+    body[4] = UInt8((length >> 8) & 0xFF)
+    body[5] = UInt8(length & 0xFF)
+    return body
+}
+
+/// One ADTS AAC-LC 48 kHz stereo frame. The payload is constant filler
+/// that can never be mistaken for a syncword, so the remuxer's false-sync
+/// guard has nothing to trip on and the census counts frames.
+func censusADTSFrame(_ frameLen: Int) -> [UInt8] {
+    var f = [UInt8](repeating: 0x21, count: frameLen)
+    f[0] = 0xFF
+    f[1] = 0xF1 // MPEG-4, layer 00, no CRC
+    f[2] = UInt8((1 << 6) | (3 << 2)) // AAC-LC, 48 kHz, channel config high bit 0
+    f[3] = UInt8((1 << 6) | ((frameLen >> 11) & 0x03)) // channel config 2
+    f[4] = UInt8((frameLen >> 3) & 0xFF)
+    f[5] = UInt8(((frameLen & 0x07) << 5) | 0x1F)
+    f[6] = 0xFC
+    return f
+}
+
+func censusVideoAU(keyframe: Bool) -> [UInt8] {
+    let sps: [UInt8] = [0x67, 0x42, 0xC0, 0x1E, 0xD9, 0x00, 0xF0, 0x11, 0x7E, 0xF0, 0x3C, 0x80]
+    let pps: [UInt8] = [0x68, 0xCE, 0x3C, 0x80]
+    var slice = [UInt8](repeating: 0x10, count: 400)
+    slice[0] = keyframe ? 0x65 : 0x41
+    let start: [UInt8] = [0, 0, 0, 1]
+    return start + sps + start + pps + start + slice
+}
+
+/// A transport stream whose audio PES are cut at byte offsets that have
+/// nothing to do with frame boundaries, so the carry runs on nearly every
+/// PES. `audioLagTicks` delays the audio in MUX ORDER, which is what puts
+/// a segment's last frames behind the keyframe that cuts it.
+func straddlingCensusTS(videoFrames: Int, videoFrameTicks: Int64, gop: Int,
+                        frameLen: Int, audioLagTicks: Int64) -> (Data, Int) {
+    let frameTicks = 1024 * CastFMP4Remuxer.ticksPerSecond / 48_000
+    let base: Int64 = 10_000
+    var writer = CensusTSWriter()
+    let audioFrames = Int((Int64(videoFrames) * videoFrameTicks) / frameTicks) + 4
+    var es: [UInt8] = []
+    es.reserveCapacity(audioFrames * frameLen)
+    for _ in 0..<audioFrames { es.append(contentsOf: censusADTSFrame(frameLen)) }
+    let cuts = [frameLen * 2 + 57, frameLen * 3 - 31, frameLen + 7, frameLen * 4 + 13]
+    var audioPES: [(start: Int, end: Int, pts: Int64)] = []
+    var off = 0
+    var cut = 0
+    while off < es.count {
+        var end = min(off + cuts[cut % cuts.count], es.count)
+        cut += 1
+        let firstFrame = (off + frameLen - 1) / frameLen
+        // A payload in which no frame COMMENCES would be sent without a
+        // PTS and the remuxer drops unstamped PES, so grow this one until
+        // a frame starts in it.
+        while firstFrame * frameLen >= end, end < es.count {
+            end = min(end + cuts[cut % cuts.count], es.count)
+            cut += 1
+        }
+        if firstFrame * frameLen >= end { break }
+        audioPES.append((off, end, base + Int64(firstFrame) * frameTicks))
+        off = end
+    }
+    // PAT pointing at a PMT on pid 0x1000: H.264 on 0x100, ADTS on 0x101.
+    let pat: [UInt8] = [0x00, 0xB0, 13, 0x00, 0x01, 0xC1, 0, 0, 0, 0x01, 0xF0, 0x00, 0, 0, 0, 0]
+    let pmtBody: [UInt8] = [0x00, 0x01, 0xC1, 0, 0,
+                            0xE1, 0x00, 0xF0, 0x00,
+                            0x1B, 0xE1, 0x00, 0xF0, 0x00,
+                            0x0F, 0xE1, 0x01, 0xF0, 0x00]
+    let pmt: [UInt8] = [0x02, 0xB0, UInt8(pmtBody.count + 4)] + pmtBody + [0, 0, 0, 0]
+    writer.psi(pid: 0, table: pat)
+    writer.psi(pid: 0x1000, table: pmt)
+    var next = 0
+    for i in 0..<videoFrames {
+        let dts = base + Int64(i) * videoFrameTicks
+        writer.pes(pid: 0x100, payload: censusPES(streamID: 0xE0, payload: censusVideoAU(keyframe: i % gop == 0),
+                                                  pts: dts, dts: dts))
+        while next < audioPES.count, audioPES[next].pts <= dts - audioLagTicks {
+            let a = audioPES[next]
+            writer.pes(pid: 0x101, payload: censusPES(streamID: 0xC0, payload: Array(es[a.start..<a.end]),
+                                                      pts: a.pts, dts: nil))
+            next += 1
+        }
+    }
+    while next < audioPES.count {
+        let a = audioPES[next]
+        writer.pes(pid: 0x101, payload: censusPES(streamID: 0xC0, payload: Array(es[a.start..<a.end]),
+                                                  pts: a.pts, dts: nil))
+        next += 1
+    }
+    return (writer.bytes, countADTSFrames(es))
+}
+
+@MainActor func runStraddleCensus() {
+    // 12 s of 30 fps video, a keyframe every second, 400-byte AAC frames.
+    // The loss allowance covers the fixture's ragged ends only: the head
+    // frames below the first video presentation time and the tail video
+    // that outlives the audio (one GOP, 48 frames).
+    let (aligned, alignedFrames) = straddlingCensusTS(videoFrames: 360, videoFrameTicks: 3_000,
+                                                      gop: 30, frameLen: 400, audioLagTicks: 0)
+    censusChecks("straddle", censusRemux(aligned), inputFrames: alignedFrames,
+                 lossAllowance: 52, minSegments: 3)
+
+    // The measured provider shape: audio about 170 ms behind its video in
+    // mux order, so every segment's last 8 frames parse after the cut.
+    let (trailing, trailingFrames) = straddlingCensusTS(videoFrames: 360, videoFrameTicks: 3_000,
+                                                        gop: 30, frameLen: 400, audioLagTicks: 15_300)
+    censusChecks("trailing", censusRemux(trailing), inputFrames: trailingFrames,
+                 lossAllowance: 52, minSegments: 3)
+}
+
+runStraddleCensus()
+
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

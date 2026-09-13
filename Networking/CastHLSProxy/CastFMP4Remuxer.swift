@@ -278,10 +278,71 @@ final class CastFMP4Remuxer {
 
     private var videoQueue: [VideoSample] = []
     private var audioQueue: [AudioSample] = []
+
+    /// Video samples of the NEXT segment, held while the cut waits for
+    /// audio, plus the cut they are waiting behind (-1 = none pending).
+    ///
+    /// Provider audio trails its video in the mux, so when the keyframe
+    /// that cuts a segment is demuxed the last ~170 ms of that segment's
+    /// audio has not been parsed yet. Cutting there shipped the segment
+    /// short, and the late frames then opened the NEXT segment with an
+    /// audio tfdt BELOW that segment's own start: a backwards audio
+    /// append, which Chromium's splicer trims or drops. So the cut waits
+    /// until the audio queue reaches it, bounded by `maxCutHoldTicks` so
+    /// a video-only or audio-starved stream still emits segments on time.
+    private var heldVideo: [VideoSample] = []
+    private var pendingCutDTS: Int64 = -1
+
+    /// How long a segment cut may wait for the audio that belongs in it.
+    /// Provider audio trailed its video by about 170 ms in the measured
+    /// casts; half a second of video is a generous bound that still keeps
+    /// the playlist growing when the audio PID dies mid-stream.
+    private static let maxCutHoldTicks: Int64 = CastFMP4Remuxer.ticksPerSecond / 2
     /// Output AAC frame ticks: 1024 samples at the track sample rate.
     private var audioFrameTicks: Int64 = 0
     /// Audio frames can straddle PES packet boundaries; carry the tail.
+    /// The carry is NEVER cleared at a PES, segment or generation
+    /// boundary: it is the front bytes of a real frame, and dropping them
+    /// is one lost frame (21.33 ms) of audio.
     private var audioCarry: [UInt8] = []
+
+    /// Presentation time the NEXT audio frame is expected at, 90 kHz:
+    /// the running audio clock, and the authority for every frame's
+    /// stamp. A frame's duration is definitional (1024 samples at the
+    /// declared rate) while a live provider's PES PTS cadence is not, and
+    /// a PES PTS describes the first access unit that COMMENCES in its
+    /// payload, so it cannot stamp a frame carried in from the previous
+    /// PES at all.
+    ///
+    /// Measured on a real ESPNU capture of the Dispatcharr AAC output
+    /// profile (2026-09-13): every audio PES is stamped exactly 9600
+    /// ticks after the one before it, five frames' worth, yet about one
+    /// PES in six carries SIX frames. Re-anchoring on every PES therefore
+    /// re-stamped a frame that had already been emitted, once per such
+    /// PES, and the segment census wandered 2 to 3 frames either side of
+    /// what the segment's own duration calls for. On the Google TV
+    /// Streamer that read as audio DEMUXER_UNDERFLOW with the video
+    /// renderer holding frames: 60 fps decoded with zero drops, about 47
+    /// fps actually presented, media clock ratio 1.0000.
+    private var audioRunPTS: Int64 = -1
+
+    /// How far the running audio clock may sit from a PES PTS before the
+    /// PES PTS wins. One PES worth of frames: the measured packing jitter
+    /// on the live capture was up to four frames, and a real splice moves
+    /// the clock far more than eight.
+    private static let maxAudioAnchorDriftFrames: Int64 = 8
+
+    /// Stamp one audio frame: continue `audioRunPTS`, re-anchoring to the
+    /// PES PTS only when the two have drifted further apart than
+    /// `maxAudioAnchorDriftFrames` frames, which no packing jitter
+    /// explains and a splice or a provider discontinuity does.
+    private func stampAudioFrame(pesAnchor: Int64, frameTicks: Int64) -> Int64 {
+        let tolerance = frameTicks > 0 ? frameTicks * Self.maxAudioAnchorDriftFrames : 0
+        if audioRunPTS < 0 || abs(pesAnchor - audioRunPTS) > tolerance {
+            audioRunPTS = pesAnchor
+        }
+        return audioRunPTS
+    }
     private var lastVideoDuration: Int64 = 3_000 // ~30 fps fallback for the first delta
     private var sequenceNumber = 0
 
@@ -364,6 +425,16 @@ final class CastFMP4Remuxer {
     /// the segment's EXTINF be that common end. The next generation then
     /// starts where this one really stopped.
     private func flushGenerationTail() {
+        // A pending cut takes effect first: the held samples belong to a
+        // segment of their own, and the audio the cut was waiting for has
+        // either arrived by now or never will.
+        if pendingCutDTS >= 0 {
+            let cut = heldVideo.first?.dts ?? ((videoQueue.last?.dts ?? 0) + lastVideoDuration)
+            pendingCutDTS = -1
+            finalizeSegment(cutDTS: cut)
+            videoQueue.append(contentsOf: heldVideo)
+            heldVideo.removeAll(keepingCapacity: true)
+        }
         guard initSent, let lastVideo = videoQueue.last else { return }
         let videoEnd = lastVideo.dts + lastVideoDuration
         let audioEnd = audioQueue.last.map { $0.pts + audioFrameTicks } ?? -1
@@ -597,8 +668,9 @@ final class CastFMP4Remuxer {
             timelineBasePTS = pts
         }
 
-        if keyframe, let first = videoQueue.first, dts - first.dts >= targetSegmentTicks {
-            finalizeSegment(cutDTS: dts)
+        if pendingCutDTS < 0, keyframe, let first = videoQueue.first,
+           dts - first.dts >= targetSegmentTicks {
+            pendingCutDTS = dts
         }
         // AVCC conversion: length-prefixed NALs, parameter sets kept
         // in-band (a mid-stream resolution change then stays decodable).
@@ -610,7 +682,28 @@ final class CastFMP4Remuxer {
                                        UInt8((n >> 8) & 0xFF), UInt8(n & 0xFF)])
             sample.append(contentsOf: nal)
         }
-        videoQueue.append(VideoSample(data: sample, dts: dts, pts: pts, keyframe: keyframe))
+        let queued = VideoSample(data: sample, dts: dts, pts: pts, keyframe: keyframe)
+        if pendingCutDTS >= 0 {
+            heldVideo.append(queued)
+            maybeCut(latestDTS: dts)
+            return
+        }
+        videoQueue.append(queued)
+    }
+
+    /// Take the pending cut once the audio queue has caught up past it,
+    /// or once the hold has run longer than `maxCutHoldTicks` of video.
+    /// See `heldVideo` for why the cut waits at all.
+    private func maybeCut(latestDTS: Int64) {
+        let cut = pendingCutDTS
+        guard cut >= 0 else { return }
+        let audioEnd = audioQueue.last.map { $0.pts + audioFrameTicks } ?? Int64.max
+        let audioReady = audioPID < 0 || audioEnd >= cut
+        if !audioReady, latestDTS - cut < Self.maxCutHoldTicks { return }
+        pendingCutDTS = -1
+        finalizeSegment(cutDTS: cut)
+        videoQueue.append(contentsOf: heldVideo)
+        heldVideo.removeAll(keepingCapacity: true)
     }
 
     /// PTS shares DTS's wrap epoch; unwrap it relative to the unwrapped
@@ -673,8 +766,8 @@ final class CastFMP4Remuxer {
             data.append(contentsOf: payload)
         }
         audioCarry = []
+        let pesAnchor = audioClock.unwrap(pts33)
         var p = 0
-        var framePTS: Int64 = -1
         while p < data.count {
             guard let info = CastAudioTranscoder.parseFrameHeader(source, data, p) else {
                 if data.count - p < 8 { break } // possibly a truncated header: carry it
@@ -701,11 +794,12 @@ final class CastFMP4Remuxer {
                 }
                 maybeEmitInit()
             }
-            if framePTS < 0 { framePTS = audioClock.unwrap(pts33) }
+            let frameTicks = Int64(info.samplesPerFrame) * Self.ticksPerSecond / Int64(info.sampleRate)
+            let framePTS = stampAudioFrame(pesAnchor: pesAnchor, frameTicks: frameTicks)
+            audioRunPTS = framePTS + frameTicks
             if initSent, timelineBasePTS >= 0, framePTS >= timelineBasePTS {
                 audioQueue.append(AudioSample(data: Array(data[p..<next]), pts: framePTS))
             }
-            framePTS += Int64(info.samplesPerFrame) * Self.ticksPerSecond / Int64(info.sampleRate)
             p = next
         }
         if p < data.count { audioCarry = Array(data[p...]) }
@@ -726,8 +820,9 @@ final class CastFMP4Remuxer {
             data.append(contentsOf: payload)
         }
         audioCarry = []
+        let pesAnchor = audioClock.unwrap(pts33)
         var p = 0
-        var framePTS: Int64 = -1
+        var firstFrameOfPES = true
         while p < data.count {
             guard let info = CastAudioTranscoder.parseFrameHeader(source, data, p) else {
                 if data.count - p < 8 { break } // possibly a truncated header: carry it
@@ -768,8 +863,11 @@ final class CastFMP4Remuxer {
                 audioPathDescription = "\(source.displayName) \(Self.channelLabel(info.channels)) -> AAC stereo"
                 transcodeLogged = true
             }
-            if framePTS < 0 {
-                framePTS = audioClock.unwrap(pts33)
+            let frameTicks = Int64(info.samplesPerFrame) * Self.ticksPerSecond / Int64(info.sampleRate)
+            let framePTS = stampAudioFrame(pesAnchor: pesAnchor, frameTicks: frameTicks)
+            audioRunPTS = framePTS + frameTicks
+            if firstFrameOfPES {
+                firstFrameOfPES = false
                 if expectedSrcAudioPTS >= 0,
                    abs(framePTS - expectedSrcAudioPTS) > CastAudioTranscoder.discontinuityTicks {
                     // Splice/reconnect: flush both codecs; the PTS mapper
@@ -779,8 +877,7 @@ final class CastFMP4Remuxer {
                 }
             }
             try t.feed(data, range: p..<next, ptsTicks: framePTS, info: info)
-            framePTS += Int64(info.samplesPerFrame) * Self.ticksPerSecond / Int64(info.sampleRate)
-            expectedSrcAudioPTS = framePTS
+            expectedSrcAudioPTS = framePTS + frameTicks
             p = next
         }
         if p < data.count { audioCarry = Array(data[p...]) }
@@ -795,8 +892,8 @@ final class CastFMP4Remuxer {
             data.append(contentsOf: payload)
         }
         audioCarry = []
+        let pesAnchor = audioClock.unwrap(pts33)
         var p = 0
-        var framePTS: Int64 = -1
         while p + 7 <= data.count {
             guard data[p] == 0xFF, data[p + 1] & 0xF0 == 0xF0 else {
                 p += 1 // scan to syncword (junk between frames happens on splices)
@@ -893,15 +990,17 @@ final class CastFMP4Remuxer {
                 audioFrameTicks = 1024 * Self.ticksPerSecond / Int64(cfg.sampleRate)
                 maybeEmitInit()
             }
-            if initSent, frameLen > headerLen {
-                // First frame of the PES rides the PES PTS; followers step
-                // by the fixed 1024-sample frame duration. Re-anchoring on
-                // every PES keeps drift bounded to one PES worth of frames.
-                if framePTS < 0 { framePTS = audioClock.unwrap(pts33) }
-                if timelineBasePTS >= 0, framePTS >= timelineBasePTS {
+            if frameLen > headerLen {
+                // The running audio clock stamps every frame, carried
+                // frames included; the PES PTS only re-anchors it when
+                // the two disagree by more than one PES worth of frames.
+                // See `audioRunPTS` for what stamping the carried frame
+                // with the new PES PTS cost on the device.
+                let framePTS = stampAudioFrame(pesAnchor: pesAnchor, frameTicks: audioFrameTicks)
+                audioRunPTS = framePTS + audioFrameTicks
+                if initSent, timelineBasePTS >= 0, framePTS >= timelineBasePTS {
                     audioQueue.append(AudioSample(data: Array(data[payloadStart..<(p + frameLen)]), pts: framePTS))
                 }
-                framePTS += audioFrameTicks
             }
             p += frameLen
         }
@@ -1209,6 +1308,19 @@ final class CastFMP4Remuxer {
         // dropped at queue time and `timelineBasePTS >= timelineBase`.
         let firstAudioPTSSeconds = segAudio.first
             .map { Double($0.pts - timelineBase) / Double(Self.ticksPerSecond) } ?? -1.0
+        // Audio census for the device log (2026-09-13): aexp is how many
+        // frames this segment's own duration calls for, so a shortfall is
+        // visible in the log without arithmetic. Logged only when the
+        // segment misses by more than two frames: one is the unavoidable
+        // boundary quantization and the generation's first segment also
+        // drops the audio below the first video presentation time.
+        if audioFrameTicks > 0, audioPID >= 0 {
+            let expected = Double(durationTicks) / Double(audioFrameTicks)
+            if abs(expected - Double(audioSamples)) > 2.0 {
+                log(String(format: "audio census: audio=%d aexp=%.1f shortfall=%.1f frames",
+                           audioSamples, expected, expected - Double(audioSamples)))
+            }
+        }
         let segmentStartSeconds = Double(emittedMediaTicks) / Double(Self.ticksPerSecond)
         emittedMediaTicks += durationTicks
         videoQueue.removeAll(keepingCapacity: true)
