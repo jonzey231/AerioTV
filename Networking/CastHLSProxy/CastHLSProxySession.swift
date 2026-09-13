@@ -109,10 +109,6 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// Serializes control (start/stop/reconnect bookkeeping) and ingest
     /// data; the remuxer is single-caller on this queue.
     private let queue = DispatchQueue(label: "com.aerio.casthls.session")
-    /// Backing store for `demuxedMasterURL`, written on `queue` when the
-    /// ready gate passes.
-    private var demuxedMasterURLStorage: URL?
-
     private var server: CastHLSProxyServer?
     private var store: CastHLSSegmentStore?
     private var ingest: IngestConnection?
@@ -140,16 +136,12 @@ final class CastHLSProxySession: @unchecked Sendable {
     private var rollupBytes = 0
     private var rollupTicks: Int64 = 0
     /// Timeline snapshot handed over by `CastFMP4Remuxer.onSegmentComposition`,
-    /// which fires immediately before `onMediaSegment` on the same ingest
-    /// queue. Held on the session (not in a captured local) so Swift 6
+    /// which fires immediately before `onDemuxedMediaSegments` on the same
+    /// ingest queue. Held on the session (not in a captured local) so Swift 6
     /// concurrency checking has a single owner for it.
     private var pendingComposition: (video: Int, audio: Int,
                                      vdts: Double, vpts: Double, apts: Double,
                                      start: Double)?
-    /// Demuxed renditions of the segment about to be published, handed
-    /// over by `CastFMP4Remuxer.onDemuxedMediaSegments` (which fires
-    /// immediately before `onMediaSegment` on the same ingest queue).
-    private var pendingDemuxed: (video: Data, audio: Data?, audioDurationTicks: Int64)?
 
     // Stats surface for the cast Options sheet (task #267): the latest
     // completed per-8-segment rollup is STORED, not just logged, plus a
@@ -217,9 +209,13 @@ final class CastHLSProxySession: @unchecked Sendable {
 
     /// Point the proxy at `rawTSURL` (the SAME URL + headers the local
     /// player would use) and wait until the playlist has two segments.
-    /// Returns the MASTER playlist URL to hand to the cast load (its
-    /// CLOSED-CAPTIONS=NONE keeps Shaka's caption parser away from the
-    /// muxed segments; loading live.m3u8 directly is a known fatal).
+    /// Returns the DEMUXED MASTER playlist URL to hand to the cast load:
+    /// separate video and audio renditions, one SourceBuffer each, so the
+    /// audio can declare ac-3 / ec-3 honestly on a receiver that answers
+    /// isTypeSupported false for any muxed video/mp4 carrying those codecs
+    /// but TRUE for audio/mp4 with them. Its CLOSED-CAPTIONS=NONE also
+    /// keeps Shaka's caption parser off the video segments; loading a
+    /// media playlist directly is a known fatal.
     ///
     /// Throws `CastUnsupportedCodecError` for a mux the proxy cannot
     /// serve and `CastHLSProxyError` for infrastructure failures.
@@ -301,14 +297,7 @@ final class CastHLSProxySession: @unchecked Sendable {
                            ready.segments, seconds,
                            Double(Self.readyMediaTicks) / Double(CastFMP4Remuxer.ticksPerSecond),
                            Self.readyMinSegments))
-                // Both masters hang off the same base: /master.m3u8 is the
-                // MUXED one (legacy, kept for one release) and
-                // /demuxed.m3u8 the two-rendition shape the SENDER must
-                // load. AerioCastController: point MediaInfo.contentURL at
-                // `demuxedMasterURL` below instead of this return value.
-                let demuxed = URL(string: "http://\(lanIP):\(port)/demuxed.m3u8")!
-                queue.sync { self.demuxedMasterURLStorage = demuxed }
-                return URL(string: "http://\(lanIP):\(port)/master.m3u8")!
+                return URL(string: "http://\(lanIP):\(port)/demuxed.m3u8")!
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
@@ -317,16 +306,6 @@ final class CastHLSProxySession: @unchecked Sendable {
         stopIfStillActive(rawTSURL)
         throw CastHLSProxyError.timedOut
     }
-
-    /// The DEMUXED master playlist URL for the running proxy: separate
-    /// video and audio renditions, one SourceBuffer each, so the audio can
-    /// declare ac-3 / ec-3 honestly on a receiver that answers
-    /// isTypeSupported false for any muxed video/mp4 carrying those codecs
-    /// but TRUE for audio/mp4 with them. This is what the sender should
-    /// load from now on; the URL `startChannel` returns is the muxed
-    /// master, kept reachable for one release. nil until a `startChannel`
-    /// has passed its ready gate.
-    var demuxedMasterURL: URL? { queue.sync { demuxedMasterURLStorage } }
 
     /// Full teardown: ingest, ring, server socket, background keepalive.
     /// Called when the cast session ends (or a start fails).
@@ -428,30 +407,17 @@ final class CastHLSProxySession: @unchecked Sendable {
 
         let remuxer = CastFMP4Remuxer(allowAC3Passthrough: allowAC3Passthrough,
                                       log: { [weak self] in self?.log($0) })
-        remuxer.onInitSegment = { [weak self] data in
-            guard let self, self.ingestEpoch == epoch else { return }
-            self.store?.setInitSegment(generation: gen, data: data)
-            // The playlist's CODECS attribute must name the audio the
-            // segments actually carry (AAC, ac-3 or ec-3).
-            self.store?.setAudioCodecsAttribute(remuxer.audioCodecsAttribute)
-            if let avc = CastHLSSegmentStore.avcCodecString(from: data) {
-                self.videoCodecDescription = "H.264 (\(avc))"
-            }
-            self.log("init segment ready gen=\(gen) (\(data.count) B)")
-        }
         remuxer.onDemuxedInitSegments = { [weak self] video, audio in
             guard let self, self.ingestEpoch == epoch else { return }
             self.store?.setDemuxedInitSegments(generation: gen, video: video, audio: audio)
+            // The playlist's CODECS attribute must name the audio the
+            // segments actually carry (AAC, ac-3 or ec-3).
+            self.store?.setAudioCodecsAttribute(remuxer.audioCodecsAttribute)
+            if let avc = CastHLSSegmentStore.avcCodecString(from: video) {
+                self.videoCodecDescription = "H.264 (\(avc))"
+            }
             self.log("demuxed init ready gen=\(gen) "
                 + "vinit=\(video.count) B ainit=\(audio?.count ?? 0) B")
-        }
-        // Stashed because the remuxer reports the demuxed pair immediately
-        // BEFORE the muxed segment, and the store claims the single
-        // sequence number all three renditions share at publish time.
-        pendingDemuxed = nil
-        remuxer.onDemuxedMediaSegments = { [weak self] video, audio, _, audioDurationTicks in
-            guard let self, self.ingestEpoch == epoch else { return }
-            self.pendingDemuxed = (video, audio, audioDurationTicks)
         }
         // Per-segment timeline snapshot, stashed by the composition
         // callback (which fires first) and logged below once the store has
@@ -465,17 +431,16 @@ final class CastHLSProxySession: @unchecked Sendable {
             guard let self, self.ingestEpoch == epoch else { return }
             self.pendingComposition = (video, audio, vdts, vpts, apts, start)
         }
-        remuxer.onMediaSegment = { [weak self] data, durationTicks in
+        remuxer.onDemuxedMediaSegments = { [weak self] video, audio, durationTicks, audioDurationTicks in
             guard let self, self.ingestEpoch == epoch else { return }
             // The store's generation gate is the authority; this epoch
             // check just spares dead work after a teardown race.
-            let demuxed = self.pendingDemuxed
-            self.pendingDemuxed = nil
-            let publishedSeq = self.store?.addSegment(generation: gen, data: data,
+            let segmentBytes = video.count + (audio?.count ?? 0)
+            let publishedSeq = self.store?.addSegment(generation: gen,
                                                       durationTicks: durationTicks,
-                                                      videoData: demuxed?.video,
-                                                      audioData: demuxed?.audio,
-                                                      audioDurationTicks: demuxed?.audioDurationTicks)
+                                                      videoData: video,
+                                                      audioData: audio,
+                                                      audioDurationTicks: audioDurationTicks)
             if let c = self.pendingComposition {
                 self.pendingComposition = nil
                 let dur = Double(durationTicks) / Double(CastFMP4Remuxer.ticksPerSecond)
@@ -493,13 +458,13 @@ final class CastHLSProxySession: @unchecked Sendable {
                     + "vpts=\(String(format: "%.3f", c.vpts)) "
                     + "apts=\(String(format: "%.3f", c.apts)) "
                     + "buffStart=\(String(format: "%.3f", buffStart)) "
-                    + "video=\(c.video) audio=\(c.audio) \(data.count) B "
-                    + "vseg=\(demuxed?.video.count ?? 0) B "
-                    + "aseg=\(demuxed?.audio?.count ?? 0) B")
+                    + "video=\(c.video) audio=\(c.audio) \(segmentBytes) B "
+                    + "vseg=\(video.count) B "
+                    + "aseg=\(audio?.count ?? 0) B")
             }
             self.segmentsLogged += 1
             self.totalSegmentsProduced += 1
-            self.rollupBytes += data.count
+            self.rollupBytes += segmentBytes
             self.rollupTicks += durationTicks
             if self.segmentsLogged % Self.logEverySegments == 0 {
                 let seconds = Double(self.rollupTicks) / Double(CastFMP4Remuxer.ticksPerSecond)

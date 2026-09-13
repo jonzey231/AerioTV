@@ -8,7 +8,7 @@
 //  (receiver.html on the repo's gh-pages; bare castMediaElement video, AerioTV
 //  idle screen + fading channel banner), so the load carries a directly
 //  playable contentURL. Casting rework P2: that URL is the PHONE-LOCAL cast
-//  HLS proxy's master playlist (http://<phone-lan-ip>:<port>/master.m3u8,
+//  HLS proxy's DEMUXED master playlist (http://<phone-lan-ip>:<port>/demuxed.m3u8,
 //  CastHLSProxySession), which ingests the channel's raw MPEG-TS and
 //  re-serves it as sliding-window live HLS with fMP4/CMAF segments. The
 //  previous Dispatcharr progressive-fMP4 URL stuttered every 10-15 s on the
@@ -636,16 +636,12 @@ final class AerioCastController: NSObject, ObservableObject {
                 + "-> ingest=plain audio=\(allowAC3 ? "passthrough" : "aac-only")")
             let playlistURL: URL
             do {
-                _ = try await CastHLSProxySession.shared.startChannel(
-                    rawTSURL: rawTS, headers: headers, allowAC3Passthrough: allowAC3)
                 // The DEMUXED master is what the receiver loads: the audio
                 // rendition declares ac-3 / ec-3 honestly in its own
-                // audio/mp4 SourceBuffer. The muxed master stays served but
-                // nothing loads it.
-                guard let demuxed = CastHLSProxySession.shared.demuxedMasterURL else {
-                    throw CastHLSProxyError.serverFailed
-                }
-                playlistURL = demuxed
+                // audio/mp4 SourceBuffer. It is the only shape the proxy
+                // serves (the muxed endpoints were removed 2026-09-13).
+                playlistURL = try await CastHLSProxySession.shared.startChannel(
+                    rawTSURL: rawTS, headers: headers, allowAC3Passthrough: allowAC3)
             } catch is CancellationError {
                 return
             } catch {

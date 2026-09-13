@@ -169,6 +169,39 @@ Click each section for the full list:
 </details>
 
 <details>
+<summary><strong>Casting</strong> Google Cast from iPhone, with native hand-off to AerioTV on Android TV.</summary>
+
+- Cast live channels from the iPhone to Google Cast receivers on
+  your network. AirPlay remains available from the system picker
+- **Android TV / Google TV with AerioTV installed**: the cast
+  hands off to the AerioTV app on the TV, which tunes the channel
+  itself. No phone-side processing, original audio (including
+  AC-3 surround) passes through, full frame rate
+- **Other Cast receivers** (Chromecast, Chromecast Ultra,
+  Cast-enabled TVs without the app): the phone serves the live
+  stream to AerioTV's web receiver, repackaged as HLS with
+  separate video and audio renditions
+- Audio is never transcoded: AAC passes through, and AC-3 or
+  E-AC-3 pass through when the receiver reports it can decode
+  them. If it cannot, AerioTV declines to cast that channel and
+  tells you why. Video is passed through as-is (H.264 is what
+  Cast receivers decode)
+- No Dispatcharr output profile or other server-side
+  configuration is needed. Earlier guidance about a dedicated
+  cast profile is obsolete
+- When casting to the web receiver the phone is the media source,
+  so it has to stay on the same network as the receiver. Weak
+  Wi-Fi on the receiver (for example 2.4 GHz on a Chromecast
+  Ultra) can cause buffering on high-bitrate channels; 5 GHz is
+  recommended
+- The cast card at the bottom of the app controls playback; the X
+  stops the TV and closes the card. On Android TV, pressing stop
+  or exit on the remote ends the cast session and returns to
+  Live TV
+
+</details>
+
+<details>
 <summary><strong>iCloud Sync</strong> — granular categories, scoped delete, set-up-once.</summary>
 
 - Server configurations, preferences, VOD watch progress, EPG

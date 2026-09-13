@@ -4,32 +4,25 @@
 //
 //  Minimal HTTP/1.1 server for the phone-local cast HLS proxy (GH #33
 //  web-receiver rework). NWListener, no dependencies: the only client is
-//  the Cast device's Chromium page on the same LAN, fetching three
+//  the Cast device's Chromium page on the same LAN, fetching the DEMUXED
 //  resource shapes:
-//
-//    /master.m3u8    variant wrapper (CODECS + CLOSED-CAPTIONS=NONE)
-//    /live.m3u8      sliding-window live playlist
-//    /init<G>.mp4    fMP4 init segment for ingest generation G
-//    /seg<N>.m4s     CMAF media segment, monotonic sequence N
-//
-//  and, since 2026-09-13, the DEMUXED shape the sender actually loads:
 //
 //    /demuxed.m3u8   master: EXT-X-MEDIA audio rendition + EXT-X-STREAM-INF
 //    /video.m3u8     video-only media playlist (vinit / vseg)
 //    /audio.m3u8     audio-only media playlist (ainit / aseg)
-//    /vinit<G>.mp4   video-only moov for generation G
+//    /vinit<G>.mp4   video-only moov for ingest generation G
 //    /ainit<G>.mp4   audio-only moov for generation G
-//    /vseg<N>.m4s    video traf only, sequence N
+//    /vseg<N>.m4s    video traf only, monotonic sequence N
 //    /aseg<N>.m4s    audio traf only, sequence N
 //
-//  Why both: measured on the Google TV Streamer's Cast runtime,
+//  Why demuxed: measured on the Google TV Streamer's Cast runtime,
 //  isTypeSupported("video/mp4; codecs=\"avc1.64002A,ac-3\"") is false and
 //  so is isTypeSupported("video/mp4; codecs=\"ac-3\""), but
 //  isTypeSupported("audio/mp4; codecs=\"ac-3\"") is TRUE. A single muxed
-//  rendition can therefore only ever declare AAC, which is what forces the
-//  server-side AAC output profile; a separate audio rendition appended into
-//  its own SourceBuffer is how Emby's web receiver reaches its hardware
-//  audio decoder. The muxed endpoints stay for one release.
+//  rendition could therefore only ever declare AAC, which is what forced
+//  the server-side AAC output profile; a separate audio rendition appended
+//  into its own SourceBuffer is how Emby's web receiver reaches its
+//  hardware audio decoder. The muxed endpoints were removed 2026-09-13.
 //
 //  Every response carries `Access-Control-Allow-Origin: *` because the
 //  receiver page's origin is Google's, not ours, and Chromium enforces
@@ -62,8 +55,6 @@ final class CastHLSProxyServer: @unchecked Sendable {
     private let firstPlaylistServed = OSAllocatedUnfairLockFlag()
     /// Diagnostic: dump the master and media playlist TEXT once each, so
     /// a failing cast can be read back from the log without the device.
-    private let masterTextLogged = OSAllocatedUnfairLockFlag()
-    private let playlistTextLogged = OSAllocatedUnfairLockFlag()
     private let demuxedMasterTextLogged = OSAllocatedUnfairLockFlag()
     private let videoPlaylistTextLogged = OSAllocatedUnfairLockFlag()
     private let audioPlaylistTextLogged = OSAllocatedUnfairLockFlag()
@@ -71,9 +62,9 @@ final class CastHLSProxyServer: @unchecked Sendable {
     private let requestCounter = AtomicRequestCounter()
 
     /// Requests logged verbatim at the start of a session before the rate
-    /// limit kicks in (enough to cover master + playlist + init + the
-    /// first handful of segments, which is the whole startup handshake a
-    /// failed cast has to be diagnosed from).
+    /// limit kicks in (enough to cover the master, both media playlists,
+    /// both inits and the first handful of segments, which is the whole
+    /// startup handshake a failed cast has to be diagnosed from).
     private static let verboseRequests = 12
 
     /// After `verboseRequests`, only non-200 responses and every Nth
@@ -167,19 +158,6 @@ final class CastHLSProxyServer: @unchecked Sendable {
         // receiver, is the problem).
         var waitMs = -1
         switch path {
-        case "/master.m3u8":
-            let text = store.masterPlaylistText()
-            body = Data(text.utf8)
-            mime = Self.mimePlaylist
-            if masterTextLogged.trySet() { log("master playlist: \(Self.escaped(text))") }
-        case "/live.m3u8":
-            let text = store.mediaPlaylistText()
-            body = Data(text.utf8)
-            mime = Self.mimePlaylist
-            if firstPlaylistServed.trySet() {
-                log("receiver fetched the playlist for the first time (\(Self.host(of: peer)))")
-            }
-            if playlistTextLogged.trySet() { log("media playlist: \(Self.escaped(text))") }
         case "/demuxed.m3u8":
             let text = store.demuxedMasterPlaylistText()
             body = Data(text.utf8)
@@ -208,6 +186,8 @@ final class CastHLSProxyServer: @unchecked Sendable {
             mime = Self.mimeAudioMP4
         case let p where p.hasPrefix("/vseg") && p.hasSuffix(".m4s"):
             let seq = Int(p.dropFirst(5).dropLast(4))
+            // Concurrent serve queue, so holding the live-edge fetch here
+            // blocks nobody else.
             let began = Date()
             body = seq.flatMap { store.awaitSegment(seq: $0, rendition: .video) }
             waitMs = Int(Date().timeIntervalSince(began) * 1000)
@@ -216,18 +196,6 @@ final class CastHLSProxyServer: @unchecked Sendable {
             let seq = Int(p.dropFirst(5).dropLast(4))
             let began = Date()
             body = seq.flatMap { store.awaitSegment(seq: $0, rendition: .audio) }
-            waitMs = Int(Date().timeIntervalSince(began) * 1000)
-            mime = Self.mimeSegment
-        case let p where p.hasPrefix("/init") && p.hasSuffix(".mp4"):
-            let gen = Int(p.dropFirst(5).dropLast(4))
-            body = gen.flatMap { store.initSegment(generation: $0) }
-            mime = Self.mimeMP4
-        case let p where p.hasPrefix("/seg") && p.hasSuffix(".m4s"):
-            let seq = Int(p.dropFirst(4).dropLast(4))
-            // Concurrent serve queue, so holding the live-edge fetch here
-            // blocks nobody else.
-            let began = Date()
-            body = seq.flatMap { store.awaitSegment(seq: $0) }
             waitMs = Int(Date().timeIntervalSince(began) * 1000)
             mime = Self.mimeSegment
         default:
@@ -269,7 +237,7 @@ final class CastHLSProxyServer: @unchecked Sendable {
     /// fetched seg0, seg1, then seg4, then nothing).
     ///
     /// Rate limit: the first `verboseRequests` of a session verbatim
-    /// (master, playlist, init, the opening segments), then only non-200s
+    /// (master, playlists, inits, the opening segments), then only non-200s
     /// and every `requestLogEvery`th request.
     private func logRequest(method: String, path: String, status: Int, bytes: Int, waitMs: Int) {
         let n = requestCounter.next()

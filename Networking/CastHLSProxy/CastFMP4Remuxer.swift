@@ -39,14 +39,16 @@ protocol CastAudioTranscoding: AnyObject {
 
 /// Ingests raw TS bytes off the wire, demuxes to elementary streams, and
 /// emits CMAF init + media segments:
-///  - `onInitSegment` fires once, as soon as SPS/PPS (and the audio
-///    config when the PMT declares audio) have been seen: ftyp + moov
-///    with one video and optionally one audio track, timescale 90000 on
-///    both so PES 90 kHz timestamps ride through untouched.
-///  - `onMediaSegment` fires per segment: one moof (two trafs sharing
-///    one mdat, video data first), cut ONLY on video keyframes,
-///    targeting `targetSegmentTicks`. baseMediaDecodeTime is the
-///    segment's first DTS rebased to the session start, carried through
+///  - `onDemuxedInitSegments` fires once, as soon as SPS/PPS (and the
+///    audio config when the PMT declares audio) have been seen: a
+///    video-only ftyp + moov and, unless the mux is video-only, an
+///    audio-only one, timescale 90000 on both so PES 90 kHz timestamps
+///    ride through untouched.
+///  - `onDemuxedMediaSegments` fires per segment: one moof per
+///    rendition, each with its single traf, cut ONLY on video keyframes
+///    at the SAME boundary, targeting `targetSegmentTicks`.
+///    baseMediaDecodeTime is the segment's first DTS (video) or first
+///    frame PTS (audio) rebased to the generation start, carried through
 ///    the 33-bit PTS wraparound by a per-track unwrapper.
 ///
 /// H.264 video is pure passthrough (Annex B converted to 4-byte-length
@@ -60,11 +62,10 @@ final class CastFMP4Remuxer {
 
     static let ticksPerSecond: Int64 = 90_000
 
-    /// Which tracks a built init or media segment carries. `muxed` is the
-    /// legacy one-rendition shape kept for one release behind the old
-    /// master.m3u8 / live.m3u8 paths; the other two are the demuxed
-    /// renditions the sender loads (see `onDemuxedInitSegments`).
-    private enum Rendition { case muxed, videoOnly, audioOnly }
+    /// Which track a built init or media segment carries. The receiver
+    /// loads the demuxed pair and nothing else (see
+    /// `onDemuxedInitSegments`).
+    private enum Rendition { case videoOnly, audioOnly }
     private static let tsPacket = 188
     private static let ptsWrap: Int64 = 1 << 33
 
@@ -112,15 +113,10 @@ final class CastFMP4Remuxer {
         }
     }
 
-    var onInitSegment: ((Data) -> Void)?
-    /// `durationTicks` is the segment's video span in 90 kHz ticks.
-    var onMediaSegment: ((Data, Int64) -> Void)?
-
-    /// DEMUXED renditions of the init segment (2026-09-13), fired
-    /// immediately after `onInitSegment` from the same configuration: the
-    /// first Data is a video-only moov, the second an audio-only moov
-    /// carrying the ac-3 / ec-3 / mp4a sample entry, nil for a video-only
-    /// mux. Both keep the mehd/mvhd 24 h declared duration.
+    /// DEMUXED renditions of the init segment (2026-09-13): the first
+    /// Data is a video-only moov, the second an audio-only moov carrying
+    /// the ac-3 / ec-3 / mp4a sample entry, nil for a video-only mux.
+    /// Both keep the mehd/mvhd 24 h declared duration.
     ///
     /// Why demuxed: measured on the Google TV Streamer's Cast runtime,
     /// isTypeSupported("video/mp4; codecs=\"avc1.64002A,ac-3\"") and
@@ -133,10 +129,9 @@ final class CastFMP4Remuxer {
     /// declare what it really is.
     var onDemuxedInitSegments: ((Data, Data?) -> Void)?
 
-    /// DEMUXED renditions of the segment `onMediaSegment` is about to
-    /// receive, fired immediately before it, cut at exactly the same
-    /// boundary and carrying the same moof sequence number: the first Data
-    /// holds the video traf only, the second the audio traf only. When the
+    /// The two renditions of one cut, cut at exactly the same boundary and
+    /// carrying the same moof sequence number: the first Data holds the
+    /// video traf only, the second the audio traf only. When the
     /// cut span carried no audio frame the audio rendition is STILL
     /// emitted, as a zero-sample traf, so the two media playlists keep
     /// identical sequence numbering; it is nil only for a video-only mux.
@@ -1317,9 +1312,7 @@ final class CastFMP4Remuxer {
             audioReady = aacFreqIndex >= 0
         }
         guard audioReady else { return }
-        onInitSegment?(buildInitSegment(.muxed))
-        // Demuxed renditions from the SAME configuration, so a receiver
-        // that refuses a muxed ac-3 codec string can still be handed the
+        // A receiver that refuses a muxed ac-3 codec string is handed the
         // audio in its own SourceBuffer.
         onDemuxedInitSegments?(buildInitSegment(.videoOnly),
                                audioPID >= 0 ? buildInitSegment(.audioOnly) : nil)
@@ -1345,11 +1338,9 @@ final class CastFMP4Remuxer {
         for a in audioQueue {
             if a.pts < cutDTS { segAudio.append(a) } else { keepAudio.append(a) }
         }
-        // One sequence number per emitted CUT, shared by all three
-        // renditions of it: the demuxed playlists must number identically.
+        // One sequence number per emitted CUT, shared by both renditions
+        // of it: the demuxed playlists must number identically.
         sequenceNumber += 1
-        let segment = buildMediaSegment(video: videoQueue, videoDurations: durations,
-                                        audio: segAudio, rendition: .muxed)
         let videoSegment = buildMediaSegment(video: videoQueue, videoDurations: durations,
                                              audio: segAudio, rendition: .videoOnly)
         let audioSegment = audioPID >= 0
@@ -1395,16 +1386,13 @@ final class CastFMP4Remuxer {
         emittedMediaTicks += durationTicks
         videoQueue.removeAll(keepingCapacity: true)
         audioQueue = keepAudio
-        // Fired BEFORE onMediaSegment so the per-segment timeline line is
-        // logged ahead of anything the store/session does with the bytes.
+        // Fired BEFORE onDemuxedMediaSegments so the per-segment timeline
+        // line is logged ahead of anything the store/session does with the
+        // bytes.
         onSegmentComposition?(videoSamples, audioSamples,
                               firstVideoDTSSeconds, firstVideoPTSSeconds,
                               firstAudioPTSSeconds, segmentStartSeconds)
-        // Demuxed pair first, so the store can stash it and publish all
-        // three renditions under the one sequence number `onMediaSegment`
-        // claims.
         onDemuxedMediaSegments?(videoSegment, audioSegment, durationTicks, audioDurationTicks)
-        onMediaSegment?(segment, durationTicks)
     }
 
     // MARK: fMP4 writing
@@ -1439,7 +1427,6 @@ final class CastFMP4Remuxer {
     /// demuxed cast can be read back from one log.
     private static func logPrefix(_ rendition: Rendition) -> String {
         switch rendition {
-        case .muxed: return ""
         case .videoOnly: return "video "
         case .audioOnly: return "audio "
         }
@@ -1456,7 +1443,7 @@ final class CastFMP4Remuxer {
         // placeholder offsets to learn its size, then rebuild with real
         // ones (sizes are offset-independent). The sequence number is
         // claimed once per cut by `finalizeSegment`, not per build pass and
-        // not per rendition, so all three renditions of one cut agree.
+        // not per rendition, so both renditions of one cut agree.
         var moof = buildMoof(video: video, videoDurations: videoDurations, audio: audio,
                              rendition: rendition, videoDataOffset: 0, audioDataOffset: 0)
         let moofSize = moof.count

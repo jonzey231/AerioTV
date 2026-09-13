@@ -94,8 +94,11 @@ do {
     let store = CastHLSSegmentStore()
     let ticks3s: Int64 = 3 * 90_000
     let gen1 = store.beginGeneration()
-    store.setInitSegment(generation: gen1, data: Data("init1-avcC".utf8))
-    for _ in 0..<3 { store.addSegment(generation: gen1, data: Data("seg".utf8), durationTicks: ticks3s) }
+    store.setDemuxedInitSegments(generation: gen1, video: Data("init1-avcC".utf8), audio: Data("a1".utf8))
+    for _ in 0..<3 {
+        store.addSegment(generation: gen1, durationTicks: ticks3s,
+                         videoData: Data("vseg".utf8), audioData: Data("aseg".utf8))
+    }
     expectEq(store.currentReadyState.segments, 3, "segment count in generation 1")
     // The ready gate is a duration, so the store must total media time too.
     expectEq(store.currentReadyState.mediaTicks, 3 * ticks3s,
@@ -105,42 +108,47 @@ do {
     expectEq(store.currentReadyState.segments, 0, "generation bump resets ready count")
     expectEq(store.currentReadyState.mediaTicks, 0, "generation bump resets ready media time")
     // A stale gen-1 publisher must not claim a sequence number.
-    store.addSegment(generation: gen1, data: Data("stale".utf8), durationTicks: ticks3s)
-    store.setInitSegment(generation: gen2, data: Data("init2".utf8))
-    for _ in 0..<2 { store.addSegment(generation: gen2, data: Data("seg2".utf8), durationTicks: ticks3s) }
+    store.addSegment(generation: gen1, durationTicks: ticks3s,
+                     videoData: Data("stale".utf8), audioData: nil)
+    store.setDemuxedInitSegments(generation: gen2, video: Data("init2".utf8), audio: Data("a2".utf8))
+    for _ in 0..<2 {
+        store.addSegment(generation: gen2, durationTicks: ticks3s,
+                         videoData: Data("vseg2".utf8), audioData: Data("aseg2".utf8))
+    }
 
-    let text = store.mediaPlaylistText()
+    let text = store.videoPlaylistText()
     let lines = text.split(separator: "\n").map(String.init)
     expect(lines.contains("#EXT-X-VERSION:7"), "version 7")
     expect(lines.contains("#EXT-X-MEDIA-SEQUENCE:0"), "media sequence starts at 0 (5-window covers all 5)")
     expect(lines.contains("#EXT-X-DISCONTINUITY"), "discontinuity tag present at splice")
-    expect(lines.contains("#EXT-X-MAP:URI=\"init\(gen1).mp4\""), "old generation MAP present")
-    expect(lines.contains("#EXT-X-MAP:URI=\"init\(gen2).mp4\""), "new generation MAP present")
+    expect(lines.contains("#EXT-X-MAP:URI=\"vinit\(gen1).mp4\""), "old generation MAP present")
+    expect(lines.contains("#EXT-X-MAP:URI=\"vinit\(gen2).mp4\""), "new generation MAP present")
     expect(!text.contains("ENDLIST"), "no ENDLIST on a live playlist")
     // Contiguous sequence numbering across the splice: seg0..seg4.
-    for n in 0...4 { expect(lines.contains("seg\(n).m4s"), "seg\(n) advertised") }
-    expect(!text.contains("seg5.m4s"), "stale-generation segment claimed no sequence number")
+    for n in 0...4 { expect(lines.contains("vseg\(n).m4s"), "vseg\(n) advertised") }
+    expect(!text.contains("vseg5.m4s"), "stale-generation segment claimed no sequence number")
     // The discontinuity tag must sit immediately before the new
     // generation's MAP and its first segment, with nothing in between
     // (see section 12: no PROGRAM-DATE-TIME, ever).
     if let di = lines.firstIndex(of: "#EXT-X-DISCONTINUITY") {
-        expectEq(lines[di + 1], "#EXT-X-MAP:URI=\"init\(gen2).mp4\"", "discontinuity precedes new MAP")
+        expectEq(lines[di + 1], "#EXT-X-MAP:URI=\"vinit\(gen2).mp4\"", "discontinuity precedes new MAP")
     } else {
         expect(false, "discontinuity index")
     }
     expect(lines.contains("#EXTINF:3.000,"), "EXTINF has 3 decimals")
 
     // Old-generation init + segments stay fetchable until ring eviction.
-    expectEq(store.initSegment(generation: gen1), Data("init1-avcC".utf8), "old init retained")
-    expectEq(store.awaitSegment(seq: 0, timeout: 0.05), Data("seg".utf8), "old segment fetchable after splice")
+    expectEq(store.videoInitSegment(generation: gen1), Data("init1-avcC".utf8), "old init retained")
+    expectEq(store.awaitSegment(seq: 0, rendition: .video, timeout: 0.05), Data("vseg".utf8),
+             "old segment fetchable after splice")
 
     // Master playlist reflects the CURRENT generation's init (no avcC in
     // init2, so fallback codec string) and carries the load-bearing tags.
-    let master = store.masterPlaylistText()
+    let master = store.demuxedMasterPlaylistText()
     expect(master.contains("CLOSED-CAPTIONS=NONE"), "master carries CLOSED-CAPTIONS=NONE")
     expect(master.contains("BANDWIDTH="), "master carries BANDWIDTH")
     expect(master.contains("mp4a.40.2"), "master carries AAC codec")
-    expect(master.contains("live.m3u8"), "master points at media playlist")
+    expect(master.contains("video.m3u8"), "master points at the video media playlist")
 }
 
 // MARK: 5. ring eviction with init retention
@@ -149,42 +157,54 @@ do {
     let store = CastHLSSegmentStore()
     let ticks: Int64 = 3 * 90_000
     let gen1 = store.beginGeneration()
-    store.setInitSegment(generation: gen1, data: Data("i1".utf8))
-    for _ in 0..<3 { store.addSegment(generation: gen1, data: Data([1]), durationTicks: ticks) }
+    store.setDemuxedInitSegments(generation: gen1, video: Data("i1".utf8), audio: nil)
+    for _ in 0..<3 {
+        store.addSegment(generation: gen1, durationTicks: ticks, videoData: Data([1]), audioData: nil)
+    }
     let gen2 = store.beginGeneration()
-    store.setInitSegment(generation: gen2, data: Data("i2".utf8))
+    store.setDemuxedInitSegments(generation: gen2, video: Data("i2".utf8), audio: nil)
     // Ring size 8: after 6 gen2 segments (total 9) one gen1 segment evicts.
-    for _ in 0..<6 { store.addSegment(generation: gen2, data: Data([2]), durationTicks: ticks) }
-    expect(store.initSegment(generation: gen1) != nil, "gen1 init retained while a gen1 segment is ringed")
+    for _ in 0..<6 {
+        store.addSegment(generation: gen2, durationTicks: ticks, videoData: Data([2]), audioData: nil)
+    }
+    expect(store.videoInitSegment(generation: gen1) != nil,
+           "gen1 init retained while a gen1 segment is ringed")
     // Push the remaining gen1 segments out (11 total > 8 + 3).
-    for _ in 0..<2 { store.addSegment(generation: gen2, data: Data([2]), durationTicks: ticks) }
-    expectEq(store.initSegment(generation: gen1), nil, "gen1 init dropped once no ring entry references it")
-    expect(store.initSegment(generation: gen2) != nil, "current generation init always retained")
+    for _ in 0..<2 {
+        store.addSegment(generation: gen2, durationTicks: ticks, videoData: Data([2]), audioData: nil)
+    }
+    expectEq(store.videoInitSegment(generation: gen1), nil,
+             "gen1 init dropped once no ring entry references it")
+    expect(store.videoInitSegment(generation: gen2) != nil, "current generation init always retained")
     // The flagged (discontinuity) segment was seg3; it evicts at 12 total.
-    var text = store.mediaPlaylistText()
+    var text = store.videoPlaylistText()
     expect(!text.contains("#EXT-X-DISCONTINUITY-SEQUENCE"), "discontinuity-sequence absent while tag in ring")
-    for _ in 0..<4 { store.addSegment(generation: gen2, data: Data([2]), durationTicks: ticks) }
-    text = store.mediaPlaylistText()
+    for _ in 0..<4 {
+        store.addSegment(generation: gen2, durationTicks: ticks, videoData: Data([2]), audioData: nil)
+    }
+    text = store.videoPlaylistText()
     expect(text.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1"), "discontinuity-sequence increments after tag rolls out")
-    expect(!text.contains("#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"init\(gen2)"),
+    expect(!text.contains("#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"vinit\(gen2)"),
            "no stale discontinuity tag once flagged segment evicted")
 
     // Live-edge hold semantics: newest+1 blocks briefly then nils on
     // timeout; far future and evicted return nil immediately.
     let t0 = Date()
-    expectEq(store.awaitSegment(seq: 15, timeout: 0.3), nil, "newest+1 held until timeout")
+    expectEq(store.awaitSegment(seq: 15, rendition: .video, timeout: 0.3), nil,
+             "newest+1 held until timeout")
     expect(Date().timeIntervalSince(t0) >= 0.25, "newest+1 actually waited")
     let t1 = Date()
-    expectEq(store.awaitSegment(seq: 40, timeout: 5), nil, "far future 404s fast")
-    expectEq(store.awaitSegment(seq: 0, timeout: 5), nil, "evicted 404s fast")
+    expectEq(store.awaitSegment(seq: 40, rendition: .video, timeout: 5), nil, "far future 404s fast")
+    expectEq(store.awaitSegment(seq: 0, rendition: .video, timeout: 5), nil, "evicted 404s fast")
     expect(Date().timeIntervalSince(t1) < 0.2, "no hold for far-future/evicted")
     // Publication wakes a held fetch.
     let publisher = Thread {
         Thread.sleep(forTimeInterval: 0.15)
-        store.addSegment(generation: gen2, data: Data([9]), durationTicks: ticks)
+        store.addSegment(generation: gen2, durationTicks: ticks, videoData: Data([9]), audioData: nil)
     }
     publisher.start()
-    expectEq(store.awaitSegment(seq: 15, timeout: 3), Data([9]), "held fetch resolves on publish")
+    expectEq(store.awaitSegment(seq: 15, rendition: .video, timeout: 3), Data([9]),
+             "held fetch resolves on publish")
 }
 
 // MARK: 6. remuxer PTS unwrap helpers
@@ -226,14 +246,17 @@ do {
 
     let store = CastHLSSegmentStore()
     let gen = store.beginGeneration()
-    store.setInitSegment(generation: gen, data: Data("init".utf8))
-    expect(store.masterPlaylistText().contains(",mp4a.40.2\""), "master defaults to the AAC codec")
+    // No audio init, so the master falls back to the attribute the session
+    // set from the remuxer.
+    store.setDemuxedInitSegments(generation: gen, video: Data("init".utf8), audio: nil)
+    expect(store.demuxedMasterPlaylistText().contains(",mp4a.40.2\""),
+           "master defaults to the AAC codec")
     store.setAudioCodecsAttribute("ac-3")
-    let master = store.masterPlaylistText()
+    let master = store.demuxedMasterPlaylistText()
     expect(master.contains(",ac-3\""), "master names ac-3 for a passthrough")
     expect(!master.contains("mp4a"), "master drops the AAC codec for a passthrough")
     store.setAudioCodecsAttribute(nil)
-    let videoOnly = store.masterPlaylistText()
+    let videoOnly = store.demuxedMasterPlaylistText()
     expect(!videoOnly.contains("mp4a") && !videoOnly.contains("ac-3"),
            "video-only master names no audio codec")
 }
@@ -352,6 +375,14 @@ func segmentSpans(_ segment: Data) -> [Int: TrackSpan] {
     return result
 }
 
+/// Per-track spans of one CUT, read out of its two rendition segments:
+/// the video rendition carries track 1, the audio rendition track 2.
+func cutSpans(_ video: Data, _ audio: Data?) -> [Int: TrackSpan] {
+    var spans = segmentSpans(video)
+    if let audio { for (id, span) in segmentSpans(audio) { spans[id] = span } }
+    return spans
+}
+
 /// The shared real-transport-stream fixture: H.264 with B-frames plus
 /// AAC-LC in MPEG-TS, built once per machine and cached in the temp dir.
 /// nil when ffmpeg is not installed.
@@ -391,9 +422,9 @@ func continuityFixtureTS() -> Data? {
         return
     }
 
-    var segments: [Data] = []
+    var segments: [(video: Data, audio: Data?)] = []
     let remuxer = CastFMP4Remuxer()
-    remuxer.onMediaSegment = { data, _ in segments.append(data) }
+    remuxer.onDemuxedMediaSegments = { v, a, _, _ in segments.append((v, a)) }
     var offset = 0
     while offset < bytes.count {
         let n = min(64 * 1024, bytes.count - offset)
@@ -413,7 +444,7 @@ func continuityFixtureTS() -> Data? {
     var audioContiguous = true
     var audioKeepsUp = true
     for (index, segment) in segments.enumerated() {
-        let spans = segmentSpans(segment)
+        let spans = cutSpans(segment.video, segment.audio)
         guard let video = spans[1], let audio = spans[2] else {
             expect(false, "segment \(index) carries both trafs")
             return
@@ -493,12 +524,13 @@ func audioLagFixtureTS() -> Data? {
 
 /// One ingest connection: feed `limit` bytes in wire-sized chunks, then
 /// the per-connection teardown the session always runs.
-@MainActor func ingestOneConnection(_ bytes: Data, limit: Int) -> (segments: [Data], durations: [Int64]) {
-    var segments: [Data] = []
+@MainActor func ingestOneConnection(_ bytes: Data, limit: Int)
+    -> (segments: [(video: Data, audio: Data?)], durations: [Int64]) {
+    var segments: [(video: Data, audio: Data?)] = []
     var durations: [Int64] = []
     let remuxer = CastFMP4Remuxer()
-    remuxer.onMediaSegment = { data, ticks in
-        segments.append(data)
+    remuxer.onDemuxedMediaSegments = { v, a, ticks, _ in
+        segments.append((v, a))
         durations.append(ticks)
     }
     var offset = 0
@@ -528,8 +560,9 @@ func audioLagFixtureTS() -> Data? {
     guard genA.segments.count >= 3, genB.segments.count >= 2 else { return }
 
     let playlistEndA = genA.durations.reduce(0, +)
-    let lastA = segmentSpans(genA.segments[genA.segments.count - 1])
-    let firstB = segmentSpans(genB.segments[0])
+    let lastSegA = genA.segments[genA.segments.count - 1]
+    let lastA = cutSpans(lastSegA.video, lastSegA.audio)
+    let firstB = cutSpans(genB.segments[0].video, genB.segments[0].audio)
     guard let videoA = lastA[1], let audioA = lastA[2],
           let videoB = firstB[1], let audioB = firstB[2] else {
         expect(false, "both generations carry both trafs at the seam")
@@ -567,14 +600,18 @@ do {
     let store = CastHLSSegmentStore()
     let ticks: Int64 = 3 * 90_000
     let gen = store.beginGeneration()
-    store.setInitSegment(generation: gen, data: Data("i".utf8))
-    for _ in 0..<3 { store.addSegment(generation: gen, data: Data([1]), durationTicks: ticks) }
+    store.setDemuxedInitSegments(generation: gen, video: Data("i".utf8), audio: nil)
+    for _ in 0..<3 {
+        store.addSegment(generation: gen, durationTicks: ticks, videoData: Data([1]), audioData: nil)
+    }
     // nextSeq is 3; 3, 4 and 5 are inside the hold window, 6 is not.
     let held = Date()
-    expectEq(store.awaitSegment(seq: 5, timeout: 0.3), nil, "two past the edge is held until timeout")
+    expectEq(store.awaitSegment(seq: 5, rendition: .video, timeout: 0.3), nil,
+             "two past the edge is held until timeout")
     expect(Date().timeIntervalSince(held) >= 0.25, "two past the edge actually waited")
     let fast = Date()
-    expectEq(store.awaitSegment(seq: 6, timeout: 5), nil, "three past the edge 404s fast")
+    expectEq(store.awaitSegment(seq: 6, rendition: .video, timeout: 5), nil,
+             "three past the edge 404s fast")
     expect(Date().timeIntervalSince(fast) < 0.2, "no hold beyond the future window")
 }
 
@@ -618,7 +655,9 @@ do {
     // Two AAC frames is enough: the flags live in the tfhd, not per sample.
     let remuxer = CastFMP4Remuxer()
     var segment = Data()
-    remuxer.onMediaSegment = { data, _ in if segment.isEmpty { segment = data } }
+    remuxer.onDemuxedMediaSegments = { _, a, _, _ in
+        if segment.isEmpty, let a { segment = a }
+    }
     if let fixture = continuityFixtureTS() {
         var offset = 0
         while offset < fixture.count, segment.isEmpty {
@@ -765,10 +804,12 @@ do {
     let store = CastHLSSegmentStore()
     let ticks3s: Int64 = 3 * 90_000
     let gen = store.beginGeneration()
-    store.setInitSegment(generation: gen, data: Data("init".utf8))
-    for _ in 0..<4 { store.addSegment(generation: gen, data: Data([1]), durationTicks: ticks3s) }
+    store.setDemuxedInitSegments(generation: gen, video: Data("init".utf8), audio: nil)
+    for _ in 0..<4 {
+        store.addSegment(generation: gen, durationTicks: ticks3s, videoData: Data([1]), audioData: nil)
+    }
 
-    let first = store.mediaPlaylistText()
+    let first = store.videoPlaylistText()
     expectEq(programDateTimes(first).count, 0, "no EXT-X-PROGRAM-DATE-TIME on a live playlist")
     // The load gate is four segments (CastHLSProxySession.readyMinSegments),
     // so this is the narrowest window the receiver can ever see.
@@ -778,8 +819,10 @@ do {
 
     // Slide the window: windowSize is 5, so six more segments roll the
     // first four out, and the span stays the full five segments.
-    for _ in 0..<6 { store.addSegment(generation: gen, data: Data([1]), durationTicks: ticks3s) }
-    let slid = store.mediaPlaylistText()
+    for _ in 0..<6 {
+        store.addSegment(generation: gen, durationTicks: ticks3s, videoData: Data([1]), audioData: nil)
+    }
+    let slid = store.videoPlaylistText()
     expect(slid.contains("#EXT-X-MEDIA-SEQUENCE:5"), "window head advanced with the ring")
     expectEq(programDateTimes(slid).count, 0, "still no PROGRAM-DATE-TIME after the window slid")
     expectEq(windowSpanSeconds(slid), 15.0, "a full window spans five segments")
@@ -792,13 +835,17 @@ do {
     let store = CastHLSSegmentStore()
     let ticks3s: Int64 = 3 * 90_000
     let gen1 = store.beginGeneration()
-    store.setInitSegment(generation: gen1, data: Data("i1".utf8))
-    for _ in 0..<2 { store.addSegment(generation: gen1, data: Data([1]), durationTicks: ticks3s) }
+    store.setDemuxedInitSegments(generation: gen1, video: Data("i1".utf8), audio: nil)
+    for _ in 0..<2 {
+        store.addSegment(generation: gen1, durationTicks: ticks3s, videoData: Data([1]), audioData: nil)
+    }
     let gen2 = store.beginGeneration()
-    store.setInitSegment(generation: gen2, data: Data("i2".utf8))
-    for _ in 0..<2 { store.addSegment(generation: gen2, data: Data([2]), durationTicks: ticks3s) }
+    store.setDemuxedInitSegments(generation: gen2, video: Data("i2".utf8), audio: nil)
+    for _ in 0..<2 {
+        store.addSegment(generation: gen2, durationTicks: ticks3s, videoData: Data([2]), audioData: nil)
+    }
 
-    let text = store.mediaPlaylistText()
+    let text = store.videoPlaylistText()
     let lines = text.split(separator: "\n").map(String.init)
     expectEq(programDateTimes(text).count, 0, "no PROGRAM-DATE-TIME across a splice")
     if let discIndex = lines.firstIndex(of: "#EXT-X-DISCONTINUITY") {
@@ -830,7 +877,7 @@ do {
         compositions.append(Composition(video: v, audio: a, vdts: vdts, vpts: vpts,
                                         apts: apts, start: start))
     }
-    remuxer.onMediaSegment = { _, ticks in durations.append(ticks) }
+    remuxer.onDemuxedMediaSegments = { _, _, ticks, _ in durations.append(ticks) }
     var offset = 0
     while offset < bytes.count {
         let n = min(64 * 1024, bytes.count - offset)
@@ -1125,8 +1172,9 @@ func pceFixtureTS() -> (plain: Data, pce: Data)? {
         guard moofStart >= 0 else { continue }
         let moofEnd = moofStart + Int(be32(b, moofStart))
         let trafs = boxChildren(b, moofStart + 8, moofEnd).filter { $0.0 == "traf" }
-        guard trafs.count >= 2 else { continue }
-        let traf = trafs[1]
+        // Demuxed audio segments carry a single traf; a muxed moof would
+        // carry audio second. Either way the audio traf is the last one.
+        guard let traf = trafs.last else { continue }
         for child in boxChildren(b, traf.1, traf.2) where child.0 == "trun" {
             let count = Int(be32(b, child.1 + 4))
             // data_offset is relative to the moof start.
@@ -1154,8 +1202,9 @@ func pceFixtureTS() -> (plain: Data, pce: Data)? {
         var logs: [String] = []
         var initSegment: Data?
         let remuxer = CastFMP4Remuxer(log: { logs.append($0) })
-        remuxer.onInitSegment = { initSegment = $0 }
-        remuxer.onMediaSegment = { data, _ in segments.append(data) }
+        // The AUDIO init is what the PCE decides: its esds carries the ASC.
+        remuxer.onDemuxedInitSegments = { _, a in initSegment = a }
+        remuxer.onDemuxedMediaSegments = { _, a, _, _ in if let a { segments.append(a) } }
         var offset = 0
         while offset < bytes.count {
             let n = min(64 * 1024, bytes.count - offset)
@@ -1168,7 +1217,7 @@ func pceFixtureTS() -> (plain: Data, pce: Data)? {
     let pce = remux(fixtures.pce)
 
     expect(pce.segments.count >= 6, "the PCE stream still segments (\(pce.segments.count))")
-    expect(pce.init_ != nil, "the PCE stream emits an init segment")
+    expect(pce.init_ != nil, "the PCE stream emits an audio init segment")
     // Same declared track as the untouched stereo stream: the PCE said one
     // front channel pair, so the ASC says config 2 and nothing about the
     // init segment changes.
@@ -1286,7 +1335,7 @@ func countADTSFrames(_ b: [UInt8]) -> Int {
 }
 
 struct CensusResult {
-    var segments: [Data] = []
+    var segments: [(video: Data, audio: Data?)] = []
     var durations: [Int64] = []
     var audioCounts: [Int] = []
     var logs: [String] = []
@@ -1295,8 +1344,8 @@ struct CensusResult {
 @MainActor func censusRemux(_ bytes: Data) -> CensusResult {
     var result = CensusResult()
     let remuxer = CastFMP4Remuxer(log: { result.logs.append($0) })
-    remuxer.onMediaSegment = { data, ticks in
-        result.segments.append(data)
+    remuxer.onDemuxedMediaSegments = { v, a, ticks, _ in
+        result.segments.append((v, a))
         result.durations.append(ticks)
     }
     remuxer.onSegmentComposition = { _, audio, _, _, _, _ in result.audioCounts.append(audio) }
@@ -1324,7 +1373,7 @@ struct CensusResult {
     var previousEnd: Int64 = -1
     var framesInBoxes = 0
     for segment in result.segments {
-        guard let audio = segmentSpans(segment)[2] else { continue }
+        guard let audioData = segment.audio, let audio = segmentSpans(audioData)[2] else { continue }
         if previousEnd >= 0, abs(audio.start - previousEnd) > 1 { contiguous = false }
         previousEnd = audio.end
         framesInBoxes += Int((audio.end - audio.start) / frameTicks)
@@ -1590,8 +1639,8 @@ runStraddleCensus()
     var initSegment: Data?
     var logs: [String] = []
     let remuxer = CastFMP4Remuxer(log: { logs.append($0) })
-    remuxer.onInitSegment = { initSegment = $0 }
-    remuxer.onMediaSegment = { _, _ in }
+    remuxer.onDemuxedInitSegments = { v, _ in initSegment = v }
+    remuxer.onDemuxedMediaSegments = { _, _, _, _ in }
     var offset = 0
     while offset < bytes.count {
         let n = min(64 * 1024, bytes.count - offset)
@@ -1640,8 +1689,10 @@ runStraddleCensus()
     expectEq(declared, expected, "mvhd duration matches mehd (not the all-ones sentinel)")
     expect(declared != UInt64.max, "mvhd duration is not the unknown-duration sentinel")
 
-    expectEq(logs.filter { $0 == "init: mehd 24h, liveness recorded" }.count, 1,
+    expectEq(logs.filter { $0 == "video init: mehd 24h, liveness recorded" }.count, 1,
              "the declared duration is logged once per generation")
+    expectEq(logs.filter { $0 == "audio init: mehd 24h, liveness recorded" }.count, 1,
+             "the audio rendition declares its duration too")
 }
 
 runInitLivenessChecks()
@@ -1709,7 +1760,6 @@ func trunSampleCounts(_ segment: Data) -> [Int64] {
         print("SKIP demuxed renditions (no ffmpeg fixture)")
         return
     }
-    var muxed: [Data] = []
     var videoSegments: [Data] = []
     var audioSegments: [Data] = []
     var videoTicks: [Int64] = []
@@ -1724,7 +1774,6 @@ func trunSampleCounts(_ segment: Data) -> [Int64] {
         videoTicks.append(vTicks)
         audioTicks.append(aTicks)
     }
-    remuxer.onMediaSegment = { data, _ in muxed.append(data) }
     var offset = 0
     while offset < bytes.count {
         let n = min(64 * 1024, bytes.count - offset)
@@ -1768,13 +1817,13 @@ func trunSampleCounts(_ segment: Data) -> [Int64] {
     for i in videoSegments.indices {
         if trafTrackIDs(videoSegments[i]) != [1] { oneTraf = false; rightTrack = false }
         if trafTrackIDs(audioSegments[i]) != [2] { oneTraf = false; rightTrack = false }
-        let seqs = [moofSequenceNumber(muxed[i]), moofSequenceNumber(videoSegments[i]),
+        let seqs = [moofSequenceNumber(videoSegments[i]),
                     moofSequenceNumber(audioSegments[i])]
         if Set(seqs).count != 1 { sameSequence = false }
     }
     expect(oneTraf, "demuxed: exactly one traf per rendition segment")
     expect(rightTrack, "demuxed: each rendition names the track it always did")
-    expect(sameSequence, "demuxed: all three renditions of a cut share one moof sequence")
+    expect(sameSequence, "demuxed: both renditions of a cut share one moof sequence")
 
     // Audio census per segment, the rule the muxed shape already obeys: the
     // frames in the segment add up to the duration the playlist declares.
@@ -1796,10 +1845,9 @@ func trunSampleCounts(_ segment: Data) -> [Int64] {
     // And the playlists the store builds from them.
     let store = CastHLSSegmentStore()
     let gen = store.beginGeneration()
-    store.setInitSegment(generation: gen, data: Data("i".utf8))
     store.setDemuxedInitSegments(generation: gen, video: videoInit ?? Data(), audio: audioInit)
-    for i in muxed.indices {
-        _ = store.addSegment(generation: gen, data: muxed[i], durationTicks: videoTicks[i],
+    for i in videoSegments.indices {
+        _ = store.addSegment(generation: gen, durationTicks: videoTicks[i],
                              videoData: videoSegments[i],
                              audioData: i < audioSegments.count ? audioSegments[i] : nil,
                              audioDurationTicks: audioTicks[i])
@@ -1842,10 +1890,6 @@ func trunSampleCounts(_ segment: Data) -> [Int64] {
         if abs(vExtinf[i] - aExtinf[i]) > frameSeconds + 0.001 { extinfOK = false }
     }
     expect(extinfOK, "demuxed playlists: EXTINF differs by less than one audio frame")
-
-    // The muxed endpoints stay reachable for one release.
-    expect(store.masterPlaylistText().contains("live.m3u8"), "muxed master still served")
-    expect(store.mediaPlaylistText().contains("seg"), "muxed media playlist still served")
 }
 
 runDemuxedRenditionChecks()
