@@ -1256,6 +1256,16 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         nextSeq += 1
         let ramCap = retainedRAMCap ?? maxBufferedSegments
         if segments.count > ramCap {
+            let evicted = segments.prefix(segments.count - ramCap)
+            // Rule 4: the reservoir can hold at most the ring itself. If the
+            // ring is about to evict a segment the playlist never showed,
+            // advertise it first; the player must never lose a segment it
+            // has not seen.
+            if let advertised = pacedAdvertisedSeq, let lastEvicted = evicted.last?.seq,
+               lastEvicted > advertised {
+                pacedAdvertisedSeq = lastEvicted
+                pacedNextReleaseAt = Date() + (evicted.last?.duration ?? targetSegmentSeconds)
+            }
             segments.removeFirst(segments.count - ramCap)
         }
         if inProcessDelivery, let first = segments.first?.seq {
@@ -1287,6 +1297,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             debugLog("[TS-REMUX] READY on seg\(readyThreshold - 1) -> \(url.absoluteString)")
             DispatchQueue.main.async { [weak self] in self?.onReady?(url) }
         }
+        // Start (or advance) the paced live edge. The first call, in the
+        // same closure that declared READY, makes the two READY segments
+        // visible at once; every later call releases only what the 1.0x
+        // clock allows.
+        advancePacedEdge()
     }
 
     /// Write the closed segment into the rewind spill window, then ring
@@ -1338,7 +1353,113 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// the poll cadence went with it).
     let advertisedTargetDuration = DoubleBox(2.0)
 
+    // MARK: Live-edge pacing (proxy burst join, 2026-09-13)
+    //
+    // Dispatcharr's "proxy" stream profile dumps ~30 s of backlog in the
+    // first second of a tune: ten to twelve segments close inside 1 s, the
+    // advertised live edge jumps 30 s under AVPlayer's feet right after it
+    // joined, and it chases with -12640 "Cannot get that close to live",
+    // a frozen first frame and a 17 s time-to-video. Join-side fixes were
+    // tried and all failed on device (see the memory note). This paces the
+    // PLAYLIST instead: after READY the advertised edge advances at 1.0x
+    // wall time, and segments that close faster than that wait in a
+    // reservoir. They are already stored; only their visibility is delayed,
+    // never their order, and nothing is ever dropped.
+    /// Highest sequence number the live playlist is allowed to advertise.
+    /// nil until READY, which means "no pacing yet": before READY the
+    /// playlist is rendered exactly as it always was.
+    private var pacedAdvertisedSeq: Int?
+    /// Wall time at which the next held segment may become visible:
+    /// the previous advertised segment's visibility time plus its duration.
+    private var pacedNextReleaseAt = Date.distantPast
+    /// Highest /segN.ts (or .m4s) the player has fetched; the starvation
+    /// guard reads it as the player's position. -1 = nothing fetched yet.
+    private var pacedHighestRequestedSeq = -1
+    private var pacedLastLogAt = Date.distantPast
+    /// Ordinary upstream jitter (a 2.0 s segment closing 2.0 s minus a few
+    /// tens of ms after the last one) must not start holding segments on a
+    /// real-time feed, so a closure this close to its deadline counts as on
+    /// time. Bursts miss the deadline by whole seconds, not by 0.25 s.
+    private let pacedGrace = 0.25
+
+    /// Pacing applies to the LIVE playlist only. Live Rewind spill (the
+    /// whole disk window is the seekable range) and the catch-up / DVR
+    /// EVENT and ENDLIST renderings are untouched. In-process delivery is
+    /// excluded as well: its segments are inlined as data URIs, so there
+    /// are no segment GETs to read the player's position from and the
+    /// starvation guard (rule 3) could not be honored there.
+    private var pacingApplies: Bool {
+        readySignaled && !eventPlaylist && !playlistComplete
+            && !inProcessDelivery
+            && !(spillDir != nil && !spilled.isEmpty)
+    }
+
+    /// Advance the paced live edge for `now`. Called on `queue` from
+    /// playlistText (every playlist poll) and from storeSegment.
+    private func advancePacedEdge(now: Date = Date()) {
+        guard pacingApplies, let lastStored = segments.last?.seq else { return }
+        guard var advertised = pacedAdvertisedSeq else {
+            // READY just fired: the two segments READY was declared on are
+            // visible immediately (rule 1), and the clock starts from the
+            // edge segment's duration.
+            pacedAdvertisedSeq = lastStored
+            pacedNextReleaseAt = now + (segments.last?.duration ?? targetSegmentSeconds)
+            return
+        }
+        while advertised < lastStored {
+            let next = advertised + 1
+            guard let segment = segments.first(where: { $0.seq == next }) else {
+                // Ringed out before it could be advertised (rule 4 keeps
+                // this from happening, but never stall the edge on a hole).
+                advertised = next
+                continue
+            }
+            guard now >= pacedNextReleaseAt - pacedGrace else { break }
+            advertised = next
+            // Anchor the next deadline on the later of now and this one, so
+            // a late feed never banks credit and an on-time feed never
+            // accumulates debt: one 2 s segment every 2 s releases on
+            // arrival, forever, exactly as before this change.
+            pacedNextReleaseAt = max(now, pacedNextReleaseAt) + segment.duration
+        }
+        pacedAdvertisedSeq = advertised
+        pacedStarvationRelease(now: now)
+        pacedLog(now: now, lastStored: lastStored)
+    }
+
+    /// Rule 3: pacing must never cause a stall the reservoir could have
+    /// prevented. If the player is within one target duration of the
+    /// advertised edge and segments are held, release one at once.
+    private func pacedStarvationRelease(now: Date) {
+        guard let advertised = pacedAdvertisedSeq,
+              let lastStored = segments.last?.seq,
+              advertised < lastStored,
+              pacedHighestRequestedSeq >= 0 else { return }
+        let ahead = segments
+            .filter { $0.seq > pacedHighestRequestedSeq && $0.seq <= advertised }
+            .reduce(0.0) { $0 + $1.duration }
+        guard ahead <= pinnedTargetDuration else { return }
+        let next = advertised + 1
+        pacedAdvertisedSeq = next
+        pacedNextReleaseAt = now + (segments.first(where: { $0.seq == next })?.duration
+                                    ?? targetSegmentSeconds)
+        debugLog("[TS-REMUX] paced: starvation release seg \(next)")
+    }
+
+    /// Rule 6: at most one held-segment line per second.
+    private func pacedLog(now: Date, lastStored: Int) {
+        guard let advertised = pacedAdvertisedSeq, advertised < lastStored,
+              now.timeIntervalSince(pacedLastLogAt) >= 1 else { return }
+        pacedLastLogAt = now
+        let held = segments.filter { $0.seq > advertised }
+        let heldSeconds = held.reduce(0.0) { $0 + $1.duration }
+        let heldMS = Int(max(0, pacedNextReleaseAt.timeIntervalSince(now)) * 1000)
+        debugLog("[TS-REMUX] paced: seg \(advertised + 1) held \(heldMS) ms "
+                 + "(reservoir \(held.count) segs, \(String(format: "%.1f", heldSeconds)) s)")
+    }
+
     private func playlistText() -> String {
+        advancePacedEdge()
         // Rewind mode: advertise the whole disk window; AVPlayer's
         // seekable range then IS the rewind window. Every spilled entry
         // also existed in memory when written, so seq numbering is one
@@ -1346,11 +1467,19 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // In-process delivery inlines the segments, so the window is the
         // last few RAM segments only; the rewind disk window is not
         // advertised there (a 30-minute window would be a 1 GB playlist).
+        // Live-edge pacing clamps the LIVE window to the paced edge; the
+        // spill (Live Rewind) window is rendered whole, as always.
+        let live: [(seq: Int, data: Data, duration: Double)]
+        if pacingApplies, let advertised = pacedAdvertisedSeq {
+            live = segments.filter { $0.seq <= advertised }
+        } else {
+            live = segments
+        }
         let window: [(seq: Int, duration: Double)] = inProcessDelivery
-            ? segments.suffix(inlineWindowSegments).map { (seq: $0.seq, duration: $0.duration) }
+            ? live.suffix(inlineWindowSegments).map { (seq: $0.seq, duration: $0.duration) }
             : (spillDir != nil && !spilled.isEmpty)
                 ? spilled.map { (seq: $0.seq, duration: $0.duration) }
-                : segments.suffix(liveWindowSegments).map { (seq: $0.seq, duration: $0.duration) }
+                : live.suffix(liveWindowSegments).map { (seq: $0.seq, duration: $0.duration) }
         guard let first = window.first else {
             return "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:\(Int(pinnedTargetDuration.rounded(.up)))\n#EXT-X-MEDIA-SEQUENCE:0\n"
         }
@@ -1498,10 +1627,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             } else if path.hasPrefix("/seg"), path.hasSuffix(".ts"),
                       let seq = Int(path.dropFirst(4).dropLast(3)),
                       let data = self.segmentData(seq: seq) {
+                // The player's position, for the pacing starvation guard.
+                self.pacedHighestRequestedSeq = max(self.pacedHighestRequestedSeq, seq)
                 r = ServedResource(status: 200, body: data, contentType: "video/mp2t", uti: "public.mpeg-2-transport-stream")
             } else if path.hasPrefix("/seg"), path.hasSuffix(".m4s"),
                       let seq = Int(path.dropFirst(4).dropLast(4)),
                       let data = self.segmentData(seq: seq) {
+                self.pacedHighestRequestedSeq = max(self.pacedHighestRequestedSeq, seq)
                 r = ServedResource(status: 200, body: data, contentType: "video/iso.segment", uti: "public.mpeg-4")
             } else {
                 r = ServedResource(status: 404, body: Data("not found".utf8), contentType: "text/plain", uti: "public.plain-text")

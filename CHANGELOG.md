@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Live TV: channels whose server sends a large burst of backlog at tune no
+  longer freeze or chase the live edge; the live playlist now advances at
+  real time while the extra segments wait in a buffer.
+
 ## v1.8.34 - 2026-09-13
 
 ### Changed
