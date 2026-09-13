@@ -22,6 +22,176 @@ var failures = 0
     }
 }
 
+// MARK: 1. AAC PTS ladder / re-anchor
+
+do {
+    var mapper = CastAudioTranscoder.AACPTSMapper(sampleRate: 44_100)
+    let frame: Int64 = 1024 * 90_000 // divided by 44100 per step, exact each time
+    // Anchor at a non-zero pts; ladder computed from anchor each frame.
+    let anchor: Int64 = 1_234_567
+    var raws: [Int64] = []
+    for n in 0..<1000 { raws.append(anchor + Int64(n) * frame / 44_100) }
+    var lastOut: Int64 = -1
+    var okLadder = true
+    for (n, raw) in raws.enumerated() {
+        let out = mapper.map(raw)
+        let expected = anchor + Int64(n) * frame / 44_100
+        if out != expected { okLadder = false }
+        if out <= lastOut { okLadder = false }
+        lastOut = out
+    }
+    expect(okLadder, "pts ladder exact at 44.1kHz over 1000 frames (no cumulative drift)")
+    // The 1000th frame: 1000*1024/44100 s = 23.219954... s = 2089795.9 ticks.
+    // Ladder value stays anchored (no per-frame rounding accumulation).
+    expectEq(mapper.map(anchor + 1000 * frame / 44_100), anchor + 1000 * frame / 44_100,
+             "ladder frame 1000 computed from anchor")
+    // Re-anchor: a jump of 600ms (54000 ticks) past the ladder re-anchors.
+    let jumped = anchor + 1001 * frame / 44_100 + 54_000
+    expectEq(mapper.map(jumped), jumped, "re-anchor on >500ms jump")
+    // And the next frame steps from the new anchor.
+    expectEq(mapper.map(jumped + frame / 44_100), jumped + frame / 44_100, "post-re-anchor step")
+    // A small deviation (< 500ms) does NOT re-anchor: output stays on ladder.
+    var m2 = CastAudioTranscoder.AACPTSMapper(sampleRate: 48_000)
+    _ = m2.map(0)
+    let step48: Int64 = 1024 * 90_000 / 48_000 // 1920
+    expectEq(m2.map(step48 + 40_000), step48, "jitter under threshold stays on ladder")
+}
+
+// MARK: 2. MPEG audio transcode routing (stream_type 0x03 / 0x04)
+
+/// Stands in for the AudioToolbox transcoder: records what the remuxer
+/// framed and hands back one AAC frame per source frame, so the pure
+/// framing/PTS logic runs off-device.
+final class FakeCastAudioTranscoder: CastAudioTranscoding {
+    let onConfig: (_ asc: [UInt8], _ sampleRate: Int) -> Void
+    let onFrame: (_ data: [UInt8], _ ptsTicks: Int64) -> Void
+    var fedLengths: [Int] = []
+    var fedPTS: [Int64] = []
+    var flushes = 0
+    var released = 0
+    private var configSent = false
+
+    init(onConfig: @escaping (_ asc: [UInt8], _ sampleRate: Int) -> Void,
+         onFrame: @escaping (_ data: [UInt8], _ ptsTicks: Int64) -> Void) {
+        self.onConfig = onConfig
+        self.onFrame = onFrame
+    }
+
+    func feed(_ data: [UInt8], range: Range<Int>, ptsTicks: Int64, info: CastESFrameInfo) throws {
+        if !configSent {
+            configSent = true
+            // AAC-LC stereo at the source rate: freqIndex 3 is 48 kHz.
+            onConfig([0x11, 0x90], info.sampleRate)
+        }
+        fedLengths.append(range.count)
+        fedPTS.append(ptsTicks)
+        onFrame([UInt8](repeating: 0x42, count: 64), ptsTicks)
+    }
+
+    func flush() { flushes += 1 }
+    func release() { released += 1 }
+}
+
+/// One MPEG-1 Layer II frame: 48 kHz stereo, 128 kbps, 384 bytes. The
+/// payload is filler that cannot be mistaken for a syncword.
+func mp2Frame() -> [UInt8] {
+    var f = [UInt8](repeating: 0x21, count: 384)
+    f[0] = 0xFF
+    f[1] = 0xFD // MPEG-1, layer II, no CRC
+    f[2] = 0x84 // 128 kbps, 48 kHz, no padding
+    f[3] = 0x00 // stereo
+    return f
+}
+
+/// A transport stream whose PMT declares `audioStreamType` audio on
+/// pid 0x101 carrying `audioES`, alongside plain H.264 on pid 0x100.
+func mpegAudioFixtureTS(audioStreamType: UInt8, audioES: [UInt8],
+                        audioFrameLen: Int, audioFrameTicks: Int64,
+                        videoFrames: Int) -> Data {
+    var writer = CensusTSWriter()
+    let base: Int64 = 10_000
+    let pat: [UInt8] = [0x00, 0xB0, 13, 0x00, 0x01, 0xC1, 0, 0, 0, 0x01, 0xF0, 0x00, 0, 0, 0, 0]
+    let pmtBody: [UInt8] = [0x00, 0x01, 0xC1, 0, 0,
+                            0xE1, 0x00, 0xF0, 0x00,
+                            0x1B, 0xE1, 0x00, 0xF0, 0x00,
+                            audioStreamType, 0xE1, 0x01, 0xF0, 0x00]
+    let pmt: [UInt8] = [0x02, 0xB0, UInt8(pmtBody.count + 4)] + pmtBody + [0, 0, 0, 0]
+    writer.psi(pid: 0, table: pat)
+    writer.psi(pid: 0x1000, table: pmt)
+    let videoFrameTicks: Int64 = 3_000
+    var nextAudio = 0
+    let audioFrames = audioES.count / audioFrameLen
+    for i in 0..<videoFrames {
+        let dts = base + Int64(i) * videoFrameTicks
+        writer.pes(pid: 0x100, payload: censusPES(streamID: 0xE0,
+                                                  payload: censusVideoAU(keyframe: i % 30 == 0),
+                                                  pts: dts, dts: dts))
+        // One audio PES per two source frames, stamped on the first.
+        while nextAudio < audioFrames, base + Int64(nextAudio) * audioFrameTicks <= dts {
+            let end = min(nextAudio + 2, audioFrames)
+            let bytes = Array(audioES[(nextAudio * audioFrameLen)..<(end * audioFrameLen)])
+            writer.pes(pid: 0x101, payload: censusPES(streamID: 0xC0, payload: bytes,
+                                                      pts: base + Int64(nextAudio) * audioFrameTicks,
+                                                      dts: nil))
+            nextAudio = end
+        }
+    }
+    return writer.bytes
+}
+
+@MainActor func runMPEGTranscodeChecks() {
+    let frameTicks: Int64 = 1152 * CastFMP4Remuxer.ticksPerSecond / 48_000 // 2160
+    var es: [UInt8] = []
+    for _ in 0..<120 { es.append(contentsOf: mp2Frame()) }
+
+    for streamType: UInt8 in [0x03, 0x04] {
+        var fake: FakeCastAudioTranscoder?
+        let remuxer = CastFMP4Remuxer(transcoderFactory: { _, onConfig, onFrame in
+            let t = FakeCastAudioTranscoder(onConfig: onConfig, onFrame: onFrame)
+            fake = t
+            return t
+        })
+        let ts = mpegAudioFixtureTS(audioStreamType: streamType, audioES: es,
+                                    audioFrameLen: 384, audioFrameTicks: frameTicks,
+                                    videoFrames: 90)
+        var threw = false
+        do { try remuxer.feed(ts) } catch { threw = true }
+        let label = String(format: "0x%02X", Int(streamType))
+        expect(!threw, "\(label) MPEG audio is transcoded, not refused")
+        guard let t = fake else {
+            expect(false, "\(label) reached the transcoder")
+            continue
+        }
+        expect(t.fedLengths.count >= 100, "\(label) framed whole MP2 frames into the transcoder")
+        expect(t.fedLengths.allSatisfy { $0 == 384 }, "\(label) every fed frame is one 384-byte syncframe")
+        var stepsOK = true
+        for i in 1..<t.fedPTS.count where t.fedPTS[i] - t.fedPTS[i - 1] != frameTicks { stepsOK = false }
+        expect(stepsOK, "\(label) source frame PTS steps by one MP2 frame duration")
+        expectEq(remuxer.audioPathDescription, "MP2 stereo -> AAC stereo", "\(label) audio path description")
+        expectEq(remuxer.audioCodecsAttribute, "mp4a.40.2", "\(label) playlist CODECS names the encoder output")
+        remuxer.release()
+        expectEq(t.released, 1, "\(label) release tears the codecs down")
+    }
+
+    // AC-3 is NEVER transcoded: without receiver passthrough it refuses
+    // by name, and no transcoder is ever constructed.
+    var built = false
+    let ac3Remuxer = CastFMP4Remuxer(transcoderFactory: { _, onConfig, onFrame in
+        built = true
+        return FakeCastAudioTranscoder(onConfig: onConfig, onFrame: onFrame)
+    })
+    let ac3TS = mpegAudioFixtureTS(audioStreamType: 0x81, audioES: es,
+                                   audioFrameLen: 384, audioFrameTicks: frameTicks,
+                                   videoFrames: 30)
+    var refusedName: String?
+    do { try ac3Remuxer.feed(ac3TS) } catch let e as CastUnsupportedCodecError { refusedName = e.codecName }
+    catch { refusedName = "other" }
+    expectEq(refusedName, "AC-3 audio", "AC-3 still refuses by name (never transcoded)")
+    expect(!built, "no transcoder is constructed for AC-3")
+}
+
+runMPEGTranscodeChecks()
+
 // MARK: 3. master playlist codec string from synthetic avcC
 
 do {

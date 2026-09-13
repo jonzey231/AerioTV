@@ -2,17 +2,18 @@
 //  CastAudioFrameParser.swift
 //  Aerio
 //
-//  Pure elementary-stream frame parsers for the cast HLS proxy. The
-//  proxy never transcodes audio: AAC and (when the receiver reports
-//  support) AC-3 / E-AC-3 pass through untouched, and anything else is
-//  refused by name. Framing those passthrough syncframes still needs the
-//  header parsers, so they live here with no AudioToolbox dependency.
+//  Pure elementary-stream frame parsers for the cast HLS proxy, shared
+//  by the passthrough framer and the MPEG audio transcoder. AAC and
+//  (when the receiver reports support) AC-3 / E-AC-3 pass through
+//  untouched, MPEG audio transcodes to AAC, and anything else is refused
+//  by name. These parsers have no AudioToolbox dependency.
 //
 
 import Foundation
 
-/// Source codecs the proxy can frame for passthrough. Anything else
-/// refuses by name in the remuxer's PMT gate.
+/// Source codecs the proxy can frame: AC-3 / E-AC-3 for passthrough and
+/// MPEG audio for the transcode. Anything else refuses by name in the
+/// remuxer's PMT gate.
 enum CastAudioSourceCodec {
     case ac3
     case eac3

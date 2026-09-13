@@ -5500,7 +5500,10 @@ struct MainTabView: View {
                 // Android card: program on its own middle line, the accent
                 // status line last.
                 programTitle: content?.subtitle,
-                status: content == nil ? "Select a Channel" : "Casting to \(device)",
+                // A web-receiver channel flip replaces this with
+                // "Switching to <channel>" until the receiver plays.
+                status: content == nil ? "Select a Channel"
+                    : castController.castStatusLine(deviceName: device),
                 artURL: content?.artURL,
                 isPlaying: castController.remoteIsPlaying,
                 // Android parity: no transport button until something plays.
@@ -5564,7 +5567,8 @@ struct MainTabView: View {
                     ?? "Casting to \(castController.connectedDeviceName ?? "TV")",
                 subtitle: castController.castingContent?.subtitle,
                 artURL: castController.castingContent?.artURL,
-                statusText: "Casting to \(castController.connectedDeviceName ?? "TV")",
+                statusText: castController.castStatusLine(
+                    deviceName: castController.connectedDeviceName ?? "TV"),
                 isPlaying: castController.remoteIsPlaying,
                 stopLabel: "Stop casting",
                 onTogglePlayPause: { castController.remoteTogglePlayPause() },

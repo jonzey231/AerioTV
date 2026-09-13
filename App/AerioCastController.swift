@@ -100,6 +100,28 @@ final class AerioCastController: NSObject, ObservableObject {
     /// Mirrors the remote player's play/pause for the cover's transport button.
     @Published private(set) var remoteIsPlaying = true
 
+    /// Channel name of an in-flight WEB RECEIVER channel flip: set the moment
+    /// the flip is requested and cleared when the receiver reports PLAYING
+    /// (or the flip fails / is superseded / the session ends). A web-receiver
+    /// flip is a full unload + fresh load, so the old channel disappears from
+    /// the screen while the new one warms up; the card and the controls sheet
+    /// say "Switching to <channel>" for exactly that window.
+    @Published private(set) var switchingToTitle: String?
+    /// Supersede token: every flip bumps it, and a load task whose token is
+    /// stale drops its result instead of racing the newer flip.
+    private var flipToken = 0
+    /// True once a web receiver has media loaded, so the NEXT load on this
+    /// session is a flip (tear the proxy down and load afresh) rather than the
+    /// session's first load.
+    private var webReceiverHasLoadedMedia = false
+
+    /// Accent status line for the cast card and the controls sheet: the flip
+    /// in progress wins over the steady "Casting to <device>".
+    func castStatusLine(deviceName: String) -> String {
+        if let switchingToTitle { return "Switching to \(switchingToTitle)" }
+        return "Casting to \(deviceName)"
+    }
+
     /// A session connected with nothing to play: the receiver is up but the
     /// user started the cast from the guide pill, where no channel is
     /// playing. The cover renders a channel list instead of stranding the
@@ -481,9 +503,10 @@ final class AerioCastController: NSObject, ObservableObject {
         return nil
     }
 
-    /// Channel up/down from the cast cover: each flip re-points the local
-    /// proxy (same server + port, new generation, gap-free splice) and is
-    /// a fresh load on the web receiver. Walks ChannelStore's full list,
+    /// Channel up/down from the cast cover. On the web receiver every flip
+    /// is a FULL restart: the proxy session is stopped and a new one starts
+    /// on the new channel, and the receiver gets a brand new load. Walks
+    /// ChannelStore's full list,
     /// skipping channels with no stream URL at all.
     func castChannel(_ delta: Int) {
         guard let current = castingContent else { return }
@@ -607,11 +630,32 @@ final class AerioCastController: NSObject, ObservableObject {
             surfaceCastFailure("This channel has no castable stream")
             return
         }
+        // Channel flip on the web receiver (Logan 2026-09-13): a flip is a
+        // FRESH LOAD, never a splice into the running HLS stream. A Chromecast
+        // Ultra chokes on the splice for about 5 s (BUFFERING/PLAYING
+        // toggling, the playhead creeping in 0.1 s stall-skip steps, then a
+        // gap jump) while the old channel is still on screen. So the old proxy
+        // session is torn down first (ports freed, ingest cancelled), a new
+        // one starts on the new channel, and the receiver is handed a brand
+        // new load request: it unloads the old media and shows its own loading
+        // state for the new channel. Cast Connect (the native Android TV app)
+        // keeps its in-place setChannel tune; only this path changed.
+        let isFlip = webReceiverHasLoadedMedia
+        flipToken &+= 1
+        let token = flipToken
+        if isFlip {
+            switchingToTitle = content.title
+            webReceiverHasLoadedMedia = false
+            debugLog("[Cast] channel flip: fresh load for \(content.title) (proxy restart)")
+        }
         let headers = content.streamHeaders
         // Cast audio (Logan 2026-09-13): AC-3 / E-AC-3 PASSES THROUGH to the
         // web receiver and the Dispatcharr output-profile path is gone.
-        // Nothing server-side is asked for, nothing is transcoded on the
-        // phone, and local playback was never involved.
+        // Nothing server-side is asked for and local playback was never
+        // involved. The one on-phone transcode left is MPEG audio (TS
+        // stream_type 0x03 / 0x04) to AAC, restored 2026-09-13 for the
+        // European and OTA channels that carry MP2; the AC-3 family is
+        // never re-encoded.
         //
         // What changed: the proxy now serves a DEMUXED master (separate video
         // and audio renditions, one SourceBuffer each), and a Google TV
@@ -625,7 +669,7 @@ final class AerioCastController: NSObject, ObservableObject {
         // `receiverCaps` ac-3 / ec-3, measured by the receiver itself. False
         // plus an AC-3 source is refused by name rather than transcoded. AAC
         // sources pass through as before (a channel_configuration 0 layout is
-        // still refused).
+        // still refused), and MPEG audio transcodes instead of refusing.
         let receiverName = session.device.friendlyName ?? lastDeviceName
         let receiverModel = session.device.modelName ?? receiverName ?? "unknown"
         proxyLoadTask = Task { [weak self] in
@@ -634,6 +678,14 @@ final class AerioCastController: NSObject, ObservableObject {
             // arrived on this channel yet".
             let caps = await self?.awaitReceiverCaps()
             if Task.isCancelled { return }
+            if isFlip {
+                // Tear the old session down BEFORE the new ingest: this frees
+                // the port and cancels the old ingest, so the new session gets
+                // its own server, ring and playlist URL rather than splicing a
+                // new generation behind the old channel's segments.
+                await Task.detached { CastHLSProxySession.shared.stop() }.value
+                if Task.isCancelled { return }
+            }
             if caps == nil { debugLog("[Cast] caps not received, assuming no AC-3") }
             let allowAC3 = caps?["ac-3"] == true || caps?["ec-3"] == true
             func cap(_ key: String) -> String { caps?[key] == true ? "yes" : "no" }
@@ -652,6 +704,10 @@ final class AerioCastController: NSObject, ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
+                await MainActor.run { [weak self] in
+                    guard let self, self.flipToken == token else { return }
+                    self.switchingToTitle = nil
+                }
                 self?.surfaceCastFailure(Self.castFailureMessage(
                     error, receiverName: receiverName, isDispatcharr: rawTS.path.contains("/proxy/ts/")))
                 debugLog("[Cast] load channel=\(content.title) audio=unknown mode=refused")
@@ -671,6 +727,7 @@ final class AerioCastController: NSObject, ObservableObject {
                 // the proxy warmed up.
                 guard let self,
                       let live = GCKCastContext.sharedInstance().sessionManager.currentCastSession,
+                      self.flipToken == token,
                       self.castingContent?.mediaID == content.mediaID else { return }
                 self.loadProxyPlaylist(playlistURL, content: content, on: live)
             }
@@ -817,6 +874,8 @@ final class AerioCastController: NSObject, ObservableObject {
         let request = client.loadMedia(with: requestBuilder.build())
         request.delegate = self
         loadRequest = request
+        // The next load on this session is a flip: tear down and load afresh.
+        webReceiverHasLoadedMedia = true
     }
 
     // MARK: - Switch Stream reprime (cast Options sheet, task #267)
@@ -1095,6 +1154,8 @@ extension AerioCastController: GCKSessionManagerListener {
         proxyLoadTask?.cancel()
         proxyLoadTask = nil
         loadRequest = nil
+        switchingToTitle = nil
+        webReceiverHasLoadedMedia = false
         sleepTimerTask?.cancel()
         sleepTimerTask = nil
         sleepEndsAt = nil
@@ -1176,7 +1237,14 @@ extension AerioCastController: GCKRemoteMediaClientListener {
         case .paused: playing = false
         default: playing = true // playing / buffering / loading all read as "on"
         }
-        MainActor.assumeIsolated { self.remoteIsPlaying = playing }
+        // A flip's "Switching to <channel>" ends when the receiver actually
+        // reports PLAYING, not when the load request returns: the receiver
+        // still has to fetch the playlist and fill its buffer.
+        let nowPlaying = mediaStatus?.playerState == .playing
+        MainActor.assumeIsolated {
+            self.remoteIsPlaying = playing
+            if nowPlaying { self.switchingToTitle = nil }
+        }
     }
 }
 
