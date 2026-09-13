@@ -1247,11 +1247,6 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
         }
         lastSegmentCloseWall = nowWall
-        if firstSegmentCloseWall == nil {
-            firstSegmentCloseWall = nowWall
-        } else {
-            mediaSecondsAfterFirstClose += duration
-        }
         if nextSeq > 0, nextSeq % 150 == 0 {
             debugLog("[TS-REMUX] feed-jitter: \(starvedClosures) starved closures so far, worst gap \(String(format: "%.1f", worstClosureGap))s")
         }
@@ -1284,96 +1279,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if !readySignaled, segments.count >= readyThreshold,
            localPort != 0,
            fmp4 == nil || fmp4InitSegment != nil {
-            evaluateReadyGate(now: nowWall)
+            readySignaled = true
+            let url = inProcessDelivery
+                ? URL(string: "\(HLSDelivery.scheme)://\(deliveryID)/live.m3u8")!
+                : URL(string: "http://127.0.0.1:\(localPort)/live.m3u8")!
+            TuneTimeline.shared.mark("remuxReady")
+            debugLog("[TS-REMUX] READY on seg\(readyThreshold - 1) -> \(url.absoluteString)")
+            DispatchQueue.main.async { [weak self] in self?.onReady?(url) }
         }
-    }
-
-    // MARK: Burst-aware READY gate
-    //
-    // Dispatcharr's proxy stream profile dumps its whole backlog in the
-    // first second of a tune (field log 2026-09-13, a user's Apple TV:
-    // ITV1 21:06:39.958-40.130, BBC Two 21:06:49.004-50.245, BBC One
-    // 21:06:58.644-58.827 all closed 10 to 12 segments inside ~1 s). The
-    // old gate published on segment 1, when the playlist held ~3 s, and
-    // the tile then parked 6 s back from an edge that moved ~30 s in the
-    // next second. AVPlayer chased it: ITV1 froze 4 s then jumped to
-    // 33.1 s, BBC Two sat at pos 0.0 with "35.1s loaded ahead", BBC One
-    // answered -12640 "Cannot get that close to live" and stayed 25 s
-    // behind for the rest of the tune.
-    //
-    // So: publish instantly when the feed arrives at real time (healthy
-    // feeds keep their byte-identical near-instant tune), and when the
-    // ingest is running faster than 3x real time, hold READY until the
-    // burst is over - no new segment for 250 ms after at least 2 have
-    // landed - or 1.5 s, whichever comes first. The join offset is then
-    // computed against a playlist that is no longer moving.
-    private static let burstIngestRateThreshold = 3.0
-    private static let burstQuietSeconds = 0.25
-    private static let burstMaxHoldSeconds = 1.5
-
-    /// Media seconds of every segment closed AFTER the first, over the
-    /// wall seconds since that first closure. 1.0 = real time; the field
-    /// bursts measure in the tens. Nil until a second segment exists.
-    private func ingestRateRatio(now: Date) -> Double? {
-        guard let first = firstSegmentCloseWall, mediaSecondsAfterFirstClose > 0 else { return nil }
-        let elapsed = now.timeIntervalSince(first)
-        guard elapsed > 0.001 else { return mediaSecondsAfterFirstClose / 0.001 }
-        return mediaSecondsAfterFirstClose / elapsed
-    }
-
-    private func evaluateReadyGate(now: Date) {
-        guard !readySignaled else { return }
-        if burstHoldStart != nil {
-            // A segment landed while the hold is running: the feed is
-            // still dumping backlog, so restart the quiet timer. The
-            // 1.5 s deadline is untouched and still caps the wait.
-            burstHoldSegments += 1
-            armBurstQuietTimer()
-            return
-        }
-        if let rate = ingestRateRatio(now: now), rate > Self.burstIngestRateThreshold {
-            burstHoldStart = now
-            burstHoldSegments = 0
-            burstHoldRate = rate
-            armBurstQuietTimer()
-            burstDeadlineWork?.cancel()
-            let deadline = DispatchWorkItem { [weak self] in self?.signalReady() }
-            burstDeadlineWork = deadline
-            queue.asyncAfter(deadline: .now() + Self.burstMaxHoldSeconds, execute: deadline)
-            return
-        }
-        signalReady()
-    }
-
-    private func armBurstQuietTimer() {
-        burstQuietWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, self.burstHoldSegments >= 2 else { return }
-            self.signalReady()
-        }
-        burstQuietWork = work
-        queue.asyncAfter(deadline: .now() + Self.burstQuietSeconds, execute: work)
-    }
-
-    private func signalReady() {
-        guard !readySignaled, localPort != 0 else { return }
-        readySignaled = true
-        burstQuietWork?.cancel(); burstQuietWork = nil
-        burstDeadlineWork?.cancel(); burstDeadlineWork = nil
-        let url = inProcessDelivery
-            ? URL(string: "\(HLSDelivery.scheme)://\(deliveryID)/live.m3u8")!
-            : URL(string: "http://127.0.0.1:\(localPort)/live.m3u8")!
-        TuneTimeline.shared.mark("remuxReady")
-        if let start = burstHoldStart {
-            let heldMs = Int(Date().timeIntervalSince(start) * 1000)
-            let buffered = segments.reduce(0.0) { $0 + $1.duration }
-            debugLog(String(format:
-                "[TS-REMUX] READY held %d ms for burst (%d segments, %.1f s buffered, ingest %.1fx real time)",
-                heldMs, burstHoldSegments, buffered, burstHoldRate))
-            burstHoldStart = nil
-        }
-        debugLog("[TS-REMUX] READY on seg\(readyThreshold - 1) -> \(url.absoluteString)")
-        DispatchQueue.main.async { [weak self] in self?.onReady?(url) }
     }
 
     /// Write the closed segment into the rewind spill window, then ring
@@ -1400,16 +1313,6 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     // MARK: Feed-jitter telemetry (read the [TS-REMUX] feed-jitter lines)
     private var lastSegmentCloseWall: Date?
-    /// Wall clock of the FIRST closed segment plus the media seconds of
-    /// every closure after it: the ingest cadence the burst gate reads.
-    private var firstSegmentCloseWall: Date?
-    private var mediaSecondsAfterFirstClose = 0.0
-    /// Burst-hold bookkeeping (see evaluateReadyGate).
-    private var burstHoldStart: Date?
-    private var burstHoldSegments = 0
-    private var burstHoldRate = 0.0
-    private var burstQuietWork: DispatchWorkItem?
-    private var burstDeadlineWork: DispatchWorkItem?
     private var lastStarvationLogAt = Date.distantPast
     /// When ANY live remuxer last cut a segment short because bytes
     /// stopped arriving. Read from the main thread by the playback
@@ -4095,20 +3998,12 @@ struct AVPlayerMultiviewTile: View {
         // inventory): the log had no discrete line for it, only the
         // layer's isReadyForDisplay, so "how long did AVPlayer take to
         // accept the playlist" was guesswork.
-        let joinPinOffset = driverJoinOffset
         var itemReadyObs: NSKeyValueObservation?
         itemReadyObs = playerItem.observe(\.status, options: [.new]) { item, _ in
             guard item.status != .unknown else { return }
             if item.status == .readyToPlay {
                 TuneTimeline.shared.mark("ready")
                 debugLog("[AVP-ITEM] AVPlayerItem readyToPlay")
-                if joinPinOffset > 0 {
-                    let name = channelName
-                    DispatchQueue.main.async {
-                        LiveEdgeJoin.pin(item: item, offset: joinPinOffset,
-                                         channel: name)
-                    }
-                }
             } else {
                 debugLog("[AVP-ITEM] AVPlayerItem status=failed (\(item.error?.localizedDescription ?? "unknown"))")
             }
@@ -4759,51 +4654,3 @@ enum H264SPSTiming {
     }
 }
 
-
-
-/// Live-edge join helper, shared by the multiview tiles and the solo
-/// AVPlayer screen.
-///
-/// `configuredTimeOffsetFromLive` is a HINT: AVPlayer honours it against
-/// whatever the playlist says at the moment it evaluates it, and on the
-/// burst feeds Dispatcharr's proxy profile produces (about 30 s of
-/// backlog dumped in the first second of a tune) that edge is still
-/// sprinting when the item turns readyToPlay. The remuxer's burst gate
-/// now holds READY until the playlist stops moving, so the offset is
-/// computed against a stable edge; this pin is the belt to that braces:
-/// one explicit seek to (seekable end - offset) if the player actually
-/// joined far from where we asked, and never outside the seekable range.
-enum LiveEdgeJoin {
-    /// Extra slack past the requested offset before an explicit move is
-    /// worth the seek. One target duration of drift is normal.
-    static let joinTolerance = 8.0
-
-    /// Returns the seconds the playhead sits behind the live edge, or nil
-    /// when the item has no usable seekable range yet.
-    static func behindEdge(_ item: AVPlayerItem) -> Double? {
-        guard let range = item.seekableTimeRanges.last?.timeRangeValue else { return nil }
-        let behind = (range.end - item.currentTime()).seconds
-        return behind.isFinite ? behind : nil
-    }
-
-    /// One explicit seek to end-minus-offset at join.
-    static func pin(item: AVPlayerItem, offset: Double, channel: String) {
-        guard let range = item.seekableTimeRanges.last?.timeRangeValue else { return }
-        let behind = (range.end - item.currentTime()).seconds
-        guard behind.isFinite else { return }
-        guard behind > offset + joinTolerance else {
-            debugLog(String(format:
-                "[AVP-MV] join position %.1fs behind edge (asked %.1fs), no pin needed channel=%@",
-                behind, offset, channel))
-            return
-        }
-        let target = range.end - CMTime(seconds: offset, preferredTimescale: 600)
-        guard target >= range.start, target <= range.end else { return }
-        debugLog(String(format:
-            "[AVP-MV] join pin: %.1fs behind edge, seeking to edge - %.1fs channel=%@",
-            behind, offset, channel))
-        item.seek(to: target, toleranceBefore: .zero,
-                  toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600),
-                  completionHandler: nil)
-    }
-}

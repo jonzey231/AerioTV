@@ -4231,10 +4231,6 @@ final class AVPlayerProgressDriver {
     /// .waitingToPlayAtSpecifiedRate/AVPlayerWaitingToMinimizeStallsReason,
     /// the remuxer's published-segment count when that streak began, and
     /// the once-per-streak latch for playImmediately.
-    /// One-shot burst catch-up latch (see maybeCatchUpAfterBurst) and the
-    /// slack past the join offset that has to be exceeded before it fires.
-    private var burstCatchUpDone = false
-    private static let burstCatchUpSlack = 8.0
     private var minimizeStallsWaitTicks = 0
     private var minimizeStallsWaitBaseSegments = 0
     private var nudgedThisWaitStreak = false
@@ -4655,7 +4651,6 @@ final class AVPlayerProgressDriver {
             return
         }
         endWaitStreak()
-        maybeCatchUpAfterBurst(item: item)
         let now = item.currentTime()
         defer { freezeLastMediaTime = now }
         guard freezeLastMediaTime.isValid else {
@@ -4686,46 +4681,6 @@ final class AVPlayerProgressDriver {
                     freezeConsecutiveTicks, now.seconds))
                 freezeConsecutiveTicks = 0
             }
-        }
-    }
-
-    /// Burst catch-up (field log 2026-09-13, a user's Apple TV). The
-    /// Dispatcharr proxy profile dumps ~30 s of backlog in the first
-    /// second of a tune. The remuxer now holds READY until that burst is
-    /// over, but a burst can also land just AFTER the join, and then the
-    /// playhead is stranded far behind an edge it will never close on its
-    /// own: BBC One in that log played the whole tune at "edge=25.3s",
-    /// audio 2.6 s in, video only at +17641 ms. One forward seek fixes
-    /// it; the guards keep it off every healthy tune.
-    ///
-    ///  - not before 3 s of playback (the join itself is allowed to settle),
-    ///  - once per player session,
-    ///  - only inside the first 60 s (a burst is a startup artefact; later
-    ///    distance from the edge is the hold-back doing its job),
-    ///  - only when the buffer is full, so a starved feed is never
-    ///    answered by a seek toward the edge,
-    ///  - and never outside the item's own seekable range.
-    private func maybeCatchUpAfterBurst(item: AVPlayerItem) {
-        guard isLive, !burstCatchUpDone, catchupBaseMs == nil, !liveRewindWindowActive else { return }
-        let since = CACurrentMediaTime() - launchStart
-        guard since >= 3, since < 60 else { return }
-        guard item.isPlaybackBufferFull || item.isPlaybackLikelyToKeepUp else { return }
-        guard let range = item.seekableTimeRanges.last?.timeRangeValue else { return }
-        let behind = (range.end - item.currentTime()).seconds
-        guard behind.isFinite else { return }
-        let offset = appliedLiveOffset > 0
-            ? appliedLiveOffset
-            : max(3 * (liveTargetDuration?() ?? 2.0), LiveEdgeHoldback.base)
-        guard behind > offset + Self.burstCatchUpSlack else { return }
-        let target = range.end - CMTime(seconds: offset, preferredTimescale: 600)
-        guard target >= range.start, target <= range.end else { return }
-        burstCatchUpDone = true
-        debugLog(String(format:
-            "[AVP-NUDGE] burst catch-up: %.1f s behind, seeking to edge - %.1f s",
-            behind, offset))
-        player.seek(to: target, toleranceBefore: .zero,
-                    toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)) { [weak self] _ in
-            self?.player.playImmediately(atRate: 1.0)
         }
     }
 
