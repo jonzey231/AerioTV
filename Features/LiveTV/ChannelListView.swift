@@ -196,6 +196,35 @@ struct ChannelListView: View {
         return max(0, miniBottomAbs + gap - naturalTopAbsolute)
     }
 
+    #if os(tvOS)
+    /// Mini-player push for the tvOS Live TV layouts.
+    ///
+    /// The mini is an OVERLAY in HomeView (zIndex 2, `.ignoresSafeArea()`), so
+    /// nothing underneath reserves its height. With the Channel Preview banner
+    /// ON the banner reserves the mini's column and the rows already clear it.
+    /// With the banner OFF there was nothing left to reserve it, so the guide's
+    /// timeline and the channel rows started UNDER the mini.
+    ///
+    /// Logan 2026-09-13: anchor on the TIMELINE's top (the guide's time header
+    /// row), not on a fixed inset, so any future header change keeps the mini
+    /// and the timeline aligned. `contentNaturalTop` is the pane's unpadded top
+    /// (a zero-height ghost outside the padded subtree, so the reading cannot
+    /// feed back into its own padding) and `headerHeight` is the distance from
+    /// the padded host's top to the timeline's top, which is invariant under
+    /// that padding because both move together.
+    private func tvMiniPush(contentNaturalTop: CGFloat, headerHeight: CGFloat) -> CGFloat {
+        guard nowPlaying.isActive, nowPlaying.isMinimized else { return 0 }
+        // Channel Preview: the banner reserves the mini's column instead of
+        // the whole pane dropping below it (Logan 2026-09-05).
+        guard !previewMode else { return 0 }
+        guard contentNaturalTop > 0 else { return 0 }
+        let miniBottomAbs = nowPlaying.miniPlayerBottomAbs
+        guard miniBottomAbs > 0 else { return 0 }
+        let gap: CGFloat = 12
+        return max(0, miniBottomAbs + gap - (contentNaturalTop + max(0, headerHeight)))
+    }
+    #endif
+
     #if os(iOS)
     /// Resolves the width-adaptive List / Guide default for the current
     /// horizontal size class. Single source of truth so every dispatch site
@@ -377,6 +406,13 @@ struct ChannelListView: View {
     /// is padded by the difference so it starts at the time row.
     @State private var guideHostTopAbs: CGFloat = 0
     @State private var guideTopAbs: CGFloat = 0
+    /// Channel-list variant: the same three tops as the guide (natural top of
+    /// the whole pane, top of the padded host, top of the scrolling rows) so
+    /// the mini-player push can be anchored on the ROWS rather than on the
+    /// pane, exactly like the guide anchors on its timeline.
+    @State private var listNaturalTop: CGFloat = 0
+    @State private var listHostTopAbs: CGFloat = 0
+    @State private var listRowsTopAbs: CGFloat = 0
     @State private var bannerDescriptionFocused = false
     @FocusState private var pillEntryCatcherFocused: Bool
     /// Set by the nav circles' Down catcher: focus the banner description
@@ -1152,7 +1188,17 @@ struct ChannelListView: View {
                     if guideSidebarOpen { dismissGuideSidebar() }
                 }
                 #endif
+                #if os(tvOS)
+                // Anchored on the guide's timeline top, not on this pane's top
+                // (Logan 2026-09-13): with the Channel Preview banner off the
+                // mini sits directly above the timeline and the timeline plus
+                // its channel rows start below the mini's bottom edge.
+                .padding(.top, tvMiniPush(contentNaturalTop: capturedNaturalTop,
+                                          headerHeight: guideTopAbs - guideHostTopAbs))
+                .animation(.spring(response: 0.35), value: guideTopAbs)
+                #else
                 .padding(.top, miniPlayerTopInset(naturalTopAbsolute: capturedNaturalTop))
+                #endif
                 .animation(.spring(response: 0.35), value: capturedNaturalTop)
                 .animation(.spring(response: 0.35), value: nowPlaying.isMinimized)
                 .animation(.spring(response: 0.35), value: nowPlaying.miniPlayerBottomAbs)
@@ -1254,7 +1300,39 @@ struct ChannelListView: View {
     // MARK: - Channel List Content
 
     private var channelListContent: some View {
+        #if os(tvOS)
+        // Same shape as the Guide branch: a zero-height ghost OUTSIDE the
+        // padded subtree captures the pane's natural top, so the mini-player
+        // push below can never feed back into its own measurement.
         VStack(spacing: 0) {
+            Color.clear
+                .frame(height: 0)
+                .allowsHitTesting(false)
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { listNaturalTop = $0 }
+            channelListBody
+                // Anchored on the first channel row's top (the list's own
+                // header, the pill row, stands in for the guide's timeline),
+                // so the rows always start below the mini's bottom edge.
+                .padding(.top, tvMiniPush(contentNaturalTop: listNaturalTop,
+                                          headerHeight: listRowsTopAbs - listHostTopAbs))
+                .animation(.spring(response: 0.35), value: listNaturalTop)
+                .animation(.spring(response: 0.35), value: listRowsTopAbs)
+                .animation(.spring(response: 0.35), value: nowPlaying.isMinimized)
+                .animation(.spring(response: 0.35), value: nowPlaying.miniPlayerBottomAbs)
+        }
+        #else
+        channelListBody
+        #endif
+    }
+
+    private var channelListBody: some View {
+        VStack(spacing: 0) {
+            #if os(tvOS)
+            Color.clear
+                .frame(height: 0)
+                .allowsHitTesting(false)
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { listHostTopAbs = $0 }
+            #endif
             // v1.6.18 — pills only live in the VStack on iPad and tvOS,
             // where they're always visible. The iPhone scroll-collapse
             // path moves the pills into `.safeAreaInset(.top)` on the
@@ -1368,6 +1446,10 @@ struct ChannelListView: View {
                     .padding(.vertical, 8)
                 }
                 .background(Color.appBackground)
+                // Viewport top of the rows (stable while scrolling, unlike the
+                // "guide.top" anchor inside the stack): the mini-player push is
+                // anchored on this the way the guide is anchored on its timeline.
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { listRowsTopAbs = $0 }
                 .focusSection()
                 .focusScope(guideFocusNS)
                 .onReceive(

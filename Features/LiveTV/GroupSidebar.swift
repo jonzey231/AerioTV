@@ -35,6 +35,38 @@ private let groupSidebarRowFontSize: CGFloat = 30
 /// each side, rounded up so the focus ring never clips at the panel edge.
 private let groupSidebarManageButtonWidth: CGFloat = 52
 
+/// Fits a sidebar's CONTENT width to the longest group name (Logan 2026-09-13:
+/// the rail sizes to its content instead of a fixed width), then clamps.
+///
+/// Measured with the exact font the rows render with, so the fit matches what
+/// is drawn; `+ 44` covers the row's 20pt horizontal padding on each side plus
+/// a little breathing room past the text. Names longer than `maximum` truncate
+/// (every row is `lineLimit(1)`). Recomputes whenever `groups` changes because
+/// every call site reads it from a computed property.
+func groupSidebarFittedWidth(groups: [String],
+                             headerFloor: CGFloat,
+                             minimum: CGFloat,
+                             maximum: CGFloat) -> CGFloat {
+    // Rows go semibold when active, which is the widest they ever draw.
+    let font = UIFont.systemFont(ofSize: groupSidebarRowFontSize, weight: .semibold)
+    let widest = groups.reduce(CGFloat(0)) { acc, token in
+        let w = (groupSidebarLabel(token) as NSString)
+            .size(withAttributes: [.font: font]).width
+        return max(acc, w)
+    }
+    return min(max(widest + 44, headerFloor, minimum), max(minimum, maximum))
+}
+
+/// Width the header needs when it carries the Manage Groups button, so a short
+/// group list can never squeeze that button off the panel (GH #57).
+func groupSidebarHeaderFloor(hasManageButton: Bool) -> CGFloat {
+    guard hasManageButton else { return 0 }
+    let headerFont = UIFont.systemFont(ofSize: 22, weight: .semibold)
+    let headerTitle = ("Groups" as NSString)
+        .size(withAttributes: [.font: headerFont]).width
+    return 20 + headerTitle + 12 + groupSidebarManageButtonWidth + 20
+}
+
 /// Maps a group token to its sidebar display label: the "All" sentinel becomes
 /// "All Channels", every other token renders as-is.
 func groupSidebarLabel(_ token: String) -> String {
@@ -157,23 +189,12 @@ struct GroupSidebarPanel: View {
 
     private var panelWidth: CGFloat {
         if let fixedWidth { return fixedWidth }
-        let font = UIFont.systemFont(ofSize: groupSidebarRowFontSize, weight: .semibold)
-        let widest = groups.reduce(CGFloat(0)) { acc, token in
-            let w = (groupSidebarLabel(token) as NSString)
-                .size(withAttributes: [.font: font]).width
-            return max(acc, w)
-        }
-        // 20pt row padding each side + a little breathing room past the text.
-        // GH #57: the header now carries the Manage Groups button beside the
-        // title, so a narrow group list must not squeeze it off the panel.
-        // Floor the fit at what that header actually needs.
-        let headerFont = UIFont.systemFont(ofSize: 22, weight: .semibold)
-        let headerTitle = ("Groups" as NSString)
-            .size(withAttributes: [.font: headerFont]).width
-        let headerFloor = onManageGroups == nil
-            ? 0
-            : 20 + headerTitle + 12 + groupSidebarManageButtonWidth + 20
-        return min(max(widest + 44, headerFloor, 300), 620)
+        return groupSidebarFittedWidth(
+            groups: groups,
+            headerFloor: groupSidebarHeaderFloor(hasManageButton: onManageGroups != nil),
+            minimum: 300,
+            maximum: 620
+        )
     }
 
     var body: some View {
@@ -291,6 +312,23 @@ struct GuideGroupSidebarPane: View {
 
     @Namespace private var sidebarFocusNS
 
+    /// Content width of the docked drawer (Logan 2026-09-13): fitted to the
+    /// longest group name instead of the old fixed 320. Minimum is that same
+    /// 320 (the drawer never gets narrower than it used to be); maximum is
+    /// 40 percent of the screen width, less this pane's own 20pt padding on
+    /// each side, so one very long group name cannot swallow the guide.
+    /// Longer names truncate (rows are `lineLimit(1)`).
+    private var fittedContentWidth: CGFloat {
+        let screenW = UIScreen.main.bounds.width
+        let maxPane = (screenW > 0 ? screenW : 1920) * 0.40
+        return groupSidebarFittedWidth(
+            groups: groups,
+            headerFloor: groupSidebarHeaderFloor(hasManageButton: onManageGroups != nil),
+            minimum: 360 - 40,
+            maximum: maxPane - 40
+        )
+    }
+
     init(groups: [String],
          selectedToken: String,
          onSelect: @escaping (String) -> Void,
@@ -319,7 +357,7 @@ struct GuideGroupSidebarPane: View {
                 onRowFocused: onPreview,
                 onManageGroups: onManageGroups,
                 hiddenGroupCount: hiddenGroupCount,
-                fixedWidth: 360 - 40
+                fixedWidth: fittedContentWidth
             )
             .padding(.top, 4)
             .padding(.horizontal, 20)
