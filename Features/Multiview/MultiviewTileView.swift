@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 #if canImport(UIKit)
 import UIKit
 import UniformTypeIdentifiers
@@ -67,11 +68,52 @@ struct MultiviewTileView: View {
     /// list, current mpv progress, and the `togglePauseAction`
     /// callback. Non-audio tiles still decode, so this store keeps
     /// tracking even while muted.
-    @StateObject private var progressStore = PlayerProgressStore()
+    /// Ownership only. `PlayerTileStores` publishes NOTHING, so
+    /// `@StateObject` here keeps the per-tile stores alive across
+    /// re-renders (and builds a fresh pair per tile identity) WITHOUT
+    /// subscribing this view to their change streams.
+    ///
+    /// This indirection is the fix for the runaway tvOS context menu
+    /// (field trace 2026-09-13): observing `PlayerProgressStore`
+    /// directly re-evaluated the whole tile body twice a second (the
+    /// driver's 0.5s `currentMs` pump), and each re-evaluation rebuilt
+    /// the `.contextMenu` attachment. With the menu OPEN, UIKit tore
+    /// down and re-created the menu cells on that same half-second
+    /// beat: a focus update per rebuild and ~2 leaked layers per
+    /// second, until Menu dismissed it. The tile now re-renders only
+    /// when a value it actually draws changes (see the mirrors below).
+    @StateObject private var stores = PlayerTileStores()
+
+    private var progressStore: PlayerProgressStore { stores.progress }
 
     /// Per-tile attempt log — mpv events, failover attempts. Purely
     /// diagnostic; nothing user-visible.
-    @StateObject private var logStore = AttemptLogStore()
+    private var logStore: AttemptLogStore { stores.log }
+
+    // MARK: - Selective mirrors of `progressStore`
+    //
+    // The tile is no longer an observer of `progressStore`, so the few
+    // published values the BODY draws are mirrored into `@State` from
+    // explicit `.onReceive` subscriptions. Each mirror re-renders the
+    // tile only when its own value changes - never on the 0.5s clock.
+
+    /// Mirrors `progressStore.reachedEOF` (VOD "Finished" overlay).
+    @State private var eofReached: Bool = false
+    /// Mirrors `progressStore.liveResumeNotice` (GH #70 top notice).
+    @State private var liveResumeNotice: String? = nil
+    /// Mirrors `progressStore.streamStalled` (soft "Reconnecting…").
+    @State private var stalled: Bool = false
+    /// Bumped whenever a value the CONTEXT MENU / track dialogs read
+    /// changes (track lists, selected track, audio sync, pause state,
+    /// and the one-shot "driver has wired its actions" edge). Those
+    /// call sites keep reading `progressStore` directly; this counter
+    /// is what schedules the re-render so they can't go stale.
+    @State private var menuRevision: Int = 0
+    /// One-shot: the first `currentMs` tick after the engine wires its
+    /// command closures (`setAudioSyncAction` and friends are plain
+    /// stored closures, not `@Published`, so nothing else would ever
+    /// pull them into the menu).
+    @State private var didPrimeMenuAfterStart: Bool = false
 
     /// iPadOS: focus state driven by `TVPressOverlay`'s UIKit focus
     /// callback. Unused on tvOS after the Button/ButtonStyle rewrite
@@ -451,8 +493,11 @@ struct MultiviewTileView: View {
         // can reach the system unhandled and suspend the app; keep an
         // eye on field reports). Context-menu at N=1 drops its actions
         // but keeps the attachment so focus behaviour is unchanged.
+        // The menu content reads `menuRevision` so a track-list /
+        // audio-sync / pause change still refreshes it; the 0.5s
+        // position pump deliberately does not.
         .contextMenu {
-            if !isSoleTile { tileContextMenu }
+            if !isSoleTile, menuRevision >= 0 { tileContextMenu }
         }
         // Relocate-mode D-pad swap is handled at the CONTAINER level
         // (`MultiviewContainerView`'s `.onMoveCommand`), not here.
@@ -512,7 +557,7 @@ struct MultiviewTileView: View {
         // are real focus targets on tvOS. Gated to `.vod` so live / DVR
         // tiles never show it.
         .overlay {
-            if tile.kind == .vod, progressStore.reachedEOF {
+            if tile.kind == .vod, eofReached {
                 finishedOverlay
             }
         }
@@ -554,7 +599,17 @@ struct MultiviewTileView: View {
         // Clock source: the driver's 0.5s currentMs pump (a per-init
         // Timer.publish never fires here - the 0.5s re-render replaces
         // it before its first tick; field find 2026-08-27).
-        .onReceive(progressStore.$currentMs) { _ in checkDVREndApproaching() }
+        .onReceive(progressStore.$currentMs) { _ in
+            checkDVREndApproaching()
+            // One-shot only: the pump must NOT re-render the tile, or
+            // the open context menu is rebuilt twice a second.
+            if !didPrimeMenuAfterStart {
+                didPrimeMenuAfterStart = true
+                menuRevision &+= 1
+            }
+        }
+        .onReceive(progressStore.$liveResumeNotice) { liveResumeNotice = $0 }
+        .modifier(MenuStateMirror(store: progressStore, revision: $menuRevision))
         // Playback-error overlay, also a SIBLING so its Retry / Remove
         // buttons are real focus targets on tvOS (same reasoning as the
         // Finished overlay above).
@@ -567,7 +622,7 @@ struct MultiviewTileView: View {
         // rejoined the live edge; the coordinator raised the note (solo
         // fullscreen only) and auto-clears it after a few seconds.
         .overlay(alignment: .top) {
-            if let notice = progressStore.liveResumeNotice {
+            if let notice = liveResumeNotice {
                 Text(notice)
                     .font(.labelSmall)
                     .foregroundStyle(.white)
@@ -576,13 +631,15 @@ struct MultiviewTileView: View {
                     .background(.black.opacity(0.72), in: Capsule())
                     .padding(.top, 60)
                     .transition(.opacity.combined(with: .move(edge: .top)))
-                    .animation(.easeInOut(duration: 0.25), value: progressStore.liveResumeNotice)
+                    .animation(.easeInOut(duration: 0.25), value: liveResumeNotice)
             }
         }
         // Move audio off a tile the moment it finishes (before the user
         // taps anything) so sound continues on another tile. No-op if
         // this isn't the audio tile or there's nowhere to hand off.
-        .onChange(of: progressStore.reachedEOF) { _, nowEOF in
+        .onReceive(progressStore.$reachedEOF) { nowEOF in
+            guard nowEOF != eofReached else { return }
+            eofReached = nowEOF
             if nowEOF, tile.kind == .vod {
                 reassignAudioIfFinishedTileWasAudio()
             }
@@ -597,8 +654,10 @@ struct MultiviewTileView: View {
         // Pre-terminal stall -> raise a soft "Reconnecting…" card ~45s before
         // the terminal-error path would, so a killed source shows feedback fast
         // instead of a frozen frame (2026-07-13).
-        .onChange(of: progressStore.streamStalled) { _, stalled in
-            handleStreamStall(stalled)
+        .onReceive(progressStore.$streamStalled) { nowStalled in
+            guard nowStalled != stalled else { return }
+            stalled = nowStalled
+            handleStreamStall(nowStalled)
         }
         .accessibilityLabel(a11yLabel)
     }
@@ -980,7 +1039,7 @@ struct MultiviewTileView: View {
             // `.onTapGesture`). Gated to `.vod` so live / DVR tiles
             // never show it.
             .overlay {
-                if tile.kind == .vod, progressStore.reachedEOF {
+                if tile.kind == .vod, eofReached {
                     finishedOverlay
                 }
             }
@@ -1022,7 +1081,15 @@ struct MultiviewTileView: View {
             // Clock source: the driver's 0.5s currentMs pump (a per-init
             // Timer.publish never fires here - the 0.5s re-render replaces
             // it before its first tick; field find 2026-08-27).
-            .onReceive(progressStore.$currentMs) { _ in checkDVREndApproaching() }
+            .onReceive(progressStore.$currentMs) { _ in
+                checkDVREndApproaching()
+                if !didPrimeMenuAfterStart {
+                    didPrimeMenuAfterStart = true
+                    menuRevision &+= 1
+                }
+            }
+            .onReceive(progressStore.$liveResumeNotice) { liveResumeNotice = $0 }
+            .modifier(MenuStateMirror(store: progressStore, revision: $menuRevision))
             // Playback-error overlay, also OUTSIDE `tappableRegion` so
             // its Retry / Remove buttons receive taps directly.
             .overlay {
@@ -1032,15 +1099,19 @@ struct MultiviewTileView: View {
             }
             // Hand audio off the instant a VOD tile finishes (mirrors
             // the tvOS body). No-op unless this was the audio tile.
-            .onChange(of: progressStore.reachedEOF) { _, nowEOF in
+            .onReceive(progressStore.$reachedEOF) { nowEOF in
+                guard nowEOF != eofReached else { return }
+                eofReached = nowEOF
                 if nowEOF, tile.kind == .vod {
                     reassignAudioIfFinishedTileWasAudio()
                 }
             }
             // Pre-terminal stall -> soft "Reconnecting…" card (mirrors the
             // tvOS body); here the card's own Retry button is the affordance.
-            .onChange(of: progressStore.streamStalled) { _, stalled in
-                handleStreamStall(stalled)
+            .onReceive(progressStore.$streamStalled) { nowStalled in
+                guard nowStalled != stalled else { return }
+                stalled = nowStalled
+                handleStreamStall(nowStalled)
             }
     }
     #endif
@@ -2428,3 +2499,45 @@ private struct TileFocusBorder: View {
 // directly, so per-tile re-renders don't bubble into
 // `MPVPlayerViewRepresentable.updateUIViewController` during
 // multi-tile transitions. Feature is on the backlog.
+
+// MARK: - Per-tile store ownership (no publishing)
+
+/// Holder for a tile's `PlayerProgressStore` + `AttemptLogStore`.
+///
+/// It conforms to `ObservableObject` purely so `@StateObject` can own
+/// it, and it publishes NOTHING: no `@Published` property, no manual
+/// `objectWillChange.send()`. A view that holds it therefore never
+/// re-renders because of playback progress. Views that genuinely want
+/// progress updates (the chrome scrubber) observe the
+/// `PlayerProgressStore` itself, which is unchanged.
+final class PlayerTileStores: ObservableObject {
+    let progress = PlayerProgressStore()
+    let log = AttemptLogStore()
+}
+
+// MARK: - Menu-relevant state mirror
+
+/// Subscribes to only the low-frequency `PlayerProgressStore` values
+/// that the per-tile context menu and the track dialogs read, and bumps
+/// a revision counter when one of them actually changes.
+///
+/// The point is what it does NOT subscribe to: `currentMs`. The driver
+/// pumps that every 0.5s, and a tile re-render on that beat rebuilt the
+/// open tvOS `.contextMenu` twice a second (2026-09-13 field trace).
+private struct MenuStateMirror: ViewModifier {
+    let store: PlayerProgressStore
+    @Binding var revision: Int
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(store.$isPaused.removeDuplicates()) { _ in revision &+= 1 }
+            .onReceive(store.$audioSyncMs.removeDuplicates()) { _ in revision &+= 1 }
+            .onReceive(store.$currentAudioTrackID.removeDuplicates()) { _ in revision &+= 1 }
+            .onReceive(store.$currentSubtitleTrackID.removeDuplicates()) { _ in revision &+= 1 }
+            // Track LISTS are compared by count: the menu only gates on
+            // `count > 1` / `isEmpty`, and the dialogs re-read the live
+            // arrays when they open (their own @State flip re-renders).
+            .onReceive(store.$audioTracks.map(\.count).removeDuplicates()) { _ in revision &+= 1 }
+            .onReceive(store.$subtitleTracks.map(\.count).removeDuplicates()) { _ in revision &+= 1 }
+    }
+}
