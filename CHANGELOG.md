@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.8.34 - 2026-09-13
+
+### Changed
+
+- Apple TV Live TV: moving through the group sidebar shows each group's
+  channels as you go, no Select needed.
+
 ## v1.8.33 - 2026-09-13
 
 ### Fixed
