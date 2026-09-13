@@ -2011,67 +2011,42 @@ struct RemoteControlScreen: View {
     var cast: AerioCastController? = nil
 
     @State private var showOptions = false
+    @Environment(\.dismiss) private var dismiss
 
+    /// Compact bottom-sheet layout (Logan 2026-09-13): Android's cast sheet,
+    /// not a full-screen page. Grabber, centered transport glyph, channel /
+    /// program / accent status, the live bar, a skip row, then the bottom
+    /// row (collapse, big play/pause, channel list, X). Every action the old
+    /// full-screen remote had is still wired.
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            VStack(spacing: 18) {
-                Spacer()
-                if let art = artURL, let url = URL(string: art) {
-                    AsyncImage(url: url) { image in
-                        image.resizable().scaledToFit()
-                    } placeholder: {
-                        Image(systemName: "tv").font(.system(size: 56))
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: 220, maxHeight: 120)
-                } else {
-                    Image(systemName: "tv").font(.system(size: 56))
-                        .foregroundStyle(.secondary)
-                }
-                Text(title)
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-                if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.body)
-                        .foregroundStyle(.white.opacity(0.7))
-                        .multilineTextAlignment(.center)
-                }
-                Text(statusText)
-                    .font(.callout)
-                    .foregroundStyle(Color.accentColor)
-                Spacer()
+            VStack(spacing: 12) {
+                header
                 if let companion, companion.remoteState.canSeek {
                     rewindBar(companion)
+                } else {
+                    liveLabel
                 }
-                HStack(spacing: 24) {
-                    transportButton("chevron.down", label: "Channel down", action: onChannelDown)
-                    Button(action: onTogglePlayPause) {
-                        ZStack {
-                            Circle().fill(Color.accentColor).frame(width: 74, height: 74)
-                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                                .font(.system(size: 30, weight: .bold))
-                                .foregroundStyle(.black)
-                        }
-                    }
-                    .accessibilityLabel(isPlaying ? "Pause" : "Play")
-                    transportButton("chevron.up", label: "Channel up", action: onChannelUp)
-                    if companion != nil || cast != nil {
-                        transportButton("slider.horizontal.3", label: "Options") { showOptions = true }
-                    }
-                    transportButton("xmark", label: stopLabel, action: onStop)
-                }
+                skipRow
+                bottomRow
                 if let onDisconnect {
                     Button("Disconnect (leave TV playing)", action: onDisconnect)
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(Color.accentColor)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(ThemeManager.shared.accent)
                 }
-                Spacer().frame(height: 48)
+                Spacer(minLength: 0)
             }
             .padding(.horizontal, 24)
+            .padding(.top, 14)
+            .padding(.bottom, 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+        // Small sheet over the page the user was on (the channel list stays
+        // visible above it), draggable up to full height for the options.
+        .presentationDetents([.fraction(0.45), .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(Color.black)
         .sheet(isPresented: $showOptions) {
             if let companion {
                 RemoteOptionsSheet(companion: companion)
@@ -2079,6 +2054,103 @@ struct RemoteControlScreen: View {
                 CastOptionsSheet(cast: cast)
             }
         }
+    }
+
+    /// Centered glyph (or the channel art when we have it), channel name in
+    /// bold, the program, then the accent "Casting to <device>" line.
+    @ViewBuilder
+    private var header: some View {
+        VStack(spacing: 2) {
+            if let art = artURL, let url = URL(string: art) {
+                AsyncImage(url: url) { image in
+                    image.resizable().scaledToFit()
+                } placeholder: {
+                    glyphIcon
+                }
+                .frame(maxWidth: 96, maxHeight: 44)
+            } else {
+                glyphIcon
+            }
+            Text(title)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            if let subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .lineLimit(1)
+            }
+            Text(statusText)
+                .font(.caption)
+                .foregroundStyle(ThemeManager.shared.accent)
+                .lineLimit(1)
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var glyphIcon: some View {
+        Image(systemName: "sparkles.tv")
+            .font(.system(size: 30))
+            .foregroundStyle(ThemeManager.shared.accent)
+            .frame(height: 40)
+    }
+
+    /// Stand-in for the rewind bar when the transport cannot seek: a full
+    /// accent bar with the LIVE label, same slot as Android's.
+    private var liveLabel: some View {
+        VStack(spacing: 6) {
+            Capsule()
+                .fill(ThemeManager.shared.accent)
+                .frame(height: 4)
+            Text("LIVE")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(ThemeManager.shared.accent)
+                .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    /// Skip back / forward 30 with the channel flip on either side, so the
+    /// channel-switch actions survive the condensed layout.
+    private var skipRow: some View {
+        HStack(spacing: 18) {
+            transportButton("chevron.down", label: "Channel down",
+                            size: 44, action: onChannelDown)
+            transportButton("gobackward.30", label: "Skip back 30 seconds",
+                            size: 44) { seek(-30_000) }
+            transportButton("goforward.30", label: "Skip forward 30 seconds",
+                            size: 44) { seek(30_000) }
+            transportButton("chevron.up", label: "Channel up",
+                            size: 44, action: onChannelUp)
+        }
+    }
+
+    private var bottomRow: some View {
+        HStack(spacing: 22) {
+            transportButton("chevron.down", label: "Collapse", size: 50) { dismiss() }
+            Button(action: onTogglePlayPause) {
+                ZStack {
+                    Circle().fill(ThemeManager.shared.accent).frame(width: 64, height: 64)
+                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 26, weight: .bold))
+                        .foregroundStyle(.black)
+                }
+            }
+            .accessibilityLabel(isPlaying ? "Pause" : "Play")
+            if companion != nil || cast != nil {
+                transportButton("list.bullet", label: "Channel list and options",
+                                size: 50) { showOptions = true }
+            }
+            transportButton("xmark", label: stopLabel, size: 50, action: onStop)
+        }
+    }
+
+    /// ±30 s: the companion transport seeks its live-rewind buffer; the other
+    /// transports flip nothing, so the buttons stay out of the way there.
+    private func seek(_ deltaMs: Int64) {
+        guard let companion, companion.remoteState.canSeek else { return }
+        companion.seekBy(deltaMs)
     }
 
     /// Live-rewind scrubber + ±30s + Go Live (companion only, when a rewind
@@ -2091,9 +2163,9 @@ struct RemoteControlScreen: View {
         VStack(spacing: 8) {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.2)).frame(height: 5)
-                    Capsule().fill(Color.accentColor)
-                        .frame(width: geo.size.width * frac, height: 5)
+                    Capsule().fill(Color.white.opacity(0.2)).frame(height: 4)
+                    Capsule().fill(ThemeManager.shared.accent)
+                        .frame(width: geo.size.width * frac, height: 4)
                 }
                 .contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0).onEnded { g in
@@ -2102,30 +2174,31 @@ struct RemoteControlScreen: View {
                     companion.seekToWall(target)
                 })
             }
-            .frame(height: 24)
+            .frame(height: 16)
+            // The +/-30 s buttons live in the sheet's own skip row now, so
+            // this line keeps just the LIVE state and Go Live.
             HStack {
-                Button("−30s") { companion.seekBy(-30_000) }
-                Spacer()
                 Text(s.isLive ? "LIVE" : "REWOUND")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(s.isLive ? Color.accentColor : .white.opacity(0.6))
+                    .foregroundStyle(s.isLive ? ThemeManager.shared.accent : .white.opacity(0.6))
                 Spacer()
-                Button("+30s") { companion.seekBy(30_000) }
-                Button("Go Live") { companion.goLive() }
+                if !s.isLive {
+                    Button("Go Live") { companion.goLive() }
+                        .foregroundStyle(ThemeManager.shared.accent)
+                }
             }
-            .font(.callout)
-            .foregroundStyle(.white)
+            .font(.caption)
         }
-        .padding(.bottom, 12)
     }
 
     private func transportButton(_ symbol: String, label: String,
+                                 size: CGFloat = 58,
                                  action: @escaping () -> Void) -> some View {
         Button(action: action) {
             ZStack {
-                Circle().fill(Color.white.opacity(0.12)).frame(width: 58, height: 58)
+                Circle().fill(Color.white.opacity(0.12)).frame(width: size, height: size)
                 Image(systemName: symbol)
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.system(size: size * 0.38, weight: .semibold))
                     .foregroundStyle(.white)
             }
         }
