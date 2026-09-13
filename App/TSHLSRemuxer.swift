@@ -1247,6 +1247,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
         }
         lastSegmentCloseWall = nowWall
+        closedSegmentCount += 1
+        recentClosures.append((wall: nowWall, duration: duration))
+        let closureCutoff = nowWall.addingTimeInterval(-Self.burstRateWindowSeconds)
+        recentClosures.removeAll { $0.wall < closureCutoff }
         if firstSegmentCloseWall == nil {
             firstSegmentCloseWall = nowWall
         } else {
@@ -1307,18 +1311,29 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     // burst is over - no new segment for 250 ms after at least 2 have
     // landed - or 1.5 s, whichever comes first. The join offset is then
     // computed against a playlist that is no longer moving.
-    private static let burstIngestRateThreshold = 3.0
+    //
+    // The rate has to be measured over a REAL window, not over the first
+    // two closures: every tune closes segments 0 and 1 back to back (the
+    // remuxer cuts them out of the bytes already in flight), so a ratio
+    // taken there says "20x real time" on a perfectly healthy feed and
+    // the hold misfired on a normal channel (device round 2026-09-13,
+    // "READY held 1551 ms for burst (1 segments, 3.1 s buffered)" on
+    // ESPN2, whose first three segments totalled 3.1 s). A backlog dump
+    // is only a backlog dump when BOTH hold at the moment the gate is
+    // evaluated: at least 3 segments have closed in total, and at least
+    // 6 media seconds closed inside the last 1.0 s of wall time.
+    private static let burstMinSegments = 3
+    private static let burstMinMediaInWindow = 6.0
+    private static let burstRateWindowSeconds = 1.0
     private static let burstQuietSeconds = 0.25
     private static let burstMaxHoldSeconds = 1.5
 
-    /// Media seconds of every segment closed AFTER the first, over the
-    /// wall seconds since that first closure. 1.0 = real time; the field
-    /// bursts measure in the tens. Nil until a second segment exists.
-    private func ingestRateRatio(now: Date) -> Double? {
-        guard let first = firstSegmentCloseWall, mediaSecondsAfterFirstClose > 0 else { return nil }
-        let elapsed = now.timeIntervalSince(first)
-        guard elapsed > 0.001 else { return mediaSecondsAfterFirstClose / 0.001 }
-        return mediaSecondsAfterFirstClose / elapsed
+    /// Media seconds closed inside the trailing `burstRateWindowSeconds`
+    /// of wall time, and that as a multiple of real time for the log.
+    private func recentIngest(now: Date) -> (media: Double, ratio: Double) {
+        let cutoff = now.addingTimeInterval(-Self.burstRateWindowSeconds)
+        let media = recentClosures.filter { $0.wall >= cutoff }.reduce(0.0) { $0 + $1.duration }
+        return (media, media / Self.burstRateWindowSeconds)
     }
 
     private func evaluateReadyGate(now: Date) {
@@ -1331,7 +1346,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             armBurstQuietTimer()
             return
         }
-        if let rate = ingestRateRatio(now: now), rate > Self.burstIngestRateThreshold {
+        let ingest = recentIngest(now: now)
+        if closedSegmentCount >= Self.burstMinSegments,
+           ingest.media >= Self.burstMinMediaInWindow {
+            let rate = ingest.ratio
             burstHoldStart = now
             burstHoldSegments = 0
             burstHoldRate = rate
@@ -1364,9 +1382,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             ? URL(string: "\(HLSDelivery.scheme)://\(deliveryID)/live.m3u8")!
             : URL(string: "http://127.0.0.1:\(localPort)/live.m3u8")!
         TuneTimeline.shared.mark("remuxReady")
+        playlistMediaDuration.set(segments.reduce(0.0) { $0 + $1.duration })
         if let start = burstHoldStart {
             let heldMs = Int(Date().timeIntervalSince(start) * 1000)
             let buffered = segments.reduce(0.0) { $0 + $1.duration }
+            joinBurstBuffered.set(buffered)
             debugLog(String(format:
                 "[TS-REMUX] READY held %d ms for burst (%d segments, %.1f s buffered, ingest %.1fx real time)",
                 heldMs, burstHoldSegments, buffered, burstHoldRate))
@@ -1404,6 +1424,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// every closure after it: the ingest cadence the burst gate reads.
     private var firstSegmentCloseWall: Date?
     private var mediaSecondsAfterFirstClose = 0.0
+    /// Trailing wall window of closures the burst gate measures over, and
+    /// the total number of segments this remuxer has ever closed.
+    private var recentClosures: [(wall: Date, duration: Double)] = []
+    private var closedSegmentCount = 0
     /// Burst-hold bookkeeping (see evaluateReadyGate).
     private var burstHoldStart: Date?
     private var burstHoldSegments = 0
@@ -1434,6 +1458,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// 18:07: the value grew from 3 to 4 when a 3.92 s segment closed and
     /// the poll cadence went with it).
     let advertisedTargetDuration = DoubleBox(2.0)
+    /// Media seconds this remuxer's playlist advertised at READY, and the
+    /// buffered seconds a burst hold accumulated (0 when READY was not
+    /// held). Both are read from the main thread by the join geometry.
+    let playlistMediaDuration = DoubleBox(0)
+    let joinBurstBuffered = DoubleBox(0)
 
     private func playlistText() -> String {
         // Rewind mode: advertise the whole disk window; AVPlayer's
@@ -4035,7 +4064,35 @@ struct AVPlayerMultiviewTile: View {
         let joinTargetDuration = isLiveTune ? (remuxer?.advertisedTargetDuration.get() ?? 0) : 0
         if isLiveTune {
             let floor = max(3 * joinTargetDuration, learned, LiveEdgeHoldback.base)
-            let offset = min(18.0, floor + streamBufferSeconds)
+            var offset = min(18.0, floor + streamBufferSeconds)
+            // Burst cushion: when the remuxer HELD READY for a backlog
+            // dump, the playlist it publishes is deeper than a normal
+            // tune's, and joining only 6 s back puts the playhead where
+            // the next poll can outrun it. Ride the held buffer, capped
+            // at 10 s, and keep 2 s of it as headroom.
+            let burstBuffered = remuxer?.joinBurstBuffered.get() ?? 0
+            if burstBuffered > 0 {
+                let cushioned = max(offset, min(burstBuffered - 2, 10))
+                if cushioned != offset {
+                    debugLog(String(format:
+                        "[AVP-MV] burst cushion: offset %.1f s (burst %.1f s)",
+                        cushioned, burstBuffered))
+                    offset = cushioned
+                }
+            }
+            // Clamp to what the playlist actually holds. Asking to join
+            // further back than the whole advertised window is how the
+            // device round produced -12640 "Cannot get that close to
+            // live"; the remuxer knows its own media duration at READY,
+            // so clamp here instead of seeking afterwards.
+            let playlistDuration = remuxer?.playlistMediaDuration.get() ?? 0
+            if playlistDuration > 0, offset > playlistDuration - 1.5 {
+                let clamped = max(0, playlistDuration - 1.5)
+                debugLog(String(format:
+                    "[AVP-MV] join offset clamped %.1f s -> %.1f s (playlist %.1f s)",
+                    offset, clamped, playlistDuration))
+                offset = clamped
+            }
             playerItem.configuredTimeOffsetFromLive =
                 CMTime(seconds: offset, preferredTimescale: 600)
             debugLog(String(format:
@@ -4095,20 +4152,12 @@ struct AVPlayerMultiviewTile: View {
         // inventory): the log had no discrete line for it, only the
         // layer's isReadyForDisplay, so "how long did AVPlayer take to
         // accept the playlist" was guesswork.
-        let joinPinOffset = driverJoinOffset
         var itemReadyObs: NSKeyValueObservation?
         itemReadyObs = playerItem.observe(\.status, options: [.new]) { item, _ in
             guard item.status != .unknown else { return }
             if item.status == .readyToPlay {
                 TuneTimeline.shared.mark("ready")
                 debugLog("[AVP-ITEM] AVPlayerItem readyToPlay")
-                if joinPinOffset > 0 {
-                    let name = channelName
-                    DispatchQueue.main.async {
-                        LiveEdgeJoin.pin(item: item, offset: joinPinOffset,
-                                         channel: name)
-                    }
-                }
             } else {
                 debugLog("[AVP-ITEM] AVPlayerItem status=failed (\(item.error?.localizedDescription ?? "unknown"))")
             }
@@ -4761,49 +4810,3 @@ enum H264SPSTiming {
 
 
 
-/// Live-edge join helper, shared by the multiview tiles and the solo
-/// AVPlayer screen.
-///
-/// `configuredTimeOffsetFromLive` is a HINT: AVPlayer honours it against
-/// whatever the playlist says at the moment it evaluates it, and on the
-/// burst feeds Dispatcharr's proxy profile produces (about 30 s of
-/// backlog dumped in the first second of a tune) that edge is still
-/// sprinting when the item turns readyToPlay. The remuxer's burst gate
-/// now holds READY until the playlist stops moving, so the offset is
-/// computed against a stable edge; this pin is the belt to that braces:
-/// one explicit seek to (seekable end - offset) if the player actually
-/// joined far from where we asked, and never outside the seekable range.
-enum LiveEdgeJoin {
-    /// Extra slack past the requested offset before an explicit move is
-    /// worth the seek. One target duration of drift is normal.
-    static let joinTolerance = 8.0
-
-    /// Returns the seconds the playhead sits behind the live edge, or nil
-    /// when the item has no usable seekable range yet.
-    static func behindEdge(_ item: AVPlayerItem) -> Double? {
-        guard let range = item.seekableTimeRanges.last?.timeRangeValue else { return nil }
-        let behind = (range.end - item.currentTime()).seconds
-        return behind.isFinite ? behind : nil
-    }
-
-    /// One explicit seek to end-minus-offset at join.
-    static func pin(item: AVPlayerItem, offset: Double, channel: String) {
-        guard let range = item.seekableTimeRanges.last?.timeRangeValue else { return }
-        let behind = (range.end - item.currentTime()).seconds
-        guard behind.isFinite else { return }
-        guard behind > offset + joinTolerance else {
-            debugLog(String(format:
-                "[AVP-MV] join position %.1fs behind edge (asked %.1fs), no pin needed channel=%@",
-                behind, offset, channel))
-            return
-        }
-        let target = range.end - CMTime(seconds: offset, preferredTimescale: 600)
-        guard target >= range.start, target <= range.end else { return }
-        debugLog(String(format:
-            "[AVP-MV] join pin: %.1fs behind edge, seeking to edge - %.1fs channel=%@",
-            behind, offset, channel))
-        item.seek(to: target, toleranceBefore: .zero,
-                  toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600),
-                  completionHandler: nil)
-    }
-}
