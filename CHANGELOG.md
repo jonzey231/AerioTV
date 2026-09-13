@@ -1,12 +1,18 @@
 # Changelog
 
-## Unreleased
+## v1.8.35 - 2026-09-13
 
 ### Fixed
 
+- Multiview: adding a second stream no longer locks up the app, a
+  regression in 1.8.34.
+- Apple TV Multiview: the X now closes the stream you have selected
+  instead of another one.
 - Live TV: channels whose server sends a large burst of backlog at tune no
   longer freeze or chase the live edge; the live playlist now advances at
   real time while the extra segments wait in a buffer.
+- Program Info: the program's own icon now shows when no other artwork is
+  available.
 
 ## v1.8.34 - 2026-09-13
 
