@@ -2207,7 +2207,12 @@ struct ChannelListView: View {
     }
 
     /// Where a reset lands: All when shown, else the first visible group.
-    private var fallbackGroup: String { groupTokens.first ?? "All" }
+    /// Not simply the first token: Favorites is pinned ahead of All, so a
+    /// reset would otherwise land on Favorites whenever the user has any.
+    private var fallbackGroup: String {
+        let tokens = groupTokens
+        return tokens.contains("All") ? "All" : (tokens.first ?? "All")
+    }
 
     /// Apple GH #55: step the selected group pill from a horizontal list
     /// swipe. The cycle matches the pill row (All first, then the visible
