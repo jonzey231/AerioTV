@@ -4791,22 +4791,44 @@ struct AVPlayerLayerView: UIViewRepresentable {
             debugLog("[AVP-PIP] will start")
         }
 
+        func pictureInPictureControllerDidStartPictureInPicture(_ controller: AVPictureInPictureController) {
+            debugLog("[AVP-PIP] did start")
+            #if os(iOS)
+            let pipID = ObjectIdentifier(controller)
+            MainActor.assumeIsolated { ForegroundPiPBridge.shared.handleDidStart(pipID) }
+            #endif
+        }
+
         func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) {
             store?.isPiPActive = false
             debugLog("[AVP-PIP] did stop")
+            #if os(iOS)
+            let pipID = ObjectIdentifier(controller)
+            MainActor.assumeIsolated { ForegroundPiPBridge.shared.handleDidStop(pipID) }
+            #endif
         }
 
         func pictureInPictureController(_ controller: AVPictureInPictureController,
                                         failedToStartPictureInPictureWithError error: Error) {
             store?.isPiPActive = false
             debugLog("[AVP-PIP] failed to start: \(error.localizedDescription)")
+            #if os(iOS)
+            let pipID = ObjectIdentifier(controller)
+            MainActor.assumeIsolated { ForegroundPiPBridge.shared.handleFailedToStart(pipID) }
+            #endif
         }
 
         func pictureInPictureController(_ controller: AVPictureInPictureController,
                                         restoreUserInterfaceForPictureInPictureStopWithCompletionHandler
                                         completionHandler: @escaping (Bool) -> Void) {
             // The hosting SwiftUI screen stays mounted through PiP, so
-            // there is nothing to rebuild - just confirm.
+            // there is nothing to rebuild - just confirm. A swipe-started
+            // PiP ran with the player minimized: expand it first so the
+            // window animates back into a fullscreen layer.
+            #if os(iOS)
+            let pipID = ObjectIdentifier(controller)
+            MainActor.assumeIsolated { _ = ForegroundPiPBridge.shared.handleRestore(pipID) }
+            #endif
             completionHandler(true)
         }
     }
@@ -4850,6 +4872,7 @@ struct AVPlayerLayerView: UIViewRepresentable {
                     pip.delegate = coordinator
                     pip.canStartPictureInPictureAutomaticallyFromInline = true
                     coordinator.controller = pip
+                    MainActor.assumeIsolated { ForegroundPiPBridge.shared.register(pip) }
                     debugLog("[AVP-PIP] controller armed (auto-start from inline)")
                 }
             }
@@ -4859,6 +4882,7 @@ struct AVPlayerLayerView: UIViewRepresentable {
             existing.delegate = nil
             coordinator.controller = nil
             coordinator.store?.isPiPActive = false
+            MainActor.assumeIsolated { ForegroundPiPBridge.shared.unregister(existing) }
             debugLog("[AVP-PIP] controller disarmed (no longer solo)")
         }
         #endif

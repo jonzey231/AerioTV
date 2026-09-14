@@ -356,6 +356,9 @@ class MPVPlayerViewController: UIViewController {
         // multi-tile mount correlates 1:1 with an app freeze.
         pip.canStartPictureInPictureAutomaticallyFromInline = true
         pipController = pip
+        // Top-strip swipe down starts this same controller in the
+        // foreground (ForegroundPiPBridge).
+        ForegroundPiPBridge.shared.register(pip)
         return pip
     }
 
@@ -365,7 +368,8 @@ class MPVPlayerViewController: UIViewController {
     /// on swipe-home. The sample buffer layer itself (and mpv) stay
     /// alive; only the PiP controller goes away.
     func tearDownPiPController() {
-        guard pipController != nil else { return }
+        guard let existing = pipController else { return }
+        ForegroundPiPBridge.shared.unregister(existing)
         pipController?.delegate = nil
         pipController = nil
     }
@@ -8737,6 +8741,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 completionHandler: @escaping (Bool) -> Void
         ) {
             debugLog("🖼️ PiP: restore UI")
+            // Exception to the no-UI-work rule above: a PiP started by the
+            // top-strip swipe ran with the player minimized, so the
+            // fullscreen player has to come back before the window can
+            // animate into it. Background-started PiP is a no-op here
+            // (the bridge only owns swipe-started sessions).
+            #if os(iOS)
+            let pipID = ObjectIdentifier(pictureInPictureController)
+            MainActor.assumeIsolated {
+                _ = ForegroundPiPBridge.shared.handleRestore(pipID)
+            }
+            #endif
             // Synchronous completion. No layout, no state writes, no
             // async hops. The source view is already in its restored
             // position (it never moved during PiP — iOS merely
@@ -8758,6 +8773,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         ) {
             #if DEBUG
             debugLog("[MPV-PIP] failedToStart: \(error.localizedDescription) (\(error as NSError))")
+            #endif
+            #if os(iOS)
+            let pipID = ObjectIdentifier(pictureInPictureController)
+            MainActor.assumeIsolated {
+                ForegroundPiPBridge.shared.handleFailedToStart(pipID)
+            }
             #endif
         }
 
@@ -8834,6 +8855,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             _ pictureInPictureController: AVPictureInPictureController
         ) {
             debugLog("🖼️ PiP: did start")
+            // Swipe-started PiP: minimize the fullscreen player now that
+            // the window owns the video.
+            #if os(iOS)
+            let pipID = ObjectIdentifier(pictureInPictureController)
+            MainActor.assumeIsolated {
+                ForegroundPiPBridge.shared.handleDidStart(pipID)
+            }
+            #endif
         }
 
         func pictureInPictureControllerDidStopPictureInPicture(
@@ -8850,6 +8879,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // position than the pre-PiP layout. Kept as a log-only
             // hook so the next person debugging PiP has symmetry with
             // `didStart`.
+            //
+            // One exception: a swipe-started PiP closed with the window's
+            // X (no restore ran) stops playback, matching the docked
+            // bar's X. Restored sessions already cleared the bridge flag,
+            // so this is a no-op for them.
+            #if os(iOS)
+            let pipID = ObjectIdentifier(pictureInPictureController)
+            MainActor.assumeIsolated {
+                ForegroundPiPBridge.shared.handleDidStop(pipID)
+            }
+            #endif
         }
     }
 }

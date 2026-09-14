@@ -303,6 +303,148 @@ extension View {
     }
 }
 
+#if os(iOS)
+// MARK: - Top-strip swipe down (foreground PiP / minimize)
+
+/// Shared rules for the iOS player top-strip swipe down (Logan 2026-09-14):
+/// a downward swipe that STARTS in the close-button row starts system PiP
+/// on iPhone (docked-bar minimize when PiP can't run) and minimizes to the
+/// corner mini on iPad. The same strip is excluded from the channel flip.
+enum PlayerTopStripSwipe {
+    /// Fraction of the player height that counts as the top strip.
+    static let heightFraction: CGFloat = 0.15
+    /// Downward travel (or predicted travel) that commits the action.
+    static let commitDistance: CGFloat = 80
+    static let commitPredicted: CGFloat = 180
+    /// Visual follow: the content moves at this fraction of the finger,
+    /// capped, so it reads as "pulling" rather than dragging the page.
+    static let followFactor: CGFloat = 0.5
+    static let followCap: CGFloat = 140
+
+    static func startsInStrip(_ startY: CGFloat, height: CGFloat) -> Bool {
+        height > 0 && startY <= height * heightFraction
+    }
+
+    static func followOffset(_ translation: CGSize) -> CGFloat {
+        guard translation.height > 0 else { return 0 }
+        return min(followCap, translation.height * followFactor)
+    }
+
+    static func commits(_ value: DragGesture.Value) -> Bool {
+        let dy = value.translation.height
+        guard dy > abs(value.translation.width) else { return false }
+        return dy > commitDistance || value.predictedEndTranslation.height > commitPredicted
+    }
+}
+
+/// Foreground Picture in Picture for the fullscreen player. Both engines'
+/// solo PiP controllers (AVPlayerLayerView and the mpv sample-buffer
+/// layer) register here; the top-strip swipe asks it to start PiP while
+/// the app is active. The session stays mounted (the iPhone container is
+/// only minimized off screen), so there is nothing to tear down on start.
+/// Restore expands the player again; closing the window without restore
+/// stops playback the way the docked bar's X does.
+@MainActor
+final class ForegroundPiPBridge: ObservableObject {
+    static let shared = ForegroundPiPBridge()
+
+    private weak var controller: AVPictureInPictureController?
+    /// True from a swipe-started PiP until it restores, closes or fails.
+    /// HomeView hides the iPhone docked bar while this is set: the video
+    /// lives in the PiP window, an empty bar under it would be noise.
+    @Published private(set) var isActive = false
+    /// Run once PiP has actually started (or failed to): the caller's
+    /// minimize. Deferred so the source layer stays on screen while iOS
+    /// animates it into the window.
+    private var pendingOnStart: (@MainActor () -> Void)?
+
+    func register(_ pip: AVPictureInPictureController) {
+        controller = pip
+    }
+
+    func unregister(_ pip: AVPictureInPictureController) {
+        guard controller === pip else { return }
+        controller = nil
+        // The window can't outlive its controller; don't strand the
+        // docked bar hidden behind a flag nothing will clear.
+        isActive = false
+        pendingOnStart = nil
+    }
+
+    /// Starts PiP on the registered controller. False when PiP can't run
+    /// right now (unsupported, no solo controller, layer not ready), in
+    /// which case the caller falls back to the plain minimize.
+    func start(onStarted: @escaping @MainActor () -> Void) -> Bool {
+        guard AVPictureInPictureController.isPictureInPictureSupported(),
+              let pip = controller,
+              pip.isPictureInPicturePossible,
+              !pip.isPictureInPictureActive else {
+            debugLog("[PIP-FG] start unavailable controller=\(controller != nil) possible=\(controller?.isPictureInPicturePossible == true)")
+            return false
+        }
+        isActive = true
+        pendingOnStart = onStarted
+        pip.startPictureInPicture()
+        debugLog("[PIP-FG] start requested")
+        return true
+    }
+
+    // Delegate hooks take the controller's ObjectIdentifier, not the
+    // controller: the PiP delegates are nonisolated and Swift 6 refuses to
+    // send the non-Sendable controller into a main-actor closure.
+
+    /// Delegate hook: PiP refused to start. The deferred minimize still
+    /// runs, which lands on the docked bar: exactly the fallback path.
+    func handleFailedToStart(_ pipID: ObjectIdentifier) {
+        guard isActive else { return }
+        isActive = false
+        debugLog("[PIP-FG] failed to start; falling back to docked minimize")
+        runPendingOnStart()
+    }
+
+    /// Delegate hook: the window is up, minimize the fullscreen player.
+    func handleDidStart(_ pipID: ObjectIdentifier) {
+        guard isActive else { return }
+        runPendingOnStart()
+    }
+
+    private func runPendingOnStart() {
+        let body = pendingOnStart
+        pendingOnStart = nil
+        body?()
+    }
+
+    /// Delegate hook: the PiP restore button. Reopens the fullscreen
+    /// player; returns true when this bridge owned the PiP session.
+    @discardableResult
+    func handleRestore(_ pipID: ObjectIdentifier) -> Bool {
+        guard isActive else { return false }
+        isActive = false
+        pendingOnStart = nil
+        debugLog("[PIP-FG] restore -> expand")
+        NowPlayingManager.shared.expand()
+        return true
+    }
+
+    /// Delegate hook: PiP ended. Still active here means no restore ran,
+    /// i.e. the user closed the window, so stop playback. A controller
+    /// that is no longer the registered one (the tile was swapped by a
+    /// retune) only clears the flag and never stops the new session.
+    func handleDidStop(_ pipID: ObjectIdentifier) {
+        guard isActive else { return }
+        isActive = false
+        pendingOnStart = nil
+        guard controller.map(ObjectIdentifier.init) == pipID else {
+            debugLog("[PIP-FG] stale controller stopped; flag cleared")
+            return
+        }
+        debugLog("[PIP-FG] closed without restore -> stop playback")
+        NowPlayingManager.shared.stop()
+    }
+}
+#endif
+
+
 // MARK: - Player Progress Store
 // @unchecked Sendable: all @Published mutations dispatched to main queue manually.
 final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
@@ -816,6 +958,18 @@ private struct PlayerRootView: View {
     @AppStorage("appBehaviorsAppleTVChannelFlip")
     private var appleTVChannelFlip = true
 
+    #if os(iOS)
+    /// Key window height (iPad split screen safe); the swipe-down minimize
+    /// travel and the top-strip bounds are both measured against it.
+    private var playerWindowHeight: CGFloat {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first { $0.isKeyWindow }?
+            .frame.height ?? UIScreen.main.bounds.height
+    }
+    #endif
+
     // Skip Intervals (Settings > App Behaviors): the skip buttons and a
     // single scrub press. Held here so a change re-renders the glyphs.
     @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
@@ -1181,6 +1335,14 @@ private struct PlayerRootView: View {
             DragGesture()
                 .onChanged { value in
                     guard state == .playing, value.translation.height > 0 else { return }
+                    // Top-strip swipe down (Logan 2026-09-14): follows the
+                    // finger at a damped rate with chrome up or down; it
+                    // never flips (see onEnded).
+                    if PlayerTopStripSwipe.startsInStrip(
+                        value.startLocation.y, height: playerWindowHeight) {
+                        dragOffset = PlayerTopStripSwipe.followOffset(value.translation)
+                        return
+                    }
                     // v1.6.18: when chrome is visible, a downward swipe
                     // is a channel-flip-down gesture (handled in
                     // onEnded below) — NOT a minimize. Skip the
@@ -1191,6 +1353,38 @@ private struct PlayerRootView: View {
                 }
                 .onEnded { value in
                     guard state == .playing else { return }
+
+                    // Top-strip swipe down: iPhone starts system PiP in the
+                    // foreground and minimizes once the window is up (the
+                    // player stays mounted off screen, so mpv keeps feeding
+                    // the PiP layer); PiP unavailable, or iPad, falls to the
+                    // regular minimize below. Swipes starting in the strip
+                    // never reach the channel flip.
+                    if PlayerTopStripSwipe.startsInStrip(
+                        value.startLocation.y, height: playerWindowHeight) {
+                        guard PlayerTopStripSwipe.commits(value) else {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                                dragOffset = 0
+                            }
+                            return
+                        }
+                        let finish: @MainActor () -> Void = {
+                            if let minimize = onMinimize { minimize() } else { onDismiss() }
+                        }
+                        if UIDevice.current.userInterfaceIdiom == .phone,
+                           onMinimize != nil,
+                           ForegroundPiPBridge.shared.start(onStarted: finish) {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                                dragOffset = 0
+                            }
+                            return
+                        }
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                            dragOffset = 0
+                        }
+                        finish()
+                        return
+                    }
 
                     // v1.6.18: chrome-visible vertical swipe = channel
                     // flip (live only). User flow: tap once to summon
@@ -1223,11 +1417,7 @@ private struct PlayerRootView: View {
                     }
 
                     // Use the key window height for iPad/split-screen compatibility.
-                    let screenH = UIApplication.shared.connectedScenes
-                        .compactMap { $0 as? UIWindowScene }
-                        .flatMap { $0.windows }
-                        .first { $0.isKeyWindow }?
-                        .frame.height ?? UIScreen.main.bounds.height
+                    let screenH = playerWindowHeight
                     let isSwipeDown = value.translation.height > abs(value.translation.width) &&
                                       (value.translation.height > 60 ||
                                        value.predictedEndTranslation.height > 150)
@@ -5834,6 +6024,8 @@ struct NativeHLSPlayerScreen: View {
     @State private var showControls = true
     @State private var controlsHideTask: Task<Void, Never>?
     @State private var selfTestTask: Task<Void, Never>?
+    /// Top-strip swipe down follow offset (Logan 2026-09-14).
+    @State private var topStripDragOffset: CGFloat = 0
     #endif
 
 
@@ -5967,6 +6159,34 @@ struct NativeHLSPlayerScreen: View {
         // pins the chrome visible; resume restarts the hide clock
         // (mpv chrome parity).
         .statusBarHidden()
+        // Top-strip swipe down (Logan 2026-09-14). This screen is a
+        // fullScreenCover whose dismissal tears the player down, so it
+        // cannot hand its layer to a foreground PiP window; it always
+        // takes the minimize fallback (the same corner mini / docked bar
+        // handoff Menu uses), on iPhone and iPad alike.
+        .offset(y: topStripDragOffset)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 10)
+                .onChanged { value in
+                    guard player != nil,
+                          PlayerTopStripSwipe.startsInStrip(
+                            value.startLocation.y, height: UIScreen.main.bounds.height) else { return }
+                    topStripDragOffset = PlayerTopStripSwipe.followOffset(value.translation)
+                }
+                .onEnded { value in
+                    guard player != nil,
+                          PlayerTopStripSwipe.startsInStrip(
+                            value.startLocation.y, height: UIScreen.main.bounds.height) else {
+                        if topStripDragOffset != 0 { topStripDragOffset = 0 }
+                        return
+                    }
+                    let commit = PlayerTopStripSwipe.commits(value)
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                        topStripDragOffset = 0
+                    }
+                    if commit { minimizeToMini() }
+                }
+        )
         .onChange(of: progressStore.isPaused) { _, paused in
             if paused {
                 controlsHideTask?.cancel()

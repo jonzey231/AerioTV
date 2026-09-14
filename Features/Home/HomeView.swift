@@ -4106,6 +4106,11 @@ struct MainTabView: View {
     @ObservedObject private var tabBarScrollState = TVTabBarScrollState.shared
     #endif
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
+    #if os(iOS)
+    /// Swipe-started foreground PiP: the docked bar stays hidden while the
+    /// video lives in the PiP window.
+    @ObservedObject private var foregroundPiP = ForegroundPiPBridge.shared
+    #endif
     @ObservedObject private var favoritesStore = FavoritesStore.shared
     @ObservedObject private var vodStore = VODStore.shared
     private var isTVOS: Bool {
@@ -5341,6 +5346,7 @@ struct MainTabView: View {
                 if UIDevice.current.userInterfaceIdiom == .phone,
                    activeRemoteTransport == nil,
                    nowPlaying.isMinimized,
+                   !foregroundPiP.isActive,
                    let item = nowPlaying.playingItem {
                     MiniPlayerBar(item: item, nowPlaying: nowPlaying, dragOffset: $miniPlayerDragOffset)
                 }

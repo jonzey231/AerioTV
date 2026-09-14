@@ -240,12 +240,57 @@ struct MultiviewContainerView: View {
     @State private var showRecentsOverlay = false
     #endif
 
+    #if os(iOS)
+    /// Top-strip swipe down (Logan 2026-09-14): how far the player follows
+    /// the finger, and the container height the strip is measured against
+    /// (the same local space the drag gestures report in).
+    @State private var topStripDragOffset: CGFloat = 0
+    @State private var containerHeight: CGFloat = 0
+
+    private var topStripSwipeEligible: Bool {
+        store.tiles.count == 1 && !nowPlaying.isMinimized
+    }
+
+    /// Commit of the top-strip swipe down. iPhone: system PiP in the
+    /// foreground, with the container minimized (off screen, still mounted,
+    /// so the player and remuxer keep running for the PiP window); the
+    /// docked bar is the fallback when PiP can't start. iPad: corner mini.
+    private func performTopStripSwipeDown() {
+        if store.vodSoloTile != nil { store.saveVODProgressNow() }
+        let minimize: @MainActor () -> Void = {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                topStripDragOffset = 0
+                NowPlayingManager.shared.minimize()
+            }
+        }
+        let phone = UIDevice.current.userInterfaceIdiom == .phone
+        // PiP path: spring back first so the layer is in place for the
+        // PiP start animation; the bridge minimizes once PiP is up (or
+        // failed, which lands on the docked bar).
+        let pip = phone && ForegroundPiPBridge.shared.start(onStarted: minimize)
+        DebugLogger.shared.log(
+            "[MV-Cmd] top-strip swipe down → \(pip ? "foreground PiP" : "minimize") phone=\(phone)",
+            category: "Playback", level: .info
+        )
+        if pip {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                topStripDragOffset = 0
+            }
+        } else {
+            minimize()
+        }
+    }
+    #endif
+
     var body: some View {
         // GH #71: digit keys tune the sole live tile through the same
         // path the Channels overlay pick uses (`tuneDirect`). Only the
         // full-screen single live tile listens; multiview grids, VOD
         // and the minimized mini-player leave digits alone.
         containerBody
+            #if os(iOS)
+            .offset(y: topStripDragOffset)
+            #endif
             .channelNumberEntry(
                 scope: .player,
                 isActive: store.tiles.count == 1
@@ -838,6 +883,10 @@ struct MultiviewContainerView: View {
                           nowPlaying.isLive,
                           store.tiles.count == 1,
                           !nowPlaying.isMinimized else { return }
+                    // The top strip belongs to the swipe-down PiP /
+                    // minimize gesture below, never to a flip.
+                    guard !PlayerTopStripSwipe.startsInStrip(
+                        value.startLocation.y, height: containerHeight) else { return }
                     let dy = value.translation.height
                     let dx = abs(value.translation.width)
                     // Strong vertical bias: at least 40pt of
@@ -851,6 +900,40 @@ struct MultiviewContainerView: View {
                     chromeState.reportInteraction()
                 }
         )
+        // Top-strip swipe down (Logan 2026-09-14): a downward drag that
+        // STARTS in the close-button row pulls the player down; past the
+        // threshold iPhone starts system PiP (docked-bar minimize when PiP
+        // can't run) and iPad minimizes to the corner mini. Solo tile only:
+        // PiP is a fullscreen affordance and the grid has no strip.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 10)
+                .onChanged { value in
+                    guard topStripSwipeEligible,
+                          PlayerTopStripSwipe.startsInStrip(
+                            value.startLocation.y, height: containerHeight) else { return }
+                    topStripDragOffset = PlayerTopStripSwipe.followOffset(value.translation)
+                }
+                .onEnded { value in
+                    guard topStripSwipeEligible,
+                          PlayerTopStripSwipe.startsInStrip(
+                            value.startLocation.y, height: containerHeight) else {
+                        if topStripDragOffset != 0 { topStripDragOffset = 0 }
+                        return
+                    }
+                    if PlayerTopStripSwipe.commits(value) {
+                        performTopStripSwipeDown()
+                    } else {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                            topStripDragOffset = 0
+                        }
+                    }
+                }
+        )
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.height
+        } action: { newValue in
+            containerHeight = newValue
+        }
         #endif
         #if os(tvOS)
         // tvOS: D-pad navigation only wakes the per-tile focus
