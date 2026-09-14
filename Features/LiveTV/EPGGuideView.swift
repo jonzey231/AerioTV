@@ -4550,7 +4550,51 @@ final class GuideFocusScratch {
     /// A remapped short Left/Right action waiting out the hold threshold;
     /// cancelled when the same press turns into a hold.
     var pendingArrowAction: Task<Void, Never>?
+    /// When a remapped arrow's focus move was last vetoed before the engine
+    /// applied it, and for which key; the onMoveCommand that follows the
+    /// same press skips so the action runs once.
+    var arrowVetoAt = Date.distantPast
+    var arrowVetoKey: String?
 }
+
+#if os(tvOS)
+/// Guide key rows (Logan 2026-09-14): a remapped short Left/Right must not
+/// move the ring at all. onMoveCommand runs AFTER the engine has applied the
+/// move, so the only place to refuse it is `shouldUpdateFocus(in:)`, which
+/// the engine asks every environment containing the focused item, the window
+/// included, before it commits. The guide installs `handler` while it is on
+/// screen; returning true blocks that one update.
+@MainActor
+enum GuideArrowFocusVeto {
+    static var handler: ((UIFocusUpdateContext) -> Bool)?
+    static var owner: ObjectIdentifier?
+    private static var installed = false
+
+    static func install() {
+        guard !installed else { return }
+        installed = true
+        let cls: AnyClass = UIWindow.self
+        let sel = #selector(UIWindow.shouldUpdateFocus(in:))
+        let alt = #selector(UIWindow.aerio_guideShouldUpdateFocus(in:))
+        guard let original = class_getInstanceMethod(cls, sel),
+              let swizzled = class_getInstanceMethod(cls, alt) else { return }
+        // UIWindow inherits the method from UIView: add it on UIWindow first
+        // so the exchange never touches every UIView.
+        if class_addMethod(cls, sel, method_getImplementation(swizzled), method_getTypeEncoding(swizzled)) {
+            class_replaceMethod(cls, alt, method_getImplementation(original), method_getTypeEncoding(original))
+        } else {
+            method_exchangeImplementations(original, swizzled)
+        }
+    }
+}
+
+extension UIWindow {
+    @objc func aerio_guideShouldUpdateFocus(in context: UIFocusUpdateContext) -> Bool {
+        if let handler = GuideArrowFocusVeto.handler, handler(context) { return false }
+        return aerio_guideShouldUpdateFocus(in: context)
+    }
+}
+#endif
 
 struct EPGGuideView: View {
     /// Focus bookkeeping that no body reads. Held as a reference so writes
@@ -5752,13 +5796,25 @@ struct EPGGuideView: View {
         guard focusedProgramID != nil else { return }
         switch direction {
         case .left:
-            // Guide key rows (Logan 2026-09-14): a remapped short Left. The
-            // default (.navigate) skips straight to the LOCKED rule below,
-            // untouched. Column-independent actions replace the press here;
-            // edge-gated ones run only at the pan point further down.
+            // Guide key rows: this press was already handled by the focus
+            // veto (nothing moved, action dispatched). Only a remapped Left
+            // is ever vetoed, so the default rule below never sees this.
+            if focusScratch.arrowVetoKey == "LEFT",
+               Date().timeIntervalSince(focusScratch.arrowVetoAt) < 0.3 {
+                debugLog("[PRESS] guide LEFT move command skipped: handled by the veto")
+                break
+            }
+            // Guide key rows (Logan 2026-09-14, both TVs): a remapped short
+            // Left. The default (.navigate) skips straight to the LOCKED rule
+            // below, untouched. Program actions fire on every press; any
+            // other action fires only when the press started on the program
+            // airing now, and elsewhere this Left is plain navigation (the
+            // locked rule below). Normally the veto already handled a firing
+            // press; this is the path when the engine did not ask first.
             let leftAction = RemoteControlStore.shared.effectiveGuideAction(.leftShort)
-            if leftAction != .navigate && !GuideRemoteDispatch.isLeftEdgeGated(leftAction) {
-                runRemappedArrow(leftAction, key: "LEFT", holdSlot: .leftLong)
+            if leftAction != .navigate,
+               let scope = remappedArrowScope(leftAction, key: "LEFT", originPID: arrowPressOriginPID()) {
+                runRemappedArrow(leftAction, key: "LEFT", holdSlot: .leftLong, scope: scope)
                 break
             }
             // Sidebar mode used to open the docked group menu on a
@@ -5800,12 +5856,6 @@ struct EPGGuideView: View {
                     break   // the target is on screen already
                 }
             }
-            // First program column (the locked rule would pan here): an
-            // edge-gated remap runs INSTEAD of the pan.
-            if leftAction != .navigate {
-                runRemappedArrow(leftAction, key: "LEFT", holdSlot: .leftLong)
-                break
-            }
             withAnimation(.easeOut(duration: 0.3)) {
                 horizontalOffset = min(0, horizontalOffset + pixelsPerHour * 0.5)
             }
@@ -5819,11 +5869,18 @@ struct EPGGuideView: View {
             // the still-held Right does not scroll the EPG forward after the
             // mini closes. Short/normal Right scrolling is unaffected.
             if rightHoldPinningTimeline { break }
-            // Guide key rows: a remapped short Right replaces the step on
-            // every press (Right has no column edge to respect).
+            if focusScratch.arrowVetoKey == "RIGHT",
+               Date().timeIntervalSince(focusScratch.arrowVetoAt) < 0.3 {
+                debugLog("[PRESS] guide RIGHT move command skipped: handled by the veto")
+                break
+            }
+            // Guide key rows: a remapped short Right. Program actions fire on
+            // every press; any other action fires only on the row's last
+            // program, and elsewhere Right steps normally.
             let rightAction = RemoteControlStore.shared.effectiveGuideAction(.rightShort)
-            if rightAction != .navigate {
-                runRemappedArrow(rightAction, key: "RIGHT", holdSlot: .rightLong)
+            if rightAction != .navigate,
+               let scope = remappedArrowScope(rightAction, key: "RIGHT", originPID: arrowPressOriginPID()) {
+                runRemappedArrow(rightAction, key: "RIGHT", holdSlot: .rightLong, scope: scope)
                 break
             }
             // While a corner mini is minimized this Right may be the start of
@@ -5846,8 +5903,12 @@ struct EPGGuideView: View {
     /// press started on first. When the same key's hold slot does something,
     /// the action waits out the hold threshold and is dropped if the press
     /// turns into a hold (the hold detectors post *HoldBegan).
-    private func runRemappedArrow(_ action: GuideRemoteAction, key: String, holdSlot: RemoteSlot) {
-        let origin: String? = Date().timeIntervalSince(focusScratch.lastFocusChangeAt) < 0.25
+    private func runRemappedArrow(_ action: GuideRemoteAction, key: String, holdSlot: RemoteSlot,
+                                  scope: String, restoreOrigin: Bool = true) {
+        // A vetoed press never moved the ring, so there is nothing to restore
+        // (and a recent unrelated focus change must not be undone).
+        let origin: String? = restoreOrigin
+            && Date().timeIntervalSince(focusScratch.lastFocusChangeAt) < 0.25
             ? focusScratch.previousFocusedProgramID : nil
         let holdAction = RemoteControlStore.shared.effectiveGuideAction(holdSlot)
         let holdArmed = holdAction != .navigate && holdAction != .none
@@ -5856,7 +5917,7 @@ struct EPGGuideView: View {
         let wait: UInt64 = !holdArmed ? 0
             : (holdSlot == .leftLong && holdAction == .openGroupSidebar
                && RemoteControlStore.shared.useGroupSidebar) ? 370_000_000 : 550_000_000
-        debugLog("[PRESS] guide \(key) mapped action=\(action.wire) origin=\(origin ?? "nil") wait=\(wait / 1_000_000)ms")
+        debugLog("[PRESS] guide \(key) mapped action=\(action.wire) scope=\(scope) origin=\(origin ?? "nil") wait=\(wait / 1_000_000)ms")
         focusScratch.pendingArrowAction?.cancel()
         focusScratch.pendingArrowAction = Task { @MainActor in
             if let origin, focusedProgramID != origin {
@@ -5903,6 +5964,80 @@ struct EPGGuideView: View {
         TVPagePressCatcher { (down: Bool) in
             pageGuideFocus(down: down, proxy: proxy)
         }
+        // Guide key rows: the arrow focus veto lives as long as the grid.
+        .onAppear {
+            GuideArrowFocusVeto.install()
+            GuideArrowFocusVeto.owner = ObjectIdentifier(focusScratch)
+            GuideArrowFocusVeto.handler = { context in shouldVetoArrowFocusMove(context) }
+        }
+        .onDisappear {
+            guard GuideArrowFocusVeto.owner == ObjectIdentifier(focusScratch) else { return }
+            GuideArrowFocusVeto.handler = nil
+            GuideArrowFocusVeto.owner = nil
+        }
+    }
+
+    /// Guide key rows: refuse the engine's move for a remapped short arrow
+    /// before it is applied, then run the mapped action with nothing moved.
+    /// Vetoes only when the action will fire under the rule settled for both
+    /// TVs (see `remappedArrowScope`); a press that will not fire keeps its
+    /// normal focus move. `.navigate` never vetoes, so the default rule is
+    /// untouched.
+    private func shouldVetoArrowFocusMove(_ context: UIFocusUpdateContext) -> Bool {
+        let heading = context.focusHeading
+        let isLeft = heading.contains(.left)
+        guard isLeft || heading.contains(.right),
+              !TVSearchOverlayState.shared.isUp,
+              let pid = focusedProgramID else { return false }
+        if !isLeft && rightHoldPinningTimeline { return false }
+        let key = isLeft ? "LEFT" : "RIGHT"
+        let action = RemoteControlStore.shared.effectiveGuideAction(isLeft ? .leftShort : .rightShort)
+        guard action != .navigate,
+              let scope = remappedArrowScope(action, key: key, originPID: pid) else { return false }
+        let now = Date()
+        // The engine can ask again for the same press (window plus retries):
+        // block every ask, dispatch once.
+        if focusScratch.arrowVetoKey == key, now.timeIntervalSince(focusScratch.arrowVetoAt) < 0.2 {
+            return true
+        }
+        focusScratch.arrowVetoAt = now
+        focusScratch.arrowVetoKey = key
+        debugLog("[PRESS] guide \(key) veto: focus move blocked before the engine applied it origin=\(pid) action=\(action.wire) scope=\(scope)")
+        let holdSlot: RemoteSlot = isLeft ? .leftLong : .rightLong
+        DispatchQueue.main.async {
+            runRemappedArrow(action, key: key, holdSlot: holdSlot, scope: scope, restoreOrigin: false)
+        }
+        return true
+    }
+
+    /// Settled rule for a remapped short arrow (Logan 2026-09-14, both TVs).
+    /// Returns the log scope when the action fires from `originPID`, nil when
+    /// the press is plain navigation instead:
+    ///  - program actions (Play, Record, Program info, Program menu): every
+    ///    press ("any");
+    ///  - any other action on Left: only from the program airing now on its
+    ///    row, start <= now < end ("live");
+    ///  - any other action on Right: only from the row's last program
+    ///    ("lastCell").
+    private func remappedArrowScope(_ action: GuideRemoteAction, key: String, originPID: String?) -> String? {
+        if GuideRemoteDispatch.isProgramAction(action) { return "any" }
+        guard let pid = originPID,
+              let chID = channelID(ofProgram: pid),
+              let list = guideStore.programs[chID] else { return nil }
+        if key == "LEFT" {
+            guard let prog = list.first(where: { $0.id == pid }) else { return nil }
+            let now = Date()
+            return prog.start <= now && now < prog.end ? "live" : nil
+        }
+        return list.last?.id == pid ? "lastCell" : nil
+    }
+
+    /// The program a Left/Right press started on, as seen from onMoveCommand
+    /// (which runs after the engine moved focus): the previously focused
+    /// program when focus just changed, else the focused one.
+    private func arrowPressOriginPID() -> String? {
+        Date().timeIntervalSince(focusScratch.lastFocusChangeAt) < 0.25
+            ? focusScratch.previousFocusedProgramID : focusedProgramID
     }
 
     private func pageGuideFocus(down: Bool, proxy: ScrollViewProxy) {

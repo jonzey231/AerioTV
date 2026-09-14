@@ -214,13 +214,14 @@ enum GuideRemoteDispatch {
         post(.guideFocusedCellAction, ["action": action.wire])
     }
 
-    /// Edge-gated actions on a remapped short Left: they run only where the
-    /// locked rule would pan (focus is in the first program column or could
-    /// not move); elsewhere Left keeps moving focus normally. Every other
-    /// action is column-independent and replaces the Left press outright.
-    static func isLeftEdgeGated(_ action: GuideRemoteAction) -> Bool {
+    /// Program actions act on the focused cell, so a remapped short Left or
+    /// Right fires them on every press. Every other action is gated (Left:
+    /// only from the program airing now; Right: only from the row's last
+    /// program) and elsewhere the arrow keeps moving focus normally
+    /// (Logan 2026-09-14, both TVs).
+    static func isProgramAction(_ action: GuideRemoteAction) -> Bool {
         switch action {
-        case .openGroupSidebar, .focusGroupPills, .timelineBack, .jumpToNow: return true
+        case .play, .record, .programInfo, .programDetails: return true
         default: return false
         }
     }

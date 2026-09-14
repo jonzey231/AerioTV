@@ -1301,7 +1301,7 @@ struct ChannelListView: View {
                             && remoteStore.effectiveGuideAction(.leftLong) == .openGroupSidebar ? 0.32 : 0.5,
                         // Window-level recognizer: disarm while the in-place
                         // Search screen covers the guide. Left (hold) mapped
-                        // to Default navigation detaches it so the held Left
+                        // to Move focus detaches it so the held Left
                         // repeats through the engine like any arrow.
                         isEnabled: !searchOverlay.isUp
                             && remoteStore.effectiveGuideAction(.leftLong) != .navigate,

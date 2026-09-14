@@ -15,7 +15,7 @@ import SwiftUI
 /// - Back / Menu is never a slot; Back semantics stay hardcoded and are
 ///   deliberately absent from every choice list.
 /// - Guide rows (2026-09-14): Select, Left and Right, short and hold. Every
-///   short arrow defaults to Default navigation (the LOCKED timeline rule)
+///   short arrow defaults to Move focus (the LOCKED timeline rule)
 ///   and Up/Down stay unmappable focus navigation.
 /// - Choice lists are CURATED to actions the tvOS executor can actually
 ///   run today (omit rather than advertise a dead button); these mirror
@@ -83,7 +83,7 @@ struct RemoteControlSettingsView: View {
     /// the Android per-slot curation exactly.
     private static func guideActionChoices(for slot: RemoteSlot) -> [GuideRemoteAction] {
         var out: [GuideRemoteAction] = []
-        // Default navigation first on the arrows (their built-in behavior).
+        // Move focus first on the arrows (their built-in behavior).
         // Select's built-in behavior is Play, listed below.
         if slot != .okShort && slot != .okLong { out.append(.navigate) }
         out += [
@@ -198,7 +198,7 @@ struct RemoteControlSettingsView: View {
             ForEach(Self.guideSlots, id: \.self) { slot in
                 guideSlotRow(slot)
             }
-            sectionFooter("What each button does while browsing the guide. Up and Down always navigate. A Left set to Open sidebar, Go to group pills, Browse earlier programs or Jump to now still moves between programs and acts only from the first program column. In Sidebar Menu mode, if no button is set to Open sidebar, holding Left opens it.")
+            sectionFooter("What each button does while browsing the guide. Up and Down always navigate. Left or Right set to Play channel, Record, Program info or Program menu acts on every press. Any other Left action acts only from the program airing now, and any other Right action only from the last program in the row; elsewhere the arrow moves between programs. In Sidebar Menu mode, if no button is set to Open sidebar, holding Left opens it.")
         }
     }
 
@@ -370,7 +370,7 @@ private func displayName(_ action: GuideRemoteAction) -> String {
     case .closeMiniPlayer: return "Close mini player"
     case .programInfo:     return "Program menu"
     case .openSearch:      return "Search"
-    case .navigate:        return "Default navigation"
+    case .navigate:        return "Move focus"
     case .openGroupSidebar: return "Open sidebar"
     case .play:            return "Play channel"
     case .programDetails:  return "Program info"
