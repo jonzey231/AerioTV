@@ -88,8 +88,9 @@ struct GuidePreviewBanner: View {
             // Programme art where the channel logo used to be (Logan
             // 2026-09-05); the channel name stays underneath, the logo is
             // the fallback until art lands or when there is none.
+            // No fixed width: portrait art narrows its own slot (see
+            // GuidePreviewArtSlot) and the copy takes the freed width.
             leadingBlock
-                .frame(width: 360)
             if let program {
                 copy(for: program)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -127,10 +128,8 @@ struct GuidePreviewBanner: View {
         VStack(spacing: 8) {
             switch program.map(artCache.state(for:)) ?? .pending {
             case .art(let url):
-                AuthPosterImage(url: url, placeholder: .clear, maxPixel: 800)
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 360, height: 203)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                GuidePreviewArtSlot(url: url)
+                    .id(url)
             case .none:
                 // Every source came back empty (static team channels and the
                 // like): the channel logo stands in (Logan 2026-09-05).
@@ -354,3 +353,39 @@ final class GuidePreviewArtCache: ObservableObject {
     }
 }
 #endif
+
+/// The banner's art slot. Landscape art keeps the 16:9 360x203 slot. PORTRAIT
+/// art (TMDB posters on a lot of programmes) used to be center-cropped into
+/// that slot, which sliced the poster's title off. Portrait art now keeps the
+/// slot HEIGHT and takes its width from the image's own aspect, so the poster
+/// is drawn whole and the copy column takes the freed width (2026-09-14).
+private struct GuidePreviewArtSlot: View {
+    let url: URL
+
+    private static let slotWidth: CGFloat = 360
+    private static let slotHeight: CGFloat = 203
+
+    /// Pixel size of the loaded bitmap; nil until it lands.
+    @State private var pixelSize: CGSize? = nil
+
+    /// Width of the slot: the full 16:9 width for landscape art, the
+    /// image's own aspect at the same height for anything narrower.
+    private var slotWidth: CGFloat {
+        guard let s = pixelSize, s.width > 0, s.height > 0 else { return Self.slotWidth }
+        let ratio = s.width / s.height
+        guard ratio < (Self.slotWidth / Self.slotHeight) else { return Self.slotWidth }
+        return max(80, (Self.slotHeight * ratio).rounded())
+    }
+
+    var body: some View {
+        AuthPosterImage(url: url,
+                        onImageLoaded: { size in
+                            if pixelSize != size { pixelSize = size }
+                        },
+                        placeholder: .clear,
+                        maxPixel: 800)
+            .aspectRatio(contentMode: .fit)
+            .frame(width: slotWidth, height: Self.slotHeight)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
