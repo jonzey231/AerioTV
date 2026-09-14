@@ -935,18 +935,17 @@ struct MultiviewContainerView: View {
                         // Connection issue: the Retry cell leads the row and
                         // is the action the user wants, so land there.
                         // Otherwise default focus is the Pause cell, the
-                        // row's screen-centered anchor (Logan 2026-09-11);
-                        // it only exists with the transport cells up, so
-                        // plain live still lands on Add Stream.
-                        let hasTransport = store.catchupTile != nil
-                            || store.vodSoloTile != nil
-                            || LiveRewindEngine.shared.buffering
+                        // row's screen-centered anchor (Logan 2026-09-11).
+                        // Pause ALWAYS renders now (the transport cells only
+                        // dim without a window), so do not gate on a
+                        // scrubbable window: at tune-in Live Rewind is not
+                        // buffering yet, and the old gate sent the FIRST
+                        // chrome showing to Add Stream / Multiview (ATV
+                        // trace 2026-09-14) while later showings hit Pause.
                         focusedChrome = if store.audioProgressStore?.connectionIssueActive == true {
                             .retry
-                        } else if hasTransport {
-                            .playPause
                         } else {
-                            .addStream
+                            .playPause
                         }
                     }
                 }
