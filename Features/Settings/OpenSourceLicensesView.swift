@@ -29,6 +29,14 @@ An additional permission under GPL section 7 covers linking the proprietary Goog
 Complete corresponding source: https://github.com/jonzey231/AerioTV
 """
 
+    /// Shown as its own "Patents" section on every platform. Matches the
+    /// Patents section of README.md and THIRD_PARTY_LICENSES.md.
+    static let patentNotice = """
+AerioTV includes independent implementations of audio and video codecs through FFmpeg that may be covered by patents in some countries. AerioTV is free software under GPL-3.0-or-later and grants no patent license; users are responsible for compliance with any patent or licensing requirements where they live.
+
+Dolby, DTS and other codec and format names are trademarks of their respective owners. AerioTV is not affiliated with, endorsed by, or certified by any of them.
+"""
+
     static let components: [OSSComponent] = [
         OSSComponent(
             id: "aeriotv",
@@ -3378,6 +3386,14 @@ struct OpenSourceLicensesView: View {
                 Text("License").sectionHeaderStyle()
             }
             Section {
+                Text(OSSCatalog.patentNotice)
+                    .font(.footnote)
+                    .foregroundColor(.textSecondary)
+                    .listRowBackground(Color.cardBackground)
+            } header: {
+                Text("Patents").sectionHeaderStyle()
+            }
+            Section {
                 TMDBAttributionView(style: .long)
                     .listRowBackground(Color.cardBackground)
             } header: {
@@ -3429,6 +3445,12 @@ struct OpenSourceLicensesView: View {
                             .font(.system(size: 40, weight: .bold))
                             .foregroundColor(.textPrimary)
                         Text(OSSCatalog.appSummary)
+                            .font(.system(size: 24))
+                            .foregroundColor(.textSecondary)
+                        Text("Patents")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundColor(.textPrimary)
+                        Text(OSSCatalog.patentNotice)
                             .font(.system(size: 24))
                             .foregroundColor(.textSecondary)
                         TMDBAttributionView(style: .long)

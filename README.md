@@ -548,6 +548,19 @@ Khronos Group) and shaderc (The Khronos Group) are used under the Apache
 License, Version 2.0. Full text:
 https://www.apache.org/licenses/LICENSE-2.0
 
+### Patents
+
+AerioTV includes independent implementations of audio and video codecs through
+FFmpeg that may be covered by patents in some countries. AerioTV is free
+software under GPL-3.0-or-later and grants no patent license; users are
+responsible for compliance with any patent or licensing requirements where they
+live.
+
+Dolby, Dolby Digital, Dolby Digital Plus, Dolby TrueHD, DTS, DTS-HD and other
+codec and format names are trademarks of their respective owners. AerioTV is
+not affiliated with, endorsed by, or certified by any of them, and codec names
+are used only to describe the formats the app can play.
+
 ### TMDB attribution
 
 This product uses the TMDB API but is not endorsed or certified by TMDB.

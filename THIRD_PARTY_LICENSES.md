@@ -36,6 +36,22 @@ as GPL-only. mpv and FFmpeg as bundled here are therefore LGPL-3.0-or-later,
 which is GPL-compatible, and the shipped binaries self-report "LGPL version 3
 or later".
 
+### Decoders and patents
+
+The bundled FFmpeg build contains independent, clean-room software
+implementations of the usual audio and video decoders, including AC-3, E-AC-3
+(Dolby Digital Plus), DTS / DCA, TrueHD / MLP, AAC, MP2, MP3, FLAC, ALAC,
+H.264, HEVC and AV1. They are used as a fallback when the platform decoder
+cannot handle a stream; hardware and platform decoding is preferred wherever
+the device supports it.
+
+These implementations may be covered by patents in some countries. AerioTV is
+free software under GPL-3.0-or-later and grants no patent license; users are
+responsible for compliance with any patent or licensing requirements where they
+live. Dolby, DTS and other codec and format names are trademarks of their
+respective owners; AerioTV is not affiliated with, endorsed by, or certified by
+any of them.
+
 ### Relinking
 
 MPVKit is linked as a dynamic XCFramework, so it can be replaced with a modified
