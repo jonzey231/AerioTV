@@ -352,6 +352,28 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// ESPN2 HD at 18:37:12 - zero bytes for 30 s, then a fresh pipeline
     /// silent for another 12 s until the user flipped away).
     var onFirstByte: (() -> Void)?
+    /// Live stall signal (Android parity, 2026-09-14). Fires on the main
+    /// queue with `true` the moment the ingest has gone
+    /// `ingestSilenceThreshold` with no bytes on the wire, and again with
+    /// `false` the moment bytes resume. Armed only when
+    /// `reportsIngestStall` is set (live tunes); VOD/catch-up/DVR
+    /// downloads legitimately go quiet and must never flash a status.
+    /// The first-byte window is NOT covered here: an ingest that has
+    /// never delivered a byte belongs to the tile's first-byte deadline
+    /// and its stream-failover walk.
+    var onIngestSilence: ((Bool) -> Void)?
+    /// Fires once on the main queue when the upstream CLOSES a live
+    /// ingest cleanly (EOF with no error, e.g. the stream was stopped in
+    /// Dispatcharr). Before this the live branch of didCompleteWithError
+    /// did nothing at all, so a server-side stop was only ever noticed
+    /// later by the silence/stale-frame ladder; a closed connection is
+    /// proof the upstream is gone, so the consumer re-tunes at once.
+    var onIngestClosed: (() -> Void)?
+    /// Set by live consumers before start(); see onIngestSilence.
+    var reportsIngestStall = false
+    /// Seconds of dead air that count as a stall (Android parity: the
+    /// Android player shows its "Reconnecting" line at 2 s).
+    static let ingestSilenceThreshold: Double = 2
     /// True once the upstream has delivered any byte. Readable from any
     /// thread (set on the URLSession delegate queue, read on the main
     /// queue by a tile adopting a WARM ingest, whose first byte can
@@ -378,6 +400,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     }
     private var connectedAt: Date?
     private var ingestedBytes: Int64 = 0
+    /// When the last ingest byte landed (nil until the first one does).
+    /// Written on the URLSession delegate queue under firstByteLock, read
+    /// by the silence poll on the remuxer's own queue.
+    private var lastByteAt: Date?
+    /// Latched state of the silence signal, touched only on `queue`.
+    private var silenceReported = false
+    /// One clean-close report per ingest, touched only on the delegate queue.
+    private var closeReported = false
     /// A non-200 ingest response whose (small) JSON body we are buffering
     /// before failing, plus its Retry-After. Dispatcharr answers every
     /// live-proxy 503 with {"error": "<reason>"}, and that reason is the
@@ -633,6 +663,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         ingestTask = task
         ingestStartedAt = Date()
         firstByteLogged = false
+        firstByteLock.lock(); lastByteAt = nil; firstByteLock.unlock()
+        closeReported = false
+        queue.async { [weak self] in
+            self?.silenceReported = false
+            self?.scheduleSilenceCheck()
+        }
         task.resume()
         TuneTimeline.shared.mark("ingest")
         // New ingest, new window: without this the first closure of a flip
@@ -640,6 +676,38 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // poisons worstGap for the next 30 s.
         Self.feedRateWindow.reset()
         debugLog("[TS-REMUX] ingest started (headers: \(headers.keys.sorted().joined(separator: ",")))")
+    }
+
+    // MARK: Ingest silence poll (live "Reconnecting" signal)
+
+    /// Self-rescheduling 0.5 s poll on the remuxer's own queue. Cheap
+    /// (one Date compare) and it dies with the remuxer, so no timer
+    /// outlives a teardown.
+    private func scheduleSilenceCheck() {
+        guard reportsIngestStall, !stopped, !errorSignaled else { return }
+        queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, !self.stopped, !self.errorSignaled else { return }
+            self.checkIngestSilence()
+            self.scheduleSilenceCheck()
+        }
+    }
+
+    private func checkIngestSilence() {
+        firstByteLock.lock()
+        let last = lastByteAt
+        firstByteLock.unlock()
+        // Nothing has arrived yet: the first-byte deadline owns that window.
+        guard let last else { return }
+        let gap = Date().timeIntervalSince(last)
+        let silent = gap >= Self.ingestSilenceThreshold
+        guard silent != silenceReported else { return }
+        silenceReported = silent
+        if silent {
+            debugLog("[TS-REMUX] ingest silent for \(String(format: "%.1f", gap))s (>= \(Int(Self.ingestSilenceThreshold))s); reporting stall")
+        } else {
+            debugLog("[TS-REMUX] ingest bytes resumed; clearing stall")
+        }
+        DispatchQueue.main.async { [weak self] in self?.onIngestSilence?(silent) }
     }
 
     // MARK: TS packet walk
@@ -1739,6 +1807,7 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
         // separated from the PSI walk.
         firstByteLock.lock()
         ingestedBytes += Int64(data.count)
+        lastByteAt = Date()
         // A response we never saw (a 200 with no delegate callback is not
         // possible, but an adopted/warm ingest can hand us data first)
         // still counts as connected for the loading detail line.
@@ -1774,7 +1843,17 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
             if eventPlaylist {
                 debugLog("[TS-REMUX] ingest complete (clean EOF); finalizing event playlist")
                 markComplete()
+                return
             }
+            // Our own stop() cancels the task; that is a teardown, not the
+            // upstream going away.
+            let cancelled = (error as NSError?)?.code == NSURLErrorCancelled
+            guard !cancelled, !closeReported else { return }
+            closeReported = true
+            debugLog("[TS-REMUX] upstream CLOSED the live ingest (clean EOF) after "
+                + "\(bytesIngested / 1_048_576) MB; the stream is gone, so this re-tunes "
+                + "now instead of waiting out the \(Int(Self.ingestSilenceThreshold))s silence timer")
+            DispatchQueue.main.async { [weak self] in self?.onIngestClosed?() }
             return
         }
         queue.async { [weak self] in self?.fail(.ingestFailed(error.localizedDescription)) }
@@ -2584,6 +2663,14 @@ struct AVPlayerMultiviewTile: View {
     /// clear them (the panel stayed in HDR). Late applies are dropped.
     /// Declared on every platform (start/stop touch it unconditionally).
     @State private var tileStopped = false
+    /// Immediate re-tunes spent on a clean upstream close, capped so a
+    /// server that closes every connection cannot spin forever. Cleared
+    /// with the failover walk (teardown / user tune) and on first frame.
+    @State private var upstreamClosedRetunes = 0
+    /// Live stall state: the remuxer's latched silence signal, and the
+    /// token that keeps exactly one buffer-evaluation loop running.
+    @State private var ingestSilent = false
+    @State private var stallEvalToken = UUID()
     /// Standing slow retry for a live tile whose fast retries ran out
     /// (review 2026-09-11 section 2 proposal 3): ESPNews HD died at
     /// 15:05:36 and the tile stayed dead for 5 minutes 6 seconds
@@ -2898,6 +2985,110 @@ struct AVPlayerMultiviewTile: View {
         }
     }
 
+    // MARK: - Live ingest stall ("Reconnecting", Android parity 2026-09-14)
+
+    /// Status copy this tile owns for a mid-stream stall. Compared by
+    /// value so the clear never wipes a status some other path put up.
+    private static let reconnectingStatus = "Reconnecting..."
+
+    /// Live tunes only: arm the remuxer's 2 s silence signal and its
+    /// clean-close signal.
+    private func attachLiveStallHandlers(_ mux: TSHLSRemuxer) {
+        guard !isVOD, !isDVR, catchup == nil else { return }
+        mux.reportsIngestStall = true
+        mux.onIngestSilence = { silent in handleIngestSilence(silent) }
+        mux.onIngestClosed = { handleUpstreamClosed() }
+    }
+
+    /// Bytes stopped (or resumed) on a channel that is already playing.
+    ///
+    /// Silence ALONE is not a stall: Dispatcharr's proxy delivers this
+    /// stream in 8 to 9.5 s bursts while playback is perfect with ~10 s
+    /// buffered (Android log analysis 2026-09-14), so a bare 2 s gap
+    /// would flash "Reconnecting" during healthy playback. The overlay
+    /// needs BOTH conditions - ingest silent >= 2 s AND the player
+    /// actually starving (less than 1.5 s loaded ahead of the playhead) -
+    /// and it clears as soon as either recovers (bytes resume, or more
+    /// than 3 s is loaded ahead again).
+    private func handleIngestSilence(_ silent: Bool) {
+        guard tileError == nil, !tileStopped else { return }
+        ingestSilent = silent
+        if silent {
+            guard firstFrameSeen else { return }
+            stallEvalToken = UUID()
+            evaluateStallOverlay(token: stallEvalToken)
+        } else {
+            stallEvalToken = UUID()
+            if statusText == Self.reconnectingStatus {
+                statusText = nil
+                debugLog("[AVP-STREAM] ingest resumed; cleared Reconnecting channel=\(channelName)")
+            }
+        }
+    }
+
+    /// Seconds of media loaded ahead of the playhead, or nil when the
+    /// item cannot answer yet.
+    private func loadedAheadSeconds() -> Double? {
+        guard let item = player?.currentItem,
+              let range = item.loadedTimeRanges.last?.timeRangeValue else { return nil }
+        let end = CMTimeGetSeconds(CMTimeAdd(range.start, range.duration))
+        let now = CMTimeGetSeconds(item.currentTime())
+        guard end.isFinite, now.isFinite else { return nil }
+        return max(0, end - now)
+    }
+
+    /// Re-evaluates the overlay every 0.5 s for as long as the ingest is
+    /// silent; the silence signal itself only latches at its edges.
+    private func evaluateStallOverlay(token: UUID) {
+        guard token == stallEvalToken, ingestSilent, tileError == nil, !tileStopped else { return }
+        let ahead = loadedAheadSeconds() ?? 0
+        if statusText == nil, ahead < Self.stallBufferFloor {
+            statusText = Self.reconnectingStatus
+            debugLog("[AVP-STREAM] STALL: ingest silent >= \(Int(TSHLSRemuxer.ingestSilenceThreshold))s and "
+                + "only \(String(format: "%.1f", ahead))s loaded ahead; showing Reconnecting channel=\(channelName)")
+        } else if statusText == Self.reconnectingStatus, ahead > Self.stallBufferClear {
+            statusText = nil
+            debugLog("[AVP-STREAM] buffer recovered to \(String(format: "%.1f", ahead))s ahead; "
+                + "cleared Reconnecting channel=\(channelName)")
+        }
+        let next = stallEvalToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            evaluateStallOverlay(token: next)
+        }
+    }
+
+    /// Loaded-ahead seconds below which a silent ingest counts as a stall,
+    /// and above which the overlay clears again.
+    private static let stallBufferFloor: Double = 1.5
+    private static let stallBufferClear: Double = 3
+
+    /// The upstream closed cleanly (server-side stop). A closed socket is
+    /// proof, not a guess, so this re-tunes at once rather than letting
+    /// the silence/stale-frame ladder run its course.
+    private func handleUpstreamClosed() {
+        guard tileError == nil, !tileStopped else { return }
+        guard upstreamClosedRetunes < Self.upstreamClosedMaxRetunes else {
+            debugLog("[AVP-STREAM] upstream closed \(upstreamClosedRetunes) times; giving up channel=\(channelName)")
+            failOrFallback("ingest closed by upstream")
+            return
+        }
+        upstreamClosedRetunes += 1
+        debugLog("[AVP-STREAM] upstream closed the live stream; immediate re-tune "
+            + "\(upstreamClosedRetunes)/\(Self.upstreamClosedMaxRetunes) channel=\(channelName)")
+        stop()
+        statusText = Self.reconnectingStatus
+        let token = teardownToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard token == teardownToken else {
+                debugLog("[AVP-STREAM] upstream-close re-tune dropped (channel changed or tile gone)")
+                return
+            }
+            start()
+        }
+    }
+
+    private static let upstreamClosedMaxRetunes = 3
+
     // MARK: - No-first-byte stream failover (s7_86.txt:353-395)
 
     /// Seconds a live ingest may stay connected-but-silent before the
@@ -2924,6 +3115,9 @@ struct AVPlayerMultiviewTile: View {
     /// Wipes the walk. Called on teardown and on every user-initiated
     /// tune, so a new channel never inherits the old channel's tried set.
     private func resetFailoverWalk() {
+        upstreamClosedRetunes = 0
+        ingestSilent = false
+        stallEvalToken = UUID()
         firstByteDeadlineToken = UUID()
         firstByteSeen = false
         failoverTriedStreamIDs.removeAll()
@@ -3767,6 +3961,7 @@ struct AVPlayerMultiviewTile: View {
                 // A warm ingest can be silent too (s7_86.txt:353-395):
                 // it is the same upstream open, just started earlier.
                 mux.onFirstByte = { noteFirstByte() }
+                attachLiveStallHandlers(mux)
                 if mux.hasReceivedFirstByte {
                     // Bytes arrived before this tile existed, so the
                     // callback will never fire for it; nothing to guard.
@@ -3803,6 +3998,7 @@ struct AVPlayerMultiviewTile: View {
             }
             // Connected-but-silent ingest guard (s7_86.txt:353-395).
             mux.onFirstByte = { noteFirstByte() }
+            attachLiveStallHandlers(mux)
             remuxer = mux
             mux.start()
             armFirstByteDeadline()
@@ -4376,6 +4572,9 @@ struct AVPlayerMultiviewTile: View {
 
     private func stop() {
         tileStopped = true
+        // No stall overlay survives a pipeline teardown.
+        ingestSilent = false
+        stallEvalToken = UUID()
         // Disarm the deadline with the pipeline, but KEEP the tried set:
         // an internal retry (503 ladder, fresh pipeline) is the same tune
         // on the same channel, and re-walking streams we already proved

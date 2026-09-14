@@ -5800,6 +5800,14 @@ struct NativeHLSPlayerScreen: View {
     /// One-shot guard so the watchdog, the failure notification, and a remux
     /// error can't each trigger a fallback into an already-dismissed screen.
     @State private var didFallback = false
+    /// Live ingest stall state (Android parity 2026-09-14). `ingestSilent`
+    /// is the remuxer's latched 2 s silence signal; the overlay only goes
+    /// up when the player is ALSO starving (Dispatcharr delivers this
+    /// stream in 8 to 9.5 s bursts, so silence alone is not a stall).
+    @State private var ingestSilent = false
+    @State private var stallEvalToken = UUID()
+    /// Immediate re-tunes spent on a clean upstream close, capped.
+    @State private var upstreamClosedRetunes = 0
     #if os(iOS)
     /// Unified chrome state: one store, one driver, one visibility Bool.
     /// The store is the same observable type the mpv overlay reads, fed
@@ -5988,6 +5996,9 @@ struct NativeHLSPlayerScreen: View {
                     )
                     fallbackToMPV()
                 }
+                mux.reportsIngestStall = true
+                mux.onIngestSilence = { silent in handleIngestSilence(silent) }
+                mux.onIngestClosed = { handleUpstreamClosed() }
                 remuxer = mux
                 mux.start()
             } else {
@@ -6022,6 +6033,10 @@ struct NativeHLSPlayerScreen: View {
             // trigger a fallback into a dismissed screen.
             remuxer?.onReady = nil
             remuxer?.onError = nil
+            remuxer?.onIngestSilence = nil
+            remuxer?.onIngestClosed = nil
+            stallEvalToken = UUID()
+            ingestSilent = false
             remuxer?.stop()
             remuxer = nil
             sleepWork?.cancel()
@@ -6065,6 +6080,127 @@ struct NativeHLSPlayerScreen: View {
         }
     }
     #endif
+
+    // MARK: - Live ingest stall ("Reconnecting", Android parity)
+
+    private static let reconnectingStatus = "Reconnecting..."
+    /// Loaded-ahead seconds below which a silent ingest counts as a stall,
+    /// and above which the overlay clears again.
+    private static let stallBufferFloor: Double = 1.5
+    private static let stallBufferClear: Double = 3
+
+    /// The remuxer's silence signal flipped. Silence ALONE is not a stall
+    /// (Dispatcharr's proxy delivers in 8 to 9.5 s bursts with ~10 s
+    /// buffered), so the overlay waits for the player to actually starve.
+    private func handleIngestSilence(_ silent: Bool) {
+        guard player != nil, !didFallback else { return }
+        ingestSilent = silent
+        if silent {
+            stallEvalToken = UUID()
+            evaluateStallOverlay(token: stallEvalToken)
+        } else {
+            stallEvalToken = UUID()
+            if statusText == Self.reconnectingStatus {
+                statusText = nil
+                DebugLogger.shared.log("[AVP-STREAM] ingest resumed; cleared Reconnecting",
+                                       category: "Playback", level: .info)
+            }
+        }
+    }
+
+    private func loadedAheadSeconds() -> Double? {
+        guard let item = player?.currentItem,
+              let range = item.loadedTimeRanges.last?.timeRangeValue else { return nil }
+        let end = CMTimeGetSeconds(CMTimeAdd(range.start, range.duration))
+        let now = CMTimeGetSeconds(item.currentTime())
+        guard end.isFinite, now.isFinite else { return nil }
+        return max(0, end - now)
+    }
+
+    /// Runs every 0.5 s while the ingest is silent (the signal itself only
+    /// latches at its edges).
+    private func evaluateStallOverlay(token: UUID) {
+        guard token == stallEvalToken, ingestSilent, !didFallback, player != nil else { return }
+        let ahead = loadedAheadSeconds() ?? 0
+        if statusText == nil, ahead < Self.stallBufferFloor {
+            statusText = Self.reconnectingStatus
+            DebugLogger.shared.log(
+                "[AVP-STREAM] STALL: ingest silent >= \(Int(TSHLSRemuxer.ingestSilenceThreshold))s and only "
+                + String(format: "%.1f", ahead) + "s loaded ahead; showing Reconnecting",
+                category: "Playback", level: .warning)
+        } else if statusText == Self.reconnectingStatus, ahead > Self.stallBufferClear {
+            statusText = nil
+            DebugLogger.shared.log(
+                "[AVP-STREAM] buffer recovered to " + String(format: "%.1f", ahead)
+                + "s ahead; cleared Reconnecting",
+                category: "Playback", level: .info)
+        }
+        let next = stallEvalToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            evaluateStallOverlay(token: next)
+        }
+    }
+
+    /// Clean upstream close (the stream was stopped server-side): the
+    /// socket closing is proof the source is gone, so re-tune at once
+    /// instead of waiting out the silent-stall ladder.
+    private func handleUpstreamClosed() {
+        guard !didFallback else { return }
+        guard upstreamClosedRetunes < 3 else {
+            DebugLogger.shared.log("[AVP-STREAM] upstream closed 3 times; falling back to mpv",
+                                   category: "Playback", level: .warning)
+            fallbackToMPV()
+            return
+        }
+        upstreamClosedRetunes += 1
+        DebugLogger.shared.log(
+            "[AVP-STREAM] upstream closed the live stream; immediate re-tune \(upstreamClosedRetunes)/3",
+            category: "Playback", level: .warning)
+        statusText = Self.reconnectingStatus
+        restartRemuxPipeline()
+    }
+
+    /// Tears the remux pipeline down and stands a fresh one up on the same
+    /// URL, keeping this screen (and its chrome) on screen.
+    private func restartRemuxPipeline() {
+        guard let url = overrideURL ?? item.streamURL ?? item.streamURLs.first else { return }
+        ingestSilent = false
+        stallEvalToken = UUID()
+        player?.pause()
+        player = nil
+        stallWatchdog?.cancel()
+        stallWatchdog = nil
+        remuxer?.onReady = nil
+        remuxer?.onError = nil
+        remuxer?.onIngestSilence = nil
+        remuxer?.onIngestClosed = nil
+        remuxer?.stop()
+        remuxer = nil
+        let rewindSeconds: Double = {
+            guard UserDefaults.standard.bool(forKey: "liveRewindEnabled") else { return 0 }
+            let depth = UserDefaults.standard.integer(forKey: "liveRewindDepthMinutes")
+            return Double(depth > 0 ? depth : 30) * 60
+        }()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard !didFallback else { return }
+            let mux = TSHLSRemuxer(sourceURL: url, headers: ingestHeaders,
+                                   rewindWindowSeconds: rewindSeconds)
+            mux.onReady = { localURL in
+                statusText = nil
+                startPlayer(with: localURL, headers: [:])
+            }
+            mux.onError = { error in
+                DebugLogger.shared.log("[AVP-HLS] remux failed after re-tune (\(error)); falling back to mpv",
+                                       category: "Playback", level: .warning)
+                fallbackToMPV()
+            }
+            mux.reportsIngestStall = true
+            mux.onIngestSilence = { silent in handleIngestSilence(silent) }
+            mux.onIngestClosed = { handleUpstreamClosed() }
+            remuxer = mux
+            mux.start()
+        }
+    }
 
     /// Byte source for the loading detail line: the TS remux ingest when
     /// this screen stood one up, otherwise the player item's own access
