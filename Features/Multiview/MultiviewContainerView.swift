@@ -1421,9 +1421,9 @@ struct MultiviewContainerView: View {
                         // Video Scale is a solo-player affordance: with
                         // 2+ tiles the grid stays Fit, so the section
                         // hides itself.
-                        videoScaleMode: audioStore.videoScaleMode,
+                        videoScaleMode: audioStore.aspectMode,
                         onSelectVideoScale: store.tiles.count <= 1
-                            ? { audioStore.videoScaleMode = $0 }
+                            ? { audioStore.setVideoScale($0) }
                             : nil
                     )
     }

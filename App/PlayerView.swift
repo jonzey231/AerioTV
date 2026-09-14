@@ -207,44 +207,22 @@ enum VideoAspectMode: String, CaseIterable, Identifiable {
         case .stretch: return .resize
         }
     }
-}
 
-// MARK: - Video Scale Mode
-
-/// Global two-value video scale used by the Video Scale control (pinch
-/// on iPhone/iPad, "Video Scale" row in the player options). `fit` is
-/// the default letterbox; `fill` scales up preserving aspect so the
-/// shorter dimension fills the screen and the overflow is cropped,
-/// which removes pillar bars baked into a 16:9 stream on a 4:3 panel.
-/// Persisted globally (unsynced) under `videoScaleMode`; it is a
-/// two-value projection of `VideoAspectMode`, so both controls drive
-/// one layer property.
-enum VideoScaleMode: String, CaseIterable, Identifiable {
-    case fit
-    case fill
-
-    static let defaultsKey = "videoScaleMode"
-
-    var id: String { rawValue }
-
-    var label: String { self == .fill ? "Fill" : "Fit" }
-
-    var icon: String { aspectMode.icon }
-
-    var aspectMode: VideoAspectMode { self == .fill ? .fill : .fit }
-
-    var next: VideoScaleMode { self == .fill ? .fit : .fill }
-
-    /// Persisted value, defaulting to `.fit`.
-    static var stored: VideoScaleMode {
-        VideoScaleMode(rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .fit
+    /// Next value in the single "Video Scale" cycle: Fit -> Fill -> Stretch.
+    var next: VideoAspectMode {
+        switch self {
+        case .fit:     return .fill
+        case .fill:    return .stretch
+        case .stretch: return .fit
+        }
     }
 
-    /// Writes both the new global key and the legacy aspect key so the
-    /// Aspect Ratio menu and Video Scale never disagree after a relaunch.
-    static func persist(_ mode: VideoScaleMode) {
+    /// Persisted globally (unsynced), the one stored value for the
+    /// player's Video Scale control and the Cast/companion aspect command.
+    static let defaultsKey = "player.aspectMode"
+
+    static func persist(_ mode: VideoAspectMode) {
         UserDefaults.standard.set(mode.rawValue, forKey: defaultsKey)
-        UserDefaults.standard.set(mode.aspectMode.rawValue, forKey: "player.aspectMode")
     }
 }
 
@@ -255,7 +233,7 @@ enum VideoScaleMode: String, CaseIterable, Identifiable {
 /// (multiview with 2 or more tiles, PiP).
 struct VideoScalePinch: ViewModifier {
     @ObservedObject var progressStore: PlayerProgressStore
-    @State private var toast: VideoScaleMode?
+    @State private var toast: VideoAspectMode?
     @State private var toastTask: Task<Void, Never>?
 
     func body(content: Content) -> some View {
@@ -285,22 +263,23 @@ struct VideoScalePinch: ViewModifier {
 
     private func commit(_ magnification: CGFloat) {
         guard progressStore.allowsVideoFill, !progressStore.isPiPActive else { return }
-        let target: VideoScaleMode
+        let target: VideoAspectMode
         if magnification > 1.15 {
             target = .fill
         } else if magnification < 0.85 {
+            // Pinch in always lands on Fit, including from Stretch.
             target = .fit
         } else {
             return
         }
-        if progressStore.videoScaleMode != target {
-            progressStore.videoScaleMode = target
+        if progressStore.aspectMode != target {
+            progressStore.setVideoScale(target)
         }
         show(target)
     }
 
     /// Flash the mode name for about a second.
-    private func show(_ mode: VideoScaleMode) {
+    private func show(_ mode: VideoAspectMode) {
         toastTask?.cancel()
         withAnimation(.easeOut(duration: 0.15)) { toast = mode }
         toastTask = Task { @MainActor in
@@ -475,21 +454,16 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// from UserDefaults so the user's choice survives across streams and
     /// launches; the overflow menu's action writes the same key.
     @Published var aspectMode: VideoAspectMode =
-        VideoAspectMode(rawValue: UserDefaults.standard.string(forKey: "player.aspectMode") ?? "")
-        ?? VideoScaleMode.stored.aspectMode
+        VideoAspectMode(rawValue: UserDefaults.standard.string(forKey: VideoAspectMode.defaultsKey) ?? "") ?? .fit
     /// False while this store drives a multiview tile that shares the
     /// screen with other tiles: Fill is a solo-player affordance, so a
     /// grid of 2+ tiles stays Fit no matter what the global setting is.
     @Published var allowsVideoFill: Bool = true
-    /// Two-value projection of `aspectMode` for the Video Scale control.
-    /// The setter persists globally; Stretch (Aspect Ratio menu only)
-    /// reads back as Fit here.
-    var videoScaleMode: VideoScaleMode {
-        get { aspectMode == .fill ? .fill : .fit }
-        set {
-            aspectMode = newValue.aspectMode
-            VideoScaleMode.persist(newValue)
-        }
+    /// Video Scale: sets the mode and persists it globally. The single
+    /// entry point for every control (pinch, options row, tvOS pills).
+    func setVideoScale(_ mode: VideoAspectMode) {
+        aspectMode = mode
+        VideoAspectMode.persist(mode)
     }
     /// Gravity the layer should actually use right now: Fill is
     /// suppressed for non-solo multiview tiles and while PiP owns the
@@ -2063,9 +2037,9 @@ private struct PlayerRootView: View {
                             onSelectVersion: progressStore.switchVersionAction == nil
                                 ? nil
                                 : { [weak progressStore] in progressStore?.switchVersionAction?($0) },
-                            videoScaleMode: progressStore.videoScaleMode,
+                            videoScaleMode: progressStore.aspectMode,
                             onSelectVideoScale: { [weak progressStore] in
-                                progressStore?.videoScaleMode = $0
+                                progressStore?.setVideoScale($0)
                             }
                         )
                         .focusSection()
@@ -2755,8 +2729,7 @@ private struct PlayerRootView: View {
                 : { [weak progressStore] in progressStore?.setAudioSyncAction?($0) },
             setSubtitleTrack: { [weak progressStore] in progressStore?.setSubtitleTrackAction?($0) },
             setSpeed: { [weak progressStore] in progressStore?.setSpeedAction?($0) },
-            setAspect: { progressStore.aspectMode = $0; UserDefaults.standard.set($0.rawValue, forKey: "player.aspectMode") },
-            setVideoScale: { progressStore.videoScaleMode = $0 },
+            setVideoScale: { progressStore.setVideoScale($0) },
             setSleepTimer: { sleepTimerEnd = $0 },
             toggleStreamInfo: { withAnimation(.easeInOut(duration: 0.2)) { showStreamInfo.toggle() } },
             toggleAudioOnly: {
@@ -3155,8 +3128,8 @@ struct PlayerOverflowMenu: View, Equatable {
     let sleepTimerEnd: Date?
     let showStreamInfo: Bool
     let isAudioOnly: Bool
-    /// Current on-screen aspect mode (issue #26), shown with a checkmark in
-    /// the Aspect Ratio submenu.
+    /// Current on-screen aspect mode (issue #26), shown as the Video
+    /// Scale row's current value.
     let aspectMode: VideoAspectMode
     /// When true, the menu shows a "Record Current Program" item that
     /// fires `recordAction`. Gated off the audio tile's live EPG state
@@ -3173,10 +3146,9 @@ struct PlayerOverflowMenu: View, Equatable {
     nonisolated(unsafe) var setAudioSync: ((Int) -> Void)?
     var setSubtitleTrack: ((Int) -> Void)?
     var setSpeed: ((Double) -> Void)?
-    var setAspect: ((VideoAspectMode) -> Void)?
-    /// Video Scale: cycles Fit / Fill and persists globally. nil hides
-    /// the row.
-    var setVideoScale: ((VideoScaleMode) -> Void)?
+    /// Video Scale: cycles Fit / Fill / Stretch and persists globally.
+    /// nil hides the row.
+    var setVideoScale: ((VideoAspectMode) -> Void)?
     var setSleepTimer: ((Date?) -> Void)?
     var toggleStreamInfo: (() -> Void)?
     var toggleAudioOnly: (() -> Void)?
@@ -3362,33 +3334,13 @@ struct PlayerOverflowMenu: View, Equatable {
                     }
                 }
 
-                // Aspect Ratio (issue #26) — live + VOD, hidden in audio-only.
-                if !isAudioOnly {
-                    Menu {
-                        ForEach(VideoAspectMode.allCases) { mode in
-                            Button {
-                                setAspect?(mode)
-                            } label: {
-                                if mode == aspectMode {
-                                    Label(mode.label, systemImage: "checkmark")
-                                } else {
-                                    Text(mode.label)
-                                }
-                            }
-                        }
+                // Video Scale (issue #26): one row cycling
+                // Fit -> Fill -> Stretch. Live + VOD, hidden in audio-only.
+                if !isAudioOnly, let setVideoScale {
+                    Button {
+                        setVideoScale(aspectMode.next)
                     } label: {
-                        Label("Aspect: \(aspectMode.label)", systemImage: aspectMode.icon)
-                    }
-
-                    // Video Scale: two-value Fit / Fill cycle, the same
-                    // setting the pinch gesture drives.
-                    if let setVideoScale {
-                        let scale: VideoScaleMode = aspectMode == .fill ? .fill : .fit
-                        Button {
-                            setVideoScale(scale.next)
-                        } label: {
-                            Label("Video Scale: \(scale.label)", systemImage: scale.icon)
-                        }
+                        Label("Video Scale: \(aspectMode.label)", systemImage: aspectMode.icon)
                     }
                 }
 
@@ -3550,8 +3502,8 @@ struct TVPlayerOptionsPanel: View {
     /// Video Scale (Fit / Fill). `onSelectVideoScale` nil hides the
     /// section, which is what a multiview grid of 2+ tiles does since
     /// Fill only applies to a solo player.
-    var videoScaleMode: VideoScaleMode = .fit
-    var onSelectVideoScale: ((VideoScaleMode) -> Void)?
+    var videoScaleMode: VideoAspectMode = .fit
+    var onSelectVideoScale: ((VideoAspectMode) -> Void)?
 
     /// Focus tracking for every pill in the panel. Each pill binds to
     /// a unique string id via `.focused($focusedID, equals:)`; the
@@ -3794,7 +3746,7 @@ struct TVPlayerOptionsPanel: View {
     @ViewBuilder private var videoScaleSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             sectionHeader("Video Scale")
-            ForEach(VideoScaleMode.allCases) { mode in
+            ForEach(VideoAspectMode.allCases) { mode in
                 optionPill(
                     id: "video-scale-\(mode.rawValue)",
                     text: mode.label,
@@ -5690,29 +5642,12 @@ struct UnifiedPlayerChrome: View {
                     Label("Subtitles", systemImage: "captions.bubble")
                 }
             }
-            Menu {
-                ForEach(VideoAspectMode.allCases) { mode in
-                    Button {
-                        onInteract()
-                        progress.aspectMode = mode
-                        UserDefaults.standard.set(mode.rawValue, forKey: "player.aspectMode")
-                    } label: {
-                        if progress.aspectMode == mode {
-                            Label(mode.label, systemImage: "checkmark")
-                        } else {
-                            Label(mode.label, systemImage: mode.icon)
-                        }
-                    }
-                }
-            } label: {
-                Label("Aspect Ratio", systemImage: "aspectratio")
-            }
             Button {
                 onInteract()
-                progress.videoScaleMode = progress.videoScaleMode.next
+                progress.setVideoScale(progress.aspectMode.next)
             } label: {
-                Label("Video Scale: \(progress.videoScaleMode.label)",
-                      systemImage: progress.videoScaleMode.icon)
+                Label("Video Scale: \(progress.aspectMode.label)",
+                      systemImage: progress.aspectMode.icon)
             }
             Menu {
                 ForEach([30, 60, 90, 120], id: \.self) { minutes in
