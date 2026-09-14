@@ -104,7 +104,19 @@ final class MultiviewStore: ObservableObject {
     /// entering multiview from single playback. New tiles append at
     /// the end. Drag-rearrange reorders this list in place, which is
     /// what drives the visual shuffle via `.animation(value: tiles)`.
-    @Published private(set) var tiles: [MultiviewTile] = []
+    @Published private(set) var tiles: [MultiviewTile] = [] {
+        didSet { syncVideoFillEligibility() }
+    }
+
+    /// Video Scale: Fill is a solo-player affordance, so every tile
+    /// store is told whether it currently owns the whole screen. With
+    /// 2 or more tiles the grid stays Fit regardless of the setting.
+    private func syncVideoFillEligibility() {
+        let solo = tiles.count <= 1
+        for store in progressStoresByTileID.values where store.allowsVideoFill != solo {
+            store.allowsVideoFill = solo
+        }
+    }
 
     /// Which tile currently owns audio. Exactly one tile is unmuted
     /// at any time during multiview (binary model, not a mix). The
@@ -409,6 +421,7 @@ final class MultiviewStore: ObservableObject {
         if wasAudio && prior !== store {
             audioProgressStoreRevision &+= 1
         }
+        store.allowsVideoFill = (tiles.count <= 1)
         debugLog("[MV-ProgressStore] register tileID=\(tileID) wasAudio=\(wasAudio) audioTileID=\(audioTileID ?? "nil") dictCount=\(progressStoresByTileID.count)")
     }
 

@@ -436,7 +436,7 @@ class MPVPlayerViewController: UIViewController {
         // Issue #26: honor the persisted aspect mode at layer setup (the
         // Coordinator's sink handles later changes). Defaults to .resizeAspect
         // (Fit) when there's no coordinator yet or no persisted choice.
-        sampleBufferLayer.videoGravity = coordinator?.progressStore.aspectMode.videoGravity ?? .resizeAspect
+        sampleBufferLayer.videoGravity = coordinator?.progressStore.effectiveVideoGravity ?? .resizeAspect
         sampleBufferLayer.frame = view.bounds
         view.layer.addSublayer(sampleBufferLayer)
 
@@ -3153,11 +3153,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // whenever it changes (and once on subscribe for the persisted
             // initial value). Cross-platform — the AVSampleBufferDisplayLayer
             // and its videoGravity exist on iOS and tvOS alike.
-            progressStore.$aspectMode
+            // Fill is suppressed for non-solo multiview tiles and while
+            // PiP owns the video, so the three inputs combine here.
+            Publishers.CombineLatest3(progressStore.$aspectMode,
+                                      progressStore.$allowsVideoFill,
+                                      progressStore.$isPiPActive)
                 .receive(on: DispatchQueue.main)
-                .sink { [weak self] mode in
+                .sink { [weak self] mode, allowsFill, pipActive in
                     MainActor.assumeIsolated {
-                        self?.viewController?.sampleBufferLayer.videoGravity = mode.videoGravity
+                        self?.viewController?.sampleBufferLayer.videoGravity =
+                            (allowsFill && !pipActive) ? mode.videoGravity : .resizeAspect
                     }
                 }
                 .store(in: &cancellables)

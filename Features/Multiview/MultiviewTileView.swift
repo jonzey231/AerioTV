@@ -992,6 +992,10 @@ struct MultiviewTileView: View {
     private var iPadOSBody: some View {
         tileContent
             .contentShape(Rectangle())
+            // Video Scale: pinch out for Fill, pinch in for Fit. The
+            // modifier itself no-ops while this tile shares the screen
+            // with others (Fill is solo only).
+            .videoScalePinch(progressStore)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(a11yLabel)
             .confirmationDialog(

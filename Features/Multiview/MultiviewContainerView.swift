@@ -1417,7 +1417,14 @@ struct MultiviewContainerView: View {
                         currentLayout: layoutMode,
                         onSelectLayout: { mode in
                             withAnimation(.easeInOut(duration: 0.2)) { layoutMode = mode }
-                        }
+                        },
+                        // Video Scale is a solo-player affordance: with
+                        // 2+ tiles the grid stays Fit, so the section
+                        // hides itself.
+                        videoScaleMode: audioStore.videoScaleMode,
+                        onSelectVideoScale: store.tiles.count <= 1
+                            ? { audioStore.videoScaleMode = $0 }
+                            : nil
                     )
     }
 

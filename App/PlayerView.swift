@@ -209,6 +209,121 @@ enum VideoAspectMode: String, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Video Scale Mode
+
+/// Global two-value video scale used by the Video Scale control (pinch
+/// on iPhone/iPad, "Video Scale" row in the player options). `fit` is
+/// the default letterbox; `fill` scales up preserving aspect so the
+/// shorter dimension fills the screen and the overflow is cropped,
+/// which removes pillar bars baked into a 16:9 stream on a 4:3 panel.
+/// Persisted globally (unsynced) under `videoScaleMode`; it is a
+/// two-value projection of `VideoAspectMode`, so both controls drive
+/// one layer property.
+enum VideoScaleMode: String, CaseIterable, Identifiable {
+    case fit
+    case fill
+
+    static let defaultsKey = "videoScaleMode"
+
+    var id: String { rawValue }
+
+    var label: String { self == .fill ? "Fill" : "Fit" }
+
+    var icon: String { aspectMode.icon }
+
+    var aspectMode: VideoAspectMode { self == .fill ? .fill : .fit }
+
+    var next: VideoScaleMode { self == .fill ? .fit : .fill }
+
+    /// Persisted value, defaulting to `.fit`.
+    static var stored: VideoScaleMode {
+        VideoScaleMode(rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .fit
+    }
+
+    /// Writes both the new global key and the legacy aspect key so the
+    /// Aspect Ratio menu and Video Scale never disagree after a relaunch.
+    static func persist(_ mode: VideoScaleMode) {
+        UserDefaults.standard.set(mode.rawValue, forKey: defaultsKey)
+        UserDefaults.standard.set(mode.aspectMode.rawValue, forKey: "player.aspectMode")
+    }
+}
+
+#if os(iOS)
+/// Pinch-to-scale on the player video (iPhone and iPad): pinch out
+/// past 1.15 sets Fill, pinch in below 0.85 sets Fit, with a brief
+/// centered "Fill" / "Fit" label. Ignored while Fill is not eligible
+/// (multiview with 2 or more tiles, PiP).
+struct VideoScalePinch: ViewModifier {
+    @ObservedObject var progressStore: PlayerProgressStore
+    @State private var toast: VideoScaleMode?
+    @State private var toastTask: Task<Void, Never>?
+
+    func body(content: Content) -> some View {
+        content
+            .simultaneousGesture(
+                MagnifyGesture(minimumScaleDelta: 0.05)
+                    .onEnded { value in commit(value.magnification) }
+            )
+            .overlay(alignment: .center) {
+                if let toast {
+                    Text(toast.label)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 22)
+                        .padding(.vertical, 12)
+                        .background(Color.black.opacity(0.55),
+                                    in: Capsule())
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+            }
+            .onDisappear {
+                toastTask?.cancel()
+                toastTask = nil
+            }
+    }
+
+    private func commit(_ magnification: CGFloat) {
+        guard progressStore.allowsVideoFill, !progressStore.isPiPActive else { return }
+        let target: VideoScaleMode
+        if magnification > 1.15 {
+            target = .fill
+        } else if magnification < 0.85 {
+            target = .fit
+        } else {
+            return
+        }
+        if progressStore.videoScaleMode != target {
+            progressStore.videoScaleMode = target
+        }
+        show(target)
+    }
+
+    /// Flash the mode name for about a second.
+    private func show(_ mode: VideoScaleMode) {
+        toastTask?.cancel()
+        withAnimation(.easeOut(duration: 0.15)) { toast = mode }
+        toastTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeIn(duration: 0.2)) { toast = nil }
+        }
+    }
+}
+#endif
+
+extension View {
+    /// Applies the Video Scale pinch gesture on iPhone / iPad; a no-op
+    /// on tvOS, where the Options panel owns the setting.
+    @ViewBuilder func videoScalePinch(_ progressStore: PlayerProgressStore) -> some View {
+        #if os(iOS)
+        modifier(VideoScalePinch(progressStore: progressStore))
+        #else
+        self
+        #endif
+    }
+}
+
 // MARK: - Player Progress Store
 // @unchecked Sendable: all @Published mutations dispatched to main queue manually.
 final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
@@ -360,7 +475,28 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// from UserDefaults so the user's choice survives across streams and
     /// launches; the overflow menu's action writes the same key.
     @Published var aspectMode: VideoAspectMode =
-        VideoAspectMode(rawValue: UserDefaults.standard.string(forKey: "player.aspectMode") ?? "") ?? .fit
+        VideoAspectMode(rawValue: UserDefaults.standard.string(forKey: "player.aspectMode") ?? "")
+        ?? VideoScaleMode.stored.aspectMode
+    /// False while this store drives a multiview tile that shares the
+    /// screen with other tiles: Fill is a solo-player affordance, so a
+    /// grid of 2+ tiles stays Fit no matter what the global setting is.
+    @Published var allowsVideoFill: Bool = true
+    /// Two-value projection of `aspectMode` for the Video Scale control.
+    /// The setter persists globally; Stretch (Aspect Ratio menu only)
+    /// reads back as Fit here.
+    var videoScaleMode: VideoScaleMode {
+        get { aspectMode == .fill ? .fill : .fit }
+        set {
+            aspectMode = newValue.aspectMode
+            VideoScaleMode.persist(newValue)
+        }
+    }
+    /// Gravity the layer should actually use right now: Fill is
+    /// suppressed for non-solo multiview tiles and while PiP owns the
+    /// video (PiP keeps Fit).
+    var effectiveVideoGravity: AVLayerVideoGravity {
+        (allowsVideoFill && !isPiPActive) ? aspectMode.videoGravity : .resizeAspect
+    }
     /// Stream technical info (codec, resolution, bitrate, etc.) sourced
     /// from mpv. Populated for live playback and read by the Stream
     /// Info overlay on every server type.
@@ -839,6 +975,7 @@ private struct PlayerRootView: View {
             }
         )
         .background(Color.black)
+        .videoScalePinch(progressStore)
         #else
         Text("MPV engine not available on this platform")
             .foregroundColor(.red)
@@ -1925,7 +2062,11 @@ private struct PlayerRootView: View {
                             currentVersionOptionID: progressStore.currentVersionOptionID,
                             onSelectVersion: progressStore.switchVersionAction == nil
                                 ? nil
-                                : { [weak progressStore] in progressStore?.switchVersionAction?($0) }
+                                : { [weak progressStore] in progressStore?.switchVersionAction?($0) },
+                            videoScaleMode: progressStore.videoScaleMode,
+                            onSelectVideoScale: { [weak progressStore] in
+                                progressStore?.videoScaleMode = $0
+                            }
                         )
                         .focusSection()
                         // Back/Menu inside the panel closes it (not the app)
@@ -2615,6 +2756,7 @@ private struct PlayerRootView: View {
             setSubtitleTrack: { [weak progressStore] in progressStore?.setSubtitleTrackAction?($0) },
             setSpeed: { [weak progressStore] in progressStore?.setSpeedAction?($0) },
             setAspect: { progressStore.aspectMode = $0; UserDefaults.standard.set($0.rawValue, forKey: "player.aspectMode") },
+            setVideoScale: { progressStore.videoScaleMode = $0 },
             setSleepTimer: { sleepTimerEnd = $0 },
             toggleStreamInfo: { withAnimation(.easeInOut(duration: 0.2)) { showStreamInfo.toggle() } },
             toggleAudioOnly: {
@@ -3032,6 +3174,9 @@ struct PlayerOverflowMenu: View, Equatable {
     var setSubtitleTrack: ((Int) -> Void)?
     var setSpeed: ((Double) -> Void)?
     var setAspect: ((VideoAspectMode) -> Void)?
+    /// Video Scale: cycles Fit / Fill and persists globally. nil hides
+    /// the row.
+    var setVideoScale: ((VideoScaleMode) -> Void)?
     var setSleepTimer: ((Date?) -> Void)?
     var toggleStreamInfo: (() -> Void)?
     var toggleAudioOnly: (() -> Void)?
@@ -3234,6 +3379,17 @@ struct PlayerOverflowMenu: View, Equatable {
                     } label: {
                         Label("Aspect: \(aspectMode.label)", systemImage: aspectMode.icon)
                     }
+
+                    // Video Scale: two-value Fit / Fill cycle, the same
+                    // setting the pinch gesture drives.
+                    if let setVideoScale {
+                        let scale: VideoScaleMode = aspectMode == .fill ? .fill : .fit
+                        Button {
+                            setVideoScale(scale.next)
+                        } label: {
+                            Label("Video Scale: \(scale.label)", systemImage: scale.icon)
+                        }
+                    }
                 }
 
                 Divider()
@@ -3391,6 +3547,11 @@ struct TVPlayerOptionsPanel: View {
     var layoutOptions: [MultiviewLayoutMode] = []
     var currentLayout: MultiviewLayoutMode = .auto
     var onSelectLayout: ((MultiviewLayoutMode) -> Void)?
+    /// Video Scale (Fit / Fill). `onSelectVideoScale` nil hides the
+    /// section, which is what a multiview grid of 2+ tiles does since
+    /// Fill only applies to a solo player.
+    var videoScaleMode: VideoScaleMode = .fit
+    var onSelectVideoScale: ((VideoScaleMode) -> Void)?
 
     /// Focus tracking for every pill in the panel. Each pill binds to
     /// a unique string id via `.focused($focusedID, equals:)`; the
@@ -3414,6 +3575,7 @@ struct TVPlayerOptionsPanel: View {
                 if isLive, onEnterMultiview != nil {
                     multiviewSection
                 }
+                if onSelectVideoScale != nil { videoScaleSection }
                 streamInfoSection
             }
             .padding(20)
@@ -3627,6 +3789,24 @@ struct TVPlayerOptionsPanel: View {
     /// chrome as every other row — just with a leading info icon and
     /// the title swapping based on the current toggle state. Unified
     /// so the whole panel reads as one consistent focusable list.
+    /// Video Scale: Fit (letterbox) vs Fill (crop to fill). Same global
+    /// setting the iPhone / iPad pinch gesture drives.
+    @ViewBuilder private var videoScaleSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("Video Scale")
+            ForEach(VideoScaleMode.allCases) { mode in
+                optionPill(
+                    id: "video-scale-\(mode.rawValue)",
+                    text: mode.label,
+                    systemImage: mode.icon,
+                    isSelected: mode == videoScaleMode
+                ) {
+                    onSelectVideoScale?(mode)
+                }
+            }
+        }
+    }
+
     @ViewBuilder private var streamInfoSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             sectionHeader("Diagnostics")
@@ -4287,10 +4467,13 @@ final class AVPlayerProgressDriver {
         wireCommands(player)
         observe(player)
         // Apply the persisted aspect immediately and on every change.
-        applyGravity(store.aspectMode.videoGravity)
-        aspectCancellable = store.$aspectMode
+        applyGravity(store.effectiveVideoGravity)
+        aspectCancellable = Publishers.CombineLatest3(
+            store.$aspectMode, store.$allowsVideoFill, store.$isPiPActive)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] mode in self?.applyGravity(mode.videoGravity) }
+            .sink { [weak self] mode, allowsFill, pipActive in
+                self?.applyGravity((allowsFill && !pipActive) ? mode.videoGravity : .resizeAspect)
+            }
     }
 
     /// State IN: observers that mirror AVPlayer -> store.
@@ -5524,6 +5707,13 @@ struct UnifiedPlayerChrome: View {
             } label: {
                 Label("Aspect Ratio", systemImage: "aspectratio")
             }
+            Button {
+                onInteract()
+                progress.videoScaleMode = progress.videoScaleMode.next
+            } label: {
+                Label("Video Scale: \(progress.videoScaleMode.label)",
+                      systemImage: progress.videoScaleMode.icon)
+            }
             Menu {
                 ForEach([30, 60, 90, 120], id: \.self) { minutes in
                     Button("\(minutes) minutes") {
@@ -5696,7 +5886,7 @@ struct NativeHLSPlayerScreen: View {
                 // could only chase Apple's fade from outside).
                 AVPlayerLayerView(
                     player: player,
-                    videoGravity: progressStore.aspectMode.videoGravity,
+                    videoGravity: progressStore.effectiveVideoGravity,
                     pipStore: progressStore
                 )
                 .ignoresSafeArea()
@@ -5711,6 +5901,7 @@ struct NativeHLSPlayerScreen: View {
                 // AVPlayerLayer's UIView claims raw touches at the UIKit
                 // layer and a plain tap loses that recognizer race.
                 .simultaneousGesture(TapGesture().onEnded { toggleControls() })
+                .videoScalePinch(progressStore)
                 #else
                 NativeAVPlayerController(
                     player: player,

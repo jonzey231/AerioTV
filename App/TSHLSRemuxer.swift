@@ -2617,12 +2617,17 @@ struct AVPlayerMultiviewTile: View {
     /// tune (session.txt:3375-3380).
     @State private var pendingDisplayCriteria: (width: Int, height: Int, fps: Double, tenBit: Bool)?
     @State private var firstFrameSeen = false
+    /// Video Scale: gravity for this tile's layer, kept in step with the
+    /// shared store (Fill only when this tile owns the whole screen and
+    /// PiP is not driving it).
+    @State private var tileGravity: AVLayerVideoGravity = .resizeAspect
 
     var body: some View {
         ZStack {
             Color.black
             if let player {
                 AVPlayerLayerView(player: player,
+                                  videoGravity: tileGravity,
                                   pipStore: pipEnabled ? progressStore : nil)
                 AVPSubtitleOverlay(store: subtitleStore, timeMs: {
                     let s = player.currentTime().seconds
@@ -2700,6 +2705,8 @@ struct AVPlayerMultiviewTile: View {
         // PiP closed while still backgrounded: suspension follows with no
         // further lifecycle callback, so quiesce right here.
         .onReceive(progressStore.$isPiPActive) { active in
+            tileGravity = (progressStore.allowsVideoFill && !active)
+                ? progressStore.aspectMode.videoGravity : .resizeAspect
             if pipWasActive, !active,
                UIApplication.shared.applicationState == .background {
                 debugLog("[AVP-PIP] closed while backgrounded; quiescing pipeline")
@@ -2718,6 +2725,15 @@ struct AVPlayerMultiviewTile: View {
         // Clear the VOD "Buffering..." spinner the moment the playhead
         // actually advances (the driver's periodic observer writes
         // currentMs for VOD only, so live is untouched).
+        // Video Scale: follow the shared aspect + solo-tile eligibility.
+        .onReceive(progressStore.$aspectMode) { mode in
+            tileGravity = (progressStore.allowsVideoFill && !progressStore.isPiPActive)
+                ? mode.videoGravity : .resizeAspect
+        }
+        .onReceive(progressStore.$allowsVideoFill) { allowsFill in
+            tileGravity = (allowsFill && !progressStore.isPiPActive)
+                ? progressStore.aspectMode.videoGravity : .resizeAspect
+        }
         .onReceive(progressStore.$currentMs) { ms in
             if ms > 0, statusText == "Buffering..." { statusText = nil }
             // Native catch-up sessions want periodic position reports
