@@ -27,6 +27,7 @@ actor EPGCache {
 struct ChannelListView: View {
     @EnvironmentObject private var nowPlaying: NowPlayingManager
     @EnvironmentObject private var favoritesStore: FavoritesStore
+    @ObservedObject private var recentsStore = RecentChannelsStore.shared
     @EnvironmentObject private var channelStore: ChannelStore
     @Environment(\.modelContext) private var modelContext
     @Environment(\.horizontalSizeClass) private var sizeClass
@@ -424,16 +425,14 @@ struct ChannelListView: View {
     /// Favorites tab is gone). Same sentinel shape as "collection:<id>".
     static let favoritesToken = "favorites"
     private var favoritesToken: String { Self.favoritesToken }
+    /// Synthetic "Recently Watched" group: the last 25 channels watched on
+    /// this playlist, most recent first (Logan 2026-09-14). Unchecked in
+    /// Manage Groups by default.
+    static let recentlyWatchedToken = ManageGroupsSheet.recentGroupToken
+    private var recentlyWatchedToken: String { Self.recentlyWatchedToken }
     /// Group the guide opens on (Manage Groups > long press / Default Group).
     /// Empty = All. Applied once per playlist load.
     private let defaultChannelGroupKey = "defaultChannelGroup"
-    /// Manage Groups toggle (off by default) that exposes the "Recently
-    /// Watched" default-group option. With it off, a stored Recently
-    /// Watched default falls back to All Channels (Android parity).
-    private let recentGroupEnabledKey = "defaultChannelGroupRecentEnabled"
-    /// The group the user last had selected, so Recently Watched can
-    /// reopen it. Device-local: it tracks this device's viewing.
-    private let lastSelectedGroupKey = "lastSelectedChannelGroup"
     @State private var defaultGroupApplied = false
     #if os(iOS)
     @AppStorage(phoneGroupSelectorKey) private var phoneGroupSelector = "sidebar"
@@ -578,10 +577,7 @@ struct ChannelListView: View {
                 )
                 #endif
                 .onChange(of: searchText)       { _, _ in filterChannels() }
-                .onChange(of: selectedGroup)    { _, v in
-                    rememberSelectedGroup(v)
-                    filterChannels()
-                }
+                .onChange(of: selectedGroup)    { _, _ in filterChannels() }
                 .onChange(of: sortModeRaw)      { _, _ in filterChannels() }
                 // #45: re-filter when a collection's membership changes so a
                 // collection view updates live as channels are added/removed.
@@ -595,6 +591,10 @@ struct ChannelListView: View {
                 // view's sort) leaves it unchanged.
                 .onChange(of: favoritesStore.favoriteItems.count) { _, _ in
                     favoritesDidChange()
+                }
+                // Recently Watched is a live group: a tune reorders it.
+                .onChange(of: recentsStore.recentIDs) { _, _ in
+                    if selectedGroup == recentlyWatchedToken { filterChannels() }
                 }
                 #if os(tvOS)
                 // Down from the nav circles (Logan 2026-09-05): the banner
@@ -697,6 +697,7 @@ struct ChannelListView: View {
                         showGuideView = true
                         if selectedGroup != fallbackGroup { selectedGroup = fallbackGroup }
                     }
+                    ManageGroupsSheet.seedRecentlyWatchedHidden(storageKey: hiddenGroupsKey)
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                     groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)
                     groupSortMode = GroupOrderStore.loadMode(forKey: channelGroupSortModeKey)
@@ -778,6 +779,7 @@ struct ChannelListView: View {
                 }
                 #endif
                 .onReceive(NotificationCenter.default.publisher(for: .syncManagerDidApplyPreferences)) { _ in
+                    ManageGroupsSheet.seedRecentlyWatchedHidden(storageKey: hiddenGroupsKey)
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                     groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)
                     groupSortMode = GroupOrderStore.loadMode(forKey: channelGroupSortModeKey)
@@ -2075,21 +2077,29 @@ struct ChannelListView: View {
         if favoritesStore.hasFavorites && !hiddenGroups.contains(favoritesToken) {
             tokens.append(favoritesToken)
         }
+        if !recentsStore.recentIDs.isEmpty && !hiddenGroups.contains(recentlyWatchedToken) {
+            tokens.append(recentlyWatchedToken)
+        }
         if !(hiddenGroups.contains("All") && !visible.isEmpty) { tokens.append("All") }
         let all = tokens + visible
         // Manual order may place Favorites / All Channels anywhere (Logan
         // 2026-09-06); orders that never mention them keep them in front.
         guard groupSortMode == GroupSortMode.manual.rawValue else { return all }
-        return GroupOrderStore.applyTokens(all, order: groupOrder, pinnedFirst: [favoritesToken, "All"])
+        return GroupOrderStore.applyTokens(all, order: groupOrder,
+                                           pinnedFirst: [favoritesToken, recentlyWatchedToken, "All"])
     }
 
     private func pillIcon(for token: String) -> String? {
-        token == favoritesToken ? "star.fill" : nil
+        if token == favoritesToken { return "star.fill" }
+        if token == recentlyWatchedToken { return "clock.arrow.circlepath" }
+        return nil
     }
 
     /// Pill / row title for a group token.
     static func groupTitle(_ token: String) -> String {
-        token == favoritesToken ? "Favorites" : token
+        if token == favoritesToken { return "Favorites" }
+        if token == recentlyWatchedToken { return "Recently Watched" }
+        return token
     }
 
     /// Manage Groups (hide / order / default group). Its own property: the
@@ -2116,7 +2126,7 @@ struct ChannelListView: View {
             },
             defaultGroupKey: defaultChannelGroupKey,
             favoritesAvailable: favoritesStore.hasFavorites,
-            recentGroupEnabledKey: recentGroupEnabledKey
+            recentlyWatchedAvailable: true
         )
     }
 
@@ -2154,6 +2164,7 @@ struct ChannelListView: View {
     private func reconcileSelectedGroupWithPlaylist() {
         if selectedGroup != "All",
            selectedGroup != favoritesToken,
+           selectedGroup != recentlyWatchedToken,
            !selectedGroup.hasPrefix("collection:"),
            !channelStore.orderedGroups.isEmpty,
            !channelStore.orderedGroups.contains(selectedGroup) {
@@ -2171,29 +2182,12 @@ struct ChannelListView: View {
     private func applyDefaultGroupIfNeeded() {
         guard !defaultGroupApplied else { return }
         defaultGroupApplied = true
-        guard var wanted = UserDefaults.standard.string(forKey: defaultChannelGroupKey),
-              !wanted.isEmpty else { return }
-        if wanted == ManageGroupsSheet.recentGroupToken {
-            // Recently Watched: reopen the last selected group, but only
-            // while the Manage Groups toggle is on. Off (or nothing
-            // recorded yet) falls back to All Channels, i.e. no move.
-            guard UserDefaults.standard.bool(forKey: recentGroupEnabledKey),
-                  let last = UserDefaults.standard.string(forKey: lastSelectedGroupKey),
-                  !last.isEmpty else { return }
-            wanted = last
-        }
-        guard wanted != selectedGroup else { return }
+        guard let wanted = UserDefaults.standard.string(forKey: defaultChannelGroupKey),
+              !wanted.isEmpty, wanted != selectedGroup else { return }
         if groupTokens.contains(wanted) || wanted.hasPrefix("collection:") {
             selectedGroup = wanted
             debugLog("[GROUPS] default group applied: \(wanted)")
         }
-    }
-
-    /// Records the group for the Recently Watched default option. Stored
-    /// unconditionally (the toggle only decides whether it is read back),
-    /// so turning the option on later already has something to open.
-    private func rememberSelectedGroup(_ group: String) {
-        UserDefaults.standard.set(group, forKey: lastSelectedGroupKey)
     }
 
     /// Where a reset lands: All when shown, else the first visible group.
@@ -2228,7 +2222,16 @@ struct ChannelListView: View {
 
     private func filterChannels() {
         var result = channelStore.channels
-        if selectedGroup == favoritesToken {
+        // Recently Watched: recency order IS the order, so this group skips
+        // the channel sort and the group re-sort below.
+        let preservesOrder = selectedGroup == recentlyWatchedToken
+        if selectedGroup == recentlyWatchedToken {
+            // Synthetic group: the last 25 channels watched on this
+            // playlist, most recent first. Hidden-group exclusion does not
+            // apply to an explicit pick, same as Favorites.
+            ChannelCollectionsStore.shared.activeFilterCollectionID = nil
+            result = recentsStore.resolved
+        } else if selectedGroup == favoritesToken {
             // Favorites group: the user's own list, in their order; hidden
             // groups do not apply to an explicit pick.
             ChannelCollectionsStore.shared.activeFilterCollectionID = nil
@@ -2257,7 +2260,7 @@ struct ChannelListView: View {
             result = result.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
         }
         // Apply sort
-        switch sortModeRaw {
+        switch preservesOrder ? "recency" : sortModeRaw {
         case "name":
             result.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         case "favorites":
@@ -2282,7 +2285,7 @@ struct ChannelListView: View {
         // the within-group order. Default group order leaves the global
         // channel sort untouched (pre-existing behavior). Drives both the
         // list and the guide, which both render `filteredChannels`.
-        if (GroupSortMode(rawValue: groupSortMode) ?? .default) != .default {
+        if !preservesOrder, (GroupSortMode(rawValue: groupSortMode) ?? .default) != .default {
             let ordered = GroupOrderStore.displayOrder(channelStore.orderedGroups, mode: groupSortMode, order: groupOrder)
             let rank = Dictionary(ordered.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: { first, _ in first })
             result = result.enumerated().sorted { lhs, rhs in
@@ -4940,6 +4943,8 @@ struct PhoneGroupDrawer: View {
                         HStack(spacing: 8) {
                             if token == favoritesToken {
                                 Image(systemName: "star.fill").font(.system(size: 13))
+                            } else if token == ChannelListView.recentlyWatchedToken {
+                                Image(systemName: "clock.arrow.circlepath").font(.system(size: 13))
                             }
                             Text(ChannelListView.groupTitle(token))
                                 .font(.system(size: 15, weight: token == selected ? .bold : .medium))

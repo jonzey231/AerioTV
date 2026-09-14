@@ -10,8 +10,14 @@ import SwiftUI
 /// that EPG refreshes / renames are reflected without touching the
 /// store.
 ///
-/// Cap: 20 entries. Push is dedup-on-id — re-pushing an already-
+/// Cap: 25 entries. Push is dedup-on-id — re-pushing an already-
 /// present channel moves it to the front.
+///
+/// PER PLAYLIST (Logan 2026-09-14): the list is scoped to the active
+/// playlist, so switching playlists swaps in that playlist's own
+/// recents instead of showing IDs that belong to another server.
+/// `ChannelStore` calls `setScope(playlistID:)` whenever the active
+/// server changes.
 ///
 /// NOT intended for cross-device sync; UserDefaults is fine, no
 /// iCloud mirror needed.
@@ -22,21 +28,53 @@ final class RecentChannelsStore: ObservableObject {
     /// Ordered IDs, most-recent first.
     @Published private(set) var recentIDs: [String] = []
 
-    /// Hard cap. Each entry is a small String, so 20 is comfortable
+    /// Hard cap. Each entry is a small String, so 25 is comfortable
     /// both in memory and in UserDefaults; the picker will only ever
     /// show the first ~8 in its section anyway.
     private static let maxEntries = 25
 
-    private static let defaultsKey = "aerio.recent.channels.v1"
+    /// Pre-scoping key. Still the read/write target until a playlist
+    /// scope is set, and the source of the one-time migration below.
+    private static let legacyDefaultsKey = "aerio.recent.channels.v1"
+
+    /// Active playlist (server) identifier, or nil before the first
+    /// `setScope` call.
+    private var scopeID: String?
+
+    /// Where the current scope persists. Unscoped falls back to the
+    /// legacy key so a push before the first channel load is not lost.
+    private var defaultsKey: String {
+        guard let scopeID, !scopeID.isEmpty else { return Self.legacyDefaultsKey }
+        return "\(Self.legacyDefaultsKey).\(scopeID)"
+    }
 
     private init() {
+        load()
+    }
+
+    // MARK: - Scope
+
+    /// Point the store at a playlist. Loads that playlist's list; the
+    /// first scope to be set adopts any pre-scoping list so existing
+    /// users keep their recents on the playlist they were watching.
+    func setScope(playlistID: String?) {
+        let new = (playlistID?.isEmpty ?? true) ? nil : playlistID
+        guard new != scopeID else { return }
+        scopeID = new
+        if new != nil,
+           UserDefaults.standard.stringArray(forKey: defaultsKey) == nil,
+           let legacy = UserDefaults.standard.stringArray(forKey: Self.legacyDefaultsKey) {
+            UserDefaults.standard.set(legacy, forKey: defaultsKey)
+            UserDefaults.standard.removeObject(forKey: Self.legacyDefaultsKey)
+        }
+        recentIDs = []
         load()
     }
 
     // MARK: - Load / save
 
     private func load() {
-        guard let stored = UserDefaults.standard.stringArray(forKey: Self.defaultsKey) else {
+        guard let stored = UserDefaults.standard.stringArray(forKey: defaultsKey) else {
             return
         }
         // Defensive: cap on load in case a future version changes the
@@ -46,7 +84,7 @@ final class RecentChannelsStore: ObservableObject {
     }
 
     private func save() {
-        UserDefaults.standard.set(recentIDs, forKey: Self.defaultsKey)
+        UserDefaults.standard.set(recentIDs, forKey: defaultsKey)
     }
 
     // MARK: - Public API

@@ -1320,6 +1320,8 @@ final class ChannelStore: ObservableObject {
             currentChannelServerID = server.id
         }
         activeServer = server
+        // Recently Watched is per playlist (Logan 2026-09-14).
+        RecentChannelsStore.shared.setScope(playlistID: server.id.uuidString)
         // Set isLoading immediately (before the Task starts) so the UI shows
         // the loading spinner right away. Without this, there's a brief gap
         // where channels are empty and isLoading is false, which shows the
@@ -1349,6 +1351,7 @@ final class ChannelStore: ObservableObject {
         GuideStore.shared.invalidateGridCoverage()
         activeServer = server
         currentChannelServerID = server.id
+        RecentChannelsStore.shared.setScope(playlistID: server.id.uuidString)
         loadTask?.cancel()
         epgEnrichTask?.cancel()
         await load(server: server)

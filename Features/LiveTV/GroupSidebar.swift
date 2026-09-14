@@ -72,6 +72,7 @@ func groupSidebarHeaderFloor(hasManageButton: Bool) -> CGFloat {
 func groupSidebarLabel(_ token: String) -> String {
     if token == groupSidebarAllToken { return "All Channels" }
     if token == ChannelListView.favoritesToken { return "Favorites" }
+    if token == ChannelListView.recentlyWatchedToken { return "Recently Watched" }
     return token
 }
 
@@ -256,6 +257,8 @@ struct GroupSidebarPanel: View {
             HStack(spacing: 8) {
                 if token == ChannelListView.favoritesToken {
                     Image(systemName: "star.fill").font(.system(size: 22, weight: .medium))
+                } else if token == ChannelListView.recentlyWatchedToken {
+                    Image(systemName: "clock.arrow.circlepath").font(.system(size: 22, weight: .medium))
                 }
                 Text(groupSidebarLabel(token))
                     .lineLimit(1)
