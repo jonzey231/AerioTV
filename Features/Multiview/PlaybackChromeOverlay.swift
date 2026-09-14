@@ -650,6 +650,9 @@ struct PlaybackChromeOverlay: View {
 /// total clock, 30s skips, play-pause). Solo-VOD sessions only.
 struct VODTransportBar_iOS: View {
     @ObservedObject var store: MultiviewStore
+    // Skip Intervals setting; held here so a change re-renders the glyphs.
+    @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
+    @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
     @State private var dragFraction: CGFloat? = nil
     @State private var settleTask: Task<Void, Never>? = nil
 
@@ -719,19 +722,21 @@ struct VODTransportBar_iOS: View {
             }
 
             HStack(spacing: 26) {
-                vodButton("gobackward.30") {
+                vodButton(SkipIntervals.backSymbol(skipBackSeconds)) {
                     if let ps = store.audioProgressStore {
-                        ps.seekAction?(max(0, ps.currentMs - 30_000))
+                        ps.seekAction?(max(0, ps.currentMs - SkipIntervals.backMs))
                     }
                 }
+                .accessibilityLabel(SkipIntervals.backLabel(skipBackSeconds))
                 vodButton(isPaused ? "play.fill" : "pause.fill") {
                     store.audioProgressStore?.togglePauseAction?()
                 }
-                vodButton("goforward.30") {
+                vodButton(SkipIntervals.forwardSymbol(skipForwardSeconds)) {
                     if let ps = store.audioProgressStore {
-                        ps.seekAction?(min(Int32(clamping: duration), ps.currentMs + 30_000))
+                        ps.seekAction?(min(Int32(clamping: duration), ps.currentMs + SkipIntervals.forwardMs))
                     }
                 }
+                .accessibilityLabel(SkipIntervals.forwardLabel(skipForwardSeconds))
             }
             .padding(.top, 2)
         }
@@ -759,6 +764,9 @@ struct VODTransportBar_iOS: View {
 struct RewindTransportBar_iOS: View {
     @ObservedObject var store: MultiviewStore
     @ObservedObject private var liveRewind = LiveRewindEngine.shared
+    // Skip Intervals setting; held here so a change re-renders the glyphs.
+    @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
+    @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
     @State private var dragFraction: CGFloat? = nil
 
     var body: some View {
@@ -837,19 +845,21 @@ struct RewindTransportBar_iOS: View {
             // anchors right without disturbing the centering.
             ZStack {
                 HStack(spacing: 26) {
-                    transportButton("gobackward.30") {
+                    transportButton(SkipIntervals.backSymbol(skipBackSeconds)) {
                         if let ps = store.audioProgressStore {
-                            ps.seekAction?(max(0, (liveRewind.timeshifting ? ps.currentMs : Int32(clamping: window)) - 30_000))
+                            ps.seekAction?(max(0, (liveRewind.timeshifting ? ps.currentMs : Int32(clamping: window)) - SkipIntervals.backMs))
                         }
                     }
+                    .accessibilityLabel(SkipIntervals.backLabel(skipBackSeconds))
                     transportButton(isPaused ? "play.fill" : "pause.fill") {
                         store.audioProgressStore?.togglePauseAction?()
                     }
-                    transportButton("goforward.30") {
+                    transportButton(SkipIntervals.forwardSymbol(skipForwardSeconds)) {
                         if let ps = store.audioProgressStore {
-                            ps.seekAction?((liveRewind.timeshifting ? ps.currentMs : Int32(clamping: window)) + 30_000)
+                            ps.seekAction?((liveRewind.timeshifting ? ps.currentMs : Int32(clamping: window)) + SkipIntervals.forwardMs)
                         }
                     }
+                    .accessibilityLabel(SkipIntervals.forwardLabel(skipForwardSeconds))
                 }
                 if liveRewind.timeshifting {
                     HStack {
@@ -1137,6 +1147,9 @@ struct PlaybackBottomChrome_tvOS: View {
     /// The pre-map App Behaviors channel-flip toggle still suppresses a
     /// channelUp/channelDown mapping, so the strip drops that pair too.
     @AppStorage("appBehaviorsAppleTVChannelFlip") private var appleTVChannelFlip = true
+    // Skip Intervals setting for the Rewind / Forward cells.
+    @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
+    @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
 
     /// Pairs for this chrome, resolved from the current map and mode.
     /// Catch-up, VOD solo and a rolling Live Rewind all put short
@@ -1293,18 +1306,18 @@ struct PlaybackBottomChrome_tvOS: View {
         // caption says why; the press does nothing.
         nativeToolButton(
             .rewind30,
-            icon: "gobackward.30",
+            icon: SkipIntervals.backSymbol(skipBackSeconds),
             title: hasTransportCells ? "Rewind" : Self.noRewindCaption,
             dimmed: !hasTransportCells,
-            a11yLabel: "Rewind 30 seconds",
+            a11yLabel: "Rewind \(skipBackSeconds) seconds",
             a11yHint: hasTransportCells
-                ? "Jump back thirty seconds"
+                ? "Jump back \(skipBackSeconds) seconds"
                 : Self.noRewindCaption
         ) {
             guard hasTransportCells else { return }
             chromeState.reportInteraction()
             if let ps = store.audioProgressStore {
-                ps.seekAction?(max(0, ps.currentMs - 30_000))
+                ps.seekAction?(max(0, ps.currentMs - SkipIntervals.backMs))
             }
         }
     }
@@ -1315,18 +1328,18 @@ struct PlaybackBottomChrome_tvOS: View {
     private var controlRowTrailingCells: some View {
         nativeToolButton(
             .forward30,
-            icon: "goforward.30",
+            icon: SkipIntervals.forwardSymbol(skipForwardSeconds),
             title: hasTransportCells ? "Forward" : Self.noRewindCaption,
             dimmed: !hasTransportCells,
-            a11yLabel: "Forward 30 seconds",
+            a11yLabel: "Forward \(skipForwardSeconds) seconds",
             a11yHint: hasTransportCells
-                ? "Jump forward thirty seconds"
+                ? "Jump forward \(skipForwardSeconds) seconds"
                 : Self.noRewindCaption
         ) {
             guard hasTransportCells else { return }
             chromeState.reportInteraction()
             if let ps = store.audioProgressStore {
-                ps.seekAction?(ps.currentMs + 30_000)
+                ps.seekAction?(ps.currentMs + SkipIntervals.forwardMs)
             }
         }
 
@@ -2111,7 +2124,11 @@ final class DpadScrubController: ObservableObject {
         if dir == lastDirection { accelCount += 1 } else { accelCount = 0 }
         lastDirection = dir
         let mult = Int64(min(12, 1 + accelCount / 2))
-        let stepped = Int64(targetMs) + Int64(dir) * 10_000 * mult
+        // A single press (including the discrete step a hold delivers
+        // before it is recognized) moves by the Skip Intervals setting;
+        // the hold loop keeps the accelerating 10 s x mult scrub.
+        let stepMs = holdActive ? Int64(dir) * SkipIntervals.holdStepMs * mult : SkipIntervals.stepMs(dir)
+        let stepped = Int64(targetMs) + stepMs
         targetMs = Int32(max(0, min(Int64(endMs), stepped)))
         active = true
         debugLog("[DPAD-SCRUB] step dir=\(dir) x\(mult) -> \(targetMs)/\(endMs)ms \(isCatchup ? "catchup" : (isVOD ? "vod" : "rewind"))")

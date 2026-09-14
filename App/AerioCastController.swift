@@ -2117,6 +2117,9 @@ struct RemoteControlScreen: View {
     var cast: AerioCastController? = nil
 
     @State private var showOptions = false
+    // Skip Intervals (Settings > App Behaviors) for the skip row.
+    @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
+    @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
     @Environment(\.dismiss) private var dismiss
 
     /// Compact bottom-sheet layout (Logan 2026-09-13): Android's cast sheet,
@@ -2228,16 +2231,19 @@ struct RemoteControlScreen: View {
         }
     }
 
-    /// Skip back / forward 30 with the channel flip on either side, so the
-    /// channel-switch actions survive the condensed layout.
+    /// Skip back / forward (Settings > Skip Intervals) with the channel flip
+    /// on either side, so the channel-switch actions survive the condensed
+    /// layout.
     private var skipRow: some View {
         HStack(spacing: 18) {
             transportButton("chevron.down", label: "Channel down",
                             size: 44, action: onChannelDown)
-            transportButton("gobackward.30", label: "Skip back 30 seconds",
-                            size: 44) { seek(-30_000) }
-            transportButton("goforward.30", label: "Skip forward 30 seconds",
-                            size: 44) { seek(30_000) }
+            transportButton(SkipIntervals.backSymbol(skipBackSeconds),
+                            label: "Skip back \(skipBackSeconds) seconds",
+                            size: 44) { seek(-Int64(skipBackSeconds) * 1000) }
+            transportButton(SkipIntervals.forwardSymbol(skipForwardSeconds),
+                            label: "Skip forward \(skipForwardSeconds) seconds",
+                            size: 44) { seek(Int64(skipForwardSeconds) * 1000) }
             transportButton("chevron.up", label: "Channel up",
                             size: 44, action: onChannelUp)
         }
@@ -2263,7 +2269,7 @@ struct RemoteControlScreen: View {
         }
     }
 
-    /// ±30 s: the companion transport seeks its live-rewind buffer; the other
+    /// Skip Intervals skip: the companion transport seeks its live-rewind buffer; the other
     /// transports flip nothing, so the buttons stay out of the way there.
     /// Home-indicator inset: the detent height is the sheet's own height, so
     /// the content must clear the safe area at the bottom.
@@ -2279,7 +2285,7 @@ struct RemoteControlScreen: View {
         companion.seekBy(deltaMs)
     }
 
-    /// Live-rewind scrubber + ±30s + Go Live (companion only, when a rewind
+    /// Live-rewind scrubber + Go Live (companion only, when a rewind
     /// buffer is rolling on the TV).
     @ViewBuilder
     private func rewindBar(_ companion: CompanionClient) -> some View {
@@ -2301,7 +2307,7 @@ struct RemoteControlScreen: View {
                 })
             }
             .frame(height: 16)
-            // The +/-30 s buttons live in the sheet's own skip row now, so
+            // The skip buttons live in the sheet's own skip row now, so
             // this line keeps just the LIVE state and Go Live.
             HStack {
                 Text(s.isLive ? "LIVE" : "REWOUND")

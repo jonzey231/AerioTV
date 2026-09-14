@@ -150,6 +150,8 @@ final class SyncManager: ObservableObject {
     private let syncDoubleKeys  = ["networkTimeout"]
     private let syncIntKeys = [
         "maxRetries", "bgRefreshIntervalMins", "bgRefreshHour", "bgRefreshMinute",
+        // Skip Intervals (Settings > App Behaviors): one global pair.
+        SkipIntervals.backKey, SkipIntervals.forwardKey,
     ]
     // `favoriteChannelIDs` carries the membership Set; `favoriteOrder`
     // carries the user's manual drag-reorder positions from the iOS

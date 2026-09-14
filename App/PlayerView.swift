@@ -816,6 +816,11 @@ private struct PlayerRootView: View {
     @AppStorage("appBehaviorsAppleTVChannelFlip")
     private var appleTVChannelFlip = true
 
+    // Skip Intervals (Settings > App Behaviors): the skip buttons and a
+    // single scrub press. Held here so a change re-renders the glyphs.
+    @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
+    @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
+
     // Sleep timer
     @State private var sleepTimerEnd: Date?
 
@@ -1877,12 +1882,13 @@ private struct PlayerRootView: View {
 
     /// Move the scrub preview by one step. No seek happens here, so the
     /// video keeps playing smoothly while scrubbing. Holding the same
-    /// direction accelerates (1x..12x) so a long movie is crossable; a
-    /// single tap nudges about 10 seconds.
+    /// direction accelerates (1x..12x) so a long movie is crossable; the
+    /// first press of a run moves by the Skip Intervals setting.
     private func scrubStep(_ dir: Int) {
         guard timelineEndMs > 0 else { return }
         controlsHideTask?.cancel()
         scrubSettleTask?.cancel()  // a fresh scrub supersedes any post-seek settle
+        let firstStep = !isScrubbing || dir != scrubLastDirection
         if !isScrubbing {
             isScrubbing = true
             scrubTargetMs = progressStore.currentMs
@@ -1891,8 +1897,10 @@ private struct PlayerRootView: View {
         if dir == scrubLastDirection { scrubAccelCount += 1 } else { scrubAccelCount = 0 }
         scrubLastDirection = dir
         let mult = Int32(min(12, 1 + scrubAccelCount / 2))
-        let step = Int64(10_000) * Int64(mult)
-        let target = Int64(scrubTargetMs) + Int64(dir) * step
+        let stepMs = firstStep
+            ? SkipIntervals.stepMs(dir)
+            : Int64(dir) * SkipIntervals.holdStepMs * Int64(mult)
+        let target = Int64(scrubTargetMs) + stepMs
         scrubTargetMs = Int32(max(0, min(Int64(timelineEndMs), target)))
         debugLog("🎚️ [VOD-SCRUB] step dir=\(dir) x\(mult) -> \(scrubTargetMs)/\(progressStore.durationMs)ms")
         scheduleScrubCommit()
@@ -2242,35 +2250,37 @@ private struct PlayerRootView: View {
                 Spacer()
 
                 #if !os(tvOS)
-                // Skip back 10 s (iOS only — tvOS uses the scrubber)
+                // Skip back by the Skip Intervals setting (iOS only; tvOS uses the scrubber)
                 Button {
-                    let target = max(0, progressStore.currentMs - 10_000)
+                    let target = max(0, progressStore.currentMs - SkipIntervals.backMs)
                     progressStore.seekAction?(target)
                     scheduleControlsHide()
                 } label: {
-                    Image(systemName: "gobackward.10")
+                    Image(systemName: SkipIntervals.backSymbol(skipBackSeconds))
                         .font(.system(size: 22, weight: .medium))
                         .foregroundColor(.white)
                         .frame(width: 44, height: 44)
                 }
+                .accessibilityLabel(SkipIntervals.backLabel(skipBackSeconds))
                 .opacity(canSeekBackward ? 1 : 0.3)
                 .disabled(!canSeekBackward)
 
                 Spacer().frame(width: 32)
 
-                // Skip forward 10 s (iOS only)
+                // Skip forward by the Skip Intervals setting (iOS only)
                 Button {
                     let target = timelineEndMs > 0
-                        ? min(timelineEndMs, progressStore.currentMs + 10_000)
-                        : progressStore.currentMs + 10_000
+                        ? min(timelineEndMs, progressStore.currentMs + SkipIntervals.forwardMs)
+                        : progressStore.currentMs + SkipIntervals.forwardMs
                     progressStore.seekAction?(target)
                     scheduleControlsHide()
                 } label: {
-                    Image(systemName: "goforward.10")
+                    Image(systemName: SkipIntervals.forwardSymbol(skipForwardSeconds))
                         .font(.system(size: 22, weight: .medium))
                         .foregroundColor(.white)
                         .frame(width: 44, height: 44)
                 }
+                .accessibilityLabel(SkipIntervals.forwardLabel(skipForwardSeconds))
                 .opacity(canSeekForward ? 1 : 0.3)
                 .disabled(!canSeekForward)
 
@@ -2302,21 +2312,23 @@ private struct PlayerRootView: View {
                 .frame(width: Self.tvCenterCellSlot)
 
                 HStack(spacing: Self.tvToolCellSpacing) {
-                    tvTransportButton(icon: "gobackward.30", title: "Rewind",
+                    tvTransportButton(icon: SkipIntervals.backSymbol(skipBackSeconds), title: "Rewind",
                                       focus: .transportRW) {
-                        progressStore.seekAction?(max(0, progressStore.currentMs - 30_000))
+                        progressStore.seekAction?(max(0, progressStore.currentMs - SkipIntervals.backMs))
                         scheduleControlsHide()
                     }
+                    .accessibilityLabel(SkipIntervals.backLabel(skipBackSeconds))
                 }
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .padding(.trailing, Self.tvCenterCellSlot / 2 + Self.tvToolCellSpacing)
 
                 HStack(spacing: Self.tvToolCellSpacing) {
-                    tvTransportButton(icon: "goforward.30", title: "Forward",
+                    tvTransportButton(icon: SkipIntervals.forwardSymbol(skipForwardSeconds), title: "Forward",
                                       focus: .transportFF) {
-                        progressStore.seekAction?(progressStore.currentMs + 30_000)
+                        progressStore.seekAction?(progressStore.currentMs + SkipIntervals.forwardMs)
                         scheduleControlsHide()
                     }
+                    .accessibilityLabel(SkipIntervals.forwardLabel(skipForwardSeconds))
                     tvTransportButton(icon: "slider.horizontal.3", title: "Options",
                                       focus: .gearIcon) {
                         controlsHideTask?.cancel()
@@ -4089,7 +4101,8 @@ struct TVRemoteInputView: UIViewRepresentable {
         // MARK: - Left arrow
 
         @objc private func leftTapped() {
-            coordinator?.callbacks?.onSeek(-10_000)
+            // Single press: the Skip Intervals setting (holds scrub below).
+            coordinator?.callbacks?.onSeek(-SkipIntervals.backMs)
             // Brief visual feedback
             coordinator?.callbacks?.onLeftHold(true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
@@ -4113,7 +4126,7 @@ struct TVRemoteInputView: UIViewRepresentable {
         // MARK: - Right arrow
 
         @objc private func rightTapped() {
-            coordinator?.callbacks?.onSeek(10_000)
+            coordinator?.callbacks?.onSeek(SkipIntervals.forwardMs)
             coordinator?.callbacks?.onRightHold(true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                 self?.coordinator?.callbacks?.onRightHold(false)

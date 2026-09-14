@@ -351,15 +351,19 @@ final class NowPlayingBridge {
         if let onSkip {
             cc.skipForwardCommand.isEnabled = true
             cc.skipBackwardCommand.isEnabled = true
-            cc.skipForwardCommand.preferredIntervals = [30]
-            cc.skipBackwardCommand.preferredIntervals = [30]
+            // Settings > Skip Intervals, read each time the commands are
+            // configured (every play / channel change).
+            let forwardSecs = Double(SkipIntervals.forwardSeconds)
+            let backSecs = Double(SkipIntervals.backSeconds)
+            cc.skipForwardCommand.preferredIntervals = [NSNumber(value: forwardSecs)]
+            cc.skipBackwardCommand.preferredIntervals = [NSNumber(value: backSecs)]
             cc.skipForwardCommand.addTarget { event in
-                let secs = (event as? MPSkipIntervalCommandEvent)?.interval ?? 30
+                let secs = (event as? MPSkipIntervalCommandEvent)?.interval ?? forwardSecs
                 DispatchQueue.main.async { onSkip(secs) }
                 return .success
             }
             cc.skipBackwardCommand.addTarget { event in
-                let secs = (event as? MPSkipIntervalCommandEvent)?.interval ?? 30
+                let secs = (event as? MPSkipIntervalCommandEvent)?.interval ?? backSecs
                 DispatchQueue.main.async { onSkip(-secs) }
                 return .success
             }

@@ -57,6 +57,11 @@ struct AppBehaviorsSettingsView: View {
     @AppStorage("liveRewindRetainChannels") private var liveRewindRetainChannels = false
     @AppStorage("liveRewindRetainCount") private var liveRewindRetainCount = 2
 
+    // Skip Intervals (Logan 2026-09-14): one global, synced pair for
+    // every skip control outside multiview. See SkipIntervals.
+    @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
+    @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
+
     /// Keep Available ladder (2026-07-11 rework, user directive round
     /// 2: the user-meaningful knob is HOW FAR BACK you can rewind, not
     /// how long files persist - retention is now a fixed internal 1
@@ -341,6 +346,29 @@ struct AppBehaviorsSettingsView: View {
                 Text("Orientation").sectionHeaderStyle()
             } footer: {
                 Text("The player's fullscreen button can still rotate into landscape either way.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+            .listSectionSeparator(.hidden)
+
+            // MARK: Skip Intervals (shown whatever the Live Rewind toggle
+            // says, since VOD and DVR use it too)
+            Section {
+                steppedSliderRow_iOS(
+                    title: "Skip back",
+                    values: SkipIntervals.choices,
+                    selection: $skipBackSeconds,
+                    label: { "\($0) seconds" }
+                )
+                steppedSliderRow_iOS(
+                    title: "Skip forward",
+                    values: SkipIntervals.choices,
+                    selection: $skipForwardSeconds,
+                    label: { "\($0) seconds" }
+                )
+            } header: {
+                Text("Skip Intervals").sectionHeaderStyle()
+            } footer: {
+                Text("How far the skip buttons move in live rewind, catch-up, recordings, movies, and TV shows, including the cast remote and the Lock Screen controls.")
                     .font(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
@@ -855,6 +883,26 @@ struct AppBehaviorsSettingsView: View {
                     }
 
                     Text("Show the LIVE, NEW, and season/episode pills on the guide, channel list, and program info. Remembered separately for Apple TV and iPhone/iPad, and synced across your Apple TVs.")
+                        .font(.system(size: 22))
+                        .foregroundColor(.textTertiary)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 4)
+                }
+
+                SettingsSection("Skip Intervals", style: .card) {
+                    tvSteppedSegmentsRow(
+                        title: "Skip back",
+                        values: SkipIntervals.choices,
+                        selection: $skipBackSeconds,
+                        segmentLabel: { "\($0)s" }
+                    )
+                    tvSteppedSegmentsRow(
+                        title: "Skip forward",
+                        values: SkipIntervals.choices,
+                        selection: $skipForwardSeconds,
+                        segmentLabel: { "\($0)s" }
+                    )
+                    Text("How far the skip buttons and a single left or right press move in live rewind, catch-up, recordings, movies, and TV shows. Holding left or right still scrubs faster the longer you hold.")
                         .font(.system(size: 22))
                         .foregroundColor(.textTertiary)
                         .padding(.horizontal, 20)
