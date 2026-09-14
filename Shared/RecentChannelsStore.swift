@@ -10,7 +10,7 @@ import SwiftUI
 /// that EPG refreshes / renames are reflected without touching the
 /// store.
 ///
-/// Cap: 25 entries. Push is dedup-on-id — re-pushing an already-
+/// Cap: 25 entries. Push is dedup-on-id: re-pushing an already-
 /// present channel moves it to the front.
 ///
 /// PER PLAYLIST (Logan 2026-09-14): the list is scoped to the active
