@@ -1063,8 +1063,9 @@ struct MoviesView: View {
     /// Up to 20 newest titles by source add time (cached).
     private var recentlyAdded: [VODDisplayItem] { derived.recentlyAdded }
 
-    /// Hero pages: every Continue Watching title (newest first, up to 12),
-    /// or, with nothing in progress, the newest addition or first title.
+    /// Hero pages: every Continue Watching title (newest first, up to 12).
+    /// Empty when nothing is resumable: the hero section is Continue
+    /// Watching and nothing else (Logan 2026-09-14).
     /// Cached hero pages. The old computed form ran a linear search over
     /// the whole library for each resume row on EVERY body pass, and a
     /// tvOS focus move re-evaluates the body (Time Profiler 2026-09-04
@@ -1075,9 +1076,8 @@ struct MoviesView: View {
     /// Logan 2026-09-04).
     @State private var heroBackdrops: [String: URL] = [:]
 
-    /// True when the hero is the Continue Watching hero (at least one page
-    /// carries a WatchProgress row) rather than the single library fallback
-    /// page (newest addition / first title), which is never labeled.
+    /// True when the hero carries at least one WatchProgress row. With the
+    /// library fallback page gone this is true whenever a hero exists.
     private var heroIsContinueWatching: Bool {
         heroPages.contains { $0.progress != nil }
     }
@@ -1110,16 +1110,14 @@ struct MoviesView: View {
         }
         // Progress rows exist but their titles are not loaded yet (the
         // sweep is still running): keep what is showing rather than
-        // swapping in a random featured card (Logan 2026-09-04: "carousel
-        // replaced by a static single card" mid-sweep on TV Shows).
+        // clearing the hero mid-sweep (Logan 2026-09-04: "carousel
+        // replaced by a static single card" on TV Shows).
         if !progress.isEmpty, isLoadingLibrary { return }
-        if let single = recentlyAdded.first ?? visibleMovies.first {
-            let page = MoviesHeroPage(item: single, progress: nil)
-            heroPages = [applyBackdrop(page)]
-            fetchHeroBackdrops(for: [page])
-        } else {
-            heroPages = []
-        }
+        // The hero section exists ONLY for Continue Watching (Logan
+        // 2026-09-14). With nothing resumable there is no hero at all: no
+        // "Recently added" / "Featured" fallback card and no reserved
+        // space, the page starts with the first shelf.
+        heroPages = []
     }
 
     private func applyBackdrop(_ page: MoviesHeroPage) -> MoviesHeroPage {
@@ -2900,9 +2898,9 @@ enum MoviesSortOrder: String, CaseIterable {
 
 // MARK: - Movies tab redesign: hero
 
-/// Featured title at the top of the Movies tab: backdrop (poster when the
-/// source has no backdrop), title, metadata line, plot, and the action
-/// row. Leads with the newest resume point when there is one.
+/// Continue Watching title at the top of the Movies tab: backdrop (poster
+/// when the source has no backdrop), title, metadata line, plot, and the
+/// action row.
 /// One hero page: a title plus its resume row when it is in progress.
 struct MoviesHeroPage: Identifiable {
     let item: VODDisplayItem
@@ -3204,16 +3202,15 @@ struct MoviesHero: View {
     var onToggleWatchlist: (() -> Void)? = nil
     /// The hero menu behind the right-most options circle (Logan 2026-09-10, all platforms).
     @State private var showOptions = false
+    /// Pixel size of the loaded hero art; nil until it lands. Decides
+    /// whether the art fills the wide slot or gets a poster-shaped one.
+    @State private var artPixelSize: CGSize? = nil
     /// tvOS: base id the carousel uses to focus this page's buttons
     /// ("<id>|primary", "<id>|start", "<id>|details").
     var primaryFocusID: String? = nil
     #if os(tvOS)
     @Environment(\.heroFocusBinding) private var heroFocusBinding
     #endif
-
-    private var eyebrow: String {
-        progress != nil ? "Continue watching" : (item.addedAt != nil ? "Recently added" : "Featured")
-    }
 
     private var metaParts: [String] {
         var parts: [String] = []
@@ -3293,18 +3290,62 @@ struct MoviesHero: View {
         #endif
     }
 
+    /// The hero art slot.
+    ///
+    /// A LANDSCAPE image (a real backdrop) fills the full-width slot: aspect
+    /// fill scales it to the hero's height and only the sides are trimmed.
+    /// A PORTRAIT image (the poster fallback, used when neither TMDB nor the
+    /// provider has a backdrop) used to go through the same aspect fill,
+    /// which blew a 2:3 poster up to the hero's WIDTH and cropped away
+    /// everything but a band across the middle (Logan 2026-09-14: "a huge
+    /// crop showing only torsos"). Portrait art now keeps the hero's HEIGHT,
+    /// takes its width from its own aspect and sits at the trailing edge,
+    /// drawn whole, with the copy column beside it (same treatment as the
+    /// Live TV preview banner, b2fc738).
     @ViewBuilder
     private var artwork: some View {
         GeometryReader { geo in
             if let url = artworkURL {
-                AuthPosterImage(url: url, headers: headers, placeholder: .clear, maxPixel: 1920)
-                    .aspectRatio(contentMode: .fill)
+                let image = AuthPosterImage(url: url,
+                                            headers: headers,
+                                            onImageLoaded: { size in
+                                                if artPixelSize != size { artPixelSize = size }
+                                            },
+                                            placeholder: .clear,
+                                            maxPixel: 1920)
+                    .id(url)
+                if let width = portraitArtWidth {
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        image
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: width, height: geo.size.height)
+                            .clipped()
+                    }
                     .frame(width: geo.size.width, height: geo.size.height)
-                    .clipped()
+                } else {
+                    image
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                }
             } else {
                 Color.clear
             }
         }
+    }
+
+    /// Width of the poster-shaped slot when the loaded art is portrait (or
+    /// close to square); nil for landscape art, which keeps the full-width
+    /// slot. Unknown until the bitmap lands, so the first pass draws the
+    /// landscape slot and swaps once measured.
+    private var portraitArtWidth: CGFloat? {
+        guard let s = artPixelSize, s.width > 0, s.height > 0 else { return nil }
+        let ratio = s.width / s.height
+        // 1.2 and up counts as landscape: TMDB backdrops are 16:9, provider
+        // stills are 4:3 at the narrowest.
+        guard ratio < 1.2 else { return nil }
+        return max(80, (heroHeight * ratio).rounded())
     }
 
     #if os(tvOS)
@@ -3388,6 +3429,9 @@ struct MoviesHero: View {
             actions
         }
         .padding(copyInset)
+        // A portrait poster owns the trailing edge of the slot: the copy
+        // column stops short of it instead of running underneath.
+        .padding(.trailing, portraitArtWidth ?? 0)
         #if os(tvOS)
         .frame(maxWidth: 720, alignment: .leading)
         #else
