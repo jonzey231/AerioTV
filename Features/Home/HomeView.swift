@@ -3442,7 +3442,7 @@ final class NowPlayingManager: ObservableObject {
     var pendingMinimize: Task<Void, Never>?
     /// How long the first Back waits for a possible second one. Short enough
     /// that a single Back still feels immediate.
-    static let doubleBackCloseWindow: TimeInterval = 0.4
+    static let doubleBackCloseWindow: TimeInterval = 0.3
 
     /// Arm the deferred minimize. `body` runs on the main actor once the
     /// window elapses without a second Menu/Back; it is the caller's whole
