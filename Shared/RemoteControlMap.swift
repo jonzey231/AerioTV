@@ -74,6 +74,16 @@ enum GuideRemoteAction: String, CaseIterable {
     case focusGroupPills
     case resumePlayer, closeMiniPlayer
     case programInfo, openSearch
+    /// Guide Select / Left / Right rows (Logan 2026-09-14, Android parity).
+    /// `navigate` = the key's built-in guide behavior (short arrows: the
+    /// LOCKED timeline rule; Select: tune; holds: plain engine repeat).
+    case navigate
+    /// Open the docked group sidebar (Sidebar Menu mode); in Top Group Pills
+    /// mode it lands on the group pills instead.
+    case openGroupSidebar
+    /// Focused-cell actions: tune the channel, open the Program Info sheet,
+    /// open the record sheet.
+    case play, programDetails, record
     case none
 
     var wire: String { rawValue }
@@ -205,12 +215,39 @@ struct RemoteControlMap: Equatable {
             .rewind: .pageUp,
             .channelUp: .pageUp,
             .channelDown: .pageDown,
+            .okShort: .play,
             .okLong: .programInfo,
+            .leftShort: .navigate,
             .leftLong: .timelineBack,
+            .rightShort: .navigate,
             .rightLong: .closeMiniPlayer,
             .playPause: .resumePlayer,
         ]
     )
+
+    /// The six guide rows shown under Settings > Remote Control > In the TV
+    /// Guide, in display order.
+    static let guideKeySlots: [RemoteSlot] = [
+        .okShort, .okLong, .leftShort, .leftLong, .rightShort, .rightLong,
+    ]
+
+    /// What a guide slot ACTUALLY does, given the Group Selection mode.
+    ///
+    /// Sidebar Menu mode must always have a way into the sidebar (GH #72:
+    /// in an empty group it is the only way out). Before these rows existed
+    /// the mode hard-owned hold-Left, whatever the map said. That stays the
+    /// default: in sidebar mode, when NO guide key row is mapped to
+    /// `openGroupSidebar`, Left (hold) resolves to it. As soon as the user
+    /// puts Open sidebar on some row (for example Left), Left (hold) runs its
+    /// own mapped action.
+    func effectiveGuideAction(_ slot: RemoteSlot, useGroupSidebar: Bool) -> GuideRemoteAction {
+        let raw = guideAction(slot)
+        guard useGroupSidebar, slot == .leftLong, raw != .openGroupSidebar else { return raw }
+        if Self.guideKeySlots.contains(where: { guideAction($0) == .openGroupSidebar }) {
+            return raw
+        }
+        return .openGroupSidebar
+    }
 
     // MARK: Decode
 

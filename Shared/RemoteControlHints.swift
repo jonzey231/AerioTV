@@ -70,6 +70,11 @@ enum RemoteControlHints {
         case .jumpToNow:        return "jump to now"
         case .jumpToTop:        return "jump to the top channel"
         case .resumePlayer:     return "return to the player"
+        case .openGroupSidebar: return "open channel groups"
+        case .programInfo:      return "open the program menu"
+        case .programDetails:   return "show program info"
+        case .record:           return "record"
+        case .play:             return "play the channel"
         default:                return nil
         }
     }
@@ -79,10 +84,9 @@ enum RemoteControlHints {
     /// the group menu instead of whatever the map says.
     @MainActor
     static func guideHoldLeftHint(_ map: RemoteControlMap) -> String? {
-        if RemoteControlStore.shared.useGroupSidebar {
-            return "Hold left on remote to open channel groups."
-        }
-        guard let phrase = guidePhrase(map.guideAction(.leftLong)) else { return nil }
+        let action = map.effectiveGuideAction(.leftLong,
+                                              useGroupSidebar: RemoteControlStore.shared.useGroupSidebar)
+        guard let phrase = guidePhrase(action) else { return nil }
         return "Hold left on remote to \(phrase)."
     }
 
@@ -100,6 +104,11 @@ enum RemoteControlHints {
         case .jumpToNow:        return "now"
         case .jumpToTop:        return "top channel"
         case .resumePlayer:     return "player"
+        case .openGroupSidebar: return "groups"
+        case .programInfo:      return "menu"
+        case .programDetails:   return "info"
+        case .record:           return "record"
+        case .play:             return "play"
         default:                return nil
         }
     }
@@ -110,15 +119,23 @@ enum RemoteControlHints {
     /// the pill into the tab bar for no extra information.
     @MainActor
     static func guideHoldLeftShort(_ map: RemoteControlMap) -> String? {
-        if RemoteControlStore.shared.useGroupSidebar {
+        let sidebar = RemoteControlStore.shared.useGroupSidebar
+        if map.effectiveGuideAction(.leftShort, useGroupSidebar: sidebar) == .openGroupSidebar {
             return "Left = groups"
         }
-        guard let phrase = guidePhraseShort(map.guideAction(.leftLong)) else { return nil }
+        guard let phrase = guidePhraseShort(map.effectiveGuideAction(.leftLong, useGroupSidebar: sidebar)) else { return nil }
         return "Hold Left = \(phrase)"
     }
 }
 
 #if os(tvOS)
+extension Notification.Name {
+    /// Guide key rows: run a focused-cell action (userInfo["action"] wire).
+    static let guideFocusedCellAction = Notification.Name("guideFocusedCellAction")
+    /// Move focus onto the first group pill (Top Group Pills mode).
+    static let guideFocusGroupPills = Notification.Name("guideFocusGroupPills")
+}
+
 /// Remote Control #196: shared dispatcher for the guide-context actions
 /// reachable from more than one press site (hold-Left / hold-Right in
 /// ChannelListView, hold-Select in EPGGuideView). Grid moves post the
@@ -169,8 +186,42 @@ enum GuideRemoteDispatch {
             // NowPlayingManager.stop() orphans the PlayerSession-owned mini.
             withAnimation(.spring(response: 0.35)) { PlayerSession.shared.exit() }
             return true
-        case .focusGroupPills, .programInfo, .openSearch, .none:
+        case .openGroupSidebar:
+            // Sidebar mode: the guide answers with the focused programme.
+            // Pills mode has no sidebar: land on the group pills instead.
+            guard RemoteControlStore.shared.useGroupSidebar else {
+                post(.guideFocusGroupPills)
+                return true
+            }
+            post(.guideOpenGroupSidebar)
+            return true
+        case .focusGroupPills:
+            post(.guideFocusGroupPills)
+            return true
+        case .programInfo, .programDetails, .record, .play:
+            performOnFocusedCell(action)
+            return true
+        case .openSearch, .navigate, .none:
             return false
+        }
+    }
+
+    /// Focused-cell actions live in the program cell (its menu, sheets and
+    /// tune closure). Only the FOCUSED cell subscribes, so this reaches one
+    /// cell, not the grid.
+    static func performOnFocusedCell(_ action: GuideRemoteAction) {
+        debugLog("[PRESS] guide mapped cell action=\(action.wire)")
+        post(.guideFocusedCellAction, ["action": action.wire])
+    }
+
+    /// Edge-gated actions on a remapped short Left: they run only where the
+    /// locked rule would pan (focus is in the first program column or could
+    /// not move); elsewhere Left keeps moving focus normally. Every other
+    /// action is column-independent and replaces the Left press outright.
+    static func isLeftEdgeGated(_ action: GuideRemoteAction) -> Bool {
+        switch action {
+        case .openGroupSidebar, .focusGroupPills, .timelineBack, .jumpToNow: return true
+        default: return false
         }
     }
 
@@ -266,9 +317,13 @@ extension RemoteControlHints {
         case .focusGroupPills: return "Group pills"
         case .resumePlayer:    return "Resume"
         case .closeMiniPlayer: return "Close mini"
-        case .programInfo:     return "Program info"
+        case .programInfo:     return "Program menu"
         case .openSearch:      return "Search"
-        case .none:            return nil
+        case .openGroupSidebar: return "Groups"
+        case .programDetails:  return "Program info"
+        case .record:          return "Record"
+        case .play:            return "Play"
+        case .navigate, .none: return nil
         }
     }
 
@@ -287,10 +342,27 @@ extension RemoteControlHints {
                             useGroupSidebar: Bool,
                             miniActive: Bool) -> [RemoteHintPair] {
         var pairs: [RemoteHintPair] = []
-        if useGroupSidebar {
-            pairs.append(RemoteHintPair(key: "Hold Left", action: "Groups"))
-        } else if let phrase = stripGuideAction(map.guideAction(.leftLong)) {
+        // Guide key rows (Logan 2026-09-14): every pair is read off the
+        // effective map. Select / Hold Select / Left / Right appear only when
+        // remapped away from their built-in behavior, so the default strip is
+        // unchanged.
+        let eff = { (slot: RemoteSlot) in
+            map.effectiveGuideAction(slot, useGroupSidebar: useGroupSidebar)
+        }
+        if eff(.okShort) != .play, let phrase = stripGuideAction(eff(.okShort)) {
+            pairs.append(RemoteHintPair(key: "Select", action: phrase))
+        }
+        if eff(.okLong) != .programInfo, let phrase = stripGuideAction(eff(.okLong)) {
+            pairs.append(RemoteHintPair(key: "Hold Select", action: phrase))
+        }
+        if let phrase = stripGuideAction(eff(.leftShort)) {
+            pairs.append(RemoteHintPair(key: "Left", action: phrase))
+        }
+        if let phrase = stripGuideAction(eff(.leftLong)) {
             pairs.append(RemoteHintPair(key: "Hold Left", action: phrase))
+        }
+        if let phrase = stripGuideAction(eff(.rightShort)) {
+            pairs.append(RemoteHintPair(key: "Right", action: phrase))
         }
         pairs.append(RemoteHintPair(key: miniActive ? "Double Back" : "Back",
                                     action: "Top channel"))
@@ -298,9 +370,12 @@ extension RemoteControlHints {
             if let phrase = stripGuideAction(map.guideAction(.playPause)) {
                 pairs.append(RemoteHintPair(key: "Play/Pause", action: phrase))
             }
-            if let phrase = stripGuideAction(map.guideAction(.rightLong)) {
+            if let phrase = stripGuideAction(eff(.rightLong)) {
                 pairs.append(RemoteHintPair(key: "Hold Right", action: phrase))
             }
+        } else if eff(.rightLong) != .closeMiniPlayer,
+                  let phrase = stripGuideAction(eff(.rightLong)) {
+            pairs.append(RemoteHintPair(key: "Hold Right", action: phrase))
         }
         return pairs
     }

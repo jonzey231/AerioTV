@@ -90,6 +90,11 @@ final class RemoteControlStore: ObservableObject {
 
     func playerAction(_ slot: RemoteSlot) -> PlayerRemoteAction { map.playerAction(slot) }
     func guideAction(_ slot: RemoteSlot) -> GuideRemoteAction { map.guideAction(slot) }
+    /// The guide action a press runs right now (Group Selection aware). The
+    /// press paths, the settings rows and the hint strip all read this.
+    func effectiveGuideAction(_ slot: RemoteSlot) -> GuideRemoteAction {
+        map.effectiveGuideAction(slot, useGroupSidebar: useGroupSidebar)
+    }
 
     // MARK: Editing (pins preset = custom)
 

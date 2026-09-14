@@ -4543,6 +4543,13 @@ final class GuideFocusScratch {
     var preRightStepAt = Date.distantPast
     /// A short Right step deferred to the press RELEASE.
     var pendingRightStep = false
+    /// Guide key rows: the programme focused BEFORE the latest focus change,
+    /// so a remapped short Left/Right can put the ring back where the press
+    /// started (onMoveCommand runs after the engine already moved it).
+    var previousFocusedProgramID: String?
+    /// A remapped short Left/Right action waiting out the hold threshold;
+    /// cancelled when the same press turns into a hold.
+    var pendingArrowAction: Task<Void, Never>?
 }
 
 struct EPGGuideView: View {
@@ -5236,6 +5243,7 @@ struct EPGGuideView: View {
             // own snaps/restores/pans) are ignored so this can never loop.
             .onChange(of: focusedProgramID) { oldValue, newValue in
                 focusScratch.lastFocusChangeAt = Date()
+                focusScratch.previousFocusedProgramID = oldValue
                 guard let pid = newValue else { focusScratch.lastFocusedChannel = nil; return }
                 let chID = channelID(ofProgram: pid)
                 #if os(tvOS)
@@ -5744,6 +5752,15 @@ struct EPGGuideView: View {
         guard focusedProgramID != nil else { return }
         switch direction {
         case .left:
+            // Guide key rows (Logan 2026-09-14): a remapped short Left. The
+            // default (.navigate) skips straight to the LOCKED rule below,
+            // untouched. Column-independent actions replace the press here;
+            // edge-gated ones run only at the pan point further down.
+            let leftAction = RemoteControlStore.shared.effectiveGuideAction(.leftShort)
+            if leftAction != .navigate && !GuideRemoteDispatch.isLeftEdgeGated(leftAction) {
+                runRemappedArrow(leftAction, key: "LEFT", holdSlot: .leftLong)
+                break
+            }
             // Sidebar mode used to open the docked group menu on a
             // short-Left at the now column. REVERSED per Logan
             // 2026-08-06 (matching his Android ruling the same day):
@@ -5783,6 +5800,12 @@ struct EPGGuideView: View {
                     break   // the target is on screen already
                 }
             }
+            // First program column (the locked rule would pan here): an
+            // edge-gated remap runs INSTEAD of the pan.
+            if leftAction != .navigate {
+                runRemappedArrow(leftAction, key: "LEFT", holdSlot: .leftLong)
+                break
+            }
             withAnimation(.easeOut(duration: 0.3)) {
                 horizontalOffset = min(0, horizontalOffset + pixelsPerHour * 0.5)
             }
@@ -5796,6 +5819,13 @@ struct EPGGuideView: View {
             // the still-held Right does not scroll the EPG forward after the
             // mini closes. Short/normal Right scrolling is unaffected.
             if rightHoldPinningTimeline { break }
+            // Guide key rows: a remapped short Right replaces the step on
+            // every press (Right has no column edge to respect).
+            let rightAction = RemoteControlStore.shared.effectiveGuideAction(.rightShort)
+            if rightAction != .navigate {
+                runRemappedArrow(rightAction, key: "RIGHT", holdSlot: .rightLong)
+                break
+            }
             // While a corner mini is minimized this Right may be the start of
             // a hold-to-close: step on the RELEASE (guideRightPressEnded), not
             // on press-down, so a hold never scrolls the timeline first.
@@ -5808,6 +5838,40 @@ struct EPGGuideView: View {
             performRightStep()
         default:
             break
+        }
+    }
+
+    /// Run a remapped short-arrow guide action. The engine has already
+    /// moved focus for this press, so the ring goes back to the cell the
+    /// press started on first. When the same key's hold slot does something,
+    /// the action waits out the hold threshold and is dropped if the press
+    /// turns into a hold (the hold detectors post *HoldBegan).
+    private func runRemappedArrow(_ action: GuideRemoteAction, key: String, holdSlot: RemoteSlot) {
+        let origin: String? = Date().timeIntervalSince(focusScratch.lastFocusChangeAt) < 0.25
+            ? focusScratch.previousFocusedProgramID : nil
+        let holdAction = RemoteControlStore.shared.effectiveGuideAction(holdSlot)
+        let holdArmed = holdAction != .navigate && holdAction != .none
+            && !(holdSlot == .rightLong && holdAction == .closeMiniPlayer
+                 && !(NowPlayingManager.shared.isActive && NowPlayingManager.shared.isMinimized))
+        let wait: UInt64 = !holdArmed ? 0
+            : (holdSlot == .leftLong && holdAction == .openGroupSidebar
+               && RemoteControlStore.shared.useGroupSidebar) ? 370_000_000 : 550_000_000
+        debugLog("[PRESS] guide \(key) mapped action=\(action.wire) origin=\(origin ?? "nil") wait=\(wait / 1_000_000)ms")
+        focusScratch.pendingArrowAction?.cancel()
+        focusScratch.pendingArrowAction = Task { @MainActor in
+            if let origin, focusedProgramID != origin {
+                for _ in 0..<4 {
+                    focusedProgramID = origin
+                    try? await Task.sleep(nanoseconds: 60_000_000)
+                    if focusedProgramID == origin { break }
+                }
+            }
+            if wait > 0 { try? await Task.sleep(nanoseconds: wait) }
+            guard !Task.isCancelled else {
+                debugLog("[PRESS] guide \(key) mapped action dropped: press became a hold")
+                return
+            }
+            GuideRemoteDispatch.perform(action)
         }
     }
 
@@ -6008,6 +6072,13 @@ struct EPGGuideView: View {
             .onReceive(
                 NotificationCenter.default.publisher(for: .guideJumpToNow)
             ) { _ in handleJumpToNow() }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .guideLeftHoldBegan)
+                    .merge(with: NotificationCenter.default.publisher(for: .guideRightHoldBegan))
+            ) { _ in
+                focusScratch.pendingArrowAction?.cancel()
+                focusScratch.pendingArrowAction = nil
+            }
             .onReceive(
                 NotificationCenter.default.publisher(for: .guidePageStep)
             ) { note in handlePageStep(note, proxy: proxy) }
@@ -7334,6 +7405,54 @@ private struct GuideProgramButton: View {
         prog.end > Date()
     }
 
+    #if os(tvOS)
+    /// Guide key rows (Logan 2026-09-14): run a mapped action on THIS cell.
+    /// Cell-owned actions (tune, program menu, Program Info, record) run
+    /// here; everything else goes through the shared dispatcher.
+    private func runCellAction(_ action: GuideRemoteAction) {
+        switch action {
+        case .play:
+            onSelect(channelItem)
+        case .programInfo:
+            showCtxDialog = true
+        case .programDetails:
+            presentProgramInfo(after: 0)
+        case .record:
+            if canOfferRecord { activeSheet = .record }
+        case .navigate, .none:
+            break
+        default:
+            GuideRemoteDispatch.perform(action)
+        }
+    }
+    #endif
+
+    /// Present the Program Info sheet for this cell's programme.
+    private func presentProgramInfo(after delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            activeSheet = .programInfo(
+                ProgramInfoTarget(
+                    channelName: channelItem.name,
+                    title: prog.title,
+                    start: prog.start,
+                    end: prog.end,
+                    description: prog.description,
+                    category: prog.category,
+                    programID: prog.programID,
+                    posterURLString: prog.posterURL,
+                    subTitle: prog.subTitle,
+                    season: prog.season,
+                    episode: prog.episode,
+                    isNew: prog.isNew,
+                    isLiveBroadcast: prog.isLiveBroadcast,
+                    isPremiere: prog.isPremiere,
+                    isFinale: prog.isFinale,
+                    isRepeat: prog.isRepeat
+                )
+            )
+        }
+    }
+
     /// v1.7.x: whether to offer a Record action for this program given
     /// the connected account's permission tier. A future program can
     /// only be recorded on the Dispatcharr server (POST
@@ -7452,23 +7571,38 @@ private struct GuideProgramButton: View {
             .focused($isFocused)
             .focused(focusedProgramID, equals: prog.id)
             .onTapGesture {
+                // Multiview staging owns Select regardless of the map: the
+                // staging flow has no other way to pile channels.
                 if multiviewStore.isStagingFromGuide {
                     onMultiviewIntent(channelItem)
-                } else {
-                    onSelect(channelItem)
+                    return
                 }
+                // Guide "Select" row (2026-09-14): default .play = tune.
+                let action = RemoteControlStore.shared.effectiveGuideAction(.okShort)
+                debugLog("[PRESS] guide SELECT action=\(action.wire) prog=\(prog.id)")
+                runCellAction(action)
             }
             .onLongPressGesture(minimumDuration: 0.25) {
                 // Guide "Select (hold)" slot, dispatched BY ACTION VALUE
                 // (#196). The confirmationDialog below IS the program menu
-                // (okLong = .programInfo by default); any other mapped
-                // action runs through the shared dispatcher, and Do
-                // Nothing suppresses the press entirely.
-                let action = RemoteControlStore.shared.guideAction(.okLong)
-                if action == .programInfo {
-                    showCtxDialog = true
-                } else {
-                    GuideRemoteDispatch.perform(action)
+                // (okLong = .programInfo by default); cell actions run here,
+                // any other mapped action runs through the shared
+                // dispatcher, and Do Nothing suppresses the press entirely.
+                let action = RemoteControlStore.shared.effectiveGuideAction(.okLong)
+                debugLog("[PRESS] guide SELECT-HOLD action=\(action.wire) prog=\(prog.id)")
+                runCellAction(action)
+            }
+            // Mapped cell actions from arrow keys reach ONLY the focused
+            // cell: the subscription exists while this cell holds focus.
+            .background {
+                if isFocused {
+                    Color.clear.onReceive(
+                        NotificationCenter.default.publisher(for: .guideFocusedCellAction)
+                    ) { note in
+                        guard let wire = note.userInfo?["action"] as? String,
+                              let action = GuideRemoteAction.fromWire(wire) else { return }
+                        runCellAction(action)
+                    }
                 }
             }
             .confirmationDialog(prog.title,
@@ -7519,28 +7653,7 @@ private struct GuideProgramButton: View {
                     // tvOS swallowed the sheet when it was asked to present while the
                     // long-press dialog was still dismissing (trace 2026-09-05 12:32):
                     // let the dialog finish first.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        activeSheet = .programInfo(
-                            ProgramInfoTarget(
-                                channelName: channelItem.name,
-                                title: prog.title,
-                                start: prog.start,
-                                end: prog.end,
-                                description: prog.description,
-                                category: prog.category,
-                                programID: prog.programID,
-                                posterURLString: prog.posterURL,
-                                subTitle: prog.subTitle,
-                                season: prog.season,
-                                episode: prog.episode,
-                                isNew: prog.isNew,
-                                isLiveBroadcast: prog.isLiveBroadcast,
-                                isPremiere: prog.isPremiere,
-                                isFinale: prog.isFinale,
-                                isRepeat: prog.isRepeat
-                            )
-                        )
-                    }
+                    presentProgramInfo(after: 0.35)
                 }
                 if canOfferRecord {
                     Button(prog.isLive ? "Record from Now" : "Record") {

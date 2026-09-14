@@ -14,8 +14,9 @@ import SwiftUI
 /// Design invariants inherited from the shared model (do not relax):
 /// - Back / Menu is never a slot; Back semantics stay hardcoded and are
 ///   deliberately absent from every choice list.
-/// - Guide SHORT arrows are focus navigation, never mappable, so the
-///   guide section only offers hold-Select / hold-Left / hold-Right.
+/// - Guide rows (2026-09-14): Select, Left and Right, short and hold. Every
+///   short arrow defaults to Default navigation (the LOCKED timeline rule)
+///   and Up/Down stay unmappable focus navigation.
 /// - Choice lists are CURATED to actions the tvOS executor can actually
 ///   run today (omit rather than advertise a dead button); these mirror
 ///   the Android curation exactly.
@@ -48,12 +49,10 @@ struct RemoteControlSettingsView: View {
         .rightShort, .rightLong,
     ]
 
-    /// Guide slots offered: hold-Select / hold-Left / hold-Right only.
-    /// Short arrows always navigate; up/down hold are omitted until a
-    /// guide long-press detector exists (omit rather than fake).
-    private static let guideSlots: [RemoteSlot] = [
-        .okLong, .leftLong, .rightLong,
-    ]
+    /// Guide slots offered: Select, Left and Right, short + hold. Up/Down
+    /// stay navigation; their holds are omitted until a guide long-press
+    /// detector exists (omit rather than fake).
+    private static let guideSlots: [RemoteSlot] = RemoteControlMap.guideKeySlots
 
     /// Dedicated playback / channel buttons some remotes expose. Task
     /// scope is the player context: these retarget what the button does
@@ -83,14 +82,19 @@ struct RemoteControlSettingsView: View {
     /// teardown / program-menu paths are dispatched from there), matching
     /// the Android per-slot curation exactly.
     private static func guideActionChoices(for slot: RemoteSlot) -> [GuideRemoteAction] {
-        var out: [GuideRemoteAction] = [
+        var out: [GuideRemoteAction] = []
+        // Default navigation first on the arrows (their built-in behavior).
+        // Select's built-in behavior is Play, listed below.
+        if slot != .okShort && slot != .okLong { out.append(.navigate) }
+        out += [
+            .play, .programInfo, .programDetails, .record,
+            .openGroupSidebar,
             .timelineBack, .timelineForward,
             .pageUp, .pageDown,
             .jumpToNow, .jumpToTop,
             .focusGroupPills, .resumePlayer,
         ]
         if slot == .rightLong { out.append(.closeMiniPlayer) }
-        if slot == .okLong { out.append(.programInfo) }
         out.append(.none)
         return out
     }
@@ -174,7 +178,7 @@ struct RemoteControlSettingsView: View {
                 isSelected: store.useGroupSidebar,
                 action: { store.useGroupSidebar = true }
             )
-            sectionFooter("How channel groups are picked in the guide. Top Group Pills keep the group row above the grid; Sidebar Menu hides that row and opens with a Left press from the currently airing column. Only one is active at a time.")
+            sectionFooter("How channel groups are picked in the guide. Top Group Pills keep the group row above the grid; Sidebar Menu hides that row and opens when you hold Left in the guide (or from whichever button you set to Open sidebar below). Only one is active at a time.")
         }
     }
 
@@ -188,13 +192,13 @@ struct RemoteControlSettingsView: View {
         }
     }
 
-    /// 4. Guide-context holds (short arrows are navigation, not shown).
+    /// 4. Guide-context Select / Left / Right rows.
     private var inTheGuideSection: some View {
         SettingsSection("In the TV Guide", style: .card) {
             ForEach(Self.guideSlots, id: \.self) { slot in
                 guideSlotRow(slot)
             }
-            sectionFooter("What each button does while browsing the guide. Short arrow presses always navigate.")
+            sectionFooter("What each button does while browsing the guide. Up and Down always navigate. A Left set to Open sidebar, Go to group pills, Browse earlier programs or Jump to now still moves between programs and acts only from the first program column. In Sidebar Menu mode, if no button is set to Open sidebar, holding Left opens it.")
         }
     }
 
@@ -247,7 +251,9 @@ struct RemoteControlSettingsView: View {
     /// A guide-context slot row: pushes the curated guide choice list for
     /// that specific slot.
     private func guideSlotRow(_ slot: RemoteSlot) -> some View {
-        let current = store.guideAction(slot)
+        // Effective action, so Left (hold) reads Open sidebar in Sidebar
+        // Menu mode, which is what the press actually does.
+        let current = store.effectiveGuideAction(slot)
         return TVSettingsNavRow(
             destination: TVSlotChoiceListView(
                 title: displayName(slot),
@@ -302,15 +308,15 @@ struct RemoteControlSettingsView: View {
 private func displayName(_ slot: RemoteSlot) -> String {
     switch slot {
     case .okShort:     return "Select"
-    case .okLong:      return "Select (hold)"
+    case .okLong:      return "Select (Hold)"
     case .upShort:     return "Up"
-    case .upLong:      return "Up (hold)"
+    case .upLong:      return "Up (Hold)"
     case .downShort:   return "Down"
-    case .downLong:    return "Down (hold)"
+    case .downLong:    return "Down (Hold)"
     case .leftShort:   return "Left"
-    case .leftLong:    return "Left (hold)"
+    case .leftLong:    return "Left (Hold)"
     case .rightShort:  return "Right"
-    case .rightLong:   return "Right (hold)"
+    case .rightLong:   return "Right (Hold)"
     case .playPause:   return "Play/Pause"
     case .ffwd:        return "Fast Forward"
     case .rewind:      return "Rewind"
@@ -364,6 +370,11 @@ private func displayName(_ action: GuideRemoteAction) -> String {
     case .closeMiniPlayer: return "Close mini player"
     case .programInfo:     return "Program menu"
     case .openSearch:      return "Search"
+    case .navigate:        return "Default navigation"
+    case .openGroupSidebar: return "Open sidebar"
+    case .play:            return "Play channel"
+    case .programDetails:  return "Program info"
+    case .record:          return "Record"
     case .none:            return "Do nothing"
     }
 }

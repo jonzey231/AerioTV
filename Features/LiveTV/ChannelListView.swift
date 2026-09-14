@@ -1297,10 +1297,14 @@ struct ChannelListView: View {
                         // gets the snappier ~0.32s threshold (Android twin's
                         // SIDEBAR_HOLD_OPEN_MS; the OS-style 0.5s read as a
                         // slow open on device, Logan 2026-08-06).
-                        minimumPressDuration: guideSidebarSelectorActive ? 0.32 : 0.5,
+                        minimumPressDuration: guideSidebarSelectorActive
+                            && remoteStore.effectiveGuideAction(.leftLong) == .openGroupSidebar ? 0.32 : 0.5,
                         // Window-level recognizer: disarm while the in-place
-                        // Search screen covers the guide.
-                        isEnabled: !searchOverlay.isUp,
+                        // Search screen covers the guide. Left (hold) mapped
+                        // to Default navigation detaches it so the held Left
+                        // repeats through the engine like any arrow.
+                        isEnabled: !searchOverlay.isUp
+                            && remoteStore.effectiveGuideAction(.leftLong) != .navigate,
                         onBegan: { NotificationCenter.default.post(name: .guideLeftHoldBegan, object: nil) },
                         onEnded: { NotificationCenter.default.post(name: .guideLeftHoldEnded, object: nil) }
                     )
@@ -1321,7 +1325,7 @@ struct ChannelListView: View {
                             if action == .closeMiniPlayer {
                                 return nowPlaying.isActive && nowPlaying.isMinimized
                             }
-                            return action != .none
+                            return action != .none && action != .navigate
                         }(),
                         onBegan: {
                             NotificationCenter.default.post(name: .guideRightHoldBegan, object: nil)
@@ -1335,16 +1339,24 @@ struct ChannelListView: View {
                     )
                 )
                 .onReceive(NotificationCenter.default.publisher(for: .guideLeftHoldBegan)) { _ in
-                    // Sidebar mode owns hold-Left (Logan 2026-08-06, ported
-                    // from the Android ruling): the hold opens the docked
-                    // group menu and a single Left stays plain navigation so
-                    // the EPG history left of "now" is reachable. The mapped
-                    // leftLong action applies only in pills mode.
-                    if guideSidebarSelectorActive {
-                        if !guideSidebarOpen {
-                            NotificationCenter.default.post(name: .guideOpenGroupSidebar, object: nil)
+                    // Sidebar mode opens the docked group menu on this hold
+                    // by default (Logan 2026-08-06, ported from the Android
+                    // ruling); a single Left stays plain navigation so the
+                    // EPG history left of "now" is reachable.
+                    // Guide key rows (2026-09-14): the hold resolves through
+                    // the effective map, which keeps this default (sidebar
+                    // mode with no other Open sidebar row = open it here).
+                    var action = RemoteControlStore.shared.effectiveGuideAction(.leftLong)
+                    debugLog("[PRESS] guide hold-Left action=\(action.wire) sidebarMode=\(guideSidebarSelectorActive)")
+                    if action == .openGroupSidebar {
+                        if guideSidebarSelectorActive {
+                            if !guideSidebarOpen {
+                                NotificationCenter.default.post(name: .guideOpenGroupSidebar, object: nil)
+                            }
+                            return
                         }
-                        return
+                        // Pills mode has no sidebar: go to the pills instead.
+                        action = .focusGroupPills
                     }
                     // #196: hold-Left dispatches by the mapped action. The
                     // focus-pin below runs for EVERY hold (not just
@@ -1352,7 +1364,6 @@ struct ChannelListView: View {
                     // still-held Left must not overshoot into the leading
                     // Guide/Search/List controls, and pinning "All" is the
                     // established parking spot for the press duration.
-                    let action = RemoteControlStore.shared.guideAction(.leftLong)
                     GuideRemoteDispatch.perform(action)
                     // Timeline jumps keep the grid focused via
                     // retargetFocusToViewportColumn; only the pill action
@@ -1368,6 +1379,11 @@ struct ChannelListView: View {
                             if !Task.isCancelled { leftHoldPinningAll = false }
                         }
                     }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .guideFocusGroupPills)) { _ in
+                    // Mapped "Go to group pills" / pills-mode "Open sidebar".
+                    guard !guideSidebarSelectorActive else { return }
+                    groupPillFocused = groupTokens.first ?? "All"
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .guideLeftHoldEnded)) { _ in
                     leftHoldPinningAll = false
