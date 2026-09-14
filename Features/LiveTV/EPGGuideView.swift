@@ -4588,6 +4588,44 @@ enum GuideArrowFocusVeto {
     }
 }
 
+/// Guide key rows: raw Left/Right press edges, recorded by the app-wide
+/// UIApplication.sendEvent swizzle (TVFocusTracer, the source of the
+/// `[PRESS] LEFT began|ended` lines) before UIKit routes the press. A
+/// remapped short arrow with an armed hold slot fires at the RELEASE edge
+/// when the press ends before the hold threshold.
+@MainActor
+enum GuideArrowPressEdges {
+    static var downAt: [String: Date] = [:]
+    static var upAt: [String: Date] = [:]
+
+    /// True while `key` is physically held (a press began and has not ended).
+    static func isDown(_ key: String) -> Bool {
+        guard let down = downAt[key] else { return false }
+        return (upAt[key] ?? .distantPast) < down
+    }
+
+    static func record(_ press: UIPress) {
+        let key: String
+        switch press.type {
+        case .leftArrow: key = "LEFT"
+        case .rightArrow: key = "RIGHT"
+        default: return
+        }
+        switch press.phase {
+        case .began:
+            // A repeated began for a press still held keeps the original
+            // down edge; a missed release older than 5 s is forgotten.
+            if !isDown(key) || Date().timeIntervalSince(downAt[key] ?? .distantPast) > 5 {
+                downAt[key] = Date()
+            }
+        case .ended, .cancelled:
+            upAt[key] = Date()
+        default:
+            break
+        }
+    }
+}
+
 extension UIWindow {
     @objc func aerio_guideShouldUpdateFocus(in context: UIFocusUpdateContext) -> Bool {
         if let handler = GuideArrowFocusVeto.handler, handler(context) { return false }
@@ -5799,8 +5837,7 @@ struct EPGGuideView: View {
             // Guide key rows: this press was already handled by the focus
             // veto (nothing moved, action dispatched). Only a remapped Left
             // is ever vetoed, so the default rule below never sees this.
-            if focusScratch.arrowVetoKey == "LEFT",
-               Date().timeIntervalSince(focusScratch.arrowVetoAt) < 0.3 {
+            if arrowPressWasVetoed("LEFT") {
                 debugLog("[PRESS] guide LEFT move command skipped: handled by the veto")
                 break
             }
@@ -5869,8 +5906,7 @@ struct EPGGuideView: View {
             // the still-held Right does not scroll the EPG forward after the
             // mini closes. Short/normal Right scrolling is unaffected.
             if rightHoldPinningTimeline { break }
-            if focusScratch.arrowVetoKey == "RIGHT",
-               Date().timeIntervalSince(focusScratch.arrowVetoAt) < 0.3 {
+            if arrowPressWasVetoed("RIGHT") {
                 debugLog("[PRESS] guide RIGHT move command skipped: handled by the veto")
                 break
             }
@@ -5901,8 +5937,13 @@ struct EPGGuideView: View {
     /// Run a remapped short-arrow guide action. The engine has already
     /// moved focus for this press, so the ring goes back to the cell the
     /// press started on first. When the same key's hold slot does something,
-    /// the action waits out the hold threshold and is dropped if the press
-    /// turns into a hold (the hold detectors post *HoldBegan).
+    /// the short action fires at the press RELEASE if the press ends before
+    /// the hold threshold (Logan 2026-09-14: waiting out the threshold from
+    /// press-down made a quick Left open the sidebar too slowly), and is
+    /// dropped when the press is still down at the threshold or turns into a
+    /// hold (the hold detectors post *HoldBegan and own that press). Never
+    /// both for one press. Without a tracked press edge it falls back to
+    /// waiting out the threshold.
     private func runRemappedArrow(_ action: GuideRemoteAction, key: String, holdSlot: RemoteSlot,
                                   scope: String, restoreOrigin: Bool = true) {
         // A vetoed press never moved the ring, so there is nothing to restore
@@ -5917,7 +5958,13 @@ struct EPGGuideView: View {
         let wait: UInt64 = !holdArmed ? 0
             : (holdSlot == .leftLong && holdAction == .openGroupSidebar
                && RemoteControlStore.shared.useGroupSidebar) ? 370_000_000 : 550_000_000
-        debugLog("[PRESS] guide \(key) mapped action=\(action.wire) scope=\(scope) origin=\(origin ?? "nil") wait=\(wait / 1_000_000)ms")
+        let thresholdMs = Int(wait / 1_000_000)
+        let threshold = TimeInterval(wait) / 1_000_000_000
+        // The press this action belongs to: its down edge must be recent.
+        let downAt = GuideArrowPressEdges.downAt[key] ?? .distantPast
+        let tracked = wait > 0 && Date().timeIntervalSince(downAt) < 1.5
+        let mode = wait == 0 ? "immediate" : (tracked ? "release" : "wait")
+        debugLog("[PRESS] guide \(key) mapped action=\(action.wire) scope=\(scope) origin=\(origin ?? "nil") holdThreshold=\(thresholdMs)ms mode=\(mode)")
         focusScratch.pendingArrowAction?.cancel()
         focusScratch.pendingArrowAction = Task { @MainActor in
             if let origin, focusedProgramID != origin {
@@ -5927,7 +5974,29 @@ struct EPGGuideView: View {
                     if focusedProgramID == origin { break }
                 }
             }
-            if wait > 0 { try? await Task.sleep(nanoseconds: wait) }
+            if tracked {
+                // Watch the release edge. A recognized hold cancels this task
+                // first (guideLeft/RightHoldBegan receiver).
+                while !Task.isCancelled {
+                    let upAt = GuideArrowPressEdges.upAt[key] ?? .distantPast
+                    if upAt >= downAt {
+                        let heldMs = Int(upAt.timeIntervalSince(downAt) * 1000)
+                        if upAt.timeIntervalSince(downAt) < threshold {
+                            debugLog("[PRESS] guide \(key) short decision: released after \(heldMs)ms (< \(thresholdMs)ms), firing \(action.wire)")
+                            break
+                        }
+                        debugLog("[PRESS] guide \(key) hold decision: released after \(heldMs)ms (>= \(thresholdMs)ms), short action dropped")
+                        return
+                    }
+                    if Date().timeIntervalSince(downAt) >= threshold {
+                        debugLog("[PRESS] guide \(key) hold decision: still pressed at \(thresholdMs)ms, short action dropped (hold slot owns this press)")
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
+            } else if wait > 0 {
+                try? await Task.sleep(nanoseconds: wait)
+            }
             guard !Task.isCancelled else {
                 debugLog("[PRESS] guide \(key) mapped action dropped: press became a hold")
                 return
@@ -5991,6 +6060,13 @@ struct EPGGuideView: View {
               let pid = focusedProgramID else { return false }
         if !isLeft && rightHoldPinningTimeline { return false }
         let key = isLeft ? "LEFT" : "RIGHT"
+        // A press already vetoed stays vetoed while it is held: its short or
+        // hold action is being decided, and a hold that panned the timeline
+        // (Browse earlier) must not turn the rest of the press into a move.
+        if GuideArrowPressEdges.isDown(key), focusScratch.arrowVetoKey == key,
+           let down = GuideArrowPressEdges.downAt[key], focusScratch.arrowVetoAt >= down {
+            return true
+        }
         let action = RemoteControlStore.shared.effectiveGuideAction(isLeft ? .leftShort : .rightShort)
         guard action != .navigate,
               let scope = remappedArrowScope(action, key: key, originPID: pid) else { return false }
@@ -6010,13 +6086,27 @@ struct EPGGuideView: View {
         return true
     }
 
+    /// True when this key's latest press (or one within the last 0.3 s) was
+    /// already handled by the focus veto, so its onMoveCommand must not run
+    /// the action or the locked rule a second time (a hold held past 0.3 s
+    /// used to fall out of the time window).
+    private func arrowPressWasVetoed(_ key: String) -> Bool {
+        guard focusScratch.arrowVetoKey == key else { return false }
+        if Date().timeIntervalSince(focusScratch.arrowVetoAt) < 0.3 { return true }
+        guard let down = GuideArrowPressEdges.downAt[key] else { return false }
+        return focusScratch.arrowVetoAt >= down && Date().timeIntervalSince(down) < 5
+    }
+
     /// Settled rule for a remapped short arrow (Logan 2026-09-14, both TVs).
     /// Returns the log scope when the action fires from `originPID`, nil when
     /// the press is plain navigation instead:
     ///  - program actions (Play, Record, Program info, Program menu): every
     ///    press ("any");
     ///  - any other action on Left: only from the program airing now on its
-    ///    row, start <= now < end ("live");
+    ///    row, start <= now < end, AND with the timeline at its live position
+    ///    (`timelineIsAtLive`); once Browse earlier panned into history a
+    ///    single Left is plain navigation so the user keeps scrolling back
+    ///    ("live");
     ///  - any other action on Right: only from the row's last program
     ///    ("lastCell").
     private func remappedArrowScope(_ action: GuideRemoteAction, key: String, originPID: String?) -> String? {
@@ -6027,7 +6117,12 @@ struct EPGGuideView: View {
         if key == "LEFT" {
             guard let prog = list.first(where: { $0.id == pid }) else { return nil }
             let now = Date()
-            return prog.start <= now && now < prog.end ? "live" : nil
+            guard prog.start <= now && now < prog.end else { return nil }
+            guard timelineIsAtLive() else {
+                debugLog("[PRESS] guide LEFT on the live program but the timeline is panned earlier than now: plain navigation")
+                return nil
+            }
+            return "live"
         }
         return list.last?.id == pid ? "lastCell" : nil
     }
@@ -6108,6 +6203,14 @@ struct EPGGuideView: View {
     /// uses, so a Menu press near now doesn't burn on a micro-correction).
     private func timelineIsAwayFromNow() -> Bool {
         abs(horizontalOffset - nowAnchorOffset()) > pixelsPerHour * 0.5
+    }
+
+    /// True when the timeline is at its live position: not panned earlier
+    /// than the "now left-aligned" anchor beyond the same 3-minute slop
+    /// (0.05 h) the locked Left rule uses to decide it is already at now.
+    /// Larger offsets are earlier in time (a Left pan adds to the offset).
+    private func timelineIsAtLive() -> Bool {
+        horizontalOffset - nowAnchorOffset() <= pixelsPerHour * 0.05
     }
 
     /// The offset that puts "now" a 15-minute lead right of the channel

@@ -4103,6 +4103,9 @@ final class TVFocusTracer {
 extension UIApplication {
     @objc func aerio_sendEvent(_ event: UIEvent) {
         if event.type == .presses, let presses = (event as? UIPressesEvent)?.allPresses {
+            // Guide key rows: Left/Right edges, recorded whether or not the
+            // tracer logs (the guide fires a remapped short arrow at release).
+            for press in presses { GuideArrowPressEdges.record(press) }
         }
         if event.type == .presses, let presses = (event as? UIPressesEvent)?.allPresses, TVFocusTracer.shared.isOn {
             for press in presses where press.phase == .began || press.phase == .ended {
