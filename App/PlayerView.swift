@@ -358,7 +358,7 @@ final class ForegroundPiPBridge: ObservableObject {
 
     private weak var controller: AVPictureInPictureController?
     /// True from a request until PiP restores, closes, fails or is dismissed.
-    private var isActive = false
+    private(set) var isActive = false
     /// The iPhone player host renders invisible and non-interactive while
     /// this is set. Outlives `isActive` on the close path so the host can't
     /// flash back while the session tears down.
@@ -367,6 +367,16 @@ final class ForegroundPiPBridge: ObservableObject {
     /// hook below does not un-hide the host mid-teardown.
     private var closing = false
     private var waitTask: Task<Void, Never>?
+    /// Set while PiP moves to a new session (channel change, another VOD,
+    /// recording or catch-up started while PiP was up). The tile rebuilds
+    /// its layer and PiP controller on every retune, so the window can't be
+    /// re-pointed: the old window is stopped, the host stays hidden, and PiP
+    /// restarts on the new session's controller once it is possible.
+    private(set) var isHandingOff = false
+    private var handoffTask: Task<Void, Never>?
+    /// A handoff waits far longer than a swipe: the new stream has to tune
+    /// (remux warm-up) before its layer can go into PiP.
+    static let handoffWait: TimeInterval = 20.0
 
     func register(_ pip: AVPictureInPictureController) {
         controller = pip
@@ -379,15 +389,15 @@ final class ForegroundPiPBridge: ObservableObject {
 
     /// iPhone minimize. Hides the host now, then starts PiP as soon as the
     /// controller allows it.
-    func request() {
+    func request(wait: TimeInterval = ForegroundPiPBridge.armWait) {
         guard !isActive else { return }
         isActive = true
         closing = false
         hidesHost = true
         NowPlayingManager.shared.applyMinimized()
-        debugLog("[PIP-FG] request: host hidden, waiting for PiP (controller=\(controller != nil) possible=\(controller?.isPictureInPicturePossible == true))")
+        debugLog("[PIP-FG] request: host hidden, waiting up to \(wait)s for PiP (controller=\(controller != nil) possible=\(controller?.isPictureInPicturePossible == true))")
         waitTask?.cancel()
-        let deadline = Date().addingTimeInterval(Self.armWait)
+        let deadline = Date().addingTimeInterval(wait)
         waitTask = Task { @MainActor [weak self] in
             while let self, self.isActive, !Task.isCancelled {
                 if AVPictureInPictureController.isPictureInPictureSupported(),
@@ -400,7 +410,7 @@ final class ForegroundPiPBridge: ObservableObject {
                     return
                 }
                 if Date() >= deadline {
-                    debugLog("[PIP-FG] start unavailable after \(Self.armWait)s (controller=\(self.controller != nil)); back to fullscreen")
+                    debugLog("[PIP-FG] start unavailable after \(wait)s (controller=\(self.controller != nil)); back to fullscreen")
                     self.springBack()
                     return
                 }
@@ -444,6 +454,9 @@ final class ForegroundPiPBridge: ObservableObject {
     func dismissForExpand() {
         waitTask?.cancel()
         waitTask = nil
+        handoffTask?.cancel()
+        handoffTask = nil
+        isHandingOff = false
         closing = false
         if hidesHost { hidesHost = false }
         guard isActive else { return }
@@ -457,14 +470,55 @@ final class ForegroundPiPBridge: ObservableObject {
     /// nothing hidden for the next session. The X path is exempt.
     func sessionEnding() {
         guard !closing else { return }
-        dismissForExpand()
+        if isActive || isHandingOff {
+            beginHandoff()
+        } else {
+            dismissForExpand()
+        }
+    }
+
+    /// PiP is up (or requested) and its session is being replaced. Saves
+    /// the outgoing VOD/DVR position, stops the old window without ending
+    /// playback, and forgets the old controller so the restart can't grab
+    /// the dying layer. If no new session follows within a beat, this was
+    /// a plain exit: un-hide and stand down.
+    func beginHandoff() {
+        guard !closing else { return }
+        if isActive {
+            MultiviewStore.shared.saveVODProgressNow()
+            isActive = false
+            waitTask?.cancel()
+            waitTask = nil
+            debugLog("[PIP-FG] handoff: stopping old window, host stays hidden")
+            let old = controller
+            controller = nil
+            old?.stopPictureInPicture()
+        }
+        isHandingOff = true
+        hidesHost = true
+        handoffTask?.cancel()
+        handoffTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard let self, !Task.isCancelled, self.isHandingOff else { return }
+            self.isHandingOff = false
+            self.handoffTask = nil
+            if PlayerSession.shared.mode != .idle || NowPlayingManager.shared.playingItem != nil {
+                debugLog("[PIP-FG] handoff: new session up, restarting PiP")
+                self.request(wait: Self.handoffWait)
+            } else {
+                debugLog("[PIP-FG] handoff: no new session, standing down")
+                self.hidesHost = false
+            }
+        }
     }
 
     /// Delegate hook: the PiP restore button. Reopens the fullscreen player;
     /// returns true when this bridge owned the PiP session.
     @discardableResult
     func handleRestore(_ pipID: ObjectIdentifier) -> Bool {
-        guard isActive else { return false }
+        // Same stale-controller rule as handleDidStop: a late restore from
+        // the window a handoff just stopped must not expand the new session.
+        guard isActive, controller.map(ObjectIdentifier.init) == pipID else { return false }
         isActive = false
         waitTask?.cancel()
         waitTask = nil
@@ -478,20 +532,23 @@ final class ForegroundPiPBridge: ObservableObject {
     /// i.e. the user closed the window: end the session with the host kept
     /// hidden until it has unmounted. A controller that is no longer the
     /// registered one (the tile was swapped by a retune) never stops the
-    /// new session; it brings the player back fullscreen instead of
-    /// leaving it invisible.
+    /// new session.
     func handleDidStop(_ pipID: ObjectIdentifier) {
         guard isActive else { return }
+        // A stop from any controller other than the registered one is the
+        // previous session's window winding down after a handoff (the tile
+        // rebuilt its layer): ignore it, the pending request owns the new
+        // window and its own timeout.
+        guard controller.map(ObjectIdentifier.init) == pipID else {
+            debugLog("[PIP-FG] stale controller stopped; ignored")
+            return
+        }
         isActive = false
         waitTask?.cancel()
         waitTask = nil
-        guard controller.map(ObjectIdentifier.init) == pipID else {
-            debugLog("[PIP-FG] stale controller stopped; back to fullscreen")
-            hidesHost = false
-            NowPlayingManager.shared.expand()
-            return
-        }
         debugLog("[PIP-FG] closed without restore -> exit session")
+        // VOD / recording resume point before the tile goes away.
+        MultiviewStore.shared.saveVODProgressNow()
         closing = true
         PlayerSession.shared.exit()
         Task { @MainActor [weak self] in

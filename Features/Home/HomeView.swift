@@ -3622,6 +3622,9 @@ final class NowPlayingManager: ObservableObject {
         if isLive, let outgoing = playingItem?.id, outgoing != item.id {
             previousChannelID = outgoing
         }
+        // Captured before the write below: the PiP handoff check further
+        // down needs to know whether this is a different item.
+        let wasItemID = playingItem?.id
         if playingItem != item { playingItem = item }
         // v1.6.18: persistent breadcrumb for guide focus default —
         // see the property docstring above.
@@ -3630,9 +3633,16 @@ final class NowPlayingManager: ObservableObject {
         self.isLive = isLive
         isMinimized = consumeStartMinimized()
         #if os(iOS)
-        // A new tune while swipe-started PiP is up: don't leave the old
-        // window floating over (or stopping) the new session.
-        if !isMinimized { ForegroundPiPBridge.shared.dismissForExpand() }
+        // A new tune while foreground PiP is up stays in PiP (Logan
+        // 2026-09-14): hand the window over to the new session instead of
+        // expanding. The same item re-announcing itself is not a tune.
+        let pip = ForegroundPiPBridge.shared
+        if pip.isActive, wasItemID != item.id { pip.beginHandoff() }
+        if pip.isHandingOff {
+            isMinimized = true
+        } else if !isMinimized {
+            pip.dismissForExpand()
+        }
         #endif
         // v1.6.15: always bump the stream-start signal for live so
         // the channel-info banner can run its own 5s timer.

@@ -213,6 +213,11 @@ final class PlayerSession: ObservableObject {
     /// float so the 0->1 bounce never drops the (48kHz-pinned) session
     /// between the outgoing and incoming players.
     func beginCatchup(_ pb: CatchupPlayback) {
+        #if os(iOS)
+        // Replaces the session without exit(): hand foreground PiP over to
+        // the replay (no-op when PiP isn't up).
+        ForegroundPiPBridge.shared.sessionEnding()
+        #endif
         AudioSessionRefCount.increment()
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 250_000_000)
