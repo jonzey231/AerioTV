@@ -414,6 +414,18 @@ final class ForegroundPiPBridge: ObservableObject {
         body?()
     }
 
+    /// The player is coming back full screen by some other route (docked
+    /// bar tap, a new tune from the guide) while swipe-started PiP is up:
+    /// close the window so the video isn't in two places. The flag is
+    /// cleared FIRST so the resulting didStop does not stop playback.
+    func dismissForExpand() {
+        guard isActive else { return }
+        isActive = false
+        pendingOnStart = nil
+        debugLog("[PIP-FG] expanded elsewhere -> stopping PiP window")
+        controller?.stopPictureInPicture()
+    }
+
     /// Delegate hook: the PiP restore button. Reopens the fullscreen
     /// player; returns true when this bridge owned the PiP session.
     @discardableResult

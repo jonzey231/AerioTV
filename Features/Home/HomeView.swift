@@ -3629,6 +3629,11 @@ final class NowPlayingManager: ObservableObject {
         playingHeaders = headers
         self.isLive = isLive
         isMinimized = consumeStartMinimized()
+        #if os(iOS)
+        // A new tune while swipe-started PiP is up: don't leave the old
+        // window floating over (or stopping) the new session.
+        if !isMinimized { ForegroundPiPBridge.shared.dismissForExpand() }
+        #endif
         // v1.6.15: always bump the stream-start signal for live so
         // the channel-info banner can run its own 5s timer.
         // Optionally also bump the chrome-wake signal — Siri Remote
@@ -3695,6 +3700,10 @@ final class NowPlayingManager: ObservableObject {
         isMinimized = false
         pendingMinimize?.cancel()
         pendingMinimize = nil
+        #if os(iOS)
+        // No-op after a PiP restore (the bridge already cleared itself).
+        ForegroundPiPBridge.shared.dismissForExpand()
+        #endif
     }
 
     func stop() {
@@ -6842,7 +6851,21 @@ struct MainTabView: View {
             // in `.ignoresSafeArea()` here was the v1.6.17 regression
             // — it cascaded down and overrode the carve-out, putting
             // the tiles back under the cutout.
+            //
+            // Minimized (docked bar or swipe-started foreground PiP): the
+            // container used to stay laid out full screen with its opaque
+            // black background and live hit-testing, covering the whole app
+            // (device 2026-09-14, a751992). Mirror the legacy iPhone wrapper:
+            // slide it below the screen (still mounted, so the AVPlayerLayer
+            // stays in the window for PiP), fade it, and drop hit-testing.
+            // The drag offset lets the docked bar's swipe-up pull it back in.
+            let minimized = nowPlaying.isMinimized
+            let screenH = UIScreen.main.bounds.height
             MultiviewContainerView()
+                .offset(y: minimized ? max(0, screenH + miniPlayerDragOffset) : 0)
+                .opacity(minimized ? min(1, -miniPlayerDragOffset / 300) : 1)
+                .allowsHitTesting(!minimized)
+                .accessibilityHidden(minimized)
                 .zIndex(2)
         }
     }
