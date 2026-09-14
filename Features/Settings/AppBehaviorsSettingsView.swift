@@ -1097,17 +1097,8 @@ struct AppBehaviorsSettingsView: View {
                 } label: {
                     Text(segmentLabel(value))
                         .font(.system(size: 22, weight: .medium))
-                        .foregroundColor(value == current ? theme.accent : .textSecondary)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(value == current
-                                      ? theme.accent.opacity(0.18)
-                                      : Color.clear)
-                        )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(TVSteppedSegmentStyle(isSelected: value == current))
             }
         }
         .padding(.horizontal, 20)
@@ -1119,6 +1110,28 @@ struct AppBehaviorsSettingsView: View {
     }
     #endif
 }
+
+#if os(tvOS)
+/// Segment chip for `tvSteppedSegmentsRow`. Mirrors `MoviesPillStyle`
+/// (Capsule, owned focus visual so the system white platter never shows)
+/// at the row's original compact padding. Focused: white ring when
+/// selected, accent ring when not.
+private struct TVSteppedSegmentStyle: ButtonStyle {
+    let isSelected: Bool
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(isSelected ? .appBackground : (isFocused ? .white : .textSecondary))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Capsule().fill(isSelected ? Color.accentPrimary : Color.clear))
+            .overlay(Capsule().stroke(isSelected ? Color.white : Color.accentPrimary, lineWidth: isFocused ? 3 : 0))
+            .scaleEffect(isFocused ? 1.05 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+#endif
 
 // MARK: - Stream Buffer Slider (reusable, platform-split)
 
