@@ -289,6 +289,13 @@ struct ChannelListView: View {
     /// 90ms preview debounce (Android parity) so D-pad travel through the
     /// rail doesn't re-filter the grid on every row.
     @State private var guideSidebarPreviewTask: Task<Void, Never>?
+    #if os(tvOS)
+    /// Shift guide sidebar layout: the leading inset the guide grid takes
+    /// while the pane is open (0 when closed or in Overlay). Written once per
+    /// open / close with animations disabled, so the grid re-lays out a
+    /// single time instead of every frame of the pane's slide.
+    @State private var guideSidebarShiftInset: CGFloat = 0
+    #endif
     @ObservedObject private var remoteStore = RemoteControlStore.shared
     #if os(tvOS)
     /// Disarms the guide's window-level hold detectors while the in-place
@@ -1076,7 +1083,9 @@ struct ChannelListView: View {
 
                 // Overlay, not a docked column (Logan 2026-09-05): the pane
                 // sits over the guide's channel column, below the banner and
-                // pill row, and nothing else moves.
+                // pill row, and nothing else moves. The Shift guide sidebar
+                // layout (Logan 2026-09-14) instead moves only the guide grid
+                // right by the pane's width, with no scrim.
                 ZStack(alignment: .topLeading) {
                     #if os(tvOS)
                     Color.clear.frame(height: 0)
@@ -1085,11 +1094,14 @@ struct ChannelListView: View {
                     if guideSidebarOpen {
                         // Drawer with a scrim (Logan 2026-09-05): the rest of the
                         // tab dims so covering it is the point, not a compromise.
-                        Color.black.opacity(0.45)
-                            .ignoresSafeArea()
-                            .allowsHitTesting(false)
-                            .transition(.opacity)
-                            .zIndex(0.5)
+                        // Shift guide covers nothing, so it has no scrim.
+                        if remoteStore.guideSidebarLayout == .overlay {
+                            Color.black.opacity(0.45)
+                                .ignoresSafeArea()
+                                .allowsHitTesting(false)
+                                .transition(.opacity)
+                                .zIndex(0.5)
+                        }
                         // #196 Android-parity semantics: focusing a row
                         // PREVIEWS its group live behind the pane (90ms
                         // debounce); OK or Right COMMITS and closes; Back
@@ -1146,8 +1158,11 @@ struct ChannelListView: View {
                         .transition(.move(edge: .leading))
                         .focusSection()
                         // Top edge on the first channel row: the guide's top
-                        // plus its 50pt time header (Logan 2026-09-05).
-                        .padding(.top, max(0, guideTopAbs - guideHostTopAbs + 50))
+                        // plus its 50pt time header (Logan 2026-09-05). Shift
+                        // guide narrows the time header too, so the pane starts
+                        // at the guide's top.
+                        .padding(.top, max(0, guideTopAbs - guideHostTopAbs
+                                           + (remoteStore.guideSidebarLayout == .shift ? 0 : 50)))
                         .ignoresSafeArea(.container, edges: [.leading, .bottom])
                         .zIndex(1)
                     }
@@ -1241,6 +1256,11 @@ struct ChannelListView: View {
                             }
                         )
                         #if os(tvOS)
+                        // Shift guide: the grid starts where the pane ends. The
+                        // pane ignores the leading safe area, so the inset is
+                        // measured from the same screen edge.
+                        .padding(.leading, guideSidebarShiftInset)
+                        .ignoresSafeArea(.container, edges: guideSidebarShiftInset > 0 ? .leading : [])
                         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { guideTopAbs = $0 }
                         #endif
                         // GH #72: the guide itself stays mounted (it owns the
@@ -1266,7 +1286,12 @@ struct ChannelListView: View {
                 }
                 #if os(tvOS)
                 .animation(.easeOut(duration: 0.28), value: guideSidebarOpen)
-                .onChange(of: guideSidebarOpen) { _, open in TVGuideSidebarState.shared.isOpen = open }
+                .onChange(of: guideSidebarOpen) { _, open in
+                    TVGuideSidebarState.shared.isOpen = open
+                    updateGuideSidebarShiftInset()
+                }
+                .onChange(of: remoteStore.guideSidebarLayout) { _, _ in updateGuideSidebarShiftInset() }
+                .onChange(of: hiddenGroups) { _, _ in updateGuideSidebarShiftInset() }
                 .onDisappear { TVGuideSidebarState.shared.isOpen = false }
                 .onReceive(NotificationCenter.default.publisher(for: .guideCloseGroupSidebar)) { _ in
                     if guideSidebarOpen { dismissGuideSidebar() }
@@ -2142,8 +2167,19 @@ struct ChannelListView: View {
             },
             defaultGroupKey: defaultChannelGroupKey,
             favoritesAvailable: favoritesStore.hasFavorites,
-            recentlyWatchedAvailable: true
+            recentlyWatchedAvailable: true,
+            sidebarLayoutAvailable: offersGuideSidebarLayout
         )
+    }
+
+    /// Manage Groups offers the guide Sidebar layout only on Apple TV with the
+    /// Sidebar Menu group selector; the layout means nothing elsewhere.
+    private var offersGuideSidebarLayout: Bool {
+        #if os(tvOS)
+        return remoteStore.useGroupSidebar
+        #else
+        return false
+        #endif
     }
 
     /// The guide now writes GuidePreviewState directly, so there is nothing to
@@ -2153,6 +2189,18 @@ struct ChannelListView: View {
     private var previewProgramHandler: ((GuideProgram?, ChannelDisplayItem?) -> Void)? { nil }
 
     #if os(tvOS)
+    /// Re-derives `guideSidebarShiftInset` from the open state, the sidebar
+    /// layout and the pane's fitted width (hidden groups change that width).
+    private func updateGuideSidebarShiftInset() {
+        let inset: CGFloat = (guideSidebarOpen && remoteStore.guideSidebarLayout == .shift)
+            ? GuideGroupSidebarPane.paneWidth(groups: groupTokens, hasManageButton: true)
+            : 0
+        guard inset != guideSidebarShiftInset else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { guideSidebarShiftInset = inset }
+    }
+
     private func openBannerInfo() {
         guard let prog = GuidePreviewState.shared.program,
               let ch = GuidePreviewState.shared.channel else { return }

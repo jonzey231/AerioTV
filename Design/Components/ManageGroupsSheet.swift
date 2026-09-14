@@ -133,6 +133,9 @@ struct ManageGroupsSheet: View {
     var hiddenCategoryAvailable: Bool = false
     var hiddenCategoryOn: Bool = false
     var onToggleHiddenCategory: (() -> Void)? = nil
+    /// Apple TV Live TV only: offers the guide Sidebar layout (Overlay / Shift
+    /// guide) when Group Selection is Sidebar Menu (Logan 2026-09-14).
+    var sidebarLayoutAvailable: Bool = false
     @State private var defaultGroup: String = ""
     private let favoritesToken = "favorites"
     /// Token for the synthetic "last 25 channels watched" group. Handled
@@ -163,6 +166,8 @@ struct ManageGroupsSheet: View {
     #if os(tvOS)
     /// The group currently picked up for d-pad reordering, or nil.
     @State private var grabbedGroup: String? = nil
+    /// Owns the synced guide Sidebar layout preference.
+    @ObservedObject private var remoteStore = RemoteControlStore.shared
     #endif
 
     #if os(iOS)
@@ -589,6 +594,29 @@ struct ManageGroupsSheet: View {
                     .padding(.bottom, 16)
                     // Lock the mode selector out while a group is grabbed.
                     .disabled(grabbedGroup != nil)
+                }
+
+                if sidebarLayoutAvailable {
+                    Text("Sidebar layout")
+                        .font(.labelSmall)
+                        .foregroundColor(.textSecondary)
+                        .padding(.horizontal, 48)
+                        .padding(.bottom, 12)
+                    HStack(spacing: 12) {
+                        ForEach(GuideSidebarLayout.allCases, id: \.self) { layout in
+                            TVModeChip(title: layout.label, selected: remoteStore.guideSidebarLayout == layout) {
+                                remoteStore.guideSidebarLayout = layout
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 48)
+                    .padding(.bottom, 12)
+                    .disabled(grabbedGroup != nil)
+                    Text("Shift guide moves the TV Guide over so the sidebar never covers programs.")
+                        .font(.labelSmall)
+                        .foregroundColor(.textTertiary)
+                        .padding(.horizontal, 48)
+                        .padding(.bottom, 16)
                 }
 
                 if defaultGroupKey != nil {

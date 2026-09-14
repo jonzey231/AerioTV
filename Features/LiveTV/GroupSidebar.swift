@@ -8,10 +8,10 @@ import UIKit
 // initiative, Logan spec 2026-07-20): the left-anchored group rail that slides
 // in when the user presses Left from the "now" column. Shared between the two
 // surfaces that need it:
-//   - the GUIDE, via `GuideGroupSidebarPane` — a hard, opaque DOCKED side menu
-//     that the guide content sits beside (no scrim, no overlay); Right steps
-//     back out to the grid without changing the group, and Menu/Back does the
-//     same;
+//   - the GUIDE, via `GuideGroupSidebarPane`: a hard, opaque side menu that
+//     either overlays the guide under a scrim or, with the Shift guide sidebar
+//     layout, sits beside the narrowed grid; Right commits the group and
+//     Menu/Back reverts it;
 //   - the PLAYER's channel-list overlay, which embeds `GroupSidebarPanel`
 //     directly as its leading pane.
 //
@@ -322,14 +322,24 @@ struct GuideGroupSidebarPane: View {
     /// each side, so one very long group name cannot swallow the guide.
     /// Longer names truncate (rows are `lineLimit(1)`).
     private var fittedContentWidth: CGFloat {
+        Self.fittedContentWidth(groups: groups, hasManageButton: onManageGroups != nil)
+    }
+
+    private static func fittedContentWidth(groups: [String], hasManageButton: Bool) -> CGFloat {
         let screenW = UIScreen.main.bounds.width
         let maxPane = (screenW > 0 ? screenW : 1920) * 0.40
         return groupSidebarFittedWidth(
             groups: groups,
-            headerFloor: groupSidebarHeaderFloor(hasManageButton: onManageGroups != nil),
+            headerFloor: groupSidebarHeaderFloor(hasManageButton: hasManageButton),
             minimum: 360 - 40,
             maximum: maxPane - 40
         )
+    }
+
+    /// Full drawn width of the pane (content plus its 20pt side padding), so
+    /// the Shift guide sidebar layout can move the grid over by exactly this.
+    static func paneWidth(groups: [String], hasManageButton: Bool) -> CGFloat {
+        fittedContentWidth(groups: groups, hasManageButton: hasManageButton) + 40
     }
 
     init(groups: [String],

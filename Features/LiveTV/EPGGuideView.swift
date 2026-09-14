@@ -5232,7 +5232,12 @@ struct EPGGuideView: View {
                     reAnchorTimelineToNow(animated: false)
                 }
             }
-            .onChange(of: geo.size.width) { _, w in visibleProgramWidth = w - channelColumnWidth }
+            .onChange(of: geo.size.width) { _, w in
+                visibleProgramWidth = w - channelColumnWidth
+                // A wider grid (Shift guide sidebar closing) has less room to
+                // scroll: pull an offset past the new end back in, unanimated.
+                if horizontalOffset < maxHorizontalOffset { horizontalOffset = maxHorizontalOffset }
+            }
             // Jump-to-day (Logan 2026-09-06): scrolling back until the now
             // line is on screen ends the jump on its own; the clock returns
             // to the live time and the grid width settles back.

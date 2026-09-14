@@ -9,14 +9,30 @@ enum GroupSelectorMode: String {
     case sidebar
 }
 
+/// How the guide's group sidebar sits beside the grid (Sidebar Menu mode only).
+/// `overlay` (default) covers the channel column under a scrim; `shift` moves
+/// the guide grid right by the pane's width so nothing is covered.
+enum GuideSidebarLayout: String, CaseIterable {
+    case overlay
+    case shift
+
+    var label: String {
+        switch self {
+        case .overlay: return "Overlay"
+        case .shift:   return "Shift guide"
+        }
+    }
+}
+
 /// Owns the TV remote-control mapping + the two companion TV guide prefs
 /// (group-selection surface, tune-in destination). Singleton `ObservableObject`
 /// so SwiftUI views observe the effective map and re-derive hints live.
 ///
-/// Persistence: three per-device-type keys synced across the user's Apple TVs
+/// Persistence: four per-device-type keys synced across the user's Apple TVs
 /// (registered in `SyncManager` sync lists):
 ///   - `remoteControlMap.tv`  (Data, JSON)      -> `syncDataKeys`
 ///   - `guideGroupSelector.tv` (String)         -> `syncStringKeys`
+///   - `guideSidebarLayout.tv` (String)         -> `syncStringKeys`
 ///   - `guideTuneInMini.tv`   (Bool)            -> `syncBoolKeys`
 /// Writing to `UserDefaults.standard` triggers `SyncManager`'s debounced push
 /// automatically; a remote merge posts `.syncManagerDidApplyPreferences`, which
@@ -29,6 +45,7 @@ final class RemoteControlStore: ObservableObject {
     // key names when building its sync-key lists.
     nonisolated static let mapKey = "remoteControlMap.tv"
     nonisolated static let groupSelectorKey = "guideGroupSelector.tv"
+    nonisolated static let sidebarLayoutKey = "guideSidebarLayout.tv"
     nonisolated static let tuneInMiniKey = "guideTuneInMini.tv"
 
     /// The effective remote-control map (resolved through DEFAULT for any
@@ -44,6 +61,16 @@ final class RemoteControlStore: ObservableObject {
             // Push at once (as FavoritesStore does): a synced key written only
             // locally could be handed back its old value by the next pull, so
             // the first change looked like it never applied (Logan 2026-09-05).
+            SyncManager.shared.pushPreferencesImmediate()
+        }
+    }
+
+    /// Sidebar layout for the guide's group sidebar (Manage Groups, Logan
+    /// 2026-09-14). Only meaningful while `useGroupSidebar` is on.
+    @Published var guideSidebarLayout: GuideSidebarLayout {
+        didSet {
+            guard oldValue != guideSidebarLayout else { return }
+            UserDefaults.standard.set(guideSidebarLayout.rawValue, forKey: Self.sidebarLayoutKey)
             SyncManager.shared.pushPreferencesImmediate()
         }
     }
@@ -65,6 +92,7 @@ final class RemoteControlStore: ObservableObject {
         map = RemoteControlMap.fromData(ud.data(forKey: Self.mapKey))
         let selector = GroupSelectorMode(rawValue: ud.string(forKey: Self.groupSelectorKey) ?? "") ?? .pills
         useGroupSidebar = (selector == .sidebar)
+        guideSidebarLayout = GuideSidebarLayout(rawValue: ud.string(forKey: Self.sidebarLayoutKey) ?? "") ?? .overlay
         tuneInMini = ud.bool(forKey: Self.tuneInMiniKey)
 
         // Reload after a remote sync merge writes fresh values into UserDefaults.
@@ -82,6 +110,8 @@ final class RemoteControlStore: ObservableObject {
         let selector = GroupSelectorMode(rawValue: ud.string(forKey: Self.groupSelectorKey) ?? "") ?? .pills
         let sidebar = (selector == .sidebar)
         if sidebar != useGroupSidebar { useGroupSidebar = sidebar }
+        let layout = GuideSidebarLayout(rawValue: ud.string(forKey: Self.sidebarLayoutKey) ?? "") ?? .overlay
+        if layout != guideSidebarLayout { guideSidebarLayout = layout }
         let mini = ud.bool(forKey: Self.tuneInMiniKey)
         if mini != tuneInMini { tuneInMini = mini }
     }

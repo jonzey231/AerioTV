@@ -101,7 +101,10 @@ final class SyncManager: ObservableObject {
         "channelGroupOrder.sortMode",
         // TV guide group-selection surface (pills/sidebar), per-device-type.
         // Mutually exclusive with the pills row. See RemoteControlStore.
-        RemoteControlStore.groupSelectorKey
+        RemoteControlStore.groupSelectorKey,
+        // TV guide sidebar layout (overlay/shift), per-device-type, beside
+        // the group selector it modifies. See RemoteControlStore.
+        RemoteControlStore.sidebarLayoutKey
     ]
     /// Data-typed keys (Codable JSON blobs). `customCategoryColors.v1`
     /// holds the user-defined `[CustomCategory]` list from
