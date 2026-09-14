@@ -2908,7 +2908,11 @@ struct AVPlayerMultiviewTile: View {
                     go()
                 }
             }
-            if let outgoing {
+            // stop() hands a healthy rewind session to channel retention
+            // (Keep Recent Channels Live) instead of stopping it; stopping
+            // `outgoing` here would kill the channel just retained.
+            if let outgoing,
+               !LiveChannelRetention.shared.entries.contains(where: { $0.remuxer === outgoing }) {
                 outgoing.stop { resume() }
             } else {
                 resume()
@@ -3883,6 +3887,8 @@ struct AVPlayerMultiviewTile: View {
             // same Dispatcharr endpoints as the TS path and expect the
             // same auth.
             startPlayer(url: sourceURL, requestHeaders: headers)
+            // No remux ingest here to adopt a warm one; release it now.
+            LivePrewarm.shared.cancel(reason: "tile playing direct HLS")
             debugLog("[AVP-MV] tile playing direct HLS channel=\(channelName)")
         default:
             statusText = "Preparing..."

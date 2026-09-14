@@ -601,6 +601,13 @@ final class PlayerSession: ObservableObject {
         // session engine is the single source of truth.
         _ = bypassNativeRouter
 
+        // A warm ingest left from an earlier press is dead the moment any
+        // OTHER tune starts (different channel, or this channel as catch-up /
+        // VOD); release it now instead of after the adoption window, which
+        // kept the previous channel's upstream open on the server.
+        LivePrewarm.shared.cancel(unlessLiveChannelID: isLive ? item.id : nil,
+                                  reason: "another tune started")
+
         #if os(iOS)
         // GH #33: while this phone is a companion remote, a live channel tap
         // RETUNES THE TV instead of starting local playback. This must gate
@@ -1118,5 +1125,13 @@ final class LivePrewarm {
         expiry = nil
         p.remuxer.stop()
         debugLog("[TUNE-PREWARM] cancelled (\(reason)) channel=\(p.channelID)")
+    }
+
+    /// Cancel the pending prewarm unless it is for [channelID] (nil cancels
+    /// any). Keeps the adoption window only for the tune it was opened for.
+    func cancel(unlessLiveChannelID channelID: String?, reason: String) {
+        guard let p = pending else { return }
+        if let channelID, !channelID.isEmpty, p.channelID == channelID { return }
+        cancel(reason: reason)
     }
 }

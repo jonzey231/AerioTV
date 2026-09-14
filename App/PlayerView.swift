@@ -5808,6 +5808,10 @@ struct NativeHLSPlayerScreen: View {
     @State private var stallEvalToken = UUID()
     /// Immediate re-tunes spent on a clean upstream close, capped.
     @State private var upstreamClosedRetunes = 0
+    /// Pending delayed remuxer start from restartRemuxPipeline. Cancelled by
+    /// onDisappear so a dismissal inside the 0.5 s gap cannot start a
+    /// remuxer (and its upstream connection) that nothing will ever stop.
+    @State private var restartWork: DispatchWorkItem?
     #if os(iOS)
     /// Unified chrome state: one store, one driver, one visibility Bool.
     /// The store is the same observable type the mpv overlay reads, fed
@@ -6037,6 +6041,8 @@ struct NativeHLSPlayerScreen: View {
             remuxer?.onIngestClosed = nil
             stallEvalToken = UUID()
             ingestSilent = false
+            restartWork?.cancel()
+            restartWork = nil
             remuxer?.stop()
             remuxer = nil
             sleepWork?.cancel()
@@ -6181,7 +6187,9 @@ struct NativeHLSPlayerScreen: View {
             let depth = UserDefaults.standard.integer(forKey: "liveRewindDepthMinutes")
             return Double(depth > 0 ? depth : 30) * 60
         }()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        restartWork?.cancel()
+        let work = DispatchWorkItem {
+            restartWork = nil
             guard !didFallback else { return }
             let mux = TSHLSRemuxer(sourceURL: url, headers: ingestHeaders,
                                    rewindWindowSeconds: rewindSeconds)
@@ -6200,6 +6208,8 @@ struct NativeHLSPlayerScreen: View {
             remuxer = mux
             mux.start()
         }
+        restartWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
 
     /// Byte source for the loading detail line: the TS remux ingest when
