@@ -4154,13 +4154,6 @@ struct MainTabView: View {
     /// tasks is responsible. Cancelled + nilled on the true → false
     /// transition so the logger stops cleanly.
     @State private var bgWorkHeartbeatTask: Task<Void, Never>? = nil
-    /// Presents the user-facing background-activity details popover
-    /// (iOS) / fullScreenCover (tvOS). The "Syncing…" badge is a
-    /// tappable Button that flips this true — users open it to see
-    /// exactly which background task is holding the indicator
-    /// visible (e.g. a 779-category VOD refill that's been churning
-    /// for 5 minutes on a slow server).
-    @State private var showBackgroundWorkDetails = false
     /// Flipped true after the first DVR reconcile completes so the
     /// initial loading screen knows it can dismiss. Only gates the
     /// dismiss when a Dispatcharr server is configured — other server
@@ -4741,8 +4734,6 @@ struct MainTabView: View {
 
     /// Short identifier labels used by the heartbeat log. Terse
     /// by design — the log consumer needs grep-friendly tokens.
-    /// User-facing strings live in
-    /// `humanReadableBackgroundTaskLabels`.
     private var activeBackgroundTaskLabels: [String] {
         var labels: [String] = []
         if channelStore.isLoading        { labels.append("channels") }
@@ -4754,31 +4745,6 @@ struct MainTabView: View {
         if vodStore.isRefillingSeries    { labels.append("vod-series-refill") }
         if vodStore.isSearchingMovies    { labels.append("vod-movies-search") }
         if vodStore.isSearchingSeries    { labels.append("vod-series-search") }
-        return labels
-    }
-
-    /// Friendly labels shown in the user-facing
-    /// `BackgroundWorkDetailsView` when the user taps / selects the
-    /// "Syncing…" badge. Deduplicates `isLoading*` + `isRefilling*`
-    /// (both are typically true at load start — the refill flag
-    /// stays true through the category loop, the load flag flips
-    /// false at first partial data) so users see a single "Loading
-    /// Movies" row rather than two confusingly-named ones. Search
-    /// flags are separate because they're user-initiated and
-    /// worth distinguishing from the initial library load.
-    private var humanReadableBackgroundTaskLabels: [String] {
-        var labels: [String] = []
-        if channelStore.isLoading        { labels.append("Loading channel list") }
-        if channelStore.isEPGLoading     { labels.append("Loading EPG") }
-        if guideStore.isLoading          { labels.append("Parsing guide data") }
-        if vodStore.isLoadingMovies || vodStore.isRefillingMovies {
-            labels.append("Loading Movies")
-        }
-        if vodStore.isLoadingSeries || vodStore.isRefillingSeries {
-            labels.append("Loading Series")
-        }
-        if vodStore.isSearchingMovies    { labels.append("Searching Movies") }
-        if vodStore.isSearchingSeries    { labels.append("Searching Series") }
         return labels
     }
 
@@ -4812,92 +4778,12 @@ struct MainTabView: View {
                 )
                 #endif
 
-            // Background activity indicator — top left. Tappable on
-            // iOS, focusable/selectable on tvOS so users can see
-            // WHICH background task is still running when the badge
-            // sits "Syncing…" for minutes. Opens a platform-native
-            // detail view (popover on iOS, fullScreenCover on tvOS)
-            // listing the active tasks + elapsed time.
-            // tvOS (Logan 2026-09-03): no badge; the nav bar's Refresh
-            // circle already spins while background work runs.
-            if isAnyBackgroundWork, !nowPlaying.isActive || nowPlaying.isMinimized,
-               !isTVOS {
-                VStack {
-                    Button {
-                        showBackgroundWorkDetails = true
-                    } label: {
-                        HStack(spacing: 6) {
-                            ProgressView()
-                                #if os(tvOS)
-                                .scaleEffect(0.6)
-                                #else
-                                .scaleEffect(0.5)
-                                #endif
-                            #if os(tvOS)
-                            Text("Syncing… · select for info")
-                                .font(.system(size: 18, weight: .medium))
-                                .foregroundColor(.white.opacity(0.8))
-                            #else
-                            Text("Syncing | Tap for Info")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(.white.opacity(0.7))
-                            #endif
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(Color.black.opacity(0.5).clipShape(Capsule()))
-                    }
-                    // iOS gets `.plain` (no chrome, just the label).
-                    // tvOS gets `TVNoHighlightButtonStyle` which
-                    // replaces the default system focus halo — the
-                    // bright-white outline the system applies to
-                    // `.plain` buttons is visually overwhelming on
-                    // a tiny capsule badge (user-reported v1.6.8).
-                    // `TVNoHighlightButtonStyle` uses the same gentle
-                    // accent-tinted scale + shadow pattern as every
-                    // other tvOS row in the app so focus feedback
-                    // stays consistent across the UI.
-                    #if os(tvOS)
-                    .buttonStyle(TVNoHighlightButtonStyle())
-                    // `.focusSection()` keeps this badge out of the
-                    // default D-pad navigation path — it sits in its
-                    // own focus region in the top-left corner, so
-                    // users navigating the main content grid don't
-                    // accidentally land here. They have to
-                    // deliberately drive focus up-and-left to reach
-                    // it.
-                    .focusSection()
-                    #else
-                    .buttonStyle(.plain)
-                    #endif
-                    .padding(.leading, 16)
-                    .padding(.top, -16)
-                    #if os(iOS)
-                    .popover(isPresented: $showBackgroundWorkDetails,
-                             attachmentAnchor: .rect(.bounds)) {
-                        BackgroundWorkDetailsView(
-                            labels: humanReadableBackgroundTaskLabels,
-                            elapsedSeconds: bgWorkStartedAt.map {
-                                Int(CFAbsoluteTimeGetCurrent() - $0)
-                            } ?? 0
-                        )
-                        .presentationCompactAdaptation(.popover)
-                    }
-                    #else
-                    .fullScreenCover(isPresented: $showBackgroundWorkDetails) {
-                        BackgroundWorkDetailsView(
-                            labels: humanReadableBackgroundTaskLabels,
-                            elapsedSeconds: bgWorkStartedAt.map {
-                                Int(CFAbsoluteTimeGetCurrent() - $0)
-                            } ?? 0
-                        )
-                    }
-                    #endif
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .zIndex(1)
-            }
+            // The "Syncing | Tap for Info" pill is gone (Logan
+            // 2026-09-14). tvOS already spins the nav bar's Refresh
+            // circle while a sync runs; iPhone / iPad show a small
+            // spinning refresh glyph in the Live TV header
+            // (`PhoneHeaderSyncSpinner`), with pull-to-refresh still the
+            // manual trigger.
 
             // Nav action circles: Refresh + Search immediately LEFT of the
             // system tab bar, on every content tab (hidden on Settings) —
@@ -7197,123 +7083,6 @@ struct MainTabView: View {
     }
 }
 
-// MARK: - Background Work Details View
-//
-// Presented (iOS popover / tvOS fullScreenCover) when the user
-// taps / selects the top-left "Syncing…" badge. Shows each active
-// task on its own row with a subtle progress dot, plus the total
-// elapsed-seconds counter for the background-work window. The
-// content is a plain value-type snapshot — labels + elapsed are
-// passed in by the caller at present-time; the view doesn't
-// observe anything, so if the background state changes while the
-// modal is open the user sees the moment-of-open snapshot rather
-// than a live-updating list. Dismissing and re-opening shows the
-// fresh state. Keeps the view stateless and avoids any chance of
-// re-triggering the very invalidation cascade we were trying to
-// surface.
-private struct BackgroundWorkDetailsView: View {
-    let labels: [String]
-    let elapsedSeconds: Int
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        #if os(tvOS)
-        tvBody
-        #else
-        iOSBody
-        #endif
-    }
-
-    #if os(iOS)
-    private var iOSBody: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 8) {
-                ProgressView().scaleEffect(0.7)
-                Text("Background Activity")
-                    .font(.headline)
-                Spacer()
-            }
-
-            if labels.isEmpty {
-                Text("Nothing running right now.")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-            } else {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(labels, id: \.self) { label in
-                        HStack(spacing: 10) {
-                            Image(systemName: "circle.dotted")
-                                .font(.system(size: 11))
-                                .foregroundColor(.accentPrimary)
-                            Text(label)
-                                .font(.body)
-                                .foregroundColor(.textPrimary)
-                        }
-                    }
-                }
-            }
-
-            Divider()
-            Text("Elapsed: \(elapsedSeconds)s")
-                .font(.caption)
-                .foregroundColor(.textTertiary)
-        }
-        .padding(16)
-        .frame(minWidth: 260, idealWidth: 300, maxWidth: 340, alignment: .leading)
-    }
-    #endif
-
-    #if os(tvOS)
-    private var tvBody: some View {
-        ZStack(alignment: .topTrailing) {
-            Color.appBackground.ignoresSafeArea()
-
-            VStack(alignment: .leading, spacing: 32) {
-                HStack(spacing: 16) {
-                    ProgressView().scaleEffect(1.4)
-                    Text("Background Activity")
-                        .font(.system(size: 44, weight: .bold))
-                        .foregroundColor(.textPrimary)
-                }
-
-                if labels.isEmpty {
-                    Text("Nothing running right now.")
-                        .font(.system(size: 24))
-                        .foregroundColor(.textSecondary)
-                } else {
-                    VStack(alignment: .leading, spacing: 18) {
-                        ForEach(labels, id: \.self) { label in
-                            HStack(spacing: 18) {
-                                Image(systemName: "circle.dotted")
-                                    .font(.system(size: 22))
-                                    .foregroundColor(.accentPrimary)
-                                Text(label)
-                                    .font(.system(size: 28))
-                                    .foregroundColor(.textPrimary)
-                            }
-                        }
-                    }
-                }
-
-                Text("Elapsed: \(elapsedSeconds)s")
-                    .font(.system(size: 20))
-                    .foregroundColor(.textTertiary)
-
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 80)
-            .padding(.vertical, 72)
-            .frame(maxWidth: 900, alignment: .leading)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-
-            Button("Close") { dismiss() }
-                .padding(.top, 48)
-                .padding(.trailing, 64)
-        }
-        .onExitCommand { dismiss() }
-    }
-    #endif
-}
 
 
 // MARK: - Channel Info Banner (v1.6.15)

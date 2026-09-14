@@ -4424,7 +4424,10 @@ final class AVPlayerProgressDriver {
             store.$aspectMode, store.$allowsVideoFill, store.$isPiPActive)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] mode, allowsFill, pipActive in
-                self?.applyGravity((allowsFill && !pipActive) ? mode.videoGravity : .resizeAspect)
+                let gravity: AVLayerVideoGravity =
+                    (allowsFill && !pipActive) ? mode.videoGravity : .resizeAspect
+                self?.applyGravity(gravity)
+                debugLog("[VIDEO-SCALE] applied \(mode.rawValue) gravity=\(gravity.rawValue) layer=avplayer allowsFill=\(allowsFill) pip=\(pipActive)")
             }
     }
 

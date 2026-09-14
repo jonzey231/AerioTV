@@ -3161,8 +3161,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] mode, allowsFill, pipActive in
                     MainActor.assumeIsolated {
-                        self?.viewController?.sampleBufferLayer.videoGravity =
+                        let gravity: AVLayerVideoGravity =
                             (allowsFill && !pipActive) ? mode.videoGravity : .resizeAspect
+                        self?.viewController?.sampleBufferLayer.videoGravity = gravity
+                        debugLog("[VIDEO-SCALE] applied \(mode.rawValue) gravity=\(gravity.rawValue) layer=avsbdl allowsFill=\(allowsFill) pip=\(pipActive)")
                     }
                 }
                 .store(in: &cancellables)

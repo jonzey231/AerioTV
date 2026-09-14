@@ -367,7 +367,13 @@ struct ManageGroupsSheet: View {
                     Picker("Opens On", selection: $defaultGroup) {
                         Text("All Channels").tag("")
                         if favoritesAvailable { Text("Favorites").tag(favoritesToken) }
-                        ForEach(displayList, id: \.self) { g in Text(g).tag(g) }
+                        // In Manual order `displayList` also carries the
+                        // pinned sentinels, which used to render raw
+                        // ("favorites", "All") and duplicate the two rows
+                        // above. Filter them out and title the rest.
+                        ForEach(displayList.filter {
+                            $0 != favoritesToken && $0 != allChannelsToken
+                        }, id: \.self) { g in Text(rowTitle(g)).tag(g) }
                     }
                     .onChange(of: defaultGroup) { _, v in
                         // The onAppear load also lands here; only a real

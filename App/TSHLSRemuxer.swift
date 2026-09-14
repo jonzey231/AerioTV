@@ -2622,6 +2622,17 @@ struct AVPlayerMultiviewTile: View {
     /// PiP is not driving it).
     @State private var tileGravity: AVLayerVideoGravity = .resizeAspect
 
+    /// Single place the tile's video gravity is decided, so a device log
+    /// proves a Video Scale pill actually reached the layer.
+    private func applyTileGravity(mode: VideoAspectMode,
+                                  allowsFill: Bool,
+                                  pipActive: Bool) {
+        let gravity: AVLayerVideoGravity =
+            (allowsFill && !pipActive) ? mode.videoGravity : .resizeAspect
+        tileGravity = gravity
+        debugLog("[VIDEO-SCALE] applied \(mode.rawValue) gravity=\(gravity.rawValue) tile=\(tileID) allowsFill=\(allowsFill) pip=\(pipActive)")
+    }
+
     var body: some View {
         ZStack {
             Color.black
@@ -2705,8 +2716,9 @@ struct AVPlayerMultiviewTile: View {
         // PiP closed while still backgrounded: suspension follows with no
         // further lifecycle callback, so quiesce right here.
         .onReceive(progressStore.$isPiPActive) { active in
-            tileGravity = (progressStore.allowsVideoFill && !active)
-                ? progressStore.aspectMode.videoGravity : .resizeAspect
+            applyTileGravity(mode: progressStore.aspectMode,
+                             allowsFill: progressStore.allowsVideoFill,
+                             pipActive: active)
             if pipWasActive, !active,
                UIApplication.shared.applicationState == .background {
                 debugLog("[AVP-PIP] closed while backgrounded; quiescing pipeline")
@@ -2727,12 +2739,14 @@ struct AVPlayerMultiviewTile: View {
         // currentMs for VOD only, so live is untouched).
         // Video Scale: follow the shared aspect + solo-tile eligibility.
         .onReceive(progressStore.$aspectMode) { mode in
-            tileGravity = (progressStore.allowsVideoFill && !progressStore.isPiPActive)
-                ? mode.videoGravity : .resizeAspect
+            applyTileGravity(mode: mode,
+                             allowsFill: progressStore.allowsVideoFill,
+                             pipActive: progressStore.isPiPActive)
         }
         .onReceive(progressStore.$allowsVideoFill) { allowsFill in
-            tileGravity = (allowsFill && !progressStore.isPiPActive)
-                ? progressStore.aspectMode.videoGravity : .resizeAspect
+            applyTileGravity(mode: progressStore.aspectMode,
+                             allowsFill: allowsFill,
+                             pipActive: progressStore.isPiPActive)
         }
         .onReceive(progressStore.$currentMs) { ms in
             if ms > 0, statusText == "Buffering..." { statusText = nil }
@@ -4601,6 +4615,7 @@ struct AVPlayerLayerView: UIViewRepresentable {
         }
         if view.playerLayer.videoGravity != videoGravity {
             view.playerLayer.videoGravity = videoGravity
+            debugLog("[VIDEO-SCALE] applied layer=avplayerlayer gravity=\(videoGravity.rawValue)")
         }
         syncPiP(view, context.coordinator)
     }

@@ -1372,6 +1372,11 @@ struct MultiviewContainerView: View {
     /// container body its argument list blew the type-checker budget
     /// once version switching joined it.
     private func containerOptionsPanel(audioStore: PlayerProgressStore) -> some View {
+        // The store is a plain local here, not an observed object, so a
+        // Video Scale selection used to change `aspectMode` without ever
+        // re-rendering this panel: the pill highlight never moved. The
+        // bridge below observes the store so the selection sticks.
+        ObservingProgressStore(store: audioStore) { audioStore in
         TVPlayerOptionsPanel(
                         audioTracks: audioStore.audioTracks,
                         currentAudioTrackID: audioStore.currentAudioTrackID,
@@ -1426,6 +1431,7 @@ struct MultiviewContainerView: View {
                             ? { audioStore.setVideoScale($0) }
                             : nil
                     )
+        }
     }
 
     private var vodSelectVersionHandler: ((VODVersionOption) -> Void)? {
@@ -2664,4 +2670,15 @@ private struct AddSheetRequestBridge: ViewModifier {
             }
         }
     }
+}
+
+
+/// Re-renders its content whenever the wrapped `PlayerProgressStore`
+/// publishes. Used where a store reaches a view as a plain value (the
+/// container's options panel) and the view must still track its state.
+private struct ObservingProgressStore<Content: View>: View {
+    @ObservedObject var store: PlayerProgressStore
+    @ViewBuilder var content: (PlayerProgressStore) -> Content
+
+    var body: some View { content(store) }
 }

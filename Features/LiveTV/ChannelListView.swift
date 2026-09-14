@@ -499,6 +499,13 @@ struct ChannelListView: View {
                         }
                     }
                     #if os(iOS)
+                    // iPad background-sync indicator (the phone header row
+                    // carries its own; the phone hides this bar entirely).
+                    if !isPhoneIdiom, channelStore.isLoading || channelStore.isEPGLoading {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            PhoneHeaderSyncSpinner(size: 14)
+                        }
+                    }
                     // Guide view toggle: shown on all iOS width classes now
                     // that iPhone (and the folded foldable) can open the Guide.
                     // Session-only: toggling never writes defaultLiveTVView.
@@ -816,6 +823,8 @@ struct ChannelListView: View {
 
     #if os(iOS)
     private var isPhoneIdiom: Bool { UIDevice.current.userInterfaceIdiom == .phone }
+    /// Header overflow (three-dot) state: see `phoneHeaderActions`.
+    @State private var phoneHeaderActionsExpanded = false
 
     /// Phone header row (Logan 2026-09-05, mockup "Phone · Live TV"): the
     /// groups control at the left, the pills (pills mode) or the active group
@@ -850,7 +859,7 @@ struct ChannelListView: View {
                     }
                 }
                 .accessibilityLabel("Manage Groups")
-                if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty) && !compactChromeHidesFilterBar {
+                if phoneGroupPillsShown {
                     // Clipped: the strip must not run under the icons.
                     groupFilterBar
                         .clipped()
@@ -858,35 +867,88 @@ struct ChannelListView: View {
                     Spacer(minLength: 4)
                 }
             }
-            Button { phoneSearchPresented = true } label: { phoneCircle("magnifyingglass") }
+            // Background sync indicator (not a button): pull-to-refresh
+            // stays the manual trigger, this only says a sync is running.
+            if channelStore.isLoading || channelStore.isEPGLoading {
+                PhoneHeaderSyncSpinner()
+            }
+            phoneHeaderActions
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        // Tapping anywhere else in the header collapses the overflow.
+        .background(
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture { collapsePhoneHeaderActions() }
+        )
+        .onChange(of: selectedGroup) { _, _ in collapsePhoneHeaderActions() }
+    }
+
+    /// Parity with the Android header (2026-09-14): with the group pills
+    /// on screen the trailing circles would run over the pill strip, so
+    /// they fold behind a three-dot button that EXPANDS IN PLACE (the
+    /// real circles appear inline, not a menu). Any of them, or a tap
+    /// elsewhere, collapses it again. Sidebar mode has no pill strip and
+    /// therefore never shows the three-dot button.
+    @ViewBuilder private var phoneHeaderActions: some View {
+        if phoneHeaderActionsCollapsible && !phoneHeaderActionsExpanded {
+            Button {
+                withAnimation(.spring(response: 0.25)) { phoneHeaderActionsExpanded = true }
+            } label: { phoneCircle("ellipsis") }
+            .accessibilityLabel("More")
+            .transition(.opacity)
+        } else {
+            Button {
+                collapsePhoneHeaderActions()
+                phoneSearchPresented = true
+            } label: { phoneCircle("magnifyingglass") }
                 .accessibilityLabel("Search")
             Menu {
                 Button {
                     sortModeRaw = "number"
+                    collapsePhoneHeaderActions()
                 } label: {
                     if sortModeRaw == "number" { Label("By Number", systemImage: "checkmark") } else { Text("By Number") }
                 }
                 Button {
                     sortModeRaw = "name"
+                    collapsePhoneHeaderActions()
                 } label: {
                     if sortModeRaw == "name" { Label("By Name", systemImage: "checkmark") } else { Text("By Name") }
                 }
                 Button {
                     sortModeRaw = "favorites"
+                    collapsePhoneHeaderActions()
                 } label: {
                     if sortModeRaw == "favorites" { Label("Favorites First", systemImage: "checkmark") } else { Text("Favorites First") }
                 }
             } label: { phoneCircle("arrow.up.arrow.down") }
             .accessibilityLabel("Sort")
             Button {
+                collapsePhoneHeaderActions()
                 userDidToggleView = true
                 withAnimation(.spring(response: 0.25)) { showGuideView.toggle() }
                 LiveTVViewSession.showGuideView = showGuideView
             } label: { phoneCircle(showGuideView ? "list.bullet" : "calendar") }
             .accessibilityLabel(showGuideView ? "Show List" : "Show Guide")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
+    }
+
+    /// True while the pill strip owns the header's middle: sidebar mode
+    /// keeps all three circles, since nothing competes for the width.
+    private var phoneHeaderActionsCollapsible: Bool {
+        !guideSidebarSelectorActive && phoneGroupPillsShown
+    }
+
+    private var phoneGroupPillsShown: Bool {
+        (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
+            && !compactChromeHidesFilterBar
+    }
+
+    private func collapsePhoneHeaderActions() {
+        guard phoneHeaderActionsExpanded else { return }
+        withAnimation(.spring(response: 0.25)) { phoneHeaderActionsExpanded = false }
     }
 
     private func phoneCircle(_ systemImage: String) -> some View {
@@ -4792,6 +4854,26 @@ private struct PerIdiomSearchableModifier: ViewModifier {
 #endif
 
 #if os(iOS)
+/// Background-sync indicator for the iPhone / iPad Live TV header: a
+/// slowly spinning refresh glyph, NOT a button (pull-to-refresh stays the
+/// manual trigger). Replaces the old "Syncing | Tap for Info" pill.
+struct PhoneHeaderSyncSpinner: View {
+    var size: CGFloat = 15
+    @State private var spin = false
+
+    var body: some View {
+        Image(systemName: "arrow.clockwise")
+            .font(.system(size: size, weight: .semibold))
+            .foregroundColor(.textTertiary)
+            .rotationEffect(.degrees(spin ? 360 : 0))
+            .animation(.linear(duration: 1.1).repeatForever(autoreverses: false),
+                       value: spin)
+            .onAppear { spin = true }
+            .allowsHitTesting(false)
+            .accessibilityLabel("Syncing")
+    }
+}
+
 /// Phone group drawer (sidebar mode). A long press lifts a row to reorder.
 struct PhoneGroupDrawer: View {
     let tokens: [String]
