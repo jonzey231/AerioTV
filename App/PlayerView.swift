@@ -6311,6 +6311,13 @@ struct NativeHLSPlayerScreen: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             session.begin(item: item, server: server, bypassNativeRouter: true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                // Logan 2026-09-14: arm the double-Back-to-close window as
+                // the mini actually lands (this path defers the minimize
+                // across a session handoff, so stamping at press time would
+                // expire the window before the mini exists). A second
+                // Menu/Back within 0.7s ends the session; see
+                // NowPlayingManager.consumeDoubleBackClose.
+                NowPlayingManager.shared.noteMenuMinimize()
                 NowPlayingManager.shared.minimize()
             }
         }

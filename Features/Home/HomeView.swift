@@ -3432,6 +3432,30 @@ final class NowPlayingManager: ObservableObject {
     var menuMiniPressCount = 0
     var menuMiniDebounce: Task<Void, Never>?
 
+    /// Double-Back-to-close (Logan 2026-09-14): the timestamp of the last
+    /// Menu/Back press that MINIMIZED the player. A second Menu/Back within
+    /// `doubleBackCloseWindow` tears the session down completely instead of
+    /// expanding the mini back to fullscreen. Not @Published: nothing renders
+    /// off it, and a publish here would re-run every observer on each press.
+    var lastMinimizeMenuPressAt: Date?
+    /// Window for the second press. Short enough that an ordinary "minimize,
+    /// look at the guide, press Back to resume" never trips it.
+    static let doubleBackCloseWindow: TimeInterval = 0.7
+
+    /// Called from every Menu/Back path that results in a minimize, so the
+    /// mini-player branch can recognize the follow-up press.
+    func noteMenuMinimize() {
+        lastMinimizeMenuPressAt = Date()
+    }
+
+    /// Consume-once: true when this Menu/Back press arrived inside the window
+    /// opened by the minimizing press.
+    func consumeDoubleBackClose() -> Bool {
+        guard let at = lastMinimizeMenuPressAt else { return false }
+        lastMinimizeMenuPressAt = nil
+        return Date().timeIntervalSince(at) <= Self.doubleBackCloseWindow
+    }
+
     /// True while a CarPlay scene is connected (set by CarPlaySceneDelegate
     /// on connect/disconnect). Drives the CarPlay branch in
     /// MPVPlayerView.didEnterBackground so audio keeps playing in the car
@@ -3658,12 +3682,14 @@ final class NowPlayingManager: ObservableObject {
         // mounted container, no teardown, no restart, no separate screen
         // (the old promote-to-native-screen path is retired).
         isMinimized = false
+        lastMinimizeMenuPressAt = nil
     }
 
     func stop() {
         debugLog("🎮 NowPlaying.stop: \(playingItem?.name ?? "nil")")
         playingItem = nil
         isMinimized = false
+        lastMinimizeMenuPressAt = nil
         // #42: authoritative reset of the chrome mirror on every playback
         // teardown. The flag is only ever *set* by .onChange observers in
         // MultiviewContainerView / PlayerView, which don't fire `false` when
@@ -6995,6 +7021,19 @@ struct MainTabView: View {
             // Checked AFTER pushed navigation submenus (above) so Back can back
             // out of Settings/VOD while a mini plays. (Stopping playback now
             // lives only on the explicit close control.)
+            // Logan 2026-09-14: a SECOND Menu/Back within 0.7s of the press
+            // that minimized ends playback outright - no mini, stream stopped,
+            // player closed back to the page behind it. Checked before the
+            // #42 P3 debounce so the close wins over expand/top-channel; the
+            // FIRST press is untouched (it already minimized immediately).
+            if nowPlaying.consumeDoubleBackClose() {
+                debugLog("🎮 [HMP]   → mini DOUBLE-Back within window → close session (stop playback)")
+                nowPlaying.menuMiniDebounce?.cancel()
+                nowPlaying.menuMiniDebounce = nil
+                nowPlaying.menuMiniPressCount = 0
+                withAnimation(.spring(response: 0.35)) { PlayerSession.shared.exit() }
+                return
+            }
             nowPlaying.menuMiniPressCount += 1
             nowPlaying.menuMiniDebounce?.cancel()
             nowPlaying.menuMiniDebounce = Task { @MainActor in

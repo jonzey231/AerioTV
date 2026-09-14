@@ -1852,6 +1852,11 @@ struct MultiviewContainerView: View {
                     "[MV-Cmd]   → branch: N=1 fallthrough → minimize (reachable with chrome hidden; #42 Part 4)",
                     category: "Playback", level: .info
                 )
+                // Logan 2026-09-14: arm the double-Back-to-close window. A
+                // second Menu/Back within 0.7s (handled in
+                // HomeView.handleMenuPress, mini branch) ends the session
+                // instead of expanding the mini back to fullscreen.
+                NowPlayingManager.shared.noteMenuMinimize()
                 NowPlayingManager.shared.minimize()
                 // Back-flow step 2: with the player now in the corner mini,
                 // land guide focus on the channel just watched (its NOW cell)

@@ -390,6 +390,10 @@ extension RemoteControlHints {
             pairs.append(RemoteHintPair(key: "Up/Down", action: "Transport row"))
         }
         pairs.append(RemoteHintPair(key: "Back", action: "Mini player"))
+        // Logan 2026-09-14: a second Back right after the minimizing one
+        // ends playback outright. Same wording form as the guide strip's
+        // "Double Back" pair so the two read as one vocabulary.
+        pairs.append(RemoteHintPair(key: "Double Back", action: "Close"))
         return pairs
     }
 }
