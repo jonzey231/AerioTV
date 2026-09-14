@@ -6305,20 +6305,26 @@ struct NativeHLSPlayerScreen: View {
     /// cost of trading system chrome for the container; acceptable in
     /// the corner mini.
     private func minimizeToMini() {
-        let session = PlayerSession.shared
-        let server = session.nativeHLSServer
-        session.nativeHLSItem = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            session.begin(item: item, server: server, bypassNativeRouter: true)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                // Logan 2026-09-14: arm the double-Back-to-close window as
-                // the mini actually lands (this path defers the minimize
-                // across a session handoff, so stamping at press time would
-                // expire the window before the mini exists). A second
-                // Menu/Back within 0.7s ends the session; see
-                // NowPlayingManager.consumeDoubleBackClose.
-                NowPlayingManager.shared.noteMenuMinimize()
-                NowPlayingManager.shared.minimize()
+        // Logan 2026-09-14: second press of a double Back (the pending
+        // minimize armed below is still waiting) closes the session
+        // outright - the cover is already gone, nothing was minimized.
+        if NowPlayingManager.shared.consumeDoubleBackClose() {
+            debugLog("[AVP-HLS] double Back → cancel minimize + exit session")
+            // The deferred body never ran, so the cover is still mounted:
+            // drop it here as well as tearing the session down.
+            PlayerSession.shared.nativeHLSItem = nil
+            PlayerSession.shared.exit()
+            return
+        }
+        NowPlayingManager.shared.scheduleMinimize {
+            let session = PlayerSession.shared
+            let server = session.nativeHLSServer
+            session.nativeHLSItem = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                session.begin(item: item, server: server, bypassNativeRouter: true)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    NowPlayingManager.shared.minimize()
+                }
             }
         }
     }

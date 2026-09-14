@@ -3432,28 +3432,39 @@ final class NowPlayingManager: ObservableObject {
     var menuMiniPressCount = 0
     var menuMiniDebounce: Task<Void, Never>?
 
-    /// Double-Back-to-close (Logan 2026-09-14): the timestamp of the last
-    /// Menu/Back press that MINIMIZED the player. A second Menu/Back within
-    /// `doubleBackCloseWindow` tears the session down completely instead of
-    /// expanding the mini back to fullscreen. Not @Published: nothing renders
-    /// off it, and a publish here would re-run every observer on each press.
-    var lastMinimizeMenuPressAt: Date?
-    /// Window for the second press. Short enough that an ordinary "minimize,
-    /// look at the guide, press Back to resume" never trips it.
-    static let doubleBackCloseWindow: TimeInterval = 0.7
+    /// Double-Back-to-close (Logan 2026-09-14, reworked): the solo player's
+    /// Menu/Back does NOT minimize on the press any more. It schedules the
+    /// minimize `doubleBackCloseWindow` later and parks the task here. A
+    /// second Menu/Back inside that window cancels the task and closes the
+    /// session outright, so the user never sees a mini flash up and vanish.
+    /// Not @Published: nothing renders off it, and a publish here would
+    /// re-run every observer on each press.
+    var pendingMinimize: Task<Void, Never>?
+    /// How long the first Back waits for a possible second one. Short enough
+    /// that a single Back still feels immediate.
+    static let doubleBackCloseWindow: TimeInterval = 0.4
 
-    /// Called from every Menu/Back path that results in a minimize, so the
-    /// mini-player branch can recognize the follow-up press.
-    func noteMenuMinimize() {
-        lastMinimizeMenuPressAt = Date()
+    /// Arm the deferred minimize. `body` runs on the main actor once the
+    /// window elapses without a second Menu/Back; it is the caller's whole
+    /// minimize path (minimize + any follow-up focus work).
+    func scheduleMinimize(_ body: @escaping @MainActor () -> Void) {
+        pendingMinimize?.cancel()
+        pendingMinimize = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(Self.doubleBackCloseWindow * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            NowPlayingManager.shared.pendingMinimize = nil
+            body()
+        }
     }
 
-    /// Consume-once: true when this Menu/Back press arrived inside the window
-    /// opened by the minimizing press.
+    /// Consume-once: true when this Menu/Back press arrived while a deferred
+    /// minimize was still pending, i.e. it is the second press of a double
+    /// Back. Cancels the pending minimize so no mini player is ever shown.
     func consumeDoubleBackClose() -> Bool {
-        guard let at = lastMinimizeMenuPressAt else { return false }
-        lastMinimizeMenuPressAt = nil
-        return Date().timeIntervalSince(at) <= Self.doubleBackCloseWindow
+        guard let task = pendingMinimize else { return false }
+        task.cancel()
+        pendingMinimize = nil
+        return true
     }
 
     /// True while a CarPlay scene is connected (set by CarPlaySceneDelegate
@@ -3682,14 +3693,16 @@ final class NowPlayingManager: ObservableObject {
         // mounted container, no teardown, no restart, no separate screen
         // (the old promote-to-native-screen path is retired).
         isMinimized = false
-        lastMinimizeMenuPressAt = nil
+        pendingMinimize?.cancel()
+        pendingMinimize = nil
     }
 
     func stop() {
         debugLog("🎮 NowPlaying.stop: \(playingItem?.name ?? "nil")")
         playingItem = nil
         isMinimized = false
-        lastMinimizeMenuPressAt = nil
+        pendingMinimize?.cancel()
+        pendingMinimize = nil
         // #42: authoritative reset of the chrome mirror on every playback
         // teardown. The flag is only ever *set* by .onChange observers in
         // MultiviewContainerView / PlayerView, which don't fire `false` when
@@ -7021,19 +7034,6 @@ struct MainTabView: View {
             // Checked AFTER pushed navigation submenus (above) so Back can back
             // out of Settings/VOD while a mini plays. (Stopping playback now
             // lives only on the explicit close control.)
-            // Logan 2026-09-14: a SECOND Menu/Back within 0.7s of the press
-            // that minimized ends playback outright - no mini, stream stopped,
-            // player closed back to the page behind it. Checked before the
-            // #42 P3 debounce so the close wins over expand/top-channel; the
-            // FIRST press is untouched (it already minimized immediately).
-            if nowPlaying.consumeDoubleBackClose() {
-                debugLog("🎮 [HMP]   → mini DOUBLE-Back within window → close session (stop playback)")
-                nowPlaying.menuMiniDebounce?.cancel()
-                nowPlaying.menuMiniDebounce = nil
-                nowPlaying.menuMiniPressCount = 0
-                withAnimation(.spring(response: 0.35)) { PlayerSession.shared.exit() }
-                return
-            }
             nowPlaying.menuMiniPressCount += 1
             nowPlaying.menuMiniDebounce?.cancel()
             nowPlaying.menuMiniDebounce = Task { @MainActor in

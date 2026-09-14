@@ -1716,6 +1716,18 @@ struct MultiviewContainerView: View {
             "[MV-Cmd] tvOS Menu source=\(source) | showTVOptions=\(showTVOptions) showStreamInfo=\(showStreamInfo) isMinimized=\(nowPlaying.isMinimized) chromeVisible=\(chromeState.isVisible) tiles=\(store.tiles.count) fullscreenTile=\(store.fullscreenTileID ?? "nil") relocating=\(store.relocatingTileID ?? "nil")",
             category: "Playback", level: .info
         )
+        // Logan 2026-09-14: second press of a double Back. Only non-nil
+        // while the solo-player minimize below is waiting out its 0.4s
+        // window, so this never changes any other Menu behavior. Closing
+        // here means no mini player is ever created.
+        if nowPlaying.consumeDoubleBackClose() {
+            DebugLogger.shared.log(
+                "[MV-Cmd]   → branch: DOUBLE Back within window → cancel minimize + exit session",
+                category: "Playback", level: .info
+            )
+            PlayerSession.shared.exit()
+            return
+        }
         // Remote Control #195 overlays FIRST: Back closes the whole
         // Channels/Recents overlay from any stage (Logan 2026-08-06:
         // Right steps out one layer at a time, Back exits fully).
@@ -1852,20 +1864,23 @@ struct MultiviewContainerView: View {
                     "[MV-Cmd]   → branch: N=1 fallthrough → minimize (reachable with chrome hidden; #42 Part 4)",
                     category: "Playback", level: .info
                 )
-                // Logan 2026-09-14: arm the double-Back-to-close window. A
-                // second Menu/Back within 0.7s (handled in
-                // HomeView.handleMenuPress, mini branch) ends the session
-                // instead of expanding the mini back to fullscreen.
-                NowPlayingManager.shared.noteMenuMinimize()
-                NowPlayingManager.shared.minimize()
-                // Back-flow step 2: with the player now in the corner mini,
-                // land guide focus on the channel just watched (its NOW cell)
-                // so the user resumes browsing from there, not row 0. The
-                // .forceGuideFocus handler targets lastPlayedChannelID and
-                // scrolls it to center; deferred so the minimize spring
-                // settles and the guide becomes the active focus context.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+                // Logan 2026-09-14 (reworked): DEFER the minimize by 0.4s so
+                // a second Menu/Back can turn this into a full close instead
+                // of minimizing and then tearing the mini down. The second
+                // press is caught at the top of this function
+                // (consumeDoubleBackClose); if none arrives the block below
+                // runs exactly as before.
+                NowPlayingManager.shared.scheduleMinimize {
+                    NowPlayingManager.shared.minimize()
+                    // Back-flow step 2: with the player now in the corner mini,
+                    // land guide focus on the channel just watched (its NOW cell)
+                    // so the user resumes browsing from there, not row 0. The
+                    // .forceGuideFocus handler targets lastPlayedChannelID and
+                    // scrolls it to center; deferred so the minimize spring
+                    // settles and the guide becomes the active focus context.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+                    }
                 }
             } else {
                 DebugLogger.shared.log(
