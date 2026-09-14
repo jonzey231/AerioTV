@@ -6103,10 +6103,13 @@ struct NativeHLSPlayerScreen: View {
     // MARK: - Live ingest stall ("Reconnecting", Android parity)
 
     private static let reconnectingStatus = "Reconnecting..."
-    /// Loaded-ahead seconds below which a silent ingest counts as a stall,
-    /// and above which the overlay clears again.
-    private static let stallBufferFloor: Double = 1.5
-    private static let stallBufferClear: Double = 3
+    /// Overlay thresholds. Silence plus a low buffer (under 1.5 s) is only
+    /// "starving" and routinely happens between Dispatcharr bursts while the
+    /// picture plays perfectly (Streamer 2026-09-14), so the overlay needs a
+    /// REAL stall: a rebuffer after playing, the playhead frozen this long
+    /// while playback is requested, or the buffer effectively empty.
+    private static let stallFrozenSeconds: Double = 1
+    private static let stallEmptyBuffer: Double = 0.25
 
     /// The remuxer's silence signal flipped. Silence ALONE is not a stall
     /// (Dispatcharr's proxy delivers in 8 to 9.5 s bursts with ~10 s
@@ -6117,14 +6120,9 @@ struct NativeHLSPlayerScreen: View {
         if silent {
             stallEvalToken = UUID()
             evaluateStallOverlay(token: stallEvalToken)
-        } else {
-            stallEvalToken = UUID()
-            if statusText == Self.reconnectingStatus {
-                statusText = nil
-                DebugLogger.shared.log("[AVP-STREAM] ingest resumed; cleared Reconnecting",
-                                       category: "Playback", level: .info)
-            }
         }
+        // Bytes resuming does not clear the overlay by itself: a running
+        // evaluator hides it once the playhead actually advances again.
     }
 
     private func loadedAheadSeconds() -> Double? {
@@ -6138,25 +6136,39 @@ struct NativeHLSPlayerScreen: View {
 
     /// Runs every 0.5 s while the ingest is silent (the signal itself only
     /// latches at its edges).
-    private func evaluateStallOverlay(token: UUID) {
-        guard token == stallEvalToken, ingestSilent, !didFallback, player != nil else { return }
+    private func evaluateStallOverlay(token: UUID, lastPosition: Double? = nil,
+                                      lastAdvance: Date = Date(), sawAdvance: Bool = false) {
+        guard token == stallEvalToken, !didFallback else { return }
+        guard ingestSilent || statusText == Self.reconnectingStatus else { return }
+        guard let player else { return }
         let ahead = loadedAheadSeconds() ?? 0
-        if statusText == nil, ahead < Self.stallBufferFloor {
+        let position = player.currentItem.map { CMTimeGetSeconds($0.currentTime()) } ?? .nan
+        let advanced = position.isFinite && lastPosition != nil && position != lastPosition
+        let now = Date()
+        let advanceAt = (advanced || lastPosition == nil) ? now : lastAdvance
+        let wantsToPlay = player.timeControlStatus != .paused
+        let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+        let frozen = wantsToPlay && !advanced && now.timeIntervalSince(advanceAt) >= Self.stallFrozenSeconds
+        let empty = wantsToPlay && ingestSilent && ahead < Self.stallEmptyBuffer
+        let stalled = (waiting && (sawAdvance || advanced)) || frozen || empty
+        if statusText == nil, stalled {
             statusText = Self.reconnectingStatus
             DebugLogger.shared.log(
-                "[AVP-STREAM] STALL: ingest silent >= \(Int(TSHLSRemuxer.ingestSilenceThreshold))s and only "
+                "[AVP-STREAM] STALL: playback stalled (status=\(player.timeControlStatus.rawValue), frozen=\(frozen)) with "
                 + String(format: "%.1f", ahead) + "s loaded ahead; showing Reconnecting",
                 category: "Playback", level: .warning)
-        } else if statusText == Self.reconnectingStatus, ahead > Self.stallBufferClear {
+        } else if statusText == Self.reconnectingStatus, advanced, !waiting {
             statusText = nil
             DebugLogger.shared.log(
-                "[AVP-STREAM] buffer recovered to " + String(format: "%.1f", ahead)
+                "[AVP-STREAM] playback advancing with " + String(format: "%.1f", ahead)
                 + "s ahead; cleared Reconnecting",
                 category: "Playback", level: .info)
         }
         let next = stallEvalToken
+        let pos: Double? = position.isFinite ? position : lastPosition
+        let saw = sawAdvance || advanced
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            evaluateStallOverlay(token: next)
+            evaluateStallOverlay(token: next, lastPosition: pos, lastAdvance: advanceAt, sawAdvance: saw)
         }
     }
 

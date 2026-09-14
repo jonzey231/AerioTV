@@ -3009,11 +3009,10 @@ struct AVPlayerMultiviewTile: View {
     /// Silence ALONE is not a stall: Dispatcharr's proxy delivers this
     /// stream in 8 to 9.5 s bursts while playback is perfect with ~10 s
     /// buffered (Android log analysis 2026-09-14), so a bare 2 s gap
-    /// would flash "Reconnecting" during healthy playback. The overlay
-    /// needs BOTH conditions - ingest silent >= 2 s AND the player
-    /// actually starving (less than 1.5 s loaded ahead of the playhead) -
-    /// and it clears as soon as either recovers (bytes resume, or more
-    /// than 3 s is loaded ahead again).
+    /// would flash "Reconnecting" during healthy playback. Even a low
+    /// buffer is only "starving": the overlay waits for playback itself to
+    /// stop (a rebuffer, the playhead frozen >= 1 s, or an empty buffer)
+    /// and clears as soon as the playhead advances again.
     private func handleIngestSilence(_ silent: Bool) {
         guard tileError == nil, !tileStopped else { return }
         ingestSilent = silent
@@ -3021,13 +3020,9 @@ struct AVPlayerMultiviewTile: View {
             guard firstFrameSeen else { return }
             stallEvalToken = UUID()
             evaluateStallOverlay(token: stallEvalToken)
-        } else {
-            stallEvalToken = UUID()
-            if statusText == Self.reconnectingStatus {
-                statusText = nil
-                debugLog("[AVP-STREAM] ingest resumed; cleared Reconnecting channel=\(channelName)")
-            }
         }
+        // Bytes resuming does not clear the overlay by itself: a running
+        // evaluator hides it once the playhead actually advances again.
     }
 
     /// Seconds of media loaded ahead of the playhead, or nil when the
@@ -3043,28 +3038,45 @@ struct AVPlayerMultiviewTile: View {
 
     /// Re-evaluates the overlay every 0.5 s for as long as the ingest is
     /// silent; the silence signal itself only latches at its edges.
-    private func evaluateStallOverlay(token: UUID) {
-        guard token == stallEvalToken, ingestSilent, tileError == nil, !tileStopped else { return }
+    private func evaluateStallOverlay(token: UUID, lastPosition: Double? = nil,
+                                      lastAdvance: Date = Date(), sawAdvance: Bool = false) {
+        guard token == stallEvalToken, tileError == nil, !tileStopped else { return }
+        guard ingestSilent || statusText == Self.reconnectingStatus else { return }
+        guard let player else { return }
         let ahead = loadedAheadSeconds() ?? 0
-        if statusText == nil, ahead < Self.stallBufferFloor {
+        let position = player.currentItem.map { CMTimeGetSeconds($0.currentTime()) } ?? .nan
+        let advanced = position.isFinite && lastPosition != nil && position != lastPosition
+        let now = Date()
+        let advanceAt = (advanced || lastPosition == nil) ? now : lastAdvance
+        let wantsToPlay = player.timeControlStatus != .paused
+        let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+        let frozen = wantsToPlay && !advanced && now.timeIntervalSince(advanceAt) >= Self.stallFrozenSeconds
+        let empty = wantsToPlay && ingestSilent && ahead < Self.stallEmptyBuffer
+        let stalled = (waiting && (sawAdvance || advanced)) || frozen || empty
+        if statusText == nil, stalled {
             statusText = Self.reconnectingStatus
-            debugLog("[AVP-STREAM] STALL: ingest silent >= \(Int(TSHLSRemuxer.ingestSilenceThreshold))s and "
-                + "only \(String(format: "%.1f", ahead))s loaded ahead; showing Reconnecting channel=\(channelName)")
-        } else if statusText == Self.reconnectingStatus, ahead > Self.stallBufferClear {
+            debugLog("[AVP-STREAM] STALL: playback stalled (status=\(player.timeControlStatus.rawValue), frozen=\(frozen)) with "
+                + "\(String(format: "%.1f", ahead))s loaded ahead; showing Reconnecting channel=\(channelName)")
+        } else if statusText == Self.reconnectingStatus, advanced, !waiting {
             statusText = nil
-            debugLog("[AVP-STREAM] buffer recovered to \(String(format: "%.1f", ahead))s ahead; "
+            debugLog("[AVP-STREAM] playback advancing with \(String(format: "%.1f", ahead))s ahead; "
                 + "cleared Reconnecting channel=\(channelName)")
         }
         let next = stallEvalToken
+        let pos: Double? = position.isFinite ? position : lastPosition
+        let saw = sawAdvance || advanced
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            evaluateStallOverlay(token: next)
+            evaluateStallOverlay(token: next, lastPosition: pos, lastAdvance: advanceAt, sawAdvance: saw)
         }
     }
 
-    /// Loaded-ahead seconds below which a silent ingest counts as a stall,
-    /// and above which the overlay clears again.
-    private static let stallBufferFloor: Double = 1.5
-    private static let stallBufferClear: Double = 3
+    /// Overlay thresholds. Silence plus a low buffer (under 1.5 s) is only
+    /// "starving" and routinely happens between Dispatcharr bursts while the
+    /// picture plays perfectly (Streamer 2026-09-14), so the overlay needs a
+    /// REAL stall: a rebuffer after playing, the playhead frozen this long
+    /// while playback is requested, or the buffer effectively empty.
+    private static let stallFrozenSeconds: Double = 1
+    private static let stallEmptyBuffer: Double = 0.25
 
     /// The upstream closed cleanly (server-side stop). A closed socket is
     /// proof, not a guess, so this re-tunes at once rather than letting
