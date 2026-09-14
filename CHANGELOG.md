@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.8.36 - 2026-09-14
+
+### Fixed
+
+- Apple TV: the Video Scale you pick now highlights and sticks.
+- The syncing badge no longer covers the sidebar button. It is gone:
+  iPhone and iPad show a spinning refresh glyph while loading, and Apple
+  TV keeps its Refresh circle.
+- Favorites shows its proper name in the default-group picker.
+- Live TV: the hero banner shows portrait posters whole.
+- The mini player again sits on the poster's bottom edge.
+
+### Changed
+
+- Video Scale replaces Aspect Ratio in the player, with Fit, Fill and
+  Stretch, plus pinch to change it on iPhone and iPad.
+- iPhone Live TV: the header actions sit behind a three-dot button that
+  expands in place when group pills are on.
+- Apple TV: a second Back within 300 ms closes playback instead of
+  leaving the mini player, with a hint in the strip.
+
+### Added
+
+- Recently Watched, a group listing the last 25 channels you watched. It
+  is off by default in Manage Groups and can be set as your default
+  group.
+- Long-press any movie or series to hide it. A Hidden category in the
+  Filter list brings them back, unchecked by default, and hidden titles
+  sync across your devices.
+- A patent and trademark notice for the bundled codecs in the README and
+  the Licenses screen.
+
 ## v1.8.35 - 2026-09-13
 
 ### Fixed
