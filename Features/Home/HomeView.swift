@@ -3683,6 +3683,19 @@ final class NowPlayingManager: ObservableObject {
 
     func minimize() {
         debugLog("🎮 NowPlaying.minimize: \(playingItem?.name ?? "nil")")
+        #if os(iOS)
+        // iPhone has no docked mini (Logan 2026-09-14): every minimize is
+        // foreground PiP, which hides the host and calls applyMinimized.
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            ForegroundPiPBridge.shared.request()
+            return
+        }
+        #endif
+        applyMinimized()
+    }
+
+    /// The state half of minimize, without the iPhone PiP routing.
+    func applyMinimized() {
         isMinimized = true
         // #42: the chrome can't be visible once we minimize. Clear the shared
         // mirror here so the re-coupled ChannelInfoBanner can't strand on a
@@ -4773,8 +4786,6 @@ struct MainTabView: View {
         let elapsedStr = elapsed.map { " \($0)ms" } ?? ""
         debugLog("🔶 Initial sync complete — dismissing loading screen (total=\(elapsedStr), vodStillLoadingInBackground=\(vodStillLoading))")
     }
-    /// Shared drag offset — MiniPlayerBar writes it, PlayerView reads it to slide in from below.
-    @State private var miniPlayerDragOffset: CGFloat = 0
 
     /// Drives the top-of-screen "Syncing…" indicator so the user
     /// knows background work is ongoing that may still be publishing
@@ -5342,25 +5353,9 @@ struct MainTabView: View {
         // bar keeps the inset: it is mutually exclusive with the card (rule 5)
         // and its long-standing geometry is not part of this change.
         #if os(iOS)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 0) {
-                // v1.6.13: only iPhone uses the bottom MiniPlayerBar.
-                // iPad uses a top-right corner mini (handled inside the
-                // body's main ZStack — see the iPad GeometryReader
-                // branches above), so the bottom bar would double-render
-                // an off-screen mini and steal vertical space from the
-                // guide.
-                // Rule 5: while a session is remote the phone shows nothing
-                // locally except the card, so the two never stack.
-                if UIDevice.current.userInterfaceIdiom == .phone,
-                   activeRemoteTransport == nil,
-                   nowPlaying.isMinimized,
-                   !foregroundPiP.isActive,
-                   let item = nowPlaying.playingItem {
-                    MiniPlayerBar(item: item, nowPlaying: nowPlaying, dragOffset: $miniPlayerDragOffset)
-                }
-            }
-        }
+        // The iPhone docked MiniPlayerBar inset lived here; removed with the
+        // docked bar itself (Logan 2026-09-14): iPhone minimize is
+        // foreground PiP only (ForegroundPiPBridge).
         // Rule 2 (Logan 2026-09-12): ONE small card ABOVE the bottom nav bar on
         // every tab while a Google Cast, AirPlay or companion session is live.
         // Tap opens the remote controls sheet (rule 3); the X ends the session
@@ -6852,20 +6847,19 @@ struct MainTabView: View {
             // — it cascaded down and overrode the carve-out, putting
             // the tiles back under the cutout.
             //
-            // Minimized (docked bar or swipe-started foreground PiP): the
+            // Minimized = foreground PiP (the only iPhone minimize): the
             // container used to stay laid out full screen with its opaque
             // black background and live hit-testing, covering the whole app
-            // (device 2026-09-14, a751992). Mirror the legacy iPhone wrapper:
-            // slide it below the screen (still mounted, so the AVPlayerLayer
-            // stays in the window for PiP), fade it, and drop hit-testing.
-            // The drag offset lets the docked bar's swipe-up pull it back in.
-            let minimized = nowPlaying.isMinimized
-            let screenH = UIScreen.main.bounds.height
+            // (device 2026-09-14, a751992). Hide it in place instead: opacity
+            // 0 and no hit-testing, still mounted and at its fullscreen frame
+            // so the AVPlayerLayer stays in the window for PiP and restore
+            // animates back into the right rect. `hidesHost` covers the gap
+            // before isMinimized and the close teardown after it.
+            let hidden = nowPlaying.isMinimized || foregroundPiP.hidesHost
             MultiviewContainerView()
-                .offset(y: minimized ? max(0, screenH + miniPlayerDragOffset) : 0)
-                .opacity(minimized ? min(1, -miniPlayerDragOffset / 300) : 1)
-                .allowsHitTesting(!minimized)
-                .accessibilityHidden(minimized)
+                .opacity(hidden ? 0 : 1)
+                .allowsHitTesting(!hidden)
+                .accessibilityHidden(hidden)
                 .zIndex(2)
         }
     }
@@ -6971,8 +6965,8 @@ struct MainTabView: View {
             .ignoresSafeArea()
             .zIndex(2)
         } else {
-            GeometryReader { geo in
-                let containerH = geo.size.height
+            let hiddenForPiP = nowPlaying.isMinimized || foregroundPiP.hidesHost
+            GeometryReader { _ in
                 PlayerView(
                     urls: item.streamURLs,
                     title: item.name,
@@ -6987,9 +6981,11 @@ struct MainTabView: View {
                 )
                 .id(item.id)
                 .ignoresSafeArea()
-                .offset(y: nowPlaying.isMinimized ? max(0, containerH + miniPlayerDragOffset) : 0)
-                .opacity(nowPlaying.isMinimized ? min(1, -miniPlayerDragOffset / 300) : 1)
-                .allowsHitTesting(!nowPlaying.isMinimized)
+                // Same hidden-in-place treatment as the unified iPhone host
+                // (foreground PiP is the only iPhone minimize).
+                .opacity(hiddenForPiP ? 0 : 1)
+                .allowsHitTesting(!hiddenForPiP)
+                .accessibilityHidden(hiddenForPiP)
             }
             .ignoresSafeArea()
         }
@@ -7632,148 +7628,6 @@ private struct MiniPlayerChromeModifier: ViewModifier {
     }
 }
 
-// MARK: - Mini Player Bar
-struct MiniPlayerBar: View {
-    let item: ChannelDisplayItem
-    @ObservedObject var nowPlaying: NowPlayingManager
-    @Binding var dragOffset: CGFloat
-
-    private func expand() {
-        let screenH = UIScreen.main.bounds.height
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
-            dragOffset = -screenH
-        }
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 320_000_000)
-            nowPlaying.expand()
-            dragOffset = 0
-        }
-    }
-
-    private func progressFraction(start: Date, end: Date, now: Date) -> CGFloat {
-        let total = end.timeIntervalSince(start)
-        guard total > 0 else { return 0 }
-        return CGFloat(max(0, min(1, now.timeIntervalSince(start) / total)))
-    }
-
-    private func programSubtitle(program: String, start: Date?, end: Date?, now: Date) -> String {
-        guard let end else { return program }
-        let remaining = max(0, end.timeIntervalSince(now))
-        let mins = Int(remaining / 60)
-        if mins <= 0 { return "\(program) · Ending soon" }
-        if mins < 60 { return "\(program) · \(mins)m left" }
-        let h = mins / 60; let m = mins % 60
-        let timeStr = m == 0 ? "\(h)h left" : "\(h)h \(m)m left"
-        return "\(program) · \(timeStr)"
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Liquid glass drag handle
-            Capsule()
-                .fill(.ultraThinMaterial)
-                .overlay(Capsule().stroke(Color.white.opacity(0.2), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
-                .frame(width: 36, height: 5)
-                .padding(.top, 8)
-                .padding(.bottom, 6)
-
-            HStack(spacing: 12) {
-                // Channel logo or placeholder
-                // v1.6.23: route through CachedLogoImage so the
-                // active server's auth headers are applied (fixes
-                // Dispatcharr-API logo 401 → blank-logo regression).
-                CachedLogoImage(url: item.logoURL, width: 40, height: 28)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-
-                // Channel name + current program + progress
-                TimelineView(.everyMinute) { context in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(item.name)
-                            .font(.headlineSmall)
-                            .foregroundColor(.textPrimary)
-                            .lineLimit(1)
-
-                        if let program = item.currentProgram, !program.isEmpty {
-                            Text(programSubtitle(program: program,
-                                                 start: item.currentProgramStart,
-                                                 end: item.currentProgramEnd,
-                                                 now: context.date))
-                                .font(.labelSmall)
-                                .foregroundColor(.textSecondary)
-                                .lineLimit(1)
-
-                            if let start = item.currentProgramStart,
-                               let end = item.currentProgramEnd {
-                                let progress = progressFraction(start: start, end: end, now: context.date)
-                                GeometryReader { geo in
-                                    ZStack(alignment: .leading) {
-                                        Capsule()
-                                            .fill(Color.white.opacity(0.12))
-                                            .frame(height: 3)
-                                        Capsule()
-                                            .fill(Color.accentPrimary.opacity(0.7))
-                                            .frame(width: geo.size.width * progress, height: 3)
-                                    }
-                                }
-                                .frame(height: 3)
-                            }
-                        } else {
-                            Text("Live TV")
-                                .font(.labelSmall)
-                                .foregroundColor(.textSecondary)
-                        }
-                    }
-                }
-
-                Spacer()
-
-                // Stop / close — has its own tap area so it doesn't trigger the bar tap
-                Button {
-                    nowPlaying.stop()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 22))
-                        .foregroundColor(.textTertiary)
-                }
-                #if os(tvOS)
-                .buttonStyle(TVNoHighlightButtonStyle())
-                #else
-                .buttonStyle(.plain)
-                #endif
-            }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 10)
-        }
-        .background(.bar)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color.accentPrimary.opacity(0.25))
-                .frame(height: 1)
-        }
-        // Tap anywhere on the bar (except the X) to expand
-        .contentShape(Rectangle())
-        .onTapGesture { expand() }
-        // Drag up — synced with the PlayerView so the video follows the finger
-        .gesture(
-            DragGesture()
-                .onChanged { value in
-                    if value.translation.height < 0 {
-                        dragOffset = value.translation.height
-                    }
-                }
-                .onEnded { value in
-                    if value.translation.height < -40 {
-                        expand()
-                    } else {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
-                            dragOffset = 0
-                        }
-                    }
-                }
-        )
-    }
-}
 #endif
 
 // MARK: - Tab bar auto-hide (GH #20) platform split

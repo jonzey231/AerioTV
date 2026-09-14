@@ -337,26 +337,36 @@ enum PlayerTopStripSwipe {
     }
 }
 
-/// Foreground Picture in Picture for the fullscreen player. Both engines'
-/// solo PiP controllers (AVPlayerLayerView and the mpv sample-buffer
-/// layer) register here; the top-strip swipe asks it to start PiP while
-/// the app is active. The session stays mounted (the iPhone container is
-/// only minimized off screen), so there is nothing to tear down on start.
-/// Restore expands the player again; closing the window without restore
-/// stops playback the way the docked bar's X does.
+/// Foreground Picture in Picture: the ONLY iPhone minimize (Logan
+/// 2026-09-14, the docked bottom bar is gone). Both engines' solo PiP
+/// controllers (AVPlayerLayerView and the mpv sample-buffer layer) register
+/// here; NowPlayingManager.minimize() on iPhone calls `request()`.
+///
+/// The fullscreen host is hidden the moment the request lands (`hidesHost`:
+/// opacity 0, no hit-testing, still mounted so the layer stays in the window
+/// for PiP). If the controller isn't armed or PiP isn't possible yet, the
+/// request polls for up to `armWait`; still impossible, or a start failure,
+/// springs the player back to fullscreen. Restore expands; closing the
+/// window ends the session with the host kept hidden until it is gone.
 @MainActor
 final class ForegroundPiPBridge: ObservableObject {
     static let shared = ForegroundPiPBridge()
 
+    /// How long a request waits for the controller to arm / become possible
+    /// (a swipe a few seconds into a tune lands before `controller armed`).
+    static let armWait: TimeInterval = 2.0
+
     private weak var controller: AVPictureInPictureController?
-    /// True from a swipe-started PiP until it restores, closes or fails.
-    /// HomeView hides the iPhone docked bar while this is set: the video
-    /// lives in the PiP window, an empty bar under it would be noise.
-    @Published private(set) var isActive = false
-    /// Run once PiP has actually started (or failed to): the caller's
-    /// minimize. Deferred so the source layer stays on screen while iOS
-    /// animates it into the window.
-    private var pendingOnStart: (@MainActor () -> Void)?
+    /// True from a request until PiP restores, closes, fails or is dismissed.
+    private var isActive = false
+    /// The iPhone player host renders invisible and non-interactive while
+    /// this is set. Outlives `isActive` on the close path so the host can't
+    /// flash back while the session tears down.
+    @Published private(set) var hidesHost = false
+    /// Set while the window's X is ending the session, so the session-exit
+    /// hook below does not un-hide the host mid-teardown.
+    private var closing = false
+    private var waitTask: Task<Void, Never>?
 
     func register(_ pip: AVPictureInPictureController) {
         controller = pip
@@ -365,93 +375,131 @@ final class ForegroundPiPBridge: ObservableObject {
     func unregister(_ pip: AVPictureInPictureController) {
         guard controller === pip else { return }
         controller = nil
-        // The window can't outlive its controller; don't strand the
-        // docked bar hidden behind a flag nothing will clear.
-        isActive = false
-        pendingOnStart = nil
     }
 
-    /// Starts PiP on the registered controller. False when PiP can't run
-    /// right now (unsupported, no solo controller, layer not ready), in
-    /// which case the caller falls back to the plain minimize.
-    func start(onStarted: @escaping @MainActor () -> Void) -> Bool {
-        guard AVPictureInPictureController.isPictureInPictureSupported(),
-              let pip = controller,
-              pip.isPictureInPicturePossible,
-              !pip.isPictureInPictureActive else {
-            debugLog("[PIP-FG] start unavailable controller=\(controller != nil) possible=\(controller?.isPictureInPicturePossible == true)")
-            return false
-        }
+    /// iPhone minimize. Hides the host now, then starts PiP as soon as the
+    /// controller allows it.
+    func request() {
+        guard !isActive else { return }
         isActive = true
-        pendingOnStart = onStarted
-        pip.startPictureInPicture()
-        debugLog("[PIP-FG] start requested")
-        return true
+        closing = false
+        hidesHost = true
+        NowPlayingManager.shared.applyMinimized()
+        debugLog("[PIP-FG] request: host hidden, waiting for PiP (controller=\(controller != nil) possible=\(controller?.isPictureInPicturePossible == true))")
+        waitTask?.cancel()
+        let deadline = Date().addingTimeInterval(Self.armWait)
+        waitTask = Task { @MainActor [weak self] in
+            while let self, self.isActive, !Task.isCancelled {
+                if AVPictureInPictureController.isPictureInPictureSupported(),
+                   let pip = self.controller,
+                   pip.isPictureInPicturePossible {
+                    if !pip.isPictureInPictureActive {
+                        pip.startPictureInPicture()
+                        debugLog("[PIP-FG] start requested")
+                    }
+                    return
+                }
+                if Date() >= deadline {
+                    debugLog("[PIP-FG] start unavailable after \(Self.armWait)s (controller=\(self.controller != nil)); back to fullscreen")
+                    self.springBack()
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+    }
+
+    /// PiP can't run: the player comes back fullscreen (no docked bar).
+    private func springBack() {
+        isActive = false
+        waitTask?.cancel()
+        waitTask = nil
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            hidesHost = false
+            NowPlayingManager.shared.expand()
+        }
     }
 
     // Delegate hooks take the controller's ObjectIdentifier, not the
     // controller: the PiP delegates are nonisolated and Swift 6 refuses to
     // send the non-Sendable controller into a main-actor closure.
 
-    /// Delegate hook: PiP refused to start. The deferred minimize still
-    /// runs, which lands on the docked bar: exactly the fallback path.
+    /// Delegate hook: PiP refused to start.
     func handleFailedToStart(_ pipID: ObjectIdentifier) {
         guard isActive else { return }
-        isActive = false
-        debugLog("[PIP-FG] failed to start; falling back to docked minimize")
-        runPendingOnStart()
+        debugLog("[PIP-FG] failed to start; back to fullscreen")
+        springBack()
     }
 
-    /// Delegate hook: the window is up, minimize the fullscreen player.
+    /// Delegate hook: diagnostic only (the host was hidden at request).
     func handleDidStart(_ pipID: ObjectIdentifier) {
         guard isActive else { return }
-        runPendingOnStart()
+        debugLog("[PIP-FG] window up")
     }
 
-    private func runPendingOnStart() {
-        let body = pendingOnStart
-        pendingOnStart = nil
-        body?()
-    }
-
-    /// The player is coming back full screen by some other route (docked
-    /// bar tap, a new tune from the guide) while swipe-started PiP is up:
-    /// close the window so the video isn't in two places. The flag is
-    /// cleared FIRST so the resulting didStop does not stop playback.
+    /// The player is coming back fullscreen by another route (a new tune
+    /// from the guide, expand): close the window so the video isn't in two
+    /// places. `isActive` is cleared FIRST so the resulting didStop does not
+    /// stop playback.
     func dismissForExpand() {
+        waitTask?.cancel()
+        waitTask = nil
+        closing = false
+        if hidesHost { hidesHost = false }
         guard isActive else { return }
         isActive = false
-        pendingOnStart = nil
         debugLog("[PIP-FG] expanded elsewhere -> stopping PiP window")
         controller?.stopPictureInPicture()
     }
 
-    /// Delegate hook: the PiP restore button. Reopens the fullscreen
-    /// player; returns true when this bridge owned the PiP session.
+    /// PlayerSession.exit hook: a session ended by something else (VOD
+    /// opened, recording played) takes the window down with it and leaves
+    /// nothing hidden for the next session. The X path is exempt.
+    func sessionEnding() {
+        guard !closing else { return }
+        dismissForExpand()
+    }
+
+    /// Delegate hook: the PiP restore button. Reopens the fullscreen player;
+    /// returns true when this bridge owned the PiP session.
     @discardableResult
     func handleRestore(_ pipID: ObjectIdentifier) -> Bool {
         guard isActive else { return false }
         isActive = false
-        pendingOnStart = nil
+        waitTask?.cancel()
+        waitTask = nil
+        hidesHost = false
         debugLog("[PIP-FG] restore -> expand")
         NowPlayingManager.shared.expand()
         return true
     }
 
     /// Delegate hook: PiP ended. Still active here means no restore ran,
-    /// i.e. the user closed the window, so stop playback. A controller
-    /// that is no longer the registered one (the tile was swapped by a
-    /// retune) only clears the flag and never stops the new session.
+    /// i.e. the user closed the window: end the session with the host kept
+    /// hidden until it has unmounted. A controller that is no longer the
+    /// registered one (the tile was swapped by a retune) never stops the
+    /// new session; it brings the player back fullscreen instead of
+    /// leaving it invisible.
     func handleDidStop(_ pipID: ObjectIdentifier) {
         guard isActive else { return }
         isActive = false
-        pendingOnStart = nil
+        waitTask?.cancel()
+        waitTask = nil
         guard controller.map(ObjectIdentifier.init) == pipID else {
-            debugLog("[PIP-FG] stale controller stopped; flag cleared")
+            debugLog("[PIP-FG] stale controller stopped; back to fullscreen")
+            hidesHost = false
+            NowPlayingManager.shared.expand()
             return
         }
-        debugLog("[PIP-FG] closed without restore -> stop playback")
-        NowPlayingManager.shared.stop()
+        debugLog("[PIP-FG] closed without restore -> exit session")
+        closing = true
+        PlayerSession.shared.exit()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard let self, self.closing else { return }
+            self.closing = false
+            self.hidesHost = false
+        }
     }
 }
 #endif
@@ -1366,12 +1414,10 @@ private struct PlayerRootView: View {
                 .onEnded { value in
                     guard state == .playing else { return }
 
-                    // Top-strip swipe down: iPhone starts system PiP in the
-                    // foreground and minimizes once the window is up (the
-                    // player stays mounted off screen, so mpv keeps feeding
-                    // the PiP layer); PiP unavailable, or iPad, falls to the
-                    // regular minimize below. Swipes starting in the strip
-                    // never reach the channel flip.
+                    // Top-strip swipe down: minimize (onMinimize ->
+                    // NowPlayingManager.minimize, which on iPhone is foreground
+                    // PiP with the player hidden in place, iPad the corner
+                    // mini). Swipes starting in the strip never flip channels.
                     if PlayerTopStripSwipe.startsInStrip(
                         value.startLocation.y, height: playerWindowHeight) {
                         guard PlayerTopStripSwipe.commits(value) else {
@@ -1380,21 +1426,10 @@ private struct PlayerRootView: View {
                             }
                             return
                         }
-                        let finish: @MainActor () -> Void = {
-                            if let minimize = onMinimize { minimize() } else { onDismiss() }
-                        }
-                        if UIDevice.current.userInterfaceIdiom == .phone,
-                           onMinimize != nil,
-                           ForegroundPiPBridge.shared.start(onStarted: finish) {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
-                                dragOffset = 0
-                            }
-                            return
-                        }
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
                             dragOffset = 0
                         }
-                        finish()
+                        if let minimize = onMinimize { minimize() } else { onDismiss() }
                         return
                     }
 

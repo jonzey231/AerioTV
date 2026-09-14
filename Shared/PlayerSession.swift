@@ -235,6 +235,12 @@ final class PlayerSession: ObservableObject {
     }
 
     func exit() {
+        #if os(iOS)
+        // Foreground PiP belongs to this session: take the window down and
+        // un-hide the host for whatever plays next (no-op on the PiP X path,
+        // which is what called us).
+        ForegroundPiPBridge.shared.sessionEnding()
+        #endif
         // v1.6.18: capture the audio tile's channel id BEFORE we
         // reset the store. NowPlayingManager.lastPlayedChannelID is
         // the persistent breadcrumb the Live TV guide reads for its

@@ -251,34 +251,20 @@ struct MultiviewContainerView: View {
         store.tiles.count == 1 && !nowPlaying.isMinimized
     }
 
-    /// Commit of the top-strip swipe down. iPhone: system PiP in the
-    /// foreground, with the container minimized (off screen, still mounted,
-    /// so the player and remuxer keep running for the PiP window); the
-    /// docked bar is the fallback when PiP can't start. iPad: corner mini.
+    /// Commit of the top-strip swipe down. NowPlayingManager.minimize()
+    /// routes by idiom: iPhone hides the host at once and starts system PiP
+    /// (springs back fullscreen when PiP can't run); iPad takes the corner
+    /// mini.
     private func performTopStripSwipeDown() {
-        if store.vodSoloTile != nil { store.saveVODProgressNow() }
-        let minimize: @MainActor () -> Void = {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
-                topStripDragOffset = 0
-                NowPlayingManager.shared.minimize()
-            }
-        }
-        let phone = UIDevice.current.userInterfaceIdiom == .phone
-        // PiP path: spring back first so the layer is in place for the
-        // PiP start animation; the bridge minimizes once PiP is up (or
-        // failed, which lands on the docked bar).
-        let pip = phone && ForegroundPiPBridge.shared.start(onStarted: minimize)
         DebugLogger.shared.log(
-            "[MV-Cmd] top-strip swipe down → \(pip ? "foreground PiP" : "minimize") phone=\(phone)",
+            "[MV-Cmd] top-strip swipe down → minimize (iPhone = foreground PiP)",
             category: "Playback", level: .info
         )
-        if pip {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
-                topStripDragOffset = 0
-            }
-        } else {
-            minimize()
+        if store.vodSoloTile != nil { store.saveVODProgressNow() }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+            topStripDragOffset = 0
         }
+        NowPlayingManager.shared.minimize()
     }
     #endif
 
