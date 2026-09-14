@@ -4039,6 +4039,9 @@ struct MainTabView: View {
     @Query private var allRecordings: [Recording]
 
     @State private var selectedTab: AppTab = .liveTV
+    /// iPad: the user tapped the stashed mini sliver on Settings to bring it
+    /// back out. Cleared on every tab switch so Settings stashes again.
+    @State private var settingsMiniPeek = false
     @State private var showSearch = false
     /// Channel-retention status circle (tvOS): observed so the count
     /// circle appears/disappears live as channels are kept or dropped.
@@ -5085,6 +5088,8 @@ struct MainTabView: View {
                 // "Exit Multiview?" confirmation.
                 let isSoleStream = multiviewStore.tiles.count == 1
                 let minimized = isSoleStream && nowPlaying.isMinimized
+                // Settings tab: the mini stashes at the trailing edge.
+                let stashed = minimized && selectedTab == .settings
                 GeometryReader { geo in
                     let miniW: CGFloat = 410
                     let miniH: CGFloat = 231
@@ -5168,6 +5173,7 @@ struct MainTabView: View {
                     )
                     .animation(.spring(response: 0.35), value: minimized)
                     .animation(.spring(response: 0.35), value: miniTop)
+                    .modifier(MiniPlayerSettingsStash(stashed: stashed, travel: miniW + 40 - MiniPlayerSettingsStash.sliver))
                 }
                 .ignoresSafeArea()
                 .zIndex(2)
@@ -5199,6 +5205,8 @@ struct MainTabView: View {
                 // recreating the player (avoids 1s+ hang and stream restart).
                 GeometryReader { geo in
                     let minimized = nowPlaying.isMinimized
+                    // Settings tab: the mini stashes at the trailing edge.
+                    let stashed = minimized && selectedTab == .settings
                     let miniW: CGFloat = 410
                     let miniH: CGFloat = 231
                     // Mini bottom = the Channel Preview banner's art slot
@@ -5255,6 +5263,9 @@ struct MainTabView: View {
                     .frame(width: geo.size.width, height: geo.size.height, alignment: minimized ? .topTrailing : .center)
                     .animation(.spring(response: 0.35), value: minimized)
                     .animation(.spring(response: 0.35), value: miniTop)
+                    .modifier(MiniPlayerSettingsStash(stashed: stashed, travel: miniW + 40 - MiniPlayerSettingsStash.sliver))
+                    // Stashed sliver must never take Settings focus.
+                    .disabled(stashed)
                 }
                 .ignoresSafeArea()
                 .zIndex(2)
@@ -5889,6 +5900,7 @@ struct MainTabView: View {
         #endif
         // Tab switch latency probe (Logan 2026-09-06, "visual hang").
         .onChange(of: selectedTab) { _, _ in
+            settingsMiniPeek = false
             #if os(iOS)
             // A new tab may be too short to scroll the bar back.
             TabBarCollapseState.shared.set(false)
@@ -6705,6 +6717,9 @@ struct MainTabView: View {
         if UIDevice.current.userInterfaceIdiom == .pad {
             let isSoleStream = multiviewStore.tiles.count == 1
             let minimized = isSoleStream && nowPlaying.isMinimized
+            // Settings tab: the mini stashes at the trailing edge unless
+            // the user tapped the sliver to peek it back out.
+            let stashed = minimized && selectedTab == .settings && !settingsMiniPeek
             GeometryReader { geo in
                 let miniW: CGFloat = 400
                 let miniH: CGFloat = 225
@@ -6791,8 +6806,12 @@ struct MainTabView: View {
                             .padding(.top, 24)
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                withAnimation(.spring(response: 0.35)) {
-                                    nowPlaying.expand()
+                                if stashed {
+                                    settingsMiniPeek = true
+                                } else {
+                                    withAnimation(.spring(response: 0.35)) {
+                                        nowPlaying.expand()
+                                    }
                                 }
                             }
                     }
@@ -6803,6 +6822,7 @@ struct MainTabView: View {
                     alignment: minimized ? .topTrailing : .center
                 )
                 .animation(.spring(response: 0.35), value: minimized)
+                .modifier(MiniPlayerSettingsStash(stashed: stashed, travel: miniW + 24 - MiniPlayerSettingsStash.sliver))
             }
             .ignoresSafeArea()
             .zIndex(2)
@@ -6829,6 +6849,9 @@ struct MainTabView: View {
     private func iOSLegacyPlayerWrapper(item: ChannelDisplayItem) -> some View {
         if UIDevice.current.userInterfaceIdiom == .pad {
             let minimized = nowPlaying.isMinimized
+            // Settings tab: the mini stashes at the trailing edge unless
+            // the user tapped the sliver to peek it back out.
+            let stashed = minimized && selectedTab == .settings && !settingsMiniPeek
             GeometryReader { geo in
                 let miniW: CGFloat = 400
                 let miniH: CGFloat = 225
@@ -6898,8 +6921,12 @@ struct MainTabView: View {
                             .padding(.top, 24)
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                withAnimation(.spring(response: 0.35)) {
-                                    nowPlaying.expand()
+                                if stashed {
+                                    settingsMiniPeek = true
+                                } else {
+                                    withAnimation(.spring(response: 0.35)) {
+                                        nowPlaying.expand()
+                                    }
                                 }
                             }
                     }
@@ -6910,6 +6937,7 @@ struct MainTabView: View {
                     alignment: minimized ? .topTrailing : .center
                 )
                 .animation(.spring(response: 0.35), value: minimized)
+                .modifier(MiniPlayerSettingsStash(stashed: stashed, travel: miniW + 24 - MiniPlayerSettingsStash.sliver))
             }
             .ignoresSafeArea()
             .zIndex(2)
@@ -8139,4 +8167,36 @@ private struct CompanionControlFABDock: View {
 
 private extension Comparable {
     func clamped(to r: ClosedRange<Self>) -> Self { min(max(self, r.lowerBound), r.upperBound) }
+}
+
+/// Slides the floating corner mini player (tvOS, iPad) mostly off the trailing
+/// edge while the Settings tab is selected, leaving a sliver so it reads as
+/// stashed rather than gone. Playback is untouched; only the offset changes.
+/// Reduce Motion swaps the slide for a quick fade in at the new position.
+struct MiniPlayerSettingsStash: ViewModifier {
+    /// Width of the video left on screen while stashed.
+    static let sliver: CGFloat = 32
+
+    let stashed: Bool
+    /// Distance to slide right: mini width + trailing inset - sliver.
+    let travel: CGFloat
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var fadeOpacity: Double = 1
+
+    func body(content: Content) -> some View {
+        content
+            .offset(x: stashed ? travel : 0)
+            .opacity(fadeOpacity)
+            .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.86), value: stashed)
+            .onChange(of: stashed) { _, _ in
+                guard reduceMotion else { return }
+                var jump = Transaction()
+                jump.disablesAnimations = true
+                withTransaction(jump) { fadeOpacity = 0 }
+                DispatchQueue.main.async {
+                    withAnimation(.easeOut(duration: 0.15)) { fadeOpacity = 1 }
+                }
+            }
+    }
 }
