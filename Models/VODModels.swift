@@ -442,12 +442,28 @@ struct ContinueWatchingSection: View {
         sort: \WatchProgress.updatedAt, order: .reverse
     ) private var allProgress: [WatchProgress]
 
+    /// Observed so hiding a title from this rail removes the card at once.
+    @ObservedObject private var hiddenTitles = HiddenVODStore.shared
+
     private var items: [WatchProgress] {
         allProgress.filter { progress in
             guard progress.vodType == vodType else { return false }
+            // A title the user hid drops out of Continue Watching as well;
+            // an episode row follows its parent show's hidden state.
+            if isHidden(progress) { return false }
             guard let activeServerID else { return true }
             return progress.serverID == nil || progress.serverID == activeServerID
         }
+    }
+
+    private func isHidden(_ progress: WatchProgress) -> Bool {
+        let store = HiddenVODStore.shared
+        if progress.vodType == "episode" {
+            guard let seriesID = progress.seriesID else { return false }
+            return store.isHidden(type: "series", id: seriesID, serverID: progress.serverID ?? activeServerID)
+        }
+        return store.isHidden(type: "movie", id: progress.vodID,
+                              serverID: progress.serverID ?? activeServerID)
     }
 
     var body: some View {
@@ -530,6 +546,15 @@ struct ContinueWatchingSection: View {
                                             Label("View Movie", systemImage: "info.circle")
                                         }
                                     }
+                                }
+                                // Hide the title outright (it leaves every
+                                // on-demand list, shelf and search result
+                                // until unhidden from the Hidden category).
+                                if let target = (progress.vodType == "episode"
+                                                 ? parentSeries
+                                                 : (movies.first(where: { $0.id == progress.vodID })
+                                                    ?? Self.syntheticMovieItem(from: progress))) {
+                                    HiddenVODStore.menuButton(target)
                                 }
                                 Button(role: .destructive) {
                                     // v1.6.8 (Codex A1): pass serverID so we
@@ -1397,5 +1422,215 @@ struct VODDisplayItem: Identifiable, Hashable, Codable {
         self.serverID = series.serverID
         self.movie = nil
         self.series = series
+    }
+}
+import SwiftUI
+
+// MARK: - Hidden VOD titles (v1.8.36)
+//
+// Long-pressing a movie or show offers Hide, which removes it from every
+// on-demand list, shelf and search result. Hidden titles come back through
+// the Filter row's "Hidden" category, where the same long-press offers
+// Unhide.
+//
+// Storage: UserDefaults, JSON, keyed by playlist (server UUID) the same way
+// VODVersionSelectionStore keys its remembered version choices, because
+// everything media related is scoped to the active playlist (Logan
+// 2026-08-12) while the rows persist so switching back restores the set.
+// One entry per (serverID, type, id); `type` is "movie" or "series",
+// matching MoviesView.kindString.
+//
+// Sync: the whole map rides the App Preferences lane of SyncManager under
+// its own key, as a JSON blob older clients simply ignore (payload
+// compatible). Every entry carries `hidden` plus `updatedAt`, so the merge
+// is entry-wise last writer wins and an unhide is a TOMBSTONE (hidden =
+// false with a newer stamp) rather than a missing row. That is what stops
+// a device that has been offline since before the unhide from resurrecting
+// the hidden title on its next push. Tombstones are pruned after 90 days,
+// well past any plausible offline window.
+
+@MainActor
+final class HiddenVODStore: ObservableObject {
+    static let shared = HiddenVODStore()
+
+    private static let key = "vod.hiddenTitles.v1"
+    /// Key inside the SyncManager preferences payload.
+    static let syncKey = "vod.hiddenTitles.sync.v1"
+    /// Tombstones older than this are dropped on save.
+    private static let tombstoneLifetime: TimeInterval = 90 * 24 * 60 * 60
+
+    struct Entry: Codable, Equatable {
+        var hidden: Bool
+        var updatedAt: Date
+    }
+
+    /// serverUUID -> ("movie|123" -> Entry)
+    @Published private(set) var entries: [String: [String: Entry]] = [:]
+
+    /// Category visibility, per playlist and kind ("serverUUID|movie").
+    /// The Filter list's first row checks this on; until then the Hidden
+    /// category pill does not exist, exactly like an unchecked group
+    /// (Logan 2026-09-14, Streamer test). Unchecked by default.
+    private static let categoryKey = "vod.hiddenCategoryVisible.v1"
+    @Published private(set) var categoryVisible: Set<String> = []
+
+    private init() {
+        if let data = UserDefaults.standard.data(forKey: Self.key),
+           let decoded = try? JSONDecoder().decode([String: [String: Entry]].self, from: data) {
+            entries = decoded
+        }
+        categoryVisible = Set(UserDefaults.standard.stringArray(forKey: Self.categoryKey) ?? [])
+    }
+
+    func isCategoryVisible(type: String, serverID: String?) -> Bool {
+        guard let serverID else { return false }
+        return categoryVisible.contains(Self.entryKey(type: type, id: serverID))
+    }
+
+    func setCategoryVisible(_ on: Bool, type: String, serverID: String?) {
+        guard let serverID else { return }
+        let key = Self.entryKey(type: type, id: serverID)
+        if on { categoryVisible.insert(key) } else { categoryVisible.remove(key) }
+        UserDefaults.standard.set(Array(categoryVisible).sorted(), forKey: Self.categoryKey)
+    }
+
+    nonisolated static func entryKey(type: String, id: String) -> String { "\(type)|\(id)" }
+
+    // MARK: Queries
+
+    func isHidden(_ item: VODDisplayItem) -> Bool {
+        isHidden(type: item.type == .series ? "series" : "movie",
+                 id: item.id, serverID: item.serverID.uuidString)
+    }
+
+    func isHidden(type: String, id: String, serverID: String?) -> Bool {
+        guard let serverID else { return false }
+        return entries[serverID]?[Self.entryKey(type: type, id: id)]?.hidden ?? false
+    }
+
+    /// The hidden entry keys for one playlist, for use off the main actor
+    /// (the library derive runs on a detached task).
+    func snapshot(serverID: String?) -> Set<String> {
+        guard let serverID, let map = entries[serverID] else { return [] }
+        return Set(map.filter { $0.value.hidden }.keys)
+    }
+
+    /// True when this playlist has at least one hidden title of this kind,
+    /// which is what gates the "Hidden" category on the Filter row.
+    func hasHidden(type: String, serverID: String?) -> Bool {
+        guard let serverID, let map = entries[serverID] else { return false }
+        return map.contains { $0.value.hidden && $0.key.hasPrefix(type + "|") }
+    }
+
+    // MARK: Mutation
+
+    func toggle(_ item: VODDisplayItem) {
+        isHidden(item) ? unhide(item) : hide(item)
+    }
+
+    func hide(_ item: VODDisplayItem) {
+        setHidden(true, type: item.type == .series ? "series" : "movie",
+                  id: item.id, serverID: item.serverID.uuidString)
+    }
+
+    func unhide(_ item: VODDisplayItem) {
+        setHidden(false, type: item.type == .series ? "series" : "movie",
+                  id: item.id, serverID: item.serverID.uuidString)
+    }
+
+    func setHidden(_ on: Bool, type: String, id: String, serverID: String?) {
+        guard let serverID else { return }
+        let entry = Self.entryKey(type: type, id: id)
+        var map = entries[serverID] ?? [:]
+        guard map[entry]?.hidden != on else { return }
+        map[entry] = Entry(hidden: on, updatedAt: Date())
+        entries[serverID] = map
+        persist()
+        // Deliberate user action, same as a favorite: push now rather than
+        // waiting out the 60 s preference debounce.
+        SyncManager.shared.pushPreferencesImmediate()
+    }
+
+    private func persist() {
+        pruneTombstones()
+        if let data = try? JSONEncoder().encode(entries) {
+            UserDefaults.standard.set(data, forKey: Self.key)
+        }
+    }
+
+    private func pruneTombstones() {
+        let cutoff = Date().addingTimeInterval(-Self.tombstoneLifetime)
+        for (server, map) in entries {
+            let kept = map.filter { $0.value.hidden || $0.value.updatedAt > cutoff }
+            if kept.isEmpty { entries.removeValue(forKey: server) }
+            else if kept.count != map.count { entries[server] = kept }
+        }
+    }
+
+    // MARK: Sync (iCloud KVS, App Preferences lane)
+
+    /// The blob SyncManager puts in the preferences payload. Nil when there
+    /// is nothing to say, so the key stays absent on a fresh install.
+    func syncBlob() -> Data? {
+        guard !entries.isEmpty else { return nil }
+        return try? JSONEncoder().encode(entries)
+    }
+
+    /// Entry-wise merge of another device's blob. Newer `updatedAt` wins,
+    /// per (server, title), so an unhide made later never loses to an older
+    /// device's stale hidden row and vice versa. Per-server scoping is
+    /// preserved: entries are merged inside their own server bucket.
+    func mergeRemote(_ blob: Data) {
+        guard let remote = try? JSONDecoder().decode([String: [String: Entry]].self, from: blob) else { return }
+        var changed = false
+        for (server, remoteMap) in remote {
+            var local = entries[server] ?? [:]
+            for (key, remoteEntry) in remoteMap {
+                if let mine = local[key], mine.updatedAt >= remoteEntry.updatedAt { continue }
+                local[key] = remoteEntry
+                changed = true
+            }
+            entries[server] = local
+        }
+        guard changed else { return }
+        pruneTombstones()
+        if let data = try? JSONEncoder().encode(entries) {
+            UserDefaults.standard.set(data, forKey: Self.key)
+        }
+    }
+
+    // MARK: Filtering helpers
+
+    /// Drops hidden titles, or keeps only hidden titles when `onlyHidden`.
+    nonisolated static func apply(_ items: [VODDisplayItem],
+                                  hiddenKeys: Set<String>,
+                                  onlyHidden: Bool) -> [VODDisplayItem] {
+        guard onlyHidden || !hiddenKeys.isEmpty else { return items }
+        return items.filter { item in
+            let key = entryKey(type: item.type == .series ? "series" : "movie", id: item.id)
+            return hiddenKeys.contains(key) == onlyHidden
+        }
+    }
+
+    func visible(_ items: [VODDisplayItem]) -> [VODDisplayItem] {
+        guard !entries.isEmpty else { return items }
+        return items.filter { !isHidden($0) }
+    }
+}
+
+// MARK: - Shared long-press row
+
+extension HiddenVODStore {
+    /// The Hide / Unhide row shared by every poster long-press menu
+    /// (grid, shelves, Continue Watching, search results, Related).
+    @ViewBuilder
+    static func menuButton(_ item: VODDisplayItem) -> some View {
+        let isHidden = HiddenVODStore.shared.isHidden(item)
+        Button {
+            HiddenVODStore.shared.toggle(item)
+        } label: {
+            Label(isHidden ? "Unhide" : "Hide",
+                  systemImage: isHidden ? "eye" : "eye.slash")
+        }
     }
 }

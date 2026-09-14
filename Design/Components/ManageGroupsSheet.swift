@@ -127,6 +127,12 @@ struct ManageGroupsSheet: View {
     /// offered (pinned row + default option). Hidden by default, like any
     /// group the user has unchecked (Logan 2026-09-14).
     var recentlyWatchedAvailable: Bool = false
+    /// VOD only: "Hidden" row, offered when the playlist has hidden titles.
+    /// UNCHECKED by default; checking it surfaces the Hidden category pill
+    /// on Movies / TV Shows (Logan 2026-09-14). Always the first row.
+    var hiddenCategoryAvailable: Bool = false
+    var hiddenCategoryOn: Bool = false
+    var onToggleHiddenCategory: (() -> Void)? = nil
     @State private var defaultGroup: String = ""
     private let favoritesToken = "favorites"
     /// Token for the synthetic "last 25 channels watched" group. Handled
@@ -435,6 +441,23 @@ struct ManageGroupsSheet: View {
             // GH #80: the All Channels pill is hideable too; pinned in its own
             // section so the reorderable list's indices stay intact.
             Section {
+                if hiddenCategoryAvailable {
+                    Button {
+                        onToggleHiddenCategory?()
+                    } label: {
+                        HStack {
+                            Image(systemName: hiddenCategoryOn ? "checkmark.square.fill" : "square")
+                                .font(.system(size: 20))
+                                .foregroundColor(hiddenCategoryOn ? .accentPrimary : .textTertiary)
+                                .frame(width: 28)
+                            Text("Hidden")
+                                .font(.bodyMedium.weight(.semibold))
+                                .foregroundColor(hiddenCategoryOn ? .textPrimary : .textTertiary)
+                            Spacer()
+                        }
+                    }
+                    .listRowBackground(Color.cardBackground)
+                }
                 if favoritesAvailable && !pinnedInList {
                     Button {
                         toggleHidden(favoritesToken)
@@ -574,6 +597,17 @@ struct ManageGroupsSheet: View {
                         .foregroundColor(.textTertiary)
                         .padding(.horizontal, 48)
                         .padding(.bottom, 12)
+                }
+
+                if hiddenCategoryAvailable {
+                    TVGroupToggleRow(
+                        group: "Hidden",
+                        isOn: hiddenCategoryOn,
+                        onToggle: { onToggleHiddenCategory?() },
+                        isDefault: false,
+                        onSetDefault: nil,
+                        canFocus: grabbedGroup == nil
+                    )
                 }
 
                 // Favorites group (Logan 2026-09-05): pinned first, hideable.

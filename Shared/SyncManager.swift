@@ -693,6 +693,13 @@ final class SyncManager: ObservableObject {
                 dict[k] = arr
             }
         }
+        // Hidden VOD titles (long-press Hide). One JSON blob carrying every
+        // (playlist, title) entry with its hidden flag and timestamp, so the
+        // merge on the other side is entry-wise last writer wins and an
+        // unhide survives as a tombstone. Older clients ignore the key.
+        if let blob = HiddenVODStore.shared.syncBlob() {
+            dict[HiddenVODStore.syncKey] = blob
+        }
         return dict
     }
 
@@ -837,6 +844,12 @@ final class SyncManager: ObservableObject {
                let data = try? JSONEncoder().encode(arr.sorted()) {
                 ud.set(data, forKey: k)
             }
+        }
+        // Hidden VOD titles: merged per entry rather than overwritten, so a
+        // hide made here and an unhide made there both land, newest stamp
+        // winning, with per-playlist scoping intact.
+        if let blob = dict[HiddenVODStore.syncKey] as? Data {
+            HiddenVODStore.shared.mergeRemote(blob)
         }
 
         NotificationCenter.default.post(name: .syncManagerDidApplyPreferences, object: nil)

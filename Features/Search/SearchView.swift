@@ -453,8 +453,10 @@ struct SearchView: View {
         // re-fired per keypress). The active playlist's library is already
         // resident in VODStore -- filter that, off the MainActor.
         if scope != .epg {
-            let movies = VODStore.shared.movies
-            let series = VODStore.shared.series
+            // Titles the user hid never surface in search (Logan
+            // 2026-09-14): filter here, before the detached match.
+            let movies = HiddenVODStore.shared.visible(VODStore.shared.movies)
+            let series = HiddenVODStore.shared.visible(VODStore.shared.series)
             let searchScope = scope
             let vodResults: [VODDisplayItem] = await Task.detached(priority: .userInitiated) {
                 let pool: [VODDisplayItem]

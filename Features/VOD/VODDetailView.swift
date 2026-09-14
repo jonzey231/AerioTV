@@ -1042,7 +1042,8 @@ struct VODDetailView: View {
             return out
         }.value
         debugLog("🎬 Related: \(recs.count) TMDB recommendations -> \(hits.count) in library (\(library.count) titles)")
-        relatedItems = hits
+        // Hidden titles stay out of Related too.
+        relatedItems = HiddenVODStore.shared.visible(hits)
     }
 
     #if os(tvOS)
@@ -1069,6 +1070,7 @@ struct VODDetailView: View {
                                     Label(WatchlistManager.contains(related) ? "Remove from Watchlist" : "Add to Watchlist",
                                           systemImage: WatchlistManager.contains(related) ? "bookmark.slash" : "bookmark")
                                 }
+                                HiddenVODStore.menuButton(related)
                             }
                         }
                     }
@@ -1100,6 +1102,15 @@ struct VODDetailView: View {
                                     .frame(width: 110)
                             }
                             .buttonStyle(.plain)
+                            .contextMenu {
+                                Button {
+                                    WatchlistManager.toggle(related)
+                                } label: {
+                                    Label(WatchlistManager.contains(related) ? "Remove from Watchlist" : "Add to Watchlist",
+                                          systemImage: WatchlistManager.contains(related) ? "bookmark.slash" : "bookmark")
+                                }
+                                HiddenVODStore.menuButton(related)
+                            }
                         }
                     }
                     .padding(.horizontal, 16)

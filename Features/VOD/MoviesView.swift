@@ -347,6 +347,31 @@ struct MoviesView: View {
     /// Genre pill selection; nil = All. Not persisted: a filter that
     /// silently survives a relaunch reads as "my movies vanished".
     @State private var selectedGenre: String? = nil
+
+    /// Hidden titles for this playlist (long-press Hide). Observed so the
+    /// grid, shelves and pills update the moment a title is hidden.
+    @ObservedObject private var hiddenTitles = HiddenVODStore.shared
+    /// Pill label for the Hidden category. Sits first in the pill row,
+    /// only while this playlist has at least one hidden title of this kind.
+    static let hiddenPillLabel = "Hidden"
+    private var hasHiddenTitles: Bool {
+        hiddenTitles.hasHidden(type: kindString, serverID: activeServerIDString)
+    }
+    /// The Filter list's "Hidden" row, checked by the user. Unchecked by
+    /// default, so the category pill appears only once they ask for it.
+    private var hiddenCategoryOn: Bool {
+        hiddenTitles.isCategoryVisible(type: kindString, serverID: activeServerIDString)
+    }
+    /// The pill exists only when the row is offered AND checked.
+    private var hiddenPillAvailable: Bool { hasHiddenTitles && hiddenCategoryOn }
+    /// True while the Hidden category is selected: every list shows only
+    /// hidden titles, and the long-press offers Unhide.
+    private var showingHiddenOnly: Bool {
+        hiddenPillAvailable && selectedGenre == MoviesView.hiddenPillLabel
+    }
+    private var hiddenKeys: Set<String> {
+        hiddenTitles.snapshot(serverID: activeServerIDString)
+    }
     /// Library grid's top edge in scroll-view coordinates. The alphabet
     /// rail rides with it, then sticks once it reaches the top inset.
     /// Grid top edge reaches the rail through a layout preference (not
@@ -450,6 +475,7 @@ struct MoviesView: View {
         var ids = Set(combined.map { $0.id })
         for r in searchResults where ids.insert(r.id).inserted { combined.append(r) }
         for r in personMatches where ids.insert(r.id).inserted { combined.append(r) }
+        combined = HiddenVODStore.apply(combined, hiddenKeys: hiddenKeys, onlyHidden: showingHiddenOnly)
         return MoviesView.sortItems(combined, by: sortOrder)
     }
 
@@ -458,7 +484,11 @@ struct MoviesView: View {
             // A provider pick re-runs the server search with the account
             // filter; local rows carry no provider, so only the server's
             // answer counts then.
-            if selectedProviderID != nil { return MoviesView.sortItems(searchResults, by: sortOrder) }
+            if selectedProviderID != nil {
+                return MoviesView.sortItems(
+                    HiddenVODStore.apply(searchResults, hiddenKeys: hiddenKeys, onlyHidden: showingHiddenOnly),
+                    by: sortOrder)
+            }
             return searchHits
         }
         var result = libraryItems
@@ -470,7 +500,7 @@ struct MoviesView: View {
                 return !hidden.contains(cat)
             }
         }
-        return result
+        return HiddenVODStore.apply(result, hiddenKeys: hiddenKeys, onlyHidden: showingHiddenOnly)
     }
 
     /// Whether the navigation stack is at root (no detail pushed).
@@ -534,8 +564,11 @@ struct MoviesView: View {
                 let hidden = effectiveHiddenGroups
                 let genre = selectedGenre
                 let sort = sortOrder
+                let hiddenIDs = hiddenKeys
+                let onlyHidden = showingHiddenOnly
                 let result = await Task.detached(priority: .userInitiated) {
-                    MoviesView.computeDerived(movies: movies, hidden: hidden, genre: genre, sort: sort)
+                    MoviesView.computeDerived(movies: movies, hidden: hidden, genre: genre, sort: sort,
+                                              hiddenIDs: hiddenIDs, onlyHidden: onlyHidden)
                 }.value
                 guard !Task.isCancelled else { return }
                 #if os(tvOS)
@@ -556,6 +589,11 @@ struct MoviesView: View {
                     derived = result
                     pendingDerived = nil
                 }
+            }
+            .onChange(of: hiddenPillAvailable) { _, has in
+                // Unhiding the last title takes the pill away; drop the
+                // selection with it so the grid is not left on a dead filter.
+                if !has, selectedGenre == MoviesView.hiddenPillLabel { selectedGenre = nil }
             }
             .onAppear {
                 pushRouter.push = { navPath.append($0) }
@@ -596,6 +634,13 @@ struct MoviesView: View {
                     storageKey: hiddenGroupsKey,
                     onDismiss: { updated in
                         hiddenGroups = updated
+                    },
+                    hiddenCategoryAvailable: hasHiddenTitles,
+                    hiddenCategoryOn: hiddenCategoryOn,
+                    onToggleHiddenCategory: {
+                        hiddenTitles.setCategoryVisible(!hiddenCategoryOn,
+                                                        type: kindString,
+                                                        serverID: activeServerIDString)
                     }
                 )
             }
@@ -888,7 +933,8 @@ struct MoviesView: View {
 
     /// Library minus hidden groups, before genre and sort.
     private var visibleMovies: [VODDisplayItem] {
-        MoviesView.visible(libraryItems, hidden: effectiveHiddenGroups)
+        HiddenVODStore.apply(MoviesView.visible(libraryItems, hidden: effectiveHiddenGroups),
+                             hiddenKeys: hiddenKeys, onlyHidden: showingHiddenOnly)
     }
 
     nonisolated private static func visible(_ movies: [VODDisplayItem], hidden: Set<String>) -> [VODDisplayItem] {
@@ -920,12 +966,15 @@ struct MoviesView: View {
         let hidden: Set<String>
         let genre: String?
         let sort: String
+        let hiddenIDs: Set<String>
+        let onlyHidden: Bool
     }
     private var libraryKey: LibraryKey {
         LibraryKey(count: libraryItems.count,
                    firstID: libraryItems.first?.id,
                    lastID: libraryItems.last?.id,
-                   hidden: effectiveHiddenGroups, genre: selectedGenre, sort: sortOrderRaw)
+                   hidden: effectiveHiddenGroups, genre: selectedGenre, sort: sortOrderRaw,
+                   hiddenIDs: hiddenKeys, onlyHidden: showingHiddenOnly)
     }
 
     /// The library sort, also applied to search results (Logan 2026-09-04).
@@ -975,8 +1024,12 @@ struct MoviesView: View {
     }
 
     nonisolated private static func computeDerived(movies: [VODDisplayItem], hidden: Set<String>,
-                                       genre: String?, sort: MoviesSortOrder) -> LibraryDerived {
-        let visible = Self.visible(movies, hidden: hidden)
+                                       genre: String?, sort: MoviesSortOrder,
+                                       hiddenIDs: Set<String>, onlyHidden: Bool) -> LibraryDerived {
+        // Hidden titles drop out of every list; the Hidden category flips
+        // the test so only they remain.
+        let visible = HiddenVODStore.apply(Self.visible(movies, hidden: hidden),
+                                           hiddenKeys: hiddenIDs, onlyHidden: onlyHidden)
 
         let dated = visible.filter { $0.addedAt != nil }
         let recent: [VODDisplayItem] = dated.isEmpty ? [] : Array(dated.sorted {
@@ -987,7 +1040,9 @@ struct MoviesView: View {
         }.prefix(20))
 
         var library = visible
-        if let g = genre { library = library.filter { $0.categoryName == g } }
+        if let g = genre, g != MoviesView.hiddenPillLabel {
+            library = library.filter { $0.categoryName == g }
+        }
         // Precomputed folded keys: one localized fold per title instead of
         // one localized compare per comparison.
         // Same stripped title the rail buckets on, so a rail jump lands on
@@ -1029,7 +1084,7 @@ struct MoviesView: View {
 
     private var heroPagesKey: String {
         let progress = movieProgress.prefix(12).map { "\($0.vodID)|\($0.positionMs)" }.joined(separator: ",")
-        return "\(progress)#\(libraryItems.count)#\(recentlyAdded.first?.id ?? "")#\(effectiveHiddenGroups.count)#\(isLoadingLibrary)"
+        return "\(progress)#\(libraryItems.count)#\(recentlyAdded.first?.id ?? "")#\(effectiveHiddenGroups.count)#\(hiddenKeys.count)#\(showingHiddenOnly)#\(isLoadingLibrary)"
     }
 
     private func refreshHeroPages() {
@@ -1044,7 +1099,9 @@ struct MoviesView: View {
             // Series rows have no synthetic fallback: the episode row does
             // not carry the show's name or art.
             let item = byID[key] ?? (kind == .movie ? MoviesView.syntheticItem(from: p) : nil)
-            return item.map { MoviesHeroPage(item: $0, progress: p) }
+            // A hidden title stays out of Continue Watching too.
+            guard let item, !hiddenTitles.isHidden(item) else { return nil }
+            return MoviesHeroPage(item: item, progress: p)
         }
         if !resumes.isEmpty {
             heroPages = resumes.map { applyBackdrop($0) }
@@ -1092,7 +1149,14 @@ struct MoviesView: View {
     /// Genre pills: the visible categories, in store order, "All" first.
     private var genrePills: [String] {
         let hidden = effectiveHiddenGroups
-        return libraryCategories.map(\.name).filter { !hidden.contains($0) }
+        var pills = libraryCategories.map(\.name).filter { !hidden.contains($0) }
+        // "Hidden" leads the Filter row, and only exists while something is
+        // hidden. It is an ordinary pill: one press selects, another clears.
+        if hiddenPillAvailable {
+            pills.removeAll { $0 == MoviesView.hiddenPillLabel }
+            pills.insert(MoviesView.hiddenPillLabel, at: 0)
+        }
+        return pills
     }
 
     /// The library grid: visible movies, genre-filtered, sorted (cached).
@@ -1130,7 +1194,9 @@ struct MoviesView: View {
         let wanted = Set(rows.map(\.vodID))
         var byID: [String: VODDisplayItem] = [:]
         for m in libraryItems where wanted.contains(m.id) && byID[m.id] == nil { byID[m.id] = m }
-        watchlistItems = rows.compactMap { e in byID[e.vodID] ?? MoviesView.syntheticItem(from: e) }
+        watchlistItems = HiddenVODStore.apply(
+            rows.compactMap { e in byID[e.vodID] ?? MoviesView.syntheticItem(from: e) },
+            hiddenKeys: hiddenKeys, onlyHidden: false)
     }
 
     private static func syntheticItem(from e: WatchlistEntry) -> VODDisplayItem? {
@@ -1170,6 +1236,7 @@ struct MoviesView: View {
             Label(saved ? "Remove from Watchlist" : "Add to Watchlist",
                   systemImage: saved ? "bookmark.slash" : "bookmark")
         }
+        HiddenVODStore.menuButton(item)
     }
 
     private static func syntheticItem(from p: WatchProgress) -> VODDisplayItem? {
@@ -2246,6 +2313,13 @@ struct MoviesView: View {
                 disabledProviders: $disabledProviders,
                 groups: groupsForEnabledProviders,
                 hiddenGroups: $hiddenGroups,
+                hiddenCategoryAvailable: hasHiddenTitles,
+                hiddenCategoryOn: hiddenCategoryOn,
+                onToggleHiddenCategory: {
+                    hiddenTitles.setCategoryVisible(!hiddenCategoryOn,
+                                                    type: kindString,
+                                                    serverID: activeServerIDString)
+                },
                 onChange: {
                     HiddenGroupsStore.save(hiddenGroups, forKey: hiddenGroupsKey)
                     HiddenGroupsStore.save(disabledProviders, forKey: disabledProvidersKey)
@@ -3504,6 +3578,11 @@ struct MoviesFilterPage: View {
     @Binding var disabledProviders: Set<String>
     let groups: [String]
     @Binding var hiddenGroups: Set<String>
+    /// "Hidden" row: offered only when this playlist has hidden titles of
+    /// this kind, unchecked by default, and the FIRST row in the list.
+    var hiddenCategoryAvailable: Bool = false
+    var hiddenCategoryOn: Bool = false
+    var onToggleHiddenCategory: (() -> Void)? = nil
     let onChange: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -3513,7 +3592,7 @@ struct MoviesFilterPage: View {
     private var hasProviders: Bool { providerNames.count >= 2 }
     private var visibleRowCount: Int {
         if tab == .providers && hasProviders { return providerNames.count }
-        return groups.count + (hiddenGroups.isEmpty ? 0 : 1)
+        return groups.count + (hiddenGroups.isEmpty ? 0 : 1) + (hiddenCategoryAvailable ? 1 : 0)
     }
 
     var body: some View {
@@ -3554,6 +3633,11 @@ struct MoviesFilterPage: View {
                                 }
                             }
                         } else {
+                            if hiddenCategoryAvailable {
+                                filterRow("Hidden", on: hiddenCategoryOn) {
+                                    onToggleHiddenCategory?()
+                                }
+                            }
                             if !hiddenGroups.isEmpty {
                                 filterRow("Show All Groups", on: false, accent: true) {
                                     hiddenGroups.removeAll()
