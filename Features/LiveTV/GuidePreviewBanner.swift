@@ -55,6 +55,33 @@ struct GuidePreviewBannerHost: View {
     }
 }
 
+/// Absolute (global-space) bottom edge of the banner's art slot.
+///
+/// The corner mini player's bottom edge is locked to it (Streamer parity).
+/// It used to be a constant top padding that happened to line up with the
+/// old fixed 360x203 art frame; since the slot takes its width from the
+/// loaded image (b2fc738) and the banner itself shifts with the remote hint
+/// strip and the tab bar, that constant no longer tracked anything. The slot
+/// publishes its real bottom here and HomeView's tvOS mini positions itself
+/// off it, so the two stay locked for landscape and portrait art and across
+/// a resize after the image lands.
+@MainActor
+final class GuidePreviewArtAnchor: ObservableObject {
+    static let shared = GuidePreviewArtAnchor()
+    /// 0 means "not measured" (banner not on screen): the mini falls back to
+    /// its old constant inset.
+    @Published var bottomAbs: CGFloat = 0
+
+    func report(_ value: CGFloat) {
+        // Equal-value writes still notify every observer (memory:
+        // feedback_published_write_on_equal_value).
+        let v = value.rounded()
+        if bottomAbs != v { bottomAbs = v }
+    }
+
+    func clear() { if bottomAbs != 0 { bottomAbs = 0 } }
+}
+
 struct GuidePreviewBanner: View {
     let program: GuideProgram?
     let channel: ChannelDisplayItem?
@@ -91,6 +118,13 @@ struct GuidePreviewBanner: View {
             // No fixed width: portrait art narrows its own slot (see
             // GuidePreviewArtSlot) and the copy takes the freed width.
             leadingBlock
+                // The mini player's bottom edge rides this (see
+                // GuidePreviewArtAnchor); the reading is live, so a slot
+                // that resizes when the image lands moves the mini too.
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { maxY in
+                    GuidePreviewArtAnchor.shared.report(maxY)
+                }
+                .onDisappear { GuidePreviewArtAnchor.shared.clear() }
             if let program {
                 copy(for: program)
                     .frame(maxWidth: .infinity, alignment: .leading)

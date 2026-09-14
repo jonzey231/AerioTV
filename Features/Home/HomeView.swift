@@ -4043,6 +4043,11 @@ struct MainTabView: View {
     /// Channel-retention status circle (tvOS): observed so the count
     /// circle appears/disappears live as channels are kept or dropped.
     @ObservedObject private var retention = LiveChannelRetention.shared
+    #if os(tvOS)
+    /// Bottom edge of the Channel Preview banner's art slot: the corner mini
+    /// player's bottom is locked to it while the banner is shown.
+    @ObservedObject private var guideArtAnchor = GuidePreviewArtAnchor.shared
+    #endif
     @State private var retentionListPresented = false
     @State private var retentionActionKey: String?
     /// The per-channel dialog was reached from the channel LIST dialog,
@@ -5083,6 +5088,14 @@ struct MainTabView: View {
                 GeometryReader { geo in
                     let miniW: CGFloat = 410
                     let miniH: CGFloat = 231
+                    // Mini bottom = the Channel Preview banner's art slot
+                    // bottom (Streamer parity). 87 is the fallback for when
+                    // the banner is not on screen / not yet measured; it was
+                    // the old hard-coded inset that only lined up with the
+                    // art's former fixed 360x203 frame.
+                    let miniTop: CGFloat = guideArtAnchor.bottomAbs > 0
+                        ? max(0, guideArtAnchor.bottomAbs - miniH)
+                        : 87
                     ZStack(alignment: .topTrailing) {
                         MultiviewContainerView()
                             .frame(
@@ -5134,7 +5147,7 @@ struct MainTabView: View {
                             .disabled(minimized)
                             .allowsHitTesting(!minimized)
                             .padding(.trailing, minimized ? 40 : 0)
-                            .padding(.top, minimized ? 87 : 0)
+                            .padding(.top, minimized ? miniTop : 0)
                             // v1.6.13.x: capture mini's actual
                             // bottom for ChannelListView's chip-row
                             // push-down (tvOS branch).
@@ -5154,6 +5167,7 @@ struct MainTabView: View {
                         alignment: minimized ? .topTrailing : .center
                     )
                     .animation(.spring(response: 0.35), value: minimized)
+                    .animation(.spring(response: 0.35), value: miniTop)
                 }
                 .ignoresSafeArea()
                 .zIndex(2)
@@ -5187,6 +5201,14 @@ struct MainTabView: View {
                     let minimized = nowPlaying.isMinimized
                     let miniW: CGFloat = 410
                     let miniH: CGFloat = 231
+                    // Mini bottom = the Channel Preview banner's art slot
+                    // bottom (Streamer parity). 87 is the fallback for when
+                    // the banner is not on screen / not yet measured; it was
+                    // the old hard-coded inset that only lined up with the
+                    // art's former fixed 360x203 frame.
+                    let miniTop: CGFloat = guideArtAnchor.bottomAbs > 0
+                        ? max(0, guideArtAnchor.bottomAbs - miniH)
+                        : 87
 
                     ZStack(alignment: .topTrailing) {
                         PlayerView(
@@ -5210,9 +5232,9 @@ struct MainTabView: View {
                         .shadow(color: minimized ? .black.opacity(0.6) : .clear, radius: 20, y: 8)
                         .allowsHitTesting(!minimized) // Full-screen: interactive; mini: not
                         .padding(.trailing, minimized ? 40 : 0)
-                        // Sits a little lower so it clears the tab bar
-                        // and the Channel Preview banner (Logan 2026-09-05).
-                        .padding(.top, minimized ? 87 : 0)
+                        // Bottom edge locked to the banner's art slot; the
+                        // fallback clears the tab bar (Logan 2026-09-05).
+                        .padding(.top, minimized ? miniTop : 0)
                         // v1.6.13.x: capture mini's actual bottom
                         // for ChannelListView's chip-row push-down
                         // (tvOS legacy-path branch).
@@ -5232,6 +5254,7 @@ struct MainTabView: View {
                     }
                     .frame(width: geo.size.width, height: geo.size.height, alignment: minimized ? .topTrailing : .center)
                     .animation(.spring(response: 0.35), value: minimized)
+                    .animation(.spring(response: 0.35), value: miniTop)
                 }
                 .ignoresSafeArea()
                 .zIndex(2)
