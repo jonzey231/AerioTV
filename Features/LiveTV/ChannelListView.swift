@@ -427,6 +427,13 @@ struct ChannelListView: View {
     /// Group the guide opens on (Manage Groups > long press / Default Group).
     /// Empty = All. Applied once per playlist load.
     private let defaultChannelGroupKey = "defaultChannelGroup"
+    /// Manage Groups toggle (off by default) that exposes the "Recently
+    /// Watched" default-group option. With it off, a stored Recently
+    /// Watched default falls back to All Channels (Android parity).
+    private let recentGroupEnabledKey = "defaultChannelGroupRecentEnabled"
+    /// The group the user last had selected, so Recently Watched can
+    /// reopen it. Device-local: it tracks this device's viewing.
+    private let lastSelectedGroupKey = "lastSelectedChannelGroup"
     @State private var defaultGroupApplied = false
     #if os(iOS)
     @AppStorage(phoneGroupSelectorKey) private var phoneGroupSelector = "sidebar"
@@ -571,7 +578,10 @@ struct ChannelListView: View {
                 )
                 #endif
                 .onChange(of: searchText)       { _, _ in filterChannels() }
-                .onChange(of: selectedGroup)    { _, _ in filterChannels() }
+                .onChange(of: selectedGroup)    { _, v in
+                    rememberSelectedGroup(v)
+                    filterChannels()
+                }
                 .onChange(of: sortModeRaw)      { _, _ in filterChannels() }
                 // #45: re-filter when a collection's membership changes so a
                 // collection view updates live as channels are added/removed.
@@ -2105,7 +2115,8 @@ struct ChannelListView: View {
                 filterChannels()
             },
             defaultGroupKey: defaultChannelGroupKey,
-            favoritesAvailable: favoritesStore.hasFavorites
+            favoritesAvailable: favoritesStore.hasFavorites,
+            recentGroupEnabledKey: recentGroupEnabledKey
         )
     }
 
@@ -2160,12 +2171,29 @@ struct ChannelListView: View {
     private func applyDefaultGroupIfNeeded() {
         guard !defaultGroupApplied else { return }
         defaultGroupApplied = true
-        guard let wanted = UserDefaults.standard.string(forKey: defaultChannelGroupKey),
-              !wanted.isEmpty, wanted != selectedGroup else { return }
+        guard var wanted = UserDefaults.standard.string(forKey: defaultChannelGroupKey),
+              !wanted.isEmpty else { return }
+        if wanted == ManageGroupsSheet.recentGroupToken {
+            // Recently Watched: reopen the last selected group, but only
+            // while the Manage Groups toggle is on. Off (or nothing
+            // recorded yet) falls back to All Channels, i.e. no move.
+            guard UserDefaults.standard.bool(forKey: recentGroupEnabledKey),
+                  let last = UserDefaults.standard.string(forKey: lastSelectedGroupKey),
+                  !last.isEmpty else { return }
+            wanted = last
+        }
+        guard wanted != selectedGroup else { return }
         if groupTokens.contains(wanted) || wanted.hasPrefix("collection:") {
             selectedGroup = wanted
             debugLog("[GROUPS] default group applied: \(wanted)")
         }
+    }
+
+    /// Records the group for the Recently Watched default option. Stored
+    /// unconditionally (the toggle only decides whether it is read back),
+    /// so turning the option on later already has something to open.
+    private func rememberSelectedGroup(_ group: String) {
+        UserDefaults.standard.set(group, forKey: lastSelectedGroupKey)
     }
 
     /// Where a reset lands: All when shown, else the first visible group.

@@ -123,8 +123,19 @@ struct ManageGroupsSheet: View {
     var defaultGroupKey: String? = nil
     /// Whether the Favorites group exists right now (pinned row + default option).
     var favoritesAvailable: Bool = false
+    /// Live TV only: UserDefaults key (Bool) for the "Recently Watched"
+    /// toggle. When on, the Default Group picker offers Recently Watched,
+    /// meaning "reopen whichever group was selected last". Off by default;
+    /// with it off a stored Recently Watched default falls back to All
+    /// Channels (Android parity 2026-09-14).
+    var recentGroupEnabledKey: String? = nil
     @State private var defaultGroup: String = ""
+    @State private var recentGroupEnabled: Bool = false
     private let favoritesToken = "favorites"
+    /// Sentinel stored in the default-group key for "last selected group".
+    static let recentGroupToken = "recentlyWatched"
+    private var recentToken: String { Self.recentGroupToken }
+    private var recentOptionAvailable: Bool { recentGroupEnabledKey != nil }
 
     @Environment(\.dismiss) private var dismiss
     @State private var hiddenGroups: Set<String> = []
@@ -229,6 +240,13 @@ struct ManageGroupsSheet: View {
             if let dKey = defaultGroupKey {
                 defaultGroup = UserDefaults.standard.string(forKey: dKey) ?? ""
             }
+            if let rKey = recentGroupEnabledKey {
+                recentGroupEnabled = UserDefaults.standard.bool(forKey: rKey)
+                // Defensive: a stored Recently Watched default with the
+                // toggle off resolves to All Channels everywhere else, so
+                // show it that way here too.
+                if !recentGroupEnabled && defaultGroup == recentToken { defaultGroup = "" }
+            }
             if let key = orderStorageKey, let mKey = modeKey {
                 sortMode = GroupSortMode(rawValue: GroupOrderStore.loadMode(forKey: mKey)) ?? .default
                 manualOrder = seededOrder(GroupOrderStore.load(forKey: key))
@@ -256,9 +274,21 @@ struct ManageGroupsSheet: View {
         SyncManager.shared.pushPreferencesImmediate()
     }
 
+    /// Flips the Recently Watched toggle. Turning it off drops a stored
+    /// Recently Watched default back to All Channels so the guide never
+    /// opens on a token the picker no longer offers.
+    private func setRecentEnabled(_ on: Bool) {
+        guard let rKey = recentGroupEnabledKey else { return }
+        recentGroupEnabled = on
+        UserDefaults.standard.set(on, forKey: rKey)
+        if !on && defaultGroup == recentToken { setDefault("") }
+        SyncManager.shared.pushPreferencesImmediate()
+    }
+
     private func defaultTitle(_ token: String) -> String {
         if token.isEmpty || token == allChannelsToken { return "All Channels" }
         if token == favoritesToken { return "Favorites" }
+        if token == recentToken { return "Recently Watched" }
         return token
     }
 
@@ -364,9 +394,20 @@ struct ManageGroupsSheet: View {
 
             if defaultGroupKey != nil {
                 Section {
+                    if recentOptionAvailable {
+                        Toggle("Recently Watched", isOn: Binding(
+                            get: { recentGroupEnabled },
+                            set: { setRecentEnabled($0) }
+                        ))
+                        .tint(.accentPrimary)
+                        .listRowBackground(Color.cardBackground)
+                    }
                     Picker("Opens On", selection: $defaultGroup) {
                         Text("All Channels").tag("")
                         if favoritesAvailable { Text("Favorites").tag(favoritesToken) }
+                        if recentOptionAvailable && recentGroupEnabled {
+                            Text("Recently Watched").tag(recentToken)
+                        }
                         // In Manual order `displayList` also carries the
                         // pinned sentinels, which used to render raw
                         // ("favorites", "All") and duplicate the two rows
@@ -389,7 +430,9 @@ struct ManageGroupsSheet: View {
                         .foregroundColor(.textSecondary)
                         .textCase(nil)
                 } footer: {
-                    Text("The group Live TV shows when the app opens.")
+                    Text(recentOptionAvailable
+                         ? "The group Live TV shows when the app opens. Recently Watched reopens whichever group was selected last."
+                         : "The group Live TV shows when the app opens.")
                         .font(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .textCase(nil)
@@ -521,6 +564,21 @@ struct ManageGroupsSheet: View {
                         .foregroundColor(.textTertiary)
                         .padding(.horizontal, 48)
                         .padding(.bottom, 12)
+                }
+
+                // Recently Watched (Android parity 2026-09-14): the toggle
+                // enables the option; long press makes it the default, i.e.
+                // reopen whichever group was selected last.
+                if recentOptionAvailable {
+                    TVGroupToggleRow(
+                        group: "Recently Watched",
+                        isOn: recentGroupEnabled,
+                        onToggle: { setRecentEnabled(!recentGroupEnabled) },
+                        isDefault: defaultGroup == recentToken,
+                        onSetDefault: (defaultGroupKey == nil || !recentGroupEnabled)
+                            ? nil : { setDefault(recentToken) },
+                        canFocus: grabbedGroup == nil
+                    )
                 }
 
                 // Favorites group (Logan 2026-09-05): pinned first, hideable.

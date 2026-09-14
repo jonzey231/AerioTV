@@ -117,6 +117,10 @@ final class SyncManager: ObservableObject {
     ]
     private let syncBoolKeys = [
         "useCustomAccent", "preferAVPlayer", "bgRefreshEnabled",
+        // Manage Groups "Recently Watched" toggle: gates the Recently
+        // Watched option in the Default Group picker. The last selected
+        // group itself stays device-local.
+        "defaultChannelGroupRecentEnabled",
         // EPG program badges visibility, PER DEVICE TYPE: both keys sync so a
         // TV's choice mirrors to the user's other Apple TVs and a phone/tablet's
         // to their iPhones/iPads, independently. Each device reads its own via
