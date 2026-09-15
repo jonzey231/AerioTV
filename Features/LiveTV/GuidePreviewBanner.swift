@@ -134,6 +134,21 @@ struct GuidePreviewBanner: View {
     @Environment(\.aerioTextScale) private var textScale
     @Environment(\.aerioSubtextScale) private var subtextScale
 
+    /// Art slot at the current Text Size (same scale ProgramArtSlot applies
+    /// to itself); the banner's own height has to clear it.
+    private var artSlot: ProgramArtSlotMetrics {
+        ProgramArtSlotMetrics.slot.scaled(textScale)
+    }
+
+    /// Banner height: the copy's mixed text growth, but never less than the
+    /// art plus the 8pt bottom padding (plus 1pt for the rounding the
+    /// designed 203 + 8 vs 212 already carried), so large Text Size cannot
+    /// clip the art or push it under the guide.
+    private var bannerHeight: CGFloat {
+        max(TextScale.growMixed(Self.height, textScale, subtext: subtextScale),
+            artSlot.height + 9)
+    }
+
     var body: some View {
         // Bottom-aligned: logo, copy and the corner mini share one baseline
         // (Logan 2026-09-05).
@@ -173,7 +188,7 @@ struct GuidePreviewBanner: View {
         .padding(.horizontal, 40)
         .padding(.bottom, 8)
         // Grows with Settings > Appearance > Text Size so the copy is not clipped.
-        .frame(height: TextScale.growMixed(Self.height, textScale, subtext: subtextScale))
+        .frame(height: bannerHeight)
         .frame(maxWidth: .infinity)
         .background(Color.appBackground)
         .clipped()
@@ -195,22 +210,26 @@ struct GuidePreviewBanner: View {
         VStack(spacing: 8) {
             switch program.map(artCache.state(for:)) ?? .pending {
             case .art(let url):
-                GuidePreviewArtSlot(url: url)
+                // Shared slot: height-locked, width from the art's own
+                // aspect, same as the Program Info sheet (Logan 2026-09-15).
+                ProgramArtSlot(url: url)
                     .id(url)
             case .none:
                 // Every source came back empty (static team channels and the
                 // like): the channel logo stands in (Logan 2026-09-05).
                 if let channel, channel.logoURL != nil {
-                    CachedLogoImage(url: channel.logoURL, width: 270, height: 152)
-                        .frame(width: 360, height: 203)
+                    CachedLogoImage(url: channel.logoURL,
+                                    width: TextScale.grow(270, textScale),
+                                    height: TextScale.grow(152, textScale))
+                        .frame(width: artSlot.maxWidth, height: artSlot.height)
                 } else {
-                    Color.clear.frame(width: 360, height: 203)
+                    ProgramArtSlot(url: nil)
                 }
             case .pending:
                 // No placeholder while a lookup is open: the channel logo
                 // flashed before every programme logo while stepping through
                 // channels. Empty space keeps the copy from shifting.
-                Color.clear.frame(width: 360, height: 203)
+                ProgramArtSlot(url: nil)
             }
         }
     }
@@ -421,55 +440,135 @@ final class GuidePreviewArtCache: ObservableObject {
 }
 #endif
 
-/// Shared portrait cutoff for banner and hero art.
+/// Portrait cutoff for the Movies hero art. The Live TV banner no longer
+/// uses it: its art goes through the fit-to-box ProgramArtSlot below.
 enum GuidePreviewPortraitArt {
     /// Width/height below which art counts as a portrait poster. Near-square
     /// art (sports matchup logos ~0.96) keeps the full cropped 16:9 slot.
     static let maxAspect: CGFloat = 0.8
 }
 
-/// The banner's art slot. Landscape art keeps the 16:9 360x203 slot. PORTRAIT
-/// art (TMDB posters on a lot of programmes) used to be center-cropped into
-/// that slot, which sliced the poster's title off. Portrait art now keeps the
-/// slot HEIGHT and takes its width from the image's own aspect, so the poster
-/// is drawn whole and the copy column takes the freed width (2026-09-14).
-private struct GuidePreviewArtSlot: View {
-    let url: URL
+/// ONE definition of the program-art slot, shared by the Live TV guide
+/// preview banner (tvOS hero) and the Program Info sheet (long press, all
+/// platforms).
+///
+/// Logan 2026-09-15 (rev 2): art KEEPS ITS OWN SHAPE. The earlier fixed box
+/// was rejected: a 2:3 poster shrank to fit a landscape box (and a square one
+/// on iOS), so posters read tiny next to landscape title cards. The slot is
+/// now HEIGHT-LOCKED and the width follows the image aspect, so landscape art
+/// renders landscape, portrait renders portrait, at the same height on both
+/// surfaces. Nothing is cropped, nothing is letterboxed: the drawn box IS the
+/// image shape, so the surrounding surface simply shows through.
+///
+/// Width is clamped to a 16:9 maximum so an ultra-wide banner cannot push the
+/// copy out, and to a minimum so a freak sliver of art still reads. The 16:9
+/// maximum is also what the slot RESERVES before the aspect is known, so the
+/// slot never collapses and the copy column does not jump; AuthPosterImage
+/// reports the decoded size (synchronously on a cache hit, so revisits do not
+/// pop at all), and only then does the width settle. Height never changes, so
+/// GuidePreviewArtAnchor's maxY, and the corner mini player riding it, are
+/// stable throughout.
+///
+/// This supersedes both the fill-and-crop slot with its portrait escape hatch
+/// (GuidePreviewPortraitArt.maxAspect, still used by the Movies hero) and the
+/// fit-inside-a-fixed-box slot.
+struct ProgramArtSlotMetrics {
+    /// Locked height: the two surfaces match because they share this.
+    let height: CGFloat
+    /// 16:9 width, also the pre-load reservation.
+    let maxWidth: CGFloat
+    /// Floor for very tall art.
+    let minWidth: CGFloat
+    let cornerRadius: CGFloat
 
-    private static let slotWidth: CGFloat = 360
-    private static let slotHeight: CGFloat = 203
-
-    /// Pixel size of the loaded bitmap; nil until it lands.
-    @State private var pixelSize: CGSize? = nil
-
-    /// Poster width at slot height for TRUE portrait art; nil for anything
-    /// else (and until the bitmap lands), which keeps the full 16:9 slot.
-    private var posterWidth: CGFloat? {
-        guard let s = pixelSize, s.width > 0, s.height > 0 else { return nil }
-        let ratio = s.width / s.height
-        guard ratio < GuidePreviewPortraitArt.maxAspect else { return nil }
-        return max(80, (Self.slotHeight * ratio).rounded())
+    init(height: CGFloat, cornerRadius: CGFloat) {
+        self.height = height.rounded()
+        self.maxWidth = (height * 16.0 / 9.0).rounded()
+        self.minWidth = (height * 0.5).rounded()
+        self.cornerRadius = cornerRadius
     }
 
+    /// The same slot at the app-wide Text Size (Settings > Appearance).
+    /// Logan 2026-09-15: the shipped sizes stay the DEFAULT, and users who
+    /// want larger art raise Text Size, so the slot rides the SAME scale the
+    /// type does. `TextScale.grow` is the app's one metric multiplier, so
+    /// art only ever grows (85% text keeps the designed layout) and there is
+    /// no second setting or duplicated factor. maxWidth and minWidth follow
+    /// from the height, so true aspect and the portrait floor are preserved.
+    func scaled(_ scale: CGFloat) -> ProgramArtSlotMetrics {
+        guard scale > 1 else { return self }
+        return ProgramArtSlotMetrics(height: TextScale.grow(height, scale),
+                                     cornerRadius: TextScale.grow(cornerRadius, scale))
+    }
+
+    /// Width for a given width/height aspect, clamped.
+    func width(for aspect: CGFloat?) -> CGFloat {
+        guard let aspect, aspect.isFinite, aspect > 0 else { return maxWidth }
+        return min(maxWidth, max(minWidth, (height * aspect).rounded()))
+    }
+
+    #if os(tvOS)
+    /// The banner's long-standing 203pt art height (the banner is 212 tall);
+    /// 16:9 caps the width at 361, near the old 360 box.
+    static let slot = ProgramArtSlotMetrics(height: 203, cornerRadius: 12)
+    #else
+    /// Phone/iPad sheet.
+    static let slot = ProgramArtSlotMetrics(height: 130, cornerRadius: 10)
+    /// The compact phone card, where the art sits beside the copy in a row.
+    static let compactSlot = ProgramArtSlotMetrics(height: 104, cornerRadius: 10)
+    #endif
+}
+
+/// Height-locked, aspect-shaped program artwork. Reserves the 16:9 width even
+/// when there is no art, so nothing shifts.
+struct ProgramArtSlot: View {
+    let url: URL?
+    var headers: [String: String] = [:]
+    var metrics: ProgramArtSlotMetrics = ProgramArtSlotMetrics.slot
+    var maxPixel: CGFloat = 800
+    /// Kept for callers that want the real bitmap size; the slot uses it
+    /// itself to settle its width.
+    var onImageLoaded: ((CGSize) -> Void)? = nil
+
+    /// nil until the bitmap reports its size: width stays at the 16:9 reserve.
+    @State private var aspect: CGFloat? = nil
+    /// App-wide Text Size: the slot grows with it (see `scaled(_:)`).
+    @Environment(\.aerioTextScale) private var textScale
+
+    /// The slot's metrics at the current Text Size. Every frame below uses
+    /// these, so height, 16:9 reserve and portrait floor scale together.
+    private var m: ProgramArtSlotMetrics { metrics.scaled(textScale) }
+
+    private var width: CGFloat { m.width(for: url == nil ? nil : aspect) }
+
     var body: some View {
-        let image = AuthPosterImage(url: url,
+        Color.clear
+            .frame(width: width, height: m.height)
+            .overlay {
+                if let url {
+                    AuthPosterImage(url: url,
+                                    headers: headers,
                                     onImageLoaded: { size in
-                                        if pixelSize != size { pixelSize = size }
+                                        if size.width > 0, size.height > 0 {
+                                            let a = size.width / size.height
+                                            if aspect != a { aspect = a }
+                                        }
+                                        onImageLoaded?(size)
                                     },
                                     placeholder: .clear,
-                                    maxPixel: 800)
-        Group {
-            if let posterWidth {
-                image
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: posterWidth, height: Self.slotHeight)
-            } else {
-                image
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: Self.slotWidth, height: Self.slotHeight)
-                    .clipped()
+                                    maxPixel: maxPixel)
+                        // FIT, never fill: aspect preserved, nothing cropped.
+                        // Once the aspect is known the box already matches it,
+                        // so there is nothing left over to letterbox.
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: width, height: m.height)
+                        .clipShape(RoundedRectangle(cornerRadius: m.cornerRadius,
+                                                    style: .continuous))
+                        .id(url)
+                }
             }
-        }
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipped()
+            // A new image re-reserves rather than keeping the old shape.
+            .onChange(of: url) { _, _ in aspect = nil }
     }
 }

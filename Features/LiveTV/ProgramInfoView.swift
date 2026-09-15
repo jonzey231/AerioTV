@@ -217,17 +217,10 @@ struct ProgramInfoView: View {
     /// from TMDB-by-title when that opt-in is enabled and the server
     /// has no artwork. nil = no poster, render nothing.
     @State private var posterURL: URL? = nil
-    /// GH #53: width/height ratio of the loaded poster, defaulting to the
-    /// 2:3 portrait the TMDB fallback ships. XMLTV `<icon>` art is usually
-    /// landscape (EPG Guru sends 16:9); hard-cropping it into the portrait
-    /// frame chopped the sides off. Clamped so a pathological banner can't
-    /// stretch the sheet.
-    @State private var posterRatio: CGFloat = 2.0 / 3.0
-
-    private func updatePosterRatio(_ size: CGSize) {
-        guard size.width > 0, size.height > 0 else { return }
-        posterRatio = min(max(size.width / size.height, 0.55), 1.9)
-    }
+    // The loaded bitmap's aspect no longer drives the layout: art goes into
+    // the height-locked ProgramArtSlot shared with the guide preview
+    // banner, so nothing is cropped and nothing resizes as art lands
+    // (supersedes the GH #53 posterRatio frame, Logan 2026-09-15).
 
     /// Auth headers for the active Dispatcharr server, in case a
     /// program icon is a protected `/media/` URL. The Schedules-Direct
@@ -460,12 +453,11 @@ struct ProgramInfoView: View {
             Section {
                 HStack(alignment: .top, spacing: 14) {
                     if let posterURL {
-                        AuthPosterImage(url: posterURL, headers: posterAuthHeaders,
-                                        onImageLoaded: { updatePosterRatio($0) })
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: 104, height: 104 / posterRatio)
-                            .clipped()
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        // Shared height-locked slot (ProgramArtSlot): whole
+                        // art, no crop, aspect-shaped (Logan 2026-09-15).
+                        ProgramArtSlot(url: posterURL,
+                                       headers: posterAuthHeaders,
+                                       metrics: ProgramArtSlotMetrics.compactSlot)
                     }
                     VStack(alignment: .leading, spacing: 5) {
                         Text(target.channelName.uppercased())
@@ -697,16 +689,16 @@ struct ProgramInfoView: View {
                 Section {
                     HStack {
                         Spacer()
-                        // GH #53: frame follows the REAL image ratio (width
-                        // fixed, height derived) so landscape EPG art is no
-                        // longer hard-cropped into a portrait 2:3 frame.
-                        // TMDB posters (genuinely 2:3) render as before.
-                        AuthPosterImage(url: posterURL, headers: posterAuthHeaders,
-                                        onImageLoaded: { updatePosterRatio($0) })
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: 130, height: 130 / posterRatio)
-                            .clipped()
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        // Shared height-locked slot (ProgramArtSlot): art of
+                        // any aspect (16:9 title card, 2:3 poster, square
+                        // logo) is drawn WHOLE at one locked height, the width
+                        // following its own aspect, with the sheet showing
+                        // through around it. Supersedes the
+                        // GH #53 ratio-derived frame, which still cropped
+                        // anything outside its clamped ratio range and made
+                        // the row jump when the bitmap landed.
+                        ProgramArtSlot(url: posterURL,
+                                       headers: posterAuthHeaders)
                         Spacer()
                     }
                     .listRowBackground(Color.clear)
@@ -801,12 +793,10 @@ struct ProgramInfoView: View {
         VStack(alignment: .leading, spacing: 28) {
             HStack(alignment: .top, spacing: 36) {
                 if let posterURL {
-                    AuthPosterImage(url: posterURL, headers: posterAuthHeaders,
-                                    onImageLoaded: { updatePosterRatio($0) })
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 240, height: 240 / posterRatio)
-                        .clipped()
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    // SAME shared slot, SAME height as the guide preview
+                    // banner (Logan 2026-09-15): whole art, no crop, 203 tall,
+                    // width from the art's own aspect (16:9 caps it).
+                    ProgramArtSlot(url: posterURL, headers: posterAuthHeaders)
                 }
                 VStack(alignment: .leading, spacing: 10) {
                     Text(target.channelName.uppercased())
