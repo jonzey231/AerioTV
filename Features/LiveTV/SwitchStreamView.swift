@@ -245,10 +245,9 @@ struct SwitchStreamView: View {
                 if confirmed {
                     debugLog("[SwitchStream] \(channelName): confirmed switch to stream id=\(stream.id) \"\(titleLine(for: stream))\"")
                     onSwitched?(stream.id)
-                    // Ask the live player to reload onto the same proxy URL so
-                    // libmpv re-locks onto the channel's fresh buffer. Needed
-                    // when the upstream was dead and Dispatcharr cascaded
-                    // through failover, churning the buffer; harmless otherwise.
+                    // Tell the live player the switch landed. It keeps its
+                    // connection and only reloads once (no overlap) if
+                    // playback does not advance.
                     NotificationCenter.default.post(
                         name: .switchStreamReprime, object: nil,
                         userInfo: ["uuid": channelUUID]

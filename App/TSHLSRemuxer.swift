@@ -310,6 +310,39 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Called by the tile when Dispatcharr confirmed change_stream on this
+    /// ingest's channel. The connection is kept as is; this only arms the
+    /// demux to expect a new source (an SPS change alone then counts),
+    /// keeps the switch gap out of the starvation telemetry, and marks the
+    /// switch for the playback driver's hold-back learner.
+    func noteSourceSwitch() {
+        let now = Date()
+        Self.lastSourceSwitch.set(now)
+        switchLock.lock()
+        switchNotedAtShared = now
+        switchSegmentAtShared = nil
+        switchLock.unlock()
+        queue.async {
+            self.switchExpectedUntil = now.addingTimeInterval(30)
+            self.switchAccountingSuppressed = true
+            self.switchQuietClosures = 0
+            debugLog("[TS-REMUX] switch: change_stream noted; expecting a new source on the same connection")
+        }
+    }
+
+    /// Switch Stream watch readout, safe from any thread: whether the
+    /// demux is still re-acquiring the new source (PSI re-gate or waiting
+    /// for its first IDR), and when the last segment after the most recent
+    /// noted switch was stored (nil until one lands).
+    var sourceSwitchProgress: (regating: Bool, lastSegmentAt: Date?) {
+        switchLock.lock(); defer { switchLock.unlock() }
+        return (switchRegatingShared, switchSegmentAtShared)
+    }
+
+    private func setRegatingShared(_ on: Bool) {
+        switchLock.lock(); switchRegatingShared = on; switchLock.unlock()
+    }
+
     func setRetained(_ on: Bool) {
         queue.async {
             self.retainedRAMCap = on ? 2 : nil
@@ -428,6 +461,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.aerio.tsremux")
     private var urlSession: URLSession?
     private var ingestTask: URLSessionDataTask?
+    /// LiveConnectionRegistry id of the open ingest (single-connection
+    /// invariant). Lock-free reads are fine: written on `queue` in
+    /// startIngest, read by stop() on main only to mark it closing.
+    private let connLock = NSLock()
+    private var connID: UUID?
+    /// Set synchronously by stop() (under connLock) so a start() still
+    /// queued behind it never opens a connection nobody will use.
+    private var stopRequested = false
     /// First-byte marker state (see the didReceive hook). Touched only
     /// from the URLSession delegate queue and startIngest.
     private var ingestStartedAt = Date()
@@ -505,6 +546,67 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var videoPTSDeltas: [Double] = []
     private var lastVideoAUPTS: Double = -1
     private var videoParamsSent = false
+
+    // MARK: Source switch state (Dispatcharr Switch Stream, 2026-09-15)
+    //
+    // POST /proxy/ts/change_stream swaps the upstream behind the SAME HTTP
+    // TS connection. The new source typically arrives with its own PAT/PMT
+    // (different PMT, video and audio PIDs), a new SPS (FHD -> SD), and a
+    // PTS / continuity jump. The PSI parsers used to latch the first
+    // program forever, so every packet of the new source was dropped while
+    // bytes kept flowing (device 16:08:48: 27.8 s with no segment, then
+    // -12888). Everything below lets the demux re-acquire the program in
+    // place, cut at the new source's first IDR, and tag the playlist with
+    // EXT-X-DISCONTINUITY. The connection itself is never touched.
+    /// Last PMT content the gate accepted: video PID/type plus the sorted
+    /// audio PID/type pairs. A change means a new program.
+    private var pmtSignature = ""
+    /// Last video PES PTS seen on the TS arm (-1 = none yet).
+    private var lastSeenVideoPTS: Double = -1
+    /// Last continuity counter seen on the video PID (-1 = none yet).
+    private var lastVideoCC = -1
+    /// Wall time of the last continuity break or discontinuity_indicator
+    /// on the video PID.
+    private var lastVideoCCBreakAt = Date.distantPast
+    /// Raw bytes of the last SPS seen on the video PID.
+    private var lastSPS: [UInt8]?
+    /// True from a detected source change until the new source's first
+    /// IDR carrying an SPS opens a segment. That segment gets the tag.
+    private var awaitingSwitchKeyframe = false
+    /// The next stored segment starts a new source: EXT-X-DISCONTINUITY.
+    private var nextSegmentDiscontinuity = false
+    /// Sequence numbers of every segment that carries the tag. Tiny (one
+    /// entry per switch) and never pruned, so the DISCONTINUITY-SEQUENCE
+    /// of any window (live RAM, spill, inlined, event) is simply the count
+    /// of tagged segments that slid out ahead of that window's first seq.
+    private var discontinuitySeqs = Set<Int>()
+    /// Set by noteSourceSwitch(): a change_stream was confirmed and the
+    /// next source change is expected, so an SPS change alone is enough.
+    private var switchExpectedUntil = Date.distantPast
+    /// While set, segment closures do not feed the starvation telemetry
+    /// (the switch gap is not upstream jitter). Cleared on the first
+    /// closure after the discontinuity segment, or after a quiet window.
+    private var switchAccountingSuppressed = false
+    private var switchQuietClosures = 0
+    /// Post-switch reservoir drain deadline (see advancePacedEdge).
+    private var pacedDrainUntil: Date?
+    /// Normal reservoir the drain pulls back to: two 2 s segments.
+    private let pacedDrainReservoirSeconds = 4.0
+    /// PTS jumps beyond these are a new source, not B-frame reordering
+    /// (reorder is a few frames) or ordinary jitter.
+    private let switchPTSJumpForward = 5.0
+    private let switchPTSJumpBackward = 2.0
+    /// Thread-safe switch progress for the tile's Switch Stream watch:
+    /// when the last switch was noted, and when the last segment was
+    /// stored after it (nil until one lands).
+    private let switchLock = NSLock()
+    private var switchNotedAtShared: Date?
+    private var switchSegmentAtShared: Date?
+    private var switchRegatingShared = false
+    /// When ANY live remuxer last saw (or was told about) a source switch.
+    /// Read on main by the playback driver so a switch gap never trains
+    /// the live-edge hold-back or arms a backward rejoin.
+    static let lastSourceSwitch = TimestampBox()
 
     // Segmenter state
     private var currentSegment = Data()
@@ -608,6 +710,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// is opened (review 2026-09-11 section 2 proposal 2: session.txt:3497
     /// shows the new ingest starting BEFORE `stopped (ingested 205 MB)`).
     func stop(completion: (@Sendable () -> Void)? = nil) {
+        // Synchronous: a new ingest to this channel started right after
+        // this call waits for our cancel instead of overlapping it.
+        connLock.lock(); stopRequested = true; let closingID = connID; connLock.unlock()
+        LiveConnectionRegistry.shared.markClosing(closingID)
         queue.async { [weak self] in
             guard let self else {
                 if let completion { DispatchQueue.main.async(execute: completion) }
@@ -617,6 +723,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             self.stopped = true
             self.ingestTask?.cancel()
             self.urlSession?.invalidateAndCancel()
+            self.releaseConnection()
             self.listener?.cancel()
             HLSResourceLoaderRegistry.shared.unregister(id: self.deliveryID)
             self.deliveryBase64.removeAll()
@@ -644,7 +751,18 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     // MARK: Ingest
 
+    private func releaseConnection() {
+        connLock.lock(); let id = connID; connID = nil; connLock.unlock()
+        LiveConnectionRegistry.shared.close(id)
+    }
+
     private func startIngest() {
+        // Single-connection invariant: a previous ingest to this channel
+        // that is being cancelled (warm prewarm dropped, re-tune after an
+        // upstream close) must be gone before this one opens.
+        LiveConnectionRegistry.shared.waitForClosing(sourceURL, timeout: 3)
+        connLock.lock(); let abandoned = stopRequested; connLock.unlock()
+        guard !stopped, !abandoned else { return }
         let config = URLSessionConfiguration.default
         // First-bytes patience (Freyguy, 2026-09-03): a Dispatcharr behind a
         // slow provider can take 20-30 s to deliver the first TS bytes; at
@@ -661,6 +779,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
         let task = session.dataTask(with: request)
         ingestTask = task
+        releaseConnection()
+        let newConnID = LiveConnectionRegistry.shared.open(sourceURL, owner: "ts-remux#\(deliveryID.prefix(6))")
+        connLock.lock(); connID = newConnID; connLock.unlock()
         ingestStartedAt = Date()
         firstByteLogged = false
         firstByteLock.lock(); lastByteAt = nil; firstByteLock.unlock()
@@ -795,15 +916,18 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             fixAUDOrder(&p)
         }
 
+        // PSI is watched for the whole session, not just until the first
+        // program is found: Switch Stream swaps the source on this same
+        // connection and the new mux can carry a different program.
         if pid == 0 {
-            patPacket = p
-            parsePAT(p)
+            parsePAT(p, pusi: pusi)
         } else if pid == pmtPID {
-            pmtPacket = p
-            parsePMT(p)
+            parsePMT(p, pusi: pusi)
         }
 
         guard codecGatePassed else { return }
+
+        if pid == videoPID { noteVideoContinuity(p) }
 
         // Keyframe-aligned cuts: only video PES starts can open segments.
         if pid == videoPID, pusi {
@@ -857,7 +981,35 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                     }
                 }
                 let isKeyframe = packetStartsKeyframeAccessUnit(p)
-                if awaitingFirstKeyframe {
+                let sps = isKeyframe ? firstSPSNAL(p) : nil
+                if !awaitingFirstKeyframe,
+                   let reason = sourceChangeReason(pts: pts, sps: sps) {
+                    beginSourceSwitch(reason: reason)
+                }
+                if let sps { lastSPS = sps }
+                lastSeenVideoPTS = pts
+                if awaitingSwitchKeyframe {
+                    // Only an IDR access unit that carries its own SPS (and
+                    // so its PPS) may open the first segment of the new
+                    // source: anything earlier references parameter sets
+                    // the decoder has not seen and renders as garbage.
+                    let nals = leadingNALTypes(p, limit: 16)
+                    if isKeyframe, nals.contains(7) {
+                        awaitingSwitchKeyframe = false
+                        awaitingFirstKeyframe = false
+                        setRegatingShared(false)
+                        // Segment 0 has nothing before it to be discontinuous with.
+                        nextSegmentDiscontinuity = nextSeq > 0
+                        beginSegment(at: pts)
+                        currentSegmentLeadNALs = nals
+                        var spsDesc = ""
+                        if let sps, let info = H264SPSTiming.parse(sps) {
+                            spsDesc = String(format: ", SPS %.2ffps %@", info.fps,
+                                             info.isInterlaced ? "interlaced" : "progressive")
+                        }
+                        debugLog("[TS-REMUX] switch: new source IDR+SPS at pts \(String(format: "%.3f", pts)) lead=\(nals)\(spsDesc); segment \(nextSeq) tagged EXT-X-DISCONTINUITY")
+                    }
+                } else if awaitingFirstKeyframe {
                     if isKeyframe {
                         awaitingFirstKeyframe = false
                         beginSegment(at: pts)
@@ -901,6 +1053,86 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
 
         currentSegment.append(p)
+    }
+
+    // MARK: Source switch detection
+
+    /// Continuity bookkeeping on the video PID. A counter that skips, or
+    /// an adaptation-field discontinuity_indicator, is recorded with its
+    /// wall time; on its own it is ordinary packet loss, but together
+    /// with a changed SPS it marks a new source.
+    private func noteVideoContinuity(_ p: Data) {
+        let afc = (p[3] >> 4) & 0x03
+        if (afc & 0x02) != 0, p[4] > 0, (p[5] & 0x80) != 0 {
+            lastVideoCCBreakAt = Date()
+        }
+        guard (afc & 0x01) != 0 else { return }
+        let cc = Int(p[3] & 0x0F)
+        if lastVideoCC >= 0, cc != lastVideoCC, cc != (lastVideoCC + 1) & 0x0F {
+            lastVideoCCBreakAt = Date()
+        }
+        lastVideoCC = cc
+    }
+
+    /// Why this video PES start begins a new source, or nil. Two shapes:
+    /// a PTS jump far beyond reordering or jitter (never the 33-bit wrap),
+    /// or a changed SPS together with a recent continuity break (or with
+    /// a change_stream the tile has just confirmed).
+    private func sourceChangeReason(pts: Double, sps: [UInt8]?) -> String? {
+        if lastSeenVideoPTS >= 0 {
+            let delta = pts - lastSeenVideoPTS
+            let wrap = 8_589_934_592.0 / 90_000.0
+            let wrapped = lastSeenVideoPTS > wrap - 60 && pts < 60
+            if !wrapped, delta > switchPTSJumpForward || delta < -switchPTSJumpBackward {
+                return String(format: "PTS jump %+.3fs (%.3f -> %.3f)", delta, lastSeenVideoPTS, pts)
+            }
+        }
+        if let sps, let previous = lastSPS, spsDiffers(previous, sps) {
+            let now = Date()
+            let ccBreak = now.timeIntervalSince(lastVideoCCBreakAt) < 3
+            let expected = now < switchExpectedUntil
+            if ccBreak || expected {
+                return "SPS changed (\(ccBreak ? "continuity break" : "change_stream noted"))"
+            }
+        }
+        return nil
+    }
+
+    /// Compare the leading bytes of two SPS NALs. The extracted slices can
+    /// be cut short by the TS packet end, so only the common prefix counts
+    /// (profile, level, ids and the picture size live in it).
+    private func spsDiffers(_ a: [UInt8], _ b: [UInt8]) -> Bool {
+        let n = min(16, min(a.count, b.count) - 1)
+        guard n >= 4 else { return false }
+        return a[0..<n] != b[0..<n]
+    }
+
+    /// Close whatever the old source left open and wait for the new
+    /// source's first IDR with an SPS. The connection is never touched.
+    private func beginSourceSwitch(reason: String) {
+        debugLog("[TS-REMUX] switch: source change detected (\(reason)); closing seg \(nextSeq) and waiting for the new source's IDR+SPS")
+        Self.lastSourceSwitch.set(Date())
+        setRegatingShared(true)
+        switchAccountingSuppressed = true
+        switchQuietClosures = 0
+        if !currentSegment.isEmpty, let start = currentStartPTS {
+            flushHeldAudio()
+            // End on the old source's own clock: one frame past its last
+            // video PES (the new source's PTS says nothing about it).
+            let frame = videoPTSDeltas.isEmpty ? 1.0 / 30.0
+                : videoPTSDeltas.sorted()[videoPTSDeltas.count / 2]
+            let end = lastSeenVideoPTS >= start ? lastSeenVideoPTS + frame : start + targetSegmentSeconds
+            closeSegment(endPTS: end)
+        }
+        heldAudio.removeAll(keepingCapacity: true)
+        currentSegment = Data()
+        currentStartPTS = nil
+        awaitingFirstKeyframe = true
+        awaitingSwitchKeyframe = true
+        lastSeenVideoPTS = -1
+        lastVideoAUPTS = -1
+        lastAudioPESPTS = -1
+        lastAudioPESFrames = 0
     }
 
     /// Append the completed audio PES to the open segment and read its
@@ -1029,10 +1261,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
     }
 
-    private func parsePAT(_ p: Data) {
-        guard pmtPID < 0, let base = payloadStart(p), base + 1 < 188 else { return }
+    private func parsePAT(_ p: Data, pusi: Bool) {
+        guard pusi, let base = payloadStart(p), base + 1 < 188 else { return }
         let pointer = Int(p[base])
         let section = base + 1 + pointer
+        // table_id 0x00 only: anything else on PID 0 is not a PAT.
+        guard section + 8 < 188, p[section] == 0x00 else { return }
         // table_id(1) section_length(2) tsid(2) ver(1) sec(1) last(1) = 8,
         // then program entries of 4 bytes each.
         var offset = section + 8
@@ -1040,20 +1274,48 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             let programNumber = (Int(p[offset]) << 8) | Int(p[offset + 1])
             let pidValue = (Int(p[offset + 2] & 0x1F) << 8) | Int(p[offset + 3])
             if programNumber != 0 {
-                pmtPID = pidValue
-                TuneTimeline.shared.mark("PAT")
-                debugLog("[TS-REMUX] PAT: program \(programNumber) -> PMT PID \(pmtPID)")
+                if pmtPID < 0 {
+                    pmtPID = pidValue
+                    patPacket = p
+                    TuneTimeline.shared.mark("PAT")
+                    debugLog("[TS-REMUX] PAT: program \(programNumber) -> PMT PID \(pmtPID)")
+                } else if pidValue != pmtPID {
+                    // Switch Stream: a new mux on the same connection.
+                    debugLog("[TS-REMUX] switch: PAT changed, program \(programNumber) -> PMT PID \(pmtPID) -> \(pidValue); re-running the codec gate")
+                    if codecGatePassed, fmp4 == nil { beginSourceSwitch(reason: "PAT PMT PID \(pmtPID) -> \(pidValue)") }
+                    resetProgramState()
+                    pmtPID = pidValue
+                    patPacket = p
+                } else {
+                    patPacket = p
+                }
                 return
             }
             offset += 4
         }
     }
 
-    private func parsePMT(_ p: Data) {
-        guard videoPID < 0, let base = payloadStart(p), base + 1 < 188 else { return }
+    /// Forget the program so the next PMT runs the codec gate afresh.
+    /// Segments already stored, the playlist, pacing and the connection
+    /// all stay; only the demux's view of the program is dropped.
+    private func resetProgramState() {
+        videoPID = -1
+        pmtPacket = nil
+        pmtSignature = ""
+        codecGatePassed = false
+        audioPIDs.removeAll()
+        audioStreamType = 0
+        lastVideoCC = -1
+        lastSPS = nil
+        adtsLogged = false
+        setRegatingShared(true)
+    }
+
+    private func parsePMT(_ p: Data, pusi: Bool) {
+        guard pusi, let base = payloadStart(p), base + 1 < 188 else { return }
         let pointer = Int(p[base])
         let section = base + 1 + pointer
-        guard section + 12 < 188 else { return }
+        guard section + 12 < 188, p[section] == 0x02 else { return }
         let sectionLength = (Int(p[section + 1] & 0x0F) << 8) | Int(p[section + 2])
         let programInfoLength = (Int(p[section + 10] & 0x0F) << 8) | Int(p[section + 11])
         var offset = section + 12 + programInfoLength
@@ -1062,6 +1324,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         var foundVideo: (pid: Int, type: UInt8)?
         var audioTypes: [UInt8] = []
         var foundAudioPIDs = Set<Int>()
+        var audioPairs: [String] = []
 
         while offset + 4 < sectionEnd {
             let streamType = p[offset]
@@ -1073,6 +1336,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             case 0x81, 0x87, 0x0F, 0x03, 0x04, 0x11: // AC-3 / E-AC-3 / AAC / MP2 / LATM
                 audioTypes.append(streamType)
                 foundAudioPIDs.insert(esPID)
+                audioPairs.append("\(esPID):\(streamType)")
             default:
                 break
             }
@@ -1080,12 +1344,37 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
 
         guard let video = foundVideo else { return }
+        let signature = "v\(video.pid):\(video.type) a" + audioPairs.sorted().joined(separator: ",")
+
+        if videoPID >= 0 {
+            // Program already gated. Same content: just refresh the cached
+            // PMT the segments lead with. Different content: a new source.
+            if signature == pmtSignature {
+                pmtPacket = p
+                return
+            }
+            // The HEVC arm owns its own demux; a mid-stream change there is
+            // its sub-remuxer's to handle.
+            guard fmp4 == nil else { return }
+            debugLog("[TS-REMUX] switch: PMT changed [\(pmtSignature)] -> [\(signature)]; re-running the codec gate")
+            if codecGatePassed { beginSourceSwitch(reason: "PMT content changed") }
+            resetProgramState()
+        }
         videoPID = video.pid
+        pmtPacket = p
+        pmtSignature = signature
 
         // The codec gate, per Apple's HLS authoring rules. H.264 stays on
         // the TS passthrough below; HEVC switches to the fMP4 arm (rule
         // 1.5); MPEG-2 has no decoder on this platform at all.
         if video.type == 0x24 {
+            if nextSeq > 0 {
+                // A TS playlist cannot turn into an fMP4 one mid-stream.
+                // Report it and let the tile's failure handling decide.
+                debugLog("[TS-REMUX] switch: new source is HEVC after \(nextSeq) H.264 segments -> codec gate FAILED")
+                fail(.unsupportedCodec("HEVC after Switch Stream"))
+                return
+            }
             startFMP4Pipeline()
             return
         }
@@ -1263,12 +1552,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         return nil
     }
 
-    private func leadingNALTypes(_ p: Data) -> [Int] {
+    private func leadingNALTypes(_ p: Data, limit: Int = 6) -> [Int] {
         guard let base = payloadStart(p), base + 9 < 188 else { return [] }
         var i = base + 9 + Int(p[base + 8])
         var out: [Int] = []
         let end = 188 - 4
-        while i < end, out.count < 6 {
+        while i < end, out.count < limit {
             if p[i] == 0x00, p[i + 1] == 0x00 {
                 var nalStart = -1
                 if p[i + 2] == 0x01 { nalStart = i + 3 }
@@ -1294,10 +1583,41 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // AVPlayer stalls line up with the worst gaps). Wall-clock gap
         // between closures minus the media duration ~= feed starvation.
         let nowWall = Date()
+        let isDiscontinuity = nextSegmentDiscontinuity
+        nextSegmentDiscontinuity = false
+        if isDiscontinuity {
+            discontinuitySeqs.insert(nextSeq)
+            // The first segment of the new source is live media again:
+            // drain whatever the switch left in the paced reservoir back
+            // to the normal target for the next 20 s (see advancePacedEdge).
+            pacedDrainUntil = nowWall.addingTimeInterval(20)
+            Self.lastSourceSwitch.set(nowWall)
+        }
+        if switchAccountingSuppressed {
+            // The switch gap is not upstream jitter: keep it out of the
+            // rate window, the worst-gap figure and lastFeedStarvation, or
+            // the hold-back learner and the resume gate train on it. The
+            // window restarts at the first closure after the new source's
+            // first segment, or after three closures when a noted
+            // change_stream never showed a detectable change.
+            switchQuietClosures = isDiscontinuity ? 0 : switchQuietClosures + 1
+            let afterNewSource = !isDiscontinuity && discontinuitySeqs.contains(nextSeq - 1)
+            if afterNewSource || (!awaitingSwitchKeyframe && !isDiscontinuity && switchQuietClosures >= 3) {
+                switchAccountingSuppressed = false
+                Self.feedRateWindow.reset()
+                debugLog("[TS-REMUX] switch: feed telemetry restarted after the source change")
+            }
+            lastSegmentCloseWall = nil
+        }
+        switchLock.lock()
+        if switchNotedAtShared != nil || isDiscontinuity { switchSegmentAtShared = nowWall }
+        switchLock.unlock()
         // Rate window first: the driver reads it in the same tick it reads
         // lastFeedStarvation, and needs THIS closure counted.
-        Self.feedRateWindow.record(closeWall: nowWall, mediaDuration: duration)
-        if let lastWall = lastSegmentCloseWall {
+        if !switchAccountingSuppressed {
+            Self.feedRateWindow.record(closeWall: nowWall, mediaDuration: duration)
+        }
+        if !switchAccountingSuppressed, let lastWall = lastSegmentCloseWall {
             let gap = nowWall.timeIntervalSince(lastWall)
             if gap > duration + 0.6 {
                 starvedClosures += 1
@@ -1343,6 +1663,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // once the window fills, and 12 % 5 != 0 silenced every close after
         // the first ten seconds of the 2026-08-25 UHD soak.
         if nextSeq == 1 { TuneTimeline.shared.mark("seg0") }
+        if isDiscontinuity {
+            debugLog("[TS-REMUX] switch: segment \(nextSeq - 1) closed (\(String(format: "%.2f", duration))s, \(data.count / 1024) KB) opens the new source, discontinuity sequence now \(discontinuitySeqs.count)")
+        }
         if nextSeq == 1 || nextSeq % 5 == 0 {
             debugLog("[TS-REMUX] segment \(nextSeq - 1) closed (\(String(format: "%.2f", duration))s, \(data.count / 1024) KB), buffered \(segments.count)")
         }
@@ -1504,6 +1827,29 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             // arrival, forever, exactly as before this change.
             pacedNextReleaseAt = max(now, pacedNextReleaseAt) + segment.duration
         }
+        // Post-switch drain: the switch starved the player, and the new
+        // source then arrives as a burst that pacing would bank as a
+        // reservoir, walking the advertised edge ever further behind real
+        // time (device 16:09:15: 45 s behind live). For 20 s after the new
+        // source's first segment, release held segments until the
+        // reservoir is back at the normal two-segment target.
+        if let drainUntil = pacedDrainUntil {
+            if now >= drainUntil {
+                pacedDrainUntil = nil
+            } else {
+                let before = advertised
+                var held = segments.filter { $0.seq > advertised }.reduce(0.0) { $0 + $1.duration }
+                while held > pacedDrainReservoirSeconds, advertised < lastStored {
+                    advertised += 1
+                    held -= segments.first(where: { $0.seq == advertised })?.duration ?? 0
+                }
+                if advertised > before {
+                    pacedNextReleaseAt = now + (segments.first(where: { $0.seq == advertised })?.duration
+                                                ?? targetSegmentSeconds)
+                    debugLog("[TS-REMUX] paced: switch drain released segs \(before + 1)-\(advertised) (reservoir now \(String(format: "%.1f", max(0, held))) s)")
+                }
+            }
+        }
         pacedAdvertisedSeq = advertised
         pacedStarvationRelease(now: now)
         pacedLog(now: now, lastStored: lastStored)
@@ -1587,6 +1933,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         #EXT-X-MEDIA-SEQUENCE:\(first.seq)
 
         """
+        // Switch Stream: every window variant (live RAM, Live Rewind spill,
+        // inlined, event) derives its tags from the same seq set, so the
+        // count of tagged segments that slid out ahead of this window is
+        // its DISCONTINUITY-SEQUENCE and the tags stay consistent across
+        // reloads and across variants.
+        if !discontinuitySeqs.isEmpty {
+            let slid = discontinuitySeqs.filter { $0 < first.seq }.count
+            text += "#EXT-X-DISCONTINUITY-SEQUENCE:\(slid)\n"
+        }
         if eventPlaylist {
             text += "#EXT-X-PLAYLIST-TYPE:EVENT\n"
         }
@@ -1598,6 +1953,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
         }
         for segment in window {
+            if discontinuitySeqs.contains(segment.seq) {
+                text += "#EXT-X-DISCONTINUITY\n"
+            }
             text += "#EXTINF:\(String(format: "%.3f", segment.duration)),\n"
             if inProcessDelivery, let b64 = deliveryBase64[segment.seq] {
                 let mime = fmp4 != nil ? "video/iso.segment" : "video/mp2t"
@@ -1827,6 +2185,9 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        // The socket is closed whatever the outcome; release the slot so
+        // a re-tune does not see a phantom overlap.
+        if task === ingestTask { releaseConnection() }
         // The buffered error response ended (a body too short to trip the
         // parse above, or no body at all): report it now, never as a
         // clean EOF.
@@ -3091,7 +3452,11 @@ struct AVPlayerMultiviewTile: View {
         upstreamClosedRetunes += 1
         debugLog("[AVP-STREAM] upstream closed the live stream; immediate re-tune "
             + "\(upstreamClosedRetunes)/\(Self.upstreamClosedMaxRetunes) channel=\(channelName)")
-        stop()
+        // Never hand the dead remuxer to channel retention: start() would
+        // adopt it back and sit on a closed ingest. stop() cancels it; the
+        // fresh ingest's startIngest waits for that cancel to land
+        // (LiveConnectionRegistry), so the re-tune cannot overlap it.
+        stop(allowRetain: false)
         statusText = Self.reconnectingStatus
         let token = teardownToken
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -4588,7 +4953,7 @@ struct AVPlayerMultiviewTile: View {
         stallWatchdog = watchdog
     }
 
-    private func stop() {
+    private func stop(allowRetain: Bool = true) {
         tileStopped = true
         // No stall overlay survives a pipeline teardown.
         ingestSilent = false
@@ -4609,7 +4974,7 @@ struct AVPlayerMultiviewTile: View {
             // Channel retention: hand a HEALTHY rewind session to the
             // manager instead of stopping it, so flipping back resumes
             // the full window. Errored tiles stop as before.
-            if LiveChannelRetention.isEnabled, tileError == nil,
+            if allowRetain, LiveChannelRetention.isEnabled, tileError == nil,
                let mux = remuxer, let url = readyLocalURL,
                let key = sessionRetainKey, let chID = sessionRetainChannelID {
                 LiveChannelRetention.shared.retain(

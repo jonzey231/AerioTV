@@ -5200,6 +5200,10 @@ final class AVPlayerProgressDriver {
     /// must still produce a picture.
     static let stallGateTimeout: TimeInterval = 25
 
+    /// Seconds after a Switch Stream source change during which stalls are
+    /// not learned from (hold-back) and no backward rejoin is attempted.
+    static let sourceSwitchLearningQuiet: TimeInterval = 60
+
     private func learnedHoldback() -> Double {
         liveHoldbackKey.map { LiveEdgeHoldback.offset(for: $0) } ?? LiveEdgeHoldback.base
     }
@@ -5253,6 +5257,10 @@ final class AVPlayerProgressDriver {
     @discardableResult
     private func attemptRepeatStallRejoin() -> Bool {
         guard isLive, let item = player.currentItem else { return false }
+        // Moving back into the window across a source switch replays the
+        // OLD source; the switch watch returns to live instead.
+        if let sinceSwitch = TSHLSRemuxer.lastSourceSwitch.secondsSince(),
+           sinceSwitch < Self.sourceSwitchLearningQuiet { return false }
         if let last = lastRejoinAt, Date().timeIntervalSince(last) < 180 { return false }
         // What is ACTUALLY available behind the playhead, from the item's own
         // seekable range (the remuxer's sliding window as AVPlayer sees it).
@@ -5364,7 +5372,15 @@ final class AVPlayerProgressDriver {
         if isLive, dStalls > 0, let key = liveHoldbackKey {
             let rate = TSHLSRemuxer.feedRateWindow.rateRatio()
             let worstGap = TSHLSRemuxer.feedRateWindow.worstGap()
-            if let rate, rate < 0.95 {
+            if let sinceSwitch = TSHLSRemuxer.lastSourceSwitch.secondsSince(),
+               sinceSwitch < Self.sourceSwitchLearningQuiet {
+                // Switch Stream (2026-09-15): the stall is the source swap,
+                // not feed jitter. Learning from it pushed ESPN's live edge
+                // 6 -> 18 s ("worst gap 25.5s") for every later tune.
+                debugLog(String(format:
+                    "[AVP-HOLDBACK] stall #%d ignored: source switch %.0fs ago, a switch gap is not feed jitter",
+                    stalls, sinceSwitch))
+            } else if let rate, rate < 0.95 {
                 debugLog(String(format:
                     "[AVP-HOLDBACK] stall #%d ignored: upstream below real time (rate %.2f), a larger hold-back cannot fill a buffer the feed is not filling",
                     stalls, rate))
@@ -6124,6 +6140,9 @@ struct NativeHLSPlayerScreen: View {
     /// onDisappear so a dismissal inside the 0.5 s gap cannot start a
     /// remuxer (and its upstream connection) that nothing will ever stop.
     @State private var restartWork: DispatchWorkItem?
+    /// Switch Stream progress watch (remux path). Bumped per switch so a
+    /// newer switch or a teardown retires the in-flight watch.
+    @State private var switchWatchToken = UUID()
     #if os(iOS)
     /// Unified chrome state: one store, one driver, one visibility Bool.
     /// The store is the same observable type the mpv overlay reads, fed
@@ -6246,6 +6265,32 @@ struct NativeHLSPlayerScreen: View {
         // server-side HLS request to a server that no longer answers it):
         // fall back to mpv, same as the tile path. The per-session
         // re-probe corrects the cache for next time.
+        // Switch Stream (remux path): the ingest keeps its connection and
+        // Dispatcharr swaps the upstream on the same socket. TSHLSRemuxer
+        // latches PAT/PMT once (parsePAT/parsePMT guard on the first PIDs and
+        // codec), so a new upstream with different PIDs or codecs would stop
+        // producing segments with bytes still flowing (no ingest silence) and
+        // wedge. If AVPlayer does not advance within ~6 s, restart the remux
+        // pipeline ONCE (restartRemuxPipeline stops the old ingest first).
+        .onReceive(NotificationCenter.default.publisher(for: .switchStreamReprime)) { note in
+            guard useRemux, !didFallback,
+                  let uuid = note.userInfo?["uuid"] as? String,
+                  let url = overrideURL ?? item.streamURL ?? item.streamURLs.first,
+                  url.absoluteString.contains("/proxy/ts/stream/\(uuid)") else { return }
+            let token = UUID()
+            switchWatchToken = token
+            DebugLogger.shared.log("[SWITCH] kept connection (AVPlayer remux)",
+                                   category: "Playback", level: .info)
+            // Same connection, new source: arm the remuxer's re-gate and
+            // keep the switch gap out of pacing and hold-back learning.
+            remuxer?.noteSourceSwitch()
+            let pos = player?.currentTime().seconds
+            evaluateSwitchProgress(token: token, start: Date(),
+                                   lastPosition: (pos?.isFinite ?? false) ? pos : nil,
+                                   advancingSamples: 0,
+                                   lastBytes: remuxer?.bytesIngested ?? 0,
+                                   bytesChangedAt: Date(), resumed: false)
+        }
         .onReceive(NotificationCenter.default.publisher(
             for: .AVPlayerItemFailedToPlayToEndTime)) { note in
             guard let failed = note.object as? AVPlayerItem,
@@ -6360,6 +6405,7 @@ struct NativeHLSPlayerScreen: View {
             }
         }
         .onDisappear {
+            switchWatchToken = UUID()
             #if os(iOS)
             driver?.teardown()
             driver = nil
@@ -6518,6 +6564,110 @@ struct NativeHLSPlayerScreen: View {
             category: "Playback", level: .warning)
         statusText = Self.reconnectingStatus
         restartRemuxPipeline()
+    }
+
+    /// Switch Stream progress poll (0.5 s cadence, 6 s budget). Progress is
+    /// the player position moving forward on two consecutive samples while
+    /// playing; otherwise one restartRemuxPipeline (no overlapping ingest).
+    /// The budget stretches (to `switchWatchCap`) while the remuxer is
+    /// legitimately re-acquiring the new source with bytes still arriving,
+    /// or has just stored a segment the player has not reached yet: a
+    /// reload there would throw away a source that is about to play. After
+    /// playback resumes the watch stays up to the cap to return the player
+    /// to the live edge once, if the switch left it far behind.
+    private func evaluateSwitchProgress(token: UUID, start: Date,
+                                        lastPosition: Double?, advancingSamples: Int,
+                                        lastBytes: Int64, bytesChangedAt: Date,
+                                        resumed: Bool) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard switchWatchToken == token, !didFallback, remuxer != nil || player != nil else { return }
+            let now = Date()
+            let elapsed = now.timeIntervalSince(start)
+            let bytes = remuxer?.bytesIngested ?? lastBytes
+            let changedAt = bytes != lastBytes ? now : bytesChangedAt
+            let progress = remuxer?.sourceSwitchProgress
+            if resumed {
+                if player?.timeControlStatus == .paused { return }
+                if returnToLiveAfterSwitchIfFar() || elapsed >= Self.switchWatchCap { return }
+                evaluateSwitchProgress(token: token, start: start, lastPosition: lastPosition,
+                                       advancingSamples: advancingSamples, lastBytes: bytes,
+                                       bytesChangedAt: changedAt, resumed: true)
+                return
+            }
+            let raw = player?.currentTime().seconds
+            let pos: Double? = (raw?.isFinite ?? false) ? raw : nil
+            // A user pause is not a stall; stop judging.
+            if player?.timeControlStatus == .paused { return }
+            let playing = player?.timeControlStatus == .playing
+            var samples = advancingSamples
+            if let pos, let prev = lastPosition, pos > prev, pos - prev < 5, playing {
+                samples += 1
+            } else {
+                samples = 0
+            }
+            if samples >= 2, progress?.regating != true {
+                DebugLogger.shared.log(
+                    "[SWITCH] playback resumed after \(Int(elapsed * 1000))ms (AVPlayer remux)",
+                    category: "Playback", level: .info)
+                evaluateSwitchProgress(token: token, start: start, lastPosition: pos,
+                                       advancingSamples: samples, lastBytes: bytes,
+                                       bytesChangedAt: changedAt, resumed: true)
+                return
+            }
+            if elapsed >= 6 {
+                // Dispatcharr delivers in 8 to 9.5 s bursts, so "flowing"
+                // allows a burst-sized quiet spell.
+                let flowing = now.timeIntervalSince(changedAt) < 10
+                let regating = progress?.regating == true && flowing
+                let freshSegment = progress?.lastSegmentAt.map { now.timeIntervalSince($0) < 6 } ?? false
+                if elapsed < Self.switchWatchCap, regating || freshSegment {
+                    if Int(elapsed * 2) % 4 == 0 {
+                        DebugLogger.shared.log(
+                            "[SWITCH] waiting on the new source (\(regating ? "remuxer re-gating, bytes flowing" : "segment just stored")), \(Int(elapsed))s of \(Int(Self.switchWatchCap))s",
+                            category: "Playback", level: .info)
+                    }
+                } else {
+                    switchWatchToken = UUID()
+                    DebugLogger.shared.log("[SWITCH] no progress, single reload (AVPlayer remux)",
+                                           category: "Playback", level: .warning)
+                    statusText = Self.reconnectingStatus
+                    restartRemuxPipeline()
+                    return
+                }
+            }
+            evaluateSwitchProgress(token: token, start: start,
+                                   lastPosition: pos ?? lastPosition, advancingSamples: samples,
+                                   lastBytes: bytes, bytesChangedAt: changedAt, resumed: false)
+        }
+    }
+
+    /// Hard ceiling on the Switch Stream watch, re-gate extension included.
+    private static let switchWatchCap: TimeInterval = 30
+
+    /// After a switch resumes, a player parked far behind the advertised
+    /// edge (the switch gap plus whatever pacing banked) is returned to
+    /// live once. Reuses the chrome's Return to Live (which honors the
+    /// session hold-back) where it exists. Returns true when it seeked.
+    private func returnToLiveAfterSwitchIfFar() -> Bool {
+        guard let player, let item = player.currentItem,
+              let range = item.seekableTimeRanges.last?.timeRangeValue else { return false }
+        let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+        let now = item.currentTime().seconds
+        guard end.isFinite, now.isFinite else { return false }
+        let behind = end - now
+        guard behind > 12 else { return false }
+        DebugLogger.shared.log(
+            "[SWITCH] \(String(format: "%.1f", behind))s behind the live edge after the switch; returning to live",
+            category: "Playback", level: .info)
+        #if os(iOS)
+        if let action = progressStore.seekToLiveAction {
+            action()
+            return true
+        }
+        #endif
+        player.seek(to: CMTime(seconds: max(0, end - 6), preferredTimescale: 600))
+        if player.timeControlStatus == .paused { player.play() }
+        return true
     }
 
     /// Tears the remux pipeline down and stands a fresh one up on the same

@@ -130,16 +130,13 @@ extension Notification.Name {
     static let connectionIssueRetryRequested = Notification.Name("ConnectionIssueRetryRequested")
 
     /// Posted by `SwitchStreamView` after a confirmed Dispatcharr Switch
-    /// Stream. The live player coordinator whose proxy URL matches
-    /// `userInfo["uuid"]` reloads libmpv onto the same proxy URL so it
-    /// re-locks onto the channel's fresh buffer. libmpv usually follows the
-    /// in-place TS swap on its own, but when the picked upstream is dead and
-    /// Dispatcharr cascades through server-side failover, the buffer resets
-    /// repeatedly and libmpv falls far behind the head (frozen until
-    /// re-tune). The reload is the deterministic recovery; a brief keepalive
-    /// connection is held across it so the channel isn't torn down to zero
-    /// clients (Dispatcharr's short shutdown delay would cold-revert it to the
-    /// default stream). Does NOT affect the Stats page (that's owner-worker
-    /// gated server-side); purely a playback-robustness step.
+    /// Stream. The live player whose proxy URL matches `userInfo["uuid"]`
+    /// KEEPS its existing connection (Dispatcharr swaps the upstream on the
+    /// same socket) and watches for playback progress. Only if playback does
+    /// not advance within ~6 s does it do ONE reload of the same URL (mpv
+    /// `loadfile replace`, or `restartRemuxPipeline` on the AVPlayer remux
+    /// path), with no overlapping connection. Never open a second concurrent
+    /// GET here: Dispatcharr counts it against the user's stream_limit and
+    /// terminates the player connection, reverting the switch.
     static let switchStreamReprime = Notification.Name("SwitchStreamReprime")
 }

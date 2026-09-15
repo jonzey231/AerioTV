@@ -60,6 +60,103 @@ func appendingHLSOutputFormat(_ url: URL) -> URL {
     return components.url ?? url
 }
 
+/// Single-connection invariant for live channel URLs (stream_limit 1 field
+/// bug, 2026-09-15): Dispatcharr counts every concurrent GET to
+/// /proxy/ts/stream/<uuid> against the user's stream_limit and terminates
+/// the OLDER client, and with shutdown delay 0 the channel then stops and
+/// answers 503 "Channel is stopping". Every app-side connection to a live
+/// channel URL registers here. Keyed by scheme+host+port+path (query
+/// dropped: `?output_format=hls` / `mpegts` is the same channel server-side).
+///
+/// A connection that is being torn down is marked `closing` synchronously
+/// by its owner; a new ingest to the same channel waits (bounded) for the
+/// closing one to unregister before it opens, so a cancel-then-start never
+/// overlaps. Any overlap that still happens is logged as `[SINGLE-CONN]`.
+final class LiveConnectionRegistry: @unchecked Sendable {
+    static let shared = LiveConnectionRegistry()
+
+    private struct Entry { let owner: String; var closing: Bool }
+    private let cond = NSCondition()
+    private var entries: [UUID: (key: String, entry: Entry)] = [:]
+
+    static func key(for url: URL) -> String {
+        guard var c = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url.absoluteString
+        }
+        c.query = nil
+        c.fragment = nil
+        c.user = nil
+        c.password = nil
+        return c.url?.absoluteString ?? url.absoluteString
+    }
+
+    /// True while any connection (open or closing) to this channel exists.
+    func hasConnection(to url: URL) -> Bool {
+        let key = Self.key(for: url)
+        cond.lock(); defer { cond.unlock() }
+        return entries.values.contains { $0.key == key }
+    }
+
+    /// True while ANY live connection is registered. stream_limit counts
+    /// per user across channels, so a probe must not run beside any of them.
+    var hasAnyConnection: Bool {
+        cond.lock(); defer { cond.unlock() }
+        return !entries.isEmpty
+    }
+
+    /// Blocks the CALLING queue (never main) until every CLOSING connection
+    /// to `url` has unregistered, up to `timeout`.
+    func waitForClosing(_ url: URL, timeout: TimeInterval) {
+        let key = Self.key(for: url)
+        let deadline = Date().addingTimeInterval(timeout)
+        cond.lock()
+        var waited = false
+        while entries.values.contains(where: { $0.key == key && $0.entry.closing }) {
+            waited = true
+            if !cond.wait(until: deadline) { break }
+        }
+        let stillClosing = entries.values.contains { $0.key == key && $0.entry.closing }
+        cond.unlock()
+        if waited {
+            debugLog("[SINGLE-CONN] waited for previous connection to close before opening "
+                + "\(URL(string: key)?.path ?? key)\(stillClosing ? " (timed out, still closing)" : "")")
+        }
+    }
+
+    /// Register a new connection; logs an overlap when another connection
+    /// to the same channel is still registered.
+    @discardableResult
+    func open(_ url: URL, owner: String) -> UUID {
+        let key = Self.key(for: url)
+        let id = UUID()
+        cond.lock()
+        let others = entries.values.filter { $0.key == key }
+            .map { "\($0.entry.owner)\($0.entry.closing ? "(closing)" : "(open)")" }
+        entries[id] = (key, Entry(owner: owner, closing: false))
+        cond.unlock()
+        if !others.isEmpty {
+            debugLog("[SINGLE-CONN] overlap detected: \(owner) opening \(URL(string: key)?.path ?? key) "
+                + "while \(others.joined(separator: ", ")) still registered")
+        }
+        return id
+    }
+
+    func markClosing(_ id: UUID?) {
+        guard let id else { return }
+        cond.lock()
+        entries[id]?.entry.closing = true
+        cond.unlock()
+    }
+
+    func close(_ id: UUID?) {
+        guard let id else { return }
+        cond.lock()
+        entries[id] = nil
+        cond.broadcast()
+        cond.unlock()
+    }
+}
+
 // Casting rework P2: the Dispatcharr progressive-fMP4 helpers
 // (webCastStreamURL + castWebOutputProfileID) that used to live here are
 // gone. The web receiver stuttered on that URL every 10-15 s because a
@@ -95,6 +192,38 @@ final class HLSCapabilityStore: NSObject {
     private var checkedAt: [String: Date] = [:]
     private var probedThisSession: Set<String> = []
     private var inFlight: Set<String> = []
+    /// A probe skipped because its channel had a live connection; retried
+    /// by `runDeferredProbeIfIdle` once the playback session has ended.
+    private var deferredProbe: (url: URL, headers: [String: String])?
+
+    /// Tune-time entry point: remember the probe instead of firing it. The
+    /// tune is about to open (or already opened, via LivePrewarm) its own
+    /// connection to this channel, so probing now is a second GET.
+    func deferProbe(streamURL: URL, headers: [String: String]) {
+        guard let key = hostKey(streamURL),
+              !probedThisSession.contains(key),
+              !inFlight.contains(key) else { return }
+        if deferredProbe == nil {
+            debugLog("[SINGLE-CONN] HLS capability probe deferred to session end (\(key))")
+        }
+        deferredProbe = (streamURL, headers)
+    }
+
+    /// Called after a playback session exits. Waits a few seconds so the
+    /// torn-down ingest is fully gone, then probes only if NOTHING is
+    /// connected to that channel (a new tune in the meantime re-defers).
+    func runDeferredProbeIfIdle() {
+        guard deferredProbe != nil else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard let self, let d = self.deferredProbe,
+                  MultiviewStore.shared.tiles.isEmpty,
+                  !LiveConnectionRegistry.shared.hasAnyConnection,
+                  !LivePrewarm.shared.hasPending else { return }
+            self.deferredProbe = nil
+            self.probeIfNeeded(streamURL: d.url, headers: d.headers)
+        }
+    }
 
     private override init() {
         capable = Set(UserDefaults.standard.stringArray(forKey: Self.defaultsKey) ?? [])
@@ -174,6 +303,21 @@ final class HLSCapabilityStore: NSObject {
         guard let key = hostKey(streamURL),
               !probedThisSession.contains(key),
               !inFlight.contains(key) else { return }
+        // stream_limit 1 root cause (2026-09-15): this probe is a real GET to
+        // the SAME channel the tune is opening (only the query differs).
+        // Fired at press it landed ~1 s after the warm ingest, Dispatcharr
+        // terminated the warm ingest for the user's stream_limit, then the
+        // probe cancelled itself at the headers, leaving zero clients: the
+        // channel stopped and every retry got 503 "Channel is stopping".
+        // Never probe a channel that has a connection; defer until the
+        // session is over and nothing is connected.
+        if LiveConnectionRegistry.shared.hasAnyConnection
+            || LivePrewarm.shared.hasPending
+            || !MultiviewStore.shared.tiles.isEmpty {
+            deferredProbe = (streamURL, headers)
+            debugLog("[SINGLE-CONN] HLS capability probe deferred: channel connection open")
+            return
+        }
         inFlight.insert(key)
 
         let probeURL = appendingHLSOutputFormat(streamURL)
@@ -181,7 +325,9 @@ final class HLSCapabilityStore: NSObject {
         request.timeoutInterval = 6
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
 
+        let connID = LiveConnectionRegistry.shared.open(streamURL, owner: "hls-probe")
         let delegate = ProbeDelegate { [weak self] status, location in
+            LiveConnectionRegistry.shared.close(connID)
             let hls = Self.redirectLooksLikeHLS(location)
             Task { @MainActor [weak self] in
                 self?.record(status: status, redirectIsHLS: hls, for: key)

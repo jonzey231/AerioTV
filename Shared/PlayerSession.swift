@@ -268,6 +268,7 @@ final class PlayerSession: ObservableObject {
         // slot and is exactly what makes the next tune answer 503
         // (review 2026-09-11 section 2).
         LivePrewarm.shared.cancel(reason: "session exit")
+        HLSCapabilityStore.shared.runDeferredProbeIfIdle()
         store.reset()
         mode = .idle
         NowPlayingManager.shared.configuredAsMultiviewAdapter = false
@@ -483,7 +484,9 @@ final class PlayerSession: ObservableObject {
                 routeURL = appendingHLSOutputFormat(url)
                 effectiveFormat = .hls
             }
-            HLSCapabilityStore.shared.probeIfNeeded(streamURL: url, headers: headers)
+            // Deferred, never at tune time: the probe is a second GET to
+            // this channel and tripped stream_limit (2026-09-15).
+            HLSCapabilityStore.shared.deferProbe(streamURL: url, headers: headers)
         }
         if PlaybackFeatureFlags.avPlayerForHLS, effectiveFormat == .hls {
             return ResolvedEngine(engine: .avPlayerDirectHLS, routeURL: routeURL, headers: headers)
@@ -1129,12 +1132,20 @@ final class LivePrewarm {
         return p
     }
 
-    func cancel(reason: String) {
-        guard let p = pending else { return }
+    var hasPending: Bool { pending != nil }
+
+    /// `completion` runs on main once the warm remuxer's ingest task is
+    /// cancelled and its session invalidated (immediately when nothing is
+    /// pending), so a caller can open its own ingest with no overlap.
+    func cancel(reason: String, completion: (@Sendable () -> Void)? = nil) {
+        guard let p = pending else {
+            if let completion { DispatchQueue.main.async(execute: completion) }
+            return
+        }
         pending = nil
         expiry?.cancel()
         expiry = nil
-        p.remuxer.stop()
+        p.remuxer.stop(completion: completion)
         debugLog("[TUNE-PREWARM] cancelled (\(reason)) channel=\(p.channelID)")
     }
 

@@ -14,15 +14,6 @@ import CoreVideo
 import CoreMedia  // For CMSampleBuffer
 import OpenGLES
 
-/// Tiny thread-safe latch for the Switch Stream re-sync keepalive: the
-/// keepalive task flips it once its connection receives a first byte (i.e. the
-/// server registered it as a client), and the reload waits on it before
-/// re-loading the player's own connection.
-private actor ReprimeKeepaliveGate {
-    private(set) var isConnected = false
-    func markConnected() { isConnected = true }
-}
-
 // MARK: - libmpv global init warm-up
 //
 // Observation from `[MV-TIMING]` logs on Apple TV 4K (3rd gen):
@@ -1289,69 +1280,89 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // MARK: - Switch Stream re-sync
 
         /// Posted by `SwitchStreamView` after a confirmed Dispatcharr Switch
-        /// Stream. Reload ONLY if this coordinator is the one playing that
-        /// channel's proxy URL — libmpv usually follows the in-place swap, but
-        /// a dead upstream + Dispatcharr failover cascade desyncs it, so we
-        /// reload to re-lock onto the fresh buffer.
+        /// Stream. Only the coordinator playing that channel's proxy URL
+        /// reacts. Dispatcharr swaps the upstream on the SAME client socket,
+        /// so the default is to keep the connection and let libmpv follow the
+        /// in-place swap. A second concurrent GET (the old keepalive) counts
+        /// against the user's stream_limit and got the player connection
+        /// terminated, stopping the channel and reverting the switch.
         @objc fileprivate func switchStreamReprimeRequested(_ note: Notification) {
             guard let uuid = note.userInfo?["uuid"] as? String else { return }
             Task { @MainActor [weak self] in
                 guard let self,
                       let current = self.urls.first,
                       current.absoluteString.contains("/proxy/ts/stream/\(uuid)") else { return }
-                self.reprimeWithKeepalive(url: current, headers: self.headers,
-                                          title: self.nowPlayingTitle, subtitle: self.nowPlayingSubtitle)
+                self.watchSwitchedStream(url: current)
             }
         }
 
-        /// Holds a SECOND bare client connection to the proxy stream open on a
-        /// DEDICATED ephemeral session (never the shared API pool), waits for
-        /// it to register, THEN forces a `loadfile replace` reload. The
-        /// keepalive keeps the channel's client-count >= 1 across our reload so
-        /// Dispatcharr's short shutdown delay doesn't tear the channel down and
-        /// cold-revert it to the default stream. Best-effort: if the keepalive
-        /// can't attach we reload anyway.
+        /// Bumped per Switch Stream so a newer switch (or a flip away)
+        /// retires an in-flight progress watch. Main-thread state.
+        private var switchWatchToken = 0
+        private var switchWatchStart = Date()
+        private var switchWatchLastPos: Double?
+        private var switchWatchAdvancingSamples = 0
+
+        /// Keeps the existing connection and watches mpv's time-pos for up to
+        /// 6 s. If playback does not advance, does ONE `loadfile replace` of
+        /// the same URL. mpv closes the old stream as part of the replace, so
+        /// there is never an overlapping connection.
         @MainActor
-        private func reprimeWithKeepalive(url: URL, headers: [String: String],
-                                          title: String, subtitle: String?) {
-            debugLog("[SwitchStream] \(streamTag): reload to re-sync libmpv onto the switched stream's buffer")
-            let gate = ReprimeKeepaliveGate()
-            // Dedicated ephemeral session: its connections never enter the
-            // shared API pool, so this throwaway keepalive can't influence
-            // which uwsgi worker a later change_stream lands on.
-            let session = URLSession(configuration: .ephemeral)
-            let keepalive = Task.detached(priority: .utility) {
-                var req = URLRequest(url: url, timeoutInterval: 8)
-                headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
-                // Distinct UA so this throwaway client is identifiable in
-                // Dispatcharr logs and never collides with the playback client.
-                req.setValue("AerioTV-switch-keepalive", forHTTPHeaderField: "User-Agent")
-                do {
-                    let (bytes, _) = try await session.bytes(for: req)
-                    var first = true
-                    for try await _ in bytes {
-                        if first { first = false; await gate.markConnected() }
-                        if Task.isCancelled { break }
-                    }
-                } catch {
-                    // best-effort; the reload proceeds regardless
+        private func watchSwitchedStream(url: URL) {
+            switchWatchToken &+= 1
+            switchWatchStart = Date()
+            switchWatchLastPos = nil
+            switchWatchAdvancingSamples = 0
+            debugLog("[SWITCH] kept connection \(streamTag)")
+            pollSwitchProgress(url: url, token: switchWatchToken)
+        }
+
+        @MainActor
+        private func pollSwitchProgress(url: URL, token: Int) {
+            mpvQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, let mpv = self.activeMPVHandle() else { return }
+                var pos: Double = -1
+                let posOK = mpv_get_property(mpv, "time-pos", MPV_FORMAT_DOUBLE, &pos) >= 0
+                var idle: Int32 = 0
+                mpv_get_property(mpv, "core-idle", MPV_FORMAT_FLAG, &idle)
+                var paused: Int32 = 0
+                mpv_get_property(mpv, "pause", MPV_FORMAT_FLAG, &paused)
+                let sample = (ok: posOK && pos >= 0, pos: pos, idle: idle != 0, paused: paused != 0)
+                Task { @MainActor [weak self] in
+                    self?.evaluateSwitchProgress(url: url, token: token, sample: sample)
                 }
             }
-            Task { @MainActor [weak self] in
-                guard let self else { keepalive.cancel(); session.invalidateAndCancel(); return }
-                // Wait (≤4s) for the keepalive to register before we reload
-                // (which briefly drops the player's own connection).
-                let deadline = Date().addingTimeInterval(4)
-                while Date() < deadline {
-                    if await gate.isConnected { break }
-                    try? await Task.sleep(nanoseconds: 100_000_000)
-                }
-                self.swapStream(to: url, newTitle: title, newSubtitle: subtitle)
-                // Hold the keepalive while our reload re-establishes, then drop it.
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                keepalive.cancel()
-                session.invalidateAndCancel()
+        }
+
+        @MainActor
+        private func evaluateSwitchProgress(url: URL, token: Int,
+                                            sample: (ok: Bool, pos: Double, idle: Bool, paused: Bool)) {
+            guard switchWatchToken == token,
+                  urls.first?.absoluteString == url.absoluteString else { return }
+            // A user pause is not a stall; stop judging.
+            if sample.paused { return }
+            // Progress = time-pos moving forward by a plausible step on two
+            // consecutive samples while mpv is not idle. A single timestamp
+            // jump from the new upstream does not count.
+            if sample.ok, !sample.idle, let prev = switchWatchLastPos,
+               sample.pos > prev, sample.pos - prev < 5 {
+                switchWatchAdvancingSamples += 1
+            } else {
+                switchWatchAdvancingSamples = 0
             }
+            if sample.ok { switchWatchLastPos = sample.pos }
+            let elapsed = Date().timeIntervalSince(switchWatchStart)
+            if switchWatchAdvancingSamples >= 2 {
+                debugLog("[SWITCH] playback resumed after \(Int(elapsed * 1000))ms \(streamTag)")
+                return
+            }
+            if elapsed >= 6 {
+                debugLog("[SWITCH] no progress, single reload \(streamTag)")
+                switchWatchToken &+= 1
+                swapStream(to: url, newTitle: nowPlayingTitle, newSubtitle: nowPlayingSubtitle)
+                return
+            }
+            pollSwitchProgress(url: url, token: token)
         }
 
 
@@ -3145,11 +3156,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // GH #60 seatbelt (memory-warning hook -> one relay reload).
             NotificationCenter.default.addObserver(self, selector: #selector(memorySeatbeltReload),
                                                    name: .aerioMemorySeatbeltReload, object: nil)
-            // Switch Stream: after a confirmed switch the picker asks the live
-            // player to reload so libmpv re-locks onto the channel's fresh
-            // buffer (recovers the dead-upstream/failover-cascade freeze). Only
-            // the coordinator playing that channel's proxy URL reacts. Removed
-            // via removeObserver(self) in deinit.
+            // Switch Stream: after a confirmed switch the picker notifies the
+            // live player, which keeps its connection and only reloads once
+            // (no overlap) if playback does not advance. Only the coordinator
+            // playing that channel's proxy URL reacts. Removed via
+            // removeObserver(self) in deinit.
             NotificationCenter.default.addObserver(self, selector: #selector(switchStreamReprimeRequested(_:)),
                                                    name: .switchStreamReprime, object: nil)
 
