@@ -1293,6 +1293,13 @@ struct ChannelListView: View {
                 .onChange(of: remoteStore.guideSidebarLayout) { _, _ in updateGuideSidebarShiftInset() }
                 .onChange(of: hiddenGroups) { _, _ in updateGuideSidebarShiftInset() }
                 .onDisappear { TVGuideSidebarState.shared.isOpen = false }
+                // Banner layout genuinely gone: the mini leaves the art anchor
+                // for its guide-timeline placement. Not on tab switches (the
+                // banner's onDisappear no longer clears the anchor).
+                .onAppear { if !previewMode { GuidePreviewArtAnchor.shared.clearLayoutGone() } }
+                .onChange(of: previewMode) { _, on in
+                    if !on { GuidePreviewArtAnchor.shared.clearLayoutGone() }
+                }
                 .onReceive(NotificationCenter.default.publisher(for: .guideCloseGroupSidebar)) { _ in
                     if guideSidebarOpen { dismissGuideSidebar() }
                 }
