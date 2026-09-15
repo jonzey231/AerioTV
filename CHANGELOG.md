@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.8.38 - 2026-09-14
+
+### Changed
+
+- Channel logos in the guide, channel list and player channel list grow
+  to use the space when channel numbers or names are hidden.
+
 ## v1.8.37 - 2026-09-14
 
 ### Fixed
