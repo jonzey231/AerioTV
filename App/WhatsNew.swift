@@ -57,6 +57,14 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.37",
+            title: "What's new in 1.8.37",
+            bullets: [
+                "Guide banner and On Demand hero: square and wide art fill the full slot again"
+            ],
+            releaseURL: nil
+        ),
+        WhatsNewRelease(
             version: "1.8.36",
             title: "What's new in 1.8.36",
             bullets: [

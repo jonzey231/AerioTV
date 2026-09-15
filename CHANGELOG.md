@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.8.37 - 2026-09-14
+
+### Fixed
+
+- Guide banner and On Demand hero: square and wide program art fill the
+  full slot again; only portrait posters use the poster slot.
+
 ## v1.8.36 - 2026-09-14
 
 ### Fixed
