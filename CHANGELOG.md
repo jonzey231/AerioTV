@@ -11,6 +11,17 @@
 - Favorites shows its proper name in the default-group picker.
 - Live TV: the hero banner shows portrait posters whole.
 - The mini player again sits on the poster's bottom edge.
+- Live TV: Reconnecting shows only when playback actually stalls, not
+  during normal gaps between data, and a clean server close re-tunes at
+  once.
+- Live TV: channel flips are more reliable, with no leftover restarts or
+  unused connections after closing the player.
+- Guide group resets land on All Channels instead of Favorites.
+- Apple TV guide: remapped arrow keys follow the same edge rules as the
+  normal arrows, and a quick Left steps back once you have moved into
+  earlier times.
+- Apple TV player: the first time the controls show, Pause has focus.
+- Apple TV Settings: stepped choices use capsule focus rings.
 
 ### Changed
 
@@ -20,6 +31,14 @@
   expands in place when group pills are on.
 - Apple TV: a second Back within 300 ms closes playback instead of
   leaving the mini player, with a hint in the strip.
+- iPhone: minimizing the player goes straight to Picture in Picture, and
+  the docked mini bar is gone. Changing channels or titles keeps you in
+  Picture in Picture, and closing it saves your movie or episode resume
+  point.
+- On Demand: the hero banner is reserved for Continue Watching, and
+  portrait art gets a poster-shaped slot.
+- Apple TV and iPad: the mini player slides to the screen edge while
+  Settings is open and returns when you leave.
 
 ### Added
 
@@ -29,6 +48,15 @@
 - Long-press any movie or series to hide it. A Hidden category in the
   Filter list brings them back, unchecked by default, and hidden titles
   sync across your devices.
+- iPhone: swipe down from the top of the player to start Picture in
+  Picture and keep using the app. iPad minimizes to the corner mini
+  player.
+- Skip Intervals setting: choose the skip back and skip forward amounts
+  for live TV, recordings and movies.
+- Apple TV guide: Sidebar layout setting in Manage Groups, to overlay the
+  guide or shift it over.
+- Apple TV guide: six remappable remote keys, with labels that match what
+  each key does.
 - A patent and trademark notice for the bundled codecs in the README and
   the Licenses screen.
 

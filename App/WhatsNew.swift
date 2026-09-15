@@ -67,7 +67,11 @@ enum WhatsNewStore {
                 "Apple TV: Video Scale now highlights and sticks",
                 "Apple TV: double Back closes playback",
                 "iPhone Live TV: header actions behind a three-dot button",
-                "Live TV: hero banner shows portrait posters whole"
+                "Live TV: hero banner shows portrait posters whole",
+                "iPhone: swipe down or minimize for Picture in Picture",
+                "Skip Intervals: pick your skip back and forward amounts",
+                "Apple TV guide: Sidebar layout and six remappable keys",
+                "Live TV: Reconnecting only shows on a real stall"
             ],
             releaseURL: nil
         ),
