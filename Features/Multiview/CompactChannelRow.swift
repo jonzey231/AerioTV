@@ -31,6 +31,7 @@ import SwiftUI
 /// becomes focusable via `TVNoHighlightButtonStyle`; no custom
 /// focus ring needed.
 struct CompactChannelRow: View {
+    @Environment(\.aerioTextScale) private var textScale
     let item: ChannelDisplayItem
     let isAlreadyAdded: Bool
     let isDisabled: Bool
@@ -69,17 +70,17 @@ struct CompactChannelRow: View {
                 // numbers don't get a phantom whitespace column.
                 if !item.number.isEmpty {
                     Text(item.number)
-                        .font(.system(size: numberFontSize, weight: .bold, design: .monospaced))
+                        .scaledFont(.system(size: numberFontSize, weight: .bold, design: .monospaced))
                         .lineLimit(1)
                         .foregroundStyle(.secondary)
-                        .frame(width: numberWidth, alignment: .trailing)
+                        .frame(width: TextScale.grow(numberWidth, textScale), alignment: .trailing)
                 }
 
                 logo
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(verbatim: item.name)
-                        .font(titleFont)
+                        .scaledFont(titleFont)
                         .lineLimit(1)
                         .foregroundStyle(.primary)
 
@@ -92,12 +93,12 @@ struct CompactChannelRow: View {
                         // all in those cases, but be defensive).
                         HStack(spacing: 6) {
                             Text(verbatim: prog.title)
-                                .font(subtitleFont)
+                                .scaledFont(subtitleFont)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                             if let remaining = remainingLabel(end: prog.end) {
                                 Text(verbatim: "· \(remaining)")
-                                    .font(subtitleFont)
+                                    .scaledFont(subtitleFont)
                                     .foregroundStyle(.tertiary)
                                     .lineLimit(1)
                             }
@@ -223,7 +224,7 @@ struct CompactChannelRow: View {
         #endif
     }
 
-    private var titleFont: Font {
+    private var titleFont: AerioFont {
         #if os(tvOS)
         return .system(size: 26, weight: .semibold)
         #else
@@ -231,7 +232,7 @@ struct CompactChannelRow: View {
         #endif
     }
 
-    private var subtitleFont: Font {
+    private var subtitleFont: AerioFont {
         #if os(tvOS)
         return .system(size: 20, weight: .regular)
         #else
@@ -276,17 +277,17 @@ struct CompactChannelRow: View {
     private var trailing: some View {
         if isAlreadyAdded {
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: trailingIconSize))
+                .scaledFont(.system(size: trailingIconSize))
                 .foregroundStyle(.green)
                 .accessibilityLabel("Already added")
         } else if isDisabled {
             Image(systemName: "hand.raised.slash")
-                .font(.system(size: trailingIconSize))
+                .scaledFont(.system(size: trailingIconSize))
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("Cannot add — limit reached")
         } else {
             Image(systemName: "plus.circle")
-                .font(.system(size: trailingIconSize))
+                .scaledFont(.system(size: trailingIconSize))
                 .foregroundStyle(Color.accentPrimary)
         }
     }

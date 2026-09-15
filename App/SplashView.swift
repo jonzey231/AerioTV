@@ -42,11 +42,11 @@ private struct UniversalSplashView: View {
                     .padding(.bottom, logoBottomPad)
 
                 Text("AerioTV")
-                    .font(.system(size: titleSize, weight: .bold, design: .rounded))
+                    .scaledFont(.system(size: titleSize, weight: .bold, design: .rounded))
                     .foregroundColor(.white)
 
                 Text("Live TV  ·  Movies  ·  Series")
-                    .font(.system(size: subtitleSize, weight: .light))
+                    .scaledFont(.system(size: subtitleSize, weight: .light))
                     .foregroundColor(Color(hex: "1AC4D8"))
                     .padding(.top, subtitleTopPad)
 

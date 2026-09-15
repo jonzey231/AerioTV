@@ -48,14 +48,14 @@ struct WelcomeView: View {
                         .padding(.top, 60)
 
                     Text("AerioTV")
-                        .font(.system(size: 60, weight: .bold))
+                        .scaledFont(.system(size: 60, weight: .bold))
                         .foregroundColor(.textPrimary)
                     Text("Your IPTV & Media Hub")
-                        .font(.system(size: 28, weight: .medium))
+                        .scaledFont(.system(size: 28, weight: .medium))
                         .foregroundColor(.textSecondary)
                         .padding(.bottom, 6)
                     Text("iPhone · iPad · Apple TV · Mac")
-                        .font(.system(size: 20))
+                        .scaledFont(.system(size: 20))
                         .foregroundColor(.textTertiary)
                         .padding(.bottom, 40)
 
@@ -110,13 +110,13 @@ struct WelcomeView: View {
                     // Title
                     VStack(spacing: 4) {
                         Text("AerioTV")
-                            .font(.displayLarge)
+                            .scaledFont(.displayLarge)
                             .foregroundColor(.textPrimary)
                         Text("Your IPTV & Media Hub")
-                            .font(.bodyLarge)
+                            .scaledFont(.bodyLarge)
                             .foregroundColor(.textSecondary)
                         Text("iPhone, iPad, Apple TV, & Mac")
-                            .font(.bodySmall)
+                            .scaledFont(.bodySmall)
                             .foregroundColor(.textTertiary)
                     }
                     .padding(.bottom, 24)
@@ -143,13 +143,13 @@ struct WelcomeView: View {
                         NavigationLink(destination: AddServerView()) {
                             HStack(spacing: 8) {
                                 Image(systemName: "server.rack")
-                                    .font(.system(size: 15, weight: .semibold))
+                                    .scaledFont(.system(size: 15, weight: .semibold))
                                 Text("Connect a Server")
-                                    .font(.headlineMedium)
+                                    .scaledFont(.headlineMedium)
                             }
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
-                            .frame(height: 48)
+                            .frame(minHeight: 48)
                             .background(LinearGradient.accentGradient)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
@@ -158,7 +158,7 @@ struct WelcomeView: View {
                         Button("Skip for now") {
                             hasCompletedOnboarding = true
                         }
-                        .font(.bodyMedium)
+                        .scaledFont(.bodyMedium)
                         .foregroundColor(.textTertiary)
                     }
                     .padding(.horizontal, 32)
@@ -218,7 +218,7 @@ struct WelcomeView: View {
                             .tint(.accentPrimary)
                     } else {
                         Image(systemName: iCloudSyncEnabled ? "checkmark.icloud.fill" : "icloud.fill")
-                            .font(.system(size: 15, weight: .medium))
+                            .scaledFont(.system(size: 15, weight: .medium))
                             .foregroundColor(.accentPrimary)
                     }
                 }
@@ -227,13 +227,13 @@ struct WelcomeView: View {
                     Text(syncManager.isImporting ? "Importing from iCloud…"
                          : iCloudSyncEnabled ? "iCloud Sync Enabled"
                          : "Sync via iCloud")
-                        .font(.headlineSmall)
+                        .scaledFont(.headlineSmall)
                         .foregroundColor(.textPrimary)
                     Text(syncManager.isImporting ? "Looking for an existing configuration…"
                          : iCloudSyncEnabled
                          ? "Settings synced across all your devices"
                          : "Use if you've enabled Aerio iCloud sync on another device")
-                        .font(.bodySmall)
+                        .scaledFont(.bodySmall)
                         .foregroundColor(.textSecondary)
                         .lineLimit(2)
                 }
@@ -245,7 +245,7 @@ struct WelcomeView: View {
                         .tint(.accentPrimary)
                 } else {
                     Image(systemName: iCloudSyncEnabled ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 20))
+                        .scaledFont(.system(size: 20))
                         .foregroundColor(iCloudSyncEnabled ? .accentPrimary : .textTertiary)
                 }
             }
@@ -286,20 +286,20 @@ private struct TVFeatureRow: View {
     var body: some View {
         HStack(spacing: 16) {
             Image(systemName: icon)
-                .font(.system(size: 20, weight: .semibold))
+                .scaledFont(.system(size: 20, weight: .semibold))
                 .foregroundStyle(LinearGradient.accentGradient)
                 .frame(width: 28)
 
             Text(title)
-                .font(.system(size: 24, weight: .semibold))
+                .scaledFont(.system(size: 24, weight: .semibold))
                 .foregroundColor(.textPrimary)
 
             Text("·")
-                .font(.system(size: 24))
+                .scaledFont(.system(size: 24))
                 .foregroundColor(.textTertiary)
 
             Text(detail)
-                .font(.system(size: 20))
+                .scaledFont(.system(size: 20))
                 .foregroundColor(.textTertiary)
                 .lineLimit(1)
 
@@ -332,7 +332,7 @@ private struct TVOnboardingImportButton: View {
                             .tint(.accentPrimary)
                     } else {
                         Image(systemName: isEnabled ? "checkmark.icloud.fill" : "icloud.fill")
-                            .font(.system(size: 20, weight: .medium))
+                            .scaledFont(.system(size: 20, weight: .medium))
                             .foregroundColor(.accentPrimary)
                     }
                 }
@@ -340,13 +340,13 @@ private struct TVOnboardingImportButton: View {
                     Text(isImporting ? "Importing from iCloud…"
                          : isEnabled ? "iCloud Sync Enabled"
                          : "Sync via iCloud")
-                        .font(.system(size: 24, weight: .semibold))
+                        .scaledFont(.system(size: 24, weight: .semibold))
                         .foregroundColor(.textPrimary)
                     Text(isImporting ? "Looking for an existing configuration…"
                          : isEnabled
                          ? "Settings will stay in sync across all your devices"
                          : "Import an existing Aerio configuration from iCloud and keep settings in sync across all devices using the same Apple ID")
-                        .font(.system(size: 18))
+                        .scaledFont(.system(size: 18))
                         .foregroundColor(.textSecondary)
                         .lineLimit(nil)
                         .fixedSize(horizontal: false, vertical: true)
@@ -361,7 +361,7 @@ private struct TVOnboardingImportButton: View {
                             .fill(isEnabled ? Color.accentPrimary : Color.textTertiary)
                             .frame(width: 10, height: 10)
                         Text(isEnabled ? "On" : "Off")
-                            .font(.system(size: 24, weight: .semibold))
+                            .scaledFont(.system(size: 24, weight: .semibold))
                             .foregroundColor(isEnabled
                                 ? (isFocused ? .white : .accentPrimary)
                                 : (isFocused ? .white : .textTertiary))
@@ -394,15 +394,15 @@ private struct TVOnboardingPickerRow: View {
                     .fill(Color.accentPrimary.opacity(0.15))
                     .frame(width: 44, height: 44)
                 Image(systemName: icon)
-                    .font(.system(size: 20, weight: .medium))
+                    .scaledFont(.system(size: 20, weight: .medium))
                     .foregroundColor(.accentPrimary)
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.system(size: 24, weight: .semibold))
+                    .scaledFont(.system(size: 24, weight: .semibold))
                     .foregroundColor(.textPrimary)
                 Text(subtitle)
-                    .font(.system(size: 18))
+                    .scaledFont(.system(size: 18))
                     .foregroundColor(.textSecondary)
             }
             Spacer()
@@ -436,9 +436,11 @@ private struct TVOnboardingPickerOption: View {
     var body: some View {
         Button(action: onSelect) {
             Text(label)
-                .font(.system(size: 22, weight: .semibold))
+                .scaledFont(.system(size: 22, weight: .semibold))
                 .foregroundColor(isSelected ? .white : (isFocused ? .white : .textSecondary))
-                .frame(width: 100, height: 44)
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .frame(minWidth: 100, minHeight: 44)
                 .background(
                     isSelected
                         ? AnyView(RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -485,15 +487,15 @@ private struct TVOnboardingNavButton<Destination: View>: View {
                         .fill(Color.accentPrimary.opacity(0.15))
                         .frame(width: 44, height: 44)
                     Image(systemName: icon)
-                        .font(.system(size: 20, weight: .medium))
+                        .scaledFont(.system(size: 20, weight: .medium))
                         .foregroundColor(.accentPrimary)
                 }
                 Text(label)
-                    .font(.system(size: 24, weight: .semibold))
+                    .scaledFont(.system(size: 24, weight: .semibold))
                     .foregroundColor(.textPrimary)
                 Spacer()
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 18, weight: .semibold))
+                    .scaledFont(.system(size: 18, weight: .semibold))
                     .foregroundColor(isFocused ? .accentPrimary : .textTertiary)
             }
             .padding(.horizontal, 20)
@@ -531,15 +533,15 @@ private struct TVOnboardingCategoryRow: View {
                         .fill(Color.accentPrimary.opacity(0.15))
                         .frame(width: 44, height: 44)
                     Image(systemName: category.icon)
-                        .font(.system(size: 20, weight: .medium))
+                        .scaledFont(.system(size: 20, weight: .medium))
                         .foregroundColor(.accentPrimary)
                 }
                 VStack(alignment: .leading, spacing: 3) {
                     Text(category.displayName)
-                        .font(.system(size: 24, weight: .semibold))
+                        .scaledFont(.system(size: 24, weight: .semibold))
                         .foregroundColor(.textPrimary)
                     Text(category.briefSubtitle)
-                        .font(.system(size: 18))
+                        .scaledFont(.system(size: 18))
                         .foregroundColor(.textSecondary)
                 }
                 .multilineTextAlignment(.leading)
@@ -549,7 +551,7 @@ private struct TVOnboardingCategoryRow: View {
                         .fill(isOn ? Color.accentPrimary : Color.textTertiary)
                         .frame(width: 10, height: 10)
                     Text(isOn ? "On" : "Off")
-                        .font(.system(size: 24, weight: .semibold))
+                        .scaledFont(.system(size: 24, weight: .semibold))
                         .foregroundColor(isOn
                             ? (isFocused ? .white : .accentPrimary)
                             : (isFocused ? .white : .textTertiary))
@@ -577,10 +579,10 @@ private struct TVOnboardingPrimaryButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 26, weight: .semibold))
+                .scaledFont(.system(size: 26, weight: .semibold))
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
-                .frame(height: 64)
+                .frame(minHeight: 64)
                 .background(LinearGradient.accentGradient)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay {
@@ -607,7 +609,7 @@ private struct TVOnboardingTextButton: View {
 
     var body: some View {
         Button(title, action: action)
-            .font(.system(size: 22))
+            .scaledFont(.system(size: 22))
             .foregroundColor(isFocused ? .accentPrimary : .textTertiary)
             .buttonStyle(TVNoHighlightButtonStyle())
             .focused($isFocused)
@@ -622,7 +624,7 @@ private struct TVOnboardingSkipButton: View {
 
     var body: some View {
         Button("Skip for now", action: action)
-            .font(.system(size: 22))
+            .scaledFont(.system(size: 22))
             .foregroundColor(isFocused ? .accentPrimary : .textTertiary)
             .buttonStyle(TVNoHighlightButtonStyle())
             .focused($isFocused)
@@ -643,12 +645,12 @@ private struct FeaturePill: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
-                .font(.system(size: 15, weight: .semibold))
+                .scaledFont(.system(size: 15, weight: .semibold))
                 .foregroundStyle(LinearGradient.accentGradient)
                 .frame(width: 24)
 
             Text(title)
-                .font(.headlineSmall)
+                .scaledFont(.headlineSmall)
                 .foregroundColor(.textPrimary)
         }
         .padding(.vertical, 4)
@@ -686,10 +688,10 @@ struct OnboardingSyncCategoryChooser: View {
                 VStack(alignment: .leading, spacing: 20) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("What should come in from iCloud?")
-                            .font(.headlineLarge)
+                            .scaledFont(.headlineLarge)
                             .foregroundColor(.textPrimary)
                         Text("You can change any of this later in Settings, and each device chooses for itself.")
-                            .font(.bodySmall)
+                            .scaledFont(.bodySmall)
                             .foregroundColor(.textSecondary)
                     }
 
@@ -736,17 +738,17 @@ struct OnboardingSyncCategoryChooser: View {
                         #else
                         Button(action: commit) {
                             Text("Turn On iCloud Sync")
-                                .font(.headlineMedium)
+                                .scaledFont(.headlineMedium)
                                 .foregroundColor(.white)
                                 .frame(maxWidth: .infinity)
-                                .frame(height: 48)
+                                .frame(minHeight: 48)
                                 .background(LinearGradient.accentGradient)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
                         .buttonStyle(.plain)
 
                         Button("Not now", action: onCancel)
-                            .font(.bodyMedium)
+                            .scaledFont(.bodyMedium)
                             .foregroundColor(.textTertiary)
                         #endif
                     }

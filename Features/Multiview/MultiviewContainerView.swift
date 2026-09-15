@@ -2320,7 +2320,7 @@ struct MultiviewContainerView: View {
                         .fill(.ultraThinMaterial)
                         .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
                     Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))  // glyph in a fixed box: not text, stays fixed
                         .foregroundStyle(.white)
                 }
                 .frame(width: 22, height: 22)
@@ -2370,7 +2370,7 @@ struct MultiviewContainerView: View {
                     "Device is hot — can't add more streams right now",
                     systemImage: "thermometer.high"
                 )
-                .font(.caption.weight(.semibold))
+                .scaledFont(.caption.weight(.semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
@@ -2422,7 +2422,7 @@ struct MultiviewContainerView: View {
                     message,
                     systemImage: "arrow.up.and.down.and.arrow.left.and.right"
                 )
-                .font(.caption.weight(.semibold))
+                .scaledFont(.caption.weight(.semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)

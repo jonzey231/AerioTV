@@ -25,6 +25,11 @@ struct AppearanceSettingsView: View {
     /// list slider is only shown to iPhone / iPad / Mac users.
     @AppStorage("listScale") private var listScale: Double = 1.0
 
+    /// App-wide text multiplier (Settings > Appearance > Text Size).
+    /// Read by every `.scaledFont` call site via the root environment;
+    /// synced across devices. See `TextScale` in Typography.swift.
+    @AppStorage(TextScale.key) private var textScale: Double = TextScale.defaultValue
+
     // MARK: Guide Display state — folded in from the former
     // standalone `Settings → Guide Display` page in v1.6.8. The page
     // shipped two related concerns (category colour palette, channel
@@ -146,7 +151,7 @@ struct AppearanceSettingsView: View {
                                 Image(systemName: mode == .dark ? "moon.fill"
                                       : mode == .light ? "sun.max.fill"
                                       : "circle.lefthalf.filled")
-                                    .font(.system(size: 24))
+                                    .font(.system(size: 24))  // glyph in a fixed box: not text, stays fixed
                                     .foregroundColor(theme.accent)
                                     .frame(width: 28, height: 28)
                             }
@@ -164,12 +169,12 @@ struct AppearanceSettingsView: View {
                     if theme.useCustomAccent {
                         HStack {
                             Text("Hex")
-                                .font(.system(size: 26, weight: .medium))
+                                .scaledFont(.system(size: 26, weight: .medium))
                                 .foregroundColor(.textSecondary)
                             Spacer()
                             TextField("2DD4BF", text: $theme.customAccentHex)
                                 .textFieldStyle(.plain)
-                                .font(.system(size: 26, design: .monospaced))
+                                .scaledFont(.system(size: 26, design: .monospaced))
                                 .foregroundColor(.textPrimary)
                                 .multilineTextAlignment(.trailing)
                                 .frame(width: 200)
@@ -201,6 +206,11 @@ struct AppearanceSettingsView: View {
                 tvAppearanceSection("Preview") {
                     swatchPreview
                         .padding(.horizontal, 20)
+                }
+
+                // Text Size: scales every piece of text in the app.
+                tvAppearanceSection("Text Size") {
+                    textSizeRow_tvOS
                 }
 
                 // Display Scale — two sliders on tvOS (List view is
@@ -304,7 +314,7 @@ struct AppearanceSettingsView: View {
     private func tvAppearanceSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title.uppercased())
-                .font(.system(size: 22, weight: .bold))
+                .scaledFont(.system(size: 22, weight: .bold))
                 .foregroundColor(.textTertiary)
                 .tracking(1)
                 .padding(.leading, 20)
@@ -312,6 +322,63 @@ struct AppearanceSettingsView: View {
                 content()
             }
         }
+    }
+
+    /// tvOS Text Size row. Fourteen 5% steps do not fit as chips, so the
+    /// row is a stepper: a minus and a plus capsule (the shared
+    /// `TVSteppedSegmentStyle`: accent ring when focused, never selected)
+    /// around the live percent. Left/Right move focus between the two
+    /// buttons; Select steps the value.
+    private var textSizeRow_tvOS: some View {
+        let current = TextScale.clamp(textScale)
+        let index = TextScale.steps.firstIndex(where: { abs($0 - current) < 0.001 }) ?? 3
+        return HStack(spacing: 24) {
+            Text("Text Size")
+                .scaledFont(.system(size: 26, weight: .medium))
+                .foregroundColor(.textPrimary)
+                .lineLimit(1)
+            Spacer()
+            Button {
+                setTextScale(TextScale.steps[max(0, index - 1)])
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 22, weight: .semibold))
+                    .frame(minWidth: 28)
+            }
+            .buttonStyle(TVSteppedSegmentStyle(isSelected: false))
+            .accessibilityLabel("Smaller Text")
+
+            Text("\(Int((current * 100).rounded()))%")
+                .scaledFont(.system(size: 26, weight: .semibold).monospacedDigit())
+                .foregroundColor(theme.accent)
+                .lineLimit(1)
+                .frame(minWidth: 96)
+
+            Button {
+                setTextScale(TextScale.steps[min(TextScale.steps.count - 1, index + 1)])
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 22, weight: .semibold))
+                    .frame(minWidth: 28)
+            }
+            .buttonStyle(TVSteppedSegmentStyle(isSelected: false))
+            .accessibilityLabel("Larger Text")
+
+            Button {
+                setTextScale(TextScale.defaultValue)
+            } label: {
+                Text("Reset")
+                    .scaledFont(.system(size: 22, weight: .medium))
+                    .lineLimit(1)
+            }
+            .buttonStyle(TVSteppedSegmentStyle(isSelected: index == 3))
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.cardBackground)
+        )
     }
 
     /// tvOS scale-slider row. Apple TV users don't have a touch
@@ -328,7 +395,7 @@ struct AppearanceSettingsView: View {
         let current = steps.min(by: { abs($0 - binding.wrappedValue) < abs($1 - binding.wrappedValue) }) ?? 1.0
         return HStack(spacing: 24) {
             Text(title)
-                .font(.system(size: 26, weight: .medium))
+                .scaledFont(.system(size: 26, weight: .medium))
                 .foregroundColor(.textPrimary)
             Spacer()
             ForEach(steps, id: \.self) { step in
@@ -336,7 +403,7 @@ struct AppearanceSettingsView: View {
                     binding.wrappedValue = step
                 } label: {
                     Text("\(Int(step * 100))%")
-                        .font(.system(size: 22, weight: .medium))
+                        .scaledFont(.system(size: 22, weight: .medium))
                         .foregroundColor(step == current ? theme.accent : .textSecondary)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 8)
@@ -442,7 +509,7 @@ struct AppearanceSettingsView: View {
                 } footer: {
                     if UIDevice.current.userInterfaceIdiom != .pad {
                         Text("Colors used throughout the app.")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                     }
                 }
                 .listSectionSeparator(.hidden)
@@ -452,7 +519,7 @@ struct AppearanceSettingsView: View {
                         appearanceModeAndAccentRows
                     } footer: {
                         Text("Colors used throughout the app.")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                     }
                     .listSectionSeparator(.hidden)
                 }
@@ -466,14 +533,14 @@ struct AppearanceSettingsView: View {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(style.displayName)
-                                        .font(.bodyMedium).foregroundColor(.textPrimary)
+                                        .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                                     Text(liquidGlassDescription(style))
-                                        .font(.labelSmall).foregroundColor(.textSecondary)
+                                        .scaledFont(.labelSmall).foregroundColor(.textSecondary)
                                 }
                                 Spacer()
                                 if theme.liquidGlassStyle == style {
                                     Image(systemName: "checkmark")
-                                        .font(.system(size: 14, weight: .semibold))
+                                        .scaledFont(.system(size: 14, weight: .semibold))
                                         .foregroundColor(theme.accent)
                                 }
                             }
@@ -484,7 +551,7 @@ struct AppearanceSettingsView: View {
                     Text("Glass Effect").sectionHeaderStyle()
                 } footer: {
                     Text(liquidGlassFootnote)
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
 
@@ -494,6 +561,17 @@ struct AppearanceSettingsView: View {
                         .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("Preview").sectionHeaderStyle()
+                }
+                .listSectionSeparator(.hidden)
+
+                // MARK: Text Size (app-wide text multiplier)
+                Section {
+                    textSizeRow_iOS
+                } header: {
+                    Text("Text Size").sectionHeaderStyle()
+                } footer: {
+                    Text("Scales all text in the app, from 85% to 150%. Applies live and syncs to your other devices.")
+                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
 
@@ -535,7 +613,7 @@ struct AppearanceSettingsView: View {
                          ? "Independent scale for Movies & Series and Live TV List. 100% matches the default; 85–125% lets you trade density for readability. Changes apply live — no restart needed."
                          : "Independent scale for Movies & Series, the Guide grid, and the Live TV List. 100% matches the default; 85–125% lets you trade density for readability. Changes apply live — no restart needed."
                     )
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
 
@@ -549,14 +627,14 @@ struct AppearanceSettingsView: View {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(option.label)
-                                        .font(.bodyMedium).foregroundColor(.textPrimary)
+                                        .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                                     Text(option.subtitle)
-                                        .font(.labelSmall).foregroundColor(.textTertiary)
+                                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                                 }
                                 Spacer()
                                 if timeFormat == option.value {
                                     Image(systemName: "checkmark")
-                                        .font(.system(size: 14, weight: .semibold))
+                                        .scaledFont(.system(size: 14, weight: .semibold))
                                         .foregroundColor(theme.accent)
                                 }
                             }
@@ -567,7 +645,7 @@ struct AppearanceSettingsView: View {
                     Text("Time Format").sectionHeaderStyle()
                 } footer: {
                     Text("System follows your device's clock setting. Applies to the Guide, program info, search, and recordings.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
 
@@ -576,9 +654,9 @@ struct AppearanceSettingsView: View {
                     Toggle(isOn: $showChannelLogos) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Show Channel Logos")
-                                .font(.bodyMedium).foregroundColor(.textPrimary)
+                                .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                             Text("Turn off to hide channel logos so longer channel names get the full row width.")
-                                .font(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                         }
                     }
                     .tint(theme.accent)
@@ -590,9 +668,9 @@ struct AppearanceSettingsView: View {
                     Toggle(isOn: $showChannelNumbers) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Show Channel Numbers")
-                                .font(.bodyMedium).foregroundColor(.textPrimary)
+                                .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                             Text("Turn off to hide channel numbers in the Live TV list and Guide.")
-                                .font(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                         }
                     }
                     .tint(theme.accent)
@@ -604,9 +682,9 @@ struct AppearanceSettingsView: View {
                     Toggle(isOn: $showChannelNames) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Show Channel Names")
-                                .font(.bodyMedium).foregroundColor(.textPrimary)
+                                .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                             Text("Turn off to hide channel names in the Guide's channel column.")
-                                .font(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                         }
                     }
                     .tint(theme.accent)
@@ -617,9 +695,9 @@ struct AppearanceSettingsView: View {
                     Toggle(isOn: $showProgramSubtitles) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Show Program Subtitles")
-                                .font(.bodyMedium).foregroundColor(.textPrimary)
+                                .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                             Text("Turn off to hide the episode or match name under each program title in the Guide and Live TV list, for EPGs that repeat the description there.")
-                                .font(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                         }
                     }
                     .tint(theme.accent)
@@ -647,11 +725,11 @@ struct AppearanceSettingsView: View {
                     Toggle(isOn: $enableCategoryColors) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Color Programs by Category")
-                                .font(.bodyMedium).foregroundColor(.textPrimary)
+                                .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                             Text(UIDevice.current.userInterfaceIdiom == .phone
                                  ? "Unlocks category-based coloring. On iPhone this drives the Tint Channel Cards stripe below."
                                  : "Tint guide cells by program type — tap any color below to customise.")
-                                .font(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                         }
                     }
                     .tint(theme.accent)
@@ -663,9 +741,9 @@ struct AppearanceSettingsView: View {
                     Toggle(isOn: $tintChannelCards) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Tint Channel Cards")
-                                .font(.bodyMedium).foregroundColor(.textPrimary)
+                                .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                             Text("Adds a colored stripe to Live TV channel cards (list view) based on what's currently airing.")
-                                .font(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                         }
                     }
                     .tint(theme.accent)
@@ -681,7 +759,7 @@ struct AppearanceSettingsView: View {
                     Text(UIDevice.current.userInterfaceIdiom == .phone
                          ? "iPhone's Live TV tab only renders the List view. Cards tint with a gradient that fades from the leading edge toward the center — based on the currently-airing program on the main row, and the individual program on each expanded schedule row. Dispatcharr and M3U+XMLTV work out of the box; Xtream Codes doesn't expose category data."
                          : "Programs with a category tag in the EPG source get a leading-edge gradient — on channel cards in the List view (using the currently-airing program), on each row in the expanded schedule (using that program's own category), and on cells in the Guide grid. Dispatcharr and M3U+XMLTV work out of the box; Xtream Codes doesn't expose category data.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
 
@@ -724,14 +802,14 @@ struct AppearanceSettingsView: View {
                     } label: {
                         HStack(spacing: 10) {
                             Image(systemName: "plus.circle.fill")
-                                .font(.system(size: 14, weight: .semibold))
+                                .scaledFont(.system(size: 14, weight: .semibold))
                                 .foregroundColor(theme.accent)
                             Text("Add more categories")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Spacer()
                             Text(moreCategoriesSummary)
-                                .font(.labelSmall)
+                                .scaledFont(.labelSmall)
                                 .foregroundColor(.textTertiary)
                         }
                     }
@@ -745,8 +823,8 @@ struct AppearanceSettingsView: View {
                     } label: {
                         HStack {
                             Image(systemName: "arrow.uturn.backward")
-                                .font(.system(size: 14, weight: .semibold))
-                            Text("Reset Colors to Defaults").font(.bodyMedium)
+                                .scaledFont(.system(size: 14, weight: .semibold))
+                            Text("Reset Colors to Defaults").scaledFont(.bodyMedium)
                         }
                         .foregroundColor(.statusWarning)
                     }
@@ -757,7 +835,7 @@ struct AppearanceSettingsView: View {
                     Text("Palette").sectionHeaderStyle()
                 } footer: {
                     Text("Tap a swatch to customise the color used for that program bucket. Kids > Sports > News > Movie priority when a program matches multiple.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
             }
@@ -782,7 +860,7 @@ struct AppearanceSettingsView: View {
         // changes the mode, and vice versa.
         VStack(alignment: .leading, spacing: 8) {
             Text("Appearance")
-                .font(.bodyMedium).foregroundColor(.textPrimary)
+                .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
             Picker("Appearance", selection: Binding(
                 get: { theme.appearanceMode },
                 set: { theme.setAppearanceMode($0) }
@@ -810,7 +888,7 @@ struct AppearanceSettingsView: View {
                             .stroke(Color.borderMedium, lineWidth: 1)
                     )
                 Text("Custom Accent Color")
-                    .font(.bodyMedium).foregroundColor(.textPrimary)
+                    .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
             }
         }
         .tint(theme.accent)
@@ -827,7 +905,7 @@ struct AppearanceSettingsView: View {
                 supportsOpacity: false
             ) {
                 Text("Accent Color")
-                    .font(.bodyMedium).foregroundColor(.textPrimary)
+                    .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
             }
             .listRowBackground(Color.cardBackground)
             #endif
@@ -835,7 +913,7 @@ struct AppearanceSettingsView: View {
             // Hex field for power users who want to paste a specific value
             HStack {
                 Text("Hex")
-                    .font(.bodyMedium).foregroundColor(.textSecondary)
+                    .scaledFont(.bodyMedium).foregroundColor(.textSecondary)
                 Spacer()
                 TextField("2DD4BF", text: Binding(
                     get: { theme.customAccentHex },
@@ -845,7 +923,7 @@ struct AppearanceSettingsView: View {
                         theme.customAccentHex = String(cleaned.prefix(6))
                     }
                 ))
-                    .font(.monoSmall)
+                    .scaledFont(.monoSmall)
                     .foregroundColor(.textPrimary)
                     .multilineTextAlignment(.trailing)
                     .frame(width: 90)
@@ -867,10 +945,10 @@ struct AppearanceSettingsView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(t.displayName)
-                    .font(.bodyMedium)
+                    .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                 Text(themeSubtitle(t))
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.textTertiary)
             }
 
@@ -878,10 +956,46 @@ struct AppearanceSettingsView: View {
 
             if theme.selectedTheme == t {
                 Image(systemName: "checkmark")
-                    .font(.system(size: 14, weight: .semibold))
+                    .scaledFont(.system(size: 14, weight: .semibold))
                     .foregroundColor(theme.accent)
             }
         }
+    }
+
+    /// iOS Text Size row: 85% to 150% in 5% steps, live percent readout.
+    private var textSizeRow_iOS: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Text Size")
+                    .scaledFont(.bodyMedium)
+                    .foregroundColor(.textPrimary)
+                Spacer()
+                Text("\(Int((TextScale.clamp(textScale) * 100).rounded()))%")
+                    .scaledFont(.labelSmall.monospacedDigit())
+                    .foregroundColor(.textTertiary)
+            }
+            HStack(spacing: 12) {
+                // Glyphs stay fixed so the slider's ends do not shift
+                // while the user drags.
+                Image(systemName: "textformat.size.smaller")
+                    .foregroundColor(.textTertiary)
+                    .font(.system(size: 12))
+                Slider(
+                    value: Binding(
+                        get: { TextScale.clamp(textScale) },
+                        set: { setTextScale($0) }
+                    ),
+                    in: TextScale.range,
+                    step: TextScale.step
+                )
+                .tint(theme.accent)
+                Image(systemName: "textformat.size.larger")
+                    .foregroundColor(.textTertiary)
+                    .font(.system(size: 14))
+            }
+        }
+        .padding(.vertical, 4)
+        .listRowBackground(Color.cardBackground)
     }
 
     /// iOS scale-slider row. Single horizontal HStack shared by the
@@ -892,30 +1006,37 @@ struct AppearanceSettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text(title)
-                    .font(.bodyMedium)
+                    .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                 Spacer()
                 Text("\(Int(binding.wrappedValue * 100))%")
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.textTertiary)
             }
             HStack(spacing: 12) {
                 Image(systemName: "textformat.size.smaller")
                     .foregroundColor(.textTertiary)
-                    .font(.system(size: 12))
+                    .scaledFont(.system(size: 12))
                 // GH #25: range extended past 125% for TV-across-the-room
                 // readability (fewer, larger items at 150%+).
                 Slider(value: binding, in: 0.85...1.75, step: 0.05)
                     .tint(theme.accent)
                 Image(systemName: "textformat.size.larger")
                     .foregroundColor(.textTertiary)
-                    .font(.system(size: 14))
+                    .scaledFont(.system(size: 14))
             }
         }
         .padding(.vertical, 4)
         .listRowBackground(Color.cardBackground)
     }
     #endif
+
+    private func setTextScale(_ value: Double) {
+        let snapped = TextScale.clamp(value)
+        guard abs(snapped - textScale) > 0.0001 else { return }
+        textScale = snapped
+        SyncManager.shared.pushPreferences()
+    }
 
     private var swatchPreview: some View {
         HStack(spacing: 14) {
@@ -934,9 +1055,9 @@ struct AppearanceSettingsView: View {
                     ? "Custom #\(theme.customAccentHex.uppercased())"
                     : theme.selectedTheme.displayName
                 Text(themeLabel + " · " + theme.liquidGlassStyle.displayName)
-                    .font(.bodyMedium).foregroundColor(.textPrimary)
+                    .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                 Text("Applied across the entire app")
-                    .font(.labelSmall).foregroundColor(.textSecondary)
+                    .scaledFont(.labelSmall).foregroundColor(.textSecondary)
             }
 
             Spacer()

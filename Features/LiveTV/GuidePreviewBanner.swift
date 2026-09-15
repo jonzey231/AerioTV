@@ -104,6 +104,7 @@ struct GuidePreviewBanner: View {
     }
 
     static let height: CGFloat = 212
+    @Environment(\.aerioTextScale) private var textScale
 
     var body: some View {
         // Bottom-aligned: logo, copy and the corner mini share one baseline
@@ -131,7 +132,7 @@ struct GuidePreviewBanner: View {
                     .padding(.trailing, trailingReserve)
             } else {
                 Text("Select a program")
-                    .font(.system(size: 26, weight: .medium))
+                    .scaledFont(.system(size: 26, weight: .medium))
                     .foregroundColor(.textTertiary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -140,7 +141,8 @@ struct GuidePreviewBanner: View {
         // mini does from the right (Logan 2026-09-05).
         .padding(.horizontal, 40)
         .padding(.bottom, 8)
-        .frame(height: Self.height)
+        // Grows with Settings > Appearance > Text Size so the copy is not clipped.
+        .frame(height: TextScale.grow(Self.height, textScale))
         .frame(maxWidth: .infinity)
         .background(Color.appBackground)
         .clipped()
@@ -186,12 +188,12 @@ struct GuidePreviewBanner: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 14) {
                 Text(program.title)
-                    .font(.system(size: 36, weight: .bold))
+                    .scaledFont(.system(size: 36, weight: .bold))
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
                 if let channel {
                     Text(channel.name)
-                        .font(.system(size: 22, weight: .semibold))
+                        .scaledFont(.system(size: 22, weight: .semibold))
                         .foregroundColor(.accentPrimary)
                         .lineLimit(1)
                 }
@@ -199,7 +201,7 @@ struct GuidePreviewBanner: View {
             if let sub = program.subTitle,
                !EPGText.subtitleIsRedundant(sub, title: program.title, description: program.description) {
                 Text(sub)
-                    .font(.system(size: 22, weight: .medium))
+                    .scaledFont(.system(size: 22, weight: .medium))
                     .italic()
                     .foregroundColor(.textSecondary)
                     .lineLimit(1)
@@ -222,14 +224,14 @@ struct GuidePreviewBanner: View {
                                 isRepeat: program.isRepeat, compact: false)
                 }
             }
-            .font(.system(size: 20, weight: .medium))
+            .scaledFont(.system(size: 20, weight: .medium))
             .foregroundColor(.textSecondary)
             if !program.description.isEmpty {
                 Button {
                     onSelectDescription?()
                 } label: {
                     Text(program.description)
-                        .font(.system(size: 23))
+                        .scaledFont(.system(size: 23))
                         .foregroundColor(.textPrimary.opacity(0.85))
                         .lineLimit(3)
                         .multilineTextAlignment(.leading)

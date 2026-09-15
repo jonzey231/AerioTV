@@ -450,7 +450,7 @@ struct MyRecordingsView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundColor(.yellow)
             Text("Storage is approaching the limit. New recordings may not finish.")
-                .font(.footnote)
+                .scaledFont(.footnote)
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
@@ -464,7 +464,7 @@ struct MyRecordingsView: View {
             Image(systemName: "exclamationmark.circle.fill")
                 .foregroundColor(.red)
             Text("Some recordings failed. Long-press for details.")
-                .font(.footnote)
+                .scaledFont(.footnote)
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
@@ -476,13 +476,13 @@ struct MyRecordingsView: View {
     private var emptyState: some View {
         VStack(spacing: 12) {
             Image(systemName: "film.stack")
-                .font(.system(size: 48))
+                .scaledFont(.system(size: 48))
                 .foregroundColor(.secondary)
             Text("No recordings")
-                .font(.headline)
+                .scaledFont(.headline)
                 .foregroundColor(.secondary)
             Text("Schedule a recording from the TV guide to get started.")
-                .font(.subheadline)
+                .scaledFont(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
         }
@@ -603,25 +603,25 @@ private struct RecordingRow: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(recording.programTitle.isEmpty ? "Untitled" : recording.programTitle)
-                    .font(.headline)
+                    .scaledFont(.headline)
                     .lineLimit(1)
                 Spacer()
                 statusBadge
             }
 
             Text(recording.channelName)
-                .font(.subheadline)
+                .scaledFont(.subheadline)
                 .foregroundColor(.secondary)
                 .lineLimit(1)
 
             HStack {
                 Text(formatDateRange(recording.scheduledStart, recording.scheduledEnd))
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundColor(.secondary)
 
                 if recording.preRollMinutes > 0 || recording.postRollMinutes > 0 {
                     Text("(\(bufferLabel))")
-                        .font(.caption2)
+                        .scaledFont(.caption2)
                         .foregroundColor(.secondary)
                 }
             }
@@ -634,7 +634,7 @@ private struct RecordingRow: View {
             // empty gap.
             if !recording.programDescription.isEmpty {
                 Text(recording.programDescription)
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundColor(.secondary)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -655,11 +655,11 @@ private struct RecordingRow: View {
             HStack(spacing: 8) {
                 if recording.destination == .dispatcharrServer {
                     Label("Server", systemImage: "server.rack")
-                        .font(.caption2)
+                        .scaledFont(.caption2)
                         .foregroundColor(.accentPrimary)
                 } else {
                     Label("Local", systemImage: "internaldrive")
-                        .font(.caption2)
+                        .scaledFont(.caption2)
                         .foregroundColor(.green)
                 }
 
@@ -668,7 +668,7 @@ private struct RecordingRow: View {
                     // longer says "Watch Live" (that's the long-press menu's
                     // "Start at Live"). Keep the red in-progress tint.
                     Label("In Progress", systemImage: "record.circle")
-                        .font(.caption2.bold())
+                        .scaledFont(.caption2.bold())
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
                         .background(Color.red.opacity(0.18))
@@ -680,7 +680,7 @@ private struct RecordingRow: View {
 
             if let reason = recording.failureReason, recording.status == .failed {
                 Text(reason)
-                    .font(.caption2)
+                    .scaledFont(.caption2)
                     .foregroundColor(.red)
                     .lineLimit(2)
             }
@@ -701,7 +701,7 @@ private struct RecordingRow: View {
                         .frame(height: 3)
                     }
                     Text(caption)
-                        .font(.caption2)
+                        .scaledFont(.caption2)
                         .foregroundColor(.secondary)
                 }
                 .padding(.top, 2)
@@ -723,7 +723,7 @@ private struct RecordingRow: View {
     private var statusBadge: some View {
         let (text, color) = statusInfo
         return Text(text)
-            .font(.caption2.bold())
+            .scaledFont(.caption2.bold())
             .padding(.horizontal, 8)
             .padding(.vertical, 2)
             .background(color.opacity(0.2))
@@ -848,7 +848,7 @@ private struct DVRSegmentPillButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         let focused = isFocused
         return configuration.label
-            .font(.system(size: 22, weight: .medium))
+            .scaledFont(.system(size: 22, weight: .medium))
             .foregroundColor(
                 isSelected ? .appBackground
                            : (focused ? .white : .textSecondary)
@@ -878,7 +878,7 @@ private struct DVRSegmentPillButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 15, weight: .medium))
+            .scaledFont(.system(size: 15, weight: .medium))
             .foregroundColor(isSelected ? .appBackground : .textSecondary)
             .padding(.horizontal, 18)
             .padding(.vertical, 8)

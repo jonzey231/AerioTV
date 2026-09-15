@@ -147,7 +147,12 @@ final class SyncManager: ObservableObject {
         // are mapped by name.
         showRemoteHintsKey
     ]
-    private let syncDoubleKeys  = ["networkTimeout"]
+    private let syncDoubleKeys  = [
+        "networkTimeout",
+        // Settings > Appearance > Text Size (0.85 to 1.5). Synced across
+        // ALL devices like the theme; see TextScale in Typography.swift.
+        TextScale.key
+    ]
     private let syncIntKeys = [
         "maxRetries", "bgRefreshIntervalMins", "bgRefreshHour", "bgRefreshMinute",
         // Skip Intervals (Settings > App Behaviors): one global pair.

@@ -195,10 +195,10 @@ struct SettingsView: View {
                                 Spacer()
                                 VStack(spacing: 8) {
                                     Image(systemName: "list.and.film")
-                                        .font(.system(size: 28))
+                                        .scaledFont(.system(size: 28))
                                         .foregroundColor(.textTertiary)
                                     Text("No playlists added")
-                                        .font(.bodyMedium)
+                                        .scaledFont(.bodyMedium)
                                         .foregroundColor(.textTertiary)
                                 }
                                 Spacer()
@@ -241,10 +241,10 @@ struct SettingsView: View {
                         } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 20))
+                                    .scaledFont(.system(size: 20))
                                     .foregroundStyle(LinearGradient.accentGradient)
                                 Text("Add Playlist")
-                                    .font(.bodyMedium)
+                                    .scaledFont(.bodyMedium)
                                     .foregroundColor(.accentPrimary)
                             }
                         }
@@ -261,28 +261,28 @@ struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Label("Tap ○ to set the active playlist", systemImage: "checkmark.circle")
                                     #if os(tvOS)
-                                    .font(.system(size: 20, weight: .regular))
+                                    .scaledFont(.system(size: 20, weight: .regular))
                                     .foregroundColor(.textSecondary)
                                     #else
-                                    .font(.labelSmall)
+                                    .scaledFont(.labelSmall)
                                     .foregroundColor(.textTertiary)
                                     #endif
                                 Label("Long press to edit or delete", systemImage: "hand.tap")
                                     #if os(tvOS)
-                                    .font(.system(size: 20, weight: .regular))
+                                    .scaledFont(.system(size: 20, weight: .regular))
                                     .foregroundColor(.textSecondary)
                                     #else
-                                    .font(.labelSmall)
+                                    .scaledFont(.labelSmall)
                                     .foregroundColor(.textTertiary)
                                     #endif
                                 if servers.count > 1 {
                                     #if os(iOS)
                                     Label("Tap Edit to reorder", systemImage: "arrow.up.arrow.down")
-                                        .font(.labelSmall)
+                                        .scaledFont(.labelSmall)
                                         .foregroundColor(.textTertiary)
                                     #else
                                     Label("Use ▲ ▼ to reorder", systemImage: "arrow.up.arrow.down")
-                                        .font(.system(size: 20, weight: .regular))
+                                        .scaledFont(.system(size: 20, weight: .regular))
                                         .foregroundColor(.textSecondary)
                                     #endif
                                 }
@@ -434,7 +434,7 @@ struct SettingsView: View {
                         Text("Sync").sectionHeaderStyle()
                     } footer: {
                         Text("Playlists, preferences, and VOD watch progress sync across all devices signed into the same Apple ID. Credentials are stored securely in iCloud Keychain.")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                     }
                     .listRowBackground(Color.cardBackground)
                     #if os(iOS)
@@ -503,10 +503,10 @@ struct SettingsView: View {
                         } label: {
                             HStack(spacing: 8) {
                                 Image(systemName: copiedAbout ? "checkmark.circle.fill" : "doc.on.doc")
-                                    .font(.system(size: 14, weight: .medium))
+                                    .scaledFont(.system(size: 14, weight: .medium))
                                     .foregroundColor(copiedAbout ? .accentPrimary : .textSecondary)
                                 Text(copiedAbout ? "Copied!" : "Copy to Clipboard")
-                                    .font(.bodyMedium)
+                                    .scaledFont(.bodyMedium)
                                     .foregroundColor(copiedAbout ? .accentPrimary : .textSecondary)
                                 Spacer()
                             }
@@ -521,10 +521,10 @@ struct SettingsView: View {
                         } label: {
                             HStack(spacing: 8) {
                                 Image(systemName: "doc.text")
-                                    .font(.system(size: 14, weight: .medium))
+                                    .scaledFont(.system(size: 14, weight: .medium))
                                     .foregroundColor(.textSecondary)
                                 Text("Open Source Licenses")
-                                    .font(.bodyMedium)
+                                    .scaledFont(.bodyMedium)
                                     .foregroundColor(.textSecondary)
                                 Spacer()
                             }
@@ -534,14 +534,14 @@ struct SettingsView: View {
                         Link(destination: URL(string: "https://github.com/jonzey231/AerioTV")!) {
                             HStack(spacing: 8) {
                                 Image(systemName: "link")
-                                    .font(.system(size: 14, weight: .medium))
+                                    .scaledFont(.system(size: 14, weight: .medium))
                                     .foregroundColor(.textSecondary)
                                 Text("Developer Website")
-                                    .font(.bodyMedium)
+                                    .scaledFont(.bodyMedium)
                                     .foregroundColor(.textSecondary)
                                 Spacer()
                                 Image(systemName: "arrow.up.right.square")
-                                    .font(.system(size: 12))
+                                    .scaledFont(.system(size: 12))
                                     .foregroundColor(.textTertiary)
                             }
                         }
@@ -550,14 +550,14 @@ struct SettingsView: View {
                         Link(destination: URL(string: "https://github.com/jonzey231/AerioTV/issues")!) {
                             HStack(spacing: 8) {
                                 Image(systemName: "exclamationmark.bubble")
-                                    .font(.system(size: 14, weight: .medium))
+                                    .scaledFont(.system(size: 14, weight: .medium))
                                     .foregroundColor(.textSecondary)
                                 Text("Report an Issue")
-                                    .font(.bodyMedium)
+                                    .scaledFont(.bodyMedium)
                                     .foregroundColor(.textSecondary)
                                 Spacer()
                                 Image(systemName: "arrow.up.right.square")
-                                    .font(.system(size: 12))
+                                    .scaledFont(.system(size: 12))
                                     .foregroundColor(.textTertiary)
                             }
                         }
@@ -568,7 +568,7 @@ struct SettingsView: View {
                             .sectionHeaderStyle()
                     } footer: {
                         Text("In loving memory of Jesse Mann aka EPG Guru")
-                            .font(.footnote)
+                            .scaledFont(.footnote)
                             .italic()
                             .foregroundColor(.textTertiary)
                             .frame(maxWidth: .infinity, alignment: .center)
@@ -697,7 +697,7 @@ struct SettingsView: View {
             .overlay(alignment: .bottom) {
                 if clearICloudConfirmationVisible {
                     Text("iCloud data cleared")
-                        .font(.subheadline.weight(.semibold))
+                        .scaledFont(.subheadline.weight(.semibold))
                         .padding(.horizontal, 18)
                         .padding(.vertical, 12)
                         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -773,19 +773,19 @@ struct SettingsView: View {
             } label: {
                 HStack {
                     Text("App Version")
-                        .font(.bodyMedium)
+                        .scaledFont(.bodyMedium)
                         .foregroundColor(.textSecondary)
                     Spacer()
                     Text(aboutVersion)
-                        .font(.bodyMedium)
+                        .scaledFont(.bodyMedium)
                         .foregroundColor(.textPrimary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Text("What's New")
-                        .font(.caption)
+                        .scaledFont(.caption)
                         .foregroundColor(.textTertiary)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
+                        .scaledFont(.system(size: 12, weight: .semibold))
                         .foregroundColor(.textTertiary)
                 }
                 .contentShape(Rectangle())
@@ -801,11 +801,11 @@ struct SettingsView: View {
     private func infoRow(_ label: String, value: String, isMonospaced: Bool = false) -> some View {
         HStack {
             Text(label)
-                .font(.bodyMedium)
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textSecondary)
             Spacer()
             Text(value)
-                .font(isMonospaced ? .monoSmall : .bodyMedium)
+                .scaledFont(isMonospaced ? .monoSmall : .bodyMedium)
                 .foregroundColor(.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -927,7 +927,7 @@ struct SettingsView: View {
         .overlay(alignment: .bottom) {
             if clearICloudConfirmationVisible {
                 Text("iCloud data cleared")
-                    .font(.subheadline.weight(.semibold))
+                    .scaledFont(.subheadline.weight(.semibold))
                     .padding(.horizontal, 18)
                     .padding(.vertical, 12)
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -969,7 +969,7 @@ struct SettingsView: View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Settings")
-                    .font(.title2.weight(.bold))
+                    .scaledFont(.title2.weight(.bold))
                     .foregroundColor(.textPrimary)
                     .padding(.horizontal, 14)
                     .padding(.bottom, 14)
@@ -979,7 +979,7 @@ struct SettingsView: View {
                               subtitle: servers.first(where: { $0.isActive })?.name)
 
                 Text("App Settings")
-                    .font(.title3.weight(.semibold))
+                    .scaledFont(.title3.weight(.semibold))
                     .foregroundColor(.textSecondary)
                     .padding(.horizontal, 14)
                     .padding(.top, 18)
@@ -1059,10 +1059,10 @@ struct SettingsView: View {
                         Spacer()
                         VStack(spacing: 8) {
                             Image(systemName: "list.and.film")
-                                .font(.system(size: 28))
+                                .scaledFont(.system(size: 28))
                                 .foregroundColor(.textTertiary)
                             Text("No playlists added")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textTertiary)
                         }
                         Spacer()
@@ -1097,10 +1097,10 @@ struct SettingsView: View {
                 } label: {
                     HStack(spacing: 12) {
                         Image(systemName: "plus.circle.fill")
-                            .font(.system(size: 20))
+                            .scaledFont(.system(size: 20))
                             .foregroundStyle(LinearGradient.accentGradient)
                         Text("Add Playlist")
-                            .font(.bodyMedium)
+                            .scaledFont(.bodyMedium)
                             .foregroundColor(.accentPrimary)
                     }
                 }
@@ -1110,14 +1110,14 @@ struct SettingsView: View {
                 if !servers.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         Label("Tap ○ to set the active playlist", systemImage: "checkmark.circle")
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textTertiary)
                         Label("Long press to edit or delete", systemImage: "hand.tap")
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textTertiary)
                         if servers.count > 1 {
                             Label("Touch and hold, then drag to reorder", systemImage: "arrow.up.arrow.down")
-                                .font(.labelSmall)
+                                .scaledFont(.labelSmall)
                                 .foregroundColor(.textTertiary)
                         }
                     }
@@ -1200,7 +1200,7 @@ struct SettingsView: View {
                 .buttonStyle(PressableButtonStyle())
             } footer: {
                 Text("Playlists, preferences, and VOD watch progress sync across all devices signed into the same Apple ID. Credentials are stored securely in iCloud Keychain.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listRowBackground(Color.cardBackground)
         }
@@ -1234,10 +1234,10 @@ struct SettingsView: View {
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: copiedAbout ? "checkmark.circle.fill" : "doc.on.doc")
-                            .font(.system(size: 14, weight: .medium))
+                            .scaledFont(.system(size: 14, weight: .medium))
                             .foregroundColor(copiedAbout ? .accentPrimary : .textSecondary)
                         Text(copiedAbout ? "Copied!" : "Copy to Clipboard")
-                            .font(.bodyMedium)
+                            .scaledFont(.bodyMedium)
                             .foregroundColor(copiedAbout ? .accentPrimary : .textSecondary)
                         Spacer()
                     }
@@ -1250,14 +1250,14 @@ struct SettingsView: View {
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "doc.text")
-                            .font(.system(size: 14, weight: .medium))
+                            .scaledFont(.system(size: 14, weight: .medium))
                             .foregroundColor(.textSecondary)
                         Text("Open Source Licenses")
-                            .font(.bodyMedium)
+                            .scaledFont(.bodyMedium)
                             .foregroundColor(.textSecondary)
                         Spacer()
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 12))
+                            .scaledFont(.system(size: 12))
                             .foregroundColor(.textTertiary)
                     }
                 }
@@ -1270,14 +1270,14 @@ struct SettingsView: View {
                 Link(destination: URL(string: "https://github.com/jonzey231/AerioTV")!) {
                     HStack(spacing: 8) {
                         Image(systemName: "link")
-                            .font(.system(size: 14, weight: .medium))
+                            .scaledFont(.system(size: 14, weight: .medium))
                             .foregroundColor(.textSecondary)
                         Text("Developer Website")
-                            .font(.bodyMedium)
+                            .scaledFont(.bodyMedium)
                             .foregroundColor(.textSecondary)
                         Spacer()
                         Image(systemName: "arrow.up.right.square")
-                            .font(.system(size: 12))
+                            .scaledFont(.system(size: 12))
                             .foregroundColor(.textTertiary)
                     }
                 }
@@ -1286,21 +1286,21 @@ struct SettingsView: View {
                 Link(destination: URL(string: "https://github.com/jonzey231/AerioTV/issues")!) {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.bubble")
-                            .font(.system(size: 14, weight: .medium))
+                            .scaledFont(.system(size: 14, weight: .medium))
                             .foregroundColor(.textSecondary)
                         Text("Report an Issue")
-                            .font(.bodyMedium)
+                            .scaledFont(.bodyMedium)
                             .foregroundColor(.textSecondary)
                         Spacer()
                         Image(systemName: "arrow.up.right.square")
-                            .font(.system(size: 12))
+                            .scaledFont(.system(size: 12))
                             .foregroundColor(.textTertiary)
                     }
                 }
                 .listRowBackground(Color.cardBackground)
             } footer: {
                 Text("In loving memory of Jesse Mann aka EPG Guru")
-                    .font(.footnote)
+                    .scaledFont(.footnote)
                     .italic()
                     .foregroundColor(.textTertiary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -1419,10 +1419,10 @@ struct SettingsView: View {
                         Spacer()
                         VStack(spacing: 12) {
                             Image(systemName: "list.and.film")
-                                .font(.system(size: 36))
+                                .scaledFont(.system(size: 36))
                                 .foregroundColor(.textSecondary)
                             Text("No playlists added")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textSecondary)
                         }
                         Spacer()
@@ -1484,7 +1484,7 @@ struct SettingsView: View {
                 }
                 if !servers.isEmpty {
                     Label("Long press for options: switch playlist, edit, or delete", systemImage: "hand.tap")
-                        .font(.system(size: 24, weight: .medium))
+                        .scaledFont(.system(size: 24, weight: .medium))
                         .foregroundColor(.textPrimary.opacity(0.7))
                         .padding(.top, 12)
                 }
@@ -1582,10 +1582,10 @@ struct SettingsView: View {
                     } label: {
                         HStack {
                             Text("Open Source Licenses")
-                                .font(.system(size: 26, weight: .medium))
+                                .scaledFont(.system(size: 26, weight: .medium))
                             Spacer()
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 20))
+                                .scaledFont(.system(size: 20))
                                 .opacity(0.5)
                         }
                         .padding(.horizontal, 24)
@@ -1598,7 +1598,7 @@ struct SettingsView: View {
                 .padding(.bottom, 8)
 
                 Text("In loving memory of Jesse Mann aka EPG Guru")
-                    .font(.system(size: 22))
+                    .scaledFont(.system(size: 22))
                     .italic()
                     .foregroundColor(.textTertiary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -1635,19 +1635,19 @@ struct SettingsView: View {
             } label: {
                 HStack {
                     Text("App Version")
-                        .font(.system(size: 26, weight: .medium))
+                        .scaledFont(.system(size: 26, weight: .medium))
                         .foregroundColor(.textSecondary)
                     Spacer()
                     Text(aboutVersion)
-                        .font(.system(size: 26))
+                        .scaledFont(.system(size: 26))
                         .foregroundColor(.textPrimary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Text("What's New")
-                        .font(.system(size: 22))
+                        .scaledFont(.system(size: 22))
                         .foregroundColor(.textTertiary)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 20))
+                        .scaledFont(.system(size: 20))
                         .opacity(0.5)
                 }
                 .padding(.horizontal, 24)
@@ -1663,11 +1663,11 @@ struct SettingsView: View {
     private func tvAboutRow(_ label: String, value: String) -> some View {
         HStack {
             Text(label)
-                .font(.system(size: 26, weight: .medium))
+                .scaledFont(.system(size: 26, weight: .medium))
                 .foregroundColor(.textSecondary)
             Spacer()
             Text(value)
-                .font(.system(size: 26))
+                .scaledFont(.system(size: 26))
                 .foregroundColor(.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -1685,11 +1685,11 @@ struct SettingsView: View {
         } label: {
             HStack {
                 Text(label)
-                    .font(.system(size: 26, weight: .medium))
+                    .scaledFont(.system(size: 26, weight: .medium))
                     .foregroundColor(.textSecondary)
                 Spacer()
                 Image(systemName: "qrcode")
-                    .font(.system(size: 24))
+                    .scaledFont(.system(size: 24))
                     .foregroundColor(.textPrimary)
             }
             .padding(.horizontal, 24)

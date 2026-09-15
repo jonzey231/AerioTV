@@ -497,21 +497,22 @@ struct RemoteHintPair: Identifiable {
 /// control.
 struct RemoteHintStrip: View {
     let pairs: [RemoteHintPair]
+    @Environment(\.aerioTextScale) private var textScale
 
     private var line: Text {
         var out = Text("")
         for (index, pair) in pairs.enumerated() {
             if index > 0 {
                 out = out + Text("  \u{00B7}  ")
-                    .font(.system(size: 18, weight: .regular))
+                    .scaledFont(.system(size: 18, weight: .regular), scale: textScale)
                     .foregroundColor(.textTertiary)
             }
             out = out + Text(pair.key)
-                .font(.system(size: 18, weight: .semibold))
+                .scaledFont(.system(size: 18, weight: .semibold), scale: textScale)
                 .foregroundColor(.textSecondary)
             out = out + Text("  ")
             out = out + Text(pair.action)
-                .font(.system(size: 18, weight: .regular))
+                .scaledFont(.system(size: 18, weight: .regular), scale: textScale)
                 .foregroundColor(.textTertiary)
         }
         return out

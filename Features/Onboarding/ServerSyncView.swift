@@ -160,7 +160,7 @@ struct ServerSyncView: View {
                         .shadow(color: .accentPrimary.opacity(0.3), radius: 20, y: 4)
 
                     Text("Setting Up")
-                        .font(.headlineLarge)
+                        .scaledFont(.headlineLarge)
                         .foregroundColor(.textPrimary)
                 }
 
@@ -238,7 +238,7 @@ struct ServerSyncView: View {
                     syncTask?.cancel()
                     dismiss()
                 }
-                .font(.bodyMedium)
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textSecondary)
                 #endif
             }
@@ -253,7 +253,7 @@ struct ServerSyncView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(.statusWarning)
                         Text("This is taking longer than usual. If you have a large playlist or VOD library, this is expected behavior on a fresh install. If not, your server or IPTV source might be offline or unreachable.")
-                            .font(.system(size: 14))
+                            .scaledFont(.system(size: 14))
                             .foregroundColor(.textSecondary)
                             .multilineTextAlignment(.leading)
                     }
@@ -267,7 +267,7 @@ struct ServerSyncView: View {
                 Button("Skip") {
                     onContinueAnyway()
                 }
-                .font(.bodyMedium)
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textSecondary)
                 #endif
             }
@@ -287,7 +287,7 @@ struct ServerSyncView: View {
                         .frame(width: 22, height: 22)
                 } else {
                     Image(systemName: stage.icon)
-                        .font(.system(size: 16, weight: .medium))
+                        .font(.system(size: 16, weight: .medium))  // glyph in a fixed box: not text, stays fixed
                         .foregroundColor(stage.iconColor)
                         .frame(width: 22, height: 22)
                 }
@@ -296,19 +296,19 @@ struct ServerSyncView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(stage.label)
-                    .font(.bodyMedium)
+                    .scaledFont(.bodyMedium)
                     .foregroundColor(
                         stage.status == .pending ? .textTertiary : .textPrimary
                     )
 
                 if case .done(let detail) = stage.status, !detail.isEmpty {
                     Text(detail)
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textSecondary)
                 }
                 if case .failed(let err) = stage.status {
                     Text(err)
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.statusLive)
                 }
             }
@@ -579,7 +579,7 @@ private struct TVSkipButton: View {
     var body: some View {
         Button(action: action) {
             Text("Skip")
-                .font(.system(size: 26, weight: .semibold))
+                .scaledFont(.system(size: 26, weight: .semibold))
                 .foregroundColor(isFocused ? .textPrimary : .textSecondary)
                 .padding(.horizontal, 40)
                 .padding(.vertical, 14)

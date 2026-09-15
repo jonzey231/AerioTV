@@ -144,11 +144,11 @@ struct NetworkSettingsView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text("Request Timeout")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Spacer()
                             Text("\(Int(networkTimeout))s")
-                                .font(.monoSmall)
+                                .scaledFont(.monoSmall)
                                 .foregroundColor(theme.accent)
                         }
                         Slider(value: $networkTimeout, in: 5...60, step: 5)
@@ -162,7 +162,7 @@ struct NetworkSettingsView: View {
                     Text("Connection").sectionHeaderStyle()
                 } footer: {
                     Text("Adjust timeouts if you have a slow connection.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                 }
 
                 // MARK: Buffer Size
@@ -174,16 +174,16 @@ struct NetworkSettingsView: View {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(opt.label)
-                                        .font(.bodyMedium)
+                                        .scaledFont(.bodyMedium)
                                         .foregroundColor(.textPrimary)
                                     Text(opt.detail)
-                                        .font(.labelSmall)
+                                        .scaledFont(.labelSmall)
                                         .foregroundColor(.textSecondary)
                                 }
                                 Spacer()
                                 if streamBufferSize == opt.id {
                                     Image(systemName: "checkmark")
-                                        .font(.system(size: 14, weight: .semibold))
+                                        .scaledFont(.system(size: 14, weight: .semibold))
                                         .foregroundColor(theme.accent)
                                 }
                             }
@@ -194,7 +194,7 @@ struct NetworkSettingsView: View {
                     Text("Buffer Size").sectionHeaderStyle()
                 } footer: {
                     Text("Controls how much stream data is pre-loaded. Larger buffers reduce stuttering on poor connections but add startup delay.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                 }
 
                 // Guide Window removed 2026-09-11 (Logan): the playlist's
@@ -216,12 +216,12 @@ struct NetworkSettingsView: View {
                         HStack(spacing: 10) {
                             Image(systemName: "arrow.clockwise.circle.fill")
                                 .foregroundColor(theme.accent)
-                                .font(.system(size: 18))
+                                .scaledFont(.system(size: 18))
                             VStack(alignment: .leading, spacing: 1) {
                                 Text("Background Refresh")
-                                    .font(.bodyMedium).foregroundColor(.textPrimary)
+                                    .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                                 Text("Update EPG & playlists automatically")
-                                    .font(.labelSmall).foregroundColor(.textSecondary)
+                                    .scaledFont(.labelSmall).foregroundColor(.textSecondary)
                             }
                         }
                     }
@@ -251,12 +251,12 @@ struct NetworkSettingsView: View {
                                 } label: {
                                     HStack {
                                         Text(item.label)
-                                            .font(.bodyMedium).foregroundColor(.textPrimary)
+                                            .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                                         Spacer()
                                         if bgRefreshInterval == item.mins {
                                             Image(systemName: "checkmark")
                                                 .foregroundColor(theme.accent)
-                                                .font(.system(size: 14, weight: .semibold))
+                                                .scaledFont(.system(size: 14, weight: .semibold))
                                         }
                                     }
                                 }
@@ -286,10 +286,10 @@ struct NetworkSettingsView: View {
                             ? "Refresh every \(intervalLabel(bgRefreshInterval))."
                             : "Refresh daily at \(timeLabel(hour: bgRefreshHour, minute: bgRefreshMinute))."
                         Text("\(desc) iOS may delay or skip background refreshes to preserve battery.")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                     } else {
                         Text("Automatically refresh channel lists and guide data while the app is in the background.")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                     }
                 }
             }

@@ -476,7 +476,7 @@ struct ContinueWatchingSection: View {
                 #endif
             }()) {
                 Text("Continue Watching")
-                    .font(.headlineSmall)
+                    .scaledFont(.headlineSmall)
                     .foregroundColor(.textPrimary)
                     .padding(.horizontal, 16)
                     .zIndex(0)
@@ -672,7 +672,7 @@ private struct ContinueWatchingCard: View {
                         .frame(width: cardWidth, height: cardHeight)
                         .overlay {
                             Image(systemName: "film")
-                                .font(.title2)
+                                .scaledFont(.title2)
                                 .foregroundColor(.textTertiary)
                         }
                 }
@@ -703,7 +703,7 @@ private struct ContinueWatchingCard: View {
 
             // Title line: series name for episodes, movie title for movies.
             Text(title)
-                .font(titleFont)
+                .scaledFont(titleFont)
                 .foregroundColor(titleColor)
                 .lineLimit(1)
                 .frame(width: cardWidth, alignment: .leading)
@@ -711,7 +711,7 @@ private struct ContinueWatchingCard: View {
             // Subtitle line: "S1:E4 - Episode Title" for episodes.
             if let subtitle, !subtitle.isEmpty {
                 Text(subtitle)
-                    .font(subtitleFont)
+                    .scaledFont(subtitleFont)
                     .foregroundColor(.textSecondary)
                     .lineLimit(1)
                     .frame(width: cardWidth, alignment: .leading)
@@ -720,13 +720,13 @@ private struct ContinueWatchingCard: View {
     }
 
     #if os(tvOS)
-    private var titleFont: Font { .labelSmall }
-    private var subtitleFont: Font { .system(size: 16, weight: .medium) }
+    private var titleFont: AerioFont { .labelSmall }
+    private var subtitleFont: AerioFont { .system(size: 16, weight: .medium) }
     private var titleColor: Color { isFocused ? .white : .textPrimary }
     private let barHeight: CGFloat = 5
     #else
-    private var titleFont: Font { .system(size: 13, weight: .semibold) }
-    private var subtitleFont: Font { .system(size: 11) }
+    private var titleFont: AerioFont { .system(size: 13, weight: .semibold) }
+    private var subtitleFont: AerioFont { .system(size: 11) }
     private var titleColor: Color { .textPrimary }
     private let barHeight: CGFloat = 3
     #endif

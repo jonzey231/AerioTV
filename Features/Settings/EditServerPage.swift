@@ -27,15 +27,15 @@ struct EditServerPage: View {
             HStack {
                 if let count {
                     Text("\(name) (\(count) channels)")
-                        .font(.system(size: 28, weight: .medium))
+                        .scaledFont(.system(size: 28, weight: .medium))
                 } else {
                     Text(name)
-                        .font(.system(size: 28, weight: .medium))
+                        .scaledFont(.system(size: 28, weight: .medium))
                 }
                 Spacer()
                 if server.dispatcharrSelectedProfileID == id {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 24, weight: .semibold))
+                        .scaledFont(.system(size: 24, weight: .semibold))
                         .foregroundColor(.accentPrimary)
                 }
             }
@@ -210,7 +210,7 @@ struct EditServerPage: View {
                         SettingsSection("EPG Source", style: .eyebrowCard) {
                             tvField("Custom XMLTV URL (optional)", text: $server.xtreamXMLTVURL)
                             Text("Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own.")
-                                .font(.system(size: 22))
+                                .scaledFont(.system(size: 22))
                                 .foregroundColor(.textTertiary)
                                 .padding(.top, 4)
                         }
@@ -239,17 +239,17 @@ struct EditServerPage: View {
                                     // hint mirrored on tvOS Edit Server
                                     // (the legacy ScrollView+VStack path).
                                     Text("Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.")
-                                        .font(.system(size: 22))
+                                        .scaledFont(.system(size: 22))
                                         .foregroundColor(.textTertiary)
                                         .padding(.top, 4)
                                     if !server.effectiveApiKey.isEmpty {
                                         HStack {
                                             Text("API Key (cached)")
-                                                .font(.system(size: 28, weight: .medium))
+                                                .scaledFont(.system(size: 28, weight: .medium))
                                                 .foregroundColor(.textSecondary)
                                             Spacer()
                                             Text(maskedAPIKey(server.effectiveApiKey))
-                                                .font(.system(size: 22, design: .monospaced))
+                                                .scaledFont(.system(size: 22, design: .monospaced))
                                                 .foregroundColor(.textTertiary)
                                         }
                                         .padding(.vertical, 4)
@@ -265,7 +265,7 @@ struct EditServerPage: View {
                                             }
                                             Text(isRefreshingSession ? "Refreshing…" : "Refresh Session")
                                         }
-                                        .font(.system(size: 26, weight: .semibold))
+                                        .scaledFont(.system(size: 26, weight: .semibold))
                                     }
                                     .disabled(server.username.isEmpty
                                               || server.effectivePassword.isEmpty
@@ -273,12 +273,12 @@ struct EditServerPage: View {
                                     .padding(.top, 6)
                                     if let msg = sessionRefreshMessage {
                                         Text(msg)
-                                            .font(.system(size: 22))
+                                            .scaledFont(.system(size: 22))
                                             .foregroundColor(sessionRefreshSucceeded ? .statusOnline : .statusLive)
                                             .padding(.top, 2)
                                     } else {
                                         Text("Use if streaming or logos suddenly fail. Re-fetches the API key from your Dispatcharr account.")
-                                            .font(.system(size: 22))
+                                            .scaledFont(.system(size: 22))
                                             .foregroundColor(.textTertiary)
                                             .padding(.top, 2)
                                     }
@@ -289,7 +289,7 @@ struct EditServerPage: View {
                             SettingsSection("EPG Source", style: .eyebrowCard) {
                                 tvField("Custom XMLTV URL (optional)", text: $server.dispatcharrXMLTVURL)
                                 Text("EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.")
-                                    .font(.system(size: 22))
+                                    .scaledFont(.system(size: 22))
                                     .foregroundColor(.textTertiary)
                                     .padding(.top, 4)
                             }
@@ -305,7 +305,7 @@ struct EditServerPage: View {
                         SettingsSection("Local Network", style: .eyebrowCard) {
                             tvField("Local URL", text: $server.localURL)
                             Text("Used when the Apple TV detects the local server is reachable. Leave blank to always use the main URL.")
-                                .font(.system(size: 22))
+                                .scaledFont(.system(size: 22))
                                 .foregroundColor(.textTertiary)
                                 .padding(.top, 4)
                         }
@@ -317,7 +317,7 @@ struct EditServerPage: View {
                         SettingsSection("User-Agent", style: .eyebrowCard) {
                             tvField("User-Agent", text: $server.customUserAgent)
                             Text("Shown in Dispatcharr's admin Stats panel to identify this device. Leave blank for default: \(DeviceInfo.defaultUserAgent)")
-                                .font(.system(size: 22))
+                                .scaledFont(.system(size: 22))
                                 .foregroundColor(.textTertiary)
                                 .padding(.top, 4)
                         }
@@ -329,11 +329,11 @@ struct EditServerPage: View {
                     if server.supportsVOD {
                         SettingsSection("On Demand", style: .eyebrowCard) {
                             Toggle("Fetch On Demand from this playlist", isOn: $server.vodEnabled)
-                                .font(.system(size: 28, weight: .medium))
+                                .scaledFont(.system(size: 28, weight: .medium))
                                 .foregroundColor(.textPrimary)
                                 .padding(.vertical, 4)
                             Text("When off, this playlist's movies and TV shows aren't loaded into On Demand. Useful if you only want Live TV from this server, or if you have a second playlist that already provides On Demand.")
-                                .font(.system(size: 22))
+                                .scaledFont(.system(size: 22))
                                 .foregroundColor(.textTertiary)
                                 .padding(.top, 4)
                         }
@@ -350,7 +350,7 @@ struct EditServerPage: View {
                         }
                         .pickerStyle(.segmented)
                         Text("How many days of guide data to load, back and ahead. Dispatcharr only; other sources show what their guide carries.")
-                            .font(.system(size: 22))
+                            .scaledFont(.system(size: 22))
                             .foregroundColor(.textTertiary)
                             .padding(.top, 4)
                     }
@@ -370,7 +370,7 @@ struct EditServerPage: View {
                             Text(channelProfilesLoadFailed
                                  ? "Couldn't load this server's Channel Profiles. All Channels stays in effect; check the connection and reopen this page to retry."
                                  : "Sync only the channels in a Dispatcharr Channel Profile. Changes apply on the next channel refresh.")
-                                .font(.system(size: 22))
+                                .scaledFont(.system(size: 22))
                                 .foregroundColor(.textTertiary)
                                 .padding(.top, 4)
                         }
@@ -381,11 +381,11 @@ struct EditServerPage: View {
                     SettingsSection("Info", style: .eyebrowCard) {
                         HStack {
                             Text("Type")
-                                .font(.system(size: 28, weight: .medium))
+                                .scaledFont(.system(size: 28, weight: .medium))
                                 .foregroundColor(.textSecondary)
                             Spacer()
                             Text(server.type.displayName)
-                                .font(.system(size: 28))
+                                .scaledFont(.system(size: 28))
                                 .foregroundColor(.textTertiary)
                         }
                         .padding(.vertical, 8)
@@ -405,7 +405,7 @@ struct EditServerPage: View {
                             dismiss()
                         } label: {
                             Text("Save Changes")
-                                .font(.system(size: 28, weight: .semibold))
+                                .scaledFont(.system(size: 28, weight: .semibold))
                                 .foregroundColor(.white)
                                 .padding(.horizontal, 48)
                                 .padding(.vertical, 14)
@@ -441,7 +441,7 @@ struct EditServerPage: View {
     private func tvField(_ placeholder: String, text: Binding<String>, isSecure: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(placeholder)
-                .font(.system(size: 22, weight: .medium))
+                .scaledFont(.system(size: 22, weight: .medium))
                 .foregroundColor(.textTertiary)
             TVSettingsTextField(placeholder: placeholder, text: text, isSecure: isSecure)
         }

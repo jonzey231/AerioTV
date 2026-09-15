@@ -4007,7 +4007,7 @@ struct TVNavActionCircle: View {
                         .scaleEffect(0.9)
                 } else {
                     Image(systemName: systemImage)
-                        .font(.system(size: 25, weight: .medium))
+                        .font(.system(size: 25, weight: .medium))  // glyph in a fixed box: not text, stays fixed
                 }
             }
             .frame(width: 60, height: 60)
@@ -6232,7 +6232,7 @@ struct MainTabView: View {
                         showSearch = true
                     } label: {
                         Image(systemName: "magnifyingglass")
-                            .font(.system(size: 16, weight: .medium))
+                            .scaledFont(.system(size: 16, weight: .medium))
                             .foregroundColor(theme.accent)
                     }
                 }
@@ -7403,24 +7403,24 @@ private struct ChannelInfoBanner: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     if !item.number.isEmpty {
                         Text(item.number)
-                            .font(channelNumberFont)
+                            .scaledFont(channelNumberFont)
                             .foregroundColor(.white.opacity(0.55))
                     }
                     Text(item.name)
-                        .font(channelNameFont)
+                        .scaledFont(channelNameFont)
                         .foregroundColor(.white)
                         .lineLimit(1)
                 }
 
                 if let prog = liveProgram(for: item) {
                     Text(prog.title)
-                        .font(programFont)
+                        .scaledFont(programFont)
                         .foregroundColor(.white.opacity(0.85))
                         .lineLimit(1)
 
                     if let timeAndDuration = airingTimeAndDuration(start: prog.start, end: prog.end) {
                         Text(timeAndDuration)
-                            .font(timeFont)
+                            .scaledFont(timeFont)
                             .foregroundColor(.white.opacity(0.65))
                             .lineLimit(1)
                     }
@@ -7475,28 +7475,28 @@ private struct ChannelInfoBanner: View {
         return 36
         #endif
     }
-    private var channelNumberFont: Font {
+    private var channelNumberFont: AerioFont {
         #if os(tvOS)
         return .system(size: 26, weight: .medium)
         #else
         return .system(size: 15, weight: .medium)
         #endif
     }
-    private var channelNameFont: Font {
+    private var channelNameFont: AerioFont {
         #if os(tvOS)
         return .system(size: 28, weight: .semibold)
         #else
         return .system(size: 16, weight: .semibold)
         #endif
     }
-    private var programFont: Font {
+    private var programFont: AerioFont {
         #if os(tvOS)
         return .system(size: 22)
         #else
         return .system(size: 14)
         #endif
     }
-    private var timeFont: Font {
+    private var timeFont: AerioFont {
         #if os(tvOS)
         return .system(size: 18)
         #else
@@ -8022,7 +8022,7 @@ private struct MinimizedTabButton: View {
         if #available(iOS 26.0, *) {
             Button { TabBarCollapseState.shared.set(false) } label: {
                 Image(systemName: tab.icon)
-                    .font(.system(size: 19, weight: .semibold))
+                    .font(.system(size: 19, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                     .foregroundStyle(theme.accent)
                     .frame(width: 48, height: 48)
             }

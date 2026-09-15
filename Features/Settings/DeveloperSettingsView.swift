@@ -180,7 +180,7 @@ struct DeveloperSettingsView: View {
                         .sectionHeaderStyle()
                 } footer: {
                     Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as aerio_debug_logs_archive.txt.")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                 }
                 #if os(iOS)
@@ -199,18 +199,18 @@ struct DeveloperSettingsView: View {
                             Image(systemName: unifiedPlayback
                                   ? "rectangle.stack.fill"
                                   : "rectangle.stack")
-                                .font(.system(size: 16, weight: .medium))
+                                .scaledFont(.system(size: 16, weight: .medium))
                                 .foregroundColor(unifiedPlayback ? .accentPrimary : .textSecondary)
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Unified Playback")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text(unifiedPlayback
                                  ? "On: live playback uses the multiview engine. Required for the AVPlayer options below."
                                  : "Off: legacy single-stream player (mpv only, no AVPlayer or multiview)")
-                                .font(.labelSmall)
+                                .scaledFont(.labelSmall)
                                 .foregroundColor(unifiedPlayback ? .accentPrimary : .textTertiary)
                         }
 
@@ -227,7 +227,7 @@ struct DeveloperSettingsView: View {
                         .sectionHeaderStyle()
                 } footer: {
                     Text("mpv is the default engine and plays every live channel, including HEVC. The two AVPlayer options route specific stream types to Apple's native player; anything AVPlayer cannot render (such as HEVC inside MPEG-TS) automatically falls back to mpv, so turning them on never loses a channel. Unified Playback hosts all of this: a single tile mounts MultiviewContainerView from the first frame, so adding a second stream is seamless. Disable it only if you hit a unified-path regression; the legacy PlayerView covers single-stream playback but has no multiview, mini-player, or AVPlayer support. Live only (VOD always uses the legacy path). Restart playback for changes to take effect.")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .padding(.top, 4)
                 }
@@ -245,18 +245,18 @@ struct DeveloperSettingsView: View {
                                       : Color.elevatedBackground)
                                 .frame(width: 36, height: 36)
                             Image(systemName: avPlayerHLS ? "play.tv.fill" : "play.tv")
-                                .font(.system(size: 16, weight: .medium))
+                                .scaledFont(.system(size: 16, weight: .medium))
                                 .foregroundColor(avPlayerHLS ? .accentPrimary : .textSecondary)
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text("AVPlayer for HLS Streams")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text(avPlayerHLS
                                  ? "On (default): HLS-capable channels auto-play on Apple's AVPlayer; everything else stays on mpv"
                                  : "Off: every channel uses the mpv engine")
-                                .font(.labelSmall)
+                                .scaledFont(.labelSmall)
                                 .foregroundColor(avPlayerHLS ? .accentPrimary : .textTertiary)
                         }
 
@@ -277,18 +277,18 @@ struct DeveloperSettingsView: View {
                                       : Color.elevatedBackground)
                                 .frame(width: 36, height: 36)
                             Image(systemName: avPlayerRemuxTS ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.triangle.2.circlepath.circle")
-                                .font(.system(size: 16, weight: .medium))
+                                .scaledFont(.system(size: 16, weight: .medium))
                                 .foregroundColor(avPlayerRemuxTS ? .accentPrimary : .textSecondary)
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text("AVPlayer Remux for TS Streams")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text(avPlayerRemuxTS
                                  ? "On: raw MPEG-TS remuxed to HLS for AVPlayer (HEVC/MPEG-2 fall back to mpv)"
                                  : "Off: raw TS channels use the mpv engine (the default)")
-                                .font(.labelSmall)
+                                .scaledFont(.labelSmall)
                                 .foregroundColor(avPlayerRemuxTS ? .accentPrimary : .textTertiary)
                         }
 
@@ -309,18 +309,18 @@ struct DeveloperSettingsView: View {
                                       : Color.elevatedBackground)
                                 .frame(width: 36, height: 36)
                             Image(systemName: mpvEngineEnabled ? "shield.lefthalf.filled" : "shield.slash")
-                                .font(.system(size: 16, weight: .medium))
+                                .scaledFont(.system(size: 16, weight: .medium))
                                 .foregroundColor(mpvEngineEnabled ? .accentPrimary : .textSecondary)
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text("mpv Engine")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text(mpvEngineEnabled
                                  ? "On: mpv is the fallback when AVPlayer can't play something"
                                  : "Off: AVPlayer only; unplayable content shows an error (test default)")
-                                .font(.labelSmall)
+                                .scaledFont(.labelSmall)
                                 .foregroundColor(mpvEngineEnabled ? .accentPrimary : .textTertiary)
                         }
 
@@ -337,7 +337,7 @@ struct DeveloperSettingsView: View {
                         .sectionHeaderStyle()
                 } footer: {
                     Text("Experimental engine router: live channels whose URL is genuine HLS (.m3u8, typically Xtream Codes sources) play through Apple's native AVPlayer for true HDR (PQ) output, surround sound passthrough, and AirPlay. Channels are presented in the system player without the app's custom chrome, channel flipping, or multiview. Raw MPEG-TS streams (Dispatcharr) are unaffected; AVPlayer cannot play them. Takes effect on the next channel start.")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .padding(.top, 4)
                 }
@@ -364,18 +364,18 @@ struct DeveloperSettingsView: View {
                                 Image(systemName: compactChromeiPhone
                                       ? "iphone.gen3.landscape"
                                       : "iphone.gen3")
-                                    .font(.system(size: 16, weight: .medium))
+                                    .scaledFont(.system(size: 16, weight: .medium))
                                     .foregroundColor(compactChromeiPhone ? .accentPrimary : .textSecondary)
                             }
 
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("iPhone Compact Chrome")
-                                    .font(.bodyMedium)
+                                    .scaledFont(.bodyMedium)
                                     .foregroundColor(.textPrimary)
                                 Text(compactChromeiPhone
                                      ? "On — Manage Groups lives in the Live TV nav bar"
                                      : "Off — classic layout")
-                                    .font(.labelSmall)
+                                    .scaledFont(.labelSmall)
                                     .foregroundColor(compactChromeiPhone ? .accentPrimary : .textTertiary)
                             }
 
@@ -401,10 +401,10 @@ struct DeveloperSettingsView: View {
                             Toggle(isOn: $hideFilterBarCompact) {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Hide Filter Bar")
-                                        .font(.bodyMedium)
+                                        .scaledFont(.bodyMedium)
                                         .foregroundColor(.textPrimary)
                                     Text("Removes the group pills strip above the channel list.")
-                                        .font(.labelSmall)
+                                        .scaledFont(.labelSmall)
                                         .foregroundColor(.textTertiary)
                                 }
                             }
@@ -414,10 +414,10 @@ struct DeveloperSettingsView: View {
                             Toggle(isOn: $hideSearchBarCompact) {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Hide Search Bar")
-                                        .font(.bodyMedium)
+                                        .scaledFont(.bodyMedium)
                                         .foregroundColor(.textPrimary)
                                     Text("Replaces the always-visible search row with the nav-bar search icon.")
-                                        .font(.labelSmall)
+                                        .scaledFont(.labelSmall)
                                         .foregroundColor(.textTertiary)
                                 }
                             }
@@ -432,7 +432,7 @@ struct DeveloperSettingsView: View {
                              ? "Compact Chrome moves Manage Groups into the Live TV nav bar. The two toggles above let you further reclaim vertical space by hiding the filter pills and/or the search row. All three options revert instantly — no restart required."
                              : "Designed for iPhone landscape. When enabled, Manage Groups moves to the nav bar and two further toggles appear for hiding the filter pills and search row. Reverting restores the classic layout instantly."
                         )
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .padding(.top, 4)
                     }
@@ -449,7 +449,7 @@ struct DeveloperSettingsView: View {
                         HStack {
                             Label {
                                 Text("Log File Size")
-                                    .font(.bodyMedium)
+                                    .scaledFont(.bodyMedium)
                                     .foregroundColor(.textPrimary)
                             } icon: {
                                 Image(systemName: "doc.text")
@@ -467,7 +467,7 @@ struct DeveloperSettingsView: View {
                             // path is actually working.
                             TimelineView(.periodic(from: Date(), by: 2)) { _ in
                                 Text(logSize)
-                                    .font(.monoSmall)
+                                    .scaledFont(.monoSmall)
                                     .foregroundColor(.textTertiary)
                                     .onAppear { refreshLogSize() }
                                     .onChange(of: Date().timeIntervalSinceReferenceDate) { _, _ in
@@ -497,10 +497,10 @@ struct DeveloperSettingsView: View {
                                 Label {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text("View Log File")
-                                            .font(.bodyMedium)
+                                            .scaledFont(.bodyMedium)
                                             .foregroundColor(.textPrimary)
                                         Text("Scroll through entries in the app")
-                                            .font(.labelSmall)
+                                            .scaledFont(.labelSmall)
                                             .foregroundColor(.textTertiary)
                                     }
                                 } icon: {
@@ -527,7 +527,7 @@ struct DeveloperSettingsView: View {
                                 Label {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text("Share Log File")
-                                            .font(.bodyMedium)
+                                            .scaledFont(.bodyMedium)
                                             .foregroundColor(.textPrimary)
                                         #if os(tvOS)
                                         // tvOS share sheet is AirDrop-only in
@@ -536,11 +536,11 @@ struct DeveloperSettingsView: View {
                                         // so we say so up front instead of the
                                         // iOS-style "Email, Messages, ...".
                                         Text("Send via AirDrop to a nearby Mac or iPhone")
-                                            .font(.labelSmall)
+                                            .scaledFont(.labelSmall)
                                             .foregroundColor(.textTertiary)
                                         #else
                                         Text("Email, Messages, Discord, Signal…")
-                                            .font(.labelSmall)
+                                            .scaledFont(.labelSmall)
                                             .foregroundColor(.textTertiary)
                                         #endif
                                     }
@@ -568,7 +568,7 @@ struct DeveloperSettingsView: View {
                             showClearConfirmation = true
                         } label: {
                             Label("Delete All Logs", systemImage: "trash")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                         }
                         .listRowBackground(Color.cardBackground)
 
@@ -602,18 +602,18 @@ struct DeveloperSettingsView: View {
                             Image(systemName: debugLoggingEnabled
                                   ? "ladybug.fill"
                                   : "ladybug")
-                                .font(.system(size: 16, weight: .medium))
+                                .scaledFont(.system(size: 16, weight: .medium))
                                 .foregroundColor(debugLoggingEnabled ? .accentPrimary : .textSecondary)
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Debug Logging")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text(debugLoggingEnabled
                                  ? "Active — writing to aerio_debug_logs.txt"
                                  : "Off — no data is collected")
-                                .font(.labelSmall)
+                                .scaledFont(.labelSmall)
                                 .foregroundColor(debugLoggingEnabled ? .accentPrimary : .textTertiary)
                         }
 
@@ -640,7 +640,7 @@ struct DeveloperSettingsView: View {
                         .sectionHeaderStyle()
                 } footer: {
                     Text("When enabled, detailed logs are written to a file in On My iPhone › AerioTV. Logs include network requests, playback events, EPG activity, errors, and app lifecycle events. No personally identifiable information is collected.")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .padding(.top, 4)
                 }
@@ -763,7 +763,7 @@ struct DeveloperSettingsView: View {
                     )
                     if let err = metalHDRTestError {
                         Text(err)
-                            .font(.caption)
+                            .scaledFont(.caption)
                             .foregroundColor(.textSecondary)
                     }
                     #endif
@@ -829,15 +829,15 @@ struct DeveloperSettingsView: View {
     private var tvLogSizeCard: some View {
         HStack(spacing: 16) {
             Image(systemName: "doc.text")
-                .font(.system(size: 28))
+                .scaledFont(.system(size: 28))
                 .foregroundColor(.textSecondary)
                 .frame(width: 36)
             Text("Log File Size")
-                .font(.system(size: 26, weight: .medium))
+                .scaledFont(.system(size: 26, weight: .medium))
                 .foregroundColor(.textPrimary)
             Spacer()
             Text(logSize)
-                .font(.system(size: 24, design: .monospaced))
+                .scaledFont(.system(size: 24, design: .monospaced))
                 .foregroundColor(.textTertiary)
         }
         .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
@@ -878,7 +878,7 @@ struct DeveloperSettingsView: View {
                           detail: "Timed operations — parse time, load time, memory at session start")
 
             Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as aerio_debug_logs_archive.txt.")
-                .font(.system(size: 20))
+                .scaledFont(.system(size: 20))
                 .foregroundColor(.textTertiary)
                 .padding(.top, 8)
         }
@@ -897,16 +897,16 @@ struct DeveloperSettingsView: View {
     private func tvLogCategory(icon: String, title: String, detail: String) -> some View {
         HStack(alignment: .top, spacing: 16) {
             Image(systemName: icon)
-                .font(.system(size: 22, weight: .medium))
+                .scaledFont(.system(size: 22, weight: .medium))
                 .foregroundColor(.accentSecondary)
                 .frame(width: 32)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.system(size: 24, weight: .semibold))
+                    .scaledFont(.system(size: 24, weight: .semibold))
                     .foregroundColor(.textPrimary)
                 Text(detail)
-                    .font(.system(size: 20))
+                    .scaledFont(.system(size: 20))
                     .foregroundColor(.textSecondary)
             }
         }
@@ -999,10 +999,10 @@ struct LogViewerView: View {
                 } else if content.isEmpty {
                     VStack(spacing: 12) {
                         Image(systemName: "doc.text")
-                            .font(.system(size: 40))
+                            .scaledFont(.system(size: 40))
                             .foregroundColor(.textTertiary)
                         Text("Log file is empty.")
-                            .font(.bodyMedium)
+                            .scaledFont(.bodyMedium)
                             .foregroundColor(.textTertiary)
                     }
                 } else {
@@ -1010,9 +1010,9 @@ struct LogViewerView: View {
                         if isTruncated {
                             HStack(spacing: 6) {
                                 Image(systemName: "exclamationmark.triangle")
-                                    .font(.system(size: 12, weight: .semibold))
+                                    .scaledFont(.system(size: 12, weight: .semibold))
                                 Text("Showing last \(maxLines) lines — share the file for the full log")
-                                    .font(.labelSmall)
+                                    .scaledFont(.labelSmall)
                             }
                             .foregroundColor(.statusWarning)
                             .padding(.horizontal, 14)
@@ -1094,17 +1094,17 @@ private struct LogTextView: UIViewRepresentable {
 private func logCategoryRow(icon: String, title: String, detail: String) -> some View {
     HStack(alignment: .top, spacing: 12) {
         Image(systemName: icon)
-            .font(.system(size: 14, weight: .medium))
+            .scaledFont(.system(size: 14, weight: .medium))
             .foregroundColor(.accentSecondary)
             .frame(width: 20)
             .padding(.top, 2)
 
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
-                .font(.headlineSmall)
+                .scaledFont(.headlineSmall)
                 .foregroundColor(.textPrimary)
             Text(detail)
-                .font(.labelSmall)
+                .scaledFont(.labelSmall)
                 .foregroundColor(.textSecondary)
         }
     }
@@ -1306,10 +1306,10 @@ struct TvOSLogShareSheet: View {
             Color.appBackground.ignoresSafeArea()
             VStack(spacing: 32) {
                 Text("Share Log File")
-                    .font(.system(size: 48, weight: .bold))
+                    .scaledFont(.system(size: 48, weight: .bold))
                     .foregroundStyle(.white)
                 Text("On your phone or laptop, open this URL or scan the QR code. The .txt file will download. Forward it to us via Email or Discord.")
-                    .font(.system(size: 22))
+                    .scaledFont(.system(size: 22))
                     .foregroundStyle(.white.opacity(0.75))
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 900)
@@ -1325,13 +1325,13 @@ struct TvOSLogShareSheet: View {
                             .background(Color.white)
                     }
                     Text(urlString)
-                        .font(.system(size: 30, weight: .semibold, design: .monospaced))
+                        .scaledFont(.system(size: 30, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 32)
                         .padding(.vertical, 14)
                         .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12))
                     Text("Server stops when you close this screen. The Apple TV and your phone must be on the same WiFi.")
-                        .font(.system(size: 18))
+                        .scaledFont(.system(size: 18))
                         .foregroundStyle(.white.opacity(0.55))
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 900)
@@ -1349,7 +1349,7 @@ struct TvOSLogShareSheet: View {
                     isPresented = false
                 } label: {
                     Text("Close")
-                        .font(.system(size: 26, weight: .semibold))
+                        .scaledFont(.system(size: 26, weight: .semibold))
                         .padding(.horizontal, 48)
                         .padding(.vertical, 16)
                 }
@@ -1417,7 +1417,7 @@ struct MetalHDRTestScreen: View {
             // Stats HUD: small, top-left, updated from the poller. Play/Pause
             // toggles it so Logan can judge colors with a clean frame.
             Text(hud)
-                .font(.system(size: 20, weight: .medium, design: .monospaced))
+                .scaledFont(.system(size: 20, weight: .medium, design: .monospaced))
                 .foregroundColor(.white)
                 .padding(12)
                 .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))

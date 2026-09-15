@@ -4678,6 +4678,10 @@ struct EPGGuideView: View {
     @ObservedObject private var multiviewStore = MultiviewStore.shared
     @EnvironmentObject private var channelStore: ChannelStore
     @Environment(\.modelContext) private var modelContext
+    /// Settings > Appearance > Text Size. Row and time-header heights grow
+    /// with it (never shrink) so larger cell text is not clipped; column
+    /// widths and pixels-per-hour stay put (text truncates horizontally).
+    @Environment(\.aerioTextScale) private var textScale
     @State private var _epgCacheIsFresh = false
 
 /// The channel row that `resetFocus(in: guideFocusNS)` on tvOS
@@ -4887,8 +4891,8 @@ struct EPGGuideView: View {
     // GuidePreviewState, which only the banner observes (2026-09-12).
     // Preview rows hold title, subtitle and the badge row (Logan 2026-09-06:
     // 80 pt clipped the badges against the subtitle).
-    private var rowHeight: CGFloat { previewMode ? 96 : 110 }
-    private let timeHeaderHeight: CGFloat = 50
+    private var rowHeight: CGFloat { TextScale.grow(previewMode ? 96 : 110, textScale) }
+    private var timeHeaderHeight: CGFloat { TextScale.grow(50, textScale) }
     private let pixelsPerHour: CGFloat = 600
     private let cellGap: CGFloat = 1        // hairline gap between program cells (Emby style)
     private let rowGap: CGFloat = 1         // hairline gap between rows
@@ -4906,8 +4910,8 @@ struct EPGGuideView: View {
     private var channelColumnWidth: CGFloat { (horizontalSizeClass == .compact ? 78 : 100) * guideScale }
     /// Phone cells carry the subtitle and two description lines (Logan
     /// 2026-09-05), so they are taller.
-    private var rowHeight: CGFloat { (UIDevice.current.userInterfaceIdiom == .phone ? 98 : 72) * guideScale }
-    private var timeHeaderHeight: CGFloat { 32 * guideScale }
+    private var rowHeight: CGFloat { TextScale.grow((UIDevice.current.userInterfaceIdiom == .phone ? 98 : 72) * guideScale, textScale) }
+    private var timeHeaderHeight: CGFloat { TextScale.grow(32 * guideScale, textScale) }
     private var pixelsPerHour: CGFloat { 360 * guideScale }
     private let cellGap: CGFloat = 1
     private let rowGap: CGFloat = 1
@@ -6425,7 +6429,7 @@ struct EPGGuideView: View {
                 // locale-aware format so it honors the device's
                 // 12 or 24-hour setting.
                 .overlay {
-                    GuideCornerClock(fontSize: timeHeaderHeight * 0.4, target: jumpTarget)
+                    GuideCornerClock(fontSize: timeHeaderHeight / max(1, textScale) * 0.4, target: jumpTarget)
                 }
                 // Tap: back to now. Long press: jump to a day and time
                 // (Roman via Discord; Logan 2026-09-06).
@@ -6511,7 +6515,7 @@ struct EPGGuideView: View {
                 VStack(spacing: 0) {
                     #if os(tvOS)
                     Text(timeFormatter.string(from: date).lowercased())
-                        .font(.system(size: 20, weight: .medium))
+                        .scaledFont(.system(size: 20, weight: .medium))
                         .foregroundColor(.textSecondary)
                     #else
                     // Scale with `guideScale` so shrinking / enlarging
@@ -6521,7 +6525,7 @@ struct EPGGuideView: View {
                     // producing oversized headers at 0.75x and
                     // undersized ones at 1.5x (R3 review finding).
                     Text(timeFormatter.string(from: date).lowercased())
-                        .font(.system(size: 10 * guideScale, weight: .medium))
+                        .scaledFont(.system(size: 10 * guideScale, weight: .medium))
                         .foregroundColor(.textSecondary)
                     #endif
                 }
@@ -6621,7 +6625,7 @@ struct EPGGuideView: View {
                 .offset(x: -horizontalOffset)
                 #else
                 Text(emptyRowLabel(for: channel))
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.textTertiary)
                     .frame(width: max(1, visibleProgramWidth), height: rowHeight, alignment: .center)
                     .contentShape(Rectangle())
@@ -6750,10 +6754,10 @@ struct EPGGuideView: View {
             : "\(count) tiles staged for Multiview"
         let banner = HStack(spacing: 12) {
             Image(systemName: "rectangle.3.group.fill")
-                .font(.system(size: 16, weight: .semibold))
+                .scaledFont(.system(size: 16, weight: .semibold))
                 .foregroundColor(.accentPrimary)
             Text(label)
-                .font(.system(size: 15, weight: .semibold))
+                .scaledFont(.system(size: 15, weight: .semibold))
                 .foregroundColor(.textPrimary)
             Spacer()
             // Clear (Android parity P2): one-press way to abandon a
@@ -6770,7 +6774,7 @@ struct EPGGuideView: View {
                 )
             } label: {
                 Text("Clear")
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(.system(size: 15, weight: .semibold))
                     .foregroundColor(.textSecondary)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
@@ -6797,9 +6801,9 @@ struct EPGGuideView: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "play.fill")
-                        .font(.system(size: 13, weight: .semibold))
+                        .scaledFont(.system(size: 13, weight: .semibold))
                     Text("Play")
-                        .font(.system(size: 15, weight: .semibold))
+                        .scaledFont(.system(size: 15, weight: .semibold))
                 }
                 .foregroundColor(.white)
                 .padding(.horizontal, 14)
@@ -6826,7 +6830,7 @@ struct EPGGuideView: View {
                 )
             } label: {
                 Text("Done")
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(.system(size: 15, weight: .semibold))
                     .foregroundColor(.accentPrimary)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
@@ -6861,11 +6865,11 @@ struct EPGGuideView: View {
     private func stagingToastView(_ text: String) -> some View {
         Text(text)
             #if os(tvOS)
-            .font(.system(size: 22, weight: .semibold))
+            .scaledFont(.system(size: 22, weight: .semibold))
             .padding(.horizontal, 24)
             .padding(.vertical, 14)
             #else
-            .font(.subheadline.weight(.semibold))
+            .scaledFont(.subheadline.weight(.semibold))
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             #endif
@@ -7088,7 +7092,7 @@ private struct GuideCornerClock: View {
                     .foregroundColor(.textPrimary)
             }
         }
-        .font(.system(size: fontSize, weight: .semibold).monospacedDigit())
+        .scaledFont(.system(size: fontSize, weight: .semibold).monospacedDigit())
         .lineLimit(1)
         .minimumScaleFactor(0.5)
         .padding(.horizontal, 4)
@@ -7177,7 +7181,7 @@ private struct GuideChannelButton: View {
             .overlay(alignment: .topTrailing) {
                 if favoritesStore.isFavorite(channel.id) {
                     Image(systemName: "star.fill")
-                        .font(.system(size: 14))
+                        .scaledFont(.system(size: 14))
                         .foregroundColor(.statusWarning)
                         .padding(.top, 6)
                         .padding(.trailing, channel.hasCatchup ? 30 : 8)
@@ -7210,7 +7214,7 @@ private struct GuideChannelButton: View {
                 // below the clock).
                 if favoritesStore.isFavorite(channel.id) {
                     Image(systemName: "star.fill")
-                        .font(.system(size: 11, weight: .semibold))
+                        .scaledFont(.system(size: 11, weight: .semibold))
                         .foregroundColor(.statusWarning)
                         .padding(.top, 2)
                         .padding(.trailing, channel.hasCatchup ? 17 : 3)
@@ -7228,7 +7232,7 @@ private struct GuideChannelButton: View {
             // GH #19: number column collapses when numbers are off.
             if showChannelNumbers {
                 Text(channel.number)
-                    .font(.system(size: 22, weight: .bold, design: .monospaced))
+                    .scaledFont(.system(size: 22, weight: .bold, design: .monospaced))
                     .foregroundColor(.textTertiary)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
@@ -7249,7 +7253,7 @@ private struct GuideChannelButton: View {
                 }
                 if showChannelNames {
                     Text(channel.name)
-                        .font(.system(size: 18, weight: .medium))
+                        .scaledFont(.system(size: 18, weight: .medium))
                         .foregroundColor(.textPrimary)
                         .lineLimit(1)
                 }
@@ -7266,7 +7270,7 @@ private struct GuideChannelButton: View {
         .overlay(alignment: .topTrailing) {
             if channel.hasCatchup {
                 Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 14, weight: .semibold))
+                    .scaledFont(.system(size: 14, weight: .semibold))
                     .foregroundColor(.textTertiary)
                     .padding(.top, 6)
                     .padding(.trailing, 8)
@@ -7286,14 +7290,14 @@ private struct GuideChannelButton: View {
             VStack(spacing: 1) {
                 if showChannelNames {
                     Text(channel.name)
-                        .font(.system(size: 10, weight: .medium))
+                        .scaledFont(.system(size: 10, weight: .medium))
                         .foregroundColor(.textPrimary)
                         .lineLimit(1)
                 }
                 // GH #19: hide the number line when numbers are off.
                 if showChannelNumbers {
                     Text(channel.number)
-                        .font(.system(size: 8, weight: .bold))
+                        .scaledFont(.system(size: 8, weight: .bold))
                         .foregroundColor(.textTertiary)
                 }
             }
@@ -7307,7 +7311,7 @@ private struct GuideChannelButton: View {
         .overlay(alignment: .topTrailing) {
             if channel.hasCatchup {
                 Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 9, weight: .semibold))
+                    .scaledFont(.system(size: 9, weight: .semibold))
                     .foregroundColor(.textTertiary)
                     .padding(.top, 3)
                     .padding(.trailing, 3)
@@ -7508,16 +7512,16 @@ private struct GuideProgramButton: View {
                 // Catch-up badge: aired + replayable from the archive.
                 if canReplayNow {
                     Image(systemName: "clock.arrow.circlepath")
-                        .font(.system(size: 18, weight: .semibold))
+                        .scaledFont(.system(size: 18, weight: .semibold))
                         .foregroundColor(isFocused ? .white : .accentPrimary)
                 }
                 Text(prog.title)
-                    .font(.system(size: 26, weight: .semibold))
+                    .scaledFont(.system(size: 26, weight: .semibold))
                     .foregroundColor(isFocused ? .white : .textPrimary)
                     .lineLimit(1)
                 if hasReminder {
                     Image(systemName: "bell.fill")
-                        .font(.system(size: 14))
+                        .scaledFont(.system(size: 14))
                         .foregroundColor(isFocused ? .white : .accentPrimary)
                 }
                 // Audit #50: red dot on cells with a scheduled or
@@ -7536,7 +7540,7 @@ private struct GuideProgramButton: View {
                 if showProgramSubtitles, let sub = prog.subTitle,
                    !EPGText.subtitleIsRedundant(sub, title: prog.title, description: prog.description) {
                     Text(sub)
-                        .font(.system(size: 20))
+                        .scaledFont(.system(size: 20))
                         .italic()
                         .foregroundColor(.textSecondary)
                         .lineLimit(1)
@@ -7555,7 +7559,7 @@ private struct GuideProgramButton: View {
             if showProgramSubtitles, let sub = prog.subTitle,
                !EPGText.subtitleIsRedundant(sub, title: prog.title, description: prog.description) {
                 Text(sub)
-                    .font(.system(size: 18))
+                    .scaledFont(.system(size: 18))
                     .italic()
                     .foregroundColor(isFocused ? .white.opacity(0.85) : .textSecondary)
                     .lineLimit(1)
@@ -7563,7 +7567,7 @@ private struct GuideProgramButton: View {
             }
             if !prog.description.isEmpty {
                 Text(prog.description)
-                    .font(.system(size: 18))
+                    .scaledFont(.system(size: 18))
                     .foregroundColor(isFocused ? .white.opacity(0.8) : .textSecondary)
                     .lineLimit(nil)
             }
@@ -7576,7 +7580,7 @@ private struct GuideProgramButton: View {
             // cut through the badges (Logan 2026-08-07 screenshot).
             HStack(spacing: 4) {
                 Text("\(shortTimeFormatter.string(from: prog.start)) - \(shortTimeFormatter.string(from: prog.end))")
-                    .font(.system(size: 17))
+                    .scaledFont(.system(size: 17))
                     .foregroundColor(isFocused ? .white.opacity(0.6) : .textTertiary)
                 if showEpgBadges {
                     SeasonEpisodePill(season: prog.season, episode: prog.episode, compact: true)
@@ -7592,16 +7596,16 @@ private struct GuideProgramButton: View {
                 // Catch-up badge: aired + replayable from the archive.
                 if canReplayNow {
                     Image(systemName: "clock.arrow.circlepath")
-                        .font(.system(size: 9 * guideScale, weight: .semibold))
+                        .scaledFont(.system(size: 9 * guideScale, weight: .semibold))
                         .foregroundColor(.accentPrimary)
                 }
                 Text(prog.title)
-                    .font(.system(size: 12 * guideScale, weight: .semibold))
+                    .scaledFont(.system(size: 12 * guideScale, weight: .semibold))
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
                 if hasReminder {
                     Image(systemName: "bell.fill")
-                        .font(.system(size: 9 * guideScale))
+                        .scaledFont(.system(size: 9 * guideScale))
                         .foregroundColor(.accentPrimary)
                 }
                 // Audit #50: red dot on cells with a scheduled or
@@ -7620,7 +7624,7 @@ private struct GuideProgramButton: View {
             } ?? false
             if subShown, let sub = prog.subTitle {
                 Text(sub)
-                    .font(.system(size: 10 * guideScale))
+                    .scaledFont(.system(size: 10 * guideScale))
                     .italic()
                     .foregroundColor(.textSecondary)
                     .lineLimit(1)
@@ -7639,18 +7643,18 @@ private struct GuideProgramButton: View {
             if UIDevice.current.userInterfaceIdiom == .phone {
                 if !prog.description.isEmpty {
                     Text(prog.description)
-                        .font(.system(size: 10 * guideScale))
+                        .scaledFont(.system(size: 10 * guideScale))
                         .foregroundColor(.textSecondary)
                         .lineLimit(2)
                 }
             } else if !prog.description.isEmpty, !(subShown && compactBadgeRowVisible) {
                 Text(prog.description)
-                    .font(.system(size: 10 * guideScale))
+                    .scaledFont(.system(size: 10 * guideScale))
                     .foregroundColor(.textSecondary)
                     .lineLimit(nil)
             }
             Text("\(shortTimeFormatter.string(from: prog.start)) - \(shortTimeFormatter.string(from: prog.end))")
-                .font(.system(size: 9 * guideScale))
+                .scaledFont(.system(size: 9 * guideScale))
                 .foregroundColor(.textTertiary)
                 .layoutPriority(1)
             // Season/episode pill + feed badges on their own row at the
@@ -8333,7 +8337,7 @@ private struct GuideEmptyRowButton: View {
     var body: some View {
         Button(action: action) {
             Text(label)
-                .font(.system(size: 24, weight: .medium))
+                .scaledFont(.system(size: 24, weight: .medium))
                 .foregroundColor(isFocused ? .white : .textTertiary)
                 .frame(width: width, height: rowHeight, alignment: .center)
                 .background(isFocused ? Color.white.opacity(0.25) : Color.white.opacity(0.05))

@@ -187,7 +187,7 @@ struct DVRSettingsView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(.yellow)
                     }
-                    .font(.footnote)
+                    .scaledFont(.footnote)
                 }
             } header: {
                 Text("Local Storage")
@@ -256,7 +256,7 @@ struct DVRSettingsView: View {
                 Text("Danger Zone").sectionHeaderStyle()
             } footer: {
                 Text("Deletes every recording saved on this device. Server recordings on Dispatcharr are not affected.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listRowBackground(Color.cardBackground)
         }
@@ -342,7 +342,7 @@ struct DVRSettingsView: View {
                     // data, recordings included. Disclose it rather than
                     // let a vanished recording look like an app bug.
                     Text("Recordings are stored on this Apple TV. If the system runs critically low on space, tvOS may remove stored app data, including recordings. For must-keep recordings, use a Dispatcharr server destination.")
-                        .font(.system(size: 22))
+                        .scaledFont(.system(size: 22))
                         .foregroundColor(.textTertiary)
                         .padding(.horizontal, 20)
                         .padding(.top, 4)
@@ -383,23 +383,23 @@ struct DVRSettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("Maximum")
-                    .font(.system(size: 26, weight: .medium))
+                    .scaledFont(.system(size: 26, weight: .medium))
                     .foregroundColor(.textPrimary)
                 Spacer()
                 HStack(spacing: 24) {
                     Button { if maxStorageMB > 1024 { maxStorageMB -= 1024 } } label: {
                         Image(systemName: "minus.circle.fill")
-                            .font(.system(size: 36))
+                            .scaledFont(.system(size: 36))
                             .foregroundColor(.accentPrimary)
                     }
                     .buttonStyle(TVNoHighlightButtonStyle())
                     Text(formatGB(mb: maxStorageMB))
-                        .font(.system(size: 28, weight: .semibold))
+                        .scaledFont(.system(size: 28, weight: .semibold))
                         .foregroundColor(.textPrimary)
                         .frame(minWidth: 110)
                     Button { if maxStorageMB < 204_800 { maxStorageMB += 1024 } } label: {
                         Image(systemName: "plus.circle.fill")
-                            .font(.system(size: 36))
+                            .scaledFont(.system(size: 36))
                             .foregroundColor(.accentPrimary)
                     }
                     .buttonStyle(TVNoHighlightButtonStyle())
@@ -409,11 +409,11 @@ struct DVRSettingsView: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("Used")
-                        .font(.system(size: 22))
+                        .scaledFont(.system(size: 22))
                         .foregroundColor(.textSecondary)
                     Spacer()
                     Text(formatBytes(coordinator.localUsageBytes) + " of " + formatGB(mb: maxStorageMB))
-                        .font(.system(size: 22))
+                        .scaledFont(.system(size: 22))
                         .foregroundColor(.textSecondary)
                 }
                 GeometryReader { geo in
@@ -435,7 +435,7 @@ struct DVRSettingsView: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundColor(.yellow)
                 }
-                .font(.system(size: 22))
+                .scaledFont(.system(size: 22))
             }
         }
         .padding(24)

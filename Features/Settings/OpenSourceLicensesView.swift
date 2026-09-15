@@ -3379,7 +3379,7 @@ struct OpenSourceLicensesView: View {
         List {
             Section {
                 Text(OSSCatalog.appSummary)
-                    .font(.footnote)
+                    .scaledFont(.footnote)
                     .foregroundColor(.textSecondary)
                     .listRowBackground(Color.cardBackground)
             } header: {
@@ -3387,7 +3387,7 @@ struct OpenSourceLicensesView: View {
             }
             Section {
                 Text(OSSCatalog.patentNotice)
-                    .font(.footnote)
+                    .scaledFont(.footnote)
                     .foregroundColor(.textSecondary)
                     .listRowBackground(Color.cardBackground)
             } header: {
@@ -3405,8 +3405,8 @@ struct OpenSourceLicensesView: View {
                         OSSDetailView(component: c)
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(c.name).font(.bodyMedium).foregroundColor(.textPrimary)
-                            Text(c.licenseName).font(.caption).foregroundColor(.textTertiary)
+                            Text(c.name).scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                            Text(c.licenseName).scaledFont(.caption).foregroundColor(.textTertiary)
                         }
                     }
                     .listRowBackground(Color.cardBackground)
@@ -3442,16 +3442,16 @@ struct OpenSourceLicensesView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
                         Text("Open Source Licenses")
-                            .font(.system(size: 40, weight: .bold))
+                            .scaledFont(.system(size: 40, weight: .bold))
                             .foregroundColor(.textPrimary)
                         Text(OSSCatalog.appSummary)
-                            .font(.system(size: 24))
+                            .scaledFont(.system(size: 24))
                             .foregroundColor(.textSecondary)
                         Text("Patents")
-                            .font(.system(size: 28, weight: .semibold))
+                            .scaledFont(.system(size: 28, weight: .semibold))
                             .foregroundColor(.textPrimary)
                         Text(OSSCatalog.patentNotice)
-                            .font(.system(size: 24))
+                            .scaledFont(.system(size: 24))
                             .foregroundColor(.textSecondary)
                         TMDBAttributionView(style: .long)
                         VStack(spacing: 12) {
@@ -3461,8 +3461,8 @@ struct OpenSourceLicensesView: View {
                                 } label: {
                                     HStack {
                                         VStack(alignment: .leading, spacing: 2) {
-                                            Text(c.name).font(.system(size: 28, weight: .medium))
-                                            Text(c.licenseName).font(.system(size: 20)).opacity(0.6)
+                                            Text(c.name).scaledFont(.system(size: 28, weight: .medium))
+                                            Text(c.licenseName).scaledFont(.system(size: 20)).opacity(0.6)
                                         }
                                         Spacer()
                                         Image(systemName: "chevron.right").opacity(0.4)
@@ -3488,11 +3488,11 @@ private struct OSSDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text(component.blurb)
-                    .font(.footnote)
+                    .scaledFont(.footnote)
                     .foregroundColor(.textSecondary)
                 if let text = component.licenseText {
                     Text(text)
-                        .font(.system(size: 12, design: .monospaced))
+                        .scaledFont(.system(size: 12, design: .monospaced))
                         .foregroundColor(.textPrimary)
                 }
             }
@@ -3527,7 +3527,7 @@ private struct OSSTVDetailView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 Text(component.name)
-                    .font(.system(size: 36, weight: .bold))
+                    .scaledFont(.system(size: 36, weight: .bold))
                     .foregroundColor(.textPrimary)
                 ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, block in
                     FocusableParagraph(text: block)
@@ -3544,7 +3544,7 @@ private struct FocusableParagraph: View {
     @FocusState private var focused: Bool
     var body: some View {
         Text(text)
-            .font(.system(size: 22))
+            .scaledFont(.system(size: 22))
             .foregroundColor(focused ? .textPrimary : .textSecondary)
             .padding(8)
             .background(RoundedRectangle(cornerRadius: 8)

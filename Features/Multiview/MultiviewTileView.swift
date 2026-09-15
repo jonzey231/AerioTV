@@ -617,7 +617,7 @@ struct MultiviewTileView: View {
         .overlay(alignment: .top) {
             if let notice = liveResumeNotice {
                 Text(notice)
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundStyle(.white)
                     .padding(.horizontal, 18)
                     .padding(.vertical, 10)
@@ -1475,7 +1475,7 @@ struct MultiviewTileView: View {
     private var audioBadge: some View {
         VStack(spacing: 8) {
             Image(systemName: "speaker.wave.2.fill")
-                .font(.system(size: 22, weight: .semibold))
+                .scaledFont(.system(size: 22, weight: .semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
@@ -1483,7 +1483,7 @@ struct MultiviewTileView: View {
                 .shadow(color: .black.opacity(0.45), radius: 6, y: 2)
 
             Text(tile.item.name)
-                .font(.system(size: 12, weight: .semibold))
+                .scaledFont(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -1559,7 +1559,7 @@ struct MultiviewTileView: View {
             Spacer()
             HStack {
                 Text(tile.item.name)
-                    .font(.caption.weight(.semibold))
+                    .scaledFont(.caption.weight(.semibold))
                     .lineLimit(1)
                     .foregroundStyle(.white)
                     .padding(.horizontal, 8)
@@ -1608,17 +1608,17 @@ struct MultiviewTileView: View {
                         #endif
                         .tint(.white)
                     Text("Reconnecting…")
-                        .font(.headline)
+                        .scaledFont(.headline)
                         .foregroundStyle(.white)
                 } else {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.largeTitle)
+                        .scaledFont(.largeTitle)
                         .foregroundStyle(.orange)
                     // Sole tile = the regular full-screen player: title it like
                     // one (Android "Channel Unavailable" parity). The multiview
                     // grid keeps the per-tile "Playback Problem" wording.
                     Text(isSoleTile ? "Channel Unavailable" : "Playback Problem")
-                        .font(.headline)
+                        .scaledFont(.headline)
                         .foregroundStyle(.white)
                     // SECURITY: mpv error strings can echo server-controlled
                     // bytes (HTTP error bodies, HLS parse errors, remote URL
@@ -1626,13 +1626,13 @@ struct MultiviewTileView: View {
                     // `sanitizedErrorMessage` strips control/bidi chars +
                     // caps length.
                     Text(verbatim: Self.sanitizedErrorMessage(message))
-                        .font(.caption)
+                        .scaledFont(.caption)
                         .foregroundStyle(.white.opacity(0.9))
                         .multilineTextAlignment(.center)
                         .lineLimit(3)
                         .padding(.horizontal, 10)
                     Text(reconnectStatusText)
-                        .font(.footnote)
+                        .scaledFont(.footnote)
                         .foregroundStyle(.white.opacity(0.7))
                 }
                 HStack(spacing: 12) {
@@ -1655,7 +1655,7 @@ struct MultiviewTileView: View {
                             retryNow()
                         } label: {
                             Label("Retry", systemImage: "arrow.clockwise")
-                                .font(.footnote.weight(.semibold))
+                                .scaledFont(.footnote.weight(.semibold))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 14)
                                 .padding(.vertical, 8)
@@ -1685,7 +1685,7 @@ struct MultiviewTileView: View {
                             store.remove(id: tile.id)
                         } label: {
                             Label("Remove", systemImage: "xmark.circle")
-                                .font(.footnote.weight(.semibold))
+                                .scaledFont(.footnote.weight(.semibold))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 14)
                                 .padding(.vertical, 8)
@@ -1904,15 +1904,15 @@ struct MultiviewTileView: View {
             Color.black.opacity(0.82)
             VStack(spacing: 14) {
                 Image(systemName: "checkmark.circle.fill")
-                    .font(.largeTitle)
+                    .scaledFont(.largeTitle)
                     .foregroundStyle(.white)
                 Text("Finished")
-                    .font(.headline)
+                    .scaledFont(.headline)
                     .foregroundStyle(.white)
                 // `verbatim:` so a VOD title can't be interpreted as
                 // Markdown (titles are server-sourced metadata).
                 Text(verbatim: tile.item.name)
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundStyle(.white.opacity(0.9))
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
@@ -1923,7 +1923,7 @@ struct MultiviewTileView: View {
                         replayFromStart()
                     } label: {
                         Label("Replay", systemImage: "arrow.counterclockwise")
-                            .font(.footnote.weight(.semibold))
+                            .scaledFont(.footnote.weight(.semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
@@ -1939,7 +1939,7 @@ struct MultiviewTileView: View {
                         store.remove(id: tile.id)
                     } label: {
                         Label("Remove", systemImage: "xmark.circle")
-                            .font(.footnote.weight(.semibold))
+                            .scaledFont(.footnote.weight(.semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
@@ -2255,7 +2255,7 @@ private struct CenterAudioIconView: View {
     /// on the icon.
     private var namePill: some View {
         Text(channelName)
-            .font(.system(size: 20, weight: .semibold))
+            .scaledFont(.system(size: 20, weight: .semibold))
             .foregroundStyle(.white)
             .lineLimit(1)
             .truncationMode(.tail)
@@ -2276,7 +2276,7 @@ private struct CenterAudioIconView: View {
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: iconName)
-                .font(.system(size: 44, weight: .semibold))
+                .scaledFont(.system(size: 44, weight: .semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 28)
                 .padding(.vertical, 18)

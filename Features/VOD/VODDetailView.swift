@@ -236,6 +236,7 @@ private func aerioRestoreRootSafeAreaInsets() {
 #endif
 
 struct VODDetailView: View {
+    @Environment(\.aerioTextScale) private var textScale
     let item: VODDisplayItem
     @Query private var servers: [ServerConnection]
     /// Every episode-typed `WatchProgress` row. Filtered in memory by
@@ -665,14 +666,14 @@ struct VODDetailView: View {
     private var tvHeroCopy: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(item.displayName)
-                .font(.displayLarge)
+                .scaledFont(.displayLarge)
                 .foregroundColor(.textPrimary)
                 .lineLimit(2)
             tvMetaLine
             let plot = mergedPlot
             if !plot.isEmpty {
                 Text(plot)
-                    .font(.bodySmall)
+                    .scaledFont(.bodySmall)
                     .foregroundColor(.textPrimary.opacity(0.85))
                     .lineLimit(4)
                     .frame(maxWidth: 760, alignment: .leading)
@@ -707,13 +708,13 @@ struct VODDetailView: View {
                 if !rating.isEmpty {
                     if !parts.isEmpty { Text("·").foregroundColor(.textTertiary) }
                     HStack(spacing: 4) {
-                        Image(systemName: "star.fill").font(.system(size: 18))
+                        Image(systemName: "star.fill").scaledFont(.system(size: 18))
                         Text(rating)
                     }
                     .foregroundColor(.accentPrimary)
                 }
             }
-            .font(.system(size: 22, weight: .medium))
+            .scaledFont(.system(size: 22, weight: .medium))
             .foregroundColor(.textSecondary)
         }
     }
@@ -807,7 +808,7 @@ struct VODDetailView: View {
             if !people.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("In Episode \(ep.episodeNumber)")
-                        .font(.headlineSmall)
+                        .scaledFont(.headlineSmall)
                         .foregroundColor(.textPrimary)
                         .padding(.horizontal, 56)
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -831,7 +832,7 @@ struct VODDetailView: View {
         if isLoadingDetail, fullSeries?.seasons.isEmpty ?? true {
             HStack(spacing: 10) {
                 ProgressView().tint(.accentPrimary)
-                Text("Loading episodes…").font(.labelMedium).foregroundColor(.textTertiary)
+                Text("Loading episodes…").scaledFont(.labelMedium).foregroundColor(.textTertiary)
             }
             .padding(.horizontal, 56)
             .padding(.top, 8)
@@ -843,7 +844,7 @@ struct VODDetailView: View {
                             ForEach(Array(series.seasons.enumerated()), id: \.offset) { idx, season in
                                 Button { selectedSeason = idx } label: {
                                     Text("Season \(season.seasonNumber)")
-                                        .font(.system(size: 22, weight: .medium))
+                                        .scaledFont(.system(size: 22, weight: .medium))
                                 }
                                 .buttonStyle(MoviesPillStyle(isSelected: selectedSeason == idx))
                             }
@@ -854,7 +855,7 @@ struct VODDetailView: View {
                     .focusSection()
                 } else {
                     Text("Episodes")
-                        .font(.headlineSmall)
+                        .scaledFont(.headlineSmall)
                         .foregroundColor(.textPrimary)
                         .padding(.horizontal, 56)
                 }
@@ -1052,7 +1053,7 @@ struct VODDetailView: View {
         if !relatedItems.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Available Related Titles")
-                    .font(.headlineSmall)
+                    .scaledFont(.headlineSmall)
                     .foregroundColor(.textPrimary)
                     .padding(.horizontal, 56)
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -1091,7 +1092,7 @@ struct VODDetailView: View {
         if !relatedItems.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Related")
-                    .font(.headlineSmall)
+                    .scaledFont(.headlineSmall)
                     .foregroundColor(.textPrimary)
                     .padding(.horizontal, 16)
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -1163,7 +1164,7 @@ struct VODDetailView: View {
         if !facts.isEmpty {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Details")
-                    .font(.headlineSmall)
+                    .scaledFont(.headlineSmall)
                     .foregroundColor(.textPrimary)
                 LazyVGrid(columns: [GridItem(.flexible(), alignment: .topLeading),
                                     GridItem(.flexible(), alignment: .topLeading)],
@@ -1171,11 +1172,11 @@ struct VODDetailView: View {
                     ForEach(Array(facts.enumerated()), id: \.offset) { _, fact in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(fact.0.uppercased())
-                                .font(.system(size: 16, weight: .semibold))
+                                .scaledFont(.system(size: 16, weight: .semibold))
                                 .foregroundColor(.textTertiary)
                                 .tracking(1)
                             Text(fact.1)
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -1240,7 +1241,7 @@ struct VODDetailView: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text(item.displayName)
-                        .font(.headlineLarge)
+                        .scaledFont(.headlineLarge)
                         .foregroundColor(.textPrimary)
                         .lineLimit(2)
 
@@ -1257,7 +1258,7 @@ struct VODDetailView: View {
                         let displayYear = serverYear.isEmpty ? (tmdbDetails?.year ?? "") : serverYear
                         if !displayYear.isEmpty {
                             Text(displayYear)
-                                .font(.labelSmall).foregroundColor(.textSecondary)
+                                .scaledFont(.labelSmall).foregroundColor(.textSecondary)
                         }
                         // Rating, server-wins per the parity spec: the
                         // provider-info merged rating first, then the grid-row
@@ -1274,10 +1275,10 @@ struct VODDetailView: View {
                         if !displayRating.isEmpty {
                             HStack(spacing: 3) {
                                 Image(systemName: "star.fill")
-                                    .font(.system(size: 10))
+                                    .scaledFont(.system(size: 10))
                                     .foregroundColor(.statusWarning)
                                 Text(displayRating)
-                                    .font(.labelSmall).foregroundColor(.textSecondary)
+                                    .scaledFont(.labelSmall).foregroundColor(.textSecondary)
                             }
                         }
                         // v1.6.12: runtime when known (movies only —
@@ -1285,11 +1286,11 @@ struct VODDetailView: View {
                         // episode rows, not at the show level).
                         if let movie = fullMovie, !movie.duration.isEmpty {
                             Text(movie.duration)
-                                .font(.labelSmall).foregroundColor(.textSecondary)
+                                .scaledFont(.labelSmall).foregroundColor(.textSecondary)
                         }
                         if item.type == .movie {
                             Text("MOVIE")
-                                .font(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                                 .padding(.horizontal, 6).padding(.vertical, 2)
                                 .background(Color.elevatedBackground)
                                 .clipShape(Capsule())
@@ -1328,7 +1329,7 @@ struct VODDetailView: View {
             let plot = serverPlot.isEmpty ? (tmdbDetails?.overview ?? "") : serverPlot
             if !plot.isEmpty {
                 Text(plot)
-                    .font(.bodyMedium)
+                    .scaledFont(.bodyMedium)
                     .foregroundColor(.textSecondary)
                     .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1454,10 +1455,10 @@ struct VODDetailView: View {
     private func tmdbNoteRow(icon: String, tint: Color, text: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: icon)
-                .font(.labelSmall)
+                .scaledFont(.labelSmall)
                 .foregroundColor(tint)
             Text(text)
-                .font(.labelSmall)
+                .scaledFont(.labelSmall)
                 .foregroundColor(.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1515,9 +1516,9 @@ struct VODDetailView: View {
     private func externalLinkLabel(icon: String, text: String) -> some View {
         HStack(spacing: 6) {
             Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
+                .scaledFont(.system(size: 13, weight: .semibold))
             Text(text)
-                .font(.labelMedium)
+                .scaledFont(.labelMedium)
         }
         .foregroundStyle(Color.accentPrimary)
         .padding(.horizontal, 12)
@@ -1605,7 +1606,7 @@ struct VODDetailView: View {
                                     withAnimation(.spring(response: 0.25)) { selectedSeason = idx }
                                 } label: {
                                     Text("Season \(season.seasonNumber)")
-                                        .font(.labelMedium)
+                                        .scaledFont(.labelMedium)
                                         .foregroundColor(selectedSeason == idx ? .appBackground : .textSecondary)
                                         .padding(.horizontal, 14).padding(.vertical, 7)
                                         .background(
@@ -1963,7 +1964,7 @@ struct VODDetailView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "square.stack.3d.up")
                     Text("Version: \(currentLabel)")
-                        .font(.bodyMedium)
+                        .scaledFont(.bodyMedium)
                 }
             }
             .confirmationDialog("Version", isPresented: $versionPickerPresented, titleVisibility: .visible) {
@@ -2019,9 +2020,9 @@ struct VODDetailView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "square.stack.3d.up")
                     Text("Version: \(currentLabel)")
-                        .font(.labelMedium)
+                        .scaledFont(.labelMedium)
                     Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
+                        .scaledFont(.system(size: 10, weight: .semibold))
                 }
                 .foregroundColor(.textPrimary)
                 .padding(.horizontal, 12).padding(.vertical, 8)
@@ -2162,10 +2163,10 @@ struct VODDetailView: View {
         // wrap correctly without any width hint upstream.
         HStack(alignment: .top, spacing: 8) {
             Text(label + ":")
-                .font(.labelSmall).foregroundColor(.textTertiary)
-                .frame(width: 60, alignment: .leading)
+                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                .frame(width: TextScale.grow(60, textScale), alignment: .leading)
             Text(value)
-                .font(.labelSmall).foregroundColor(.textSecondary)
+                .scaledFont(.labelSmall).foregroundColor(.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -2293,7 +2294,7 @@ struct VODDetailView: View {
         if !row.people.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 Text(row.title)
-                    .font(.headlineSmall)
+                    .scaledFont(.headlineSmall)
                     .foregroundColor(.textPrimary)
                     .padding(.horizontal, usesTVMovieLayout ? 56 : 16)
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -2490,7 +2491,7 @@ private struct TVEpisodeRowButton: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text("E\(ep.episodeNumber) · \(ep.title)")
-                        .font(.bodyMedium).foregroundColor(.textPrimary)
+                        .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                         .lineLimit(1)
                     // v1.6.16.x: metadata strip — duration · air date ·
                     // rating. Mirrors what Dispatcharr's web UI shows
@@ -2510,13 +2511,13 @@ private struct TVEpisodeRowButton: View {
                     ].filter { !$0.isEmpty }
                     if !pieces.isEmpty {
                         Text(pieces.joined(separator: " · "))
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textSecondary.opacity(0.85))
                             .lineLimit(1)
                     }
                     if !ep.plot.isEmpty {
                         Text(ep.plot)
-                            .font(.labelSmall).foregroundColor(.textSecondary)
+                            .scaledFont(.labelSmall).foregroundColor(.textSecondary)
                             .lineLimit(2)
                     }
                     // Progress pill + timeline — only rendered when
@@ -2553,9 +2554,9 @@ private struct TVEpisodeRowButton: View {
                             Image(systemName: progress.isFinished
                                   ? "checkmark.circle.fill"
                                   : "play.circle.fill")
-                                .font(.system(size: iconSize, weight: .semibold))
+                                .scaledFont(.system(size: iconSize, weight: .semibold))
                             Text(progress.isFinished ? "Watched" : "Currently Watching")
-                                .font(.system(size: textSize, weight: .semibold))
+                                .scaledFont(.system(size: textSize, weight: .semibold))
                         }
                         .foregroundColor(progress.isFinished ? .textSecondary : .white)
                         .padding(.horizontal, hPadding)
@@ -2582,7 +2583,7 @@ private struct TVEpisodeRowButton: View {
                                     .frame(maxWidth: barMaxWidth)
                                     .scaleEffect(x: 1.0, y: barHeight / 3.0, anchor: .center)
                                 Text("\(Int(pct * 100))%")
-                                    .font(.system(size: pctTextSize, weight: .semibold))
+                                    .scaledFont(.system(size: pctTextSize, weight: .semibold))
                                     .foregroundColor(.textSecondary)
                             }
                             .padding(.top, 2)
@@ -2593,7 +2594,7 @@ private struct TVEpisodeRowButton: View {
                 Spacer()
 
                 Image(systemName: "play.circle.fill")
-                    .font(.system(size: 22))
+                    .scaledFont(.system(size: 22))
                     .foregroundColor(.accentPrimary.opacity(0.7))
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
@@ -2674,7 +2675,7 @@ private struct TVEpisodeCard: View {
                         .clipped()
                     LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .center, endPoint: .bottom)
                     Text("E\(episode.episodeNumber)")
-                        .font(.system(size: 20, weight: .bold))
+                        .scaledFont(.system(size: 20, weight: .bold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 10).padding(.vertical, 4)
                         .background(Capsule().fill(Color.black.opacity(0.55)))
@@ -2691,7 +2692,7 @@ private struct TVEpisodeCard: View {
                 .overlay(alignment: .topTrailing) {
                     if progress?.isFinished == true {
                         Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 24, weight: .semibold))
+                            .scaledFont(.system(size: 24, weight: .semibold))
                             .foregroundColor(.accentPrimary)
                             .padding(8)
                             .background(Circle().fill(Color.black.opacity(0.45)))
@@ -2700,13 +2701,13 @@ private struct TVEpisodeCard: View {
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 Text(title)
-                    .font(.labelMedium)
+                    .scaledFont(.labelMedium)
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
                 let pieces = [episode.duration, episode.displayAirDate].filter { !$0.isEmpty }
                 if !pieces.isEmpty {
                     Text(pieces.joined(separator: " · "))
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .lineLimit(1)
                 }
@@ -2736,7 +2737,7 @@ private struct TVPlayButton: View {
                 }
                 Text(isResolvingURL ? "Loading…" : "Play")
             }
-            .font(.headlineSmall)
+            .scaledFont(.headlineSmall)
             .foregroundColor(.white)
             .padding(.horizontal, 20).padding(.vertical, 8)
             .background(LinearGradient.accentGradient)
@@ -2798,13 +2799,13 @@ private struct PersonCard: View {
             .buttonStyle(.card)
             VStack(spacing: 2) {
                 Text(person.name)
-                    .font(.labelMedium)
+                    .scaledFont(.labelMedium)
                     .foregroundColor(.textPrimary)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
                 if let role = person.role {
                     Text(role)
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textSecondary)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
@@ -2821,13 +2822,13 @@ private struct PersonCard: View {
                 photo
                 VStack(alignment: .center, spacing: 2) {
                     Text(person.name)
-                        .font(.labelMedium)
+                        .scaledFont(.labelMedium)
                         .foregroundColor(.textPrimary)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
                     if let role = person.role {
                         Text(role)
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textSecondary)
                             .lineLimit(2)
                             .multilineTextAlignment(.center)
@@ -2861,7 +2862,7 @@ private struct PersonCard: View {
 
     private var personGlyph: some View {
         Image(systemName: "person.fill")
-            .font(.system(size: 32))
+            .scaledFont(.system(size: 32))
             .foregroundColor(.textTertiary)
     }
 }
@@ -2921,7 +2922,7 @@ private struct PersonBioSheet: View {
                         headshot
                         VStack(alignment: .leading, spacing: 14) {
                             Text(bio?.name ?? person.name)
-                                .font(.displayMedium)
+                                .scaledFont(.displayMedium)
                                 .foregroundColor(.textPrimary)
                                 .lineLimit(2)
                             tvLifeLine
@@ -2929,13 +2930,13 @@ private struct PersonBioSheet: View {
                                 ProgressView()
                             } else if let text = bio?.biography {
                                 Text(text)
-                                    .font(.bodySmall)
+                                    .scaledFont(.bodySmall)
                                     .foregroundColor(.textSecondary)
                                     .lineLimit(9)
                                     .fixedSize(horizontal: false, vertical: true)
                             } else {
                                 Text("No biography available.")
-                                    .font(.bodyMedium)
+                                    .scaledFont(.bodyMedium)
                                     .foregroundColor(.textTertiary)
                             }
                             HStack(spacing: 12) {
@@ -2947,7 +2948,7 @@ private struct PersonBioSheet: View {
                                 }
                                 if let missText {
                                     Text(missText)
-                                        .font(.bodyMedium)
+                                        .scaledFont(.bodyMedium)
                                         .foregroundColor(.statusWarning)
                                         .transition(.opacity)
                                         .padding(.leading, 8)
@@ -2996,7 +2997,7 @@ private struct PersonBioSheet: View {
                     Text("Died \(died)")
                 }
             }
-            .font(.system(size: 22, weight: .medium))
+            .scaledFont(.system(size: 22, weight: .medium))
             .foregroundColor(.textSecondary)
             .lineLimit(1)
         }
@@ -3007,7 +3008,7 @@ private struct PersonBioSheet: View {
         if let items = bio?.knownFor, !items.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Known For")
-                    .font(.headlineSmall)
+                    .scaledFont(.headlineSmall)
                     .foregroundColor(.textPrimary)
                     .padding(.horizontal, 56)
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -3026,7 +3027,7 @@ private struct PersonBioSheet: View {
                                     .frame(width: 200, height: 300)
                                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                                     Text(item.title)
-                                        .font(.labelMedium)
+                                        .scaledFont(.labelMedium)
                                         .foregroundColor(.textSecondary)
                                         .lineLimit(2)
                                         .multilineTextAlignment(.center)
@@ -3054,7 +3055,7 @@ private struct PersonBioSheet: View {
                         headshot
                         VStack(alignment: .leading, spacing: 4) {
                             Text(bio?.name ?? person.name)
-                                .font(.headlineLarge)
+                                .scaledFont(.headlineLarge)
                                 .foregroundColor(.textPrimary)
                             lifeLine(label: "Born", value: bio?.birthday, isDate: true)
                             lifeLine(label: "Died", value: bio?.deathday, isDate: true)
@@ -3064,12 +3065,12 @@ private struct PersonBioSheet: View {
                                 ProgressView()
                             } else if let text = bio?.biography {
                                 Text(text)
-                                    .font(.bodyMedium)
+                                    .scaledFont(.bodyMedium)
                                     .foregroundColor(.textSecondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             } else {
                                 Text("No biography available.")
-                                    .font(.bodyMedium)
+                                    .scaledFont(.bodyMedium)
                                     .foregroundColor(.textTertiary)
                             }
                             // iOS half of the person TMDB-page surface (the
@@ -3079,7 +3080,7 @@ private struct PersonBioSheet: View {
                             if let personURL = URL(string: "https://www.themoviedb.org/person/\(person.id)") {
                                 Link(destination: personURL) {
                                     Label("View on TMDB", systemImage: "arrow.up.right.square")
-                                        .font(.labelMedium)
+                                        .scaledFont(.labelMedium)
                                         .foregroundColor(.accentPrimary)
                                 }
                                 .padding(.top, 8)
@@ -3096,7 +3097,7 @@ private struct PersonBioSheet: View {
             HStack(spacing: 16) {
                 if let missText {
                     Text(missText)
-                        .font(.labelMedium)
+                        .scaledFont(.labelMedium)
                         .foregroundColor(.statusWarning)
                         .transition(.opacity)
                 }
@@ -3128,7 +3129,7 @@ private struct PersonBioSheet: View {
                     .aspectRatio(contentMode: .fill)
             } else {
                 Image(systemName: "person.fill")
-                    .font(.system(size: 48))
+                    .font(.system(size: 48))  // glyph in a fixed box: not text, stays fixed
                     .foregroundColor(.textTertiary)
             }
         }
@@ -3140,7 +3141,7 @@ private struct PersonBioSheet: View {
     private func lifeLine(label: String, value: String?, isDate: Bool) -> some View {
         if let value, !value.isEmpty {
             Text("\(label): \(isDate ? Self.formatBioDate(value) : value)")
-                .font(.bodyMedium)
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textSecondary)
                 .padding(.top, 4)
         }
@@ -3168,7 +3169,7 @@ private struct PersonBioSheet: View {
         if let items = bio?.knownFor, !items.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Known For")
-                    .font(.headlineSmall)
+                    .scaledFont(.headlineSmall)
                     .foregroundColor(.textPrimary)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 12) {
@@ -3199,7 +3200,7 @@ private struct PersonBioSheet: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                 Text(item.title)
-                    .font(.labelMedium)
+                    .scaledFont(.labelMedium)
                     .foregroundColor(.textSecondary)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)

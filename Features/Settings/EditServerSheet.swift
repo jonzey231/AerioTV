@@ -321,7 +321,7 @@ struct EditServerSheet: View {
                         // guidance without having to retrace through
                         // onboarding.
                         Text("Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.")
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textTertiary)
                             .listRowBackground(Color.cardBackground)
                         // Show the cached API key (read-only) so the
@@ -337,7 +337,7 @@ struct EditServerSheet: View {
                                     .foregroundColor(.textTertiary)
                                 Spacer()
                                 Text(maskedAPIKey(server.effectiveApiKey))
-                                    .font(.system(.footnote, design: .monospaced))
+                                    .scaledFont(.system(.footnote, design: .monospaced))
                                     .foregroundColor(.textSecondary)
                             }
                             .listRowBackground(Color.cardBackground)
@@ -369,7 +369,7 @@ struct EditServerSheet: View {
                                 }
                                 Text(isRefreshingSession ? "Refreshing…" : "Refresh Session")
                             }
-                            .font(.labelMedium.weight(.semibold))
+                            .scaledFont(.labelMedium.weight(.semibold))
                             .foregroundColor(.accentPrimary)
                         }
                         .buttonStyle(.plain)
@@ -379,7 +379,7 @@ struct EditServerSheet: View {
                         .listRowBackground(Color.cardBackground)
                         if let msg = sessionRefreshMessage {
                             Text(msg)
-                                .font(.labelSmall)
+                                .scaledFont(.labelSmall)
                                 .foregroundColor(sessionRefreshSucceeded ? .statusOnline : .statusLive)
                                 .listRowBackground(Color.cardBackground)
                         } else {
@@ -388,7 +388,7 @@ struct EditServerSheet: View {
                             // button was unlabeled and most users
                             // would never know what it did.
                             Text("Use if streaming or logos suddenly fail. Re-fetches the API key from your Dispatcharr account.")
-                                .font(.labelSmall)
+                                .scaledFont(.labelSmall)
                                 .foregroundColor(.textTertiary)
                                 .listRowBackground(Color.cardBackground)
                         }
@@ -437,7 +437,7 @@ struct EditServerSheet: View {
                                 }
                                 Text("Test XMLTV URL")
                             }
-                            .font(.labelMedium.weight(.semibold))
+                            .scaledFont(.labelMedium.weight(.semibold))
                             .foregroundColor(.accentPrimary)
                         }
                         .buttonStyle(.plain)
@@ -453,7 +453,7 @@ struct EditServerSheet: View {
                     Text("EPG Source").sectionHeaderStyle()
                 } footer: {
                     Text("EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                 }
             } else if server.type == .m3uPlaylist {
@@ -479,7 +479,7 @@ struct EditServerSheet: View {
                     Text("Local Network").sectionHeaderStyle()
                 } footer: {
                     Text("Used automatically whenever the server is reachable on your local network. No setup needed. Leave blank to always use the main URL.")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                 }
             }
@@ -500,7 +500,7 @@ struct EditServerSheet: View {
                     Text("User-Agent").sectionHeaderStyle()
                 } footer: {
                     Text("Shown in Dispatcharr's admin Stats panel to identify this device. Default: \(DeviceInfo.defaultUserAgent)")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                 }
             }
@@ -516,7 +516,7 @@ struct EditServerSheet: View {
                     Text("On Demand").sectionHeaderStyle()
                 } footer: {
                     Text("When off, this playlist's movies and TV shows aren't loaded into On Demand. Useful if you only want Live TV from this server, or if you have a second playlist that already provides On Demand.")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                 }
             }
@@ -537,7 +537,7 @@ struct EditServerSheet: View {
                 Text("Guide Days").sectionHeaderStyle()
             } footer: {
                 Text("How many days of guide data to load, back and ahead. Dispatcharr only; other sources show what their guide carries.")
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.textTertiary)
             }
 
@@ -588,7 +588,7 @@ struct EditServerSheet: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.statusOnline)
                 Text(count > 0 ? "Valid — \(count) programs" : "Valid XMLTV")
-                    .font(.labelSmall.weight(.semibold))
+                    .scaledFont(.labelSmall.weight(.semibold))
                     .foregroundColor(.statusOnline)
                     .lineLimit(1)
             }
@@ -597,7 +597,7 @@ struct EditServerSheet: View {
                 Image(systemName: "exclamationmark.circle.fill")
                     .foregroundColor(.statusLive)
                 Text(err)
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.statusLive)
                     .lineLimit(2)
             }
@@ -657,7 +657,7 @@ private struct ChannelProfilePickerSection: View {
             Text(loadFailed
                  ? "Couldn't load this server's Channel Profiles. All Channels stays in effect; check the connection and reopen this page to retry."
                  : "Sync only the channels in a Dispatcharr Channel Profile. Changes apply on the next channel refresh.")
-                .font(.labelSmall)
+                .scaledFont(.labelSmall)
                 .foregroundColor(.textTertiary)
         }
         .task { await loadProfiles() }

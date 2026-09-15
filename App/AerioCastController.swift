@@ -2146,7 +2146,7 @@ struct RemoteControlScreen: View {
                 bottomRow
                 if let onDisconnect {
                     Button("Disconnect (leave TV playing)", action: onDisconnect)
-                        .font(.footnote.weight(.semibold))
+                        .scaledFont(.footnote.weight(.semibold))
                         .foregroundStyle(ThemeManager.shared.accent)
                 }
             }
@@ -2192,17 +2192,17 @@ struct RemoteControlScreen: View {
                 glyphIcon
             }
             Text(title)
-                .font(.headline.weight(.semibold))
+                .scaledFont(.headline.weight(.semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
             if let subtitle, !subtitle.isEmpty {
                 Text(subtitle)
-                    .font(.subheadline)
+                    .scaledFont(.subheadline)
                     .foregroundStyle(.white.opacity(0.7))
                     .lineLimit(1)
             }
             Text(statusText)
-                .font(.caption)
+                .scaledFont(.caption)
                 .foregroundStyle(ThemeManager.shared.accent)
                 .lineLimit(1)
         }
@@ -2212,7 +2212,7 @@ struct RemoteControlScreen: View {
 
     private var glyphIcon: some View {
         Image(systemName: "sparkles.tv")
-            .font(.system(size: 30))
+            .font(.system(size: 30))  // glyph in a fixed box: not text, stays fixed
             .foregroundStyle(ThemeManager.shared.accent)
             .frame(height: 40)
     }
@@ -2225,7 +2225,7 @@ struct RemoteControlScreen: View {
                 .fill(ThemeManager.shared.accent)
                 .frame(height: 4)
             Text("LIVE")
-                .font(.caption2.weight(.semibold))
+                .scaledFont(.caption2.weight(.semibold))
                 .foregroundStyle(ThemeManager.shared.accent)
                 .frame(maxWidth: .infinity, alignment: .center)
         }
@@ -2256,7 +2256,7 @@ struct RemoteControlScreen: View {
                 ZStack {
                     Circle().fill(ThemeManager.shared.accent).frame(width: 64, height: 64)
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 26, weight: .bold))
+                        .font(.system(size: 26, weight: .bold))  // glyph in a fixed box: not text, stays fixed
                         .foregroundStyle(.black)
                 }
             }
@@ -2311,7 +2311,7 @@ struct RemoteControlScreen: View {
             // this line keeps just the LIVE state and Go Live.
             HStack {
                 Text(s.isLive ? "LIVE" : "REWOUND")
-                    .font(.caption.weight(.semibold))
+                    .scaledFont(.caption.weight(.semibold))
                     .foregroundStyle(s.isLive ? ThemeManager.shared.accent : .white.opacity(0.6))
                 Spacer()
                 if !s.isLive {
@@ -2319,7 +2319,7 @@ struct RemoteControlScreen: View {
                         .foregroundStyle(ThemeManager.shared.accent)
                 }
             }
-            .font(.caption)
+            .scaledFont(.caption)
         }
     }
 
@@ -2330,7 +2330,7 @@ struct RemoteControlScreen: View {
             ZStack {
                 Circle().fill(Color.white.opacity(0.12)).frame(width: size, height: size)
                 Image(systemName: symbol)
-                    .font(.system(size: size * 0.38, weight: .semibold))
+                    .font(.system(size: size * 0.38, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                     .foregroundStyle(.white)
             }
         }
@@ -2455,7 +2455,7 @@ struct RemoteOptionsSheet: View {
                 }
                 if !s.streamInfo.isEmpty {
                     Section("Stream Info") {
-                        Text(s.streamInfo).font(.footnote.monospaced())
+                        Text(s.streamInfo).scaledFont(.footnote.monospaced())
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -2598,7 +2598,7 @@ struct CastOptionsSheet: View {
                             .listRowBackground(Color.clear)
                     } else {
                         Text("Waiting for the cast proxy to report.")
-                            .font(.footnote)
+                            .scaledFont(.footnote)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -2655,6 +2655,7 @@ struct CastOptionsSheet: View {
 /// (StreamInfoCardView's monospaced label/value rows): what the phone is
 /// ingesting, what it serves, and how the pipeline is pacing.
 private struct CastStreamInfoCard: View {
+    @Environment(\.aerioTextScale) private var textScale
     let stats: CastHLSProxySession.Stats
     let receiverName: String?
 
@@ -2693,11 +2694,11 @@ private struct CastStreamInfoCard: View {
     private func row(label: String, value: String) -> some View {
         HStack(spacing: 8) {
             Text(label)
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .scaledFont(.system(size: 9, weight: .bold, design: .monospaced))
                 .foregroundColor(Color.accentPrimary)
-                .frame(width: 46, alignment: .trailing)
+                .frame(width: TextScale.grow(46, textScale), alignment: .trailing)
             Text(value)
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .scaledFont(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundColor(.primary.opacity(0.9))
         }
     }
@@ -2718,7 +2719,7 @@ struct CompanionControlFAB: View {
         // systems keep the tinted glass.
         Button(action: action) {
             Image(systemName: "tv.and.mediabox")
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 19, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundStyle(theme.accent)
                 .frame(width: 48, height: 48)
         }
@@ -2875,7 +2876,7 @@ struct CastPickerSheet: View {
                     Section("Enter the code shown on \(name ?? "the TV")") {
                         TextField("6-digit code", text: $code)
                             .keyboardType(.numberPad)
-                            .font(.title3.monospaced())
+                            .scaledFont(.title3.monospaced())
                         Button("Pair") {
                             companion.submitPairingCode(code)
                             code = ""
@@ -2932,7 +2933,7 @@ struct CastPickerSheet: View {
                         }
                         if let error = castController.connectError {
                             Text(error)
-                                .font(.footnote)
+                                .scaledFont(.footnote)
                                 .foregroundStyle(.red)
                         }
                     }
@@ -3000,7 +3001,7 @@ struct CompanionPickerSheet: View {
                     Section("Enter the code shown on \(name ?? "the TV")") {
                         TextField("6-digit code", text: $code)
                             .keyboardType(.numberPad)
-                            .font(.title3.monospaced())
+                            .scaledFont(.title3.monospaced())
                         Button("Pair") {
                             companion.submitPairingCode(code)
                             code = ""
@@ -3190,13 +3191,13 @@ struct RemoteSessionCard: View {
                         image.resizable().scaledToFit()
                     } placeholder: {
                         Image(systemName: transport.glyph)
-                            .font(.system(size: 20))
+                            .font(.system(size: 20))  // glyph in a fixed box: not text, stays fixed
                             .foregroundStyle(ThemeManager.shared.accent)
                     }
                     .frame(width: 38, height: 38)
                 } else {
                     Image(systemName: transport.glyph)
-                        .font(.system(size: 20))
+                        .font(.system(size: 20))  // glyph in a fixed box: not text, stays fixed
                         .foregroundStyle(ThemeManager.shared.accent)
                 }
             }
@@ -3205,16 +3206,16 @@ struct RemoteSessionCard: View {
             // the accent status line ("Controlling <TV>" / "Casting to <TV>").
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
-                    .font(.subheadline.weight(.semibold))
+                    .scaledFont(.subheadline.weight(.semibold))
                     .lineLimit(1)
                 if let programTitle, !programTitle.isEmpty {
                     Text(programTitle)
-                        .font(.caption)
+                        .scaledFont(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 Text(status)
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundStyle(ThemeManager.shared.accent)
                     .lineLimit(1)
             }
@@ -3222,7 +3223,7 @@ struct RemoteSessionCard: View {
             if showTransport {
                 Button(action: onTogglePlayPause) {
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(.system(size: 18, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                         .foregroundStyle(ThemeManager.shared.accent)
                         .frame(width: 38, height: 40)
                         .contentShape(Rectangle())
@@ -3234,7 +3235,7 @@ struct RemoteSessionCard: View {
             // session (see HomeView: stop on the TV, then close the card).
             Button(action: onStop) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.system(size: 17, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                     .foregroundStyle(ThemeManager.shared.accent)
                     .frame(width: 38, height: 40)
                     .contentShape(Rectangle())
@@ -3828,7 +3829,7 @@ struct CompanionPairingOverlay: View {
                     Image(systemName: "iphone.gen3.radiowaves.left.and.right")
                         .foregroundStyle(Color.accentColor)
                     Text(toast)
-                        .font(.callout.weight(.semibold))
+                        .scaledFont(.callout.weight(.semibold))
                         .foregroundStyle(.white)
                 }
                 .padding(.vertical, 14)
@@ -3846,16 +3847,16 @@ struct CompanionPairingOverlay: View {
                 Color.black.opacity(0.82).ignoresSafeArea()
                 VStack(spacing: 24) {
                     Image(systemName: "iphone.gen3.radiowaves.left.and.right")
-                        .font(.system(size: 64))
+                        .scaledFont(.system(size: 64))
                         .foregroundStyle(Color.accentColor)
                     Text("Pair your phone")
-                        .font(.title.weight(.semibold))
+                        .scaledFont(.title.weight(.semibold))
                         .foregroundStyle(.white)
                     Text("Enter this code in AerioTV on your phone")
-                        .font(.title3)
+                        .scaledFont(.title3)
                         .foregroundStyle(.white.opacity(0.7))
                     Text(code)
-                        .font(.system(size: 88, weight: .bold, design: .rounded).monospacedDigit())
+                        .scaledFont(.system(size: 88, weight: .bold, design: .rounded).monospacedDigit())
                         .tracking(16)
                         .foregroundStyle(.white)
                 }

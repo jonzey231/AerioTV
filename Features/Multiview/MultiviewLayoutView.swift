@@ -202,7 +202,7 @@ private struct MultiviewLayoutPreviewHost: View {
                     Rectangle()
                         .fill(Self.palette[idx % Self.palette.count].opacity(0.85))
                     Text("\(idx + 1)")
-                        .font(.system(size: 60, weight: .heavy))
+                        .scaledFont(.system(size: 60, weight: .heavy))
                         .foregroundColor(.white)
                 }
                 .cornerRadius(8)
@@ -215,12 +215,12 @@ private struct MultiviewLayoutPreviewHost: View {
                 Button("−") { if count > 1 { count -= 1 } }
                     .disabled(count <= 1)
                 Text("N = \(count)")
-                    .font(.headline.monospacedDigit())
+                    .scaledFont(.headline.monospacedDigit())
                     .frame(width: 80)
                 Button("+") { if count < 9 { count += 1 } }
                     .disabled(count >= 9)
             }
-            .font(.title2)
+            .scaledFont(.title2)
             .padding(.bottom, 20)
         }
     }

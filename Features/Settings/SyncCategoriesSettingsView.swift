@@ -87,7 +87,7 @@ struct SyncCategoriesSettingsView: View {
         .overlay(alignment: .bottom) {
             if showDeletedToast, let category = lastDeletedCategory {
                 Text("\(category.displayName) removed from iCloud")
-                    .font(.subheadline.weight(.semibold))
+                    .scaledFont(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 16).padding(.vertical, 10)
                     .background(Capsule().fill(Color.statusLive))
@@ -110,7 +110,7 @@ struct SyncCategoriesSettingsView: View {
                 Text("Categories").sectionHeaderStyle()
             } footer: {
                 Text(footerText)
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
         }
@@ -136,7 +136,7 @@ struct SyncCategoriesSettingsView: View {
                     pendingDeleteCategory = category
                 } label: {
                     Label("Delete from iCloud", systemImage: "icloud.slash")
-                        .font(.footnote.weight(.semibold))
+                        .scaledFont(.footnote.weight(.semibold))
                 }
                 .buttonStyle(.bordered)
                 .tint(.red)
@@ -178,7 +178,7 @@ struct SyncCategoriesSettingsView: View {
                 }
 
                 Text(footerText)
-                    .font(.footnote)
+                    .scaledFont(.footnote)
                     .foregroundColor(.textTertiary)
                     .padding(.horizontal, 24)
                     .padding(.bottom, 32)

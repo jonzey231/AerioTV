@@ -383,7 +383,7 @@ struct SwitchStreamView: View {
                                     let meta = metaLine(for: stream)
                                     if !meta.isEmpty {
                                         Text(meta)
-                                            .font(.footnote)
+                                            .scaledFont(.footnote)
                                             .foregroundColor(.secondary)
                                     }
                                 }
@@ -421,9 +421,9 @@ struct SwitchStreamView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Switch Stream")
-                        .font(.system(size: 42, weight: .bold))
+                        .scaledFont(.system(size: 42, weight: .bold))
                     Text(channelName)
-                        .font(.system(size: 24))
+                        .scaledFont(.system(size: 24))
                         .foregroundColor(.textSecondary)
                 }
                 Spacer()
@@ -509,7 +509,7 @@ struct SwitchStreamView: View {
 
     private func messageCard(_ text: String, systemImage: String, tint: Color) -> some View {
         Label {
-            Text(text).font(.system(size: 24))
+            Text(text).scaledFont(.system(size: 24))
         } icon: {
             Image(systemName: systemImage).foregroundColor(tint)
         }
@@ -552,18 +552,18 @@ private struct SwitchStreamRowLabel: View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.system(size: 26, weight: .semibold))
+                    .scaledFont(.system(size: 26, weight: .semibold))
                     .foregroundColor(isFocused ? .white : .textPrimary)
                 if !meta.isEmpty {
                     Text(meta)
-                        .font(.system(size: 20))
+                        .scaledFont(.system(size: 20))
                         .foregroundColor(isFocused ? .white.opacity(0.85) : .textSecondary)
                 }
             }
             Spacer(minLength: 8)
             if isSelected {
                 Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 28))
+                    .scaledFont(.system(size: 28))
                     .foregroundColor(isFocused ? .white : .accentPrimary)
             }
         }
@@ -594,7 +594,7 @@ private struct SwitchStreamActionStyle: ButtonStyle {
     @Environment(\.isFocused) private var isFocused
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 24, weight: .semibold))
+            .scaledFont(.system(size: 24, weight: .semibold))
             .foregroundColor(isFocused ? .white : .textSecondary)
             .padding(.horizontal, 40)
             .padding(.vertical, 18)

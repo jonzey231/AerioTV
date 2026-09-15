@@ -227,7 +227,7 @@ struct ServerDetailView: View {
                 } footer: {
                     if hasLANConfigured {
                         Text("A checkmark marks the connection in use right now. The local URL is used automatically whenever the server answers on your home network; run Refresh LAN Detection below after a network change.")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                     }
                 }
                 .listRowBackground(Color.cardBackground)
@@ -289,7 +289,7 @@ struct ServerDetailView: View {
                             Image(systemName: connectionSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
                                 .foregroundColor(connectionSuccess ? .statusOnline : .statusLive)
                             Text(result)
-                                .font(.bodySmall)
+                                .scaledFont(.bodySmall)
                                 .foregroundColor(connectionSuccess ? .statusOnline : .statusLive)
                         }
                         .listRowBackground(Color.cardBackground)
@@ -378,10 +378,10 @@ struct ServerDetailView: View {
                                     .frame(width: 14)
                             } else {
                                 Image(systemName: "arrow.triangle.2.circlepath")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .scaledFont(.system(size: 14, weight: .semibold))
                             }
                             Text(isPurgingEPG ? "Refreshing EPG Data…" : "Refresh EPG Data")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                             Spacer()
                         }
                         .foregroundColor(isPurgingEPG ? .textSecondary : .statusWarning)
@@ -394,7 +394,7 @@ struct ServerDetailView: View {
                     Text(server.isActive
                          ? "Clears this playlist's cached guide data and downloads it fresh from the server. Use this if program cells look wrong or are missing. Takes a few minutes on large playlists."
                          : "Clears this playlist's cached guide data. The fresh fetch will run automatically the next time you make this playlist active.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                 }
 
                 // MARK: Refresh Everything (nuclear)
@@ -415,10 +415,10 @@ struct ServerDetailView: View {
                                     .frame(width: 14)
                             } else {
                                 Image(systemName: "arrow.clockwise.circle")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .scaledFont(.system(size: 14, weight: .semibold))
                             }
                             Text(isRefreshingAll ? "Refreshing Everything…" : "Refresh Everything")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                             Spacer()
                         }
                         .foregroundColor(isRefreshingAll ? .textSecondary : .statusWarning)
@@ -431,7 +431,7 @@ struct ServerDetailView: View {
                     Text(server.isActive
                          ? "Clears every cache (channels, guide data, and On Demand) and reloads this playlist from scratch. Use this if newly-added channels, guide data, or movies and shows are missing or stale after changes on the server."
                          : "Clears every cache (channels, guide data, and On Demand). This playlist reloads automatically the next time you make it active.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                 }
             
                 // MARK: Danger Zone
@@ -441,9 +441,9 @@ struct ServerDetailView: View {
                     } label: {
                         HStack(spacing: 10) {
                             Image(systemName: "trash")
-                                .font(.system(size: 14, weight: .semibold))
+                                .scaledFont(.system(size: 14, weight: .semibold))
                             Text("Delete Playlist")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                             Spacer()
                         }
                         .foregroundColor(.statusLive)
@@ -453,7 +453,7 @@ struct ServerDetailView: View {
                     Text("Danger Zone").sectionHeaderStyle()
                 } footer: {
                     Text("Removes this playlist and its credentials from this device. Your server data will not be affected.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                 }
             }
             #if os(iOS)
@@ -605,16 +605,16 @@ struct ServerDetailView: View {
     private func connectionURLRow(_ label: String, value: String, isActiveRoute: Bool) -> some View {
         HStack {
             Text(label)
-                .font(.bodyMedium)
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textSecondary)
             Spacer()
             if isActiveRoute {
                 Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 13))
+                    .scaledFont(.system(size: 13))
                     .foregroundColor(.statusOnline)
             }
             Text(value)
-                .font(.monoSmall)
+                .scaledFont(.monoSmall)
                 .foregroundColor(.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -638,11 +638,11 @@ struct ServerDetailView: View {
     private func infoRow(_ label: String, value: String, isMonospaced: Bool = false) -> some View {
         HStack {
             Text(label)
-                .font(.bodyMedium)
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textSecondary)
             Spacer()
             Text(value)
-                .font(isMonospaced ? .monoSmall : .bodyMedium)
+                .scaledFont(isMonospaced ? .monoSmall : .bodyMedium)
                 .foregroundColor(.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -734,23 +734,23 @@ struct PlaylistListRow: View {
                     .fill(Color.accentPrimary.opacity(0.18))
                     .frame(width: 36, height: 36)
                 Image(systemName: playlist.sourceType == .url ? "link" : "doc.fill")
-                    .font(.system(size: 15, weight: .medium))
+                    .scaledFont(.system(size: 15, weight: .medium))
                     .foregroundColor(.accentPrimary)
             }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(playlist.name)
-                    .font(.bodyMedium)
+                    .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                 HStack(spacing: 6) {
                     Text("\(playlist.channelCount) channels")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textSecondary)
                     if let refreshed = playlist.lastRefreshed {
                         Text("·")
                             .foregroundColor(.textTertiary)
                         Text(refreshed, style: .relative)
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textTertiary)
                     }
                 }

@@ -79,7 +79,7 @@ struct GuideJumpSheet: View {
         #if os(tvOS)
         VStack(alignment: .leading, spacing: 22) {
             Text("Jump To")
-                .font(.system(size: 38, weight: .bold))
+                .scaledFont(.system(size: 38, weight: .bold))
                 .foregroundColor(.textPrimary)
             // Days in three groups (Logan 2026-09-10): Today, Upcoming, Previous.
             pillRow(title: "Today") {
@@ -109,7 +109,7 @@ struct GuideJumpSheet: View {
                 }
             }
             Text(summary)
-                .font(.system(size: 22))
+                .scaledFont(.system(size: 22))
                 .foregroundColor(.textSecondary)
             HStack(spacing: 16) {
                 Button("Go") { onPick(target) }
@@ -207,7 +207,7 @@ struct GuideJumpSheet: View {
     private func pillRow<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(title)
-                .font(.system(size: 24, weight: .semibold))
+                .scaledFont(.system(size: 24, weight: .semibold))
                 .foregroundColor(.textPrimary)
             // 12 pt of slack each side so the focused pill's 1.05 scale and
             // 3 pt ring are not clipped by the scroll view; pulled back by
@@ -225,7 +225,7 @@ struct GuideJumpSheet: View {
     private func chip(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 14, weight: .semibold))
+                .scaledFont(.system(size: 14, weight: .semibold))
                 .foregroundColor(selected ? .appBackground : .textPrimary)
                 .padding(.horizontal, 14).padding(.vertical, 8)
                 .background(Capsule().fill(selected ? Color.accentPrimary : Color.elevatedBackground))

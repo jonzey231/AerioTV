@@ -684,7 +684,7 @@ struct DVRView: View {
                     // Phone (Logan 2026-09-05): a deck of every recording that
                     // is started but unfinished, a recording in progress first.
                     Text(continueWatching.allSatisfy(\.isInProgress) ? "Recording Now" : "Continue Watching")
-                        .font(.headlineSmall)
+                        .scaledFont(.headlineSmall)
                         .foregroundColor(.textPrimary)
                         .padding(.horizontal, sectionInset)
                     PhoneCardDeck(items: continueWatching, cardHeight: 220) { rec in
@@ -714,7 +714,7 @@ struct DVRView: View {
                     VStack(alignment: .leading, spacing: 8) {
                     if heroIsContinueWatching {
                         Text(continueWatchingTitle)
-                            .font(.headlineSmall)
+                            .scaledFont(.headlineSmall)
                             .foregroundColor(.textPrimary)
                             .padding(.horizontal, sectionInset)
                     }
@@ -765,7 +765,7 @@ struct DVRView: View {
                     if isPhone {
                         // Phone (Logan 2026-09-05): the same deck as Continue Watching.
                         Text("Recent Recordings")
-                            .font(.headlineSmall)
+                            .scaledFont(.headlineSmall)
                             .foregroundColor(.textPrimary)
                             .padding(.horizontal, sectionInset)
                         PhoneCardDeck(items: recent, cardHeight: 220) { rec in
@@ -878,7 +878,7 @@ struct DVRView: View {
         HStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
             Text("Storage is approaching the limit. New recordings may not finish.")
-                .font(.labelMedium)
+                .scaledFont(.labelMedium)
                 .foregroundColor(.textPrimary)
         }
         .padding(.horizontal, 20).padding(.vertical, 12)
@@ -928,7 +928,7 @@ struct DVRView: View {
     private func shelf(title: String, items: [Recording]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
-                .font(.headlineSmall)
+                .scaledFont(.headlineSmall)
                 .foregroundColor(.textPrimary)
                 .padding(.horizontal, sectionInset)
             ScrollView(.horizontal, showsIndicators: false) {
@@ -982,10 +982,10 @@ struct DVRView: View {
                 // the top of the page (Logan 2026-09-05), same as Movies.
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text(isSearching ? "Results" : "All Recordings")
-                        .font(.headlineSmall)
+                        .scaledFont(.headlineSmall)
                         .foregroundColor(.textPrimary)
                     Text("\(filteredLibrary.count)")
-                        .font(.labelMedium)
+                        .scaledFont(.labelMedium)
                         .foregroundColor(.textTertiary)
                 }
                 .contentShape(Rectangle())
@@ -1132,10 +1132,10 @@ struct DVRView: View {
     private var iOSSearchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 15, weight: .semibold))
+                .scaledFont(.system(size: 15, weight: .semibold))
                 .foregroundColor(.textSecondary)
             TextField("Search recordings", text: $searchText)
-                .font(.system(size: 16))
+                .scaledFont(.system(size: 16))
                 .foregroundColor(.textPrimary)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -1146,19 +1146,19 @@ struct DVRView: View {
                 withAnimation(.spring(response: 0.25)) { clearSearch() }
             } label: {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 16))
+                    .scaledFont(.system(size: 16))
                     .foregroundColor(.textSecondary)
             }
             .accessibilityLabel("Clear and close search")
         }
         .padding(.horizontal, 14)
-        .frame(height: 40)
+        .frame(minHeight: 40)
         .background(Capsule().fill(Color.elevatedBackground))
     }
 
     private func iOSCircle(_ systemImage: String) -> some View {
         Image(systemName: systemImage)
-            .font(.system(size: 17, weight: .semibold))
+            .font(.system(size: 17, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
             .foregroundColor(.textPrimary)
             .frame(width: 38, height: 38)
             .background(Circle().fill(Color.textPrimary.opacity(0.08)))
@@ -1169,13 +1169,13 @@ struct DVRView: View {
     private func kindPill(_ title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
         #if os(tvOS)
         Button(action: action) {
-            Text(title).font(.system(size: 22, weight: .semibold))
+            Text(title).scaledFont(.system(size: 22, weight: .semibold))
         }
         .buttonStyle(MoviesPillStyle(isSelected: isSelected))
         #else
         Button(action: action) {
             Text(title)
-                .font(.labelMedium)
+                .scaledFont(.labelMedium)
                 .foregroundColor(isSelected ? .appBackground : .textSecondary)
                 .padding(.horizontal, 14).padding(.vertical, 8)
                 .background(Capsule().fill(isSelected ? Color.accentPrimary : Color.elevatedBackground))
@@ -1391,13 +1391,13 @@ struct DVRView: View {
     private var emptyState: some View {
         VStack(spacing: 16) {
             Image(systemName: "record.circle")
-                .font(.system(size: 56))
+                .scaledFont(.system(size: 56))
                 .foregroundColor(.textTertiary)
             Text("No Recordings")
-                .font(.headlineLarge)
+                .scaledFont(.headlineLarge)
                 .foregroundColor(.textPrimary)
             Text("Recordings for the active playlist show up here. Schedule one from the guide.")
-                .font(.bodySmall)
+                .scaledFont(.bodySmall)
                 .foregroundColor(.textSecondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 520)
@@ -1411,6 +1411,9 @@ struct DVRView: View {
 /// Full-bleed hero, same construction as MoviesHero (art clipped to the
 /// rounded shape, alpha-mask fades, copy over it, capsule actions).
 struct DVRHero<Menu: View>: View {
+    /// Settings > Appearance > Text Size: the hero keeps its fixed height
+    /// (focus and scroll thresholds depend on it), so copy sheds lines instead.
+    @Environment(\.aerioTextScale) private var textScale
     let recording: Recording
     var headers: [String: String] = [:]
     let progress: Double
@@ -1436,13 +1439,13 @@ struct DVRHero<Menu: View>: View {
     private let corner: CGFloat = 24
     private let copyInset: CGFloat = 44
     private let metaSize: CGFloat = 20
-    private var titleFont: Font { .displayLarge }
+    private var titleFont: AerioFont { .displayLarge }
     #else
     private let heroHeight: CGFloat = 220
     private let corner: CGFloat = 16
     private let copyInset: CGFloat = 16
     private let metaSize: CGFloat = 13
-    private var titleFont: Font { .displayMedium }
+    private var titleFont: AerioFont { .displayMedium }
     #endif
 
     private var artworkURL: URL? { (recording.backdropURL ?? recording.posterURL).flatMap { URL(string: $0) } }
@@ -1555,18 +1558,18 @@ struct DVRHero<Menu: View>: View {
                     Circle().fill(Color.red).frame(width: 10, height: 10)
                     Text("Recording now")
                 }
-                .font(.system(size: metaSize - 2, weight: .bold))
+                .scaledFont(.system(size: metaSize - 2, weight: .bold))
                 .foregroundColor(.red)
             }
             // The page's "Continue Watching" section header above the hero
             // replaces the in-card label (Logan 2026-09-11).
             Text(recording.programTitle.isEmpty ? "Recording" : recording.programTitle)
-                .font(titleFont)
+                .scaledFont(titleFont)
                 .foregroundColor(.textPrimary)
-                .lineLimit(2)
+                .lineLimit(textScale > 1.1 ? 1 : 2)
             if let sub = recording.subTitle, !sub.isEmpty {
                 Text(sub)
-                    .font(.system(size: metaSize + 2, weight: .semibold))
+                    .scaledFont(.system(size: metaSize + 2, weight: .semibold))
                     .foregroundColor(.textPrimary.opacity(0.9))
                     .lineLimit(1)
             }
@@ -1577,7 +1580,7 @@ struct DVRHero<Menu: View>: View {
                     Text(part)
                 }
             }
-            .font(.system(size: metaSize, weight: .medium))
+            .scaledFont(.system(size: metaSize, weight: .medium))
             .foregroundColor(.textSecondary)
             #else
             // Phone: the channel on its own line, the rest on one line
@@ -1590,15 +1593,15 @@ struct DVRHero<Menu: View>: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
             }
-            .font(.system(size: metaSize, weight: .medium))
+            .scaledFont(.system(size: metaSize, weight: .medium))
             .foregroundColor(.textSecondary)
             #endif
             #if os(tvOS)
             if !recording.programDescription.isEmpty {
                 Text(recording.programDescription)
-                    .font(.bodySmall)
+                    .scaledFont(.bodySmall)
                     .foregroundColor(.textPrimary.opacity(0.85))
-                    .lineLimit(3)
+                    .lineLimit(textScale > 1.25 ? 1 : (textScale > 1.0 ? 2 : 3))
                     .frame(maxWidth: 560, alignment: .leading)
             }
             #endif
@@ -1711,6 +1714,7 @@ extension View {
 /// when neither exists), REC badge, progress bar, title and meta below,
 /// like the Movies grid (Logan 2026-09-05).
 struct DVRPosterCard: View {
+    @Environment(\.aerioTextScale) private var textScale
     let recording: Recording
     var headers: [String: String] = [:]
     var progress: Double = 0
@@ -1727,14 +1731,14 @@ struct DVRPosterCard: View {
             // Centered under the poster like the Movies cards (Logan 2026-09-10).
             VStack(alignment: .center, spacing: 2) {
                 Text(recording.programTitle.isEmpty ? "Recording" : recording.programTitle)
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.textPrimary)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity, alignment: .top)
-                    .frame(height: 34, alignment: .top)
+                    .frame(height: TextScale.grow(34, textScale), alignment: .top)
                 Text(meta)
-                    .font(.system(size: 11))
+                    .scaledFont(.system(size: 11))
                     .foregroundColor(.textSecondary)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity)
@@ -1775,7 +1779,7 @@ struct DVRPosterCard: View {
             if recording.isInProgress {
                 HStack(spacing: 3) {
                     Circle().fill(Color.red).frame(width: 5, height: 5)
-                    Text("REC").font(.system(size: 9, weight: .heavy))
+                    Text("REC").scaledFont(.system(size: 9, weight: .heavy))
                 }
                 .foregroundColor(.red)
                 .padding(.horizontal, 5).padding(.vertical, 2)
@@ -1829,11 +1833,11 @@ struct DVRRecordingCard: View {
             artworkBlock
             VStack(spacing: 2) {
                 Text(recording.programTitle.isEmpty ? "Recording" : recording.programTitle)
-                    .font(.system(size: titleSize, weight: .semibold))
+                    .scaledFont(.system(size: titleSize, weight: .semibold))
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
                 Text(metaLine)
-                    .font(.system(size: metaSize))
+                    .scaledFont(.system(size: metaSize))
                     .foregroundColor(.textTertiary)
                     .lineLimit(1)
             }
@@ -1908,13 +1912,13 @@ struct DVRRecordingCard: View {
                         .frame(width: logoWidth, height: logoWidth * 0.5, alignment: .leading)
                 } else if artworkURL != nil, !recording.channelName.isEmpty {
                     Text(recording.channelName)
-                        .font(.system(size: badgeSize, weight: .semibold))
+                        .scaledFont(.system(size: badgeSize, weight: .semibold))
                         .foregroundColor(.white.opacity(0.9))
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
                 Text(durationText)
-                    .font(.system(size: badgeSize, weight: .semibold))
+                    .scaledFont(.system(size: badgeSize, weight: .semibold))
                     .foregroundColor(.white)
             }
             .padding(.horizontal, 12)
@@ -1962,7 +1966,7 @@ struct DVRRecordingCard: View {
                 Circle().fill(Color.white).frame(width: 7, height: 7)
                 Text("REC")
             }
-            .font(.system(size: badgeSize, weight: .bold))
+            .scaledFont(.system(size: badgeSize, weight: .bold))
             .foregroundColor(.white)
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(Capsule().fill(Color.red))
@@ -1972,14 +1976,14 @@ struct DVRRecordingCard: View {
                 Image(systemName: "clock.fill")
                 Text(DVRFormat.day(recording.scheduledStart))
             }
-            .font(.system(size: badgeSize, weight: .bold))
+            .scaledFont(.system(size: badgeSize, weight: .bold))
             .foregroundColor(.white)
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(Capsule().fill(Color.black.opacity(0.6)))
             .padding(10)
         } else if recording.status == .interrupted {
             Text("Partial")
-                .font(.system(size: badgeSize, weight: .bold))
+                .scaledFont(.system(size: badgeSize, weight: .bold))
                 .foregroundColor(.white)
                 .padding(.horizontal, 10).padding(.vertical, 5)
                 .background(Capsule().fill(Color.orange.opacity(0.85)))

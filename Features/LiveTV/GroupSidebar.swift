@@ -48,7 +48,8 @@ func groupSidebarFittedWidth(groups: [String],
                              minimum: CGFloat,
                              maximum: CGFloat) -> CGFloat {
     // Rows go semibold when active, which is the widest they ever draw.
-    let font = UIFont.systemFont(ofSize: groupSidebarRowFontSize, weight: .semibold)
+    // Rows render through `.scaledFont`, so measure at the same Text Size.
+    let font = UIFont.systemFont(ofSize: groupSidebarRowFontSize * TextScale.stored, weight: .semibold)
     let widest = groups.reduce(CGFloat(0)) { acc, token in
         let w = (groupSidebarLabel(token) as NSString)
             .size(withAttributes: [.font: font]).width
@@ -61,7 +62,7 @@ func groupSidebarFittedWidth(groups: [String],
 /// group list can never squeeze that button off the panel (GH #57).
 func groupSidebarHeaderFloor(hasManageButton: Bool) -> CGFloat {
     guard hasManageButton else { return 0 }
-    let headerFont = UIFont.systemFont(ofSize: 22, weight: .semibold)
+    let headerFont = UIFont.systemFont(ofSize: 22 * TextScale.stored, weight: .semibold)
     let headerTitle = ("Groups" as NSString)
         .size(withAttributes: [.font: headerFont]).width
     return 20 + headerTitle + 12 + groupSidebarManageButtonWidth + 20
@@ -97,7 +98,7 @@ private struct GroupSidebarRowButtonStyle: ButtonStyle {
             ? Color.white.opacity(0.16)
             : (isActive ? Color.accentPrimary.opacity(0.12) : .clear)
         return configuration.label
-            .font(.system(size: groupSidebarRowFontSize, weight: isActive ? .semibold : .regular))
+            .scaledFont(.system(size: groupSidebarRowFontSize, weight: isActive ? .semibold : .regular))
             .foregroundColor(fg)
             .lineLimit(1)
             .padding(.horizontal, 20)
@@ -202,7 +203,7 @@ struct GroupSidebarPanel: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
                 Text("Groups")
-                    .font(.system(size: 22, weight: .semibold))
+                    .scaledFont(.system(size: 22, weight: .semibold))
                     .foregroundColor(.textSecondary)
 
                 // GH #57: the sidebar's own entry into hide/reorder. Sits in
@@ -256,14 +257,14 @@ struct GroupSidebarPanel: View {
         } label: {
             HStack(spacing: 8) {
                 if token == ChannelListView.favoritesToken {
-                    Image(systemName: "star.fill").font(.system(size: 22, weight: .medium))
+                    Image(systemName: "star.fill").scaledFont(.system(size: 22, weight: .medium))
                 } else if token == ChannelListView.recentlyWatchedToken {
-                    Image(systemName: "clock.arrow.circlepath").font(.system(size: 22, weight: .medium))
+                    Image(systemName: "clock.arrow.circlepath").scaledFont(.system(size: 22, weight: .medium))
                 }
                 Text(groupSidebarLabel(token))
                     .lineLimit(1)
                 if isDefault {
-                    Image(systemName: "pin.fill").font(.system(size: 14, weight: .semibold)).opacity(0.7)
+                    Image(systemName: "pin.fill").scaledFont(.system(size: 14, weight: .semibold)).opacity(0.7)
                 }
             }
         }

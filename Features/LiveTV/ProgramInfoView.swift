@@ -469,17 +469,17 @@ struct ProgramInfoView: View {
                     }
                     VStack(alignment: .leading, spacing: 5) {
                         Text(target.channelName.uppercased())
-                            .font(.system(size: 11, weight: .semibold))
+                            .scaledFont(.system(size: 11, weight: .semibold))
                             .foregroundColor(.textSecondary)
                             .tracking(1.2)
                         Text(target.title)
-                            .font(.system(size: 21, weight: .bold))
+                            .scaledFont(.system(size: 21, weight: .bold))
                             .foregroundColor(.textPrimary)
                             .fixedSize(horizontal: false, vertical: true)
                         if let sub = target.subTitle,
                            !EPGText.subtitleIsRedundant(sub, title: target.title, description: target.description) {
                             Text(sub)
-                                .font(.system(size: 14))
+                                .scaledFont(.system(size: 14))
                                 .foregroundColor(.textSecondary)
                                 .italic()
                                 .fixedSize(horizontal: false, vertical: true)
@@ -511,13 +511,13 @@ struct ProgramInfoView: View {
                 Section("Recording") {
                     ForEach(rec.rows, id: \.0) { row in
                         LabeledContent(row.0, value: row.1)
-                            .font(.system(size: 14))
+                            .scaledFont(.system(size: 14))
                     }
                 }
             }
             Section {
                 descriptionText
-                    .font(.system(size: 15))
+                    .scaledFont(.system(size: 15))
                     .foregroundColor(.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -545,11 +545,11 @@ struct ProgramInfoView: View {
     private func phoneFact(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title.uppercased())
-                .font(.system(size: 10, weight: .medium))
+                .scaledFont(.system(size: 10, weight: .medium))
                 .foregroundColor(.textTertiary)
                 .tracking(1)
             Text(value)
-                .font(.system(size: 13, weight: .medium))
+                .scaledFont(.system(size: 13, weight: .medium))
                 .foregroundColor(.textPrimary)
                 .lineLimit(2)
         }
@@ -734,7 +734,7 @@ struct ProgramInfoView: View {
                     if let sub = target.subTitle,
                        !EPGText.subtitleIsRedundant(sub, title: target.title, description: target.description) {
                         Text(sub)
-                            .font(.subheadline)
+                            .scaledFont(.subheadline)
                             .foregroundStyle(.secondary)
                             .italic()
                     }
@@ -810,17 +810,17 @@ struct ProgramInfoView: View {
                 }
                 VStack(alignment: .leading, spacing: 10) {
                     Text(target.channelName.uppercased())
-                        .font(.system(size: 20, weight: .semibold))
+                        .scaledFont(.system(size: 20, weight: .semibold))
                         .foregroundColor(.textSecondary)
                         .tracking(1.5)
                     Text(target.title)
-                        .font(.system(size: 38, weight: .bold))
+                        .scaledFont(.system(size: 38, weight: .bold))
                         .foregroundColor(.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
                     if let sub = target.subTitle,
                        !EPGText.subtitleIsRedundant(sub, title: target.title, description: target.description) {
                         Text(sub)
-                            .font(.system(size: 24))
+                            .scaledFont(.system(size: 24))
                             .foregroundColor(.textSecondary)
                             .italic()
                     }
@@ -910,11 +910,11 @@ struct ProgramInfoView: View {
     private func infoColumn(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title.uppercased())
-                .font(.system(size: 16, weight: .medium))
+                .scaledFont(.system(size: 16, weight: .medium))
                 .foregroundColor(.textTertiary)
                 .tracking(1.2)
             Text(value)
-                .font(.system(size: 22, weight: .medium))
+                .scaledFont(.system(size: 22, weight: .medium))
                 .foregroundColor(.textPrimary)
         }
     }
@@ -927,7 +927,7 @@ struct ProgramInfoView: View {
         if target.description.isEmpty {
             #if os(tvOS)
             Text("No program description provided in XMLTV.")
-                .font(.system(size: 22))
+                .scaledFont(.system(size: 22))
                 .foregroundColor(.textTertiary)
                 .italic()
             #else
@@ -938,7 +938,7 @@ struct ProgramInfoView: View {
         } else {
             #if os(tvOS)
             Text(target.description)
-                .font(.system(size: 24))
+                .scaledFont(.system(size: 24))
                 .foregroundColor(.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             #else
@@ -1004,11 +1004,11 @@ struct CategoryPill: View {
     var body: some View {
         Text(rawToken)
             #if os(tvOS)
-            .font(.system(size: 20, weight: .medium))
+            .scaledFont(.system(size: 20, weight: .medium))
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
             #else
-            .font(.system(size: 13, weight: .medium))
+            .scaledFont(.system(size: 13, weight: .medium))
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             #endif

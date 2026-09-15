@@ -288,7 +288,7 @@ struct PlaybackChromeOverlay: View {
                                 .fill(.ultraThinMaterial)
                                 .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
                             Image(systemName: "airplay.video")
-                                .font(.system(size: 18, weight: .semibold))
+                                .font(.system(size: 18, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                                 .foregroundStyle(.white)
                         }
                         .frame(width: 52, height: 52)
@@ -434,7 +434,7 @@ struct PlaybackChromeOverlay: View {
            let audioID = store.audioTileID,
            let engine = store.tileEngines[audioID] {
             Text(engine)
-                .font(.system(size: 12, weight: .semibold))
+                .scaledFont(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
@@ -464,7 +464,7 @@ struct PlaybackChromeOverlay: View {
                     .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
                     .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
                 Image(systemName: "xmark")
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(.system(size: 20, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                     .foregroundStyle(.white)
             }
             .frame(width: 52, height: 52)
@@ -491,7 +491,7 @@ struct PlaybackChromeOverlay: View {
                     .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
                     .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
                 Image(systemName: "plus")
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.system(size: 22, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                     .foregroundStyle(.white)
             }
             .frame(width: 52, height: 52)
@@ -519,7 +519,7 @@ struct PlaybackChromeOverlay: View {
                 Image(systemName: forcedLandscape
                       ? "arrow.down.right.and.arrow.up.left"
                       : "arrow.up.left.and.arrow.down.right")
-                    .font(.system(size: 19, weight: .semibold))
+                    .font(.system(size: 19, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                     .foregroundStyle(.white)
             }
             .frame(width: 52, height: 52)
@@ -609,9 +609,9 @@ struct PlaybackChromeOverlay: View {
                     if !programName.isEmpty {
                         Text(programName)
                             #if os(tvOS)
-                            .font(.system(size: 18, weight: .medium))
+                            .scaledFont(.system(size: 18, weight: .medium))
                             #else
-                            .font(.system(size: 12, weight: .medium))
+                            .scaledFont(.system(size: 12, weight: .medium))
                             #endif
                             .foregroundStyle(.white.opacity(0.8))
                             .lineLimit(1)
@@ -619,9 +619,9 @@ struct PlaybackChromeOverlay: View {
                     Spacer()
                     Text(remainingText)
                         #if os(tvOS)
-                        .font(.system(size: 18, weight: .medium))
+                        .scaledFont(.system(size: 18, weight: .medium))
                         #else
-                        .font(.system(size: 12, weight: .medium))
+                        .scaledFont(.system(size: 12, weight: .medium))
                         #endif
                         .foregroundStyle(.white.opacity(0.6))
                 }
@@ -711,12 +711,12 @@ struct VODTransportBar_iOS: View {
 
             HStack {
                 Text(Self.clock(Int32(clamping: dragFraction.map { Int64(Double(duration) * Double($0)) } ?? current)))
-                    .font(.system(size: 12, weight: .medium))
+                    .scaledFont(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.8))
                     .monospacedDigit()
                 Spacer()
                 Text(Self.clock(Int32(clamping: duration)))
-                    .font(.system(size: 12, weight: .medium))
+                    .scaledFont(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.6))
                     .monospacedDigit()
             }
@@ -745,7 +745,7 @@ struct VODTransportBar_iOS: View {
     private func vodButton(_ icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 20, weight: .semibold))
+                .font(.system(size: 20, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundStyle(.white)
                 .frame(width: 44, height: 44)
                 .background(Color.black.opacity(0.55), in: Circle())
@@ -819,7 +819,7 @@ struct RewindTransportBar_iOS: View {
                     let mins = Int(rem / 60_000)
                     Text(mins >= 60 ? "\(mins / 60) h \(mins % 60) min remaining"
                          : (mins > 0 ? "\(mins) min remaining" : "Ending soon"))
-                        .font(.system(size: 12, weight: .medium))
+                        .scaledFont(.system(size: 12, weight: .medium))
                         .foregroundStyle(.white.opacity(0.6))
                 }
                 Spacer()
@@ -830,7 +830,7 @@ struct RewindTransportBar_iOS: View {
                     Text(liveRewind.timeshifting && behindMs > 5_000
                          ? String(format: "-%d:%02d", behindMs / 60_000, (behindMs / 1000) % 60)
                          : "LIVE")
-                        .font(.system(size: 12, weight: .bold))
+                        .scaledFont(.system(size: 12, weight: .bold))
                         .foregroundStyle(liveRewind.timeshifting && behindMs > 5_000
                                          ? Color.white.opacity(0.8) : Color.white)
                         .monospacedDigit()
@@ -868,7 +868,7 @@ struct RewindTransportBar_iOS: View {
                             store.audioProgressStore?.seekAction?(Int32(clamping: window))
                         } label: {
                             Text("Go Live")
-                                .font(.system(size: 12, weight: .bold))
+                                .scaledFont(.system(size: 12, weight: .bold))
                                 .foregroundStyle(.black)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
@@ -884,7 +884,7 @@ struct RewindTransportBar_iOS: View {
     private func transportButton(_ icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 20, weight: .semibold))
+                .font(.system(size: 20, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundStyle(.white)
                 .frame(width: 44, height: 44)
                 .background(Color.black.opacity(0.55), in: Circle())
@@ -1044,19 +1044,19 @@ private struct AudioOnlyForegroundOverlay: View {
                                 .fill(Color.accentPrimary.opacity(0.15))
                                 .frame(width: 140, height: 140)
                             Image(systemName: "music.note")
-                                .font(.system(size: 56, weight: .light))
+                                .scaledFont(.system(size: 56, weight: .light))
                                 .foregroundStyle(LinearGradient.accentGradient)
                         }
                         .shadow(color: Color.accentPrimary.opacity(0.3), radius: 30)
 
                         Text(title)
-                            .font(.title2.bold())
+                            .scaledFont(.title2.bold())
                             .foregroundColor(.white)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 32)
 
                         Text("Audio Only")
-                            .font(.subheadline)
+                            .scaledFont(.subheadline)
                             .foregroundColor(.gray)
                     }
                 }
@@ -1458,7 +1458,7 @@ struct PlaybackBottomChrome_tvOS: View {
                    let audioID = store.audioTileID,
                    let engine = store.tileEngines[audioID] {
                     Text(engine)
-                        .font(.system(size: 18, weight: .semibold))
+                        .scaledFont(.system(size: 18, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.55))
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
@@ -1548,9 +1548,9 @@ struct PlaybackBottomChrome_tvOS: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "square.grid.2x2")
-                    .font(.system(size: 26, weight: .semibold))
+                    .scaledFont(.system(size: 26, weight: .semibold))
                 Text("Multiview")
-                    .font(.system(size: 24, weight: .semibold))
+                    .scaledFont(.system(size: 24, weight: .semibold))
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 32)
@@ -1578,9 +1578,9 @@ struct PlaybackBottomChrome_tvOS: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 24, weight: .semibold))
+                    .scaledFont(.system(size: 24, weight: .semibold))
                 Text("Options")
-                    .font(.system(size: 24, weight: .semibold))
+                    .scaledFont(.system(size: 24, weight: .semibold))
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 32)
@@ -1614,10 +1614,10 @@ struct PlaybackBottomChrome_tvOS: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "record.circle")
-                    .font(.system(size: 24, weight: .semibold))
+                    .scaledFont(.system(size: 24, weight: .semibold))
                     .foregroundStyle(Color.red)
                 Text("Record")
-                    .font(.system(size: 24, weight: .semibold))
+                    .scaledFont(.system(size: 24, weight: .semibold))
                     .foregroundStyle(.white)
             }
             .padding(.horizontal, 32)
@@ -1698,7 +1698,7 @@ struct TVVideoFormatBadge: View {
     var body: some View {
         if let text = Self.text(for: info) {
             Text(text)
-                .font(.system(size: 18, weight: .semibold))
+                .scaledFont(.system(size: 18, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.55))
                 .lineLimit(1)
                 .fixedSize()
@@ -1740,7 +1740,7 @@ struct TVPlayerToolCellVisual: View {
                     .fill(Color.white)
                     .opacity(focused ? 1 : 0)
                 Image(systemName: icon)
-                    .font(.system(size: 26, weight: .semibold))
+                    .scaledFont(.system(size: 26, weight: .semibold))
                     .foregroundStyle(
                         iconColor == .red ? Color.red.opacity(dimmed ? 0.4 : 1)
                             : (focused ? Color.black : Color.white).opacity(dimmed ? 0.4 : 1)
@@ -1765,12 +1765,12 @@ struct TVPlayerToolCellVisual: View {
         .fixedSize(horizontal: true, vertical: false)
         .overlay(alignment: .bottom) {
             Text(title)
-                .font(.system(size: 20, weight: .medium))
+                .scaledFont(.system(size: 20, weight: .medium))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .fixedSize()
                 .opacity(focused ? 1 : 0)
-                .frame(height: 24)
+                .frame(minHeight: 24)
         }
     }
 }
@@ -1812,13 +1812,13 @@ struct PlaybackLiveProgressBand: View {
                 HStack {
                     if !programName.isEmpty {
                         Text(programName)
-                            .font(.system(size: 18, weight: .medium))
+                            .scaledFont(.system(size: 18, weight: .medium))
                             .foregroundStyle(.white.opacity(0.8))
                             .lineLimit(1)
                     }
                     Spacer()
                     Text(remainingText)
-                        .font(.system(size: 18, weight: .medium))
+                        .scaledFont(.system(size: 18, weight: .medium))
                         .foregroundStyle(.white.opacity(0.6))
                 }
             }
@@ -1887,20 +1887,20 @@ struct LiveRewindTimelineBand: View {
             HStack(spacing: 14) {
                 if !programme.isEmpty {
                     Text(programme)
-                        .font(.system(size: 18, weight: .medium))
+                        .scaledFont(.system(size: 18, weight: .medium))
                         .foregroundStyle(.white.opacity(0.8))
                         .lineLimit(1)
                 }
                 if let remainingText {
                     Text(remainingText)
-                        .font(.system(size: 18, weight: .medium))
+                        .scaledFont(.system(size: 18, weight: .medium))
                         .foregroundStyle(.white.opacity(0.6))
                 }
                 Spacer()
                 Text(showBehind
                      ? String(format: "-%d:%02d", behindMs / 60_000, (behindMs / 1000) % 60)
                      : "LIVE")
-                    .font(.system(size: 18, weight: .bold))
+                    .scaledFont(.system(size: 18, weight: .bold))
                     .foregroundStyle(showBehind
                                      ? Color.white.opacity(0.8)
                                      : Color.accentColor)
@@ -1955,12 +1955,12 @@ struct CatchupTimelineBand: View {
 
             HStack(spacing: 14) {
                 Text(playback.title)
-                    .font(.system(size: 18, weight: .medium))
+                    .scaledFont(.system(size: 18, weight: .medium))
                     .foregroundStyle(.white.opacity(0.8))
                     .lineLimit(1)
                 Spacer()
                 Text("\(Self.clock(current)) / \(Self.clock(duration))")
-                    .font(.system(size: 18, weight: .medium))
+                    .scaledFont(.system(size: 18, weight: .medium))
                     .foregroundStyle(.white.opacity(0.8))
                     .monospacedDigit()
             }
@@ -2012,12 +2012,12 @@ struct VODTimelineBand: View {
 
             HStack(spacing: 14) {
                 Text(title)
-                    .font(.system(size: 18, weight: .medium))
+                    .scaledFont(.system(size: 18, weight: .medium))
                     .foregroundStyle(.white.opacity(0.8))
                     .lineLimit(1)
                 Spacer()
                 Text("\(Self.clock(current)) / \(Self.clock(duration))")
-                    .font(.system(size: 18, weight: .medium))
+                    .scaledFont(.system(size: 18, weight: .medium))
                     .foregroundStyle(.white.opacity(0.8))
                     .monospacedDigit()
             }

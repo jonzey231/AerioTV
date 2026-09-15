@@ -68,14 +68,14 @@ struct MultiviewTransportBar: View {
         HStack(spacing: 6) {
             Text("\(store.count) / \(store.maxTiles)")
                 #if os(tvOS)
-                .font(.system(size: 28, weight: .semibold).monospacedDigit())
+                .scaledFont(.system(size: 28, weight: .semibold).monospacedDigit())
                 #else
-                .font(.footnote.monospacedDigit())
+                .scaledFont(.footnote.monospacedDigit())
                 #endif
                 .foregroundStyle(store.isAtMax ? .secondary : .primary)
             if store.isAtMax {
                 Text("max")
-                    .font(.caption2.weight(.semibold))
+                    .scaledFont(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
@@ -109,13 +109,13 @@ struct MultiviewTransportBar: View {
         } label: {
             #if os(tvOS)
             Image(systemName: "plus")
-                .font(.system(size: 32, weight: .bold))
+                .font(.system(size: 32, weight: .bold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundStyle(store.isAtMax ? Color.secondary : Color.white)
                 .frame(width: 80, height: 80)
                 .contentShape(Circle())
             #else
             Image(systemName: "plus")
-                .font(.body.weight(.semibold))
+                .font(.body.weight(.semibold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundStyle(store.isAtMax ? Color.secondary : Color.white)
                 .frame(width: 34, height: 34)
                 .contentShape(Rectangle())
@@ -145,13 +145,13 @@ struct MultiviewTransportBar: View {
         } label: {
             #if os(tvOS)
             Image(systemName: "xmark")
-                .font(.system(size: 32, weight: .bold))
+                .font(.system(size: 32, weight: .bold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundStyle(Color.red)
                 .frame(width: 80, height: 80)
                 .contentShape(Circle())
             #else
             Image(systemName: "xmark")
-                .font(.body.weight(.semibold))
+                .font(.body.weight(.semibold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundStyle(Color.red)
                 .frame(width: 34, height: 34)
                 .contentShape(Rectangle())

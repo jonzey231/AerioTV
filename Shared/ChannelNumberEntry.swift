@@ -264,10 +264,10 @@ struct ChannelNumberEntryOverlay: View {
             Group {
                 if let message = entry.message {
                     Text(message)
-                        .font(.headline)
+                        .scaledFont(.headline)
                 } else {
                     Text(entry.digits)
-                        .font(.system(size: digitSize, weight: .semibold, design: .rounded))
+                        .scaledFont(.system(size: digitSize, weight: .semibold, design: .rounded))
                         .monospacedDigit()
                 }
             }

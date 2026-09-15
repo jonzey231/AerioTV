@@ -33,6 +33,7 @@ import SwiftUI
 /// glow), matching the app's `TVNoRingButtonStyle` convention and the guide's
 /// `ChannelRow` card look.
 struct ChannelPickRow: View {
+    @Environment(\.aerioTextScale) private var textScale
     let item: ChannelDisplayItem
     var isPlaying: Bool
     let onSelect: () -> Void
@@ -72,9 +73,9 @@ struct ChannelPickRow: View {
             HStack(spacing: 16) {
                 if showChannelNumbers {
                     Text(item.number)
-                        .font(.system(size: 22, weight: .bold, design: .monospaced))
+                        .scaledFont(.system(size: 22, weight: .bold, design: .monospaced))
                         .foregroundColor(.textTertiary)
-                        .frame(width: 56, alignment: .trailing)
+                        .frame(width: TextScale.grow(56, textScale), alignment: .trailing)
                         .lineLimit(1)
                 }
 
@@ -89,7 +90,7 @@ struct ChannelPickRow: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Text(item.name)
-                            .font(.system(size: 24, weight: .semibold))
+                            .scaledFont(.system(size: 24, weight: .semibold))
                             .foregroundColor(.textPrimary)
                             .lineLimit(1)
                         // Catch-up affordance (all-platform parity): history
@@ -97,14 +98,14 @@ struct ChannelPickRow: View {
                         // replayable window.
                         if item.hasCatchup {
                             Image(systemName: "clock.arrow.circlepath")
-                                .font(.system(size: 15, weight: .semibold))
+                                .scaledFont(.system(size: 15, weight: .semibold))
                                 .foregroundColor(.textTertiary)
                         }
                     }
 
                     if let now = nowTitle {
                         Text(now)
-                            .font(.system(size: 19))
+                            .scaledFont(.system(size: 19))
                             .foregroundColor(.accentPrimary.opacity(0.85))
                             .lineLimit(1)
                     }
@@ -126,9 +127,9 @@ struct ChannelPickRow: View {
     private var watchingBadge: some View {
         HStack(spacing: 6) {
             Image(systemName: "play.fill")
-                .font(.system(size: 12, weight: .bold))
+                .scaledFont(.system(size: 12, weight: .bold))
             Text("Watching")
-                .font(.system(size: 15, weight: .semibold))
+                .scaledFont(.system(size: 15, weight: .semibold))
         }
         .foregroundColor(.appBackground)
         .padding(.horizontal, 12)
@@ -305,13 +306,13 @@ struct ChannelListOverlay: View {
     private var channelColumn: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(groupSidebarLabel(activeGroup))
-                .font(.system(size: 34, weight: .semibold))
+                .scaledFont(.system(size: 34, weight: .semibold))
                 .foregroundColor(.textPrimary)
                 .padding(.leading, 6)
 
             if entries.isEmpty {
                 Text("No channels in this group.")
-                    .font(.system(size: 22))
+                    .scaledFont(.system(size: 22))
                     .foregroundColor(.textSecondary)
                     .padding(.leading, 6)
                 Spacer(minLength: 0)

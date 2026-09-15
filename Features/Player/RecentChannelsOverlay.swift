@@ -74,12 +74,12 @@ struct RecentChannelsOverlay: View {
 
             VStack(alignment: .leading, spacing: 20) {
                 Text("Recently Watched")
-                    .font(.system(size: 34, weight: .semibold))
+                    .scaledFont(.system(size: 34, weight: .semibold))
                     .foregroundColor(.textPrimary)
 
                 if entries.isEmpty {
                     Text("Channels you watch will show up here.")
-                        .font(.system(size: 24))
+                        .scaledFont(.system(size: 24))
                         .foregroundColor(.textSecondary)
                     Spacer(minLength: 0)
                 } else {

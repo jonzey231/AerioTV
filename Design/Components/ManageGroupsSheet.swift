@@ -222,7 +222,7 @@ struct ManageGroupsSheet: View {
 
                 if allGroups.isEmpty {
                     Text("No groups available")
-                        .font(.bodyMedium)
+                        .scaledFont(.bodyMedium)
                         .foregroundColor(.textSecondary)
                 } else {
                     #if os(tvOS)
@@ -349,10 +349,10 @@ struct ManageGroupsSheet: View {
                     Toggle(isOn: $hideFilterBarCompact) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Hide Filter Bar")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text("Removes the group pills strip from Live TV.")
-                                .font(.labelSmall)
+                                .scaledFont(.labelSmall)
                                 .foregroundColor(.textTertiary)
                         }
                     }
@@ -362,10 +362,10 @@ struct ManageGroupsSheet: View {
                     Toggle(isOn: $hideSearchBarCompact) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Hide Search Bar")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text("Collapses the always-visible search drawer. Pull down on the list to search.")
-                                .font(.labelSmall)
+                                .scaledFont(.labelSmall)
                                 .foregroundColor(.textTertiary)
                         }
                     }
@@ -373,7 +373,7 @@ struct ManageGroupsSheet: View {
                     .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("Layout")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textSecondary)
                         .textCase(nil)
                 }
@@ -391,13 +391,13 @@ struct ManageGroupsSheet: View {
                     .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("Order")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textSecondary)
                         .textCase(nil)
                 } footer: {
                     if sortMode == .manual {
                         Text("Tap Edit and/or long press, then drag to arrange groups.")
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textTertiary)
                             .textCase(nil)
                     }
@@ -430,14 +430,14 @@ struct ManageGroupsSheet: View {
                     .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("Default Group")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textSecondary)
                         .textCase(nil)
                 } footer: {
                     Text(recentOptionAvailable
                          ? "The group Live TV shows when the app opens. Choosing Recently Watched also shows that group."
                          : "The group Live TV shows when the app opens.")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .textCase(nil)
                 }
@@ -452,11 +452,11 @@ struct ManageGroupsSheet: View {
                     } label: {
                         HStack {
                             Image(systemName: hiddenCategoryOn ? "checkmark.square.fill" : "square")
-                                .font(.system(size: 20))
+                                .scaledFont(.system(size: 20))
                                 .foregroundColor(hiddenCategoryOn ? .accentPrimary : .textTertiary)
                                 .frame(width: 28)
                             Text("Hidden")
-                                .font(.bodyMedium.weight(.semibold))
+                                .scaledFont(.bodyMedium.weight(.semibold))
                                 .foregroundColor(hiddenCategoryOn ? .textPrimary : .textTertiary)
                             Spacer()
                         }
@@ -469,11 +469,11 @@ struct ManageGroupsSheet: View {
                     } label: {
                         HStack {
                             Image(systemName: hiddenGroups.contains(favoritesToken) ? "square" : "checkmark.square.fill")
-                                .font(.system(size: 20))
+                                .scaledFont(.system(size: 20))
                                 .foregroundColor(hiddenGroups.contains(favoritesToken) ? .textTertiary : .accentPrimary)
                                 .frame(width: 28)
                             Text("Favorites")
-                                .font(.bodyMedium.weight(.semibold))
+                                .scaledFont(.bodyMedium.weight(.semibold))
                                 .foregroundColor(hiddenGroups.contains(favoritesToken) ? .textTertiary : .textPrimary)
                             Spacer()
                         }
@@ -486,11 +486,11 @@ struct ManageGroupsSheet: View {
                     } label: {
                         HStack {
                             Image(systemName: hiddenGroups.contains(recentToken) ? "square" : "checkmark.square.fill")
-                                .font(.system(size: 20))
+                                .scaledFont(.system(size: 20))
                                 .foregroundColor(hiddenGroups.contains(recentToken) ? .textTertiary : .accentPrimary)
                                 .frame(width: 28)
                             Text("Recently Watched")
-                                .font(.bodyMedium.weight(.semibold))
+                                .scaledFont(.bodyMedium.weight(.semibold))
                                 .foregroundColor(hiddenGroups.contains(recentToken) ? .textTertiary : .textPrimary)
                             Spacer()
                         }
@@ -503,11 +503,11 @@ struct ManageGroupsSheet: View {
                 } label: {
                     HStack {
                         Image(systemName: hiddenGroups.contains(allChannelsToken) ? "square" : "checkmark.square.fill")
-                            .font(.system(size: 20))
+                            .scaledFont(.system(size: 20))
                             .foregroundColor(hiddenGroups.contains(allChannelsToken) ? .textTertiary : .accentPrimary)
                             .frame(width: 28)
                         Text("All Channels")
-                            .font(.bodyMedium.weight(.semibold))
+                            .scaledFont(.bodyMedium.weight(.semibold))
                             .foregroundColor(hiddenGroups.contains(allChannelsToken) ? .textTertiary : .textPrimary)
                         Spacer()
                     }
@@ -523,12 +523,12 @@ struct ManageGroupsSheet: View {
                     } label: {
                         HStack {
                             Image(systemName: hiddenGroups.contains(group) ? "square" : "checkmark.square.fill")
-                                .font(.system(size: 20))
+                                .scaledFont(.system(size: 20))
                                 .foregroundColor(hiddenGroups.contains(group) ? .textTertiary : .accentPrimary)
                                 .frame(width: 28)
 
                             Text(rowTitle(group))
-                                .font(pinnedTokens.contains(group) ? .bodyMedium.weight(.semibold) : .bodyMedium)
+                                .scaledFont(pinnedTokens.contains(group) ? .bodyMedium.weight(.semibold) : .bodyMedium)
                                 .foregroundColor(hiddenGroups.contains(group) ? .textTertiary : .textPrimary)
 
                             Spacer()
@@ -540,7 +540,7 @@ struct ManageGroupsSheet: View {
             } header: {
                 HStack {
                     Text("Check groups to show, uncheck to hide.")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textSecondary)
                         .textCase(nil)
                     Spacer()
@@ -548,7 +548,7 @@ struct ManageGroupsSheet: View {
                         hiddenGroups.removeAll()
                         HiddenGroupsStore.save(hiddenGroups, forKey: storageKey)
                     }
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.accentPrimary)
                     .textCase(nil)
                     Text("·").foregroundColor(.textTertiary).textCase(nil)
@@ -556,7 +556,7 @@ struct ManageGroupsSheet: View {
                         hiddenGroups = Set(allGroups)
                         HiddenGroupsStore.save(hiddenGroups, forKey: storageKey)
                     }
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.accentPrimary)
                     .textCase(nil)
                 }
@@ -576,7 +576,7 @@ struct ManageGroupsSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 Text(instructionText)
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.textSecondary)
                     .padding(.horizontal, 48)
                     .padding(.top, 8)
@@ -598,7 +598,7 @@ struct ManageGroupsSheet: View {
 
                 if sidebarLayoutAvailable {
                     Text("Sidebar layout")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textSecondary)
                         .padding(.horizontal, 48)
                         .padding(.bottom, 12)
@@ -613,7 +613,7 @@ struct ManageGroupsSheet: View {
                     .padding(.bottom, 12)
                     .disabled(grabbedGroup != nil)
                     Text("Shift guide moves the TV Guide over so the sidebar never covers programs.")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .padding(.horizontal, 48)
                         .padding(.bottom, 16)
@@ -621,7 +621,7 @@ struct ManageGroupsSheet: View {
 
                 if defaultGroupKey != nil {
                     Text("Opens on \(defaultTitle(defaultGroup)). Long press a group to make it the default.")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .padding(.horizontal, 48)
                         .padding(.bottom, 12)
@@ -748,9 +748,9 @@ struct ManageGroupsButton: View {
                     #if os(tvOS)
                     // Color is owned by TVManageGroupsButtonStyle so focus
                     // tints it the same way the filter pills tint on focus.
-                    .font(.system(size: 30, weight: .medium))
+                    .scaledFont(.system(size: 30, weight: .medium))
                     #else
-                    .font(.system(size: 16, weight: .medium))
+                    .scaledFont(.system(size: 16, weight: .medium))
                     .foregroundColor(.accentPrimary)
                     #endif
 
@@ -786,7 +786,7 @@ private struct TVModeChip: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 22, weight: .medium))
+                .scaledFont(.system(size: 22, weight: .medium))
         }
         // Reuse the Live TV filter-pill style so the focus highlight is a
         // capsule matching the pill shape, not the squared system platter.
@@ -858,13 +858,13 @@ struct TVGroupToggleRow: View {
     private var rowBody: some View {
         HStack {
             Text(group)
-                .font(.system(size: 28, weight: .medium))
+                .scaledFont(.system(size: 28, weight: .medium))
                 .foregroundColor(isFocused ? .white : .textPrimary)
                 .lineLimit(1)
 
             if isDefault {
                 Text("Default")
-                    .font(.system(size: 18, weight: .semibold))
+                    .scaledFont(.system(size: 18, weight: .semibold))
                     .foregroundColor(isFocused ? .white : .accentPrimary)
                     .padding(.horizontal, 10).padding(.vertical, 3)
                     .overlay(Capsule().stroke(isFocused ? Color.white : Color.accentPrimary, lineWidth: 1.5))
@@ -878,7 +878,7 @@ struct TVGroupToggleRow: View {
                     .fill(isOn ? Color.accentPrimary : Color.textTertiary)
                     .frame(width: 8, height: 8)
                 Text(isOn ? "On" : "Off")
-                    .font(.system(size: 24, weight: .semibold))
+                    .scaledFont(.system(size: 24, weight: .semibold))
                     .foregroundColor(isOn
                         ? (isFocused ? .white : .accentPrimary)
                         : (isFocused ? .white : .textTertiary))
@@ -943,12 +943,12 @@ private struct TVReorderableGroupRow: View {
         HStack(spacing: 14) {
             if isGrabbed {
                 Image(systemName: "arrow.up.arrow.down")
-                    .font(.system(size: 24, weight: .bold))
+                    .scaledFont(.system(size: 24, weight: .bold))
                     .foregroundColor(.white)
             }
 
             Text(group)
-                .font(.system(size: 28, weight: .medium))
+                .scaledFont(.system(size: 28, weight: .medium))
                 .foregroundColor(highlighted ? .white : .textPrimary)
                 .lineLimit(1)
 
@@ -956,7 +956,7 @@ private struct TVReorderableGroupRow: View {
 
             if isGrabbed {
                 Text("Moving")
-                    .font(.system(size: 24, weight: .bold))
+                    .scaledFont(.system(size: 24, weight: .bold))
                     .foregroundColor(.white)
             } else {
                 HStack(spacing: 6) {
@@ -964,7 +964,7 @@ private struct TVReorderableGroupRow: View {
                         .fill(isOn ? Color.accentPrimary : Color.textTertiary)
                         .frame(width: 8, height: 8)
                     Text(isOn ? "On" : "Off")
-                        .font(.system(size: 24, weight: .semibold))
+                        .scaledFont(.system(size: 24, weight: .semibold))
                         .foregroundColor(isOn
                             ? (isFocused ? .white : .accentPrimary)
                             : (isFocused ? .white : .textTertiary))

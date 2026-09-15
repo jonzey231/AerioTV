@@ -260,7 +260,7 @@ struct RecordProgramSheet: View {
                     }
                 }
                 if let ruleError {
-                    Section { Text(ruleError).foregroundColor(.red).font(.footnote) }
+                    Section { Text(ruleError).foregroundColor(.red).scaledFont(.footnote) }
                 }
             }
 
@@ -339,7 +339,7 @@ struct RecordProgramSheet: View {
                 Section {
                     Label {
                         Text("Keep AerioTV open — closing the app will stop this recording.")
-                            .font(.footnote)
+                            .scaledFont(.footnote)
                     } icon: {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(.yellow)
@@ -362,9 +362,9 @@ struct RecordProgramSheet: View {
                     Label {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Scheduled recordings need a Dispatcharr playlist")
-                                .font(.footnote.bold())
+                                .scaledFont(.footnote.bold())
                             Text("Aerio doesn't run in the background to record on your device — that would drain battery and use storage while you're not watching. Future-scheduled recordings happen on a Dispatcharr server, which keeps running on its own. Switch to a Dispatcharr playlist to schedule this recording, or wait until the program is airing to record it locally.")
-                                .font(.footnote)
+                                .scaledFont(.footnote)
                         }
                     } icon: {
                         Image(systemName: "clock.badge.exclamationmark.fill")
@@ -382,9 +382,9 @@ struct RecordProgramSheet: View {
                     Label {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Recording requires DVR access on Dispatcharr")
-                                .font(.footnote.bold())
+                                .scaledFont(.footnote.bold())
                             Text("Scheduling a recording on the Dispatcharr server needs an account with DVR access set to Manage. Your account can watch and record live programs to this device, but not schedule server recordings. Ask your Dispatcharr administrator for access, or wait until the program is airing to record it on this device.")
-                                .font(.footnote)
+                                .scaledFont(.footnote)
                         }
                     } icon: {
                         Image(systemName: "lock.fill")
@@ -402,9 +402,9 @@ struct RecordProgramSheet: View {
                     Label {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Saving to this device")
-                                .font(.footnote.bold())
+                                .scaledFont(.footnote.bold())
                             Text("Your account can record live programs to this device. Recording to the Dispatcharr server requires DVR access set to Manage.")
-                                .font(.footnote)
+                                .scaledFont(.footnote)
                         }
                     } icon: {
                         Image(systemName: "internaldrive.fill")
@@ -417,7 +417,7 @@ struct RecordProgramSheet: View {
                 Section {
                     Label {
                         Text("Storage is running low. This recording may not finish if the limit is reached.")
-                            .font(.footnote)
+                            .scaledFont(.footnote)
                     } icon: {
                         Image(systemName: "externaldrive.badge.exclamationmark")
                             .foregroundColor(.orange)
@@ -507,14 +507,14 @@ struct RecordProgramSheet: View {
                     }
                     VStack(alignment: .leading, spacing: 8) {
                         Text(isLive ? "Record from Now" : "Record Program")
-                            .font(.system(size: 38, weight: .bold))
+                            .scaledFont(.system(size: 38, weight: .bold))
                             .foregroundColor(.textPrimary)
                         Text(programTitle)
-                            .font(.system(size: 26, weight: .semibold))
+                            .scaledFont(.system(size: 26, weight: .semibold))
                             .foregroundColor(.textPrimary)
                             .lineLimit(2)
                         Text("\(channelName) · \(timeLabel)")
-                            .font(.system(size: 22))
+                            .scaledFont(.system(size: 22))
                             .foregroundColor(.textSecondary)
                     }
                 }
@@ -570,7 +570,7 @@ struct RecordProgramSheet: View {
                     VStack(spacing: 18) {
                         // What the buffers add up to, updated as pills change.
                         Text(isSeriesRule ? (ruleError ?? seriesRuleSummary) : recordingWindowSummary)
-                            .font(.system(size: 22))
+                            .scaledFont(.system(size: 22))
                             .foregroundColor(ruleError == nil ? .textSecondary : .red)
                         RecordActionPill(
                             label: isSeriesRule ? "Save Rule" : "Record",
@@ -614,7 +614,7 @@ struct RecordProgramSheet: View {
     private var ruleRow: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Record")
-                .font(.system(size: 24, weight: .semibold))
+                .scaledFont(.system(size: 24, weight: .semibold))
                 .padding(.leading, 4)
             HStack(spacing: 12) {
                 ForEach(RuleMode.allCases, id: \.self) { m in
@@ -630,7 +630,7 @@ struct RecordProgramSheet: View {
             .focusSection()
             if ruleMode != .once, showCustomRule {
                 Text("Title Match")
-                    .font(.system(size: 20, weight: .semibold))
+                    .scaledFont(.system(size: 20, weight: .semibold))
                     .foregroundColor(.textSecondary)
                     .padding(.leading, 4)
                 HStack(spacing: 12) {
@@ -663,7 +663,7 @@ struct RecordProgramSheet: View {
                            onCustom: (() -> Void)? = nil) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(title)
-                .font(.system(size: 24, weight: .semibold))
+                .scaledFont(.system(size: 24, weight: .semibold))
                 .padding(.leading, 4)
             // .focusSection() lets the Siri Remote's up/down gesture jump
             // between rows regardless of the focused pill's horizontal
@@ -701,7 +701,7 @@ struct RecordProgramSheet: View {
     private var destinationRow: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Destination")
-                .font(.system(size: 24, weight: .semibold))
+                .scaledFont(.system(size: 24, weight: .semibold))
                 .padding(.leading, 4)
             HStack(spacing: 12) {
                 RecordOptionPill(
@@ -730,7 +730,7 @@ struct RecordProgramSheet: View {
         let isDisabled = destination == .local
         return VStack(alignment: .leading, spacing: 8) {
             Text("Remove Commercials (Comskip)")
-                .font(.system(size: 24, weight: .semibold))
+                .scaledFont(.system(size: 24, weight: .semibold))
                 .foregroundColor(isDisabled ? .textTertiary : .textPrimary)
                 .padding(.leading, 4)
             HStack(spacing: 12) {
@@ -756,7 +756,7 @@ struct RecordProgramSheet: View {
                     ? "Comskip runs server-side. Switch the destination to Dispatcharr server to enable."
                     : "Server-side: detects and removes commercial breaks after the recording completes, when Comskip is configured on the Dispatcharr server."
             )
-                .font(.system(size: 18))
+                .scaledFont(.system(size: 18))
                 .foregroundColor(.textSecondary)
                 .padding(.leading, 4)
                 .padding(.top, 2)
@@ -773,9 +773,9 @@ struct RecordProgramSheet: View {
             Label {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Recording requires DVR access on Dispatcharr")
-                        .font(.system(size: 22, weight: .bold))
+                        .scaledFont(.system(size: 22, weight: .bold))
                     Text("Scheduling a recording on the Dispatcharr server needs an account with DVR access set to Manage. Your account can watch and record live programs to this device, but not schedule server recordings. Ask your Dispatcharr administrator for access, or wait until the program is airing to record it on this device.")
-                        .font(.system(size: 20))
+                        .scaledFont(.system(size: 20))
                 }
             } icon: {
                 Image(systemName: "lock.fill")
@@ -816,7 +816,7 @@ struct RecordProgramSheet: View {
                 }
             }
         }
-        .font(.system(size: 22))
+        .scaledFont(.system(size: 22))
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.elevatedBackground, in: RoundedRectangle(cornerRadius: 16))
@@ -854,7 +854,7 @@ struct RecordProgramSheet: View {
                 Stepper(customBufferLabel, value: $customValue, in: floor...120)
                 if floor < 0 {
                     Text("Step below zero to start the recording after the listed start time.")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                 }
             }
@@ -886,14 +886,14 @@ struct RecordProgramSheet: View {
         // app instead of the system list style.
         VStack(spacing: 36) {
             Text("Custom Buffer")
-                .font(.system(size: 42, weight: .bold))
+                .scaledFont(.system(size: 42, weight: .bold))
                 .foregroundColor(.textPrimary)
             HStack(spacing: 28) {
                 RecordOptionPill(label: "−", isSelected: false) {
                     if customValue > floor { customValue -= 1 }
                 }
                 Text(customBufferLabel)
-                    .font(.system(size: 34, weight: .semibold))
+                    .scaledFont(.system(size: 34, weight: .semibold))
                     .foregroundColor(.accentPrimary)
                     .frame(minWidth: 420)
                 RecordOptionPill(label: "+", isSelected: false) {
@@ -902,7 +902,7 @@ struct RecordProgramSheet: View {
             }
             if floor < 0 {
                 Text("Step below zero to start the recording after the listed start time.")
-                    .font(.system(size: 24))
+                    .scaledFont(.system(size: 24))
                     .foregroundColor(.textSecondary)
             }
             HStack(spacing: 24) {
@@ -1111,7 +1111,7 @@ private struct RecordOptionPillButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         let focused = isFocused
         return configuration.label
-            .font(.system(size: 22, weight: .medium))
+            .scaledFont(.system(size: 22, weight: .medium))
             .foregroundColor(isSelected ? .appBackground : (focused ? .white : .textSecondary))
             .padding(.horizontal, 26)
             .padding(.vertical, 13)
@@ -1163,7 +1163,7 @@ private struct RecordActionPillButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         let focused = isFocused
         return configuration.label
-            .font(.system(size: 24, weight: .semibold))
+            .scaledFont(.system(size: 24, weight: .semibold))
             .foregroundColor(focused ? .white : tintColor)
             .padding(.horizontal, 40)
             .padding(.vertical, 18)

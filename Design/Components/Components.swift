@@ -96,7 +96,7 @@ struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
         tf.onFocusChange = onFocusChange
         tf.textInsets = UIEdgeInsets(top: verticalInset, left: horizontalInset,
                                      bottom: verticalInset, right: horizontalInset)
-        tf.font = .systemFont(ofSize: fontSize)
+        tf.font = .systemFont(ofSize: fontSize * context.environment.aerioTextScale)
         tf.textColor = UIColor(Color.textPrimary)
         tf.attributedPlaceholder = NSAttributedString(
             string: placeholder,
@@ -116,6 +116,11 @@ struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
         uiView.isSecureTextEntry = isSecure
         if uiView.text != text { uiView.text = text }
         uiView.onFocusChange = onFocusChange
+        // Settings > Appearance > Text Size, applied live.
+        let scaledSize = fontSize * context.environment.aerioTextScale
+        if uiView.font?.pointSize != scaledSize {
+            uiView.font = .systemFont(ofSize: scaledSize)
+        }
     }
 
     final class Coordinator: NSObject, UITextFieldDelegate {
@@ -266,10 +271,10 @@ struct TMDBAttributionView: View {
     var body: some View {
         #if os(tvOS)
         let logoHeight: CGFloat = style == .long ? 20 : 44
-        let font = Font.system(size: 20)
+        let font = AerioFont.system(size: 20)
         #else
         let logoHeight: CGFloat = style == .long ? 12 : 28
-        let font = Font.footnote
+        let font = AerioFont.footnote
         #endif
         VStack(alignment: .leading, spacing: 8) {
             Image(style == .long ? "TMDBLogoLong" : "TMDBLogoShort")
@@ -279,11 +284,11 @@ struct TMDBAttributionView: View {
                 .accessibilityLabel("The Movie Database")
             // Their required line first, ours second.
             Text("This product uses the TMDB API but is not endorsed or certified by TMDB.")
-                .font(font)
+                .scaledFont(font)
                 .foregroundColor(.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
             Text("TMDB data is used only after configuring a TMDB API key in Settings > App Behaviors.")
-                .font(font)
+                .scaledFont(font)
                 .foregroundColor(.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -316,15 +321,15 @@ struct PrimaryButton: View {
                 } else {
                     if let icon {
                         Image(systemName: icon)
-                            .font(.system(size: 16, weight: .semibold))
+                            .scaledFont(.system(size: 16, weight: .semibold))
                     }
                     Text(title)
-                        .font(.headlineMedium)
+                        .scaledFont(.headlineMedium)
                 }
             }
             .foregroundColor(.white)
             .frame(maxWidth: .infinity)
-            .frame(height: 54)
+            .frame(minHeight: 54)
             .background(
                 isDisabled
                     ? AnyShapeStyle(Color.textTertiary)
@@ -358,14 +363,14 @@ struct SecondaryButton: View {
             HStack(spacing: 8) {
                 if let icon {
                     Image(systemName: icon)
-                        .font(.system(size: 15, weight: .medium))
+                        .scaledFont(.system(size: 15, weight: .medium))
                 }
                 Text(title)
-                    .font(.headlineMedium)
+                    .scaledFont(.headlineMedium)
             }
             .foregroundColor(.textPrimary)
             .frame(maxWidth: .infinity)
-            .frame(height: 54)
+            .frame(minHeight: 54)
             .background(Color.elevatedBackground)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(
@@ -453,7 +458,7 @@ struct AppTextField: View {
     private var tvBody: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.labelLarge)
+                .scaledFont(.labelLarge)
                 .foregroundColor(.textSecondary)
 
             HStack(spacing: 12) {
@@ -472,7 +477,7 @@ struct AppTextField: View {
                         passwordVisible.toggle()
                     } label: {
                         Image(systemName: passwordVisible ? "eye.slash" : "eye")
-                            .font(.system(size: 22))
+                            .font(.system(size: 22))  // glyph in a fixed box: not text, stays fixed
                             .foregroundColor(.textTertiary)
                             .frame(width: 36, height: 36)
                             .contentShape(Rectangle())
@@ -482,7 +487,7 @@ struct AppTextField: View {
                 }
             }
             .padding(.horizontal, 16)
-            .frame(height: 60)
+            .frame(minHeight: 60)
             .background(Color.elevatedBackground)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
@@ -502,13 +507,13 @@ struct AppTextField: View {
     private var iosBody: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.labelLarge)
+                .scaledFont(.labelLarge)
                 .foregroundColor(.textSecondary)
 
             HStack(spacing: 12) {
                 if let icon {
                     Image(systemName: icon)
-                        .font(.system(size: 16))
+                        .scaledFont(.system(size: 16))
                         .foregroundColor(isFocused ? .accentPrimary : .textTertiary)
                         .frame(width: 20)
                         .animation(.easeInOut(duration: 0.15), value: isFocused)
@@ -524,7 +529,7 @@ struct AppTextField: View {
                             #endif
                     }
                 }
-                .font(.bodyMedium)
+                .scaledFont(.bodyMedium)
                 // v1.6.21 fix for the "white-on-white" tvOS bug.
                 // tvOS fills the focused TextField with white and
                 // expects dark text. Forcing `.textPrimary` (light)
@@ -565,7 +570,7 @@ struct AppTextField: View {
                         passwordVisible.toggle()
                     } label: {
                         Image(systemName: passwordVisible ? "eye.slash" : "eye")
-                            .font(.system(size: 16))
+                            .font(.system(size: 16))  // glyph in a fixed box: not text, stays fixed
                             .foregroundColor(.textTertiary)
                             .frame(width: 24, height: 24)
                             .contentShape(Rectangle())
@@ -575,7 +580,7 @@ struct AppTextField: View {
                 }
             }
             .padding(.horizontal, 16)
-            .frame(height: 52)
+            .frame(minHeight: 52)
             .background(Color.elevatedBackground)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
@@ -622,9 +627,9 @@ struct ServerTypeBadge: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: type.systemIcon)
-                .font(.system(size: iconSize, weight: .semibold))
+                .scaledFont(.system(size: iconSize, weight: .semibold))
             Text(type.displayName)
-                .font(.labelSmall)
+                .scaledFont(.labelSmall)
         }
         .foregroundColor(type.color)
         .padding(.horizontal, hPad)
@@ -642,7 +647,7 @@ struct LiveBadge: View {
                 .fill(Color.statusLive)
                 .frame(width: 5, height: 5)
             Text("LIVE")
-                .font(.labelSmall)
+                .scaledFont(.labelSmall)
                 .foregroundColor(Color.statusLive)
         }
         .padding(.horizontal, 7)
@@ -666,7 +671,7 @@ struct SectionHeader: View {
             if let action {
                 Button(action: action) {
                     Text(actionTitle)
-                        .font(.labelMedium)
+                        .scaledFont(.labelMedium)
                         .foregroundColor(.accentPrimary)
                 }
                 #if os(tvOS)
@@ -689,7 +694,7 @@ struct LoadingView: View {
                 .tint(.accentPrimary)
                 .scaleEffect(1.2)
             Text(message)
-                .font(.bodyMedium)
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textSecondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -708,15 +713,15 @@ struct EmptyStateView: View {
     var body: some View {
         VStack(spacing: 20) {
             Image(systemName: icon)
-                .font(.system(size: 48))
+                .scaledFont(.system(size: 48))
                 .foregroundStyle(LinearGradient.accentGradient)
 
             VStack(spacing: 8) {
                 Text(title)
-                    .font(.headlineLarge)
+                    .scaledFont(.headlineLarge)
                     .foregroundColor(.textPrimary)
                 Text(message)
-                    .font(.bodyMedium)
+                    .scaledFont(.bodyMedium)
                     .foregroundColor(.textSecondary)
                     .multilineTextAlignment(.center)
             }
@@ -724,7 +729,7 @@ struct EmptyStateView: View {
             if let action {
                 Button(action: action) {
                     Text(actionTitle)
-                        .font(.headlineSmall)
+                        .scaledFont(.headlineSmall)
                         .foregroundColor(.white)
                         .padding(.horizontal, 24)
                         .padding(.vertical, 12)
@@ -761,7 +766,7 @@ struct NoPosterPlaceholder: View {
                 .opacity(0.6)
             if !compact {
                 Text("No artwork provided")
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.textTertiary)
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
@@ -781,7 +786,7 @@ struct TVCategoryPill: View {
     var body: some View {
         Button(action: action) {
             Text(label)
-                .font(.system(size: 22, weight: .medium))
+                .scaledFont(.system(size: 22, weight: .medium))
                 .foregroundColor(isSelected ? .appBackground : (isFocused ? .white : .textSecondary))
                 .padding(.horizontal, 26)
                 .padding(.vertical, 13)
@@ -903,7 +908,7 @@ struct EPGFlagBadge: View {
 
     var body: some View {
         Text(flag.label)
-            .font(.system(size: fontSize, weight: .bold))
+            .scaledFont(.system(size: fontSize, weight: .bold))
             .foregroundColor(.white)
             .lineLimit(1)
             .padding(.horizontal, hPad)
@@ -983,7 +988,7 @@ struct SeasonEpisodePill: View {
     var body: some View {
         if let label {
             Text(label)
-                .font(.system(size: fontSize, weight: .medium))
+                .scaledFont(.system(size: fontSize, weight: .medium))
                 .foregroundColor(.textSecondary)
                 .lineLimit(1)
                 .padding(.horizontal, hPad)
@@ -1021,10 +1026,10 @@ struct TVQRLinkSheet: View {
     var body: some View {
         VStack(spacing: 14) {
             Text(link.title)
-                .font(.system(size: 38, weight: .bold))
+                .scaledFont(.system(size: 38, weight: .bold))
                 .foregroundColor(.textPrimary)
             Text(subtitle)
-                .font(.system(size: 26))
+                .scaledFont(.system(size: 26))
                 .foregroundColor(.textSecondary)
                 .multilineTextAlignment(.center)
             if let qr = Self.qrCodeImage(from: link.url) {
@@ -1040,7 +1045,7 @@ struct TVQRLinkSheet: View {
                     .padding(.vertical, 8)
             }
             Text(link.url)
-                .font(.system(size: 24, weight: .semibold, design: .monospaced))
+                .scaledFont(.system(size: 24, weight: .semibold, design: .monospaced))
                 .foregroundColor(.textPrimary)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)

@@ -16,27 +16,27 @@ struct ReminderBannerView: View {
                             .fill(Color.accentPrimary.opacity(0.2))
                             .frame(width: 40, height: 40)
                         Image(systemName: "bell.fill")
-                            .font(.system(size: 16, weight: .semibold))
+                            .scaledFont(.system(size: 16, weight: .semibold))
                             .foregroundColor(.accentPrimary)
                     }
 
                     // Title + subtitle
                     VStack(alignment: .leading, spacing: 2) {
                         Text(banner.title)
-                            .font(.system(size: 14, weight: .semibold))
+                            .scaledFont(.system(size: 14, weight: .semibold))
                             .foregroundColor(.textPrimary)
                             .lineLimit(1)
 
                         HStack(spacing: 4) {
                             Text("Starting in 5 min")
-                                .font(.system(size: 12, weight: .medium))
+                                .scaledFont(.system(size: 12, weight: .medium))
                                 .foregroundColor(.textSecondary)
                             if !banner.channel.isEmpty {
                                 Text("on")
-                                    .font(.system(size: 12))
+                                    .scaledFont(.system(size: 12))
                                     .foregroundColor(.textTertiary)
                                 Text(banner.channel)
-                                    .font(.system(size: 12, weight: .medium))
+                                    .scaledFont(.system(size: 12, weight: .medium))
                                     .foregroundColor(.accentPrimary)
                             }
                         }
@@ -50,7 +50,7 @@ struct ReminderBannerView: View {
                         dismissBanner()
                     } label: {
                         Image(systemName: "xmark")
-                            .font(.system(size: 12, weight: .bold))
+                            .font(.system(size: 12, weight: .bold))  // glyph in a fixed box: not text, stays fixed
                             .foregroundColor(.textTertiary)
                             .frame(width: 28, height: 28)
                             .background(Color.elevatedBackground, in: Circle())

@@ -758,7 +758,7 @@ struct WhatsNewSheet: View {
                                 Image(systemName: "arrow.up.forward.app")
                                 Text("Read full release notes")
                             }
-                            .font(.subheadline.weight(.medium))
+                            .scaledFont(.subheadline.weight(.medium))
                         }
                     }
                 }
@@ -776,7 +776,7 @@ struct WhatsNewSheet: View {
                         isPresented = false
                     } label: {
                         Text("Never show again for any future updates.")
-                            .font(.subheadline)
+                            .scaledFont(.subheadline)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, minHeight: 36)
                     }
@@ -798,9 +798,9 @@ struct WhatsNewSheet: View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Image(systemName: "checkmark.circle.fill")
                 .foregroundStyle(Color.accentPrimary)
-                .font(bulletIconFont)
+                .scaledFont(bulletIconFont)
             Text(bullet)
-                .font(bulletTextFont)
+                .scaledFont(bulletTextFont)
                 .foregroundStyle(.primary)
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -856,9 +856,9 @@ struct WhatsNewSheet: View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
             Image(systemName: "checkmark.circle.fill")
                 .foregroundStyle(Color.accentPrimary)
-                .font(bulletIconFont)
+                .scaledFont(bulletIconFont)
             Text(bullet)
-                .font(bulletTextFont)
+                .scaledFont(bulletTextFont)
                 .foregroundStyle(.primary)
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -889,7 +889,7 @@ struct WhatsNewSheet: View {
                 isPresented = false
             } label: {
                 Text("Never show again for any future updates.")
-                    .font(.subheadline)
+                    .scaledFont(.subheadline)
                     .foregroundStyle(tvFocus == .disable ? .primary : .secondary)
                     .frame(maxWidth: .infinity, minHeight: 48)
                     .overlay(
@@ -906,13 +906,13 @@ struct WhatsNewSheet: View {
     private var header: some View {
         VStack(spacing: 10) {
             Image(systemName: "sparkles")
-                .font(.system(size: iconSize, weight: .semibold))
+                .scaledFont(.system(size: iconSize, weight: .semibold))
                 .foregroundStyle(Color.accentPrimary)
             Text(release.title)
-                .font(titleFont)
+                .scaledFont(titleFont)
                 .multilineTextAlignment(.center)
             Text("AerioTV \(release.version)")
-                .font(.subheadline)
+                .scaledFont(.subheadline)
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, contentHorizontalPadding)
@@ -923,14 +923,14 @@ struct WhatsNewSheet: View {
 
     #if os(tvOS)
     private var iconSize: CGFloat { 56 }
-    private var titleFont: Font { .system(size: 38, weight: .bold) }
-    private var bulletIconFont: Font { .system(size: 24) }
-    private var bulletTextFont: Font { .system(size: 24) }
+    private var titleFont: AerioFont { .system(size: 38, weight: .bold) }
+    private var bulletIconFont: AerioFont { .system(size: 24) }
+    private var bulletTextFont: AerioFont { .system(size: 24) }
     private var contentHorizontalPadding: CGFloat { 24 }
     private var headerTopPadding: CGFloat { 24 }
     #else
-    private var bulletIconFont: Font { .body }
-    private var bulletTextFont: Font { .body }
+    private var bulletIconFont: AerioFont { .body }
+    private var bulletTextFont: AerioFont { .body }
     #endif
 }
 

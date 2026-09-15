@@ -206,17 +206,17 @@ struct TVSettingsSplitView<Detail: View>: View {
         } label: {
             HStack(spacing: 14) {
                 Image(systemName: item.icon)
-                    .font(.system(size: 24, weight: .semibold))
+                    .scaledFont(.system(size: 24, weight: .semibold))
                     .foregroundColor(item.iconColor)
                     .frame(width: 34)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.label)
-                        .font(.system(size: 26, weight: .medium))
+                        .scaledFont(.system(size: 26, weight: .medium))
                         .foregroundColor(.textPrimary)
                         .lineLimit(1)
                     if let subtitle = item.subtitle {
                         Text(subtitle)
-                            .font(.system(size: 18))
+                            .scaledFont(.system(size: 18))
                             .foregroundColor(.textTertiary)
                             .lineLimit(1)
                     }

@@ -59,17 +59,17 @@ struct MultiviewSettingsView: View {
                         HStack(alignment: .top, spacing: 12) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(style.displayName)
-                                    .font(.bodyMedium)
+                                    .scaledFont(.bodyMedium)
                                     .foregroundColor(.textPrimary)
                                 Text(style.subtitle)
-                                    .font(.labelSmall)
+                                    .scaledFont(.labelSmall)
                                     .foregroundColor(.textTertiary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                             Spacer(minLength: 8)
                             if selectedStyle == style {
                                 Image(systemName: "checkmark")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .scaledFont(.system(size: 14, weight: .semibold))
                                     .foregroundColor(theme.accent)
                                     .padding(.top, 2)
                             }
@@ -81,7 +81,7 @@ struct MultiviewSettingsView: View {
                 Text("Audio Focus Indicator").sectionHeaderStyle()
             } footer: {
                 Text("Choose how Aerio marks the tile that currently owns audio when watching multiple streams at once.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
 
@@ -90,9 +90,9 @@ struct MultiviewSettingsView: View {
                 Toggle(isOn: $paddingEnabled) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Padding Between Tiles")
-                            .font(.bodyMedium).foregroundColor(.textPrimary)
+                            .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                         Text("Insert a small gap between tiles so each stream stands on its own. Off keeps adjacent tiles meeting flush.")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                     }
                 }
                 .tint(theme.accent)
@@ -114,7 +114,7 @@ struct MultiviewSettingsView: View {
                 Text("Tile Corners").sectionHeaderStyle()
             } footer: {
                 Text("Square keeps the cinema-grid look; rounded softens each tile with a 12pt radius.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
         }

@@ -548,7 +548,7 @@ struct ChannelListView: View {
                                         .foregroundColor(.accentPrimary)
                                     if hiddenGroups.count > 0 {
                                         Text("\(hiddenGroups.count)")
-                                            .font(.system(size: 9, weight: .bold))
+                                            .scaledFont(.system(size: 9, weight: .bold))
                                             .foregroundColor(.white)
                                             .padding(.horizontal, 4)
                                             .padding(.vertical, 1)
@@ -855,11 +855,11 @@ struct ChannelListView: View {
                 Button { phoneDrawerOpen = true } label: { phoneCircle("sidebar.leading") }
                     .accessibilityLabel("Channel Groups")
                 Text(Self.groupTitle(selectedGroup))
-                    .font(.labelMedium)
+                    .scaledFont(.labelMedium)
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
                 Text("\(filteredChannels.count)")
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.textTertiary)
                 Spacer(minLength: 4)
             } else {
@@ -868,7 +868,7 @@ struct ChannelListView: View {
                         phoneCircle("line.3.horizontal.decrease.circle")
                         if hiddenGroups.count > 0 {
                             Text("\(hiddenGroups.count)")
-                                .font(.system(size: 9, weight: .bold))
+                                .scaledFont(.system(size: 9, weight: .bold))
                                 .foregroundColor(.white)
                                 .padding(.horizontal, 4).padding(.vertical, 1)
                                 .background(Color.statusWarning)
@@ -972,7 +972,7 @@ struct ChannelListView: View {
 
     private func phoneCircle(_ systemImage: String) -> some View {
         Image(systemName: systemImage)
-            .font(.system(size: 17, weight: .semibold))
+            .font(.system(size: 17, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
             .foregroundColor(.textPrimary)
             .frame(width: 38, height: 38)
             .background(Circle().fill(Color.textPrimary.opacity(0.08)))
@@ -1895,7 +1895,7 @@ struct ChannelListView: View {
                         }
                     } label: {
                         Image(systemName: buttonGlyph)
-                            .font(.system(size: 16, weight: .medium))
+                            .scaledFont(.system(size: 16, weight: .medium))
                             .foregroundColor(iPadSearchPresented ? .appBackground : (hasActiveSearch ? .accentPrimary : .textSecondary))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 7)
@@ -1913,7 +1913,7 @@ struct ChannelListView: View {
                     if iPadSearchPresented {
                         TextField("Search channels", text: $searchText)
                             .textFieldStyle(.plain)
-                            .font(.labelMedium)
+                            .scaledFont(.labelMedium)
                             .foregroundColor(.textPrimary)
                             .frame(width: 240)
                             .padding(.horizontal, 14)
@@ -1959,7 +1959,7 @@ struct ChannelListView: View {
                         withAnimation(.spring(response: 0.25)) { selectedGroup = group }
                     } label: {
                         Text(Self.groupTitle(group))
-                            .font(.labelMedium)
+                            .scaledFont(.labelMedium)
                             .foregroundColor(selectedGroup == group ? .appBackground : .textSecondary)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 7)
@@ -2039,7 +2039,7 @@ struct ChannelListView: View {
             withAnimation(.spring(response: 0.25)) { selectedGroup = token }
         } label: {
             Text(c.name)
-                .font(.labelMedium)
+                .scaledFont(.labelMedium)
                 .foregroundColor(selectedGroup == token ? .appBackground : .textSecondary)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
@@ -2081,13 +2081,13 @@ struct ChannelListView: View {
     private func errorView(_ message: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 40))
+                .scaledFont(.system(size: 40))
                 .foregroundColor(.statusWarning)
             Text("Connection Error")
-                .font(.headlineLarge)
+                .scaledFont(.headlineLarge)
                 .foregroundColor(.textPrimary)
             Text(message)
-                .font(.bodyMedium)
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textSecondary)
                 .multilineTextAlignment(.center)
             PrimaryButton("Try Again") {
@@ -2783,6 +2783,8 @@ struct EPGEntry: Identifiable, Equatable {
 
 // MARK: - Channel Row
 struct ChannelRow: View {
+    /// Settings > Appearance > Text Size (fixed text frames grow with it).
+    @Environment(\.aerioTextScale) private var textScale
     let item: ChannelDisplayItem
     let onTap: () -> Void
     var fetchUpcoming: (() async -> [EPGEntry])? = nil
@@ -3167,7 +3169,7 @@ struct ChannelRow: View {
             } label: {
                 let isFav = favoritesStore.isFavorite(item.id)
                 Image(systemName: isFav ? "star.fill" : "star")
-                    .font(.system(size: 28, weight: .medium))
+                    .scaledFont(.system(size: 28, weight: .medium))
                     .foregroundColor(
                         starFocused ? .white
                         : isFav     ? .statusWarning
@@ -3201,10 +3203,10 @@ struct ChannelRow: View {
                     // GH #19: number column collapses when numbers are off.
                     if showChannelNumbers {
                         Text(item.number)
-                            .font(.system(size: 24, weight: .bold, design: .monospaced))
+                            .scaledFont(.system(size: 24, weight: .bold, design: .monospaced))
                             .lineLimit(1)
                             .foregroundColor(.textTertiary)
-                            .frame(width: 42, alignment: .trailing)
+                            .frame(width: TextScale.grow(42, textScale), alignment: .trailing)
                     }
 
                     if showChannelLogos {
@@ -3219,7 +3221,7 @@ struct ChannelRow: View {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 8) {
                             Text(item.name)
-                                .font(.system(size: 26, weight: .semibold))
+                                .scaledFont(.system(size: 26, weight: .semibold))
                                 .foregroundColor(.textPrimary)
                                 .lineLimit(1)
                             // Catch-up badge (2026-07-20, all-platform
@@ -3227,7 +3229,7 @@ struct ChannelRow: View {
                             // the channel has a replayable archive.
                             if item.hasCatchup {
                                 Image(systemName: "clock.arrow.circlepath")
-                                    .font(.system(size: 16, weight: .semibold))
+                                    .scaledFont(.system(size: 16, weight: .semibold))
                                     .foregroundColor(.textTertiary)
                             }
                         }
@@ -3238,7 +3240,7 @@ struct ChannelRow: View {
                                             font: .system(size: 22),
                                             color: .accentPrimary.opacity(0.85),
                                             isActive: isCardFocused)
-                                    .frame(height: 28)
+                                    .frame(height: TextScale.grow(28, textScale))
                                 nowPlayingTimeRemaining(end: prog.end)
                                 // Feed badges (LIVE/NEW/PREMIERE/...) for the
                                 // now-airing program; renders nothing when none.
@@ -3252,14 +3254,14 @@ struct ChannelRow: View {
                             if showProgramSubtitles, let sub = prog.subTitle,
                                !EPGText.subtitleIsRedundant(sub, title: prog.title, description: prog.description) {
                                 Text(sub)
-                                    .font(.system(size: 18))
+                                    .scaledFont(.system(size: 18))
                                     .italic()
                                     .foregroundColor(.textSecondary)
                                     .lineLimit(1)
                             }
                             if let desc = prog.description, !desc.isEmpty {
                                 Text(desc)
-                                    .font(.system(size: 18))
+                                    .scaledFont(.system(size: 18))
                                     .foregroundColor(.textSecondary)
                                     .lineLimit(2)
                             }
@@ -3306,7 +3308,7 @@ struct ChannelRow: View {
                 }
             } label: {
                 Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 24, weight: .semibold))
+                    .scaledFont(.system(size: 24, weight: .semibold))
                     .foregroundColor(
                         expandFocused ? .white
                         : isExpanded  ? .accentPrimary
@@ -3343,10 +3345,10 @@ struct ChannelRow: View {
             // GH #19: number column collapses when numbers are off.
             if showChannelNumbers {
                 Text(item.number)
-                    .font(.system(size: (isWide ? 17 : 13) * s, weight: .bold, design: .monospaced))
+                    .scaledFont(.system(size: (isWide ? 17 : 13) * s, weight: .bold, design: .monospaced))
                     .lineLimit(1)
                     .foregroundColor(.textTertiary)
-                    .frame(width: (isWide ? 36 : 26) * s, alignment: .trailing)
+                    .frame(width: TextScale.grow((isWide ? 36 : 26) * s, textScale), alignment: .trailing)
             }
 
             if showChannelLogos {
@@ -3364,20 +3366,20 @@ struct ChannelRow: View {
             VStack(alignment: .leading, spacing: (isWide ? 4 : 2) * s) {
                 HStack(spacing: 5 * s) {
                     Text(item.name)
-                        .font(.system(size: (isWide ? 17 : 15) * s, weight: .medium))
+                        .scaledFont(.system(size: (isWide ? 17 : 15) * s, weight: .medium))
                         .foregroundColor(.textPrimary)
                         .lineLimit(1)
                     // Favorite star, like the guide's channel column
                     // (Logan 2026-09-05).
                     if favoritesStore.isFavorite(item.id) {
                         Image(systemName: "star.fill")
-                            .font(.system(size: (isWide ? 12 : 10) * s, weight: .semibold))
+                            .scaledFont(.system(size: (isWide ? 12 : 10) * s, weight: .semibold))
                             .foregroundColor(.statusWarning)
                     }
                     // Catch-up badge (see tvOS row above).
                     if item.hasCatchup {
                         Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: (isWide ? 12 : 10) * s, weight: .semibold))
+                            .scaledFont(.system(size: (isWide ? 12 : 10) * s, weight: .semibold))
                             .foregroundColor(.textTertiary)
                     }
                 }
@@ -3388,7 +3390,7 @@ struct ChannelRow: View {
                                     font: .system(size: (isWide ? 15 : 11) * s),
                                     color: .accentPrimary.opacity(0.85),
                                     isActive: false)  // Static during scroll — saves GPU
-                            .frame(height: (isWide ? 20 : 16) * s)
+                            .frame(height: TextScale.grow((isWide ? 20 : 16) * s, textScale))
                         nowPlayingTimeRemaining(end: prog.end)
                         // Feed badges (LIVE/NEW/PREMIERE/...) for the
                         // now-airing program; renders nothing when none.
@@ -3401,14 +3403,14 @@ struct ChannelRow: View {
                     if showProgramSubtitles, let sub = prog.subTitle,
                        !EPGText.subtitleIsRedundant(sub, title: prog.title, description: prog.description) {
                         Text(sub)
-                            .font(.system(size: (isWide ? 12 : 10) * s))
+                            .scaledFont(.system(size: (isWide ? 12 : 10) * s))
                             .italic()
                             .foregroundColor(.textSecondary)
                             .lineLimit(1)
                     }
                     if let desc = prog.description, !desc.isEmpty {
                         Text(desc)
-                            .font(.system(size: (isWide ? 12 : 10) * s))
+                            .scaledFont(.system(size: (isWide ? 12 : 10) * s))
                             .foregroundColor(.textSecondary)
                             .lineLimit(2)
                     }
@@ -3451,9 +3453,9 @@ struct ChannelRow: View {
                     if isWide {
                         HStack(spacing: 5) {
                             Image(systemName: isExpanded ? "chevron.up" : "list.bullet")
-                                .font(.system(size: 11, weight: .medium))
+                                .scaledFont(.system(size: 11, weight: .medium))
                             Text(isExpanded ? "Hide Schedule" : "Schedule")
-                                .font(.subheadline.weight(.medium))
+                                .scaledFont(.subheadline.weight(.medium))
                         }
                         .foregroundColor(.accentPrimary)
                         .padding(.horizontal, 12)
@@ -3462,7 +3464,7 @@ struct ChannelRow: View {
                         .contentShape(Capsule())
                     } else {
                         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(.system(size: 13, weight: .medium))  // glyph in a fixed box: not text, stays fixed
                             .foregroundColor(.textTertiary)
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
@@ -3892,7 +3894,7 @@ struct ChannelRow: View {
             // the bottom.
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.title)
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(.system(size: 15, weight: .semibold))
                     .foregroundColor(.textPrimary)
                     .lineLimit(2)
                 if let start = entry.startTime {
@@ -3903,7 +3905,7 @@ struct ChannelRow: View {
                             Text(end, style: .time)
                         }
                     }
-                    .font(.system(size: 12))
+                    .scaledFont(.system(size: 12))
                     .foregroundColor(.textTertiary)
                 }
             }
@@ -4015,10 +4017,10 @@ struct ChannelRow: View {
         Button(action: action) {
             HStack(spacing: 12) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 15, weight: .medium))
+                    .scaledFont(.system(size: 15, weight: .medium))
                     .frame(width: 22)
                 Text(title)
-                    .font(.system(size: 15))
+                    .scaledFont(.system(size: 15))
                 Spacer()
             }
             .foregroundColor(isDestructive ? .statusLive : .accentPrimary)
@@ -4047,11 +4049,11 @@ struct ChannelRow: View {
             HStack(spacing: 6) {
                 if replayable {
                     Image(systemName: "clock.arrow.circlepath")
-                        .font(.system(size: 11))
+                        .scaledFont(.system(size: 11))
                         .foregroundColor(.accentPrimary)
                 }
                 Text(entry.title)
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(replayable ? .textPrimary : .textTertiary)
                     .lineLimit(1)
                 Spacer(minLength: 8)
@@ -4069,7 +4071,7 @@ struct ChannelRow: View {
                         Text("-")
                         Text(end, style: .time)
                     }
-                    .font(.system(size: 11))
+                    .scaledFont(.system(size: 11))
                     .foregroundColor(.textTertiary)
                 }
             }
@@ -4102,11 +4104,11 @@ struct ChannelRow: View {
                     Rectangle().fill(Color.borderSubtle).frame(height: 1)
                     HStack(spacing: 5) {
                         Image(systemName: "arrow.up")
-                            .font(.system(size: 9, weight: .semibold))
+                            .scaledFont(.system(size: 9, weight: .semibold))
                         Text("Previously aired")
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                         Image(systemName: "arrow.up")
-                            .font(.system(size: 9, weight: .semibold))
+                            .scaledFont(.system(size: 9, weight: .semibold))
                     }
                     .foregroundColor(.textTertiary)
                     .fixedSize()
@@ -4152,7 +4154,7 @@ struct ChannelRow: View {
                 HStack(spacing: 6) {
                     ProgressView().scaleEffect(0.7)
                     Text("Loading schedule…")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                 }
                 .padding(.horizontal, 14)
@@ -4163,10 +4165,10 @@ struct ChannelRow: View {
                 #endif
                 HStack(spacing: 6) {
                     Image(systemName: "calendar.badge.exclamationmark")
-                        .font(.system(size: 12))
+                        .scaledFont(.system(size: 12))
                         .foregroundColor(.textTertiary)
                     Text("No upcoming schedule available")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                 }
                 .padding(.horizontal, 14)
@@ -4411,9 +4413,9 @@ struct ChannelRow: View {
         let label = mins < 60 ? "\(mins)m" : "\(mins / 60)h\(mins % 60 > 0 ? " \(mins % 60)m" : "")"
         return Text(label)
             #if os(tvOS)
-            .font(.system(size: 18, weight: .medium, design: .monospaced))
+            .scaledFont(.system(size: 18, weight: .medium, design: .monospaced))
             #else
-            .font(.system(size: isWide ? 11 : 9, weight: .medium, design: .monospaced))
+            .scaledFont(.system(size: isWide ? 11 : 9, weight: .medium, design: .monospaced))
             #endif
             .foregroundColor(.textSecondary)
             .lineLimit(1)
@@ -4499,18 +4501,18 @@ struct ChannelRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(entry.title)
                         #if os(tvOS)
-                        .font(.system(size: 24, weight: .semibold))
+                        .scaledFont(.system(size: 24, weight: .semibold))
                         #else
-                        .font(.bodySmall)
+                        .scaledFont(.bodySmall)
                         #endif
                         .foregroundColor(.textPrimary)
                         .lineLimit(1)
                     if !entry.description.isEmpty {
                         Text(entry.description)
                             #if os(tvOS)
-                            .font(.system(size: 18))
+                            .scaledFont(.system(size: 18))
                             #else
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             #endif
                             .foregroundColor(.textSecondary)
                             .lineLimit(2)
@@ -4531,10 +4533,10 @@ struct ChannelRow: View {
                             }
                         }
                         #if os(tvOS)
-                        .font(.system(size: 17))
+                        .scaledFont(.system(size: 17))
                         .foregroundColor(.textTertiary)
                         #else
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                         #endif
                     }
@@ -4549,9 +4551,9 @@ struct ChannelRow: View {
                    ) {
                     Image(systemName: "bell.fill")
                         #if os(tvOS)
-                        .font(.system(size: 18))
+                        .scaledFont(.system(size: 18))
                         #else
-                        .font(.system(size: 12))
+                        .scaledFont(.system(size: 12))
                         #endif
                         .foregroundColor(.accentPrimary)
                         .padding(.trailing, 4)
@@ -4662,7 +4664,7 @@ private struct PressableEPGRow<Row: View>: View {
 // MARK: - Marquee Text
 struct MarqueeText: View {
     let text: String
-    let font: Font
+    let font: AerioFont
     let color: Color
     /// When false, text is static (truncated). Saves CPU/GPU during scroll.
     var isActive: Bool = true
@@ -4674,7 +4676,7 @@ struct MarqueeText: View {
     var body: some View {
         GeometryReader { geo in
             Text(text)
-                .font(font)
+                .scaledFont(font)
                 .foregroundColor(color)
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
@@ -4737,10 +4739,10 @@ private struct TVGroupPill: View {
             HStack(spacing: 6) {
                 if let img = systemImage {
                     Image(systemName: img)
-                        .font(.system(size: 18, weight: .medium))
+                        .scaledFont(.system(size: 18, weight: .medium))
                 }
                 Text(title ?? group)
-                    .font(.system(size: 22, weight: .medium))
+                    .scaledFont(.system(size: 22, weight: .medium))
             }
         }
         .buttonStyle(TVGroupPillButtonStyle(isSelected: isSelected))
@@ -4976,7 +4978,7 @@ struct PhoneHeaderSyncSpinner: View {
 
     var body: some View {
         Image(systemName: "arrow.clockwise")
-            .font(.system(size: size, weight: .semibold))
+            .scaledFont(.system(size: size, weight: .semibold))
             .foregroundColor(.textTertiary)
             .rotationEffect(.degrees(spin ? 360 : 0))
             .animation(.linear(duration: 1.1).repeatForever(autoreverses: false),
@@ -5003,13 +5005,13 @@ struct PhoneGroupDrawer: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("CHANNEL GROUPS")
-                    .font(.system(size: 12, weight: .bold))
+                    .scaledFont(.system(size: 12, weight: .bold))
                     .tracking(1.2)
                     .foregroundColor(.textTertiary)
                 Spacer()
                 Button(action: onManage) {
                     Image(systemName: "line.3.horizontal.decrease.circle")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 16, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                         .foregroundColor(.textPrimary)
                         .frame(width: 34, height: 34)
                         .background(Circle().fill(Color.textPrimary.opacity(0.08)))
@@ -5024,16 +5026,16 @@ struct PhoneGroupDrawer: View {
                     Button { onSelect(token) } label: {
                         HStack(spacing: 8) {
                             if token == favoritesToken {
-                                Image(systemName: "star.fill").font(.system(size: 13))
+                                Image(systemName: "star.fill").scaledFont(.system(size: 13))
                             } else if token == ChannelListView.recentlyWatchedToken {
-                                Image(systemName: "clock.arrow.circlepath").font(.system(size: 13))
+                                Image(systemName: "clock.arrow.circlepath").scaledFont(.system(size: 13))
                             }
                             Text(ChannelListView.groupTitle(token))
-                                .font(.system(size: 15, weight: token == selected ? .bold : .medium))
+                                .scaledFont(.system(size: 15, weight: token == selected ? .bold : .medium))
                                 .lineLimit(1)
                             Spacer()
                             if token == defaultToken || (token == "All" && defaultToken.isEmpty) {
-                                Image(systemName: "pin.fill").font(.system(size: 11)).foregroundColor(.textTertiary)
+                                Image(systemName: "pin.fill").scaledFont(.system(size: 11)).foregroundColor(.textTertiary)
                             }
                         }
                         .foregroundColor(token == selected ? .accentPrimary : .textPrimary)

@@ -80,7 +80,7 @@ struct AddServerView: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "chevron.left")
-                                .font(.system(size: 13, weight: .semibold))
+                                .scaledFont(.system(size: 13, weight: .semibold))
                             Text("Choose Server Type")
                         }
                         .foregroundColor(.accentPrimary)
@@ -107,10 +107,10 @@ struct AddServerView: View {
         VStack(spacing: 20) {
             VStack(spacing: 6) {
                 Text("Choose Source Type")
-                    .font(.headlineLarge)
+                    .scaledFont(.headlineLarge)
                     .foregroundColor(.textPrimary)
                 Text("Select how you want to connect to your media source.")
-                    .font(.bodyMedium)
+                    .scaledFont(.bodyMedium)
                     .foregroundColor(.textSecondary)
                     .multilineTextAlignment(.center)
             }
@@ -129,21 +129,21 @@ struct AddServerView: View {
                                 .fill(type.color.opacity(0.15))
                                 .frame(width: 52, height: 52)
                             Image(systemName: type.systemIcon)
-                                .font(.system(size: 22, weight: .medium))
+                                .scaledFont(.system(size: 22, weight: .medium))
                                 .foregroundColor(type.color)
                         }
                         VStack(alignment: .leading, spacing: 4) {
                             Text(type.displayName)
-                                .font(.headlineMedium)
+                                .scaledFont(.headlineMedium)
                                 .foregroundColor(.textPrimary)
                             Text(type.description)
-                                .font(.bodySmall)
+                                .scaledFont(.bodySmall)
                                 .foregroundColor(.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         Spacer()
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 14, weight: .semibold))
+                            .scaledFont(.system(size: 14, weight: .semibold))
                             .foregroundColor(.textTertiary)
                     }
                     .padding(16)
@@ -172,15 +172,15 @@ struct AddServerView: View {
                     .fill(viewModel.serverType.color.opacity(0.2))
                     .frame(width: 46, height: 46)
                 Image(systemName: viewModel.serverType.systemIcon)
-                    .font(.system(size: 20, weight: .medium))
+                    .scaledFont(.system(size: 20, weight: .medium))
                     .foregroundColor(viewModel.serverType.color)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(viewModel.serverType.displayName)
-                    .font(.headlineMedium)
+                    .scaledFont(.headlineMedium)
                     .foregroundColor(.textPrimary)
                 Text(viewModel.serverType.description)
-                    .font(.bodySmall)
+                    .scaledFont(.bodySmall)
                     .foregroundColor(.textSecondary)
             }
             Spacer()
@@ -272,7 +272,7 @@ struct AddServerView: View {
                     // distinction loud at the input itself rather
                     // than only in the failure error.
                     Text("Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .padding(.top, -2)
                     // v1.7.x: explicit framing of what saving credentials
@@ -320,7 +320,7 @@ struct AddServerView: View {
             }
             .tint(.accentPrimary)
             Text("How many days of guide data to load, back and ahead. Dispatcharr only; other sources show what their guide carries.")
-                .font(.labelSmall)
+                .scaledFont(.labelSmall)
                 .foregroundColor(.textTertiary)
         }
         .padding(.vertical, 8)
@@ -337,7 +337,7 @@ struct AddServerView: View {
             Toggle("Fetch On Demand from this playlist", isOn: $viewModel.vodEnabled)
                 .tint(.accentPrimary)
             Text("When off, this playlist's movies and TV shows are not loaded into the On Demand tab. Useful if you only want Live TV from this server, or if you have a second playlist that already provides On Demand. You can change this later in Settings.")
-                .font(.labelSmall)
+                .scaledFont(.labelSmall)
                 .foregroundColor(.textTertiary)
         }
         .padding(.vertical, 8)
@@ -363,21 +363,21 @@ struct AddServerView: View {
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "calendar.badge.clock")
-                        .font(.system(size: 15, weight: .semibold))
+                        .scaledFont(.system(size: 15, weight: .semibold))
                         .foregroundColor(.accentSecondary)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Advanced: External XMLTV")
-                            .font(.headlineSmall)
+                            .scaledFont(.headlineSmall)
                             .foregroundColor(.textPrimary)
                         Text("Recommended for CPU-constrained Dispatcharr hosts.")
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textTertiary)
                     }
                     Spacer()
                     if !viewModel.dispatcharrXMLTVURL
                         .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Text("Configured")
-                            .font(.labelSmall.weight(.semibold))
+                            .scaledFont(.labelSmall.weight(.semibold))
                             .foregroundColor(.statusOnline)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
@@ -385,7 +385,7 @@ struct AddServerView: View {
                             .clipShape(Capsule())
                     }
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
+                        .scaledFont(.system(size: 12, weight: .semibold))
                         .foregroundColor(.textTertiary)
                         .rotationEffect(.degrees(xmltvAdvancedExpanded ? 90 : 0))
                         .animation(.spring(response: 0.35, dampingFraction: 0.8),
@@ -428,7 +428,7 @@ struct AddServerView: View {
                                     }
                                     Text("Test XMLTV URL")
                                 }
-                                .font(.labelMedium.weight(.semibold))
+                                .scaledFont(.labelMedium.weight(.semibold))
                                 .foregroundColor(.accentPrimary)
                                 .padding(.horizontal, 14)
                                 .padding(.vertical, 10)
@@ -488,7 +488,7 @@ struct AddServerView: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.statusOnline)
                 Text(count > 0 ? "Valid — \(count) programs" : "Valid XMLTV")
-                    .font(.labelSmall.weight(.semibold))
+                    .scaledFont(.labelSmall.weight(.semibold))
                     .foregroundColor(.statusOnline)
                     .lineLimit(1)
             }
@@ -497,7 +497,7 @@ struct AddServerView: View {
                 Image(systemName: "exclamationmark.circle.fill")
                     .foregroundColor(.statusLive)
                 Text(err)
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.statusLive)
                     .lineLimit(2)
             }
@@ -546,14 +546,14 @@ struct AddServerView: View {
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "wifi")
-                        .font(.system(size: 15, weight: .semibold))
+                        .scaledFont(.system(size: 15, weight: .semibold))
                         .foregroundColor(.accentSecondary)
                     Text("Local Network (Optional)")
-                        .font(.headlineSmall)
+                        .scaledFont(.headlineSmall)
                         .foregroundColor(.textPrimary)
                     Spacer()
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
+                        .scaledFont(.system(size: 12, weight: .semibold))
                         .foregroundColor(.textTertiary)
                         .rotationEffect(.degrees(lanExpanded ? 90 : 0))
                         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: lanExpanded)
@@ -633,11 +633,11 @@ struct AddServerView: View {
                             .foregroundColor(.textSecondary)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(first.message)
-                                .font(.bodySmall)
+                                .scaledFont(.bodySmall)
                                 .foregroundColor(.textPrimary)
                             if errors.count > 1 {
                                 Text("\(errors.count - 1) more field(s) need attention.")
-                                    .font(.labelSmall)
+                                    .scaledFont(.labelSmall)
                                     .foregroundColor(.textTertiary)
                             }
                         }
@@ -664,11 +664,11 @@ struct AddServerView: View {
                         .foregroundColor(.statusOnline)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Connected successfully")
-                            .font(.headlineSmall)
+                            .scaledFont(.headlineSmall)
                             .foregroundColor(.statusOnline)
                         if let name = viewModel.verifiedServerName {
                             Text(name)
-                                .font(.bodySmall)
+                                .scaledFont(.bodySmall)
                                 .foregroundColor(.textSecondary)
                         }
                         // v1.7.x (Round 1 review): for Direct Connect
@@ -682,7 +682,7 @@ struct AddServerView: View {
                             && viewModel.dispatcharrCredentialType == .usernamePassword
                             && !viewModel.apiKey.isEmpty {
                             Text("API key cached locally for streaming, logos, and recordings.")
-                                .font(.labelSmall)
+                                .scaledFont(.labelSmall)
                                 .foregroundColor(.textTertiary)
                                 .padding(.top, 2)
                         }
@@ -700,7 +700,7 @@ struct AddServerView: View {
                     Image(systemName: "exclamationmark.circle.fill")
                         .foregroundColor(.statusLive)
                     Text(error)
-                        .font(.bodySmall)
+                        .scaledFont(.bodySmall)
                         .foregroundColor(.statusLive)
                 }
                 .padding(14)
@@ -720,7 +720,7 @@ struct AddServerView: View {
                 .fill(isHTTPS ? Color.statusOnline : Color.statusWarning)
                 .frame(width: 6, height: 6)
             Text(isHTTPS ? "HTTPS" : "HTTP")
-                .font(.monoSmall)
+                .scaledFont(.monoSmall)
                 .foregroundColor(isHTTPS ? .statusOnline : .statusWarning)
         }
     }
@@ -728,11 +728,11 @@ struct AddServerView: View {
     private func infoBox(icon: String, message: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: icon)
-                .font(.system(size: 14))
+                .scaledFont(.system(size: 14))
                 .foregroundColor(.accentPrimary)
                 .padding(.top, 1)
             Text(message)
-                .font(.bodySmall)
+                .scaledFont(.bodySmall)
                 .foregroundColor(.textSecondary)
         }
         .padding(12)
@@ -746,10 +746,10 @@ struct AddServerView: View {
     private var dispatcharrOnboardingSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Device Identity")
-                .font(.headline)
+                .scaledFont(.headline)
                 .foregroundColor(.textPrimary)
             Text("This name identifies your device in Dispatcharr's admin panel.")
-                .font(.subheadline)
+                .scaledFont(.subheadline)
                 .foregroundColor(.textSecondary)
             AppTextField("Device Name", placeholder: DeviceInfo.modelName,
                          text: $deviceNickname, icon: "iphone")
@@ -767,10 +767,10 @@ struct AddServerView: View {
                 Divider().padding(.vertical, 8)
 
                 Text("Default Recording Destination")
-                    .font(.headline)
+                    .scaledFont(.headline)
                     .foregroundColor(.textPrimary)
                 Text("Where should recordings be saved by default? Server-side is recommended. Recordings continue even when AerioTV is closed.")
-                    .font(.subheadline)
+                    .scaledFont(.subheadline)
                     .foregroundColor(.textSecondary)
 
                 Picker("Destination", selection: $dvrDestination) {

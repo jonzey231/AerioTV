@@ -49,17 +49,17 @@ struct SettingsRow: View {
                     .fill(selectionContrast ? Color.white.opacity(0.2) : iconColor.opacity(0.2))
                     .frame(width: iconBoxSize, height: iconBoxSize)
                 Image(systemName: icon)
-                    .font(.system(size: iconFontSize, weight: .semibold))
+                    .scaledFont(.system(size: iconFontSize, weight: .semibold))
                     .foregroundColor(selectionContrast ? .white : iconColor)
             }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.bodyMedium)
+                    .scaledFont(.bodyMedium)
                     .foregroundColor(selectionContrast ? .white : .textPrimary)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.bodySmall)
+                        .scaledFont(.bodySmall)
                         .foregroundColor(selectionContrast ? .white.opacity(0.85) : .textSecondary)
                 }
             }

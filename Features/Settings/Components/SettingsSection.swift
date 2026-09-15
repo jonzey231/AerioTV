@@ -59,7 +59,7 @@ struct SettingsSection<Content: View>: View {
         case .plain:
             VStack(alignment: .leading, spacing: 12) {
                 Text(title.uppercased())
-                    .font(.system(size: 22, weight: .bold))
+                    .scaledFont(.system(size: 22, weight: .bold))
                     .foregroundColor(.textTertiary)
                     .tracking(1)
                     .padding(.leading, 20)
@@ -70,7 +70,7 @@ struct SettingsSection<Content: View>: View {
         case .card:
             VStack(alignment: .leading, spacing: 16) {
                 Text(title)
-                    .font(.system(size: 28, weight: .semibold))
+                    .scaledFont(.system(size: 28, weight: .semibold))
                     .foregroundColor(.textPrimary)
                 VStack(spacing: 12) {
                     content
@@ -84,7 +84,7 @@ struct SettingsSection<Content: View>: View {
         case .compactCard:
             VStack(alignment: .leading, spacing: 12) {
                 Text(title)
-                    .font(.title3.weight(.semibold))
+                    .scaledFont(.title3.weight(.semibold))
                     .foregroundColor(.textSecondary)
                     .padding(.leading, 12)
                 VStack(spacing: 0) { content }
@@ -94,7 +94,7 @@ struct SettingsSection<Content: View>: View {
         case .eyebrowCard:
             VStack(alignment: .leading, spacing: 12) {
                 Text(title.uppercased())
-                    .font(.system(size: 22, weight: .bold))
+                    .scaledFont(.system(size: 22, weight: .bold))
                     .foregroundColor(.textTertiary)
                     .tracking(1)
                 VStack(spacing: 16) {

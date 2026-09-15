@@ -269,13 +269,13 @@ struct AppBehaviorsSettingsView: View {
             EmptyView()
         case .valid:
             Label("Valid key", systemImage: "checkmark.circle.fill")
-                .font(.labelSmall).foregroundColor(.green)
+                .scaledFont(.labelSmall).foregroundColor(.green)
         case .invalid:
             Label("Invalid key", systemImage: "xmark.circle.fill")
-                .font(.labelSmall).foregroundColor(.red)
+                .scaledFont(.labelSmall).foregroundColor(.red)
         case .saved:
             Label("Saved", systemImage: "checkmark.circle.fill")
-                .font(.labelSmall).foregroundColor(.green)
+                .scaledFont(.labelSmall).foregroundColor(.green)
         }
     }
 
@@ -289,10 +289,10 @@ struct AppBehaviorsSettingsView: View {
                 Toggle(isOn: $skipLoadingScreen) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Skip loading screen")
-                            .font(.bodyMedium)
+                            .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
                         Text("Land on Live TV instantly; data hydrates in the background")
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textTertiary)
                     }
                 }
@@ -303,10 +303,10 @@ struct AppBehaviorsSettingsView: View {
                     Toggle(isOn: $autoResumeLastChannel) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Resume last channel")
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text("Auto-start the last-played channel in the corner mini-player on launch")
-                                .font(.labelSmall)
+                                .scaledFont(.labelSmall)
                                 .foregroundColor(.textTertiary)
                         }
                     }
@@ -319,7 +319,7 @@ struct AppBehaviorsSettingsView: View {
                 Text(UIDevice.current.userInterfaceIdiom == .pad
                      ? "Skipping the loading screen may cause brief UI stutter while data loads. Resume picks up the last channel you watched in the corner mini-player; press Play/Pause to expand."
                      : "Skipping the loading screen may cause brief UI stutter while data loads.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
 
@@ -328,12 +328,12 @@ struct AppBehaviorsSettingsView: View {
                 Toggle(isOn: $autoRotate) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Auto-rotate")
-                            .font(.bodyMedium)
+                            .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
                         Text(UIDevice.current.userInterfaceIdiom == .pad
                              ? "Follow the device orientation. When off, AerioTV stays in its current orientation"
                              : "Follow the device orientation. When off, AerioTV stays portrait")
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textTertiary)
                     }
                 }
@@ -346,7 +346,7 @@ struct AppBehaviorsSettingsView: View {
                 Text("Orientation").sectionHeaderStyle()
             } footer: {
                 Text("The player's fullscreen button can still rotate into landscape either way.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
 
@@ -369,7 +369,7 @@ struct AppBehaviorsSettingsView: View {
                 Text("Skip Intervals").sectionHeaderStyle()
             } footer: {
                 Text("How far the skip buttons move in live rewind, catch-up, recordings, movies, and TV shows, including the cast remote and the Lock Screen controls.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
 
@@ -378,9 +378,9 @@ struct AppBehaviorsSettingsView: View {
                 Toggle(isOn: $liveRewindEnabled) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Pause & rewind live TV")
-                            .font(.bodyMedium).foregroundColor(.textPrimary)
+                            .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                         Text("Buffer fullscreen live playback on this device")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                     }
                 }
                 .tint(theme.accent)
@@ -389,7 +389,7 @@ struct AppBehaviorsSettingsView: View {
                 Text("Live Rewind").sectionHeaderStyle()
             } footer: {
                 Text("Buffers the channel you are watching so you can pause and rewind live TV. Uses device storage while you watch; buffered video is removed automatically.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
 
@@ -405,7 +405,7 @@ struct AppBehaviorsSettingsView: View {
                     Text("Keep Available").sectionHeaderStyle()
                 } footer: {
                     Text("How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. \(depthEstimate(liveRewindDepthMinutes))")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
 
@@ -425,7 +425,7 @@ struct AppBehaviorsSettingsView: View {
                     Text("Channel Retention").sectionHeaderStyle()
                 } footer: {
                     Text("Keeps recently watched channels buffering after you flip away, so returning brings the full rewind timeline back. Each kept channel holds an extra stream connection and uses bandwidth while it runs. Opening a channel beyond the limit drops the oldest.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
             }
@@ -438,16 +438,16 @@ struct AppBehaviorsSettingsView: View {
                     } label: {
                         HStack {
                             Image(systemName: tab.icon)
-                                .font(.system(size: 15))
+                                .scaledFont(.system(size: 15))
                                 .foregroundColor(theme.accent)
                                 .frame(width: 24)
                             Text(tab.title)
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Spacer()
                             if defaultTabRaw == tab.rawValue {
                                 Image(systemName: "checkmark")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .scaledFont(.system(size: 14, weight: .semibold))
                                     .foregroundColor(theme.accent)
                             }
                         }
@@ -458,7 +458,7 @@ struct AppBehaviorsSettingsView: View {
                 Text("Default Landing Tab").sectionHeaderStyle()
             } footer: {
                 Text("The tab shown when the app first launches.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
 
@@ -470,12 +470,12 @@ struct AppBehaviorsSettingsView: View {
                     } label: {
                         HStack {
                             Text(choice.title)
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Spacer()
                             if vodRefreshHours == choice.hours {
                                 Image(systemName: "checkmark")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .scaledFont(.system(size: 14, weight: .semibold))
                                     .foregroundColor(theme.accent)
                             }
                         }
@@ -486,7 +486,7 @@ struct AppBehaviorsSettingsView: View {
                 Text("Refresh Movies and TV Shows").sectionHeaderStyle()
             } footer: {
                 Text("Live TV channels refresh on every launch. Movies and TV Shows open from the saved library and re-sweep the provider on this schedule. Pull down on either tab to refresh right away.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
 
@@ -502,16 +502,16 @@ struct AppBehaviorsSettingsView: View {
                     } label: {
                         HStack {
                             Image(systemName: liveTVViewIcon(option))
-                                .font(.system(size: 15))
+                                .scaledFont(.system(size: 15))
                                 .foregroundColor(theme.accent)
                                 .frame(width: 24)
                             Text(liveTVViewLabel(option))
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Spacer()
                             if defaultLiveTVView == option {
                                 Image(systemName: "checkmark")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .scaledFont(.system(size: 14, weight: .semibold))
                                     .foregroundColor(theme.accent)
                             }
                         }
@@ -522,7 +522,7 @@ struct AppBehaviorsSettingsView: View {
                 Text("Default Live TV View").sectionHeaderStyle()
             } footer: {
                 Text("The layout Live TV opens in. Automatic uses List on compact, portrait phones and Guide on regular width (unfolded foldable, iPad, Apple TV). You can still switch anytime with the List / Guide button; that switch lasts for the current session and does not change this default.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
 
@@ -538,16 +538,16 @@ struct AppBehaviorsSettingsView: View {
                         } label: {
                             HStack {
                                 Image(systemName: sidebar ? "sidebar.leading" : "capsule.lefthalf.filled")
-                                    .font(.system(size: 15))
+                                    .scaledFont(.system(size: 15))
                                     .foregroundColor(theme.accent)
                                     .frame(width: 24)
                                 Text(sidebar ? "Sidebar Menu" : "Top Group Pills")
-                                    .font(.bodyMedium)
+                                    .scaledFont(.bodyMedium)
                                     .foregroundColor(.textPrimary)
                                 Spacer()
                                 if (phoneGroupSelector != "pills") == sidebar {
                                     Image(systemName: "checkmark")
-                                        .font(.system(size: 14, weight: .semibold))
+                                        .scaledFont(.system(size: 14, weight: .semibold))
                                         .foregroundColor(theme.accent)
                                 }
                             }
@@ -558,7 +558,7 @@ struct AppBehaviorsSettingsView: View {
                     Text("Group Selection").sectionHeaderStyle()
                 } footer: {
                     Text("How channel groups are picked in Live TV. Sidebar Menu opens a drawer from the header, where a long press also reorders groups. Top Group Pills put the group row at the top instead.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
             }
@@ -568,10 +568,10 @@ struct AppBehaviorsSettingsView: View {
                 Toggle(isOn: $showEpgBadges) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Show program badges")
-                            .font(.bodyMedium)
+                            .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
                         Text("LIVE, NEW, and season/episode pills on the guide")
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textTertiary)
                     }
                 }
@@ -581,7 +581,7 @@ struct AppBehaviorsSettingsView: View {
                     ForEach(Self.badgeKinds, id: \.self) { kind in
                         Toggle(isOn: badgeShownBinding(kind)) {
                             Text(Self.badgeTitle(kind))
-                                .font(.bodyMedium)
+                                .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                         }
                         .tint(theme.accent)
@@ -592,7 +592,7 @@ struct AppBehaviorsSettingsView: View {
                 Text("Guide").sectionHeaderStyle()
             } footer: {
                 Text("Show the LIVE, NEW, and season/episode pills on the guide, channel list, and program info. Remembered separately for iPhone/iPad and Apple TV, and synced across your devices of that kind.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
 
@@ -607,10 +607,10 @@ struct AppBehaviorsSettingsView: View {
                 Toggle(isOn: $appleTVChannelFlip) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Up / Down channel change")
-                            .font(.bodyMedium)
+                            .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
                         Text("On iPhone & iPad, swipe up on the player for the next channel, swipe down for the previous. On Apple TV, press up or down on the Siri Remote. Live single-stream playback only.")
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textTertiary)
                     }
                 }
@@ -620,7 +620,7 @@ struct AppBehaviorsSettingsView: View {
                 Text("Channel Flip Gesture").sectionHeaderStyle()
             } footer: {
                 Text("Turn off if accidental swipes or D-pad presses are flipping channels during playback.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
 
@@ -632,7 +632,7 @@ struct AppBehaviorsSettingsView: View {
                 Text("Stream Buffer").sectionHeaderStyle()
             } footer: {
                 Text("Extra buffer to smooth jitter and stutter on live streams from any source. Higher is smoother but adds delay behind live. 0 keeps the lowest latency. Applies to the next channel you tune.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
 
@@ -640,14 +640,14 @@ struct AppBehaviorsSettingsView: View {
             Section {
                 Toggle(isOn: $autoRecoverFrozenStreams) {
                     Text("Auto-Recover Frozen Streams")
-                        .font(.bodyMedium)
+                        .scaledFont(.bodyMedium)
                         .foregroundColor(.textPrimary)
                 }
                 .tint(theme.accent)
                 .listRowBackground(Color.cardBackground)
             } footer: {
                 Text("If a live stream stops sending video, the player reloads it to recover. Turn this off if live channels restart or stutter during commercial breaks (a brief freeze may show instead). Applies to the next channel you tune.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
 
@@ -656,10 +656,10 @@ struct AppBehaviorsSettingsView: View {
                 Toggle(isOn: $tmdbPostersEnabled) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Fetch posters from TMDB")
-                            .font(.bodyMedium)
+                            .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
                         Text("Fill in program artwork your provider doesn't supply, using The Movie Database.")
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textTertiary)
                     }
                 }
@@ -722,7 +722,7 @@ struct AppBehaviorsSettingsView: View {
             } footer: {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("If iCloud Sync is enabled, your key is saved to your iCloud Keychain and syncs to your other devices. Get a free key at themoviedb.org under Settings, then API; paste either the API Key or the Read Access Token. With a key, artwork and details for Movies and TV Shows come from TMDB first and your provider fills any gaps.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                     TMDBAttributionView(style: .short)
                 }
             }
@@ -748,11 +748,11 @@ struct AppBehaviorsSettingsView: View {
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text(title)
-                    .font(.bodyMedium)
+                    .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                 Spacer()
                 Text(label(values[idx]))
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.textTertiary)
             }
             Slider(
@@ -883,7 +883,7 @@ struct AppBehaviorsSettingsView: View {
                     }
 
                     Text("Show the LIVE, NEW, and season/episode pills on the guide, channel list, and program info. Remembered separately for Apple TV and iPhone/iPad, and synced across your Apple TVs.")
-                        .font(.system(size: 22))
+                        .scaledFont(.system(size: 22))
                         .foregroundColor(.textTertiary)
                         .padding(.horizontal, 20)
                         .padding(.top, 4)
@@ -903,7 +903,7 @@ struct AppBehaviorsSettingsView: View {
                         segmentLabel: { "\($0)s" }
                     )
                     Text("How far the skip buttons and a single left or right press move in live rewind, catch-up, recordings, movies, and TV shows. Holding left or right still scrubs faster the longer you hold.")
-                        .font(.system(size: 22))
+                        .scaledFont(.system(size: 22))
                         .foregroundColor(.textTertiary)
                         .padding(.horizontal, 20)
                         .padding(.top, 4)
@@ -918,7 +918,7 @@ struct AppBehaviorsSettingsView: View {
                         isOn: $liveRewindEnabled
                     ) { _ in }
                     Text("Buffers the channel you are watching so you can pause and rewind live TV. Uses device storage while you watch; buffered video is removed automatically.")
-                        .font(.system(size: 22))
+                        .scaledFont(.system(size: 22))
                         .foregroundColor(.textTertiary)
                         .padding(.horizontal, 20)
                         .padding(.top, 4)
@@ -936,7 +936,7 @@ struct AppBehaviorsSettingsView: View {
                             }
                         )
                         Text("How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. \(depthEstimate(liveRewindDepthMinutes))")
-                            .font(.system(size: 22))
+                            .scaledFont(.system(size: 22))
                             .foregroundColor(.textTertiary)
                             .padding(.horizontal, 20)
                             .padding(.top, 4)
@@ -961,7 +961,7 @@ struct AppBehaviorsSettingsView: View {
                             )
                         }
                         Text("Each kept channel holds an extra stream connection and uses bandwidth while it runs. Opening a channel beyond the limit drops the oldest.")
-                            .font(.system(size: 22))
+                            .scaledFont(.system(size: 22))
                             .foregroundColor(.textTertiary)
                             .padding(.horizontal, 20)
                             .padding(.top, 4)
@@ -978,7 +978,7 @@ struct AppBehaviorsSettingsView: View {
                     ) { _ in }
 
                     Text("Turn off if accidental D-pad presses are flipping channels during playback. iPhone & iPad use the matching swipe-up / swipe-down gesture on the same toggle.")
-                        .font(.system(size: 22))
+                        .scaledFont(.system(size: 22))
                         .foregroundColor(.textTertiary)
                         .padding(.horizontal, 20)
                         .padding(.top, 4)
@@ -988,7 +988,7 @@ struct AppBehaviorsSettingsView: View {
                     StreamBufferSlider(value: $streamBufferSeconds)
 
                     Text("Extra buffer to smooth jitter and stutter on live streams from any source. Higher is smoother but adds delay behind live. 0 keeps the lowest latency. Applies to the next channel you tune. Press left or right on the Siri Remote to adjust.")
-                        .font(.system(size: 22))
+                        .scaledFont(.system(size: 22))
                         .foregroundColor(.textTertiary)
                         .padding(.horizontal, 20)
                         .padding(.top, 4)
@@ -1050,7 +1050,7 @@ struct AppBehaviorsSettingsView: View {
                         }
 
                         Text("If iCloud Sync is enabled, your key is saved to your iCloud Keychain and syncs to your other devices. Get a free key at themoviedb.org; paste either the API Key or the Read Access Token. With a key, artwork and details for Movies and TV Shows come from TMDB first and your provider fills any gaps.")
-                            .font(.system(size: 22))
+                            .scaledFont(.system(size: 22))
                             .foregroundColor(.textTertiary)
                             .padding(.horizontal, 20)
                             .padding(.top, 4)
@@ -1088,7 +1088,7 @@ struct AppBehaviorsSettingsView: View {
         }) ?? selection.wrappedValue
         return HStack(spacing: 24) {
             Text(title)
-                .font(.system(size: 26, weight: .medium))
+                .scaledFont(.system(size: 26, weight: .medium))
                 .foregroundColor(.textPrimary)
             Spacer()
             ForEach(values, id: \.self) { value in
@@ -1096,7 +1096,7 @@ struct AppBehaviorsSettingsView: View {
                     selection.wrappedValue = value
                 } label: {
                     Text(segmentLabel(value))
-                        .font(.system(size: 22, weight: .medium))
+                        .scaledFont(.system(size: 22, weight: .medium))
                 }
                 .buttonStyle(TVSteppedSegmentStyle(isSelected: value == current))
             }
@@ -1116,7 +1116,7 @@ struct AppBehaviorsSettingsView: View {
 /// (Capsule, owned focus visual so the system white platter never shows)
 /// at the row's original compact padding. Focused: white ring when
 /// selected, accent ring when not.
-private struct TVSteppedSegmentStyle: ButtonStyle {
+struct TVSteppedSegmentStyle: ButtonStyle {
     let isSelected: Bool
     @Environment(\.isFocused) private var isFocused
 
@@ -1147,6 +1147,7 @@ private struct TVSteppedSegmentStyle: ButtonStyle {
 ///     up/down are passed through so the focus engine still navigates
 ///     to adjacent rows.
 struct StreamBufferSlider: View {
+    @Environment(\.aerioTextScale) private var textScale
     @Binding var value: Double
     @ObservedObject private var theme = ThemeManager.shared
 
@@ -1163,11 +1164,11 @@ struct StreamBufferSlider: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Stream Buffer")
-                    .font(.bodyMedium)
+                    .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                 Spacer()
                 Text(valueLabel)
-                    .font(.monoSmall)
+                    .scaledFont(.monoSmall)
                     .foregroundColor(theme.accent)
             }
             Slider(value: $value, in: Self.range, step: Self.step)
@@ -1191,7 +1192,7 @@ struct StreamBufferSlider: View {
     var body: some View {
         HStack(spacing: 24) {
             Text("Stream Buffer")
-                .font(.system(size: 24, weight: .semibold))
+                .scaledFont(.system(size: 24, weight: .semibold))
                 .foregroundColor(.textPrimary)
                 .frame(width: 260, alignment: .leading)
 
@@ -1213,9 +1214,9 @@ struct StreamBufferSlider: View {
             .frame(height: 44)
 
             Text(valueLabel)
-                .font(.system(size: 24, weight: .semibold).monospacedDigit())
+                .scaledFont(.system(size: 24, weight: .semibold).monospacedDigit())
                 .foregroundColor(isFocused ? theme.accent : .textSecondary)
-                .frame(width: 90, alignment: .trailing)
+                .frame(width: TextScale.grow(90, textScale), alignment: .trailing)
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 18)
@@ -1270,7 +1271,7 @@ private struct TVCompactButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 24, weight: .semibold))
+                .scaledFont(.system(size: 24, weight: .semibold))
                 .foregroundColor(disabled ? .textTertiary : .accentPrimary)
                 .padding(.horizontal, 32)
                 .padding(.vertical, 14)

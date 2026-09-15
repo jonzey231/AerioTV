@@ -58,15 +58,15 @@ struct CategoryColorPickerRow: View {
                         .fill(Color(hex: storedHex).opacity(0.22))
                         .frame(width: 36, height: 36)
                     Image(systemName: category.sfSymbol)
-                        .font(.system(size: 15, weight: .medium))
+                        .scaledFont(.system(size: 15, weight: .medium))
                         .foregroundColor(Color(hex: storedHex))
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(category.displayName)
-                        .font(.bodyMedium)
+                        .scaledFont(.bodyMedium)
                         .foregroundColor(.textPrimary)
                     Text("Default: #\(category.defaultHex)")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                 }
             }
@@ -114,7 +114,7 @@ struct MoreCategoriesView: View {
                 Text("Additional Buckets").sectionHeaderStyle()
             } footer: {
                 Text("Toggle a bucket on to include its aliases in the matcher. Defaults cover Sports, Movies, Kids, and News — these are extras for feeds that heavily tag Documentary, Drama, Sitcoms, etc.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
 
             Section {
@@ -123,16 +123,16 @@ struct MoreCategoriesView: View {
                 } label: {
                     HStack(spacing: 10) {
                         Image(systemName: "paintbrush.fill")
-                            .font(.system(size: 14, weight: .semibold))
+                            .scaledFont(.system(size: 14, weight: .semibold))
                             .foregroundColor(.accentPrimary)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Custom").font(.bodyMedium).foregroundColor(.textPrimary)
+                            Text("Custom").scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                             Text("Define your own category strings and colors")
-                                .font(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                         }
                         Spacer()
                         Text("\(CategoryColor.loadCustomCategories().count)")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
                     }
                 }
                 .listRowBackground(Color.cardBackground)
@@ -140,7 +140,7 @@ struct MoreCategoriesView: View {
                 Text("User-Defined").sectionHeaderStyle()
             } footer: {
                 Text("Custom entries are checked before the built-in buckets, so you can override a match like \"Horror\" or \"Cooking\" with your own color even if a built-in bucket would have caught it.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
         }
         .listStyle(.insetGrouped)
@@ -168,12 +168,12 @@ struct MoreCategoriesView: View {
                         .fill(cat.baseColor.opacity(isOn.wrappedValue ? 0.8 : 0.3))
                         .frame(width: 28, height: 28)
                     Image(systemName: cat.sfSymbol)
-                        .font(.system(size: 13, weight: .medium))
+                        .scaledFont(.system(size: 13, weight: .medium))
                         .foregroundColor(.white)
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(cat.displayName)
-                        .font(.bodyMedium)
+                        .scaledFont(.bodyMedium)
                         .foregroundColor(.textPrimary)
                     // "Customize color" shown regardless of toggle
                     // state — the user reported that hiding it on
@@ -186,7 +186,7 @@ struct MoreCategoriesView: View {
                         SingleCategoryColorEditor(category: cat)
                     } label: {
                         Text("Customize color")
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.accentPrimary)
                     }
                     .buttonStyle(.plain)
@@ -230,7 +230,7 @@ struct SingleCategoryColorEditor: View {
                         .foregroundColor(.textSecondary)
                     Spacer()
                     Text(storedHex.isEmpty ? category.defaultHex : storedHex)
-                        .font(.monoSmall)
+                        .scaledFont(.monoSmall)
                         .foregroundColor(.textTertiary)
                 }
                 .listRowBackground(Color.cardBackground)
@@ -242,7 +242,7 @@ struct SingleCategoryColorEditor: View {
                 } label: {
                     HStack {
                         Image(systemName: "arrow.uturn.backward")
-                            .font(.system(size: 14, weight: .semibold))
+                            .scaledFont(.system(size: 14, weight: .semibold))
                         Text("Reset to Default")
                     }
                     .foregroundColor(.statusWarning)
@@ -250,7 +250,7 @@ struct SingleCategoryColorEditor: View {
                 .listRowBackground(Color.cardBackground)
             } footer: {
                 Text("Applies wherever a program's category matches one of this bucket's aliases in the EPG (see alias list in CategoryColor.swift).")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
         }
         .listStyle(.insetGrouped)
@@ -284,10 +284,10 @@ struct CustomCategoriesView: View {
                 Section {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("No custom categories yet")
-                            .font(.bodyMedium)
+                            .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
                         Text("Tap + above to add a match string (e.g. \"Horror\") and pick a color. Custom entries win over the built-in buckets.")
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textTertiary)
                     }
                     .padding(.vertical, 4)
@@ -317,10 +317,10 @@ struct CustomCategoriesView: View {
                                     .frame(width: 28, height: 28)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(entry.match)
-                                        .font(.bodyMedium)
+                                        .scaledFont(.bodyMedium)
                                         .foregroundColor(.textPrimary)
                                     Text(entry.hex)
-                                        .font(.monoSmall)
+                                        .scaledFont(.monoSmall)
                                         .foregroundColor(.textTertiary)
                                 }
                                 Spacer()
@@ -410,13 +410,13 @@ struct CustomCategoryEditor: View {
                         .foregroundColor(.textSecondary)
                     Spacer()
                     Text(entry.hex)
-                        .font(.monoSmall)
+                        .scaledFont(.monoSmall)
                         .foregroundColor(.textTertiary)
                 }
                 .listRowBackground(Color.cardBackground)
             } footer: {
                 Text("Matching is case-insensitive and uses `contains` — entering \"Horror\" will colour any program whose XMLTV category includes the word horror.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
             }
 
             if !isNew {

@@ -207,7 +207,7 @@ struct PhoneMediaPage: View {
     private func deckSection(_ deck: PhoneDeck) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(deck.title)
-                .font(.headlineSmall)
+                .scaledFont(.headlineSmall)
                 .foregroundColor(.textPrimary)
                 .padding(.horizontal, 16)
             PhoneCardDeck(items: deck.cards, cardHeight: deckHeight) { card in
@@ -220,10 +220,10 @@ struct PhoneMediaPage: View {
         HStack(alignment: .center, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(headerTitle)
-                    .font(.headlineSmall)
+                    .scaledFont(.headlineSmall)
                     .foregroundColor(.textPrimary)
                 Text("\(headerCount)")
-                    .font(.labelMedium)
+                    .scaledFont(.labelMedium)
                     .foregroundColor(.textTertiary)
             }
             .contentShape(Rectangle())
@@ -263,7 +263,7 @@ struct PhoneMediaPage: View {
 
     private func circle(_ systemImage: String) -> some View {
         Image(systemName: systemImage)
-            .font(.system(size: 17, weight: .semibold))
+            .font(.system(size: 17, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
             .foregroundColor(.textPrimary)
             .frame(width: 38, height: 38)
             .background(Circle().fill(Color.textPrimary.opacity(0.08)))
@@ -274,10 +274,10 @@ struct PhoneMediaPage: View {
     private func searchField(_ search: PhoneSearch) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 15, weight: .semibold))
+                .scaledFont(.system(size: 15, weight: .semibold))
                 .foregroundColor(.textSecondary)
             TextField(search.placeholder, text: search.text)
-                .font(.system(size: 16))
+                .scaledFont(.system(size: 16))
                 .foregroundColor(.textPrimary)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -288,13 +288,13 @@ struct PhoneMediaPage: View {
                 withAnimation(.spring(response: 0.25)) { search.onClose() }
             } label: {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 16))
+                    .scaledFont(.system(size: 16))
                     .foregroundColor(.textSecondary)
             }
             .accessibilityLabel("Clear and close search")
         }
         .padding(.horizontal, 14)
-        .frame(height: 40)
+        .frame(minHeight: 40)
         .background(Capsule().fill(Color.elevatedBackground))
     }
 

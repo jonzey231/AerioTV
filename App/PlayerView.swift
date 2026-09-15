@@ -142,9 +142,9 @@ struct StreamInfoCardView: View {
             if !label.isEmpty {
                 Text(label)
                     #if os(tvOS)
-                    .font(.system(size: 14, weight: .bold, design: .monospaced))
+                    .scaledFont(.system(size: 14, weight: .bold, design: .monospaced))
                     #else
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .scaledFont(.system(size: 9, weight: .bold, design: .monospaced))
                     #endif
                     .foregroundColor(Color.accentPrimary)
                     .frame(width: 46, alignment: .trailing)
@@ -153,9 +153,9 @@ struct StreamInfoCardView: View {
             }
             Text(value)
                 #if os(tvOS)
-                .font(.system(size: 14, weight: .medium, design: .monospaced))
+                .scaledFont(.system(size: 14, weight: .medium, design: .monospaced))
                 #else
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .scaledFont(.system(size: 10, weight: .medium, design: .monospaced))
                 #endif
                 .foregroundColor(.white.opacity(0.9))
         }
@@ -245,7 +245,7 @@ struct VideoScalePinch: ViewModifier {
             .overlay(alignment: .center) {
                 if let toast {
                     Text(toast.label)
-                        .font(.title3.weight(.semibold))
+                        .scaledFont(.title3.weight(.semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 22)
                         .padding(.vertical, 12)
@@ -764,22 +764,22 @@ private struct StreamErrorView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 44))
+                        .scaledFont(.system(size: 44))
                         .foregroundColor(.red)
                         .padding(.top, 60)
 
                     Text("Stream Failed")
-                        .font(.title2.bold())
+                        .scaledFont(.title2.bold())
                         .foregroundColor(.white)
 
                     VStack(alignment: .leading, spacing: 8) {
                         Text("ATTEMPTS")
-                            .font(.system(size: 10, weight: .bold))
+                            .scaledFont(.system(size: 10, weight: .bold))
                             .foregroundColor(.gray)
 
                         ForEach(Array(logStore.lines.enumerated()), id: \.offset) { _, line in
                             Text(line)
-                                .font(.system(size: 10, design: .monospaced))
+                                .scaledFont(.system(size: 10, design: .monospaced))
                                 .foregroundColor(line.hasPrefix("✓") ? .green : .yellow)
                                 #if os(iOS)
                                 .textSelection(.enabled)
@@ -794,11 +794,11 @@ private struct StreamErrorView: View {
 
                     VStack(alignment: .leading, spacing: 6) {
                         Text("ERROR")
-                            .font(.system(size: 10, weight: .bold))
+                            .scaledFont(.system(size: 10, weight: .bold))
                             .foregroundColor(.gray)
 
                         Text(message)
-                            .font(.system(size: 12))
+                            .scaledFont(.system(size: 12))
                             .foregroundColor(.white.opacity(0.85))
                             #if os(iOS)
                             .textSelection(.enabled)
@@ -812,7 +812,7 @@ private struct StreamErrorView: View {
 
                     if onRetry != nil, retryCountdown > 0 {
                         Text("Retrying in \(retryCountdown)s")
-                            .font(.system(size: 12))
+                            .scaledFont(.system(size: 12))
                             .foregroundColor(.white.opacity(0.7))
                     }
 
@@ -849,7 +849,7 @@ private struct StreamErrorView: View {
 
                     if didCopyErrorDetails {
                         Text("Copied!")
-                            .font(.system(size: 12, weight: .semibold))
+                            .scaledFont(.system(size: 12, weight: .semibold))
                             .foregroundColor(.green)
                             .padding(.top, 4)
                     }
@@ -1309,7 +1309,7 @@ private struct PlayerRootView: View {
                                             .fill(.ultraThinMaterial)
                                             .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
                                         Image(systemName: "xmark")
-                                            .font(.system(size: 11, weight: .bold))
+                                            .font(.system(size: 11, weight: .bold))  // glyph in a fixed box: not text, stays fixed
                                             .foregroundStyle(.white)
                                     }
                                     .frame(width: 22, height: 22)
@@ -1837,8 +1837,8 @@ private struct PlayerRootView: View {
     private var loadingOverlay: some View {
         VStack(spacing: 20) {
             ProgressView().tint(.accentColor).scaleEffect(1.5)
-            Text(title).font(.headline).foregroundColor(.white)
-            Text("Connecting…").font(.subheadline).foregroundColor(.gray)
+            Text(title).scaledFont(.headline).foregroundColor(.white)
+            Text("Connecting…").scaledFont(.subheadline).foregroundColor(.gray)
             Button("Cancel") { onDismiss() }
                 .foregroundColor(.accentColor).padding(.top, 8)
         }
@@ -1859,19 +1859,19 @@ private struct PlayerRootView: View {
                         .fill(Color.accentPrimary.opacity(0.15))
                         .frame(width: 140, height: 140)
                     Image(systemName: "music.note")
-                        .font(.system(size: 56, weight: .light))
+                        .scaledFont(.system(size: 56, weight: .light))
                         .foregroundStyle(LinearGradient.accentGradient)
                 }
                 .shadow(color: Color.accentPrimary.opacity(0.3), radius: 30)
 
                 Text(title)
-                    .font(.title2.bold())
+                    .scaledFont(.title2.bold())
                     .foregroundColor(.white)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
 
                 Text("Audio Only")
-                    .font(.subheadline)
+                    .scaledFont(.subheadline)
                     .foregroundColor(.gray)
             }
         }
@@ -2360,7 +2360,7 @@ private struct PlayerRootView: View {
                     // capsule pill is gone.
                     if showTVOptions {
                         Text("Press \(Image(systemName: "chevron.left")) to close")
-                            .font(.system(size: 14, weight: .medium))
+                            .scaledFont(.system(size: 14, weight: .medium))
                             .foregroundColor(.white.opacity(0.5))
                             .padding(.horizontal, 16)
                             .padding(.vertical, 8)
@@ -2451,9 +2451,9 @@ private struct PlayerRootView: View {
                     if let prog = subtitle, !prog.isEmpty {
                         Text(prog)
                             #if os(tvOS)
-                            .font(.system(size: 18, weight: .medium))
+                            .scaledFont(.system(size: 18, weight: .medium))
                             #else
-                            .font(.system(size: 12, weight: .medium))
+                            .scaledFont(.system(size: 12, weight: .medium))
                             #endif
                             .foregroundColor(.white.opacity(0.8))
                             .lineLimit(1)
@@ -2462,9 +2462,9 @@ private struct PlayerRootView: View {
                     let mins = Int(remaining / 60)
                     Text(mins > 0 ? "\(mins) min remaining" : "Ending soon")
                         #if os(tvOS)
-                        .font(.system(size: 18, weight: .medium))
+                        .scaledFont(.system(size: 18, weight: .medium))
                         #else
-                        .font(.system(size: 12, weight: .medium))
+                        .scaledFont(.system(size: 12, weight: .medium))
                         #endif
                         .foregroundColor(.white.opacity(0.6))
                 }
@@ -2533,9 +2533,9 @@ private struct PlayerRootView: View {
                     : progressStore.currentMs
                 Text(formatMs(leftMs))
                     #if os(tvOS)
-                    .font(.system(size: 18, weight: .medium, design: .monospaced))
+                    .scaledFont(.system(size: 18, weight: .medium, design: .monospaced))
                     #else
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .scaledFont(.system(size: 11, weight: .medium, design: .monospaced))
                     #endif
                     .foregroundColor(.white.opacity(0.75))
                     .frame(minWidth: 46, alignment: .leading)
@@ -2551,7 +2551,7 @@ private struct PlayerRootView: View {
                     scheduleControlsHide()
                 } label: {
                     Image(systemName: SkipIntervals.backSymbol(skipBackSeconds))
-                        .font(.system(size: 22, weight: .medium))
+                        .font(.system(size: 22, weight: .medium))  // glyph in a fixed box: not text, stays fixed
                         .foregroundColor(.white)
                         .frame(width: 44, height: 44)
                 }
@@ -2570,7 +2570,7 @@ private struct PlayerRootView: View {
                     scheduleControlsHide()
                 } label: {
                     Image(systemName: SkipIntervals.forwardSymbol(skipForwardSeconds))
-                        .font(.system(size: 22, weight: .medium))
+                        .font(.system(size: 22, weight: .medium))  // glyph in a fixed box: not text, stays fixed
                         .foregroundColor(.white)
                         .frame(width: 44, height: 44)
                 }
@@ -2728,17 +2728,17 @@ private struct PlayerRootView: View {
             VStack(spacing: 2) {
                 Text(formatMs(target))
                     #if os(tvOS)
-                    .font(.system(size: 30, weight: .bold, design: .monospaced))
+                    .scaledFont(.system(size: 30, weight: .bold, design: .monospaced))
                     #else
-                    .font(.system(size: 17, weight: .bold, design: .monospaced))
+                    .scaledFont(.system(size: 17, weight: .bold, design: .monospaced))
                     #endif
                     .foregroundColor(.white)
                     .monospacedDigit()
                 Text(signedDelta(delta))
                     #if os(tvOS)
-                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                    .scaledFont(.system(size: 16, weight: .semibold, design: .monospaced))
                     #else
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .scaledFont(.system(size: 11, weight: .semibold, design: .monospaced))
                     #endif
                     .foregroundColor(delta < 0 ? Color.orange : Color.green)
                     .monospacedDigit()
@@ -2784,9 +2784,9 @@ private struct PlayerRootView: View {
                      ? String(format: "-%d:%02d", behindMs / 60_000, (behindMs / 1000) % 60)
                      : "LIVE")
                     #if os(tvOS)
-                    .font(.system(size: 18, weight: .semibold))
+                    .scaledFont(.system(size: 18, weight: .semibold))
                     #else
-                    .font(.system(size: 11, weight: .semibold))
+                    .scaledFont(.system(size: 11, weight: .semibold))
                     #endif
                     .foregroundColor(behindMs > 15_000 ? .white.opacity(0.8) : .white)
                     .monospacedDigit()
@@ -2806,9 +2806,9 @@ private struct PlayerRootView: View {
                     .frame(width: 8, height: 8)
                 Text("LIVE")
                     #if os(tvOS)
-                    .font(.system(size: 18, weight: .semibold))
+                    .scaledFont(.system(size: 18, weight: .semibold))
                     #else
-                    .font(.system(size: 11, weight: .semibold))
+                    .scaledFont(.system(size: 11, weight: .semibold))
                     #endif
                     .foregroundColor(atLive ? .white : .white.opacity(0.55))
             }
@@ -2823,9 +2823,9 @@ private struct PlayerRootView: View {
         } else {
             Text(formatMs(timelineEndMs))
                 #if os(tvOS)
-                .font(.system(size: 18, weight: .medium, design: .monospaced))
+                .scaledFont(.system(size: 18, weight: .medium, design: .monospaced))
                 #else
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .scaledFont(.system(size: 11, weight: .medium, design: .monospaced))
                 #endif
                 .foregroundColor(.white.opacity(0.75))
                 .frame(minWidth: 46, alignment: .trailing)
@@ -2855,9 +2855,9 @@ private struct PlayerRootView: View {
                         VStack(alignment: .leading, spacing: 2) {
                         Text(title)
                             #if os(tvOS)
-                            .font(.system(size: 32, weight: .bold))
+                            .scaledFont(.system(size: 32, weight: .bold))
                             #else
-                            .font(.headline)
+                            .scaledFont(.headline)
                             #endif
                             .foregroundColor(.white)
                             .lineLimit(1)
@@ -2886,9 +2886,9 @@ private struct PlayerRootView: View {
                                 .lineLimit(1)
                             }
                             #if os(tvOS)
-                            .font(.system(size: 22, weight: .regular))
+                            .scaledFont(.system(size: 22, weight: .regular))
                             #else
-                            .font(.system(size: 12, weight: .regular))
+                            .scaledFont(.system(size: 12, weight: .regular))
                             #endif
                             .foregroundColor(.white.opacity(0.72))
                             .shadow(color: .black.opacity(0.5), radius: 3)
@@ -2992,7 +2992,7 @@ private struct PlayerRootView: View {
                     .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
                     .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
                 Image(systemName: "plus")
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.system(size: 22, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                     .foregroundStyle(.white)
             }
             .frame(width: 52, height: 52)
@@ -3069,10 +3069,10 @@ private struct PlayerRootView: View {
         } label: {
             Image(systemName: "waveform.circle")
                 #if os(tvOS)
-                .font(.system(size: 28, weight: .semibold))
+                .font(.system(size: 28, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .frame(width: 64, height: 64)
                 #else
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 19, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .frame(width: 52, height: 52)
                 #endif
                 .foregroundColor(.white)
@@ -3109,10 +3109,10 @@ private struct PlayerRootView: View {
         } label: {
             Image(systemName: "captions.bubble")
                 #if os(tvOS)
-                .font(.system(size: 28, weight: .semibold))
+                .font(.system(size: 28, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .frame(width: 64, height: 64)
                 #else
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 19, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .frame(width: 52, height: 52)
                 #endif
                 .foregroundColor(progressStore.currentSubtitleTrackID != 0 ? Color.accentPrimary : .white)
@@ -3133,10 +3133,14 @@ private struct PlayerRootView: View {
             let label = progressStore.speed == 1.0 ? "1x" : String(format: "%gx", progressStore.speed)
             Text(label)
                 #if os(tvOS)
-                .font(.system(size: 22, weight: .bold, design: .rounded))
+                .scaledFont(.system(size: 22, weight: .bold, design: .rounded))
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
                 .frame(width: 64, height: 64)
                 #else
-                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .scaledFont(.system(size: 14, weight: .bold, design: .rounded))
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
                 .frame(width: 52, height: 52)
                 #endif
                 .foregroundColor(progressStore.speed == 1.0 ? .white : Color.accentPrimary)
@@ -3169,6 +3173,7 @@ private struct PlayerRootView: View {
             }
         } label: {
             VStack(spacing: 2) {
+                // Sleep timer circle: fixed-size control, glyph and countdown stay fixed.
                 Image(systemName: sleepTimerEnd != nil ? "moon.zzz.fill" : "moon.zzz")
                     #if os(tvOS)
                     .font(.system(size: 28, weight: .semibold))
@@ -3245,11 +3250,11 @@ private struct PlayerRootView: View {
         Button(action: action) {
             Image(systemName: systemName)
                 #if os(tvOS)
-                .font(.system(size: 28, weight: .semibold))
+                .font(.system(size: 28, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundColor(tint)
                 .frame(width: 64, height: 64)
                 #else
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 19, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundColor(tint)
                 .frame(width: 52, height: 52)
                 #endif
@@ -3307,7 +3312,7 @@ private struct PlayerRootView: View {
     #if os(tvOS)
     private var tvPlayPauseIndicator: some View {
         Image(systemName: progressStore.isPaused ? "pause.fill" : "play.fill")
-            .font(.system(size: 18, weight: .semibold))
+            .font(.system(size: 18, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
             .foregroundColor(.white)
             .frame(width: 36, height: 36)
             .background(.ultraThinMaterial, in: Circle())
@@ -3329,11 +3334,11 @@ private struct PlayerRootView: View {
         } label: {
             Image(systemName: progressStore.isPaused ? "play.fill" : "pause.fill")
                 #if os(tvOS)
-                .font(.system(size: 40, weight: .semibold))
+                .font(.system(size: 40, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundColor(.white)
                 .frame(width: 96, height: 96)
                 #else
-                .font(.system(size: 28, weight: .semibold))
+                .font(.system(size: 28, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundColor(.white)
                 .frame(width: 72, height: 72)
                 #endif
@@ -3396,9 +3401,9 @@ private struct PlayerRootView: View {
     private func hintPill(icon: String, text: String, size: CGFloat = 10) -> some View {
         HStack(spacing: 6) {
             Image(systemName: icon)
-                .font(.system(size: size, weight: .bold))
+                .scaledFont(.system(size: size, weight: .bold))
             Text(text)
-                .font(.system(size: 16, weight: .medium))
+                .scaledFont(.system(size: 16, weight: .medium))
         }
         .foregroundColor(.white.opacity(0.6))
         .padding(.horizontal, 12)
@@ -3746,11 +3751,11 @@ struct PlayerOverflowMenu: View, Equatable {
         } label: {
             Image(systemName: "ellipsis")
                 #if os(tvOS)
-                .font(.system(size: 28, weight: .semibold))
+                .font(.system(size: 28, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundColor(.white)
                 .frame(width: 64, height: 64)
                 #else
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 19, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundColor(.white)
                 .frame(width: 52, height: 52)
                 #endif
@@ -4082,7 +4087,7 @@ struct TVPlayerOptionsPanel: View {
 
     private func sectionHeader(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 13, weight: .semibold))
+            .scaledFont(.system(size: 13, weight: .semibold))
             .foregroundColor(.white.opacity(0.45))
             .textCase(.uppercase)
     }
@@ -4147,16 +4152,16 @@ private struct OptionPillLabel: View {
         HStack(spacing: 10) {
             if let systemImage {
                 Image(systemName: systemImage)
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(.system(size: 15, weight: .semibold))
                     .foregroundColor(.white)
             }
             Text(text)
-                .font(.system(size: 17, weight: isSelected ? .semibold : .regular))
+                .scaledFont(.system(size: 17, weight: isSelected ? .semibold : .regular))
                 .foregroundColor(.white)
             Spacer()
             if isSelected {
                 Image(systemName: "checkmark")
-                    .font(.system(size: 14, weight: .bold))
+                    .scaledFont(.system(size: 14, weight: .bold))
                     .foregroundColor(isFocused ? .white : Color.accentPrimary)
             }
         }
@@ -5812,7 +5817,7 @@ struct UnifiedPlayerChrome: View {
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(title)
-                            .font(.headline)
+                            .scaledFont(.headline)
                             .foregroundColor(.white)
                             .lineLimit(1)
                             .shadow(color: .black.opacity(0.6), radius: 4)
@@ -5833,7 +5838,7 @@ struct UnifiedPlayerChrome: View {
                                     }
                                 }
                             }
-                            .font(.system(size: 12, weight: .regular))
+                            .scaledFont(.system(size: 12, weight: .regular))
                             .foregroundColor(.white.opacity(0.72))
                             .shadow(color: .black.opacity(0.5), radius: 3)
                         }
@@ -5887,7 +5892,7 @@ struct UnifiedPlayerChrome: View {
                              action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 19, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundColor(tint)
                 .frame(width: 52, height: 52)
                 .background(.ultraThinMaterial, in: Circle())
@@ -5994,7 +5999,7 @@ struct UnifiedPlayerChrome: View {
             }
         } label: {
             Image(systemName: "ellipsis")
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 19, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundColor(.white)
                 .frame(width: 52, height: 52)
                 .background(.ultraThinMaterial, in: Circle())
@@ -6010,7 +6015,7 @@ struct UnifiedPlayerChrome: View {
             progress.togglePauseAction?()
         } label: {
             Image(systemName: progress.isPaused ? "play.fill" : "pause.fill")
-                .font(.system(size: 30, weight: .bold))
+                .font(.system(size: 30, weight: .bold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundColor(.white)
                 .frame(width: 76, height: 76)
                 .background(.ultraThinMaterial, in: Circle())
@@ -6034,13 +6039,13 @@ struct UnifiedPlayerChrome: View {
                 HStack {
                     if let programName, !programName.isEmpty {
                         Text(programName)
-                            .font(.system(size: 14, weight: .semibold))
+                            .scaledFont(.system(size: 14, weight: .semibold))
                             .foregroundColor(.white)
                             .lineLimit(1)
                     }
                     Spacer()
                     Text("\(Int(remaining / 60)) min remaining")
-                        .font(.system(size: 12, weight: .medium))
+                        .scaledFont(.system(size: 12, weight: .medium))
                         .foregroundColor(.white.opacity(0.75))
                 }
                 GeometryReader { geo in
@@ -6202,7 +6207,7 @@ struct NativeHLSPlayerScreen: View {
                 VStack(spacing: 12) {
                     ProgressView()
                     Text(statusText)
-                        .font(.bodyMedium)
+                        .scaledFont(.bodyMedium)
                         .foregroundColor(.white.opacity(0.85))
                     // Same live "what the network is doing" line as the
                     // AVPlayer tile: this screen shows the identical
@@ -6780,7 +6785,7 @@ struct NativeHLSPlayerScreen: View {
     @ViewBuilder
     private func iosOverlayIcon(_ icon: String, tint: Color = .white) -> some View {
         Image(systemName: icon)
-            .font(.system(size: 18, weight: .medium))
+            .scaledFont(.system(size: 18, weight: .medium))
             .foregroundColor(tint)
     }
     #endif
@@ -7243,10 +7248,10 @@ private struct NativeStreamInfoCard: View {
         TimelineView(.periodic(from: .now, by: 2)) { _ in
             VStack(alignment: .leading, spacing: 6) {
                 Text(channelName)
-                    .font(.system(size: 28, weight: .bold))
+                    .scaledFont(.system(size: 28, weight: .bold))
                 if let program, !program.isEmpty {
                     Text(program)
-                        .font(.system(size: 22, weight: .medium))
+                        .scaledFont(.system(size: 22, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
                 Divider()
@@ -7268,7 +7273,7 @@ private struct NativeStreamInfoCard: View {
                     }
                 }
             }
-            .font(.system(size: 20, weight: .regular))
+            .scaledFont(.system(size: 20, weight: .regular))
             .foregroundStyle(.white)
             .padding(24)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))

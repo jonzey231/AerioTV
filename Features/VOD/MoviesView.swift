@@ -1376,7 +1376,7 @@ struct MoviesView: View {
                     }
                 },
                 emptyView: isSearching && !isSearchingLibrary ? {
-                    AnyView(Text("No results").font(.labelMedium).foregroundColor(.textTertiary))
+                    AnyView(Text("No results").scaledFont(.labelMedium).foregroundColor(.textTertiary))
                 } : nil,
                 railLetters: railLetters,
                 railTarget: { letter in firstGridID(for: letter).map { String($0.dropFirst("grid-".count)) } },
@@ -1419,7 +1419,7 @@ struct MoviesView: View {
         if let who = personMatchName {
             rows.append(PhoneRow(id: "person") {
                 AnyView(Text("Includes titles with \(who)")
-                    .font(.labelMedium)
+                    .scaledFont(.labelMedium)
                     .foregroundColor(.textTertiary)
                     .padding(.horizontal, 16))
             })
@@ -1444,7 +1444,7 @@ struct MoviesView: View {
             rows.append(PhoneRow(id: "searching") {
                 AnyView(HStack(spacing: 10) {
                     ProgressView().tint(.accentPrimary)
-                    Text("Searching server…").font(.labelMedium).foregroundColor(.textTertiary)
+                    Text("Searching server…").scaledFont(.labelMedium).foregroundColor(.textTertiary)
                 }
                 .padding(.horizontal, 16))
             })
@@ -1455,13 +1455,13 @@ struct MoviesView: View {
     private var hiddenGroupsBanner: some View {
         HStack(spacing: 6) {
             Text("\(hiddenGroups.count) group\(hiddenGroups.count == 1 ? "" : "s") hidden")
-                .font(.labelMedium)
+                .scaledFont(.labelMedium)
                 .foregroundColor(.textSecondary)
             Button {
                 hiddenGroups.removeAll()
                 HiddenGroupsStore.save(hiddenGroups, forKey: hiddenGroupsKey)
             } label: {
-                Text("Show All").font(.labelMedium).foregroundColor(.accentPrimary)
+                Text("Show All").scaledFont(.labelMedium).foregroundColor(.accentPrimary)
             }
             .buttonStyle(.plain)
             Spacer()
@@ -1477,14 +1477,14 @@ struct MoviesView: View {
             if !hiddenGroups.isEmpty && searchText.isEmpty {
                 HStack(spacing: 6) {
                     Text("\(hiddenGroups.count) group\(hiddenGroups.count == 1 ? "" : "s") hidden")
-                        .font(.labelMedium)
+                        .scaledFont(.labelMedium)
                         .foregroundColor(.textSecondary)
                     Button {
                         hiddenGroups.removeAll()
                         HiddenGroupsStore.save(hiddenGroups, forKey: hiddenGroupsKey)
                     } label: {
                         Text("Show All")
-                            .font(.labelMedium)
+                            .scaledFont(.labelMedium)
                             .foregroundColor(.accentPrimary)
                     }
                     .buttonStyle(.plain)
@@ -1543,7 +1543,7 @@ struct MoviesView: View {
                                 VStack(alignment: .leading, spacing: shelfTitleSpacing) {
                                 if heroIsContinueWatching {
                                     Text("Continue Watching")
-                                        .font(.headlineSmall)
+                                        .scaledFont(.headlineSmall)
                                         .foregroundColor(.textPrimary)
                                         .padding(.horizontal, 16)
                                         .padding(.leading, contentLeadingInset)
@@ -1622,7 +1622,7 @@ struct MoviesView: View {
                                     // cards and gestures as Continue Watching (Logan
                                     // 2026-09-05).
                                     Text("Watchlist")
-                                        .font(.headlineSmall)
+                                        .scaledFont(.headlineSmall)
                                         .foregroundColor(.textPrimary)
                                         .padding(.horizontal, 16)
                                     MoviesHeroCarousel(
@@ -1682,7 +1682,7 @@ struct MoviesView: View {
                             if isSearching {
                                 if let who = personMatchName {
                                     Text("Includes titles with \(who)")
-                                        .font(.labelMedium)
+                                        .scaledFont(.labelMedium)
                                         .foregroundColor(.textTertiary)
                                         .padding(.horizontal, 16)
                                         .padding(.leading, contentLeadingInset)
@@ -1693,7 +1693,7 @@ struct MoviesView: View {
                                     HStack(spacing: 10) {
                                         ProgressView().tint(.accentPrimary)
                                         Text("Searching server…")
-                                            .font(.labelMedium)
+                                            .scaledFont(.labelMedium)
                                             .foregroundColor(.textTertiary)
                                     }
                                     .padding(.horizontal, 16)
@@ -2349,10 +2349,10 @@ struct MoviesView: View {
                 // Plain text, but tappable on the phone: no button look.
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text(title)
-                        .font(.headlineSmall)
+                        .scaledFont(.headlineSmall)
                         .foregroundColor(.textPrimary)
                     Text("\(count)")
-                        .font(.labelMedium)
+                        .scaledFont(.labelMedium)
                         .foregroundColor(.textTertiary)
                 }
                 .contentShape(Rectangle())
@@ -2447,10 +2447,10 @@ struct MoviesView: View {
     private var iOSSearchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 15, weight: .semibold))
+                .scaledFont(.system(size: 15, weight: .semibold))
                 .foregroundColor(.textSecondary)
             TextField("Search \(kindLower)", text: $searchText)
-                .font(.system(size: 16))
+                .scaledFont(.system(size: 16))
                 .foregroundColor(.textPrimary)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -2463,19 +2463,19 @@ struct MoviesView: View {
                 withAnimation(.spring(response: 0.25)) { clearSearch() }
             } label: {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 16))
+                    .scaledFont(.system(size: 16))
                     .foregroundColor(.textSecondary)
             }
             .accessibilityLabel("Clear and close search")
         }
         .padding(.horizontal, 14)
-        .frame(height: 40)
+        .frame(minHeight: 40)
         .background(Capsule().fill(Color.elevatedBackground))
     }
 
     private func iOSCircle(_ systemImage: String) -> some View {
         Image(systemName: systemImage)
-            .font(.system(size: 17, weight: .semibold))
+            .font(.system(size: 17, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
             .foregroundColor(.textPrimary)
             .frame(width: 38, height: 38)
             .background(Circle().fill(Color.textPrimary.opacity(0.08)))
@@ -2605,7 +2605,7 @@ struct MoviesView: View {
         // Same capsule + focus treatment as the guide's group pills (the
         // shared TVCategoryPill draws the squared ring on focus).
         Button(action: action) {
-            Text(label).font(.system(size: 22, weight: .medium))
+            Text(label).scaledFont(.system(size: 22, weight: .medium))
         }
         .buttonStyle(MoviesPillStyle(isSelected: isSelected))
         #else
@@ -2617,7 +2617,7 @@ struct MoviesView: View {
     private func posterShelf(title: String, items: [VODDisplayItem]) -> some View {
         VStack(alignment: .leading, spacing: shelfTitleSpacing) {
             Text(title)
-                .font(.headlineSmall)
+                .scaledFont(.headlineSmall)
                 .foregroundColor(.textPrimary)
                 .padding(.horizontal, 16)
             ScrollView(.horizontal, showsIndicators: false) {
@@ -2743,15 +2743,15 @@ struct MoviesView: View {
     private func errorView(_ msg: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 40)).foregroundColor(.statusWarning)
+                .scaledFont(.system(size: 40)).foregroundColor(.statusWarning)
             Text("Failed to load movies")
-                .font(.headlineLarge).foregroundColor(.textPrimary)
+                .scaledFont(.headlineLarge).foregroundColor(.textPrimary)
             if let serverName = vodStore.lastMoviesServerName {
                 Text("Server: \(serverName)")
-                    .font(.labelMedium).foregroundColor(.textSecondary)
+                    .scaledFont(.labelMedium).foregroundColor(.textSecondary)
             }
             Text(msg)
-                .font(.bodyMedium).foregroundColor(.textSecondary)
+                .scaledFont(.bodyMedium).foregroundColor(.textSecondary)
                 .multilineTextAlignment(.center)
             PrimaryButton("Try Again") { refreshLibrary() }
                 .frame(maxWidth: 200)
@@ -2769,6 +2769,7 @@ struct MoviesView: View {
 
 // MARK: - VOD Poster Card
 struct VODPosterCard: View {
+    @Environment(\.aerioTextScale) private var textScale
     let item: VODDisplayItem
     var headers: [String: String] = [:]
     /// TMDB art first when the cache has it (key set), provider poster
@@ -2820,7 +2821,7 @@ struct VODPosterCard: View {
                     #if os(tvOS)
                     // Readable from the couch (Logan 2026-09-05).
                     Text(item.rating)
-                        .font(.system(size: 16, weight: .bold))
+                        .scaledFont(.system(size: 16, weight: .bold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 8).padding(.vertical, 4)
                         .background(Color.black.opacity(0.7))
@@ -2828,7 +2829,7 @@ struct VODPosterCard: View {
                         .padding(6)
                     #else
                     Text(item.rating)
-                        .font(.system(size: 9, weight: .bold))
+                        .scaledFont(.system(size: 9, weight: .bold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 5).padding(.vertical, 3)
                         .background(Color.black.opacity(0.7))
@@ -2846,25 +2847,25 @@ struct VODPosterCard: View {
                 // Title: reserves exactly 2-line height via a fixed frame so all cards
                 // in the same grid row align regardless of actual title length.
                 Text(item.displayName)
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.textPrimary)
                     .lineLimit(2)
                     .multilineTextAlignment(textAlignment == .center ? .center : .leading)
                     .frame(maxWidth: .infinity, alignment: textAlignment == .center ? .top : .topLeading)
                     #if os(tvOS)
-                    .frame(height: 44) // 2 lines at labelSmall (18pt) on tvOS
+                    .frame(height: TextScale.grow(44, textScale)) // 2 lines at labelSmall (18pt) on tvOS, grows with Text Size
                     #else
-                    .frame(height: 32) // 2 lines at labelSmall on iOS
+                    .frame(height: TextScale.grow(32, textScale)) // 2 lines at labelSmall on iOS, grows with Text Size
                     #endif
 
                 // Year: always rendered (non-breaking space when absent) so every
                 // card reserves the same vertical space for this line.
                 Text(item.releaseYear.isEmpty ? "\u{00A0}" : item.releaseYear)
                     #if os(tvOS)
-                    .font(.system(size: 16, weight: .medium))
+                    .scaledFont(.system(size: 16, weight: .medium))
                     .foregroundColor(item.releaseYear.isEmpty ? .clear : .textSecondary)
                     #else
-                    .font(.system(size: 10))
+                    .scaledFont(.system(size: 10))
                     .foregroundColor(item.releaseYear.isEmpty ? .clear : .textTertiary)
                     #endif
             }
@@ -3185,6 +3186,9 @@ struct MoviesHeroCarousel: View {
 }
 
 struct MoviesHero: View {
+    /// Settings > Appearance > Text Size: the hero keeps its fixed height
+    /// (focus and scroll thresholds depend on it), so copy sheds lines instead.
+    @Environment(\.aerioTextScale) private var textScale
     let item: VODDisplayItem
     let progress: WatchProgress?
     var backdropOverride: URL? = nil
@@ -3391,9 +3395,9 @@ struct MoviesHero: View {
             // No eyebrow (Logan 2026-09-03): the carousel is Continue
             // Watching, the label was redundant.
             Text(item.displayName)
-                .font(titleFont)
+                .scaledFont(titleFont)
                 .foregroundColor(.textPrimary)
-                .lineLimit(2)
+                .lineLimit(textScale > 1.1 ? 1 : 2)
             if !metaParts.isEmpty || !item.rating.isEmpty {
                 HStack(spacing: 10) {
                     ForEach(Array(metaParts.enumerated()), id: \.offset) { idx, part in
@@ -3403,13 +3407,13 @@ struct MoviesHero: View {
                     if !item.rating.isEmpty {
                         if !metaParts.isEmpty { Text("·").foregroundColor(.textTertiary) }
                         HStack(spacing: 4) {
-                            Image(systemName: "star.fill").font(.system(size: metaSize - 4))
+                            Image(systemName: "star.fill").scaledFont(.system(size: metaSize - 4))
                             Text(item.rating)
                         }
                         .foregroundColor(.accentPrimary)
                     }
                 }
-                .font(.system(size: metaSize, weight: .medium))
+                .scaledFont(.system(size: metaSize, weight: .medium))
                 .foregroundColor(.textSecondary)
                 #if os(iOS)
                 // One line on the phone card; a long genre list wrapped to three.
@@ -3420,9 +3424,9 @@ struct MoviesHero: View {
             #if os(tvOS)
             if case let plot = (art.overview(for: item) ?? item.plotText), !plot.isEmpty {
                 Text(plot)
-                    .font(.bodySmall)
+                    .scaledFont(.bodySmall)
                     .foregroundColor(.textPrimary.opacity(0.85))
-                    .lineLimit(3)
+                    .lineLimit(textScale > 1.25 ? 1 : (textScale > 1.0 ? 2 : 3))
                     .frame(maxWidth: 560, alignment: .leading)
             }
             #endif
@@ -3471,7 +3475,7 @@ struct MoviesHero: View {
             }
             if let remainingLabel {
                 Text(remainingLabel)
-                    .font(.labelSmall)
+                    .scaledFont(.labelSmall)
                     .foregroundColor(.textSecondary)
             }
             #endif
@@ -3529,13 +3533,13 @@ struct MoviesHero: View {
     private let copyInset: CGFloat = 44
     private let eyebrowSize: CGFloat = 16
     private let metaSize: CGFloat = 20
-    private var titleFont: Font { .displayLarge }
+    private var titleFont: AerioFont { .displayLarge }
     #else
     private let copySpacing: CGFloat = 6
     private let copyInset: CGFloat = 16
     private let eyebrowSize: CGFloat = 11
     private let metaSize: CGFloat = 13
-    private var titleFont: Font { .displayMedium }
+    private var titleFont: AerioFont { .displayMedium }
     #endif
 }
 
@@ -3552,10 +3556,10 @@ struct MoviesHeroButton: View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Image(systemName: systemImage)
-                    .font(.system(size: iconSize, weight: .semibold))
+                    .scaledFont(.system(size: iconSize, weight: .semibold))
                 if !title.isEmpty {
                     Text(title)
-                        .font(.system(size: textSize, weight: .semibold))
+                        .scaledFont(.system(size: textSize, weight: .semibold))
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                 }
@@ -3644,7 +3648,7 @@ struct MoviesFilterPage: View {
             Color.black.opacity(0.45).ignoresSafeArea()
             VStack(spacing: 18) {
                 Text("Filter")
-                    .font(.system(size: 31, weight: .semibold))
+                    .scaledFont(.system(size: 31, weight: .semibold))
                     .foregroundColor(.textPrimary)
                     .padding(.top, 6)
                 if hasProviders {
@@ -3652,7 +3656,7 @@ struct MoviesFilterPage: View {
                         ForEach(Tab.allCases, id: \.self) { t in
                             Button { tab = t } label: {
                                 Text(t.rawValue)
-                                    .font(.system(size: 24, weight: .semibold))
+                                    .scaledFont(.system(size: 24, weight: .semibold))
                                     .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(NativeSheetRowStyle(isSelected: tab == t))
@@ -3719,7 +3723,7 @@ struct MoviesFilterPage: View {
                            action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(on && !accent ? "\(title)  \u{2713}" : title)
-                .font(.system(size: 26, weight: .medium))
+                .scaledFont(.system(size: 26, weight: .medium))
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
                 .frame(maxWidth: .infinity)
@@ -3739,7 +3743,7 @@ private struct NativeSheetRowStyle: ButtonStyle {
         configuration.label
             .foregroundColor(isFocused ? .accentPrimary : (isSelected ? .appBackground : .accentPrimary))
             .padding(.horizontal, 22)
-            .frame(height: 66)
+            .frame(minHeight: 66)
             .background(
                 Capsule().fill(isFocused ? Color.white
                                : (isSelected ? Color.accentPrimary : Color.white.opacity(0.10)))
@@ -3842,7 +3846,7 @@ struct AlphabetRail: View {
         VStack(spacing: spacing) {
             ForEach(Self.letters, id: \.self) { letter in
                 Text(letter)
-                    .font(.system(size: fontSize, weight: .semibold, design: .rounded))
+                    .font(.system(size: fontSize, weight: .semibold, design: .rounded))  // index rail: fixed-height control, not scaled
                     .foregroundColor(letterColor(letter, enabled: available.contains(letter)))
                     .frame(width: cell, height: cell)
             }
@@ -3864,7 +3868,7 @@ struct AlphabetRail: View {
                     if let target { onSelect(target) }
                 } label: {
                     Text(letter)
-                        .font(.system(size: fontSize, weight: .semibold, design: .rounded))
+                        .font(.system(size: fontSize, weight: .semibold, design: .rounded))  // index rail: fixed-height control, not scaled
                         .foregroundColor(letterColor(letter, enabled: enabled))
                         .frame(width: cell, height: cell)
                         #if os(tvOS)

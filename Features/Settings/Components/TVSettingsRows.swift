@@ -88,10 +88,10 @@ struct TVSettingsActionRow: View {
         Button(action: action) {
             HStack(spacing: 16) {
                 Image(systemName: icon)
-                    .font(.system(size: 26))
+                    .scaledFont(.system(size: 26))
                     .foregroundColor(iconTint)
                 Text(label)
-                    .font(.system(size: 26, weight: .medium))
+                    .scaledFont(.system(size: 26, weight: .medium))
                     .foregroundColor(tint)
                 Spacer()
             }
@@ -127,18 +127,18 @@ struct TVSettingsSelectionRow<Leading: View>: View {
                 leading()
                 VStack(alignment: .leading, spacing: 2) {
                     Text(label)
-                        .font(.system(size: 26, weight: .medium))
+                        .scaledFont(.system(size: 26, weight: .medium))
                         .foregroundColor(.textPrimary)
                     if let subtitle {
                         Text(subtitle)
-                            .font(.system(size: 20))
+                            .scaledFont(.system(size: 20))
                             .foregroundColor(.textSecondary)
                     }
                 }
                 Spacer()
                 if isSelected {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 22, weight: .semibold))
+                        .scaledFont(.system(size: 22, weight: .semibold))
                         .foregroundColor(.accentPrimary)
                 }
             }
@@ -179,7 +179,7 @@ extension TVSettingsSelectionRow where Leading == AnyView {
         self.leading = {
             AnyView(
                 Image(systemName: icon)
-                    .font(.system(size: 22))
+                    .scaledFont(.system(size: 22))
                     .foregroundColor(iconColor)
                     .frame(width: 32)
             )
@@ -212,7 +212,7 @@ struct TVSettingsToggleRow: View {
                         .fill(isOn ? iconColor : Color.textTertiary)
                         .frame(width: 10, height: 10)
                     Text(isOn ? "On" : "Off")
-                        .font(.system(size: 26, weight: .semibold))
+                        .scaledFont(.system(size: 26, weight: .semibold))
                         .foregroundColor(isOn
                             ? (isFocused ? .white : iconColor)
                             : (isFocused ? .white : .textTertiary))
@@ -299,7 +299,7 @@ struct ServerListRow: View {
             if let onSetActive {
                 Button(action: onSetActive) {
                     Image(systemName: server.isActive ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: checkmarkSize))
+                        .scaledFont(.system(size: checkmarkSize))
                         .foregroundColor(server.isActive ? .accentPrimary : .textTertiary)
                 }
                 #if os(tvOS)
@@ -314,13 +314,13 @@ struct ServerListRow: View {
                     .fill(server.type.color.opacity(0.2))
                     .frame(width: iconBoxSize, height: iconBoxSize)
                 Image(systemName: server.type.systemIcon)
-                    .font(.system(size: iconFontSize, weight: .medium))
+                    .scaledFont(.system(size: iconFontSize, weight: .medium))
                     .foregroundColor(server.type.color)
             }
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(server.name)
-                    .font(.bodyMedium)
+                    .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                 HStack(spacing: 6) {
                     ServerTypeBadge(type: server.type)
@@ -328,7 +328,7 @@ struct ServerListRow: View {
                         LANWANBadge(isLAN: isOnLAN)
                     }
                     Text(server.effectiveBaseURL)
-                        .font(.monoSmall)
+                        .scaledFont(.monoSmall)
                         .foregroundColor(.textTertiary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -368,9 +368,9 @@ struct LANWANBadge: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: isLAN ? "wifi" : "globe")
-                .font(.system(size: iconSize, weight: .semibold))
+                .scaledFont(.system(size: iconSize, weight: .semibold))
             Text(isLAN ? "LAN" : "WAN")
-                .font(.system(size: textSize, weight: .bold))
+                .scaledFont(.system(size: textSize, weight: .bold))
         }
         .foregroundColor(isLAN ? .statusOnline : .accentSecondary)
         .padding(.horizontal, hPad)
@@ -403,7 +403,7 @@ struct TVSettingsTextField: View {
             isSecure: isSecure,
             onFocusChange: { focused = $0 }
         )
-        .frame(height: 60)
+        .frame(minHeight: 60)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Color.elevatedBackground)

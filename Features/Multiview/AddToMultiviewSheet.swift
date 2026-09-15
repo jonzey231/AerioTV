@@ -299,7 +299,7 @@ struct AddToMultiviewSheet: View {
                         }
                     } label: {
                         Text(group)
-                            .font(.labelMedium)
+                            .scaledFont(.labelMedium)
                             .foregroundColor(selectedGroup == group
                                              ? .appBackground
                                              : .textSecondary)
@@ -337,7 +337,7 @@ struct AddToMultiviewSheet: View {
                         }
                     } label: {
                         Text(source.displayName)
-                            .font(.labelMedium)
+                            .scaledFont(.labelMedium)
                             .foregroundColor(pickerSource == source
                                              ? .appBackground
                                              : .textSecondary)
@@ -407,7 +407,7 @@ struct AddToMultiviewSheet: View {
                         exitSeriesDrillIn()
                     } label: {
                         Label("Back to Series", systemImage: "chevron.left")
-                            .font(.headline)
+                            .scaledFont(.headline)
                             .foregroundStyle(Color.accentPrimary)
                     }
                     .buttonStyle(.plain)
@@ -599,7 +599,7 @@ struct AddToMultiviewSheet: View {
                         }
                     } label: {
                         Text(group)
-                            .font(.system(size: 22, weight: .medium))
+                            .scaledFont(.system(size: 22, weight: .medium))
                     }
                     .buttonStyle(PickerGroupPillButtonStyle(
                         isSelected: selectedGroup == group
@@ -627,7 +627,7 @@ struct AddToMultiviewSheet: View {
                         }
                     } label: {
                         Text(source.displayName)
-                            .font(.system(size: 22, weight: .medium))
+                            .scaledFont(.system(size: 22, weight: .medium))
                     }
                     .buttonStyle(PickerGroupPillButtonStyle(
                         isSelected: pickerSource == source
@@ -703,7 +703,7 @@ struct AddToMultiviewSheet: View {
                 exitSeriesDrillIn()
             } label: {
                 Label("Back to Series", systemImage: "chevron.left")
-                    .font(.system(size: 26, weight: .semibold))
+                    .scaledFont(.system(size: 26, weight: .semibold))
                     .foregroundStyle(Color.accentPrimary)
                     .padding(.vertical, 8)
             }
@@ -713,7 +713,7 @@ struct AddToMultiviewSheet: View {
                 HStack(spacing: 16) {
                     ProgressView()
                     Text("Loading episodes...")
-                        .font(.system(size: 22))
+                        .scaledFont(.system(size: 22))
                         .foregroundStyle(.white.opacity(0.6))
                 }
                 .padding(.vertical, 12)
@@ -739,7 +739,7 @@ struct AddToMultiviewSheet: View {
     /// active source). Couch-readable, muted.
     private func tvEmptyRow(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 24, weight: .regular))
+            .scaledFont(.system(size: 24, weight: .regular))
             .foregroundStyle(.white.opacity(0.45))
             .padding(.vertical, 24)
     }
@@ -753,10 +753,10 @@ struct AddToMultiviewSheet: View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Add to Multiview")
-                    .font(.system(size: 48, weight: .bold))
+                    .scaledFont(.system(size: 48, weight: .bold))
                     .foregroundStyle(.white)
                 Text("\(multiviewStore.count) of \(multiviewStore.maxTiles) tiles")
-                    .font(.system(size: 22, weight: .medium))
+                    .scaledFont(.system(size: 22, weight: .medium))
                     .foregroundStyle(.white.opacity(0.6))
             }
             Spacer()
@@ -764,7 +764,7 @@ struct AddToMultiviewSheet: View {
                 isPresented = false
             } label: {
                 Text("Close")
-                    .font(.system(size: 24, weight: .semibold))
+                    .scaledFont(.system(size: 24, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(minWidth: 160, minHeight: 60)
                     .padding(.horizontal, 24)
@@ -785,7 +785,7 @@ struct AddToMultiviewSheet: View {
     /// spacing used to provide.
     private func tvSectionHeader(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 32, weight: .semibold))
+            .scaledFont(.system(size: 32, weight: .semibold))
             .foregroundStyle(.white.opacity(0.65))
             .padding(.top, 20)
             .padding(.bottom, 4)
@@ -1546,11 +1546,11 @@ struct AddToMultiviewSheet: View {
     private func toastView(_ text: String) -> some View {
         Text(text)
             #if os(tvOS)
-            .font(.system(size: 22, weight: .semibold))
+            .scaledFont(.system(size: 22, weight: .semibold))
             .padding(.horizontal, 24)
             .padding(.vertical, 14)
             #else
-            .font(.subheadline.weight(.semibold))
+            .scaledFont(.subheadline.weight(.semibold))
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             #endif
@@ -1603,12 +1603,12 @@ private struct VODPickerRow: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(verbatim: title)
-                        .font(titleFont)
+                        .scaledFont(titleFont)
                         .lineLimit(1)
                         .foregroundStyle(.primary)
                     if let subtitle, !subtitle.isEmpty {
                         Text(verbatim: subtitle)
-                            .font(subtitleFont)
+                            .scaledFont(subtitleFont)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -1659,11 +1659,11 @@ private struct VODPickerRow: View {
         switch trailing {
         case .add:
             Image(systemName: "plus.circle")
-                .font(.system(size: trailingIconSize))
+                .scaledFont(.system(size: trailingIconSize))
                 .foregroundStyle(Color.accentPrimary)
         case .added:
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: trailingIconSize))
+                .scaledFont(.system(size: trailingIconSize))
                 .foregroundStyle(.green)
         case .loading:
             ProgressView()
@@ -1672,11 +1672,11 @@ private struct VODPickerRow: View {
                 #endif
         case .blocked:
             Image(systemName: "hand.raised.slash")
-                .font(.system(size: trailingIconSize))
+                .scaledFont(.system(size: trailingIconSize))
                 .foregroundStyle(.secondary)
         case .disclosure:
             Image(systemName: "chevron.right")
-                .font(.system(size: trailingIconSize * 0.8, weight: .semibold))
+                .scaledFont(.system(size: trailingIconSize * 0.8, weight: .semibold))
                 .foregroundStyle(.secondary)
         }
     }
@@ -1723,7 +1723,7 @@ private struct VODPickerRow: View {
         #endif
     }
 
-    private var titleFont: Font {
+    private var titleFont: AerioFont {
         #if os(tvOS)
         return .system(size: 26, weight: .semibold)
         #else
@@ -1731,7 +1731,7 @@ private struct VODPickerRow: View {
         #endif
     }
 
-    private var subtitleFont: Font {
+    private var subtitleFont: AerioFont {
         #if os(tvOS)
         return .system(size: 20, weight: .regular)
         #else
@@ -1842,11 +1842,11 @@ private struct SharedSheetModifiers: ViewModifier {
     private func toast(_ text: String) -> some View {
         Text(text)
             #if os(tvOS)
-            .font(.system(size: 22, weight: .semibold))
+            .scaledFont(.system(size: 22, weight: .semibold))
             .padding(.horizontal, 24)
             .padding(.vertical, 14)
             #else
-            .font(.subheadline.weight(.semibold))
+            .scaledFont(.subheadline.weight(.semibold))
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             #endif

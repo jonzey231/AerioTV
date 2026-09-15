@@ -2199,7 +2199,7 @@ struct AVPSubtitleOverlay: View {
                 Spacer()
                 if let text, store.activeTrack != nil {
                     Text(text)
-                        .font(.system(size: fontSize, weight: .semibold))
+                        .scaledFont(.system(size: fontSize, weight: .semibold))
                         .multilineTextAlignment(.center)
                         .foregroundColor(.white)
                         .shadow(color: .black.opacity(0.9), radius: 2, x: 0, y: 1)
@@ -2442,7 +2442,7 @@ struct LoadingDetailLine: View {
 
     var body: some View {
         Text(detail ?? " ")
-            .font(.caption2)
+            .scaledFont(.caption2)
             .foregroundColor(.white.opacity(0.55))
             .monospacedDigit()
             .lineLimit(1)
@@ -2738,7 +2738,7 @@ struct AVPlayerMultiviewTile: View {
                 VStack(spacing: 8) {
                     ProgressView()
                     Text(statusText)
-                        .font(.caption)
+                        .scaledFont(.caption)
                         .foregroundColor(.white.opacity(0.8))
                     LoadingDetailLine(statusText: statusText) { loadingDetailSample() }
                 }
@@ -2746,22 +2746,22 @@ struct AVPlayerMultiviewTile: View {
             if let tileError {
                 VStack(spacing: 10) {
                     Image(systemName: "play.slash.fill")
-                        .font(.system(size: 34, weight: .medium))
+                        .scaledFont(.system(size: 34, weight: .medium))
                         .foregroundColor(.white.opacity(0.85))
                     Text(tileError.title)
-                        .font(.headline)
+                        .scaledFont(.headline)
                         .foregroundColor(.white)
                     Text(tileError.message)
-                        .font(.subheadline)
+                        .scaledFont(.subheadline)
                         .foregroundColor(.white.opacity(0.85))
                         .multilineTextAlignment(.center)
                     if let version = tileError.version {
                         Text("Version: \(version)")
-                            .font(.caption)
+                            .scaledFont(.caption)
                             .foregroundColor(.white.opacity(0.7))
                     }
                     Text(tileError.diagnostic)
-                        .font(.caption2)
+                        .scaledFont(.caption2)
                         .foregroundColor(.white.opacity(0.45))
                         .multilineTextAlignment(.center)
                         .lineLimit(3)

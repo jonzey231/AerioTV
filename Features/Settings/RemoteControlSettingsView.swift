@@ -105,7 +105,7 @@ struct RemoteControlSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
                 Text("Remote Control")
-                    .font(.system(size: 40, weight: .bold))
+                    .scaledFont(.system(size: 40, weight: .bold))
                     .foregroundColor(.textPrimary)
 
                 hintsSection
@@ -271,15 +271,15 @@ struct RemoteControlSettingsView: View {
     private func slotRowLabel(name: String, value: String) -> some View {
         HStack(spacing: 16) {
             Text(name)
-                .font(.system(size: 26, weight: .medium))
+                .scaledFont(.system(size: 26, weight: .medium))
                 .foregroundColor(.textPrimary)
             Spacer(minLength: 12)
             Text(value)
-                .font(.system(size: 24))
+                .scaledFont(.system(size: 24))
                 .foregroundColor(.accentPrimary)
                 .lineLimit(1)
             Image(systemName: "chevron.right")
-                .font(.system(size: 20, weight: .semibold))
+                .scaledFont(.system(size: 20, weight: .semibold))
                 .foregroundColor(.textTertiary)
         }
     }
@@ -293,7 +293,7 @@ struct RemoteControlSettingsView: View {
     /// `AppBehaviorsSettingsView`'s tvOS sections.
     private func sectionFooter(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 22))
+            .scaledFont(.system(size: 22))
             .foregroundColor(.textTertiary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 4)
@@ -401,7 +401,7 @@ private struct TVSlotChoiceListView<Action: Hashable>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(title)
-                .font(.system(size: 40, weight: .bold))
+                .scaledFont(.system(size: 40, weight: .bold))
                 .foregroundColor(.textPrimary)
                 .padding(.horizontal, 80)
                 .padding(.top, 60)

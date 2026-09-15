@@ -92,9 +92,9 @@ struct M3UImportView: View {
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: mode == .url ? "link" : "doc.fill")
-                            .font(.system(size: 13, weight: .semibold))
+                            .scaledFont(.system(size: 13, weight: .semibold))
                         Text(mode.rawValue)
-                            .font(.headlineSmall)
+                            .scaledFont(.headlineSmall)
                     }
                     .foregroundColor(sourceMode == mode ? .white : .textSecondary)
                     .frame(maxWidth: .infinity)
@@ -129,7 +129,7 @@ struct M3UImportView: View {
                 keyboardType: .URL
             )
             Text("Supports .m3u and .m3u8 formats")
-                .font(.labelSmall)
+                .scaledFont(.labelSmall)
                 .foregroundColor(.textTertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -147,21 +147,21 @@ struct M3UImportView: View {
                             .fill(Color.accentPrimary.opacity(0.15))
                             .frame(width: 46, height: 46)
                         Image(systemName: importedFileURL != nil ? "checkmark.circle.fill" : "doc.badge.plus")
-                            .font(.system(size: 20))
+                            .scaledFont(.system(size: 20))
                             .foregroundColor(.accentPrimary)
                     }
                     VStack(alignment: .leading, spacing: 2) {
                         Text(importedFileName.isEmpty ? "Choose M3U File" : importedFileName)
-                            .font(.headlineSmall)
+                            .scaledFont(.headlineSmall)
                             .foregroundColor(importedFileName.isEmpty ? .textSecondary : .textPrimary)
                             .lineLimit(1)
                         Text(importedFileURL != nil ? "Tap to change" : "Browse from Files")
-                            .font(.labelSmall)
+                            .scaledFont(.labelSmall)
                             .foregroundColor(.textTertiary)
                     }
                     Spacer()
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 13, weight: .medium))
+                        .scaledFont(.system(size: 13, weight: .medium))
                         .foregroundColor(.textTertiary)
                 }
                 .padding(14)
@@ -193,12 +193,12 @@ struct M3UImportView: View {
                 ForEach(groups.prefix(5), id: \.key) { group, channels in
                     HStack {
                         Text(group.isEmpty ? "Ungrouped" : group)
-                            .font(.bodySmall)
+                            .scaledFont(.bodySmall)
                             .foregroundColor(.textPrimary)
                             .lineLimit(1)
                         Spacer()
                         Text("\(channels.count)")
-                            .font(.labelMedium)
+                            .scaledFont(.labelMedium)
                             .foregroundColor(.accentPrimary)
                     }
                     .padding(.horizontal, 12)
@@ -208,7 +208,7 @@ struct M3UImportView: View {
                 }
                 if groups.count > 5 {
                     Text("+ \(groups.count - 5) more groups")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .padding(.leading, 12)
                 }
@@ -222,7 +222,7 @@ struct M3UImportView: View {
             Image(systemName: "exclamationmark.circle.fill")
                 .foregroundColor(.statusLive)
             Text(message)
-                .font(.bodySmall)
+                .scaledFont(.bodySmall)
                 .foregroundColor(.statusLive)
         }
         .padding(14)
@@ -361,9 +361,9 @@ struct EPGImportView: View {
                         HStack(alignment: .top, spacing: 10) {
                             Image(systemName: "info.circle.fill")
                                 .foregroundColor(.accentSecondary)
-                                .font(.system(size: 15))
+                                .scaledFont(.system(size: 15))
                             Text("Import an XMLTV-formatted EPG guide to show program schedules in the TV Guide.")
-                                .font(.bodySmall)
+                                .scaledFont(.bodySmall)
                                 .foregroundColor(.textSecondary)
                         }
                         .padding(14)
@@ -388,7 +388,7 @@ struct EPGImportView: View {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundColor(.statusOnline)
                                 Text("Found \(count) programs")
-                                    .font(.bodyMedium)
+                                    .scaledFont(.bodyMedium)
                                     .foregroundColor(.statusOnline)
                             }
                             .padding(14)
@@ -402,7 +402,7 @@ struct EPGImportView: View {
                                 Image(systemName: "exclamationmark.circle.fill")
                                     .foregroundColor(.statusLive)
                                 Text(error)
-                                    .font(.bodySmall)
+                                    .scaledFont(.bodySmall)
                                     .foregroundColor(.statusLive)
                             }
                             .padding(14)
@@ -478,9 +478,9 @@ struct EPGImportView: View {
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: mode == .url ? "link" : "doc.fill")
-                            .font(.system(size: 13, weight: .semibold))
+                            .scaledFont(.system(size: 13, weight: .semibold))
                         Text(mode.rawValue)
-                            .font(.headlineSmall)
+                            .scaledFont(.headlineSmall)
                     }
                     .foregroundColor(sourceMode == mode ? .white : .textSecondary)
                     .frame(maxWidth: .infinity)
@@ -512,21 +512,21 @@ struct EPGImportView: View {
                         .fill(Color.accentSecondary.opacity(0.15))
                         .frame(width: 46, height: 46)
                     Image(systemName: importedFileURL != nil ? "checkmark.circle.fill" : "doc.badge.plus")
-                        .font(.system(size: 20))
+                        .scaledFont(.system(size: 20))
                         .foregroundColor(.accentSecondary)
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(importedFileName.isEmpty ? "Choose XMLTV File" : importedFileName)
-                        .font(.headlineSmall)
+                        .scaledFont(.headlineSmall)
                         .foregroundColor(importedFileName.isEmpty ? .textSecondary : .textPrimary)
                         .lineLimit(1)
                     Text(importedFileURL != nil ? "Tap to change" : ".xml or .xmltv files")
-                        .font(.labelSmall)
+                        .scaledFont(.labelSmall)
                         .foregroundColor(.textTertiary)
                 }
                 Spacer()
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .medium))
+                    .scaledFont(.system(size: 13, weight: .medium))
                     .foregroundColor(.textTertiary)
             }
             .padding(14)

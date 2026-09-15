@@ -126,7 +126,7 @@ struct TVShowsView: View {
                         showManageGroups = true
                     } label: {
                         Text("Filter")
-                            .font(.headlineSmall)
+                            .scaledFont(.headlineSmall)
                             .foregroundColor(.accentPrimary)
                     }
                 }
@@ -398,7 +398,7 @@ struct TVShowsView: View {
                     }
                 } label: {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 24, weight: .medium))
+                        .font(.system(size: 24, weight: .medium))  // glyph in a fixed box: not text, stays fixed
                         .foregroundColor(showSearchField ? .accentPrimary : .textSecondary)
                         .frame(width: 56, height: 56)
                         .background(
@@ -411,7 +411,7 @@ struct TVShowsView: View {
                 if showSearchField {
                     TextField("Search series", text: $searchText)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 24))
+                        .scaledFont(.system(size: 24))
                         .foregroundColor(.textPrimary)
                         .frame(width: 400)
                         .padding(.horizontal, 16)
@@ -433,7 +433,7 @@ struct TVShowsView: View {
                     showManageGroups = true
                 } label: {
                     Text("Filter")
-                        .font(.headlineSmall)
+                        .scaledFont(.headlineSmall)
                         .foregroundColor(.accentPrimary)
                 }
                 .buttonStyle(TVNoHighlightButtonStyle())
@@ -451,14 +451,14 @@ struct TVShowsView: View {
             if !hiddenGroups.isEmpty && searchText.isEmpty {
                 HStack(spacing: 6) {
                     Text("\(hiddenGroups.count) group\(hiddenGroups.count == 1 ? "" : "s") hidden")
-                        .font(.labelMedium)
+                        .scaledFont(.labelMedium)
                         .foregroundColor(.textSecondary)
                     Button {
                         hiddenGroups.removeAll()
                         HiddenGroupsStore.save(hiddenGroups, forKey: hiddenGroupsKey)
                     } label: {
                         Text("Show All")
-                            .font(.labelMedium)
+                            .scaledFont(.labelMedium)
                             .foregroundColor(.accentPrimary)
                     }
                     .buttonStyle(.plain)
@@ -588,15 +588,15 @@ struct TVShowsView: View {
     private func errorView(_ msg: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 40)).foregroundColor(.statusWarning)
+                .scaledFont(.system(size: 40)).foregroundColor(.statusWarning)
             Text("Failed to load TV shows")
-                .font(.headlineLarge).foregroundColor(.textPrimary)
+                .scaledFont(.headlineLarge).foregroundColor(.textPrimary)
             if let serverName = vodStore.lastSeriesServerName {
                 Text("Server: \(serverName)")
-                    .font(.labelMedium).foregroundColor(.textSecondary)
+                    .scaledFont(.labelMedium).foregroundColor(.textSecondary)
             }
             Text(msg)
-                .font(.bodyMedium).foregroundColor(.textSecondary)
+                .scaledFont(.bodyMedium).foregroundColor(.textSecondary)
                 .multilineTextAlignment(.center)
             PrimaryButton("Try Again") { vodStore.refreshSeries(servers: servers) }
                 .frame(maxWidth: 200)
