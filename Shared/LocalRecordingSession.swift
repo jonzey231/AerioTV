@@ -809,6 +809,28 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     private var urlSession: URLSession?
     private var task: URLSessionDataTask?
     private var reconnectAttempts = 0
+    /// A 429/503 response whose small JSON body is buffered to check for a
+    /// Dispatcharr connection-limit refusal (DispatcharrConnectionLimit).
+    private var errorStatus: Int?
+    private var errorBody = Data()
+    /// Clean-end reconnect ladder; only a VERIFIED session-limit reading
+    /// stops the session (Logan 2026-09-15).
+    private var cleanEndPolicy = LiveCleanEndPolicy()
+    /// When the connection that is feeding the buffer was opened.
+    private var liveSessionStartedAt = Date()
+    /// Why the engine stopped the session on its own, for mpv's relay-EOF
+    /// handler: it must show the notice instead of opening the direct
+    /// stream. Taken (cleared) by `takeStopNotice()`.
+    private var stopNotice: LiveStopNotice?
+
+    /// The notice the engine stopped on, once. Nil for any other close.
+    func takeStopNotice() -> LiveStopNotice? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        let n = stopNotice
+        stopNotice = nil
+        return n
+    }
+
     /// Whether THIS session has ever delivered a byte. Gates the
     /// reconnect budget: a proven-alive stream gets patience (20
     /// attempts), a never-primed one fails fast (5) so a dead channel
@@ -946,6 +968,11 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         liveHeaders = headers
         reconnectAttempts = 0
         everReceivedData = false
+        errorStatus = nil
+        errorBody = Data()
+        cleanEndPolicy.reset()
+        liveSessionStartedAt = Date()
+        stopNotice = nil
         stateLock.unlock()
         Task { @MainActor in
             self.buffering = true
@@ -1149,6 +1176,18 @@ extension LiveRewindEngine: URLSessionDataDelegate {
         // our own teardown - relying on it meant a prime-up 500 never
         // reconnected and the tune sat on an empty buffer until the
         // reader deadline (ATV field capture, twice).
+        if let http = response as? HTTPURLResponse,
+           http.statusCode == 429 || http.statusCode == 503,
+           DispatcharrConnectionLimit.directConnectActive {
+            // Read the tiny JSON body first: a connection-limit refusal is
+            // final, anything else is a drop as before.
+            stateLock.lock()
+            errorStatus = http.statusCode
+            errorBody = Data()
+            stateLock.unlock()
+            completionHandler(.allow)
+            return
+        }
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
             debugLog("[REWIND] live connect HTTP \(http.statusCode); treating as drop")
             completionHandler(.cancel)
@@ -1159,6 +1198,11 @@ extension LiveRewindEngine: URLSessionDataDelegate {
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        stateLock.lock()
+        let bufferingError = errorStatus != nil
+        if bufferingError, errorBody.count < 8192 { errorBody.append(data) }
+        stateLock.unlock()
+        if bufferingError { return }
         // Resolved PER APPEND (the Android channel-change race fix):
         // whichever session is current receives the bytes.
         guard let buffer = bufferForReader, !buffer.closed else { return }
@@ -1180,7 +1224,80 @@ extension LiveRewindEngine: URLSessionDataDelegate {
         // connect) or the non-200 disposition, which schedules its own
         // reconnect in the response handler - never a drop to retry here.
         if let e = error as NSError?, e.code == NSURLErrorCancelled { return }
+        stateLock.lock()
+        let status = errorStatus
+        let body = errorBody
+        errorStatus = nil
+        errorBody = Data()
+        let isCurrent = session === urlSession
+        stateLock.unlock()
+        if let status {
+            if isCurrent, let notice = DispatcharrConnectionLimit.fromResponse(code: status, body: body) {
+                stopForNotice(notice, reason: "HTTP \(status)")
+                return
+            }
+            handleConnectionDrop(session: session, reason: "HTTP \(status)")
+            return
+        }
+        if error == nil, isCurrent {
+            // Clean end: reconnect on the escalating ladder (the drop path
+            // below owns the actual reconnect), and from the second one on
+            // ask Dispatcharr whether we are really at the session limit.
+            stateLock.lock()
+            let firstEnd = cleanEndPolicy.isFirstEnd
+            let sessionStartedAt = liveSessionStartedAt
+            let delay = cleanEndPolicy.nextDelay()
+            let attempt = cleanEndPolicy.attempts
+            stateLock.unlock()
+            debugLog("[RECONNECT] rewind upstream ended cleanly; reconnect attempt \(attempt) in \(Int(delay))s")
+            if !firstEnd {
+                Task { @MainActor in
+                    let verdict = await DispatcharrSessionLimitVerifier.verify(sessionStartedAt: sessionStartedAt)
+                    debugLog("[VERIFY] rewind clean end check: \(verdict.logText)")
+                    guard case .atLimit = verdict else { return }
+                    self.stopForNotice(.streamEnded, reason: "verified session limit reached elsewhere")
+                }
+            }
+            scheduleCleanEndReconnect(after: delay, session: session)
+            return
+        }
         handleConnectionDrop(session: session, reason: error?.localizedDescription ?? "eof")
+    }
+
+    /// Synchronous helper so async callers never touch `stateLock`
+    /// directly (an NSLock lock/unlock pair is unavailable in an async
+    /// context; this body has no suspension point).
+    private func withStateLock<T>(_ body: () -> T) -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return body()
+    }
+
+    /// Reconnect after a clean end, on the policy's escalating delay.
+    private func scheduleCleanEndReconnect(after delay: TimeInterval, session: URLSession) {
+        let expectedBuffer = activeBuffer
+        Task {
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+            let (stopped, stillCurrent) = self.withStateLock { () -> (Bool, Bool) in
+                let s = self.stopNotice != nil
+                let c = session === self.urlSession
+                self.liveSessionStartedAt = Date()
+                return (s, c)
+            }
+            guard !stopped, stillCurrent, let expected = expectedBuffer,
+                  self.bufferForReader === expected, !expected.closed else { return }
+            self.connect()
+        }
+    }
+
+    /// Final stop: no reconnect. mpv's relay EOF picks the notice up.
+    private func stopForNotice(_ notice: LiveStopNotice, reason: String) {
+        debugLog("[LIMIT] rewind engine \(notice.kind.rawValue) (\(reason)); closing session, no reconnect")
+        stateLock.lock(); stopNotice = notice; stateLock.unlock()
+        stopSession()
+        stateLock.lock(); stopNotice = notice; stateLock.unlock()
     }
 
     private func handleConnectionDrop(session: URLSession, reason: String) {

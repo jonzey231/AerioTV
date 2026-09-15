@@ -315,6 +315,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// demux to expect a new source (an SPS change alone then counts),
     /// keeps the switch gap out of the starvation telemetry, and marks the
     /// switch for the playback driver's hold-back learner.
+    /// The URL this ingest is actually reading. Switch Stream observers
+    /// match on this, not on a view's item/override URL, which can lag an
+    /// in-place tile swap.
+    var ingestURL: URL { sourceURL }
+
     func noteSourceSwitch() {
         let now = Date()
         Self.lastSourceSwitch.set(now)
@@ -2129,8 +2134,10 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
             // 2026-09-12: never assume the cause, and fail over when the
             // server says it has no stream). Allow the tiny body through so
             // the failure reason can quote Dispatcharr verbatim.
-            if http.statusCode == 503 {
-                errorStatusCode = 503
+            // 429 too: Dispatcharr's "Stream limit exceeded" body is the
+            // only proof of a session-limit refusal (DispatcharrConnectionLimit).
+            if http.statusCode == 503 || http.statusCode == 429 {
+                errorStatusCode = http.statusCode
                 errorBody.removeAll()
                 if let header = http.value(forHTTPHeaderField: "Retry-After"),
                    let secs = Double(header.trimmingCharacters(in: .whitespaces)) {
@@ -2634,6 +2641,21 @@ final class LiveChannelRetention: ObservableObject {
         }
         remuxer.setRetained(true)
         remuxer.onReady = nil
+        // The previous tile's handlers must not act for a retained channel:
+        // its clean-close re-tune would restart whatever that tile shows
+        // now. A retained connection never reconnects; a clean end (a
+        // server-side terminate) releases it.
+        remuxer.onFirstByte = nil
+        remuxer.onIngestSilence = nil
+        remuxer.reportsIngestStall = false
+        remuxer.onIngestClosed = { [weak self] in
+            Task { @MainActor in
+                DebugLogger.shared.log(
+                    "[AVP-RETAIN] retained '\(channelName)' ended by the server; released, no reconnect",
+                    category: "Playback", level: .info)
+                self?.drop(key: key)
+            }
+        }
         remuxer.onError = { [weak self] error in
             Task { @MainActor in
                 DebugLogger.shared.log(
@@ -3024,10 +3046,15 @@ struct AVPlayerMultiviewTile: View {
     /// clear them (the panel stayed in HDR). Late applies are dropped.
     /// Declared on every platform (start/stop touch it unconditionally).
     @State private var tileStopped = false
-    /// Immediate re-tunes spent on a clean upstream close, capped so a
-    /// server that closes every connection cannot spin forever. Cleared
-    /// with the failover walk (teardown / user tune) and on first frame.
-    @State private var upstreamClosedRetunes = 0
+    /// Clean-close reconnect ladder (immediate, 5 s, 15 s, 30 s, then 60 s)
+    /// with "Reconnecting" showing. A live stream is never abandoned on a
+    /// guess: only a VERIFIED session-limit reading stops it (see
+    /// DispatcharrSessionLimitVerifier). Cleared with the failover walk
+    /// (teardown / user tune) and by Retry.
+    @State private var cleanEndPolicy = LiveCleanEndPolicy()
+    /// When the session that is playing now was opened, for the verifier's
+    /// "a newer session took our slot" test.
+    @State private var liveSessionStartedAt = Date()
     /// Live stall state: the remuxer's latched silence signal, and the
     /// token that keeps exactly one buffer-evaluation loop running.
     @State private var ingestSilent = false
@@ -3132,12 +3159,15 @@ struct AVPlayerMultiviewTile: View {
         }
         .onAppear {
             AudioSessionRefCount.increment(caller: "avp-tile")
+            progressStore.liveStopRetryAction = { retryLiveStopNotice() }
             start()
         }
         .onDisappear {
             // Cancels any standing slow retry in flight.
             teardownToken = UUID()
             stop()
+            progressStore.liveStopNotice = nil
+            progressStore.liveStopRetryAction = nil
             // Tile teardown clears the stream-failover walk
             // (s7_86.txt:353-395).
             resetFailoverWalk()
@@ -3281,6 +3311,23 @@ struct AVPlayerMultiviewTile: View {
         }
         // A second tile joining drops the rewind UI (grid chrome has no
         // scrubber; mpv parity - its relay falls back to direct too).
+        // Switch Stream (live remux tile). The unified single-tile player
+        // is this tile, not NativeHLSPlayerScreen, so the reprime must be
+        // observed here too. Dispatcharr keeps the socket; arm the
+        // remuxer's re-gate on the ingest actually reading that channel.
+        .onReceive(NotificationCenter.default.publisher(for: .switchStreamReprime)) { note in
+            guard let uuid = note.userInfo?["uuid"] as? String else {
+                debugLog("[SWITCH] AVP tile ignored reprime: no uuid"); return
+            }
+            guard let mux = remuxer else {
+                debugLog("[SWITCH] AVP tile ignored reprime: no remuxer (channel=\(channelName))"); return
+            }
+            guard mux.ingestURL.absoluteString.contains("/proxy/ts/stream/\(uuid)") else {
+                debugLog("[SWITCH] AVP tile ignored reprime: ingest url is not /proxy/ts/stream/\(uuid) (channel=\(channelName))"); return
+            }
+            debugLog("[SWITCH] kept connection (AVPlayer remux tile) channel=\(channelName)")
+            mux.noteSourceSwitch()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .aerioLiveRewindDropRelay)) { _ in
             guard liveRewindArmed else { return }
             liveRewindArmed = false
@@ -3443,15 +3490,12 @@ struct AVPlayerMultiviewTile: View {
     /// proof, not a guess, so this re-tunes at once rather than letting
     /// the silence/stale-frame ladder run its course.
     private func handleUpstreamClosed() {
-        guard tileError == nil, !tileStopped else { return }
-        guard upstreamClosedRetunes < Self.upstreamClosedMaxRetunes else {
-            debugLog("[AVP-STREAM] upstream closed \(upstreamClosedRetunes) times; giving up channel=\(channelName)")
-            failOrFallback("ingest closed by upstream")
-            return
-        }
-        upstreamClosedRetunes += 1
-        debugLog("[AVP-STREAM] upstream closed the live stream; immediate re-tune "
-            + "\(upstreamClosedRetunes)/\(Self.upstreamClosedMaxRetunes) channel=\(channelName)")
+        guard tileError == nil, !tileStopped, progressStore.liveStopNotice == nil else { return }
+        let firstEnd = cleanEndPolicy.isFirstEnd
+        let sessionStartedAt = liveSessionStartedAt
+        let delay = cleanEndPolicy.nextDelay()
+        debugLog("[RECONNECT] upstream closed the live stream; attempt \(cleanEndPolicy.attempts) "
+            + "in \(Int(delay))s channel=\(channelName)")
         // Never hand the dead remuxer to channel retention: start() would
         // adopt it back and sit on a closed ingest. stop() cancels it; the
         // fresh ingest's startIngest waits for that cancel to land
@@ -3459,16 +3503,57 @@ struct AVPlayerMultiviewTile: View {
         stop(allowRetain: false)
         statusText = Self.reconnectingStatus
         let token = teardownToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            guard token == teardownToken else {
-                debugLog("[AVP-STREAM] upstream-close re-tune dropped (channel changed or tile gone)")
+        // From the SECOND clean end on, ask Dispatcharr whether this
+        // account is actually at its session limit with a newer session
+        // elsewhere. Only that verified answer stops the reconnects.
+        if !firstEnd {
+            Task { @MainActor in
+                let verdict = await DispatcharrSessionLimitVerifier.verify(sessionStartedAt: sessionStartedAt)
+                debugLog("[VERIFY] clean end check: \(verdict.logText) channel=\(channelName)")
+                guard token == teardownToken, case .atLimit = verdict else { return }
+                showLiveStopNotice(.streamEnded, reason: "verified session limit reached elsewhere")
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(delay, 0.5)) {
+            guard token == teardownToken, progressStore.liveStopNotice == nil else {
+                debugLog("[RECONNECT] upstream-close re-tune dropped (channel changed, tile gone or stopped)")
                 return
             }
             start()
         }
     }
 
-    private static let upstreamClosedMaxRetunes = 3
+    // MARK: - Live stop notice (connection limit / reconnect bounce)
+
+    /// Stops the pipeline for good and shows the notice. No retry, no
+    /// failover walk, no Reconnecting status: the connection is released
+    /// and the tile waits for Retry.
+    private func showLiveStopNotice(_ notice: LiveStopNotice, reason: String) {
+        guard progressStore.liveStopNotice == nil else { return }
+        debugLog("[LIMIT] \(notice.kind.rawValue) (\(reason)); connection released, waiting for Retry channel=\(channelName)")
+        // Cancels every scheduled retry (standing, 503 ladders, deadlines).
+        teardownToken = UUID()
+        failoverInFlight = false
+        firstByteDeadlineToken = UUID()
+        stop(allowRetain: false)
+        statusText = nil
+        progressStore.liveStopNotice = notice
+    }
+
+    /// Retry button of the notice: one fresh tune of the same channel.
+    private func retryLiveStopNotice() {
+        guard progressStore.liveStopNotice != nil else { return }
+        debugLog("[LIMIT] Retry pressed channel=\(channelName)")
+        progressStore.liveStopNotice = nil
+        teardownToken = UUID()
+        resetFailoverWalk()
+        cleanEndPolicy.reset()
+        mismatchAutoRetries = 0
+        serverBusyRetries = 0
+        channelStoppingRetries = 0
+        standingRetries = 0
+        start()
+    }
 
     // MARK: - No-first-byte stream failover (s7_86.txt:353-395)
 
@@ -3496,7 +3581,7 @@ struct AVPlayerMultiviewTile: View {
     /// Wipes the walk. Called on teardown and on every user-initiated
     /// tune, so a new channel never inherits the old channel's tried set.
     private func resetFailoverWalk() {
-        upstreamClosedRetunes = 0
+        cleanEndPolicy.reset()
         ingestSilent = false
         stallEvalToken = UUID()
         firstByteDeadlineToken = UUID()
@@ -3757,6 +3842,16 @@ struct AVPlayerMultiviewTile: View {
             return
         }
         #endif
+        // A stopped notice owns the tile until Retry; late errors from the
+        // torn-down pipeline are noise.
+        if progressStore.liveStopNotice != nil { return }
+        // Dispatcharr connection-limit refusal (exact server signal, Direct
+        // Connect only): show the notice and stop. No retry ladder, no
+        // failover walk, no change_stream.
+        if !isVOD, !isDVR, let notice = DispatcharrConnectionLimit.fromIngestFailure(reason) {
+            showLiveStopNotice(notice, reason: reason)
+            return
+        }
         // MKV master-playlist rejection (field 2026-08-29, -12927 on a
         // UHD remux whose SPS carries custom scaling lists): CoreMedia's
         // MULTIVARIANT loader parses the init's parameter sets with a
@@ -4240,6 +4335,8 @@ struct AVPlayerMultiviewTile: View {
         }
         tileStopped = false
         tileError = nil
+        progressStore.liveStopNotice = nil
+        liveSessionStartedAt = Date()
         if let cu = catchup {
             startCatchup(cu)
             return
@@ -4302,6 +4399,10 @@ struct AVPlayerMultiviewTile: View {
                         applyDisplayCriteria(width: vp.width, height: vp.height,
                                              fps: vp.fps, is10Bit: vp.tenBit)
                     }
+                    // The retained entry pointed these at retention; the
+                    // clean-close / silence signals belong to this tile again.
+                    mux.onFirstByte = nil
+                    attachLiveStallHandlers(mux)
                     remuxer = mux
                     statusText = nil
                     // The onChange(readyLocalURL) handler starts the player.

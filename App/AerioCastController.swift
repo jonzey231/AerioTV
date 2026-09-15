@@ -694,6 +694,17 @@ final class AerioCastController: NSObject, ObservableObject {
                 + "ac-3=\(cap("ac-3")) ec-3=\(cap("ec-3")) aac=\(cap("mp4a.40.2")) "
                 + "-> ingest=plain audio=\(allowAC3 ? "passthrough" : "aac-only")")
             let playlistURL: URL
+            // A connection-limit refusal or reconnect bounce after the
+            // receiver loaded ends the cast with the notice text.
+            CastHLSProxySession.shared.onTerminalAfterReady = { text in
+                Task { @MainActor in
+                    let controller = AerioCastController.shared
+                    guard controller.isCasting else { return }
+                    debugLog("[LIMIT] cast ingest stopped after load; ending cast")
+                    controller.surfaceCastFailure(text)
+                    controller.stopCasting()
+                }
+            }
             do {
                 // The DEMUXED master is what the receiver loads: the audio
                 // rendition declares ac-3 / ec-3 honestly in its own
@@ -769,6 +780,8 @@ final class AerioCastController: NSObject, ObservableObject {
             return isDispatcharr
                 ? "Dispatcharr could not start this channel (HTTP \(code))."
                 : "The server could not start this channel (HTTP \(code))."
+        case CastHLSProxyError.stopped(let notice):
+            return "\(notice.title). \(notice.message)"
         case CastHLSProxyError.ingestUnreachable:
             return "This channel's stream could not be reached from this iPhone."
         case CastHLSProxyError.noLANAddress:

@@ -35,9 +35,14 @@ enum CastHLSProxyError: Error, CustomStringConvertible {
     /// (503 = the server could not start this feed, e.g. a broken output
     /// profile); the sender retries once without the profile parameter.
     case upstreamUnavailable(Int)
+    /// Dispatcharr connection-limit refusal, or the server ending the
+    /// stream again right after the automatic reconnect. Final: never
+    /// reconnected (LiveStopNotice).
+    case stopped(LiveStopNotice)
 
     var description: String {
         switch self {
+        case .stopped(let notice): return "\(notice.title). \(notice.message)"
         case .noLANAddress: return "no Wi-Fi LAN address to serve the cast proxy on"
         case .serverFailed: return "local HTTP server failed to start"
         case .ingestUnreachable: return "stream unreachable"
@@ -116,6 +121,18 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// Terminal ingest failure (unsupported codec, connect exhaustion),
     /// observed by `startChannel`'s ready wait. First error wins.
     private var terminalError: Error?
+    /// `startChannel` already handed the playlist to the sender, so a
+    /// terminal stop after this point is reported through
+    /// `onTerminalAfterReady` instead of the ready wait.
+    private var readyReturned = false
+    /// Clean-end reconnect ladder; only a VERIFIED session-limit reading
+    /// stops the ingest (Logan 2026-09-15).
+    private var cleanEndPolicy = LiveCleanEndPolicy()
+    /// When the ingest connection now feeding the receiver was opened.
+    private var liveSessionStartedAt = Date()
+    /// Called (off main) with the user-facing text when the ingest stops
+    /// for good after the receiver was loaded. Set by the cast sender.
+    var onTerminalAfterReady: (@Sendable (String) -> Void)?
     private var activeURL: URL?
     private var currentGeneration = 0
     private var consecutiveFailures = 0
@@ -250,6 +267,9 @@ final class CastHLSProxySession: @unchecked Sendable {
             self.stopIngestLocked()
             self.activeURL = rawTSURL
             self.terminalError = nil
+            self.readyReturned = false
+            self.cleanEndPolicy.reset()
+            self.liveSessionStartedAt = Date()
             self.consecutiveFailures = 0
             self.everConnected = false
             self.lastIngestConnectAt = nil
@@ -293,6 +313,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             if ready.segments >= Self.readyMinSegments,
                ready.mediaTicks >= Self.readyMediaTicks {
                 let seconds = Double(ready.mediaTicks) / Double(CastFMP4Remuxer.ticksPerSecond)
+                queue.sync { readyReturned = true }
                 log(String(format: "ready with %d segments, %.2fs media (gate %.0fs / %d segments)",
                            ready.segments, seconds,
                            Double(Self.readyMediaTicks) / Double(CastFMP4Remuxer.ticksPerSecond),
@@ -515,9 +536,44 @@ final class CastHLSProxySession: @unchecked Sendable {
                     self.scheduleReconnectLocked(url: url, headers: headers, closingEpoch: epoch)
                 }
             },
-            onFinished: { [weak self] failureReason in
+            onFinished: { [weak self] failureReason, errorBody in
                 guard let self, self.ingestEpoch == epoch else { return }
                 if let failureReason { self.log("ingest ended: \(failureReason)") }
+                // Dispatcharr connection limit: final, reconnecting would only
+                // keep competing for the user's sessions.
+                if let failureReason, let body = errorBody,
+                   let code = Int(failureReason.replacingOccurrences(of: "http=", with: "")),
+                   let notice = DispatcharrConnectionLimit.fromResponse(code: code, body: body) {
+                    self.log("[LIMIT] ingest \(notice.kind.rawValue): refused, no reconnect")
+                    self.stopForNoticeLocked(notice)
+                    return
+                }
+                // Clean end: reconnect on the escalating ladder, and from
+                // the second end on ask Dispatcharr whether this account is
+                // really at its session limit with a newer session
+                // elsewhere. Only that verified answer stops the cast.
+                if failureReason == "stream ended" {
+                    let firstEnd = self.cleanEndPolicy.isFirstEnd
+                    let sessionStartedAt = self.liveSessionStartedAt
+                    let delay = self.cleanEndPolicy.nextDelay()
+                    self.log("[RECONNECT] ingest ended cleanly; reconnect attempt "
+                        + "\(self.cleanEndPolicy.attempts) in \(Int(delay))s")
+                    if !firstEnd {
+                        Task { @MainActor [weak self] in
+                            let verdict = await DispatcharrSessionLimitVerifier.verify(
+                                sessionStartedAt: sessionStartedAt)
+                            guard let self else { return }
+                            self.queue.async {
+                                self.log("[VERIFY] clean end check: \(verdict.logText)")
+                                guard case .atLimit = verdict else { return }
+                                self.stopForNoticeLocked(.streamEnded)
+                            }
+                        }
+                    }
+                    self.scheduleCleanEndReconnectLocked(url: url, headers: headers,
+                                                         closingEpoch: epoch, delay: delay)
+                    return
+                }
                 // HTTP 503 before a single byte means the server could not
                 // start this feed at all. Terminal right away rather than
                 // after the backoff ladder, so the user is told while they
@@ -531,6 +587,34 @@ final class CastHLSProxySession: @unchecked Sendable {
             })
         ingest = connection
         connection.start()
+    }
+
+    /// Runs on `queue`. Reconnect after a clean end on the policy delay,
+    /// without spending the connect-failure budget (nothing failed).
+    private func scheduleCleanEndReconnectLocked(url: URL, headers: [String: String],
+                                                 closingEpoch: Int, delay: TimeInterval) {
+        guard ingestEpoch == closingEpoch, terminalError == nil else { return }
+        stopIngestLocked()
+        let reconnectEpoch = ingestEpoch
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.ingestEpoch == reconnectEpoch, self.activeURL == url,
+                  self.terminalError == nil else { return }
+            guard let store = self.store else { return }
+            self.liveSessionStartedAt = Date()
+            self.currentGeneration = store.beginGeneration()
+            self.startIngestLocked(url: url, headers: headers)
+        }
+    }
+
+    /// Runs on `queue`. Terminal stop for a LiveStopNotice: the ingest is
+    /// released and nothing reconnects.
+    private func stopForNoticeLocked(_ notice: LiveStopNotice) {
+        terminalError = CastHLSProxyError.stopped(notice)
+        stopIngestLocked()
+        if readyReturned, let hook = onTerminalAfterReady {
+            let text = "\(notice.title). \(notice.message)"
+            DispatchQueue.main.async { hook(text) }
+        }
     }
 
     /// Runs on `queue`. Bounded backoff, then a NEW generation: the
@@ -609,7 +693,11 @@ final class CastHLSProxySession: @unchecked Sendable {
         private let queue: DispatchQueue
         private let onConnected: () -> Void
         private let onData: (Data) -> Void
-        private let onFinished: (String?) -> Void
+        private let onFinished: (String?, Data?) -> Void
+        /// A 429 / 503 whose small JSON body is read before reporting, so
+        /// the session can recognize a connection-limit refusal.
+        private var errorStatus: Int?
+        private var errorBody = Data()
         private var session: URLSession?
         private var task: URLSessionDataTask?
         private var cancelled = false
@@ -618,7 +706,7 @@ final class CastHLSProxySession: @unchecked Sendable {
         init(url: URL, headers: [String: String], queue: DispatchQueue,
              onConnected: @escaping () -> Void,
              onData: @escaping (Data) -> Void,
-             onFinished: @escaping (String?) -> Void) {
+             onFinished: @escaping (String?, Data?) -> Void) {
             self.url = url
             self.headers = headers
             self.queue = queue
@@ -652,11 +740,18 @@ final class CastHLSProxySession: @unchecked Sendable {
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                         didReceive response: URLResponse,
                         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+            if let http = response as? HTTPURLResponse,
+               http.statusCode == 429 || http.statusCode == 503 {
+                let code = http.statusCode
+                queue.async { [weak self] in self?.errorStatus = code }
+                completionHandler(.allow)
+                return
+            }
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                 let code = http.statusCode
                 queue.async { [weak self] in
                     guard let self, !self.cancelled else { return }
-                    self.onFinished("http=\(code)")
+                    self.onFinished("http=\(code)", nil)
                 }
                 completionHandler(.cancel)
                 return
@@ -672,6 +767,10 @@ final class CastHLSProxySession: @unchecked Sendable {
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
             queue.async { [weak self] in
                 guard let self, !self.cancelled else { return }
+                if self.errorStatus != nil {
+                    if self.errorBody.count < 8192 { self.errorBody.append(data) }
+                    return
+                }
                 self.onData(data)
             }
         }
@@ -680,7 +779,12 @@ final class CastHLSProxySession: @unchecked Sendable {
             queue.async { [weak self] in
                 guard let self, !self.cancelled else { return }
                 if let error, (error as NSError).code == NSURLErrorCancelled { return }
-                self.onFinished(error.map { $0.localizedDescription } ?? "stream ended")
+                if let code = self.errorStatus {
+                    self.errorStatus = nil
+                    self.onFinished("http=\(code)", self.errorBody)
+                    return
+                }
+                self.onFinished(error.map { $0.localizedDescription } ?? "stream ended", nil)
             }
         }
     }

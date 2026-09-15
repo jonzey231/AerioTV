@@ -611,6 +611,15 @@ struct MultiviewTileView: View {
                 playbackErrorOverlay(decodeErrorMessage)
             }
         }
+        // Connection-limit / stream-ended notice: static, Retry only.
+        .overlay {
+            if let notice = stores.liveStopNotice {
+                liveStopNoticeOverlay(notice)
+            }
+        }
+        .onChange(of: stores.liveStopNotice) { _, notice in
+            handleLiveStopNoticeChange(notice)
+        }
         // GH #70 honest-resume notice: a live unpause with no rewind buffer
         // rejoined the live edge; the coordinator raised the note (solo
         // fullscreen only) and auto-clears it after a few seconds.
@@ -638,7 +647,10 @@ struct MultiviewTileView: View {
         // Chrome Retry cell -> this tile's own retryNow() (identical to the
         // card button), so the countdown resets and "Reconnecting…" shows.
         .onReceive(NotificationCenter.default.publisher(for: .connectionIssueRetryRequested)) { note in
-            if (note.object as? String) == tile.id, decodeErrorMessage != nil {
+            guard (note.object as? String) == tile.id else { return }
+            if stores.liveStopNotice != nil {
+                retryLiveStopNotice()
+            } else if decodeErrorMessage != nil {
                 retryNow()
             }
         }
@@ -1081,6 +1093,15 @@ struct MultiviewTileView: View {
                 if let decodeErrorMessage {
                     playbackErrorOverlay(decodeErrorMessage)
                 }
+            }
+            // Connection-limit / stream-ended notice: static, Retry only.
+            .overlay {
+                if let notice = stores.liveStopNotice {
+                    liveStopNoticeOverlay(notice)
+                }
+            }
+            .onChange(of: stores.liveStopNotice) { _, notice in
+                handleLiveStopNoticeChange(notice)
             }
             // Hand audio off the instant a VOD tile finishes (mirrors
             // the tvOS body). No-op unless this was the audio tile.
@@ -1712,6 +1733,84 @@ struct MultiviewTileView: View {
                 NotificationCenter.default.post(name: .connectionIssueChanged, object: false)
             }
         }
+    }
+
+    /// Card for `LiveStopNotice` (Dispatcharr connection limit, or a stream
+    /// the server ended again right after the automatic reconnect). Same
+    /// look as the error card but deliberately static: no countdown, no
+    /// auto-retry, no Reconnecting line. iOS taps Retry on the card; tvOS
+    /// reaches Retry through the chrome's connection-issue cell, which is
+    /// focused when this card goes up (a card button cannot take Siri
+    /// remote focus over the playback surface, see playbackErrorOverlay).
+    private func liveStopNoticeOverlay(_ notice: LiveStopNotice) -> some View {
+        let compact = !isSoleTile
+        return ZStack {
+            Color.black.opacity(compact ? 0.82 : 0.72)
+            VStack(spacing: compact ? 6 : 12) {
+                Text(notice.title)
+                    .scaledFont(compact ? .headline : .title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                Text(notice.message)
+                    .scaledFont(compact ? .caption : .subheadline)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(compact ? 3 : nil)
+                    .padding(.horizontal, compact ? 8 : 24)
+                #if os(tvOS)
+                if compact {
+                    Text("Select Retry in the controls.")
+                        .scaledFont(.caption2)
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+                #else
+                Button {
+                    retryLiveStopNotice()
+                } label: {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                        .scaledFont(.footnote.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Capsule().fill(Color.accentPrimary))
+                }
+                .buttonStyle(.plain)
+                #endif
+            }
+            .padding(compact ? 12 : 32)
+        }
+    }
+
+    /// The notice went up or came down: drive the chrome's connection-issue
+    /// Retry cell (tvOS focus target) exactly like the error card does.
+    private func handleLiveStopNoticeChange(_ notice: LiveStopNotice?) {
+        if notice != nil {
+            // The notice owns the tile; no reconnect loop may run under it.
+            autoReconnectTask?.cancel()
+            autoReconnectTask = nil
+            softStallEscalationTask?.cancel()
+            softStallEscalationTask = nil
+            softStall = false
+            decodeErrorMessage = nil
+            isReconnecting = false
+            reconnectCountdown = 0
+            progressStore.connectionIssueActive = true
+            NotificationCenter.default.post(name: .connectionIssueChanged, object: true)
+            DebugLogger.shared.log(
+                "[LIMIT] card shown kind=\(notice?.kind.rawValue ?? "") tile=\(tile.id) sole=\(isSoleTile)",
+                category: "Playback", level: .info)
+        } else if decodeErrorMessage == nil, progressStore.connectionIssueActive {
+            progressStore.connectionIssueActive = false
+            NotificationCenter.default.post(name: .connectionIssueChanged, object: false)
+        }
+    }
+
+    /// Retry on the notice card or the chrome cell: one fresh tune.
+    private func retryLiveStopNotice() {
+        DebugLogger.shared.log(
+            "[MV-Cmd] live stop notice Retry tile=\(tile.id)",
+            category: "Playback", level: .info)
+        progressStore.liveStopRetryAction?()
     }
 
     private var reconnectStatusText: String {
@@ -2512,6 +2611,8 @@ final class PlayerTileStores: ObservableObject {
     @Published private(set) var liveResumeNotice: String? = nil
     /// `progress.streamStalled` (soft "Reconnecting…" card).
     @Published private(set) var streamStalled: Bool = false
+    /// `progress.liveStopNotice` (connection-limit / stream-ended card).
+    @Published private(set) var liveStopNotice: LiveStopNotice? = nil
     /// Bumped when a value the CONTEXT MENU / track dialogs read
     /// changes (pause state, audio sync, selected track, track-list
     /// counts) and once on the first position tick, when the engine has
@@ -2538,6 +2639,11 @@ final class PlayerTileStores: ObservableObject {
             .removeDuplicates()
             .dropFirst()
             .sink { [weak self] in self?.streamStalled = $0 }
+            .store(in: &bag)
+        progress.$liveStopNotice
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] in self?.liveStopNotice = $0 }
             .store(in: &bag)
 
         // Menu-relevant values. Track LISTS are compared by count: the

@@ -157,6 +157,315 @@ final class LiveConnectionRegistry: @unchecked Sendable {
     }
 }
 
+/// A live stream the app stopped on purpose and will not restart by
+/// itself: a Dispatcharr connection-limit refusal, or a stream the server
+/// ended again right after the one automatic reconnect. The player shows
+/// the title and message with a Retry button; nothing retries on its own.
+struct LiveStopNotice: Equatable, Sendable {
+    enum Kind: String, Sendable {
+        /// HTTP 429 "Stream limit exceeded": the user's own session limit.
+        case userStreamLimit
+        /// HTTP 503 "All active M3U profiles have reached maximum
+        /// connection limits": every provider profile is at max_streams.
+        case providerLimit
+        /// Clean end again within 60 s of the automatic reconnect.
+        case streamEnded
+    }
+    let kind: Kind
+    let title: String
+    let message: String
+
+    static let streamEnded = LiveStopNotice(
+        kind: .streamEnded,
+        title: "Stream ended",
+        message: "This stream was stopped by the server. Press Retry to start it again.")
+}
+
+/// Dispatcharr connection-limit refusals (Android parity, cf8afe49),
+/// recognized ONLY from the server's exact signals and ONLY while the
+/// active playlist is a Dispatcharr Direct Connect source. Every other
+/// status or body (503 "Channel is stopping", "Failed to register client",
+/// "No streams assigned to channel", ...) is not a limit signal and keeps
+/// its existing handling.
+enum DispatcharrConnectionLimit {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var _directConnectActive = false
+
+    /// Published by ChannelStore whenever its active server changes.
+    /// Readable from any queue (ingest delegates, mpv event thread).
+    static var directConnectActive: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _directConnectActive }
+        set { lock.lock(); _directConnectActive = newValue; lock.unlock() }
+    }
+
+    private static let userLimitPrefix = "Stream limit exceeded"
+    private static let providerLimitPrefix = "All active M3U profiles have reached maximum connection limits"
+
+    /// The notice for a raw response, or nil. `body` is the response body
+    /// (the JSON `error` field is read out of it).
+    static func fromResponse(code: Int, body: Data) -> LiveStopNotice? {
+        guard code == 429 || code == 503 else { return nil }
+        return fromResponse(code: code, reason: errorField(body))
+    }
+
+    /// The notice for a status plus Dispatcharr's already-extracted
+    /// `error` reason, or nil.
+    static func fromResponse(code: Int, reason: String?) -> LiveStopNotice? {
+        guard directConnectActive,
+              let reason = reason?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !reason.isEmpty else { return nil }
+        if code == 429, reason.range(of: userLimitPrefix, options: [.caseInsensitive, .anchored]) != nil {
+            return LiveStopNotice(kind: .userStreamLimit,
+                                  title: "Too many sessions playing",
+                                  message: userLimitMessage(reason))
+        }
+        if code == 503, reason.range(of: providerLimitPrefix, options: [.caseInsensitive, .anchored]) != nil {
+            return LiveStopNotice(kind: .providerLimit,
+                                  title: "Server is busy",
+                                  message: "All connections for this channel are in use right now. "
+                                    + "Try again in a few minutes, or contact your server administrator.")
+        }
+        return nil
+    }
+
+    /// The notice inside a TSHLSRemuxer ingest-failure text
+    /// ("ingest failed: HTTP 429 | reason=..."), or nil.
+    static func fromIngestFailure(_ text: String) -> LiveStopNotice? {
+        let code: Int
+        if text.contains("ingest failed: HTTP 429") { code = 429 }
+        else if text.contains("ingest failed: HTTP 503") { code = 503 }
+        else { return nil }
+        var reason: String?
+        for field in text.components(separatedBy: " | ") where field.hasPrefix("reason=") {
+            reason = String(field.dropFirst("reason=".count))
+        }
+        return fromResponse(code: code, reason: reason)
+    }
+
+    /// JSON `error` string of a Dispatcharr error body, nil when absent.
+    /// No fallback text: a match must be on the server's exact wording.
+    static func errorField(_ body: Data) -> String? {
+        guard !body.isEmpty,
+              let object = try? JSONSerialization.jsonObject(with: body),
+              let dict = object as? [String: Any],
+              let reason = dict["error"] as? String else { return nil }
+        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func userLimitMessage(_ reason: String) -> String {
+        var count: Int?
+        if let open = reason.firstIndex(of: "(") {
+            let digits = reason[reason.index(after: open)...].prefix { $0.isNumber }
+            count = Int(digits)
+        }
+        let sessions: String
+        switch count {
+        case nil: sessions = "a limited number of sessions"
+        case 1: sessions = "1 session"
+        case let n?: sessions = "\(n) sessions"
+        }
+        return "Your account can play \(sessions) at once, and they are all in use. "
+            + "Stop something that is playing, or contact your server administrator."
+    }
+}
+
+/// One GET that reads only what mpv cannot: the status and JSON body of a
+/// refused live request. mpv (libavformat) reports every HTTP refusal as a
+/// generic load failure, so after one the coordinator asks once before its
+/// own retry. A 200 is cancelled at the response headers; only a 429 or 503
+/// body is read (bounded). Registered with LiveConnectionRegistry, and only
+/// run while mpv holds no connection (its load already failed).
+final class DispatcharrLimitProbe: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var status: Int?
+    private var body = Data()
+    private var finished = false
+    private let completion: @Sendable (LiveStopNotice?, String) -> Void
+    private var connID: UUID?
+
+    private init(completion: @escaping @Sendable (LiveStopNotice?, String) -> Void) {
+        self.completion = completion
+    }
+
+    static func run(url: URL, headers: [String: String], owner: String,
+                    completion: @escaping @Sendable (LiveStopNotice?, String) -> Void) {
+        guard DispatcharrConnectionLimit.directConnectActive else {
+            completion(nil, "not Direct Connect")
+            return
+        }
+        let probe = DispatcharrLimitProbe(completion: completion)
+        probe.connID = LiveConnectionRegistry.shared.open(url, owner: owner)
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 4
+        let session = URLSession(configuration: config, delegate: probe, delegateQueue: nil)
+        var request = URLRequest(url: url)
+        for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+        session.dataTask(with: request).resume()
+        session.finishTasksAndInvalidate()
+    }
+
+    private func finish(_ notice: LiveStopNotice?, _ summary: String) {
+        lock.lock()
+        guard !finished else { lock.unlock(); return }
+        finished = true
+        let id = connID
+        lock.unlock()
+        LiveConnectionRegistry.shared.close(id)
+        completion(notice, summary)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 429 || code == 503 {
+            lock.lock(); status = code; lock.unlock()
+            completionHandler(.allow)
+            return
+        }
+        completionHandler(.cancel)
+        finish(nil, "HTTP \(code)")
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        body.append(data)
+        let big = body.count > 8192
+        lock.unlock()
+        if big { dataTask.cancel() }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let code = status
+        let data = body
+        lock.unlock()
+        guard let code else {
+            finish(nil, error.map { "transport: \($0.localizedDescription)" } ?? "no response")
+            return
+        }
+        finish(DispatcharrConnectionLimit.fromResponse(code: code, body: data),
+               "HTTP \(code) reason=\(DispatcharrConnectionLimit.errorField(data) ?? "none")")
+    }
+}
+
+/// Clean-end reconnect policy for a live stream (Logan 2026-09-15,
+/// revised). Dispatcharr's "terminate on limit exceeded" ends the oldest
+/// client cleanly, so two devices that both reconnect instantly boot each
+/// other. The answer is NOT to give up: a live stream is never abandoned
+/// on a guess. Repeated clean ends reconnect on an escalating ladder
+/// (immediate, 5 s, 15 s, 30 s, then every 60 s) with "Reconnecting"
+/// showing, and the ladder resets after 60 s of healthy playback, a
+/// channel change or Retry. Only VERIFIED evidence that this account is
+/// at its session limit with a newer session elsewhere
+/// (DispatcharrSessionLimitVerifier) stops the reconnects.
+struct LiveCleanEndPolicy {
+    /// Delay before reconnect attempt n (0-based); past the table, 60 s.
+    static let delays: [Double] = [0, 5, 15, 30]
+    static let steadyDelay: Double = 60
+    /// Healthy playback this long makes the next clean end a fresh first.
+    static let healthyResetSeconds: TimeInterval = 60
+
+    private(set) var attempts = 0
+    private var lastReconnectAt: Date?
+
+    /// Delay for the reconnect this clean end earns, escalating. Resets
+    /// itself when the previous reconnect has been playing healthily for
+    /// `healthyResetSeconds`.
+    mutating func nextDelay(now: Date = Date()) -> Double {
+        if let at = lastReconnectAt, now.timeIntervalSince(at) >= Self.healthyResetSeconds {
+            attempts = 0
+        }
+        let delay = attempts < Self.delays.count ? Self.delays[attempts] : Self.steadyDelay
+        attempts += 1
+        lastReconnectAt = now
+        return delay
+    }
+
+    /// True for the FIRST clean end of a tune: reconnect immediately, as
+    /// the app always has, and do not spend a verification round trip.
+    var isFirstEnd: Bool { attempts == 0 }
+
+    /// When the reconnect this clean end follows was started (the session
+    /// whose end we are judging), for the verifier's "newer session" test.
+    var lastReconnectStartedAt: Date? { lastReconnectAt }
+
+    mutating func reset() {
+        attempts = 0
+        lastReconnectAt = nil
+    }
+}
+
+/// Verifies, against Dispatcharr itself, that this account is at its
+/// concurrent-session limit with a session opened elsewhere after ours.
+/// The ONLY evidence that turns repeated clean ends into a stop. Reads
+/// `/api/accounts/users/me/` (id + stream_limit) and `/proxy/ts/status`
+/// (every running channel's clients, with user_id and connected_at, from
+/// apps/proxy/live_proxy/channel_status.py). `/proxy/ts/status` is
+/// IsAdmin-gated, so a non-admin account simply cannot verify: 401/403,
+/// a transport failure or an unexpected shape all mean "unverifiable",
+/// and the caller keeps reconnecting on its backoff ladder.
+@MainActor
+enum DispatcharrSessionLimitVerifier {
+    enum Verdict {
+        /// Verified: at or above stream_limit, with a newer session on
+        /// another client. The stream may stop until Retry.
+        case atLimit(String)
+        /// Verified otherwise: keep reconnecting.
+        case notAtLimit(String)
+        /// Nothing could be read: keep reconnecting. Never a stop.
+        case unverifiable(String)
+
+        var logText: String {
+            switch self {
+            case .atLimit(let d): return "AT LIMIT (\(d))"
+            case .notAtLimit(let d): return "not at limit (\(d))"
+            case .unverifiable(let d): return "unverifiable (\(d))"
+            }
+        }
+    }
+
+    /// `sessionStartedAt` is when the session that just ended was opened;
+    /// only a client that connected AFTER it counts as the newer session
+    /// that took our slot.
+    static func verify(sessionStartedAt: Date) async -> Verdict {
+        guard DispatcharrConnectionLimit.directConnectActive else {
+            return .unverifiable("not a Direct Connect playlist")
+        }
+        guard let api = SwitchStreamFlow.makeAPI(server: ChannelStore.shared.activeServer) else {
+            return .unverifiable("no Dispatcharr API for the active playlist")
+        }
+        let me: DispatcharrUserLimits
+        do {
+            me = try await api.getCurrentUserLimits()
+        } catch {
+            return .unverifiable("users/me failed: \(error)")
+        }
+        guard me.id >= 0 else { return .unverifiable("users/me carried no id") }
+        guard me.streamLimit > 0 else {
+            return .notAtLimit("account has no stream limit")
+        }
+        let status: DispatcharrLiveProxyStatus
+        do {
+            status = try await api.getLiveProxyStatus()
+        } catch {
+            return .unverifiable("proxy status failed (admin only): \(error)")
+        }
+        let mineID = String(me.id)
+        var mine: [DispatcharrLiveProxyStatus.Client] = []
+        for channel in status.channels {
+            mine.append(contentsOf: channel.clients.filter { $0.userID == mineID })
+        }
+        let newer = mine.filter { ($0.connectedAt ?? 0) > sessionStartedAt.timeIntervalSince1970 }
+        let detail = "sessions=\(mine.count)/\(me.streamLimit) newerThanOurs=\(newer.count)"
+        if mine.count >= me.streamLimit, !newer.isEmpty {
+            return .atLimit(detail)
+        }
+        return .notAtLimit(detail)
+    }
+}
+
 // Casting rework P2: the Dispatcharr progressive-fMP4 helpers
 // (webCastStreamURL + castWebOutputProfileID) that used to live here are
 // gone. The web receiver stuttered on that URL every 10-15 s because a
@@ -410,6 +719,14 @@ final class HLSCapabilityStore: NSObject {
 
     private func record(status: Int, redirectIsHLS: Bool, for key: String) {
         inFlight.remove(key)
+        // A refusal (429 session limit, 5xx busy/stopping) says nothing
+        // about HLS support: never cache a verdict from it, and never
+        // surface a limit notice from a probe. Re-probed on a later session.
+        if status == 429 || (500...599).contains(status) {
+            debugLog("[HLS-CAP] \(key) -> probe refused (status \(status)); no verdict recorded")
+            probedThisSession.insert(key)
+            return
+        }
         probedThisSession.insert(key)
         let wasCapable = capable.contains(key)
         if status == 302 || status == 301 {
@@ -3772,6 +4089,34 @@ struct DispatcharrAPI {
     /// owner:false event path never rewrites it, so it stays stale ~20s) —
     /// use it only to seed the current-stream mark before any in-session
     /// switch, never to confirm one.
+    /// `/api/accounts/users/me/`, for the fields the session-limit
+    /// verification needs: the account's own id and its stream_limit
+    /// (0 / absent = unlimited).
+    func getCurrentUserLimits() async throws -> DispatcharrUserLimits {
+        let url = try buildURL(path: "/api/accounts/users/me/")
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.httpMethod = "GET"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        return try decode(DispatcharrUserLimits.self, from: data)
+    }
+
+    /// `/proxy/ts/status` (admin): every live channel the proxy is
+    /// running, with its connected clients (user id + connect time).
+    /// The only server-side view of who is holding this account's
+    /// sessions. Admin-gated: a non-admin account gets 401/403, which
+    /// the caller treats as "unverifiable".
+    func getLiveProxyStatus() async throws -> DispatcharrLiveProxyStatus {
+        let url = try buildURL(path: "/proxy/ts/status")
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.httpMethod = "GET"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        return try decode(DispatcharrLiveProxyStatus.self, from: data)
+    }
+
     func getChannelStatus(channelUUID: String) async throws -> DispatcharrChannelStatus {
         let url = try buildURL(path: "/proxy/ts/status/\(channelUUID)")
         var request = URLRequest(url: url, timeoutInterval: 15)
@@ -4758,6 +5103,69 @@ struct DispatcharrChangeStreamResponse: Decodable {
 /// (reliable across switches); `streamID` is the active stream pk (goes
 /// stale on the event path — seed-only, never a confirm signal). Both
 /// decode tolerantly (DRF may string-encode the id).
+/// `/api/accounts/users/me/`, limited to the session-limit fields.
+struct DispatcharrUserLimits: Decodable {
+    let id: Int
+    /// Concurrent streams this account may hold. 0 (or absent) means the
+    /// server enforces no limit, so nothing can ever be "at the limit".
+    let streamLimit: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case streamLimit = "stream_limit"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (c.decodeStringOrNumber(forKey: .id).flatMap { Int($0) }) ?? -1
+        streamLimit = (c.decodeStringOrNumber(forKey: .streamLimit).flatMap { Int($0) }) ?? 0
+    }
+}
+
+/// `/proxy/ts/status`: the live proxy's running channels and their
+/// clients (apps/proxy/live_proxy/channel_status.py).
+struct DispatcharrLiveProxyStatus: Decodable {
+    struct Client: Decodable {
+        /// Django user id of the client, as the proxy stored it (string
+        /// in Redis, so it decodes either shape).
+        let userID: String?
+        /// Unix seconds the client connected.
+        let connectedAt: Double?
+
+        enum CodingKeys: String, CodingKey {
+            case userID = "user_id"
+            case connectedAt = "connected_at"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            userID = c.decodeStringOrNumber(forKey: .userID)
+            connectedAt = c.decodeStringOrNumber(forKey: .connectedAt).flatMap { Double($0) }
+        }
+    }
+
+    struct Channel: Decodable {
+        let channelID: String?
+        let channelName: String?
+        let clients: [Client]
+
+        enum CodingKeys: String, CodingKey {
+            case channelID = "channel_id"
+            case channelName = "channel_name"
+            case clients
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            channelID = c.decodeFlexibleString(forKey: .channelID)
+            channelName = c.decodeFlexibleString(forKey: .channelName)
+            clients = (try? c.decode([Client].self, forKey: .clients)) ?? []
+        }
+    }
+
+    let channels: [Channel]
+}
+
 struct DispatcharrChannelStatus: Decodable {
     let url: String?
     let streamID: Int?

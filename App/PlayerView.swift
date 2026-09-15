@@ -611,6 +611,12 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// seconds. Honest-UX ruling (Logan 2026-08-12): keep the snap, say
     /// so, and point at the Live Rewind toggle when it is off.
     @Published var liveResumeNotice: String? = nil
+    /// Live stream stopped on purpose and waiting for Retry: a Dispatcharr
+    /// connection-limit refusal or the reconnect-bounce stop (see
+    /// LiveStopNotice). Set by the tile's engine; the tile renders the card.
+    @Published var liveStopNotice: LiveStopNotice? = nil
+    /// Retry for `liveStopNotice`: one fresh tune, set by the engine.
+    var liveStopRetryAction: (() -> Void)?
     /// VOD resume tracking — set before playback starts, nil for live
     var vodID: String?
     var vodTitle: String?
@@ -1439,6 +1445,15 @@ private struct PlayerRootView: View {
                 )
                 .onAppear { logStore.flush() }
             }
+        }
+        // Connection-limit / stream-ended stop from the mpv engine: the
+        // error screen with its Retry (a fresh coordinator), no failover.
+        .onReceive(progressStore.$liveStopNotice) { notice in
+            guard let notice, state == .playing else { return }
+            debugLog("[LIMIT] player screen showing \(notice.kind.rawValue) notice")
+            didAttemptPlayFailover = true
+            lastError = "\(notice.title). \(notice.message)"
+            state = .error
         }
         // Offset and opacity applied to the whole view (including the black background) so the
         // tab content already rendered beneath in MainTabView is revealed as the player slides down.
@@ -6134,8 +6149,16 @@ struct NativeHLSPlayerScreen: View {
     /// stream in 8 to 9.5 s bursts, so silence alone is not a stall).
     @State private var ingestSilent = false
     @State private var stallEvalToken = UUID()
-    /// Immediate re-tunes spent on a clean upstream close, capped.
-    @State private var upstreamClosedRetunes = 0
+    /// Clean-close reconnect ladder (immediate, 5 s, 15 s, 30 s, then 60 s).
+    /// Only a VERIFIED session-limit reading stops it (Logan 2026-09-15).
+    @State private var cleanEndPolicy = LiveCleanEndPolicy()
+    @State private var liveSessionStartedAt = Date()
+    /// Live stream stopped on purpose (connection limit / reconnect bounce),
+    /// waiting for Retry. Nothing reconnects or falls back while set.
+    @State private var liveStopNotice: LiveStopNotice?
+    #if os(tvOS)
+    @Namespace private var noticeFocusNamespace
+    #endif
     /// Pending delayed remuxer start from restartRemuxPipeline. Cancelled by
     /// onDisappear so a dismissal inside the 0.5 s gap cannot start a
     /// remuxer (and its upstream connection) that nothing will ever stop.
@@ -6235,6 +6258,42 @@ struct NativeHLSPlayerScreen: View {
                     LoadingDetailLine(statusText: statusText) { loadingDetailSample() }
                 }
             }
+            if let liveStopNotice {
+                VStack(spacing: 12) {
+                    Text(liveStopNotice.title)
+                        .scaledFont(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                    Text(liveStopNotice.message)
+                        .scaledFont(.subheadline)
+                        .foregroundStyle(.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                    Button {
+                        retryLiveStopNotice()
+                    } label: {
+                        Label("Retry", systemImage: "arrow.clockwise")
+                            .scaledFont(.footnote.weight(.semibold))
+                            #if os(iOS)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(Color.accentPrimary))
+                            #endif
+                    }
+                    #if os(iOS)
+                    .buttonStyle(.plain)
+                    #else
+                    .prefersDefaultFocus(true, in: noticeFocusNamespace)
+                    #endif
+                }
+                .padding(32)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black.opacity(0.72))
+                #if os(tvOS)
+                .focusScope(noticeFocusNamespace)
+                #endif
+            }
             if showStreamInfo, let player {
                 NativeStreamInfoCard(
                     player: player,
@@ -6273,10 +6332,25 @@ struct NativeHLSPlayerScreen: View {
         // wedge. If AVPlayer does not advance within ~6 s, restart the remux
         // pipeline ONCE (restartRemuxPipeline stops the old ingest first).
         .onReceive(NotificationCenter.default.publisher(for: .switchStreamReprime)) { note in
-            guard useRemux, !didFallback,
-                  let uuid = note.userInfo?["uuid"] as? String,
-                  let url = overrideURL ?? item.streamURL ?? item.streamURLs.first,
-                  url.absoluteString.contains("/proxy/ts/stream/\(uuid)") else { return }
+            let uuid = note.userInfo?["uuid"] as? String
+            // Match on the URL the live remuxer is actually ingesting;
+            // the item/override URL is only a fallback before it exists.
+            let url = remuxer?.ingestURL ?? overrideURL ?? item.streamURL ?? item.streamURLs.first
+            let ignoreReason: String? = {
+                if !useRemux { return "not remux path" }
+                if didFallback { return "fell back to mpv" }
+                guard let uuid else { return "no uuid" }
+                guard let url else { return "no url" }
+                if !url.absoluteString.contains("/proxy/ts/stream/\(uuid)") {
+                    return "url is not /proxy/ts/stream/\(uuid)"
+                }
+                return nil
+            }()
+            if let ignoreReason {
+                DebugLogger.shared.log("[SWITCH] AVPlayer screen ignored reprime: \(ignoreReason)",
+                                       category: "Playback", level: .info)
+                return
+            }
             let token = UUID()
             switchWatchToken = token
             DebugLogger.shared.log("[SWITCH] kept connection (AVPlayer remux)",
@@ -6381,11 +6455,7 @@ struct NativeHLSPlayerScreen: View {
                     )
                 }
                 mux.onError = { error in
-                    DebugLogger.shared.log(
-                        "[AVP-HLS] remux failed (\(error)); falling back to mpv",
-                        category: "Playback", level: .warning
-                    )
-                    fallbackToMPV()
+                    handleRemuxFailure(error, context: "")
                 }
                 mux.reportsIngestStall = true
                 mux.onIngestSilence = { silent in handleIngestSilence(silent) }
@@ -6551,18 +6621,80 @@ struct NativeHLSPlayerScreen: View {
     /// socket closing is proof the source is gone, so re-tune at once
     /// instead of waiting out the silent-stall ladder.
     private func handleUpstreamClosed() {
-        guard !didFallback else { return }
-        guard upstreamClosedRetunes < 3 else {
-            DebugLogger.shared.log("[AVP-STREAM] upstream closed 3 times; falling back to mpv",
-                                   category: "Playback", level: .warning)
-            fallbackToMPV()
-            return
-        }
-        upstreamClosedRetunes += 1
+        guard !didFallback, liveStopNotice == nil else { return }
+        let firstEnd = cleanEndPolicy.isFirstEnd
+        let sessionStartedAt = liveSessionStartedAt
+        let delay = cleanEndPolicy.nextDelay()
         DebugLogger.shared.log(
-            "[AVP-STREAM] upstream closed the live stream; immediate re-tune \(upstreamClosedRetunes)/3",
+            "[RECONNECT] upstream closed the live stream; reconnect attempt \(cleanEndPolicy.attempts) in \(Int(delay))s",
             category: "Playback", level: .warning)
         statusText = Self.reconnectingStatus
+        if !firstEnd {
+            Task { @MainActor in
+                let verdict = await DispatcharrSessionLimitVerifier.verify(sessionStartedAt: sessionStartedAt)
+                DebugLogger.shared.log("[VERIFY] clean end check: \(verdict.logText)",
+                                       category: "Playback", level: .info)
+                guard case .atLimit = verdict, liveStopNotice == nil else { return }
+                stopForLiveNotice(.streamEnded, reason: "verified session limit reached elsewhere")
+            }
+        }
+        if delay <= 0 {
+            liveSessionStartedAt = Date()
+            restartRemuxPipeline()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard liveStopNotice == nil, !didFallback else { return }
+            liveSessionStartedAt = Date()
+            restartRemuxPipeline()
+        }
+    }
+
+    /// Remux failure entry: a Dispatcharr connection-limit refusal stops
+    /// with the notice (no mpv fallback, which would only reopen the
+    /// stream); everything else falls back to mpv as before.
+    private func handleRemuxFailure(_ error: Error, context: String) {
+        if liveStopNotice != nil { return }
+        if let notice = DispatcharrConnectionLimit.fromIngestFailure("\(error)") {
+            stopForLiveNotice(notice, reason: "\(error)")
+            return
+        }
+        DebugLogger.shared.log("[AVP-HLS] remux failed\(context) (\(error)); falling back to mpv",
+                               category: "Playback", level: .warning)
+        fallbackToMPV()
+    }
+
+    /// Tears the pipeline down (connection released) and shows the notice.
+    private func stopForLiveNotice(_ notice: LiveStopNotice, reason: String) {
+        guard liveStopNotice == nil else { return }
+        DebugLogger.shared.log("[LIMIT] \(notice.kind.rawValue) (\(reason)); connection released, waiting for Retry",
+                               category: "Playback", level: .warning)
+        restartWork?.cancel()
+        restartWork = nil
+        switchWatchToken = UUID()
+        ingestSilent = false
+        stallEvalToken = UUID()
+        stallWatchdog?.cancel()
+        stallWatchdog = nil
+        player?.pause()
+        player = nil
+        remuxer?.onReady = nil
+        remuxer?.onError = nil
+        remuxer?.onIngestSilence = nil
+        remuxer?.onIngestClosed = nil
+        remuxer?.stop()
+        remuxer = nil
+        statusText = nil
+        liveStopNotice = notice
+    }
+
+    /// Retry on the notice: one fresh tune, bounce window cleared.
+    private func retryLiveStopNotice() {
+        DebugLogger.shared.log("[LIMIT] Retry pressed (native player)", category: "Playback", level: .info)
+        liveStopNotice = nil
+        cleanEndPolicy.reset()
+        liveSessionStartedAt = Date()
+        statusText = "Tuning..."
         restartRemuxPipeline()
     }
 
@@ -6702,9 +6834,7 @@ struct NativeHLSPlayerScreen: View {
                 startPlayer(with: localURL, headers: [:])
             }
             mux.onError = { error in
-                DebugLogger.shared.log("[AVP-HLS] remux failed after re-tune (\(error)); falling back to mpv",
-                                       category: "Playback", level: .warning)
-                fallbackToMPV()
+                handleRemuxFailure(error, context: " after re-tune")
             }
             mux.reportsIngestStall = true
             mux.onIngestSilence = { silent in handleIngestSilence(silent) }

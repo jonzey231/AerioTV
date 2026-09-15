@@ -1283,7 +1283,12 @@ final class ChannelStore: ObservableObject {
     @Published private(set) var error: String?
 
     // The server that produced the current channel list (for upstream EPG closures).
-    private(set) var activeServer: ServerConnection?
+    private(set) var activeServer: ServerConnection? {
+        didSet {
+            // Connection-limit notices are Direct Connect only.
+            DispatcharrConnectionLimit.directConnectActive = activeServer?.type == .dispatcharrAPI
+        }
+    }
     /// ID of the server whose channels are currently loaded — detects server switches.
     private var currentChannelServerID: UUID?
 
@@ -1297,6 +1302,7 @@ final class ChannelStore: ObservableObject {
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first else {
             channels = []; orderedGroups = []; isLoading = false; error = nil
             currentChannelServerID = nil
+            DispatcharrConnectionLimit.directConnectActive = false
             return
         }
         // v1.6.13.x: idempotent guard. AppEntryView fires `refresh` from

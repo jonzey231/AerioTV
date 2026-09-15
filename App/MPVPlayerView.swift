@@ -1170,6 +1170,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // URL. The actual loadfile dispatches to mpvQueue below.
             urls = [newURL]
             currentIndex = 0
+            // A manual channel change is a new tune: clear any stop notice
+            // and the bounce window.
+            resetLiveStopState()
+            progressStore.liveStopNotice = nil
             // Reset per-stream telemetry so the diagnostic logs read
             // cleanly for the new stream rather than mixing with the
             // outgoing one's tail. mpv's own `container-fps` /
@@ -1287,11 +1291,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// against the user's stream_limit and got the player connection
         /// terminated, stopping the channel and reverting the switch.
         @objc fileprivate func switchStreamReprimeRequested(_ note: Notification) {
-            guard let uuid = note.userInfo?["uuid"] as? String else { return }
+            guard let uuid = note.userInfo?["uuid"] as? String else {
+                debugLog("[SWITCH] mpv ignored reprime: no uuid"); return
+            }
             Task { @MainActor [weak self] in
-                guard let self,
-                      let current = self.urls.first,
-                      current.absoluteString.contains("/proxy/ts/stream/\(uuid)") else { return }
+                guard let self else { return }
+                // The URL mpv is actually playing (failover advances
+                // currentIndex), not just urls.first.
+                guard let current = self.urls[safe: self.currentIndex] ?? self.urls.first else {
+                    debugLog("[SWITCH] mpv ignored reprime: no url \(self.streamTag)"); return
+                }
+                guard current.absoluteString.contains("/proxy/ts/stream/\(uuid)") else {
+                    debugLog("[SWITCH] mpv ignored reprime: url is not /proxy/ts/stream/\(uuid) \(self.streamTag)"); return
+                }
                 self.watchSwitchedStream(url: current)
             }
         }
@@ -1338,7 +1350,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private func evaluateSwitchProgress(url: URL, token: Int,
                                             sample: (ok: Bool, pos: Double, idle: Bool, paused: Bool)) {
             guard switchWatchToken == token,
-                  urls.first?.absoluteString == url.absoluteString else { return }
+                  (urls[safe: currentIndex] ?? urls.first)?.absoluteString == url.absoluteString else { return }
             // A user pause is not a stall; stop judging.
             if sample.paused { return }
             // Progress = time-pos moving forward by a plausible step on two
@@ -2254,6 +2266,51 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var streamProbeFired = false
         private var streamProbeSummary: String?
 
+        /// Live stop notice state (Dispatcharr connection limit, reconnect
+        /// bounce). `liveStopped` latches until Retry / a new tune so no
+        /// retry, failover or warm-up path reopens the stream underneath.
+        private var liveStopped = false
+        private var cleanEndPolicy = LiveCleanEndPolicy()
+        /// Retires a scheduled clean-end reconnect when anything else
+        /// (Retry, the tile's own re-tune, a new tune) starts playback.
+        private var reconnectToken = 0
+        /// When the session now playing was opened (verifier input).
+        private var liveSessionStartedAt = Date()
+        /// One limit probe per load-failure streak (reset with the retry
+        /// budget), and the gate a scheduled retry waits on so the probe
+        /// and mpv's retry never hold two connections at once.
+        private var limitProbeFired = false
+        private var limitProbeGate: DispatchSemaphore?
+
+        /// Stop mpv for good and hand the notice to the tile. No retry,
+        /// no failover, no reconnect; Retry is `liveStopRetryAction`.
+        private func stopForLiveNotice(_ notice: LiveStopNotice, reason: String) {
+            guard !liveStopped else { return }
+            liveStopped = true
+            debugLog("[LIMIT] mpv \(notice.kind.rawValue) (\(reason)); stopping, waiting for Retry \(streamTag)")
+            logStore.append("MPV: \(notice.title)")
+            if liveRewindActive {
+                liveRewindActive = false
+                LiveRewindEngine.shared.stopSession()
+            }
+            mpvQueue.async { [weak self] in
+                guard let self, let mpv = self.activeMPVHandle() else { return }
+                self.mpvCommandAsync(mpv, ["stop"])
+            }
+            let store = progressStore
+            DispatchQueue.main.async { store.liveStopNotice = notice }
+        }
+
+        /// Clears the stop latch and every per-tune guard (Retry, new tune).
+        private func resetLiveStopState() {
+            liveStopped = false
+            cleanEndPolicy.reset()
+            liveSessionStartedAt = Date()
+            reconnectToken &+= 1
+            limitProbeFired = false
+            limitProbeGate = nil
+        }
+
         /// Fire-and-forget probe of `url`. Uses its own short-timeout
         /// session (not HTTPRouter: this is diagnostics, and a hung
         /// diagnostic must never outlive the 8s window a user waits
@@ -2884,10 +2941,31 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // retry budgets and starts a fresh attempt. Native catch-up
             // mints a NEW session (the tuned URL is session-bound and
             // usually already revoked, so replaying it can only 401).
+            // Retry for the live stop notice: a fresh attempt from the top,
+            // with the stop latch and bounce window cleared.
+            progressStore.liveStopRetryAction = { [weak self] in
+                guard let self else { return }
+                self.mpvQueue.async { [weak self] in
+                    guard let self, !self.isShuttingDown, !self.urls.isEmpty else { return }
+                    debugLog("[LIMIT] mpv Retry pressed \(self.streamTag)")
+                    self.resetLiveStopState()
+                    let store = self.progressStore
+                    DispatchQueue.main.async { store.liveStopNotice = nil }
+                    self.progressStore.retryAction?()
+                }
+            }
+
             progressStore.retryAction = { [weak self] in
                 guard let self else { return }
                 self.mpvQueue.async { [weak self] in
                     guard let self, !self.isShuttingDown, !self.urls.isEmpty else { return }
+                    if self.liveStopped {
+                        debugLog("[LIMIT] mpv retry ignored: stopped for a notice \(self.streamTag)")
+                        return
+                    }
+                    self.reconnectToken &+= 1
+                    self.cleanEndPolicy.reset()
+                    self.liveSessionStartedAt = Date()
                     self.loadFailureRetryCount = 0
                     self.sameURLRetryCount = 0
                     self.streamProbeFired = false
@@ -3683,6 +3761,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             loadFailureRetryCount = 0
             streamProbeFired = false
             streamProbeSummary = nil
+            resetLiveStopState()
+            let noticeStore = progressStore
+            DispatchQueue.main.async { noticeStore.liveStopNotice = nil }
             isShuttingDown = false
             playbackEnded = false
             // Reset diagnostics
@@ -6317,6 +6398,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// and drops to the direct stream.
         private func relayErrorRecovery(reason: String) {
             let engine = LiveRewindEngine.shared
+            // The engine closed the session on a limit refusal or reconnect
+            // bounce: never fall back to a direct connection.
+            if let notice = engine.takeStopNotice() {
+                stopForLiveNotice(notice, reason: "rewind engine: \(reason)")
+                return
+            }
+            if liveStopped { return }
             if !liveRewindTailRetuneUsed,
                let buf = engine.bufferForReader, !buf.closed,
                // Only when the buffer actually HAS content: a cold-tune
@@ -6776,6 +6864,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         self.loadFailureRetryCount = 0
                         self.streamProbeFired = false
                         self.streamProbeSummary = nil
+                        self.limitProbeFired = false
                         // Populate audio/subtitle track lists for the UI
                         self.queryTracks()
                         // Update render buffer to match video's native dimensions.
@@ -7217,6 +7306,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         private func handleEndFile(_ event: UnsafePointer<mpv_event>) {
             guard !isShuttingDown else { return }
+            // Stopped for a notice: our own "stop" and anything after it.
+            if liveStopped { return }
 
             let endFile = event.pointee.data.assumingMemoryBound(to: mpv_event_end_file.self).pointee
             let reason = endFile.reason
@@ -7329,6 +7420,26 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                    currentIndex < urls.count {
                     probeStreamResponse(url: urls[currentIndex])
                 }
+                // Dispatcharr connection limit (Direct Connect, live): mpv
+                // cannot see the refusal body, so ask once before retrying.
+                // The retry scheduled below waits for this answer.
+                if endFile.error == MPV_ERROR_LOADING_FAILED.rawValue,
+                   isLive, catchup == nil, !isDVR, !limitProbeFired,
+                   DispatcharrConnectionLimit.directConnectActive,
+                   currentIndex < urls.count {
+                    limitProbeFired = true
+                    let gate = DispatchSemaphore(value: 0)
+                    limitProbeGate = gate
+                    let tag = streamTag
+                    DispatcharrLimitProbe.run(url: urls[currentIndex], headers: headers,
+                                              owner: "mpv-limit-probe") { [weak self] notice, summary in
+                        debugLog("[LIMIT] mpv load-failure probe \(tag): \(summary)\(notice.map { " -> \($0.kind.rawValue)" } ?? "")")
+                        if let notice {
+                            self?.stopForLiveNotice(notice, reason: summary)
+                        }
+                        gate.signal()
+                    }
+                }
                 if isTransientLoadError && loadFailureRetryCount < maxLoadFailureRetries {
                     loadFailureRetryCount += 1
                     let retryNum = loadFailureRetryCount
@@ -7379,9 +7490,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     // LOADING_FAILED -> re-play sequence that leaked ~750MB on
                     // the bursty UHD stream (live capture 2026-06-29).
                     cachedRenderer?.flush(removingDisplayedImage: false)
+                    let probeGate = limitProbeGate
                     DispatchQueue.global(qos: .userInitiated)
                         .asyncAfter(deadline: .now() + delay) { [weak self] in
-                            self?.play(url: retryURL)
+                            // Never retry beside the limit probe, nor after
+                            // it found a refusal.
+                            _ = probeGate?.wait(timeout: .now() + 5)
+                            guard let self, !self.liveStopped else { return }
+                            self.play(url: retryURL)
                         }
                     return
                 }
@@ -7399,6 +7515,48 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // live channel as "ended".
             if isLive, liveRewindActive {
                 relayErrorRecovery(reason: "relay EOF")
+                return
+            }
+
+            // Clean live end (Logan 2026-09-15): reconnect on an escalating
+            // ladder and never give up on a guess. From the second end on,
+            // ask Dispatcharr whether this account is really at its session
+            // limit with a newer session elsewhere; only that stops us.
+            // A multi-URL playlist keeps its stream failover on an instant
+            // end; the ladder owns the last (or only) URL.
+            if isLive, catchup == nil, !isDVR, currentIndex + 1 >= urls.count {
+                let firstEnd = cleanEndPolicy.isFirstEnd
+                let sessionStartedAt = liveSessionStartedAt
+                let delay = cleanEndPolicy.nextDelay()
+                let attempt = cleanEndPolicy.attempts
+                let retryURL = urls[currentIndex]
+                reconnectToken &+= 1
+                let token = reconnectToken
+                debugLog("[RECONNECT] mpv live stream ended; reconnect attempt \(attempt) in \(Int(delay))s \(streamTag)")
+                logStore.append("MPV: stream ended - reconnecting in \(Int(delay))s")
+                let store = progressStore
+                DispatchQueue.main.async { store.streamStalled = true }
+                if !firstEnd {
+                    let tag = streamTag
+                    Task { @MainActor [weak self] in
+                        let verdict = await DispatcharrSessionLimitVerifier.verify(sessionStartedAt: sessionStartedAt)
+                        debugLog("[VERIFY] mpv clean end check \(tag): \(verdict.logText)")
+                        guard case .atLimit = verdict else { return }
+                        self?.stopForLiveNotice(.streamEnded, reason: "verified session limit reached elsewhere")
+                    }
+                }
+                DispatchQueue.global(qos: .userInitiated)
+                    .asyncAfter(deadline: .now() + delay) { [weak self] in
+                        guard let self, !self.liveStopped, !self.isShuttingDown,
+                              self.reconnectToken == token else { return }
+                        self.liveSessionStartedAt = Date()
+                        self.sameURLRetryCount = 0
+                        self.loadFailureRetryCount = 0
+                        self.hasPerformedWarmupRetry = false
+                        let store = self.progressStore
+                        DispatchQueue.main.async { store.streamStalled = false }
+                        self.play(url: retryURL)
+                    }
                 return
             }
 
@@ -7975,7 +8133,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // MARK: - Failover (identical logic to VLC coordinator)
 
         private func failoverOrError(_ reason: String) {
-            guard !isShuttingDown else { return }
+            guard !isShuttingDown, !liveStopped else { return }
 
             logStore.append("✗ MPV: \(reason)")
             if currentIndex + 1 < urls.count {
