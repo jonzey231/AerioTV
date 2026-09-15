@@ -2,10 +2,23 @@
 
 ## v1.8.38 - 2026-09-14
 
+### Added
+
+- Text Size setting: scale text across the whole app from 85% to 150%
+  in 5% steps.
+- Subtext Size setting: scale secondary text only, from 85% to 150%.
+- Text Contrast setting: 0 to 100%, makes dimmed and theme-colored text
+  easier to read.
+
 ### Changed
 
 - Channel logos in the guide, channel list and player channel list grow
   to use the space when channel numbers or names are hidden.
+
+### Fixed
+
+- Apple TV: the mini player stays attached to the program art when
+  switching to Settings and back.
 
 ## v1.8.37 - 2026-09-14
 

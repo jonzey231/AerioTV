@@ -60,7 +60,11 @@ enum WhatsNewStore {
             version: "1.8.38",
             title: "What's new in 1.8.38",
             bullets: [
-                "Channel logos grow to use the space when numbers or names are hidden"
+                "Text Size: scale text app-wide from 85% to 150%",
+                "Subtext Size: scale secondary text from 85% to 150%",
+                "Text Contrast: make dimmed and theme-colored text easier to read",
+                "Channel logos grow to use the space when numbers or names are hidden",
+                "Apple TV: mini player stays attached to the program art after visiting Settings"
             ],
             releaseURL: nil
         ),
