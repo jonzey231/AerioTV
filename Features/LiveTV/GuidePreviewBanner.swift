@@ -388,6 +388,13 @@ final class GuidePreviewArtCache: ObservableObject {
 }
 #endif
 
+/// Shared portrait cutoff for banner and hero art.
+enum GuidePreviewPortraitArt {
+    /// Width/height below which art counts as a portrait poster. Near-square
+    /// art (sports matchup logos ~0.96) keeps the full cropped 16:9 slot.
+    static let maxAspect: CGFloat = 0.8
+}
+
 /// The banner's art slot. Landscape art keeps the 16:9 360x203 slot. PORTRAIT
 /// art (TMDB posters on a lot of programmes) used to be center-cropped into
 /// that slot, which sliced the poster's title off. Portrait art now keeps the
@@ -402,24 +409,34 @@ private struct GuidePreviewArtSlot: View {
     /// Pixel size of the loaded bitmap; nil until it lands.
     @State private var pixelSize: CGSize? = nil
 
-    /// Width of the slot: the full 16:9 width for landscape art, the
-    /// image's own aspect at the same height for anything narrower.
-    private var slotWidth: CGFloat {
-        guard let s = pixelSize, s.width > 0, s.height > 0 else { return Self.slotWidth }
+    /// Poster width at slot height for TRUE portrait art; nil for anything
+    /// else (and until the bitmap lands), which keeps the full 16:9 slot.
+    private var posterWidth: CGFloat? {
+        guard let s = pixelSize, s.width > 0, s.height > 0 else { return nil }
         let ratio = s.width / s.height
-        guard ratio < (Self.slotWidth / Self.slotHeight) else { return Self.slotWidth }
+        guard ratio < GuidePreviewPortraitArt.maxAspect else { return nil }
         return max(80, (Self.slotHeight * ratio).rounded())
     }
 
     var body: some View {
-        AuthPosterImage(url: url,
-                        onImageLoaded: { size in
-                            if pixelSize != size { pixelSize = size }
-                        },
-                        placeholder: .clear,
-                        maxPixel: 800)
-            .aspectRatio(contentMode: .fit)
-            .frame(width: slotWidth, height: Self.slotHeight)
+        let image = AuthPosterImage(url: url,
+                                    onImageLoaded: { size in
+                                        if pixelSize != size { pixelSize = size }
+                                    },
+                                    placeholder: .clear,
+                                    maxPixel: 800)
+        Group {
+            if let posterWidth {
+                image
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: posterWidth, height: Self.slotHeight)
+            } else {
+                image
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: Self.slotWidth, height: Self.slotHeight)
+                    .clipped()
+            }
+        }
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }

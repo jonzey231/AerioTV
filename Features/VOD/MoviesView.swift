@@ -3335,16 +3335,16 @@ struct MoviesHero: View {
         }
     }
 
-    /// Width of the poster-shaped slot when the loaded art is portrait (or
-    /// close to square); nil for landscape art, which keeps the full-width
+    /// Width of the poster-shaped slot when the loaded art is portrait;
+    /// nil for landscape art, which keeps the full-width
     /// slot. Unknown until the bitmap lands, so the first pass draws the
     /// landscape slot and swaps once measured.
     private var portraitArtWidth: CGFloat? {
         guard let s = artPixelSize, s.width > 0, s.height > 0 else { return nil }
         let ratio = s.width / s.height
-        // 1.2 and up counts as landscape: TMDB backdrops are 16:9, provider
-        // stills are 4:3 at the narrowest.
-        guard ratio < 1.2 else { return nil }
+        // Only TRUE portrait (under 0.8, same cutoff as the Live TV preview
+        // banner) gets the poster slot; near-square art keeps the fill slot.
+        guard ratio < GuidePreviewPortraitArt.maxAspect else { return nil }
         return max(80, (heroHeight * ratio).rounded())
     }
 
