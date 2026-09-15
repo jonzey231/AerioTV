@@ -66,8 +66,8 @@ struct CategoryColorPickerRow: View {
                         .scaledFont(.bodyMedium)
                         .foregroundColor(.textPrimary)
                     Text("Default: #\(category.defaultHex)")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
             }
         }
@@ -114,7 +114,7 @@ struct MoreCategoriesView: View {
                 Text("Additional Buckets").sectionHeaderStyle()
             } footer: {
                 Text("Toggle a bucket on to include its aliases in the matcher. Defaults cover Sports, Movies, Kids, and News — these are extras for feeds that heavily tag Documentary, Drama, Sitcoms, etc.")
-                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
 
             Section {
@@ -128,11 +128,11 @@ struct MoreCategoriesView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Custom").scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                             Text("Define your own category strings and colors")
-                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                         }
                         Spacer()
                         Text("\(CategoryColor.loadCustomCategories().count)")
-                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
                 .listRowBackground(Color.cardBackground)
@@ -140,7 +140,7 @@ struct MoreCategoriesView: View {
                 Text("User-Defined").sectionHeaderStyle()
             } footer: {
                 Text("Custom entries are checked before the built-in buckets, so you can override a match like \"Horror\" or \"Cooking\" with your own color even if a built-in bucket would have caught it.")
-                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
         }
         .listStyle(.insetGrouped)
@@ -187,7 +187,7 @@ struct MoreCategoriesView: View {
                     } label: {
                         Text("Customize color")
                             .scaledFont(.labelSmall)
-                            .foregroundColor(.accentPrimary)
+                            .foregroundColor(Color.contrastText(.accentPrimary))
                     }
                     .buttonStyle(.plain)
                 }
@@ -227,11 +227,11 @@ struct SingleCategoryColorEditor: View {
                     .listRowBackground(Color.cardBackground)
                 HStack {
                     Text("Hex")
-                        .foregroundColor(.textSecondary)
+                        .foregroundColor(Color.contrastText(.textSecondary))
                     Spacer()
                     Text(storedHex.isEmpty ? category.defaultHex : storedHex)
-                        .scaledFont(.monoSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.monoSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .listRowBackground(Color.cardBackground)
 
@@ -250,7 +250,7 @@ struct SingleCategoryColorEditor: View {
                 .listRowBackground(Color.cardBackground)
             } footer: {
                 Text("Applies wherever a program's category matches one of this bucket's aliases in the EPG (see alias list in CategoryColor.swift).")
-                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
         }
         .listStyle(.insetGrouped)
@@ -287,8 +287,8 @@ struct CustomCategoriesView: View {
                             .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
                         Text("Tap + above to add a match string (e.g. \"Horror\") and pick a color. Custom entries win over the built-in buckets.")
-                            .scaledFont(.labelSmall)
-                            .foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
                     }
                     .padding(.vertical, 4)
                     .listRowBackground(Color.cardBackground)
@@ -320,8 +320,8 @@ struct CustomCategoriesView: View {
                                         .scaledFont(.bodyMedium)
                                         .foregroundColor(.textPrimary)
                                     Text(entry.hex)
-                                        .scaledFont(.monoSmall)
-                                        .foregroundColor(.textTertiary)
+                                        .scaledFont(.monoSmall.subtext())
+                                        .foregroundColor(Color.contrastText(.textTertiary))
                                 }
                                 Spacer()
                             }
@@ -407,16 +407,16 @@ struct CustomCategoryEditor: View {
                     .listRowBackground(Color.cardBackground)
                 HStack {
                     Text("Hex")
-                        .foregroundColor(.textSecondary)
+                        .foregroundColor(Color.contrastText(.textSecondary))
                     Spacer()
                     Text(entry.hex)
-                        .scaledFont(.monoSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.monoSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .listRowBackground(Color.cardBackground)
             } footer: {
                 Text("Matching is case-insensitive and uses `contains` — entering \"Horror\" will colour any program whose XMLTV category includes the word horror.")
-                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
 
             if !isNew {

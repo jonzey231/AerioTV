@@ -132,6 +132,7 @@ struct GuidePreviewBanner: View {
 
     static let height: CGFloat = 212
     @Environment(\.aerioTextScale) private var textScale
+    @Environment(\.aerioSubtextScale) private var subtextScale
 
     var body: some View {
         // Bottom-aligned: logo, copy and the corner mini share one baseline
@@ -162,8 +163,8 @@ struct GuidePreviewBanner: View {
                     .padding(.trailing, trailingReserve)
             } else {
                 Text("Select a program")
-                    .scaledFont(.system(size: 26, weight: .medium))
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.system(size: 26, weight: .medium).subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -172,7 +173,7 @@ struct GuidePreviewBanner: View {
         .padding(.horizontal, 40)
         .padding(.bottom, 8)
         // Grows with Settings > Appearance > Text Size so the copy is not clipped.
-        .frame(height: TextScale.grow(Self.height, textScale))
+        .frame(height: TextScale.growMixed(Self.height, textScale, subtext: subtextScale))
         .frame(maxWidth: .infinity)
         .background(Color.appBackground)
         .clipped()
@@ -224,16 +225,16 @@ struct GuidePreviewBanner: View {
                 if let channel {
                     Text(channel.name)
                         .scaledFont(.system(size: 22, weight: .semibold))
-                        .foregroundColor(.accentPrimary)
+                        .foregroundColor(Color.contrastText(.accentPrimary))
                         .lineLimit(1)
                 }
             }
             if let sub = program.subTitle,
                !EPGText.subtitleIsRedundant(sub, title: program.title, description: program.description) {
                 Text(sub)
-                    .scaledFont(.system(size: 22, weight: .medium))
+                    .scaledFont(.system(size: 22, weight: .medium).subtext())
                     .italic()
-                    .foregroundColor(.textSecondary)
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .lineLimit(1)
             }
             HStack(spacing: 10) {
@@ -241,11 +242,11 @@ struct GuidePreviewBanner: View {
                 // Date-coded seasons ("S2026 E905") are not episode identity.
                 if let se = seasonEpisodeLabel(season: program.season, episode: program.episode),
                    (program.season ?? 0) < 1900 {
-                    Text("·").foregroundColor(.textTertiary)
+                    Text("·").foregroundColor(Color.contrastText(.textTertiary))
                     Text(se)
                 }
                 if let left = remainingLabel(program) {
-                    Text("·").foregroundColor(.textTertiary)
+                    Text("·").foregroundColor(Color.contrastText(.textTertiary))
                     Text(left)
                 }
                 if showEpgBadges {
@@ -254,15 +255,15 @@ struct GuidePreviewBanner: View {
                                 isRepeat: program.isRepeat, compact: false)
                 }
             }
-            .scaledFont(.system(size: 20, weight: .medium))
-            .foregroundColor(.textSecondary)
+            .scaledFont(.system(size: 20, weight: .medium).subtext())
+            .foregroundColor(Color.contrastText(.textSecondary))
             if !program.description.isEmpty {
                 Button {
                     onSelectDescription?()
                 } label: {
                     Text(program.description)
-                        .scaledFont(.system(size: 23))
-                        .foregroundColor(.textPrimary.opacity(0.85))
+                        .scaledFont(.system(size: 23).subtext())
+                        .foregroundColor(Color.contrastText(.textPrimary.opacity(0.85)))
                         .lineLimit(3)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)

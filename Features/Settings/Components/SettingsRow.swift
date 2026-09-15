@@ -60,7 +60,7 @@ struct SettingsRow: View {
                 if let subtitle {
                     Text(subtitle)
                         .scaledFont(.bodySmall)
-                        .foregroundColor(selectionContrast ? .white.opacity(0.85) : .textSecondary)
+                        .foregroundColor(selectionContrast ? .white.opacity(0.85) : Color.contrastText(.textSecondary))
                 }
             }
         }

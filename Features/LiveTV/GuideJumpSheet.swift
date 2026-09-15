@@ -109,8 +109,8 @@ struct GuideJumpSheet: View {
                 }
             }
             Text(summary)
-                .scaledFont(.system(size: 22))
-                .foregroundColor(.textSecondary)
+                .scaledFont(.system(size: 22).subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
             HStack(spacing: 16) {
                 Button("Go") { onPick(target) }
                     .buttonStyle(MoviesPillStyle(isSelected: true))

@@ -196,10 +196,10 @@ struct SettingsView: View {
                                 VStack(spacing: 8) {
                                     Image(systemName: "list.and.film")
                                         .scaledFont(.system(size: 28))
-                                        .foregroundColor(.textTertiary)
+                                        .foregroundColor(Color.contrastText(.textTertiary))
                                     Text("No playlists added")
-                                        .scaledFont(.bodyMedium)
-                                        .foregroundColor(.textTertiary)
+                                        .scaledFont(.bodyMedium.subtext())
+                                        .foregroundColor(Color.contrastText(.textTertiary))
                                 }
                                 Spacer()
                             }
@@ -245,7 +245,7 @@ struct SettingsView: View {
                                     .foregroundStyle(LinearGradient.accentGradient)
                                 Text("Add Playlist")
                                     .scaledFont(.bodyMedium)
-                                    .foregroundColor(.accentPrimary)
+                                    .foregroundColor(Color.contrastText(.accentPrimary))
                             }
                         }
                         #if os(iOS)
@@ -261,29 +261,29 @@ struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Label("Tap ○ to set the active playlist", systemImage: "checkmark.circle")
                                     #if os(tvOS)
-                                    .scaledFont(.system(size: 20, weight: .regular))
-                                    .foregroundColor(.textSecondary)
+                                    .scaledFont(.system(size: 20, weight: .regular).subtext())
+                                    .foregroundColor(Color.contrastText(.textSecondary))
                                     #else
-                                    .scaledFont(.labelSmall)
-                                    .foregroundColor(.textTertiary)
+                                    .scaledFont(.labelSmall.subtext())
+                                    .foregroundColor(Color.contrastText(.textTertiary))
                                     #endif
                                 Label("Long press to edit or delete", systemImage: "hand.tap")
                                     #if os(tvOS)
-                                    .scaledFont(.system(size: 20, weight: .regular))
-                                    .foregroundColor(.textSecondary)
+                                    .scaledFont(.system(size: 20, weight: .regular).subtext())
+                                    .foregroundColor(Color.contrastText(.textSecondary))
                                     #else
-                                    .scaledFont(.labelSmall)
-                                    .foregroundColor(.textTertiary)
+                                    .scaledFont(.labelSmall.subtext())
+                                    .foregroundColor(Color.contrastText(.textTertiary))
                                     #endif
                                 if servers.count > 1 {
                                     #if os(iOS)
                                     Label("Tap Edit to reorder", systemImage: "arrow.up.arrow.down")
-                                        .scaledFont(.labelSmall)
-                                        .foregroundColor(.textTertiary)
+                                        .scaledFont(.labelSmall.subtext())
+                                        .foregroundColor(Color.contrastText(.textTertiary))
                                     #else
                                     Label("Use ▲ ▼ to reorder", systemImage: "arrow.up.arrow.down")
-                                        .scaledFont(.system(size: 20, weight: .regular))
-                                        .foregroundColor(.textSecondary)
+                                        .scaledFont(.system(size: 20, weight: .regular).subtext())
+                                        .foregroundColor(Color.contrastText(.textSecondary))
                                     #endif
                                 }
                             }
@@ -434,7 +434,7 @@ struct SettingsView: View {
                         Text("Sync").sectionHeaderStyle()
                     } footer: {
                         Text("Playlists, preferences, and VOD watch progress sync across all devices signed into the same Apple ID. Credentials are stored securely in iCloud Keychain.")
-                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     }
                     .listRowBackground(Color.cardBackground)
                     #if os(iOS)
@@ -504,10 +504,10 @@ struct SettingsView: View {
                             HStack(spacing: 8) {
                                 Image(systemName: copiedAbout ? "checkmark.circle.fill" : "doc.on.doc")
                                     .scaledFont(.system(size: 14, weight: .medium))
-                                    .foregroundColor(copiedAbout ? .accentPrimary : .textSecondary)
+                                    .foregroundColor(copiedAbout ? .accentPrimary : Color.contrastText(.textSecondary))
                                 Text(copiedAbout ? "Copied!" : "Copy to Clipboard")
                                     .scaledFont(.bodyMedium)
-                                    .foregroundColor(copiedAbout ? .accentPrimary : .textSecondary)
+                                    .foregroundColor(copiedAbout ? Color.contrastText(.accentPrimary) : Color.contrastText(.textSecondary))
                                 Spacer()
                             }
                         }
@@ -522,10 +522,10 @@ struct SettingsView: View {
                             HStack(spacing: 8) {
                                 Image(systemName: "doc.text")
                                     .scaledFont(.system(size: 14, weight: .medium))
-                                    .foregroundColor(.textSecondary)
+                                    .foregroundColor(Color.contrastText(.textSecondary))
                                 Text("Open Source Licenses")
-                                    .scaledFont(.bodyMedium)
-                                    .foregroundColor(.textSecondary)
+                                    .scaledFont(.bodyMedium.subtext())
+                                    .foregroundColor(Color.contrastText(.textSecondary))
                                 Spacer()
                             }
                         }
@@ -535,14 +535,14 @@ struct SettingsView: View {
                             HStack(spacing: 8) {
                                 Image(systemName: "link")
                                     .scaledFont(.system(size: 14, weight: .medium))
-                                    .foregroundColor(.textSecondary)
+                                    .foregroundColor(Color.contrastText(.textSecondary))
                                 Text("Developer Website")
-                                    .scaledFont(.bodyMedium)
-                                    .foregroundColor(.textSecondary)
+                                    .scaledFont(.bodyMedium.subtext())
+                                    .foregroundColor(Color.contrastText(.textSecondary))
                                 Spacer()
                                 Image(systemName: "arrow.up.right.square")
                                     .scaledFont(.system(size: 12))
-                                    .foregroundColor(.textTertiary)
+                                    .foregroundColor(Color.contrastText(.textTertiary))
                             }
                         }
                         .listRowBackground(Color.cardBackground)
@@ -551,14 +551,14 @@ struct SettingsView: View {
                             HStack(spacing: 8) {
                                 Image(systemName: "exclamationmark.bubble")
                                     .scaledFont(.system(size: 14, weight: .medium))
-                                    .foregroundColor(.textSecondary)
+                                    .foregroundColor(Color.contrastText(.textSecondary))
                                 Text("Report an Issue")
-                                    .scaledFont(.bodyMedium)
-                                    .foregroundColor(.textSecondary)
+                                    .scaledFont(.bodyMedium.subtext())
+                                    .foregroundColor(Color.contrastText(.textSecondary))
                                 Spacer()
                                 Image(systemName: "arrow.up.right.square")
                                     .scaledFont(.system(size: 12))
-                                    .foregroundColor(.textTertiary)
+                                    .foregroundColor(Color.contrastText(.textTertiary))
                             }
                         }
                         .listRowBackground(Color.cardBackground)
@@ -568,9 +568,9 @@ struct SettingsView: View {
                             .sectionHeaderStyle()
                     } footer: {
                         Text("In loving memory of Jesse Mann aka EPG Guru")
-                            .scaledFont(.footnote)
+                            .scaledFont(.footnote.subtext())
                             .italic()
-                            .foregroundColor(.textTertiary)
+                            .foregroundColor(Color.contrastText(.textTertiary))
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.top, 8)
                             .padding(.bottom, 4)
@@ -773,8 +773,8 @@ struct SettingsView: View {
             } label: {
                 HStack {
                     Text("App Version")
-                        .scaledFont(.bodyMedium)
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.bodyMedium.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                     Spacer()
                     Text(aboutVersion)
                         .scaledFont(.bodyMedium)
@@ -782,11 +782,11 @@ struct SettingsView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Text("What's New")
-                        .scaledFont(.caption)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.caption.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                     Image(systemName: "chevron.right")
                         .scaledFont(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.textTertiary)
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .contentShape(Rectangle())
             }
@@ -801,8 +801,8 @@ struct SettingsView: View {
     private func infoRow(_ label: String, value: String, isMonospaced: Bool = false) -> some View {
         HStack {
             Text(label)
-                .scaledFont(.bodyMedium)
-                .foregroundColor(.textSecondary)
+                .scaledFont(.bodyMedium.subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
             Spacer()
             Text(value)
                 .scaledFont(isMonospaced ? .monoSmall : .bodyMedium)
@@ -980,7 +980,7 @@ struct SettingsView: View {
 
                 Text("App Settings")
                     .scaledFont(.title3.weight(.semibold))
-                    .foregroundColor(.textSecondary)
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .padding(.horizontal, 14)
                     .padding(.top, 18)
                     .padding(.bottom, 6)
@@ -1060,10 +1060,10 @@ struct SettingsView: View {
                         VStack(spacing: 8) {
                             Image(systemName: "list.and.film")
                                 .scaledFont(.system(size: 28))
-                                .foregroundColor(.textTertiary)
+                                .foregroundColor(Color.contrastText(.textTertiary))
                             Text("No playlists added")
-                                .scaledFont(.bodyMedium)
-                                .foregroundColor(.textTertiary)
+                                .scaledFont(.bodyMedium.subtext())
+                                .foregroundColor(Color.contrastText(.textTertiary))
                         }
                         Spacer()
                     }
@@ -1101,7 +1101,7 @@ struct SettingsView: View {
                             .foregroundStyle(LinearGradient.accentGradient)
                         Text("Add Playlist")
                             .scaledFont(.bodyMedium)
-                            .foregroundColor(.accentPrimary)
+                            .foregroundColor(Color.contrastText(.accentPrimary))
                     }
                 }
                 .buttonStyle(PressableButtonStyle())
@@ -1110,15 +1110,15 @@ struct SettingsView: View {
                 if !servers.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         Label("Tap ○ to set the active playlist", systemImage: "checkmark.circle")
-                            .scaledFont(.labelSmall)
-                            .foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
                         Label("Long press to edit or delete", systemImage: "hand.tap")
-                            .scaledFont(.labelSmall)
-                            .foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
                         if servers.count > 1 {
                             Label("Touch and hold, then drag to reorder", systemImage: "arrow.up.arrow.down")
-                                .scaledFont(.labelSmall)
-                                .foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall.subtext())
+                                .foregroundColor(Color.contrastText(.textTertiary))
                         }
                     }
                     .padding(.top, 4)
@@ -1200,7 +1200,7 @@ struct SettingsView: View {
                 .buttonStyle(PressableButtonStyle())
             } footer: {
                 Text("Playlists, preferences, and VOD watch progress sync across all devices signed into the same Apple ID. Credentials are stored securely in iCloud Keychain.")
-                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
             .listRowBackground(Color.cardBackground)
         }
@@ -1235,10 +1235,10 @@ struct SettingsView: View {
                     HStack(spacing: 8) {
                         Image(systemName: copiedAbout ? "checkmark.circle.fill" : "doc.on.doc")
                             .scaledFont(.system(size: 14, weight: .medium))
-                            .foregroundColor(copiedAbout ? .accentPrimary : .textSecondary)
+                            .foregroundColor(copiedAbout ? .accentPrimary : Color.contrastText(.textSecondary))
                         Text(copiedAbout ? "Copied!" : "Copy to Clipboard")
                             .scaledFont(.bodyMedium)
-                            .foregroundColor(copiedAbout ? .accentPrimary : .textSecondary)
+                            .foregroundColor(copiedAbout ? Color.contrastText(.accentPrimary) : Color.contrastText(.textSecondary))
                         Spacer()
                     }
                 }
@@ -1251,14 +1251,14 @@ struct SettingsView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "doc.text")
                             .scaledFont(.system(size: 14, weight: .medium))
-                            .foregroundColor(.textSecondary)
+                            .foregroundColor(Color.contrastText(.textSecondary))
                         Text("Open Source Licenses")
-                            .scaledFont(.bodyMedium)
-                            .foregroundColor(.textSecondary)
+                            .scaledFont(.bodyMedium.subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
                         Spacer()
                         Image(systemName: "chevron.right")
                             .scaledFont(.system(size: 12))
-                            .foregroundColor(.textTertiary)
+                            .foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
                 .buttonStyle(PressableButtonStyle())
@@ -1271,14 +1271,14 @@ struct SettingsView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "link")
                             .scaledFont(.system(size: 14, weight: .medium))
-                            .foregroundColor(.textSecondary)
+                            .foregroundColor(Color.contrastText(.textSecondary))
                         Text("Developer Website")
-                            .scaledFont(.bodyMedium)
-                            .foregroundColor(.textSecondary)
+                            .scaledFont(.bodyMedium.subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
                         Spacer()
                         Image(systemName: "arrow.up.right.square")
                             .scaledFont(.system(size: 12))
-                            .foregroundColor(.textTertiary)
+                            .foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
                 .listRowBackground(Color.cardBackground)
@@ -1287,22 +1287,22 @@ struct SettingsView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.bubble")
                             .scaledFont(.system(size: 14, weight: .medium))
-                            .foregroundColor(.textSecondary)
+                            .foregroundColor(Color.contrastText(.textSecondary))
                         Text("Report an Issue")
-                            .scaledFont(.bodyMedium)
-                            .foregroundColor(.textSecondary)
+                            .scaledFont(.bodyMedium.subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
                         Spacer()
                         Image(systemName: "arrow.up.right.square")
                             .scaledFont(.system(size: 12))
-                            .foregroundColor(.textTertiary)
+                            .foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
                 .listRowBackground(Color.cardBackground)
             } footer: {
                 Text("In loving memory of Jesse Mann aka EPG Guru")
-                    .scaledFont(.footnote)
+                    .scaledFont(.footnote.subtext())
                     .italic()
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.top, 8)
                     .padding(.bottom, 4)
@@ -1420,10 +1420,10 @@ struct SettingsView: View {
                         VStack(spacing: 12) {
                             Image(systemName: "list.and.film")
                                 .scaledFont(.system(size: 36))
-                                .foregroundColor(.textSecondary)
+                                .foregroundColor(Color.contrastText(.textSecondary))
                             Text("No playlists added")
-                                .scaledFont(.bodyMedium)
-                                .foregroundColor(.textSecondary)
+                                .scaledFont(.bodyMedium.subtext())
+                                .foregroundColor(Color.contrastText(.textSecondary))
                         }
                         Spacer()
                     }
@@ -1598,9 +1598,9 @@ struct SettingsView: View {
                 .padding(.bottom, 8)
 
                 Text("In loving memory of Jesse Mann aka EPG Guru")
-                    .scaledFont(.system(size: 22))
+                    .scaledFont(.system(size: 22).subtext())
                     .italic()
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.top, 12)
             }
@@ -1635,8 +1635,8 @@ struct SettingsView: View {
             } label: {
                 HStack {
                     Text("App Version")
-                        .scaledFont(.system(size: 26, weight: .medium))
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.system(size: 26, weight: .medium).subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                     Spacer()
                     Text(aboutVersion)
                         .scaledFont(.system(size: 26))
@@ -1644,8 +1644,8 @@ struct SettingsView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Text("What's New")
-                        .scaledFont(.system(size: 22))
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.system(size: 22).subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                     Image(systemName: "chevron.right")
                         .scaledFont(.system(size: 20))
                         .opacity(0.5)
@@ -1663,8 +1663,8 @@ struct SettingsView: View {
     private func tvAboutRow(_ label: String, value: String) -> some View {
         HStack {
             Text(label)
-                .scaledFont(.system(size: 26, weight: .medium))
-                .foregroundColor(.textSecondary)
+                .scaledFont(.system(size: 26, weight: .medium).subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
             Spacer()
             Text(value)
                 .scaledFont(.system(size: 26))
@@ -1685,8 +1685,8 @@ struct SettingsView: View {
         } label: {
             HStack {
                 Text(label)
-                    .scaledFont(.system(size: 26, weight: .medium))
-                    .foregroundColor(.textSecondary)
+                    .scaledFont(.system(size: 26, weight: .medium).subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
                 Spacer()
                 Image(systemName: "qrcode")
                     .scaledFont(.system(size: 24))

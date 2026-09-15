@@ -29,15 +29,15 @@ struct ReminderBannerView: View {
 
                         HStack(spacing: 4) {
                             Text("Starting in 5 min")
-                                .scaledFont(.system(size: 12, weight: .medium))
-                                .foregroundColor(.textSecondary)
+                                .scaledFont(.system(size: 12, weight: .medium).subtext())
+                                .foregroundColor(Color.contrastText(.textSecondary))
                             if !banner.channel.isEmpty {
                                 Text("on")
-                                    .scaledFont(.system(size: 12))
-                                    .foregroundColor(.textTertiary)
+                                    .scaledFont(.system(size: 12).subtext())
+                                    .foregroundColor(Color.contrastText(.textTertiary))
                                 Text(banner.channel)
                                     .scaledFont(.system(size: 12, weight: .medium))
-                                    .foregroundColor(.accentPrimary)
+                                    .foregroundColor(Color.contrastText(.accentPrimary))
                             }
                         }
                         .lineLimit(1)
@@ -51,7 +51,7 @@ struct ReminderBannerView: View {
                     } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 12, weight: .bold))  // glyph in a fixed box: not text, stays fixed
-                            .foregroundColor(.textTertiary)
+                            .foregroundColor(Color.contrastText(.textTertiary))
                             .frame(width: 28, height: 28)
                             .background(Color.elevatedBackground, in: Circle())
                     }

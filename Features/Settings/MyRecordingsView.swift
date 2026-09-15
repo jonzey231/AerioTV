@@ -656,7 +656,7 @@ private struct RecordingRow: View {
                 if recording.destination == .dispatcharrServer {
                     Label("Server", systemImage: "server.rack")
                         .scaledFont(.caption2)
-                        .foregroundColor(.accentPrimary)
+                        .foregroundColor(Color.contrastText(.accentPrimary))
                 } else {
                     Label("Local", systemImage: "internaldrive")
                         .scaledFont(.caption2)

@@ -79,8 +79,8 @@ struct RecentChannelsOverlay: View {
 
                 if entries.isEmpty {
                     Text("Channels you watch will show up here.")
-                        .scaledFont(.system(size: 24))
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.system(size: 24).subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                     Spacer(minLength: 0)
                 } else {
                     ScrollView(.vertical, showsIndicators: false) {

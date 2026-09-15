@@ -129,8 +129,8 @@ struct M3UImportView: View {
                 keyboardType: .URL
             )
             Text("Supports .m3u and .m3u8 formats")
-                .scaledFont(.labelSmall)
-                .foregroundColor(.textTertiary)
+                .scaledFont(.labelSmall.subtext())
+                .foregroundColor(Color.contrastText(.textTertiary))
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -153,16 +153,16 @@ struct M3UImportView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(importedFileName.isEmpty ? "Choose M3U File" : importedFileName)
                             .scaledFont(.headlineSmall)
-                            .foregroundColor(importedFileName.isEmpty ? .textSecondary : .textPrimary)
+                            .foregroundColor(importedFileName.isEmpty ? Color.contrastText(.textSecondary) : .textPrimary)
                             .lineLimit(1)
                         Text(importedFileURL != nil ? "Tap to change" : "Browse from Files")
-                            .scaledFont(.labelSmall)
-                            .foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
                     }
                     Spacer()
                     Image(systemName: "chevron.right")
                         .scaledFont(.system(size: 13, weight: .medium))
-                        .foregroundColor(.textTertiary)
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .padding(14)
                 .background(Color.cardBackground)
@@ -199,7 +199,7 @@ struct M3UImportView: View {
                         Spacer()
                         Text("\(channels.count)")
                             .scaledFont(.labelMedium)
-                            .foregroundColor(.accentPrimary)
+                            .foregroundColor(Color.contrastText(.accentPrimary))
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 7)
@@ -208,8 +208,8 @@ struct M3UImportView: View {
                 }
                 if groups.count > 5 {
                     Text("+ \(groups.count - 5) more groups")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.leading, 12)
                 }
             }
@@ -363,8 +363,8 @@ struct EPGImportView: View {
                                 .foregroundColor(.accentSecondary)
                                 .scaledFont(.system(size: 15))
                             Text("Import an XMLTV-formatted EPG guide to show program schedules in the TV Guide.")
-                                .scaledFont(.bodySmall)
-                                .foregroundColor(.textSecondary)
+                                .scaledFont(.bodySmall.subtext())
+                                .foregroundColor(Color.contrastText(.textSecondary))
                         }
                         .padding(14)
                         .background(Color.accentSecondary.opacity(0.08))
@@ -518,16 +518,16 @@ struct EPGImportView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(importedFileName.isEmpty ? "Choose XMLTV File" : importedFileName)
                         .scaledFont(.headlineSmall)
-                        .foregroundColor(importedFileName.isEmpty ? .textSecondary : .textPrimary)
+                        .foregroundColor(importedFileName.isEmpty ? Color.contrastText(.textSecondary) : .textPrimary)
                         .lineLimit(1)
                     Text(importedFileURL != nil ? "Tap to change" : ".xml or .xmltv files")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
                 Spacer()
                 Image(systemName: "chevron.right")
                     .scaledFont(.system(size: 13, weight: .medium))
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
             }
             .padding(14)
             .background(Color.cardBackground)

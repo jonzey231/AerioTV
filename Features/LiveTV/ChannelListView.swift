@@ -859,8 +859,8 @@ struct ChannelListView: View {
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
                 Text("\(filteredChannels.count)")
-                    .scaledFont(.labelSmall)
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
                 Spacer(minLength: 4)
             } else {
                 Button { showManageGroups = true } label: {
@@ -1903,7 +1903,7 @@ struct ChannelListView: View {
                     } label: {
                         Image(systemName: buttonGlyph)
                             .scaledFont(.system(size: 16, weight: .medium))
-                            .foregroundColor(iPadSearchPresented ? .appBackground : (hasActiveSearch ? .accentPrimary : .textSecondary))
+                            .foregroundColor(iPadSearchPresented ? .appBackground : (hasActiveSearch ? .accentPrimary : Color.contrastText(.textSecondary)))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 7)
                             .background(
@@ -1967,7 +1967,7 @@ struct ChannelListView: View {
                     } label: {
                         Text(Self.groupTitle(group))
                             .scaledFont(.labelMedium)
-                            .foregroundColor(selectedGroup == group ? .appBackground : .textSecondary)
+                            .foregroundColor(selectedGroup == group ? .appBackground : Color.contrastText(.textSecondary))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 7)
                             .background(
@@ -2047,7 +2047,7 @@ struct ChannelListView: View {
         } label: {
             Text(c.name)
                 .scaledFont(.labelMedium)
-                .foregroundColor(selectedGroup == token ? .appBackground : .textSecondary)
+                .foregroundColor(selectedGroup == token ? .appBackground : Color.contrastText(.textSecondary))
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
                 .background(
@@ -2094,8 +2094,8 @@ struct ChannelListView: View {
                 .scaledFont(.headlineLarge)
                 .foregroundColor(.textPrimary)
             Text(message)
-                .scaledFont(.bodyMedium)
-                .foregroundColor(.textSecondary)
+                .scaledFont(.bodyMedium.subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
                 .multilineTextAlignment(.center)
             PrimaryButton("Try Again") {
                 Task { await channelStore.forceRefresh(servers: servers, modelContext: modelContext) }
@@ -2792,6 +2792,7 @@ struct EPGEntry: Identifiable, Equatable {
 struct ChannelRow: View {
     /// Settings > Appearance > Text Size (fixed text frames grow with it).
     @Environment(\.aerioTextScale) private var textScale
+    @Environment(\.aerioSubtextScale) private var subtextScale
     let item: ChannelDisplayItem
     let onTap: () -> Void
     var fetchUpcoming: (() async -> [EPGEntry])? = nil
@@ -3212,7 +3213,7 @@ struct ChannelRow: View {
                         Text(item.number)
                             .scaledFont(.system(size: 24, weight: .bold, design: .monospaced))
                             .lineLimit(1)
-                            .foregroundColor(.textTertiary)
+                            .foregroundColor(Color.contrastText(.textTertiary))
                             .frame(width: TextScale.grow(42, textScale), alignment: .trailing)
                     }
 
@@ -3237,17 +3238,17 @@ struct ChannelRow: View {
                             if item.hasCatchup {
                                 Image(systemName: "clock.arrow.circlepath")
                                     .scaledFont(.system(size: 16, weight: .semibold))
-                                    .foregroundColor(.textTertiary)
+                                    .foregroundColor(Color.contrastText(.textTertiary))
                             }
                         }
 
                         if let prog = liveProgram {
                             HStack(spacing: 8) {
                                 MarqueeText(text: prog.title,
-                                            font: .system(size: 22),
-                                            color: .accentPrimary.opacity(0.85),
+                                            font: .system(size: 22).subtext(),
+                                            color: .contrastText(.accentPrimary.opacity(0.85)),
                                             isActive: isCardFocused)
-                                    .frame(height: TextScale.grow(28, textScale))
+                                    .frame(height: TextScale.grow(28, textScale * subtextScale))
                                 nowPlayingTimeRemaining(end: prog.end)
                                 // Feed badges (LIVE/NEW/PREMIERE/...) for the
                                 // now-airing program; renders nothing when none.
@@ -3261,15 +3262,15 @@ struct ChannelRow: View {
                             if showProgramSubtitles, let sub = prog.subTitle,
                                !EPGText.subtitleIsRedundant(sub, title: prog.title, description: prog.description) {
                                 Text(sub)
-                                    .scaledFont(.system(size: 18))
+                                    .scaledFont(.system(size: 18).subtext())
                                     .italic()
-                                    .foregroundColor(.textSecondary)
+                                    .foregroundColor(Color.contrastText(.textSecondary))
                                     .lineLimit(1)
                             }
                             if let desc = prog.description, !desc.isEmpty {
                                 Text(desc)
-                                    .scaledFont(.system(size: 18))
-                                    .foregroundColor(.textSecondary)
+                                    .scaledFont(.system(size: 18).subtext())
+                                    .foregroundColor(Color.contrastText(.textSecondary))
                                     .lineLimit(2)
                             }
                         }
@@ -3354,7 +3355,7 @@ struct ChannelRow: View {
                 Text(item.number)
                     .scaledFont(.system(size: (isWide ? 17 : 13) * s, weight: .bold, design: .monospaced))
                     .lineLimit(1)
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .frame(width: TextScale.grow((isWide ? 36 : 26) * s, textScale), alignment: .trailing)
             }
 
@@ -3387,17 +3388,17 @@ struct ChannelRow: View {
                     if item.hasCatchup {
                         Image(systemName: "clock.arrow.circlepath")
                             .scaledFont(.system(size: (isWide ? 12 : 10) * s, weight: .semibold))
-                            .foregroundColor(.textTertiary)
+                            .foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
 
                 if let prog = liveProgram {
                     HStack(spacing: 8) {
                         MarqueeText(text: prog.title,
-                                    font: .system(size: (isWide ? 15 : 11) * s),
-                                    color: .accentPrimary.opacity(0.85),
+                                    font: .system(size: (isWide ? 15 : 11) * s).subtext(),
+                                    color: .contrastText(.accentPrimary.opacity(0.85)),
                                     isActive: false)  // Static during scroll — saves GPU
-                            .frame(height: TextScale.grow((isWide ? 20 : 16) * s, textScale))
+                            .frame(height: TextScale.grow((isWide ? 20 : 16) * s, textScale * subtextScale))
                         nowPlayingTimeRemaining(end: prog.end)
                         // Feed badges (LIVE/NEW/PREMIERE/...) for the
                         // now-airing program; renders nothing when none.
@@ -3410,15 +3411,15 @@ struct ChannelRow: View {
                     if showProgramSubtitles, let sub = prog.subTitle,
                        !EPGText.subtitleIsRedundant(sub, title: prog.title, description: prog.description) {
                         Text(sub)
-                            .scaledFont(.system(size: (isWide ? 12 : 10) * s))
+                            .scaledFont(.system(size: (isWide ? 12 : 10) * s).subtext())
                             .italic()
-                            .foregroundColor(.textSecondary)
+                            .foregroundColor(Color.contrastText(.textSecondary))
                             .lineLimit(1)
                     }
                     if let desc = prog.description, !desc.isEmpty {
                         Text(desc)
-                            .scaledFont(.system(size: (isWide ? 12 : 10) * s))
-                            .foregroundColor(.textSecondary)
+                            .scaledFont(.system(size: (isWide ? 12 : 10) * s).subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
                             .lineLimit(2)
                     }
                 }
@@ -3472,7 +3473,7 @@ struct ChannelRow: View {
                     } else {
                         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                             .font(.system(size: 13, weight: .medium))  // glyph in a fixed box: not text, stays fixed
-                            .foregroundColor(.textTertiary)
+                            .foregroundColor(Color.contrastText(.textTertiary))
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
@@ -3912,8 +3913,8 @@ struct ChannelRow: View {
                             Text(end, style: .time)
                         }
                     }
-                    .scaledFont(.system(size: 12))
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.system(size: 12).subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
                 }
             }
             .padding(.horizontal, 16)
@@ -4061,7 +4062,7 @@ struct ChannelRow: View {
                 }
                 Text(entry.title)
                     .scaledFont(.labelSmall)
-                    .foregroundColor(replayable ? .textPrimary : .textTertiary)
+                    .foregroundColor(replayable ? .textPrimary : Color.contrastText(.textTertiary))
                     .lineLimit(1)
                 Spacer(minLength: 8)
                 if let start = entry.startTime, let end = entry.endTime {
@@ -4071,15 +4072,15 @@ struct ChannelRow: View {
                         // one long day otherwise).
                         if !Calendar.current.isDateInToday(start) {
                             Text(DVRFormat.day(start))
-                                .foregroundColor(.textSecondary)
+                                .foregroundColor(Color.contrastText(.textSecondary))
                             Text("·")
                         }
                         Text(start, style: .time)
                         Text("-")
                         Text(end, style: .time)
                     }
-                    .scaledFont(.system(size: 11))
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.system(size: 11).subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
                 }
             }
             .padding(.vertical, 5)
@@ -4113,11 +4114,11 @@ struct ChannelRow: View {
                         Image(systemName: "arrow.up")
                             .scaledFont(.system(size: 9, weight: .semibold))
                         Text("Previously aired")
-                            .scaledFont(.labelSmall)
+                            .scaledFont(.labelSmall.subtext())
                         Image(systemName: "arrow.up")
                             .scaledFont(.system(size: 9, weight: .semibold))
                     }
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .fixedSize()
                     Rectangle().fill(Color.borderSubtle).frame(height: 1)
                 }
@@ -4161,8 +4162,8 @@ struct ChannelRow: View {
                 HStack(spacing: 6) {
                     ProgressView().scaleEffect(0.7)
                     Text("Loading schedule…")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .padding(.horizontal, 14)
                 .padding(.bottom, 8)
@@ -4173,10 +4174,10 @@ struct ChannelRow: View {
                 HStack(spacing: 6) {
                     Image(systemName: "calendar.badge.exclamationmark")
                         .scaledFont(.system(size: 12))
-                        .foregroundColor(.textTertiary)
+                        .foregroundColor(Color.contrastText(.textTertiary))
                     Text("No upcoming schedule available")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .padding(.horizontal, 14)
                 .padding(.bottom, 10)
@@ -4420,11 +4421,11 @@ struct ChannelRow: View {
         let label = mins < 60 ? "\(mins)m" : "\(mins / 60)h\(mins % 60 > 0 ? " \(mins % 60)m" : "")"
         return Text(label)
             #if os(tvOS)
-            .scaledFont(.system(size: 18, weight: .medium, design: .monospaced))
+            .scaledFont(.system(size: 18, weight: .medium, design: .monospaced).subtext())
             #else
-            .scaledFont(.system(size: isWide ? 11 : 9, weight: .medium, design: .monospaced))
+            .scaledFont(.system(size: isWide ? 11 : 9, weight: .medium, design: .monospaced).subtext())
             #endif
-            .foregroundColor(.textSecondary)
+            .foregroundColor(Color.contrastText(.textSecondary))
             .lineLimit(1)
             .fixedSize()
     }
@@ -4517,11 +4518,11 @@ struct ChannelRow: View {
                     if !entry.description.isEmpty {
                         Text(entry.description)
                             #if os(tvOS)
-                            .scaledFont(.system(size: 18))
+                            .scaledFont(.system(size: 18).subtext())
                             #else
-                            .scaledFont(.labelSmall)
+                            .scaledFont(.labelSmall.subtext())
                             #endif
-                            .foregroundColor(.textSecondary)
+                            .foregroundColor(Color.contrastText(.textSecondary))
                             .lineLimit(2)
                     }
                     if let start = entry.startTime {
@@ -4530,7 +4531,7 @@ struct ChannelRow: View {
                             // (tomorrow's schedule, or history).
                             if !Calendar.current.isDateInToday(start) {
                                 Text(DVRFormat.day(start))
-                                    .foregroundColor(.textSecondary)
+                                    .foregroundColor(Color.contrastText(.textSecondary))
                                 Text("·")
                             }
                             Text(start, style: .time)
@@ -4540,11 +4541,11 @@ struct ChannelRow: View {
                             }
                         }
                         #if os(tvOS)
-                        .scaledFont(.system(size: 17))
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.system(size: 17).subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                         #else
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                         #endif
                     }
                     epgEntryMetaRow(entry)
@@ -4986,7 +4987,7 @@ struct PhoneHeaderSyncSpinner: View {
     var body: some View {
         Image(systemName: "arrow.clockwise")
             .scaledFont(.system(size: size, weight: .semibold))
-            .foregroundColor(.textTertiary)
+            .foregroundColor(Color.contrastText(.textTertiary))
             .rotationEffect(.degrees(spin ? 360 : 0))
             .animation(.linear(duration: 1.1).repeatForever(autoreverses: false),
                        value: spin)
@@ -5014,7 +5015,7 @@ struct PhoneGroupDrawer: View {
                 Text("CHANNEL GROUPS")
                     .scaledFont(.system(size: 12, weight: .bold))
                     .tracking(1.2)
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
                 Spacer()
                 Button(action: onManage) {
                     Image(systemName: "line.3.horizontal.decrease.circle")
@@ -5042,7 +5043,7 @@ struct PhoneGroupDrawer: View {
                                 .lineLimit(1)
                             Spacer()
                             if token == defaultToken || (token == "All" && defaultToken.isEmpty) {
-                                Image(systemName: "pin.fill").scaledFont(.system(size: 11)).foregroundColor(.textTertiary)
+                                Image(systemName: "pin.fill").scaledFont(.system(size: 11)).foregroundColor(Color.contrastText(.textTertiary))
                             }
                         }
                         .foregroundColor(token == selected ? .accentPrimary : .textPrimary)

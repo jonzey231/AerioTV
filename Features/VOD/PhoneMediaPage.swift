@@ -223,8 +223,8 @@ struct PhoneMediaPage: View {
                     .scaledFont(.headlineSmall)
                     .foregroundColor(.textPrimary)
                 Text("\(headerCount)")
-                    .scaledFont(.labelMedium)
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.labelMedium.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
             }
             .contentShape(Rectangle())
             .onTapGesture {
@@ -275,7 +275,7 @@ struct PhoneMediaPage: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .scaledFont(.system(size: 15, weight: .semibold))
-                .foregroundColor(.textSecondary)
+                .foregroundColor(Color.contrastText(.textSecondary))
             TextField(search.placeholder, text: search.text)
                 .scaledFont(.system(size: 16))
                 .foregroundColor(.textPrimary)
@@ -289,7 +289,7 @@ struct PhoneMediaPage: View {
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .scaledFont(.system(size: 16))
-                    .foregroundColor(.textSecondary)
+                    .foregroundColor(Color.contrastText(.textSecondary))
             }
             .accessibilityLabel("Clear and close search")
         }

@@ -204,7 +204,7 @@ struct GroupSidebarPanel: View {
             HStack(spacing: 12) {
                 Text("Groups")
                     .scaledFont(.system(size: 22, weight: .semibold))
-                    .foregroundColor(.textSecondary)
+                    .foregroundColor(Color.contrastText(.textSecondary))
 
                 // GH #57: the sidebar's own entry into hide/reorder. Sits in
                 // the header rather than the list so a D-pad Right out of a

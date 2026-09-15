@@ -1376,7 +1376,7 @@ struct MoviesView: View {
                     }
                 },
                 emptyView: isSearching && !isSearchingLibrary ? {
-                    AnyView(Text("No results").scaledFont(.labelMedium).foregroundColor(.textTertiary))
+                    AnyView(Text("No results").scaledFont(.labelMedium.subtext()).foregroundColor(Color.contrastText(.textTertiary)))
                 } : nil,
                 railLetters: railLetters,
                 railTarget: { letter in firstGridID(for: letter).map { String($0.dropFirst("grid-".count)) } },
@@ -1419,8 +1419,8 @@ struct MoviesView: View {
         if let who = personMatchName {
             rows.append(PhoneRow(id: "person") {
                 AnyView(Text("Includes titles with \(who)")
-                    .scaledFont(.labelMedium)
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.labelMedium.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .padding(.horizontal, 16))
             })
         }
@@ -1444,7 +1444,7 @@ struct MoviesView: View {
             rows.append(PhoneRow(id: "searching") {
                 AnyView(HStack(spacing: 10) {
                     ProgressView().tint(.accentPrimary)
-                    Text("Searching server…").scaledFont(.labelMedium).foregroundColor(.textTertiary)
+                    Text("Searching server…").scaledFont(.labelMedium.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .padding(.horizontal, 16))
             })
@@ -1455,13 +1455,13 @@ struct MoviesView: View {
     private var hiddenGroupsBanner: some View {
         HStack(spacing: 6) {
             Text("\(hiddenGroups.count) group\(hiddenGroups.count == 1 ? "" : "s") hidden")
-                .scaledFont(.labelMedium)
-                .foregroundColor(.textSecondary)
+                .scaledFont(.labelMedium.subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
             Button {
                 hiddenGroups.removeAll()
                 HiddenGroupsStore.save(hiddenGroups, forKey: hiddenGroupsKey)
             } label: {
-                Text("Show All").scaledFont(.labelMedium).foregroundColor(.accentPrimary)
+                Text("Show All").scaledFont(.labelMedium).foregroundColor(Color.contrastText(.accentPrimary))
             }
             .buttonStyle(.plain)
             Spacer()
@@ -1477,15 +1477,15 @@ struct MoviesView: View {
             if !hiddenGroups.isEmpty && searchText.isEmpty {
                 HStack(spacing: 6) {
                     Text("\(hiddenGroups.count) group\(hiddenGroups.count == 1 ? "" : "s") hidden")
-                        .scaledFont(.labelMedium)
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.labelMedium.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                     Button {
                         hiddenGroups.removeAll()
                         HiddenGroupsStore.save(hiddenGroups, forKey: hiddenGroupsKey)
                     } label: {
                         Text("Show All")
                             .scaledFont(.labelMedium)
-                            .foregroundColor(.accentPrimary)
+                            .foregroundColor(Color.contrastText(.accentPrimary))
                     }
                     .buttonStyle(.plain)
                     Spacer()
@@ -1682,8 +1682,8 @@ struct MoviesView: View {
                             if isSearching {
                                 if let who = personMatchName {
                                     Text("Includes titles with \(who)")
-                                        .scaledFont(.labelMedium)
-                                        .foregroundColor(.textTertiary)
+                                        .scaledFont(.labelMedium.subtext())
+                                        .foregroundColor(Color.contrastText(.textTertiary))
                                         .padding(.horizontal, 16)
                                         .padding(.leading, contentLeadingInset)
                                 }
@@ -1693,8 +1693,8 @@ struct MoviesView: View {
                                     HStack(spacing: 10) {
                                         ProgressView().tint(.accentPrimary)
                                         Text("Searching server…")
-                                            .scaledFont(.labelMedium)
-                                            .foregroundColor(.textTertiary)
+                                            .scaledFont(.labelMedium.subtext())
+                                            .foregroundColor(Color.contrastText(.textTertiary))
                                     }
                                     .padding(.horizontal, 16)
                                     .padding(.leading, contentLeadingInset)
@@ -2352,8 +2352,8 @@ struct MoviesView: View {
                         .scaledFont(.headlineSmall)
                         .foregroundColor(.textPrimary)
                     Text("\(count)")
-                        .scaledFont(.labelMedium)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelMedium.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .contentShape(Rectangle())
                 #if os(iOS)
@@ -2448,7 +2448,7 @@ struct MoviesView: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .scaledFont(.system(size: 15, weight: .semibold))
-                .foregroundColor(.textSecondary)
+                .foregroundColor(Color.contrastText(.textSecondary))
             TextField("Search \(kindLower)", text: $searchText)
                 .scaledFont(.system(size: 16))
                 .foregroundColor(.textPrimary)
@@ -2464,7 +2464,7 @@ struct MoviesView: View {
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .scaledFont(.system(size: 16))
-                    .foregroundColor(.textSecondary)
+                    .foregroundColor(Color.contrastText(.textSecondary))
             }
             .accessibilityLabel("Clear and close search")
         }
@@ -2748,10 +2748,10 @@ struct MoviesView: View {
                 .scaledFont(.headlineLarge).foregroundColor(.textPrimary)
             if let serverName = vodStore.lastMoviesServerName {
                 Text("Server: \(serverName)")
-                    .scaledFont(.labelMedium).foregroundColor(.textSecondary)
+                    .scaledFont(.labelMedium.subtext()).foregroundColor(Color.contrastText(.textSecondary))
             }
             Text(msg)
-                .scaledFont(.bodyMedium).foregroundColor(.textSecondary)
+                .scaledFont(.bodyMedium.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                 .multilineTextAlignment(.center)
             PrimaryButton("Try Again") { refreshLibrary() }
                 .frame(maxWidth: 200)
@@ -2862,11 +2862,11 @@ struct VODPosterCard: View {
                 // card reserves the same vertical space for this line.
                 Text(item.releaseYear.isEmpty ? "\u{00A0}" : item.releaseYear)
                     #if os(tvOS)
-                    .scaledFont(.system(size: 16, weight: .medium))
-                    .foregroundColor(item.releaseYear.isEmpty ? .clear : .textSecondary)
+                    .scaledFont(.system(size: 16, weight: .medium).subtext())
+                    .foregroundColor(item.releaseYear.isEmpty ? .clear : Color.contrastText(.textSecondary))
                     #else
-                    .scaledFont(.system(size: 10))
-                    .foregroundColor(item.releaseYear.isEmpty ? .clear : .textTertiary)
+                    .scaledFont(.system(size: 10).subtext())
+                    .foregroundColor(item.releaseYear.isEmpty ? .clear : Color.contrastText(.textTertiary))
                     #endif
             }
             .padding(.bottom, 4)
@@ -3189,6 +3189,7 @@ struct MoviesHero: View {
     /// Settings > Appearance > Text Size: the hero keeps its fixed height
     /// (focus and scroll thresholds depend on it), so copy sheds lines instead.
     @Environment(\.aerioTextScale) private var textScale
+    @Environment(\.aerioSubtextScale) private var subtextScale
     let item: VODDisplayItem
     let progress: WatchProgress?
     var backdropOverride: URL? = nil
@@ -3401,11 +3402,11 @@ struct MoviesHero: View {
             if !metaParts.isEmpty || !item.rating.isEmpty {
                 HStack(spacing: 10) {
                     ForEach(Array(metaParts.enumerated()), id: \.offset) { idx, part in
-                        if idx > 0 { Text("·").foregroundColor(.textTertiary) }
+                        if idx > 0 { Text("·").foregroundColor(Color.contrastText(.textTertiary)) }
                         Text(part)
                     }
                     if !item.rating.isEmpty {
-                        if !metaParts.isEmpty { Text("·").foregroundColor(.textTertiary) }
+                        if !metaParts.isEmpty { Text("·").foregroundColor(Color.contrastText(.textTertiary)) }
                         HStack(spacing: 4) {
                             Image(systemName: "star.fill").scaledFont(.system(size: metaSize - 4))
                             Text(item.rating)
@@ -3413,8 +3414,8 @@ struct MoviesHero: View {
                         .foregroundColor(.accentPrimary)
                     }
                 }
-                .scaledFont(.system(size: metaSize, weight: .medium))
-                .foregroundColor(.textSecondary)
+                .scaledFont(.system(size: metaSize, weight: .medium).subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
                 #if os(iOS)
                 // One line on the phone card; a long genre list wrapped to three.
                 .lineLimit(1)
@@ -3424,9 +3425,9 @@ struct MoviesHero: View {
             #if os(tvOS)
             if case let plot = (art.overview(for: item) ?? item.plotText), !plot.isEmpty {
                 Text(plot)
-                    .scaledFont(.bodySmall)
-                    .foregroundColor(.textPrimary.opacity(0.85))
-                    .lineLimit(textScale > 1.25 ? 1 : (textScale > 1.0 ? 2 : 3))
+                    .scaledFont(.bodySmall.subtext())
+                    .foregroundColor(Color.contrastText(.textPrimary.opacity(0.85)))
+                    .lineLimit(textScale * subtextScale > 1.25 ? 1 : (textScale * subtextScale > 1.0 ? 2 : 3))
                     .frame(maxWidth: 560, alignment: .leading)
             }
             #endif
@@ -3475,8 +3476,8 @@ struct MoviesHero: View {
             }
             if let remainingLabel {
                 Text(remainingLabel)
-                    .scaledFont(.labelSmall)
-                    .foregroundColor(.textSecondary)
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
             }
             #endif
         }

@@ -256,7 +256,7 @@ struct DVRSettingsView: View {
                 Text("Danger Zone").sectionHeaderStyle()
             } footer: {
                 Text("Deletes every recording saved on this device. Server recordings on Dispatcharr are not affected.")
-                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
             .listRowBackground(Color.cardBackground)
         }
@@ -342,8 +342,8 @@ struct DVRSettingsView: View {
                     // data, recordings included. Disclose it rather than
                     // let a vanished recording look like an app bug.
                     Text("Recordings are stored on this Apple TV. If the system runs critically low on space, tvOS may remove stored app data, including recordings. For must-keep recordings, use a Dispatcharr server destination.")
-                        .scaledFont(.system(size: 22))
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.system(size: 22).subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.horizontal, 20)
                         .padding(.top, 4)
                 }
@@ -409,12 +409,12 @@ struct DVRSettingsView: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("Used")
-                        .scaledFont(.system(size: 22))
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.system(size: 22).subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                     Spacer()
                     Text(formatBytes(coordinator.localUsageBytes) + " of " + formatGB(mb: maxStorageMB))
-                        .scaledFont(.system(size: 22))
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.system(size: 22).subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                 }
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
@@ -471,7 +471,7 @@ struct DVRSettingsView: View {
                 Button("Custom…", action: customAction)
             } label: {
                 Text(selection.wrappedValue == 0 ? "None" : "\(selection.wrappedValue) min")
-                    .foregroundColor(.accentPrimary)
+                    .foregroundColor(Color.contrastText(.accentPrimary))
             }
         }
     }

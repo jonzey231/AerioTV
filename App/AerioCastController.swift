@@ -2203,7 +2203,7 @@ struct RemoteControlScreen: View {
             }
             Text(statusText)
                 .scaledFont(.caption)
-                .foregroundStyle(ThemeManager.shared.accent)
+                .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))
                 .lineLimit(1)
         }
         .multilineTextAlignment(.center)
@@ -2226,7 +2226,7 @@ struct RemoteControlScreen: View {
                 .frame(height: 4)
             Text("LIVE")
                 .scaledFont(.caption2.weight(.semibold))
-                .foregroundStyle(ThemeManager.shared.accent)
+                .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))
                 .frame(maxWidth: .infinity, alignment: .center)
         }
     }
@@ -2312,7 +2312,7 @@ struct RemoteControlScreen: View {
             HStack {
                 Text(s.isLive ? "LIVE" : "REWOUND")
                     .scaledFont(.caption.weight(.semibold))
-                    .foregroundStyle(s.isLive ? ThemeManager.shared.accent : .white.opacity(0.6))
+                    .foregroundStyle(s.isLive ? Color.contrastText(ThemeManager.shared.accent) : .white.opacity(0.6))
                 Spacer()
                 if !s.isLive {
                     Button("Go Live") { companion.goLive() }
@@ -2695,7 +2695,7 @@ private struct CastStreamInfoCard: View {
         HStack(spacing: 8) {
             Text(label)
                 .scaledFont(.system(size: 9, weight: .bold, design: .monospaced))
-                .foregroundColor(Color.accentPrimary)
+                .foregroundColor(Color.contrastText(Color.accentPrimary))
                 .frame(width: TextScale.grow(46, textScale), alignment: .trailing)
             Text(value)
                 .scaledFont(.system(size: 10, weight: .medium, design: .monospaced))
@@ -3216,7 +3216,7 @@ struct RemoteSessionCard: View {
                 }
                 Text(status)
                     .scaledFont(.caption)
-                    .foregroundStyle(ThemeManager.shared.accent)
+                    .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)

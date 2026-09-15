@@ -3379,16 +3379,16 @@ struct OpenSourceLicensesView: View {
         List {
             Section {
                 Text(OSSCatalog.appSummary)
-                    .scaledFont(.footnote)
-                    .foregroundColor(.textSecondary)
+                    .scaledFont(.footnote.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .listRowBackground(Color.cardBackground)
             } header: {
                 Text("License").sectionHeaderStyle()
             }
             Section {
                 Text(OSSCatalog.patentNotice)
-                    .scaledFont(.footnote)
-                    .foregroundColor(.textSecondary)
+                    .scaledFont(.footnote.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .listRowBackground(Color.cardBackground)
             } header: {
                 Text("Patents").sectionHeaderStyle()
@@ -3406,7 +3406,7 @@ struct OpenSourceLicensesView: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(c.name).scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                            Text(c.licenseName).scaledFont(.caption).foregroundColor(.textTertiary)
+                            Text(c.licenseName).scaledFont(.caption.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                         }
                     }
                     .listRowBackground(Color.cardBackground)
@@ -3445,14 +3445,14 @@ struct OpenSourceLicensesView: View {
                             .scaledFont(.system(size: 40, weight: .bold))
                             .foregroundColor(.textPrimary)
                         Text(OSSCatalog.appSummary)
-                            .scaledFont(.system(size: 24))
-                            .foregroundColor(.textSecondary)
+                            .scaledFont(.system(size: 24).subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
                         Text("Patents")
                             .scaledFont(.system(size: 28, weight: .semibold))
                             .foregroundColor(.textPrimary)
                         Text(OSSCatalog.patentNotice)
-                            .scaledFont(.system(size: 24))
-                            .foregroundColor(.textSecondary)
+                            .scaledFont(.system(size: 24).subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
                         TMDBAttributionView(style: .long)
                         VStack(spacing: 12) {
                             ForEach(OSSCatalog.components) { c in
@@ -3488,8 +3488,8 @@ private struct OSSDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text(component.blurb)
-                    .scaledFont(.footnote)
-                    .foregroundColor(.textSecondary)
+                    .scaledFont(.footnote.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
                 if let text = component.licenseText {
                     Text(text)
                         .scaledFont(.system(size: 12, design: .monospaced))
@@ -3545,7 +3545,7 @@ private struct FocusableParagraph: View {
     var body: some View {
         Text(text)
             .scaledFont(.system(size: 22))
-            .foregroundColor(focused ? .textPrimary : .textSecondary)
+            .foregroundColor(focused ? .textPrimary : Color.contrastText(.textSecondary))
             .padding(8)
             .background(RoundedRectangle(cornerRadius: 8)
                 .fill(focused ? Color.cardBackground : Color.clear))

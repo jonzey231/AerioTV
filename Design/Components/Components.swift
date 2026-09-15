@@ -284,12 +284,12 @@ struct TMDBAttributionView: View {
                 .accessibilityLabel("The Movie Database")
             // Their required line first, ours second.
             Text("This product uses the TMDB API but is not endorsed or certified by TMDB.")
-                .scaledFont(font)
-                .foregroundColor(.textTertiary)
+                .scaledFont(font.subtext())
+                .foregroundColor(Color.contrastText(.textTertiary))
                 .fixedSize(horizontal: false, vertical: true)
             Text("TMDB data is used only after configuring a TMDB API key in Settings > App Behaviors.")
-                .scaledFont(font)
-                .foregroundColor(.textTertiary)
+                .scaledFont(font.subtext())
+                .foregroundColor(Color.contrastText(.textTertiary))
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -459,7 +459,7 @@ struct AppTextField: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .scaledFont(.labelLarge)
-                .foregroundColor(.textSecondary)
+                .foregroundColor(Color.contrastText(.textSecondary))
 
             HStack(spacing: 12) {
                 DarkFocusTextFieldRepresentable(
@@ -478,7 +478,7 @@ struct AppTextField: View {
                     } label: {
                         Image(systemName: passwordVisible ? "eye.slash" : "eye")
                             .font(.system(size: 22))  // glyph in a fixed box: not text, stays fixed
-                            .foregroundColor(.textTertiary)
+                            .foregroundColor(Color.contrastText(.textTertiary))
                             .frame(width: 36, height: 36)
                             .contentShape(Rectangle())
                     }
@@ -508,13 +508,13 @@ struct AppTextField: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .scaledFont(.labelLarge)
-                .foregroundColor(.textSecondary)
+                .foregroundColor(Color.contrastText(.textSecondary))
 
             HStack(spacing: 12) {
                 if let icon {
                     Image(systemName: icon)
                         .scaledFont(.system(size: 16))
-                        .foregroundColor(isFocused ? .accentPrimary : .textTertiary)
+                        .foregroundColor(isFocused ? .accentPrimary : Color.contrastText(.textTertiary))
                         .frame(width: 20)
                         .animation(.easeInOut(duration: 0.15), value: isFocused)
                 }
@@ -571,7 +571,7 @@ struct AppTextField: View {
                     } label: {
                         Image(systemName: passwordVisible ? "eye.slash" : "eye")
                             .font(.system(size: 16))  // glyph in a fixed box: not text, stays fixed
-                            .foregroundColor(.textTertiary)
+                            .foregroundColor(Color.contrastText(.textTertiary))
                             .frame(width: 24, height: 24)
                             .contentShape(Rectangle())
                     }
@@ -672,7 +672,7 @@ struct SectionHeader: View {
                 Button(action: action) {
                     Text(actionTitle)
                         .scaledFont(.labelMedium)
-                        .foregroundColor(.accentPrimary)
+                        .foregroundColor(Color.contrastText(.accentPrimary))
                 }
                 #if os(tvOS)
                 .buttonStyle(TVNoHighlightButtonStyle())
@@ -694,8 +694,8 @@ struct LoadingView: View {
                 .tint(.accentPrimary)
                 .scaleEffect(1.2)
             Text(message)
-                .scaledFont(.bodyMedium)
-                .foregroundColor(.textSecondary)
+                .scaledFont(.bodyMedium.subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appBackground)
@@ -721,8 +721,8 @@ struct EmptyStateView: View {
                     .scaledFont(.headlineLarge)
                     .foregroundColor(.textPrimary)
                 Text(message)
-                    .scaledFont(.bodyMedium)
-                    .foregroundColor(.textSecondary)
+                    .scaledFont(.bodyMedium.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .multilineTextAlignment(.center)
             }
 
@@ -766,8 +766,8 @@ struct NoPosterPlaceholder: View {
                 .opacity(0.6)
             if !compact {
                 Text("No artwork provided")
-                    .scaledFont(.labelSmall)
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
             }
@@ -787,7 +787,7 @@ struct TVCategoryPill: View {
         Button(action: action) {
             Text(label)
                 .scaledFont(.system(size: 22, weight: .medium))
-                .foregroundColor(isSelected ? .appBackground : (isFocused ? .white : .textSecondary))
+                .foregroundColor(isSelected ? .appBackground : (isFocused ? .white : Color.contrastText(.textSecondary)))
                 .padding(.horizontal, 26)
                 .padding(.vertical, 13)
                 .background(
@@ -988,8 +988,8 @@ struct SeasonEpisodePill: View {
     var body: some View {
         if let label {
             Text(label)
-                .scaledFont(.system(size: fontSize, weight: .medium))
-                .foregroundColor(.textSecondary)
+                .scaledFont(.system(size: fontSize, weight: .medium).subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
                 .lineLimit(1)
                 .padding(.horizontal, hPad)
                 .padding(.vertical, vPad)
@@ -1029,8 +1029,8 @@ struct TVQRLinkSheet: View {
                 .scaledFont(.system(size: 38, weight: .bold))
                 .foregroundColor(.textPrimary)
             Text(subtitle)
-                .scaledFont(.system(size: 26))
-                .foregroundColor(.textSecondary)
+                .scaledFont(.system(size: 26).subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
                 .multilineTextAlignment(.center)
             if let qr = Self.qrCodeImage(from: link.url) {
                 Image(uiImage: qr)

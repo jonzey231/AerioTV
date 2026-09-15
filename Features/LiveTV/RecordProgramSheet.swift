@@ -514,8 +514,8 @@ struct RecordProgramSheet: View {
                             .foregroundColor(.textPrimary)
                             .lineLimit(2)
                         Text("\(channelName) · \(timeLabel)")
-                            .scaledFont(.system(size: 22))
-                            .foregroundColor(.textSecondary)
+                            .scaledFont(.system(size: 22).subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
                     }
                 }
 
@@ -571,7 +571,7 @@ struct RecordProgramSheet: View {
                         // What the buffers add up to, updated as pills change.
                         Text(isSeriesRule ? (ruleError ?? seriesRuleSummary) : recordingWindowSummary)
                             .scaledFont(.system(size: 22))
-                            .foregroundColor(ruleError == nil ? .textSecondary : .red)
+                            .foregroundColor(ruleError == nil ? Color.contrastText(.textSecondary) : .red)
                         RecordActionPill(
                             label: isSeriesRule ? "Save Rule" : "Record",
                             systemImage: "record.circle",
@@ -631,7 +631,7 @@ struct RecordProgramSheet: View {
             if ruleMode != .once, showCustomRule {
                 Text("Title Match")
                     .scaledFont(.system(size: 20, weight: .semibold))
-                    .foregroundColor(.textSecondary)
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .padding(.leading, 4)
                 HStack(spacing: 12) {
                     ForEach(DispatcharrAPI.SeriesRule.TitleMode.allCases, id: \.self) { m in
@@ -731,7 +731,7 @@ struct RecordProgramSheet: View {
         return VStack(alignment: .leading, spacing: 8) {
             Text("Remove Commercials (Comskip)")
                 .scaledFont(.system(size: 24, weight: .semibold))
-                .foregroundColor(isDisabled ? .textTertiary : .textPrimary)
+                .foregroundColor(isDisabled ? Color.contrastText(.textTertiary) : .textPrimary)
                 .padding(.leading, 4)
             HStack(spacing: 12) {
                 RecordOptionPill(
@@ -756,8 +756,8 @@ struct RecordProgramSheet: View {
                     ? "Comskip runs server-side. Switch the destination to Dispatcharr server to enable."
                     : "Server-side: detects and removes commercial breaks after the recording completes, when Comskip is configured on the Dispatcharr server."
             )
-                .scaledFont(.system(size: 18))
-                .foregroundColor(.textSecondary)
+                .scaledFont(.system(size: 18).subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
                 .padding(.leading, 4)
                 .padding(.top, 2)
         }
@@ -854,8 +854,8 @@ struct RecordProgramSheet: View {
                 Stepper(customBufferLabel, value: $customValue, in: floor...120)
                 if floor < 0 {
                     Text("Step below zero to start the recording after the listed start time.")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
             }
             .navigationTitle("Custom Buffer")
@@ -894,7 +894,7 @@ struct RecordProgramSheet: View {
                 }
                 Text(customBufferLabel)
                     .scaledFont(.system(size: 34, weight: .semibold))
-                    .foregroundColor(.accentPrimary)
+                    .foregroundColor(Color.contrastText(.accentPrimary))
                     .frame(minWidth: 420)
                 RecordOptionPill(label: "+", isSelected: false) {
                     if customValue < 120 { customValue += 1 }
@@ -902,8 +902,8 @@ struct RecordProgramSheet: View {
             }
             if floor < 0 {
                 Text("Step below zero to start the recording after the listed start time.")
-                    .scaledFont(.system(size: 24))
-                    .foregroundColor(.textSecondary)
+                    .scaledFont(.system(size: 24).subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
             }
             HStack(spacing: 24) {
                 RecordActionPill(label: "Cancel", systemImage: "xmark", tintColor: .accentPrimary) {

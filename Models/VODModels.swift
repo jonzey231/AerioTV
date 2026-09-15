@@ -673,7 +673,7 @@ private struct ContinueWatchingCard: View {
                         .overlay {
                             Image(systemName: "film")
                                 .scaledFont(.title2)
-                                .foregroundColor(.textTertiary)
+                                .foregroundColor(Color.contrastText(.textTertiary))
                         }
                 }
 
@@ -712,7 +712,7 @@ private struct ContinueWatchingCard: View {
             if let subtitle, !subtitle.isEmpty {
                 Text(subtitle)
                     .scaledFont(subtitleFont)
-                    .foregroundColor(.textSecondary)
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .lineLimit(1)
                     .frame(width: cardWidth, alignment: .leading)
             }

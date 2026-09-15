@@ -74,7 +74,7 @@ struct ChannelPickRow: View {
                 if showChannelNumbers {
                     Text(item.number)
                         .scaledFont(.system(size: 22, weight: .bold, design: .monospaced))
-                        .foregroundColor(.textTertiary)
+                        .foregroundColor(Color.contrastText(.textTertiary))
                         .frame(width: TextScale.grow(56, textScale), alignment: .trailing)
                         .lineLimit(1)
                 }
@@ -99,14 +99,14 @@ struct ChannelPickRow: View {
                         if item.hasCatchup {
                             Image(systemName: "clock.arrow.circlepath")
                                 .scaledFont(.system(size: 15, weight: .semibold))
-                                .foregroundColor(.textTertiary)
+                                .foregroundColor(Color.contrastText(.textTertiary))
                         }
                     }
 
                     if let now = nowTitle {
                         Text(now)
                             .scaledFont(.system(size: 19))
-                            .foregroundColor(.accentPrimary.opacity(0.85))
+                            .foregroundColor(Color.contrastText(.accentPrimary.opacity(0.85)))
                             .lineLimit(1)
                     }
                 }
@@ -312,8 +312,8 @@ struct ChannelListOverlay: View {
 
             if entries.isEmpty {
                 Text("No channels in this group.")
-                    .scaledFont(.system(size: 22))
-                    .foregroundColor(.textSecondary)
+                    .scaledFont(.system(size: 22).subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .padding(.leading, 6)
                 Spacer(minLength: 0)
             } else {

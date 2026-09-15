@@ -276,11 +276,11 @@ struct RemoteControlSettingsView: View {
             Spacer(minLength: 12)
             Text(value)
                 .scaledFont(.system(size: 24))
-                .foregroundColor(.accentPrimary)
+                .foregroundColor(Color.contrastText(.accentPrimary))
                 .lineLimit(1)
             Image(systemName: "chevron.right")
                 .scaledFont(.system(size: 20, weight: .semibold))
-                .foregroundColor(.textTertiary)
+                .foregroundColor(Color.contrastText(.textTertiary))
         }
     }
 
@@ -293,8 +293,8 @@ struct RemoteControlSettingsView: View {
     /// `AppBehaviorsSettingsView`'s tvOS sections.
     private func sectionFooter(_ text: String) -> some View {
         Text(text)
-            .scaledFont(.system(size: 22))
-            .foregroundColor(.textTertiary)
+            .scaledFont(.system(size: 22).subtext())
+            .foregroundColor(Color.contrastText(.textTertiary))
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 4)
             .padding(.top, 4)

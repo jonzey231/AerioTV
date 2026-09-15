@@ -504,16 +504,16 @@ struct RemoteHintStrip: View {
         for (index, pair) in pairs.enumerated() {
             if index > 0 {
                 out = out + Text("  \u{00B7}  ")
-                    .scaledFont(.system(size: 18, weight: .regular), scale: textScale)
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.system(size: 18, weight: .regular).subtext(), scale: textScale)
+                    .foregroundColor(Color.contrastText(.textTertiary))
             }
             out = out + Text(pair.key)
                 .scaledFont(.system(size: 18, weight: .semibold), scale: textScale)
-                .foregroundColor(.textSecondary)
+                .foregroundColor(Color.contrastText(.textSecondary))
             out = out + Text("  ")
             out = out + Text(pair.action)
-                .scaledFont(.system(size: 18, weight: .regular), scale: textScale)
-                .foregroundColor(.textTertiary)
+                .scaledFont(.system(size: 18, weight: .regular).subtext(), scale: textScale)
+                .foregroundColor(Color.contrastText(.textTertiary))
         }
         return out
     }

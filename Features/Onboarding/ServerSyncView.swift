@@ -239,7 +239,7 @@ struct ServerSyncView: View {
                     dismiss()
                 }
                 .scaledFont(.bodyMedium)
-                .foregroundColor(.textSecondary)
+                .foregroundColor(Color.contrastText(.textSecondary))
                 #endif
             }
 
@@ -253,8 +253,8 @@ struct ServerSyncView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(.statusWarning)
                         Text("This is taking longer than usual. If you have a large playlist or VOD library, this is expected behavior on a fresh install. If not, your server or IPTV source might be offline or unreachable.")
-                            .scaledFont(.system(size: 14))
-                            .foregroundColor(.textSecondary)
+                            .scaledFont(.system(size: 14).subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
                             .multilineTextAlignment(.leading)
                     }
                     .frame(maxWidth: 360, alignment: .leading)
@@ -268,7 +268,7 @@ struct ServerSyncView: View {
                     onContinueAnyway()
                 }
                 .scaledFont(.bodyMedium)
-                .foregroundColor(.textSecondary)
+                .foregroundColor(Color.contrastText(.textSecondary))
                 #endif
             }
             .animation(.easeInOut(duration: 0.25), value: isTakingTooLong)
@@ -303,8 +303,8 @@ struct ServerSyncView: View {
 
                 if case .done(let detail) = stage.status, !detail.isEmpty {
                     Text(detail)
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                 }
                 if case .failed(let err) = stage.status {
                     Text(err)
@@ -580,7 +580,7 @@ private struct TVSkipButton: View {
         Button(action: action) {
             Text("Skip")
                 .scaledFont(.system(size: 26, weight: .semibold))
-                .foregroundColor(isFocused ? .textPrimary : .textSecondary)
+                .foregroundColor(isFocused ? .textPrimary : Color.contrastText(.textSecondary))
                 .padding(.horizontal, 40)
                 .padding(.vertical, 14)
                 .frame(minWidth: 180)

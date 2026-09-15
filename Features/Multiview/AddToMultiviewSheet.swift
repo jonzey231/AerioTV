@@ -408,7 +408,7 @@ struct AddToMultiviewSheet: View {
                     } label: {
                         Label("Back to Series", systemImage: "chevron.left")
                             .scaledFont(.headline)
-                            .foregroundStyle(Color.accentPrimary)
+                            .foregroundStyle(Color.contrastText(Color.accentPrimary))
                     }
                     .buttonStyle(.plain)
                 }
@@ -704,7 +704,7 @@ struct AddToMultiviewSheet: View {
             } label: {
                 Label("Back to Series", systemImage: "chevron.left")
                     .scaledFont(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(Color.accentPrimary)
+                    .foregroundStyle(Color.contrastText(Color.accentPrimary))
                     .padding(.vertical, 8)
             }
             .buttonStyle(TVNoHighlightButtonStyle())

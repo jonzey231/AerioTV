@@ -127,7 +127,7 @@ struct TVShowsView: View {
                     } label: {
                         Text("Filter")
                             .scaledFont(.headlineSmall)
-                            .foregroundColor(.accentPrimary)
+                            .foregroundColor(Color.contrastText(.accentPrimary))
                     }
                 }
             }
@@ -399,7 +399,7 @@ struct TVShowsView: View {
                 } label: {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 24, weight: .medium))  // glyph in a fixed box: not text, stays fixed
-                        .foregroundColor(showSearchField ? .accentPrimary : .textSecondary)
+                        .foregroundColor(showSearchField ? .accentPrimary : Color.contrastText(.textSecondary))
                         .frame(width: 56, height: 56)
                         .background(
                             Circle()
@@ -434,7 +434,7 @@ struct TVShowsView: View {
                 } label: {
                     Text("Filter")
                         .scaledFont(.headlineSmall)
-                        .foregroundColor(.accentPrimary)
+                        .foregroundColor(Color.contrastText(.accentPrimary))
                 }
                 .buttonStyle(TVNoHighlightButtonStyle())
             }
@@ -451,15 +451,15 @@ struct TVShowsView: View {
             if !hiddenGroups.isEmpty && searchText.isEmpty {
                 HStack(spacing: 6) {
                     Text("\(hiddenGroups.count) group\(hiddenGroups.count == 1 ? "" : "s") hidden")
-                        .scaledFont(.labelMedium)
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.labelMedium.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                     Button {
                         hiddenGroups.removeAll()
                         HiddenGroupsStore.save(hiddenGroups, forKey: hiddenGroupsKey)
                     } label: {
                         Text("Show All")
                             .scaledFont(.labelMedium)
-                            .foregroundColor(.accentPrimary)
+                            .foregroundColor(Color.contrastText(.accentPrimary))
                     }
                     .buttonStyle(.plain)
                     Spacer()
@@ -593,10 +593,10 @@ struct TVShowsView: View {
                 .scaledFont(.headlineLarge).foregroundColor(.textPrimary)
             if let serverName = vodStore.lastSeriesServerName {
                 Text("Server: \(serverName)")
-                    .scaledFont(.labelMedium).foregroundColor(.textSecondary)
+                    .scaledFont(.labelMedium.subtext()).foregroundColor(Color.contrastText(.textSecondary))
             }
             Text(msg)
-                .scaledFont(.bodyMedium).foregroundColor(.textSecondary)
+                .scaledFont(.bodyMedium.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                 .multilineTextAlignment(.center)
             PrimaryButton("Try Again") { vodStore.refreshSeries(servers: servers) }
                 .frame(maxWidth: 200)

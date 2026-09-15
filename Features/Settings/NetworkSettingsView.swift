@@ -149,7 +149,7 @@ struct NetworkSettingsView: View {
                             Spacer()
                             Text("\(Int(networkTimeout))s")
                                 .scaledFont(.monoSmall)
-                                .foregroundColor(theme.accent)
+                                .foregroundColor(Color.contrastText(theme.accent))
                         }
                         Slider(value: $networkTimeout, in: 5...60, step: 5)
                             .tint(theme.accent)
@@ -162,7 +162,7 @@ struct NetworkSettingsView: View {
                     Text("Connection").sectionHeaderStyle()
                 } footer: {
                     Text("Adjust timeouts if you have a slow connection.")
-                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
 
                 // MARK: Buffer Size
@@ -177,8 +177,8 @@ struct NetworkSettingsView: View {
                                         .scaledFont(.bodyMedium)
                                         .foregroundColor(.textPrimary)
                                     Text(opt.detail)
-                                        .scaledFont(.labelSmall)
-                                        .foregroundColor(.textSecondary)
+                                        .scaledFont(.labelSmall.subtext())
+                                        .foregroundColor(Color.contrastText(.textSecondary))
                                 }
                                 Spacer()
                                 if streamBufferSize == opt.id {
@@ -194,7 +194,7 @@ struct NetworkSettingsView: View {
                     Text("Buffer Size").sectionHeaderStyle()
                 } footer: {
                     Text("Controls how much stream data is pre-loaded. Larger buffers reduce stuttering on poor connections but add startup delay.")
-                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
 
                 // Guide Window removed 2026-09-11 (Logan): the playlist's
@@ -221,7 +221,7 @@ struct NetworkSettingsView: View {
                                 Text("Background Refresh")
                                     .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                                 Text("Update EPG & playlists automatically")
-                                    .scaledFont(.labelSmall).foregroundColor(.textSecondary)
+                                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                             }
                         }
                     }
@@ -286,10 +286,10 @@ struct NetworkSettingsView: View {
                             ? "Refresh every \(intervalLabel(bgRefreshInterval))."
                             : "Refresh daily at \(timeLabel(hour: bgRefreshHour, minute: bgRefreshMinute))."
                         Text("\(desc) iOS may delay or skip background refreshes to preserve battery.")
-                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     } else {
                         Text("Automatically refresh channel lists and guide data while the app is in the background.")
-                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
             }

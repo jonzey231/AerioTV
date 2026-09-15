@@ -374,6 +374,10 @@ struct AerioApp: App {
     /// Settings > Appearance > Text Size. Injected at the root so every
     /// `.scaledFont` call site (sheets and covers included) updates live.
     @AppStorage(TextScale.key) private var textScale: Double = TextScale.defaultValue
+    /// Settings > Appearance > Subtext Size and Text Contrast, injected the
+    /// same way. Contrast colors also re-render through ThemeManager.
+    @AppStorage(SubtextScale.key) private var subtextScale: Double = SubtextScale.defaultValue
+    @AppStorage(TextContrast.key) private var textContrast: Double = TextContrast.defaultValue
 
     /// Owned explicitly (vs. letting `.modelContainer(for:)` auto-
     /// build it) so we can fire an eager warmup fetch off-main at
@@ -502,6 +506,7 @@ struct AerioApp: App {
             AppEntryView()
                 .environmentObject(ThemeManager.shared)
                 .aerioTextScaleRoot(textScale)
+                .aerioSecondaryTextRoot(subtextScale: subtextScale, contrast: textContrast)
                 // GH #33: this Apple TV is a companion HOST -- advertise
                 // _aeriotv._tcp + run the WS server so an iPhone or Android
                 // phone can control it. Overlay shows the pairing code on the

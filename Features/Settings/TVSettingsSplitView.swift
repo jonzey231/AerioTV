@@ -216,8 +216,8 @@ struct TVSettingsSplitView<Detail: View>: View {
                         .lineLimit(1)
                     if let subtitle = item.subtitle {
                         Text(subtitle)
-                            .scaledFont(.system(size: 18))
-                            .foregroundColor(.textTertiary)
+                            .scaledFont(.system(size: 18).subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
                             .lineLimit(1)
                     }
                 }

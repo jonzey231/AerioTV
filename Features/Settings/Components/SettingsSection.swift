@@ -60,7 +60,7 @@ struct SettingsSection<Content: View>: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text(title.uppercased())
                     .scaledFont(.system(size: 22, weight: .bold))
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .tracking(1)
                     .padding(.leading, 20)
                 VStack(alignment: .leading, spacing: 8) {
@@ -85,7 +85,7 @@ struct SettingsSection<Content: View>: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text(title)
                     .scaledFont(.title3.weight(.semibold))
-                    .foregroundColor(.textSecondary)
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .padding(.leading, 12)
                 VStack(spacing: 0) { content }
                     .background(Color.cardBackground)
@@ -95,7 +95,7 @@ struct SettingsSection<Content: View>: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text(title.uppercased())
                     .scaledFont(.system(size: 22, weight: .bold))
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .tracking(1)
                 VStack(spacing: 16) {
                     content

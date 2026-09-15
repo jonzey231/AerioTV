@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - Aerio Brand Colors
 // Key surface and accent colors are DYNAMIC — they read from ThemeManager.shared so
@@ -58,6 +61,39 @@ extension Color {
                              light: lightInk.opacity(0.42))
     }
     #endif
+
+    // MARK: Text Contrast
+    /// Wraps a TEXT color so Settings > Appearance > Text Contrast can blend
+    /// it toward white (dark appearance) or black (light appearance), alpha
+    /// included. At 0% the color is returned untouched. Use only for text
+    /// (and inline glyphs), never fills, surfaces, rings or progress bars.
+    static func contrastText(_ base: Color) -> Color {
+        let amount = CGFloat(ThemeManager.shared.textContrast)
+        guard amount > 0.001 else { return base }
+        #if canImport(UIKit)
+        let source = UIColor(base)
+        let mode = ThemeManager.shared.appearanceMode
+        return Color(UIColor { trait in
+            let isDark: Bool
+            switch mode {
+            case .dark: isDark = true
+            case .light: isDark = false
+            case .system: isDark = trait.userInterfaceStyle != .light
+            }
+            let c = source.resolvedColor(with: trait)
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            guard c.getRed(&r, green: &g, blue: &b, alpha: &a) else { return c }
+            let t: CGFloat = isDark ? 1 : 0
+            let k = min(1, max(0, amount))
+            return UIColor(red: r + (t - r) * k,
+                           green: g + (t - g) * k,
+                           blue: b + (t - b) * k,
+                           alpha: a + (1 - a) * k)
+        })
+        #else
+        return base
+        #endif
+    }
 
     // Borders — accent-tinted on dark; on light, blend toward ink at a higher
     // alpha so dividers stay visible on white without the accent washing out.

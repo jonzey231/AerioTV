@@ -151,7 +151,11 @@ final class SyncManager: ObservableObject {
         "networkTimeout",
         // Settings > Appearance > Text Size (0.85 to 1.5). Synced across
         // ALL devices like the theme; see TextScale in Typography.swift.
-        TextScale.key
+        TextScale.key,
+        // Subtext Size (0.85 to 1.5) and Text Contrast (0 to 1), same
+        // section; see SubtextScale / TextContrast in Typography.swift.
+        SubtextScale.key,
+        TextContrast.key
     ]
     private let syncIntKeys = [
         "maxRetries", "bgRefreshIntervalMins", "bgRefreshHour", "bgRefreshMinute",

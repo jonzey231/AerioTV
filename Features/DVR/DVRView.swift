@@ -985,8 +985,8 @@ struct DVRView: View {
                         .scaledFont(.headlineSmall)
                         .foregroundColor(.textPrimary)
                     Text("\(filteredLibrary.count)")
-                        .scaledFont(.labelMedium)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelMedium.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .contentShape(Rectangle())
                 #if os(iOS)
@@ -1133,7 +1133,7 @@ struct DVRView: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .scaledFont(.system(size: 15, weight: .semibold))
-                .foregroundColor(.textSecondary)
+                .foregroundColor(Color.contrastText(.textSecondary))
             TextField("Search recordings", text: $searchText)
                 .scaledFont(.system(size: 16))
                 .foregroundColor(.textPrimary)
@@ -1147,7 +1147,7 @@ struct DVRView: View {
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .scaledFont(.system(size: 16))
-                    .foregroundColor(.textSecondary)
+                    .foregroundColor(Color.contrastText(.textSecondary))
             }
             .accessibilityLabel("Clear and close search")
         }
@@ -1176,7 +1176,7 @@ struct DVRView: View {
         Button(action: action) {
             Text(title)
                 .scaledFont(.labelMedium)
-                .foregroundColor(isSelected ? .appBackground : .textSecondary)
+                .foregroundColor(isSelected ? .appBackground : Color.contrastText(.textSecondary))
                 .padding(.horizontal, 14).padding(.vertical, 8)
                 .background(Capsule().fill(isSelected ? Color.accentPrimary : Color.elevatedBackground))
         }
@@ -1392,13 +1392,13 @@ struct DVRView: View {
         VStack(spacing: 16) {
             Image(systemName: "record.circle")
                 .scaledFont(.system(size: 56))
-                .foregroundColor(.textTertiary)
+                .foregroundColor(Color.contrastText(.textTertiary))
             Text("No Recordings")
                 .scaledFont(.headlineLarge)
                 .foregroundColor(.textPrimary)
             Text("Recordings for the active playlist show up here. Schedule one from the guide.")
-                .scaledFont(.bodySmall)
-                .foregroundColor(.textSecondary)
+                .scaledFont(.bodySmall.subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 520)
         }
@@ -1414,6 +1414,7 @@ struct DVRHero<Menu: View>: View {
     /// Settings > Appearance > Text Size: the hero keeps its fixed height
     /// (focus and scroll thresholds depend on it), so copy sheds lines instead.
     @Environment(\.aerioTextScale) private var textScale
+    @Environment(\.aerioSubtextScale) private var subtextScale
     let recording: Recording
     var headers: [String: String] = [:]
     let progress: Double
@@ -1576,12 +1577,12 @@ struct DVRHero<Menu: View>: View {
             #if os(tvOS)
             HStack(spacing: 10) {
                 ForEach(Array(metaParts.enumerated()), id: \.offset) { idx, part in
-                    if idx > 0 { Text("·").foregroundColor(.textTertiary) }
+                    if idx > 0 { Text("·").foregroundColor(Color.contrastText(.textTertiary)) }
                     Text(part)
                 }
             }
-            .scaledFont(.system(size: metaSize, weight: .medium))
-            .foregroundColor(.textSecondary)
+            .scaledFont(.system(size: metaSize, weight: .medium).subtext())
+            .foregroundColor(Color.contrastText(.textSecondary))
             #else
             // Phone: the channel on its own line, the rest on one line
             // (one HStack wrapped the date mid-range, 2026-09-05).
@@ -1593,15 +1594,15 @@ struct DVRHero<Menu: View>: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
             }
-            .scaledFont(.system(size: metaSize, weight: .medium))
-            .foregroundColor(.textSecondary)
+            .scaledFont(.system(size: metaSize, weight: .medium).subtext())
+            .foregroundColor(Color.contrastText(.textSecondary))
             #endif
             #if os(tvOS)
             if !recording.programDescription.isEmpty {
                 Text(recording.programDescription)
-                    .scaledFont(.bodySmall)
-                    .foregroundColor(.textPrimary.opacity(0.85))
-                    .lineLimit(textScale > 1.25 ? 1 : (textScale > 1.0 ? 2 : 3))
+                    .scaledFont(.bodySmall.subtext())
+                    .foregroundColor(Color.contrastText(.textPrimary.opacity(0.85)))
+                    .lineLimit(textScale * subtextScale > 1.25 ? 1 : (textScale * subtextScale > 1.0 ? 2 : 3))
                     .frame(maxWidth: 560, alignment: .leading)
             }
             #endif
@@ -1738,8 +1739,8 @@ struct DVRPosterCard: View {
                     .frame(maxWidth: .infinity, alignment: .top)
                     .frame(height: TextScale.grow(34, textScale), alignment: .top)
                 Text(meta)
-                    .scaledFont(.system(size: 11))
-                    .foregroundColor(.textSecondary)
+                    .scaledFont(.system(size: 11).subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .lineLimit(1)
                     .frame(maxWidth: .infinity)
             }
@@ -1837,8 +1838,8 @@ struct DVRRecordingCard: View {
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
                 Text(metaLine)
-                    .scaledFont(.system(size: metaSize))
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.system(size: metaSize).subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .lineLimit(1)
             }
             .multilineTextAlignment(.center)

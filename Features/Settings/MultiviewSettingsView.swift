@@ -62,8 +62,8 @@ struct MultiviewSettingsView: View {
                                     .scaledFont(.bodyMedium)
                                     .foregroundColor(.textPrimary)
                                 Text(style.subtitle)
-                                    .scaledFont(.labelSmall)
-                                    .foregroundColor(.textTertiary)
+                                    .scaledFont(.labelSmall.subtext())
+                                    .foregroundColor(Color.contrastText(.textTertiary))
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                             Spacer(minLength: 8)
@@ -81,7 +81,7 @@ struct MultiviewSettingsView: View {
                 Text("Audio Focus Indicator").sectionHeaderStyle()
             } footer: {
                 Text("Choose how Aerio marks the tile that currently owns audio when watching multiple streams at once.")
-                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
             .listSectionSeparator(.hidden)
 
@@ -92,7 +92,7 @@ struct MultiviewSettingsView: View {
                         Text("Padding Between Tiles")
                             .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                         Text("Insert a small gap between tiles so each stream stands on its own. Off keeps adjacent tiles meeting flush.")
-                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
                 .tint(theme.accent)
@@ -114,7 +114,7 @@ struct MultiviewSettingsView: View {
                 Text("Tile Corners").sectionHeaderStyle()
             } footer: {
                 Text("Square keeps the cinema-grid look; rounded softens each tile with a 12pt radius.")
-                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
             .listSectionSeparator(.hidden)
         }

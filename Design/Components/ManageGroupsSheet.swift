@@ -222,8 +222,8 @@ struct ManageGroupsSheet: View {
 
                 if allGroups.isEmpty {
                     Text("No groups available")
-                        .scaledFont(.bodyMedium)
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.bodyMedium.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                 } else {
                     #if os(tvOS)
                     tvGroupList
@@ -352,8 +352,8 @@ struct ManageGroupsSheet: View {
                                 .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text("Removes the group pills strip from Live TV.")
-                                .scaledFont(.labelSmall)
-                                .foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall.subtext())
+                                .foregroundColor(Color.contrastText(.textTertiary))
                         }
                     }
                     .tint(.accentPrimary)
@@ -365,16 +365,16 @@ struct ManageGroupsSheet: View {
                                 .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text("Collapses the always-visible search drawer. Pull down on the list to search.")
-                                .scaledFont(.labelSmall)
-                                .foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall.subtext())
+                                .foregroundColor(Color.contrastText(.textTertiary))
                         }
                     }
                     .tint(.accentPrimary)
                     .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("Layout")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                         .textCase(nil)
                 }
             }
@@ -391,14 +391,14 @@ struct ManageGroupsSheet: View {
                     .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("Order")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                         .textCase(nil)
                 } footer: {
                     if sortMode == .manual {
                         Text("Tap Edit and/or long press, then drag to arrange groups.")
-                            .scaledFont(.labelSmall)
-                            .foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
                             .textCase(nil)
                     }
                 }
@@ -430,15 +430,15 @@ struct ManageGroupsSheet: View {
                     .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("Default Group")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                         .textCase(nil)
                 } footer: {
                     Text(recentOptionAvailable
                          ? "The group Live TV shows when the app opens. Choosing Recently Watched also shows that group."
                          : "The group Live TV shows when the app opens.")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                         .textCase(nil)
                 }
             }
@@ -453,11 +453,11 @@ struct ManageGroupsSheet: View {
                         HStack {
                             Image(systemName: hiddenCategoryOn ? "checkmark.square.fill" : "square")
                                 .scaledFont(.system(size: 20))
-                                .foregroundColor(hiddenCategoryOn ? .accentPrimary : .textTertiary)
+                                .foregroundColor(hiddenCategoryOn ? .accentPrimary : Color.contrastText(.textTertiary))
                                 .frame(width: 28)
                             Text("Hidden")
                                 .scaledFont(.bodyMedium.weight(.semibold))
-                                .foregroundColor(hiddenCategoryOn ? .textPrimary : .textTertiary)
+                                .foregroundColor(hiddenCategoryOn ? .textPrimary : Color.contrastText(.textTertiary))
                             Spacer()
                         }
                     }
@@ -470,11 +470,11 @@ struct ManageGroupsSheet: View {
                         HStack {
                             Image(systemName: hiddenGroups.contains(favoritesToken) ? "square" : "checkmark.square.fill")
                                 .scaledFont(.system(size: 20))
-                                .foregroundColor(hiddenGroups.contains(favoritesToken) ? .textTertiary : .accentPrimary)
+                                .foregroundColor(hiddenGroups.contains(favoritesToken) ? Color.contrastText(.textTertiary) : .accentPrimary)
                                 .frame(width: 28)
                             Text("Favorites")
                                 .scaledFont(.bodyMedium.weight(.semibold))
-                                .foregroundColor(hiddenGroups.contains(favoritesToken) ? .textTertiary : .textPrimary)
+                                .foregroundColor(hiddenGroups.contains(favoritesToken) ? Color.contrastText(.textTertiary) : .textPrimary)
                             Spacer()
                         }
                     }
@@ -487,11 +487,11 @@ struct ManageGroupsSheet: View {
                         HStack {
                             Image(systemName: hiddenGroups.contains(recentToken) ? "square" : "checkmark.square.fill")
                                 .scaledFont(.system(size: 20))
-                                .foregroundColor(hiddenGroups.contains(recentToken) ? .textTertiary : .accentPrimary)
+                                .foregroundColor(hiddenGroups.contains(recentToken) ? Color.contrastText(.textTertiary) : .accentPrimary)
                                 .frame(width: 28)
                             Text("Recently Watched")
                                 .scaledFont(.bodyMedium.weight(.semibold))
-                                .foregroundColor(hiddenGroups.contains(recentToken) ? .textTertiary : .textPrimary)
+                                .foregroundColor(hiddenGroups.contains(recentToken) ? Color.contrastText(.textTertiary) : .textPrimary)
                             Spacer()
                         }
                     }
@@ -504,11 +504,11 @@ struct ManageGroupsSheet: View {
                     HStack {
                         Image(systemName: hiddenGroups.contains(allChannelsToken) ? "square" : "checkmark.square.fill")
                             .scaledFont(.system(size: 20))
-                            .foregroundColor(hiddenGroups.contains(allChannelsToken) ? .textTertiary : .accentPrimary)
+                            .foregroundColor(hiddenGroups.contains(allChannelsToken) ? Color.contrastText(.textTertiary) : .accentPrimary)
                             .frame(width: 28)
                         Text("All Channels")
                             .scaledFont(.bodyMedium.weight(.semibold))
-                            .foregroundColor(hiddenGroups.contains(allChannelsToken) ? .textTertiary : .textPrimary)
+                            .foregroundColor(hiddenGroups.contains(allChannelsToken) ? Color.contrastText(.textTertiary) : .textPrimary)
                         Spacer()
                     }
                 }
@@ -524,12 +524,12 @@ struct ManageGroupsSheet: View {
                         HStack {
                             Image(systemName: hiddenGroups.contains(group) ? "square" : "checkmark.square.fill")
                                 .scaledFont(.system(size: 20))
-                                .foregroundColor(hiddenGroups.contains(group) ? .textTertiary : .accentPrimary)
+                                .foregroundColor(hiddenGroups.contains(group) ? Color.contrastText(.textTertiary) : .accentPrimary)
                                 .frame(width: 28)
 
                             Text(rowTitle(group))
                                 .scaledFont(pinnedTokens.contains(group) ? .bodyMedium.weight(.semibold) : .bodyMedium)
-                                .foregroundColor(hiddenGroups.contains(group) ? .textTertiary : .textPrimary)
+                                .foregroundColor(hiddenGroups.contains(group) ? Color.contrastText(.textTertiary) : .textPrimary)
 
                             Spacer()
                         }
@@ -540,8 +540,8 @@ struct ManageGroupsSheet: View {
             } header: {
                 HStack {
                     Text("Check groups to show, uncheck to hide.")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                         .textCase(nil)
                     Spacer()
                     Button("All") {
@@ -551,7 +551,7 @@ struct ManageGroupsSheet: View {
                     .scaledFont(.labelSmall)
                     .foregroundColor(.accentPrimary)
                     .textCase(nil)
-                    Text("·").foregroundColor(.textTertiary).textCase(nil)
+                    Text("·").foregroundColor(Color.contrastText(.textTertiary)).textCase(nil)
                     Button("None") {
                         hiddenGroups = Set(allGroups)
                         HiddenGroupsStore.save(hiddenGroups, forKey: storageKey)
@@ -576,8 +576,8 @@ struct ManageGroupsSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 Text(instructionText)
-                    .scaledFont(.labelSmall)
-                    .foregroundColor(.textSecondary)
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .padding(.horizontal, 48)
                     .padding(.top, 8)
                     .padding(.bottom, reorderEnabled ? 16 : 20)
@@ -598,8 +598,8 @@ struct ManageGroupsSheet: View {
 
                 if sidebarLayoutAvailable {
                     Text("Sidebar layout")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                         .padding(.horizontal, 48)
                         .padding(.bottom, 12)
                     HStack(spacing: 12) {
@@ -613,16 +613,16 @@ struct ManageGroupsSheet: View {
                     .padding(.bottom, 12)
                     .disabled(grabbedGroup != nil)
                     Text("Shift guide moves the TV Guide over so the sidebar never covers programs.")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.horizontal, 48)
                         .padding(.bottom, 16)
                 }
 
                 if defaultGroupKey != nil {
                     Text("Opens on \(defaultTitle(defaultGroup)). Long press a group to make it the default.")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.horizontal, 48)
                         .padding(.bottom, 12)
                 }

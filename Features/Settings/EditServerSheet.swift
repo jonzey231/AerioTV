@@ -321,8 +321,8 @@ struct EditServerSheet: View {
                         // guidance without having to retrace through
                         // onboarding.
                         Text("Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.")
-                            .scaledFont(.labelSmall)
-                            .foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
                             .listRowBackground(Color.cardBackground)
                         // Show the cached API key (read-only) so the
                         // user can see it was fetched from
@@ -334,11 +334,11 @@ struct EditServerSheet: View {
                         if !server.effectiveApiKey.isEmpty {
                             HStack {
                                 Text("API Key (cached)")
-                                    .foregroundColor(.textTertiary)
+                                    .foregroundColor(Color.contrastText(.textTertiary))
                                 Spacer()
                                 Text(maskedAPIKey(server.effectiveApiKey))
-                                    .scaledFont(.system(.footnote, design: .monospaced))
-                                    .foregroundColor(.textSecondary)
+                                    .scaledFont(.system(.footnote, design: .monospaced).subtext())
+                                    .foregroundColor(Color.contrastText(.textSecondary))
                             }
                             .listRowBackground(Color.cardBackground)
                         }
@@ -388,8 +388,8 @@ struct EditServerSheet: View {
                             // button was unlabeled and most users
                             // would never know what it did.
                             Text("Use if streaming or logos suddenly fail. Re-fetches the API key from your Dispatcharr account.")
-                                .scaledFont(.labelSmall)
-                                .foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall.subtext())
+                                .foregroundColor(Color.contrastText(.textTertiary))
                                 .listRowBackground(Color.cardBackground)
                         }
                     }
@@ -453,8 +453,8 @@ struct EditServerSheet: View {
                     Text("EPG Source").sectionHeaderStyle()
                 } footer: {
                     Text("EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
             } else if server.type == .m3uPlaylist {
                 Section {
@@ -479,8 +479,8 @@ struct EditServerSheet: View {
                     Text("Local Network").sectionHeaderStyle()
                 } footer: {
                     Text("Used automatically whenever the server is reachable on your local network. No setup needed. Leave blank to always use the main URL.")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
             }
 
@@ -500,8 +500,8 @@ struct EditServerSheet: View {
                     Text("User-Agent").sectionHeaderStyle()
                 } footer: {
                     Text("Shown in Dispatcharr's admin Stats panel to identify this device. Default: \(DeviceInfo.defaultUserAgent)")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
             }
 
@@ -516,8 +516,8 @@ struct EditServerSheet: View {
                     Text("On Demand").sectionHeaderStyle()
                 } footer: {
                     Text("When off, this playlist's movies and TV shows aren't loaded into On Demand. Useful if you only want Live TV from this server, or if you have a second playlist that already provides On Demand.")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
             }
 
@@ -537,8 +537,8 @@ struct EditServerSheet: View {
                 Text("Guide Days").sectionHeaderStyle()
             } footer: {
                 Text("How many days of guide data to load, back and ahead. Dispatcharr only; other sources show what their guide carries.")
-                    .scaledFont(.labelSmall)
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
             }
 
             // Task #189 (Android parity): user-chosen Channel Profile.
@@ -549,10 +549,10 @@ struct EditServerSheet: View {
             Section {
                 HStack {
                     Text("Type")
-                        .foregroundColor(.textSecondary)
+                        .foregroundColor(Color.contrastText(.textSecondary))
                     Spacer()
                     Text(server.type.displayName)
-                        .foregroundColor(.textTertiary)
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .listRowBackground(Color.cardBackground)
             } header: {
@@ -657,8 +657,8 @@ private struct ChannelProfilePickerSection: View {
             Text(loadFailed
                  ? "Couldn't load this server's Channel Profiles. All Channels stays in effect; check the connection and reopen this page to retry."
                  : "Sync only the channels in a Dispatcharr Channel Profile. Changes apply on the next channel refresh.")
-                .scaledFont(.labelSmall)
-                .foregroundColor(.textTertiary)
+                .scaledFont(.labelSmall.subtext())
+                .foregroundColor(Color.contrastText(.textTertiary))
         }
         .task { await loadProfiles() }
     }

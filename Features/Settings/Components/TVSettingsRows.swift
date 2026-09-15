@@ -131,8 +131,8 @@ struct TVSettingsSelectionRow<Leading: View>: View {
                         .foregroundColor(.textPrimary)
                     if let subtitle {
                         Text(subtitle)
-                            .scaledFont(.system(size: 20))
-                            .foregroundColor(.textSecondary)
+                            .scaledFont(.system(size: 20).subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
                     }
                 }
                 Spacer()
@@ -300,7 +300,7 @@ struct ServerListRow: View {
                 Button(action: onSetActive) {
                     Image(systemName: server.isActive ? "checkmark.circle.fill" : "circle")
                         .scaledFont(.system(size: checkmarkSize))
-                        .foregroundColor(server.isActive ? .accentPrimary : .textTertiary)
+                        .foregroundColor(server.isActive ? .accentPrimary : Color.contrastText(.textTertiary))
                 }
                 #if os(tvOS)
                 .buttonStyle(TVNoHighlightButtonStyle())
@@ -328,8 +328,8 @@ struct ServerListRow: View {
                         LANWANBadge(isLAN: isOnLAN)
                     }
                     Text(server.effectiveBaseURL)
-                        .scaledFont(.monoSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.monoSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }

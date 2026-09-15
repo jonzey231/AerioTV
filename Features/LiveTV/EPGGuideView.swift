@@ -4682,6 +4682,7 @@ struct EPGGuideView: View {
     /// with it (never shrink) so larger cell text is not clipped; column
     /// widths and pixels-per-hour stay put (text truncates horizontally).
     @Environment(\.aerioTextScale) private var textScale
+    @Environment(\.aerioSubtextScale) private var subtextScale
     @State private var _epgCacheIsFresh = false
 
 /// The channel row that `resetFocus(in: guideFocusNS)` on tvOS
@@ -4891,7 +4892,7 @@ struct EPGGuideView: View {
     // GuidePreviewState, which only the banner observes (2026-09-12).
     // Preview rows hold title, subtitle and the badge row (Logan 2026-09-06:
     // 80 pt clipped the badges against the subtitle).
-    private var rowHeight: CGFloat { TextScale.grow(previewMode ? 96 : 110, textScale) }
+    private var rowHeight: CGFloat { TextScale.growMixed(previewMode ? 96 : 110, textScale, subtext: subtextScale) }
     private var timeHeaderHeight: CGFloat { TextScale.grow(50, textScale) }
     private let pixelsPerHour: CGFloat = 600
     private let cellGap: CGFloat = 1        // hairline gap between program cells (Emby style)
@@ -4910,7 +4911,7 @@ struct EPGGuideView: View {
     private var channelColumnWidth: CGFloat { (horizontalSizeClass == .compact ? 78 : 100) * guideScale }
     /// Phone cells carry the subtitle and two description lines (Logan
     /// 2026-09-05), so they are taller.
-    private var rowHeight: CGFloat { TextScale.grow((UIDevice.current.userInterfaceIdiom == .phone ? 98 : 72) * guideScale, textScale) }
+    private var rowHeight: CGFloat { TextScale.growMixed((UIDevice.current.userInterfaceIdiom == .phone ? 98 : 72) * guideScale, textScale, subtext: subtextScale) }
     private var timeHeaderHeight: CGFloat { TextScale.grow(32 * guideScale, textScale) }
     private var pixelsPerHour: CGFloat { 360 * guideScale }
     private let cellGap: CGFloat = 1
@@ -6515,8 +6516,8 @@ struct EPGGuideView: View {
                 VStack(spacing: 0) {
                     #if os(tvOS)
                     Text(timeFormatter.string(from: date).lowercased())
-                        .scaledFont(.system(size: 20, weight: .medium))
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.system(size: 20, weight: .medium).subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                     #else
                     // Scale with `guideScale` so shrinking / enlarging
                     // the grid also resizes the time-column labels.
@@ -6525,8 +6526,8 @@ struct EPGGuideView: View {
                     // producing oversized headers at 0.75x and
                     // undersized ones at 1.5x (R3 review finding).
                     Text(timeFormatter.string(from: date).lowercased())
-                        .scaledFont(.system(size: 10 * guideScale, weight: .medium))
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.system(size: 10 * guideScale, weight: .medium).subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                     #endif
                 }
                 .offset(x: offset + 8)
@@ -6625,8 +6626,8 @@ struct EPGGuideView: View {
                 .offset(x: -horizontalOffset)
                 #else
                 Text(emptyRowLabel(for: channel))
-                    .scaledFont(.labelSmall)
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .frame(width: max(1, visibleProgramWidth), height: rowHeight, alignment: .center)
                     .contentShape(Rectangle())
                     .onTapGesture { onSelectChannel(channel) }
@@ -6775,7 +6776,7 @@ struct EPGGuideView: View {
             } label: {
                 Text("Clear")
                     .scaledFont(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.textSecondary)
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
             }
@@ -6831,7 +6832,7 @@ struct EPGGuideView: View {
             } label: {
                 Text("Done")
                     .scaledFont(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.accentPrimary)
+                    .foregroundColor(Color.contrastText(.accentPrimary))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
                     .background(
@@ -7086,7 +7087,7 @@ private struct GuideCornerClock: View {
             if let target {
                 let day = DateFormatter(); let _ = day.setLocalizedDateFormatFromTemplate("EEE")
                 Text("\(day.string(from: target)) \(ClockFormat.short().string(from: target))")
-                    .foregroundColor(.accentPrimary)
+                    .foregroundColor(Color.contrastText(.accentPrimary))
             } else {
                 Text(ClockFormat.short().string(from: now))
                     .foregroundColor(.textPrimary)
@@ -7233,7 +7234,7 @@ private struct GuideChannelButton: View {
             if showChannelNumbers {
                 Text(channel.number)
                     .scaledFont(.system(size: 22, weight: .bold, design: .monospaced))
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                     .frame(minWidth: 38, alignment: .trailing)
@@ -7271,7 +7272,7 @@ private struct GuideChannelButton: View {
             if channel.hasCatchup {
                 Image(systemName: "clock.arrow.circlepath")
                     .scaledFont(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .padding(.top, 6)
                     .padding(.trailing, 8)
             }
@@ -7298,7 +7299,7 @@ private struct GuideChannelButton: View {
                 if showChannelNumbers {
                     Text(channel.number)
                         .scaledFont(.system(size: 8, weight: .bold))
-                        .foregroundColor(.textTertiary)
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
             }
             .multilineTextAlignment(.center)
@@ -7312,7 +7313,7 @@ private struct GuideChannelButton: View {
             if channel.hasCatchup {
                 Image(systemName: "clock.arrow.circlepath")
                     .scaledFont(.system(size: 9, weight: .semibold))
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .padding(.top, 3)
                     .padding(.trailing, 3)
             }
@@ -7540,9 +7541,9 @@ private struct GuideProgramButton: View {
                 if showProgramSubtitles, let sub = prog.subTitle,
                    !EPGText.subtitleIsRedundant(sub, title: prog.title, description: prog.description) {
                     Text(sub)
-                        .scaledFont(.system(size: 20))
+                        .scaledFont(.system(size: 20).subtext())
                         .italic()
-                        .foregroundColor(.textSecondary)
+                        .foregroundColor(Color.contrastText(.textSecondary))
                         .lineLimit(1)
                 }
                 if showEpgBadges {
@@ -7561,14 +7562,14 @@ private struct GuideProgramButton: View {
                 Text(sub)
                     .scaledFont(.system(size: 18))
                     .italic()
-                    .foregroundColor(isFocused ? .white.opacity(0.85) : .textSecondary)
+                    .foregroundColor(isFocused ? .white.opacity(0.85) : Color.contrastText(.textSecondary))
                     .lineLimit(1)
                     .layoutPriority(1)
             }
             if !prog.description.isEmpty {
                 Text(prog.description)
-                    .scaledFont(.system(size: 18))
-                    .foregroundColor(isFocused ? .white.opacity(0.8) : .textSecondary)
+                    .scaledFont(.system(size: 18).subtext())
+                    .foregroundColor(isFocused ? .white.opacity(0.8) : Color.contrastText(.textSecondary))
                     .lineLimit(nil)
             }
             // Time range + season/episode pill + feed badges, folded onto
@@ -7581,7 +7582,7 @@ private struct GuideProgramButton: View {
             HStack(spacing: 4) {
                 Text("\(shortTimeFormatter.string(from: prog.start)) - \(shortTimeFormatter.string(from: prog.end))")
                     .scaledFont(.system(size: 17))
-                    .foregroundColor(isFocused ? .white.opacity(0.6) : .textTertiary)
+                    .foregroundColor(isFocused ? .white.opacity(0.6) : Color.contrastText(.textTertiary))
                 if showEpgBadges {
                     SeasonEpisodePill(season: prog.season, episode: prog.episode, compact: true)
                     EPGFlagsRow(isLiveBroadcast: prog.isLiveBroadcast, isNew: prog.isNew,
@@ -7624,9 +7625,9 @@ private struct GuideProgramButton: View {
             } ?? false
             if subShown, let sub = prog.subTitle {
                 Text(sub)
-                    .scaledFont(.system(size: 10 * guideScale))
+                    .scaledFont(.system(size: 10 * guideScale).subtext())
                     .italic()
-                    .foregroundColor(.textSecondary)
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .lineLimit(1)
                     .layoutPriority(1)
             }
@@ -7643,19 +7644,19 @@ private struct GuideProgramButton: View {
             if UIDevice.current.userInterfaceIdiom == .phone {
                 if !prog.description.isEmpty {
                     Text(prog.description)
-                        .scaledFont(.system(size: 10 * guideScale))
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.system(size: 10 * guideScale).subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                         .lineLimit(2)
                 }
             } else if !prog.description.isEmpty, !(subShown && compactBadgeRowVisible) {
                 Text(prog.description)
-                    .scaledFont(.system(size: 10 * guideScale))
-                    .foregroundColor(.textSecondary)
+                    .scaledFont(.system(size: 10 * guideScale).subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .lineLimit(nil)
             }
             Text("\(shortTimeFormatter.string(from: prog.start)) - \(shortTimeFormatter.string(from: prog.end))")
-                .scaledFont(.system(size: 9 * guideScale))
-                .foregroundColor(.textTertiary)
+                .scaledFont(.system(size: 9 * guideScale).subtext())
+                .foregroundColor(Color.contrastText(.textTertiary))
                 .layoutPriority(1)
             // Season/episode pill + feed badges on their own row at the
             // bottom of the cell content. On the narrow iPhone/compact cell
@@ -8338,7 +8339,7 @@ private struct GuideEmptyRowButton: View {
         Button(action: action) {
             Text(label)
                 .scaledFont(.system(size: 24, weight: .medium))
-                .foregroundColor(isFocused ? .white : .textTertiary)
+                .foregroundColor(isFocused ? .white : Color.contrastText(.textTertiary))
                 .frame(width: width, height: rowHeight, alignment: .center)
                 .background(isFocused ? Color.white.opacity(0.25) : Color.white.opacity(0.05))
         }

@@ -53,6 +53,74 @@ enum TextScale {
     static func grow(_ metric: CGFloat, _ scale: CGFloat) -> CGFloat {
         metric * max(1, scale)
     }
+
+    /// `grow` for a fixed container that mixes primary text with subtext
+    /// (a title line plus description / time lines): half the container
+    /// is treated as subtext, so Subtext Size grows it proportionally.
+    static func growMixed(_ metric: CGFloat, _ scale: CGFloat, subtext: CGFloat) -> CGFloat {
+        metric * max(1, scale * (0.5 + 0.5 * subtext))
+    }
+}
+
+// MARK: - Subtext Size (Settings > Appearance)
+//
+// A second multiplier (85% to 150%, default 100%) applied ONLY to
+// secondary text: descriptions, footers, subtitles, metadata, captions,
+// timestamps, empty-state explanations. It stacks on top of Text Size.
+// Call sites opt in with `AerioFont.subtext()`, so primary text (titles,
+// channel names, buttons, tabs, pills, headers) is never affected.
+enum SubtextScale {
+    /// UserDefaults / iCloud KVS key. Synced via `SyncManager.syncDoubleKeys`.
+    static let key = "subtextScale"
+    static let range: ClosedRange<Double> = 0.85...1.5
+    static let step: Double = 0.05
+    static let defaultValue: Double = 1.0
+    static let steps: [Double] = stride(from: 85, through: 150, by: 5).map { Double($0) / 100 }
+
+    static func clamp(_ value: Double) -> Double {
+        guard value.isFinite else { return defaultValue }
+        let bounded = min(max(value, range.lowerBound), range.upperBound)
+        return (bounded / step).rounded() * step
+    }
+
+    static var stored: CGFloat {
+        let raw = UserDefaults.standard.object(forKey: key) as? Double ?? defaultValue
+        return CGFloat(clamp(raw))
+    }
+}
+
+// MARK: - Text Contrast (Settings > Appearance)
+//
+// 0% to 100% in 10% steps, default 0%. Blends dimmed (textSecondary /
+// textTertiary) and accent-colored TEXT toward white (dark appearance) or
+// black (light appearance). 0% = designed colors, 100% = plain white or
+// black. Text only: surfaces, fills, focus rings and progress bars keep
+// their tokens. See `Color.contrastText(_:)` in Colors.swift.
+enum TextContrast {
+    /// UserDefaults / iCloud KVS key. Synced via `SyncManager.syncDoubleKeys`.
+    static let key = "textContrast"
+    static let range: ClosedRange<Double> = 0...1
+    static let step: Double = 0.1
+    static let defaultValue: Double = 0
+    static let steps: [Double] = stride(from: 0, through: 100, by: 10).map { Double($0) / 100 }
+
+    static func clamp(_ value: Double) -> Double {
+        guard value.isFinite else { return defaultValue }
+        let bounded = min(max(value, range.lowerBound), range.upperBound)
+        return (bounded / step).rounded() * step
+    }
+
+    static var stored: Double {
+        clamp(UserDefaults.standard.object(forKey: key) as? Double ?? defaultValue)
+    }
+}
+
+private struct AerioSubtextScaleKey: EnvironmentKey {
+    static var defaultValue: CGFloat { SubtextScale.stored }
+}
+
+private struct AerioTextContrastKey: EnvironmentKey {
+    static var defaultValue: Double { TextContrast.stored }
 }
 
 private struct AerioTextScaleKey: EnvironmentKey {
@@ -64,6 +132,21 @@ extension EnvironmentValues {
     var aerioTextScale: CGFloat {
         get { self[AerioTextScaleKey.self] }
         set { self[AerioTextScaleKey.self] = newValue }
+    }
+
+    /// Secondary-text multiplier, applied on top of `aerioTextScale` to
+    /// fonts marked `.subtext()`. 1.0 = designed size.
+    var aerioSubtextScale: CGFloat {
+        get { self[AerioSubtextScaleKey.self] }
+        set { self[AerioSubtextScaleKey.self] = newValue }
+    }
+
+    /// Text Contrast amount, 0...1. Colors read the same value through
+    /// `ThemeManager.shared.textContrast`; this mirror is for views that
+    /// want to branch on it.
+    var aerioTextContrast: Double {
+        get { self[AerioTextContrastKey.self] }
+        set { self[AerioTextContrastKey.self] = newValue }
     }
 }
 
@@ -83,6 +166,8 @@ struct AerioFont {
     var isItalic = false
     var isMonospacedDigit = false
     var isMonospaced = false
+    /// Secondary text: also multiplied by Settings > Appearance > Subtext Size.
+    var isSubtext = false
 
     // MARK: Constructors (same shapes as Font)
 
@@ -159,6 +244,8 @@ struct AerioFont {
     func italic() -> AerioFont { var c = self; c.isItalic = true; return c }
     func monospacedDigit() -> AerioFont { var c = self; c.isMonospacedDigit = true; return c }
     func monospaced() -> AerioFont { var c = self; c.isMonospaced = true; return c }
+    /// Marks the recipe as secondary text so Subtext Size scales it too.
+    func subtext() -> AerioFont { var c = self; c.isSubtext = true; return c }
 
     // MARK: Resolution
 
@@ -268,10 +355,12 @@ private func contentSizeCategory(for size: DynamicTypeSize) -> UIContentSizeCate
 private struct ScaledFontModifier: ViewModifier {
     let font: AerioFont
     @Environment(\.aerioTextScale) private var scale
+    @Environment(\.aerioSubtextScale) private var subtextScale
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     func body(content: Content) -> some View {
-        content.font(font.resolved(scale: scale, dynamicTypeSize: dynamicTypeSize))
+        let effective = font.isSubtext ? scale * subtextScale : scale
+        return content.font(font.resolved(scale: effective, dynamicTypeSize: dynamicTypeSize))
     }
 }
 
@@ -286,6 +375,13 @@ extension View {
     func aerioTextScaleRoot(_ scale: Double) -> some View {
         environment(\.aerioTextScale, CGFloat(TextScale.clamp(scale)))
     }
+
+    /// Injects Subtext Size and Text Contrast. Apply once at the app root.
+    func aerioSecondaryTextRoot(subtextScale: Double, contrast: Double) -> some View {
+        self
+            .environment(\.aerioSubtextScale, CGFloat(SubtextScale.clamp(subtextScale)))
+            .environment(\.aerioTextContrast, TextContrast.clamp(contrast))
+    }
 }
 
 extension Text {
@@ -293,7 +389,8 @@ extension Text {
     /// would lose the `Text` type. The caller reads `aerioTextScale`.
     @MainActor
     func scaledFont(_ font: AerioFont, scale: CGFloat) -> Text {
-        self.font(font.resolved(scale: scale, dynamicTypeSize: .large))
+        let effective = font.isSubtext ? scale * SubtextScale.stored : scale
+        return self.font(font.resolved(scale: effective, dynamicTypeSize: .large))
     }
 }
 
@@ -366,7 +463,8 @@ private struct ThemeReactiveSectionHeader<Content: View>: View {
             return theme.accent.opacity(0.65)
             #endif
         }()
-        return content.modifier(SectionHeaderStyle(color: derived))
+        // Text Contrast blends the accent header toward white / black.
+        return content.modifier(SectionHeaderStyle(color: Color.contrastText(derived)))
     }
 }
 

@@ -51,12 +51,12 @@ struct WelcomeView: View {
                         .scaledFont(.system(size: 60, weight: .bold))
                         .foregroundColor(.textPrimary)
                     Text("Your IPTV & Media Hub")
-                        .scaledFont(.system(size: 28, weight: .medium))
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.system(size: 28, weight: .medium).subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                         .padding(.bottom, 6)
                     Text("iPhone · iPad · Apple TV · Mac")
-                        .scaledFont(.system(size: 20))
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.system(size: 20).subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.bottom, 40)
 
                     // Supported source types
@@ -113,11 +113,11 @@ struct WelcomeView: View {
                             .scaledFont(.displayLarge)
                             .foregroundColor(.textPrimary)
                         Text("Your IPTV & Media Hub")
-                            .scaledFont(.bodyLarge)
-                            .foregroundColor(.textSecondary)
+                            .scaledFont(.bodyLarge.subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
                         Text("iPhone, iPad, Apple TV, & Mac")
-                            .scaledFont(.bodySmall)
-                            .foregroundColor(.textTertiary)
+                            .scaledFont(.bodySmall.subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
                     }
                     .padding(.bottom, 24)
 
@@ -159,7 +159,7 @@ struct WelcomeView: View {
                             hasCompletedOnboarding = true
                         }
                         .scaledFont(.bodyMedium)
-                        .foregroundColor(.textTertiary)
+                        .foregroundColor(Color.contrastText(.textTertiary))
                     }
                     .padding(.horizontal, 32)
                     .padding(.bottom, 32)
@@ -233,8 +233,8 @@ struct WelcomeView: View {
                          : iCloudSyncEnabled
                          ? "Settings synced across all your devices"
                          : "Use if you've enabled Aerio iCloud sync on another device")
-                        .scaledFont(.bodySmall)
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.bodySmall.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                         .lineLimit(2)
                 }
 
@@ -246,7 +246,7 @@ struct WelcomeView: View {
                 } else {
                     Image(systemName: iCloudSyncEnabled ? "checkmark.circle.fill" : "circle")
                         .scaledFont(.system(size: 20))
-                        .foregroundColor(iCloudSyncEnabled ? .accentPrimary : .textTertiary)
+                        .foregroundColor(iCloudSyncEnabled ? .accentPrimary : Color.contrastText(.textTertiary))
                 }
             }
             .padding(12)
@@ -295,12 +295,12 @@ private struct TVFeatureRow: View {
                 .foregroundColor(.textPrimary)
 
             Text("·")
-                .scaledFont(.system(size: 24))
-                .foregroundColor(.textTertiary)
+                .scaledFont(.system(size: 24).subtext())
+                .foregroundColor(Color.contrastText(.textTertiary))
 
             Text(detail)
-                .scaledFont(.system(size: 20))
-                .foregroundColor(.textTertiary)
+                .scaledFont(.system(size: 20).subtext())
+                .foregroundColor(Color.contrastText(.textTertiary))
                 .lineLimit(1)
 
             Spacer(minLength: 0)
@@ -346,8 +346,8 @@ private struct TVOnboardingImportButton: View {
                          : isEnabled
                          ? "Settings will stay in sync across all your devices"
                          : "Import an existing Aerio configuration from iCloud and keep settings in sync across all devices using the same Apple ID")
-                        .scaledFont(.system(size: 18))
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.system(size: 18).subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                         .lineLimit(nil)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -402,8 +402,8 @@ private struct TVOnboardingPickerRow: View {
                     .scaledFont(.system(size: 24, weight: .semibold))
                     .foregroundColor(.textPrimary)
                 Text(subtitle)
-                    .scaledFont(.system(size: 18))
-                    .foregroundColor(.textSecondary)
+                    .scaledFont(.system(size: 18).subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
             }
             Spacer()
             HStack(spacing: 8) {
@@ -437,7 +437,7 @@ private struct TVOnboardingPickerOption: View {
         Button(action: onSelect) {
             Text(label)
                 .scaledFont(.system(size: 22, weight: .semibold))
-                .foregroundColor(isSelected ? .white : (isFocused ? .white : .textSecondary))
+                .foregroundColor(isSelected ? .white : (isFocused ? .white : Color.contrastText(.textSecondary)))
                 .lineLimit(1)
                 .padding(.horizontal, 8)
                 .frame(minWidth: 100, minHeight: 44)
@@ -496,7 +496,7 @@ private struct TVOnboardingNavButton<Destination: View>: View {
                 Spacer()
                 Image(systemName: "chevron.right")
                     .scaledFont(.system(size: 18, weight: .semibold))
-                    .foregroundColor(isFocused ? .accentPrimary : .textTertiary)
+                    .foregroundColor(isFocused ? .accentPrimary : Color.contrastText(.textTertiary))
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
@@ -541,8 +541,8 @@ private struct TVOnboardingCategoryRow: View {
                         .scaledFont(.system(size: 24, weight: .semibold))
                         .foregroundColor(.textPrimary)
                     Text(category.briefSubtitle)
-                        .scaledFont(.system(size: 18))
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.system(size: 18).subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                 }
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -691,8 +691,8 @@ struct OnboardingSyncCategoryChooser: View {
                             .scaledFont(.headlineLarge)
                             .foregroundColor(.textPrimary)
                         Text("You can change any of this later in Settings, and each device chooses for itself.")
-                            .scaledFont(.bodySmall)
-                            .foregroundColor(.textSecondary)
+                            .scaledFont(.bodySmall.subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
                     }
 
                     // Rows sit directly on the sheet, each carrying its own

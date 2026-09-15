@@ -29,6 +29,9 @@ struct AppearanceSettingsView: View {
     /// Read by every `.scaledFont` call site via the root environment;
     /// synced across devices. See `TextScale` in Typography.swift.
     @AppStorage(TextScale.key) private var textScale: Double = TextScale.defaultValue
+    /// Secondary-text multiplier (Settings > Appearance > Subtext Size),
+    /// stacked on Text Size for fonts marked `.subtext()`. Synced.
+    @AppStorage(SubtextScale.key) private var subtextScale: Double = SubtextScale.defaultValue
 
     // MARK: Guide Display state — folded in from the former
     // standalone `Settings → Guide Display` page in v1.6.8. The page
@@ -169,8 +172,8 @@ struct AppearanceSettingsView: View {
                     if theme.useCustomAccent {
                         HStack {
                             Text("Hex")
-                                .scaledFont(.system(size: 26, weight: .medium))
-                                .foregroundColor(.textSecondary)
+                                .scaledFont(.system(size: 26, weight: .medium).subtext())
+                                .foregroundColor(Color.contrastText(.textSecondary))
                             Spacer()
                             TextField("2DD4BF", text: $theme.customAccentHex)
                                 .textFieldStyle(.plain)
@@ -211,6 +214,16 @@ struct AppearanceSettingsView: View {
                 // Text Size: scales every piece of text in the app.
                 tvAppearanceSection("Text Size") {
                     textSizeRow_tvOS
+                }
+
+                // Subtext Size: secondary text only, on top of Text Size.
+                tvAppearanceSection("Subtext Size") {
+                    subtextSizeRow_tvOS
+                }
+
+                // Text Contrast: dimmed and accent text toward white/black.
+                tvAppearanceSection("Text Contrast") {
+                    textContrastRow_tvOS
                 }
 
                 // Display Scale — two sliders on tvOS (List view is
@@ -315,13 +328,106 @@ struct AppearanceSettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title.uppercased())
                 .scaledFont(.system(size: 22, weight: .bold))
-                .foregroundColor(.textTertiary)
+                .foregroundColor(Color.contrastText(.textTertiary))
                 .tracking(1)
                 .padding(.leading, 20)
             VStack(alignment: .leading, spacing: 8) {
                 content()
             }
         }
+    }
+
+    /// tvOS Subtext Size row: same stepper layout as Text Size.
+    private var subtextSizeRow_tvOS: some View {
+        let steps = SubtextScale.steps
+        let current = SubtextScale.clamp(subtextScale)
+        let index = steps.firstIndex(where: { abs($0 - current) < 0.001 }) ?? 3
+        let defaultIndex = steps.firstIndex(where: { abs($0 - SubtextScale.defaultValue) < 0.001 }) ?? 3
+        return tvPercentStepperRow(
+            title: "Subtext Size",
+            percent: Int((current * 100).rounded()),
+            isDefault: index == defaultIndex,
+            decreaseLabel: "Smaller Subtext",
+            increaseLabel: "Larger Subtext",
+            decrease: { setSubtextScale(steps[max(0, index - 1)]) },
+            increase: { setSubtextScale(steps[min(steps.count - 1, index + 1)]) },
+            reset: { setSubtextScale(SubtextScale.defaultValue) }
+        )
+    }
+
+    /// tvOS Text Contrast row: 0% to 100% in 10% steps.
+    private var textContrastRow_tvOS: some View {
+        let steps = TextContrast.steps
+        let current = TextContrast.clamp(theme.textContrast)
+        let index = steps.firstIndex(where: { abs($0 - current) < 0.001 }) ?? 0
+        let apply: (Double) -> Void = { value in
+            theme.setTextContrast(value)
+            SyncManager.shared.pushPreferences()
+        }
+        return tvPercentStepperRow(
+            title: "Text Contrast",
+            percent: Int((current * 100).rounded()),
+            isDefault: index == 0,
+            decreaseLabel: "Less Contrast",
+            increaseLabel: "More Contrast",
+            decrease: { apply(steps[max(0, index - 1)]) },
+            increase: { apply(steps[min(steps.count - 1, index + 1)]) },
+            reset: { apply(TextContrast.defaultValue) }
+        )
+    }
+
+    /// Shared tvOS minus / percent / plus / Reset row (TVSteppedSegmentStyle).
+    private func tvPercentStepperRow(
+        title: String,
+        percent: Int,
+        isDefault: Bool,
+        decreaseLabel: String,
+        increaseLabel: String,
+        decrease: @escaping () -> Void,
+        increase: @escaping () -> Void,
+        reset: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 24) {
+            Text(title)
+                .scaledFont(.system(size: 26, weight: .medium))
+                .foregroundColor(.textPrimary)
+                .lineLimit(1)
+            Spacer()
+            Button(action: decrease) {
+                Image(systemName: "minus")
+                    .font(.system(size: 22, weight: .semibold))
+                    .frame(minWidth: 28)
+            }
+            .buttonStyle(TVSteppedSegmentStyle(isSelected: false))
+            .accessibilityLabel(decreaseLabel)
+
+            Text("\(percent)%")
+                .scaledFont(.system(size: 26, weight: .semibold).monospacedDigit())
+                .foregroundColor(Color.contrastText(theme.accent))
+                .lineLimit(1)
+                .frame(minWidth: 96)
+
+            Button(action: increase) {
+                Image(systemName: "plus")
+                    .font(.system(size: 22, weight: .semibold))
+                    .frame(minWidth: 28)
+            }
+            .buttonStyle(TVSteppedSegmentStyle(isSelected: false))
+            .accessibilityLabel(increaseLabel)
+
+            Button(action: reset) {
+                Text("Reset")
+                    .scaledFont(.system(size: 22, weight: .medium))
+                    .lineLimit(1)
+            }
+            .buttonStyle(TVSteppedSegmentStyle(isSelected: isDefault))
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.cardBackground)
+        )
     }
 
     /// tvOS Text Size row. Fourteen 5% steps do not fit as chips, so the
@@ -350,7 +456,7 @@ struct AppearanceSettingsView: View {
 
             Text("\(Int((current * 100).rounded()))%")
                 .scaledFont(.system(size: 26, weight: .semibold).monospacedDigit())
-                .foregroundColor(theme.accent)
+                .foregroundColor(Color.contrastText(theme.accent))
                 .lineLimit(1)
                 .frame(minWidth: 96)
 
@@ -404,7 +510,7 @@ struct AppearanceSettingsView: View {
                 } label: {
                     Text("\(Int(step * 100))%")
                         .scaledFont(.system(size: 22, weight: .medium))
-                        .foregroundColor(step == current ? theme.accent : .textSecondary)
+                        .foregroundColor(step == current ? Color.contrastText(theme.accent) : Color.contrastText(.textSecondary))
                         .padding(.horizontal, 14)
                         .padding(.vertical, 8)
                         .background(
@@ -509,7 +615,7 @@ struct AppearanceSettingsView: View {
                 } footer: {
                     if UIDevice.current.userInterfaceIdiom != .pad {
                         Text("Colors used throughout the app.")
-                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
                 .listSectionSeparator(.hidden)
@@ -519,7 +625,7 @@ struct AppearanceSettingsView: View {
                         appearanceModeAndAccentRows
                     } footer: {
                         Text("Colors used throughout the app.")
-                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     }
                     .listSectionSeparator(.hidden)
                 }
@@ -535,7 +641,7 @@ struct AppearanceSettingsView: View {
                                     Text(style.displayName)
                                         .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                                     Text(liquidGlassDescription(style))
-                                        .scaledFont(.labelSmall).foregroundColor(.textSecondary)
+                                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                                 }
                                 Spacer()
                                 if theme.liquidGlassStyle == style {
@@ -551,7 +657,7 @@ struct AppearanceSettingsView: View {
                     Text("Glass Effect").sectionHeaderStyle()
                 } footer: {
                     Text(liquidGlassFootnote)
-                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .listSectionSeparator(.hidden)
 
@@ -571,7 +677,43 @@ struct AppearanceSettingsView: View {
                     Text("Text Size").sectionHeaderStyle()
                 } footer: {
                     Text("Scales all text in the app, from 85% to 150%. Applies live and syncs to your other devices.")
-                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                }
+
+                // MARK: Subtext Size (secondary text multiplier)
+                Section {
+                    percentSliderRow_iOS(
+                        title: "Subtext Size",
+                        value: SubtextScale.clamp(subtextScale),
+                        range: SubtextScale.range,
+                        step: SubtextScale.step,
+                        smallerGlyph: "textformat.size.smaller",
+                        largerGlyph: "textformat.size.larger",
+                        set: setSubtextScale
+                    )
+                } header: {
+                    Text("Subtext Size").sectionHeaderStyle()
+                } footer: {
+                    Text("Scales descriptions, subtitles, metadata and timestamps on top of Text Size, from 85% to 150%. Titles and buttons stay the same.")
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                }
+
+                // MARK: Text Contrast (dimmed + accent text toward white/black)
+                Section {
+                    percentSliderRow_iOS(
+                        title: "Text Contrast",
+                        value: TextContrast.clamp(theme.textContrast),
+                        range: TextContrast.range,
+                        step: TextContrast.step,
+                        smallerGlyph: "circle.lefthalf.filled",
+                        largerGlyph: "circle.fill",
+                        set: { theme.setTextContrast($0); SyncManager.shared.pushPreferences() }
+                    )
+                } header: {
+                    Text("Text Contrast").sectionHeaderStyle()
+                } footer: {
+                    Text("Makes dimmed and accent-colored text brighter in dark mode and darker in light mode. 0% keeps the theme colors, 100% uses plain white or black.")
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .listSectionSeparator(.hidden)
 
@@ -613,7 +755,7 @@ struct AppearanceSettingsView: View {
                          ? "Independent scale for Movies & Series and Live TV List. 100% matches the default; 85–125% lets you trade density for readability. Changes apply live — no restart needed."
                          : "Independent scale for Movies & Series, the Guide grid, and the Live TV List. 100% matches the default; 85–125% lets you trade density for readability. Changes apply live — no restart needed."
                     )
-                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .listSectionSeparator(.hidden)
 
@@ -629,7 +771,7 @@ struct AppearanceSettingsView: View {
                                     Text(option.label)
                                         .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                                     Text(option.subtitle)
-                                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                                 }
                                 Spacer()
                                 if timeFormat == option.value {
@@ -645,7 +787,7 @@ struct AppearanceSettingsView: View {
                     Text("Time Format").sectionHeaderStyle()
                 } footer: {
                     Text("System follows your device's clock setting. Applies to the Guide, program info, search, and recordings.")
-                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .listSectionSeparator(.hidden)
 
@@ -656,7 +798,7 @@ struct AppearanceSettingsView: View {
                             Text("Show Channel Logos")
                                 .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                             Text("Turn off to hide channel logos so longer channel names get the full row width.")
-                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                         }
                     }
                     .tint(theme.accent)
@@ -670,7 +812,7 @@ struct AppearanceSettingsView: View {
                             Text("Show Channel Numbers")
                                 .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                             Text("Turn off to hide channel numbers in the Live TV list and Guide.")
-                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                         }
                     }
                     .tint(theme.accent)
@@ -684,7 +826,7 @@ struct AppearanceSettingsView: View {
                             Text("Show Channel Names")
                                 .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                             Text("Turn off to hide channel names in the Guide's channel column.")
-                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                         }
                     }
                     .tint(theme.accent)
@@ -697,7 +839,7 @@ struct AppearanceSettingsView: View {
                             Text("Show Program Subtitles")
                                 .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                             Text("Turn off to hide the episode or match name under each program title in the Guide and Live TV list, for EPGs that repeat the description there.")
-                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                         }
                     }
                     .tint(theme.accent)
@@ -729,7 +871,7 @@ struct AppearanceSettingsView: View {
                             Text(UIDevice.current.userInterfaceIdiom == .phone
                                  ? "Unlocks category-based coloring. On iPhone this drives the Tint Channel Cards stripe below."
                                  : "Tint guide cells by program type — tap any color below to customise.")
-                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                         }
                     }
                     .tint(theme.accent)
@@ -743,7 +885,7 @@ struct AppearanceSettingsView: View {
                             Text("Tint Channel Cards")
                                 .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                             Text("Adds a colored stripe to Live TV channel cards (list view) based on what's currently airing.")
-                                .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                         }
                     }
                     .tint(theme.accent)
@@ -759,7 +901,7 @@ struct AppearanceSettingsView: View {
                     Text(UIDevice.current.userInterfaceIdiom == .phone
                          ? "iPhone's Live TV tab only renders the List view. Cards tint with a gradient that fades from the leading edge toward the center — based on the currently-airing program on the main row, and the individual program on each expanded schedule row. Dispatcharr and M3U+XMLTV work out of the box; Xtream Codes doesn't expose category data."
                          : "Programs with a category tag in the EPG source get a leading-edge gradient — on channel cards in the List view (using the currently-airing program), on each row in the expanded schedule (using that program's own category), and on cells in the Guide grid. Dispatcharr and M3U+XMLTV work out of the box; Xtream Codes doesn't expose category data.")
-                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .listSectionSeparator(.hidden)
 
@@ -809,8 +951,8 @@ struct AppearanceSettingsView: View {
                                 .foregroundColor(.textPrimary)
                             Spacer()
                             Text(moreCategoriesSummary)
-                                .scaledFont(.labelSmall)
-                                .foregroundColor(.textTertiary)
+                                .scaledFont(.labelSmall.subtext())
+                                .foregroundColor(Color.contrastText(.textTertiary))
                         }
                     }
                     .listRowBackground(Color.cardBackground)
@@ -835,7 +977,7 @@ struct AppearanceSettingsView: View {
                     Text("Palette").sectionHeaderStyle()
                 } footer: {
                     Text("Tap a swatch to customise the color used for that program bucket. Kids > Sports > News > Movie priority when a program matches multiple.")
-                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .listSectionSeparator(.hidden)
             }
@@ -913,7 +1055,7 @@ struct AppearanceSettingsView: View {
             // Hex field for power users who want to paste a specific value
             HStack {
                 Text("Hex")
-                    .scaledFont(.bodyMedium).foregroundColor(.textSecondary)
+                    .scaledFont(.bodyMedium.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                 Spacer()
                 TextField("2DD4BF", text: Binding(
                     get: { theme.customAccentHex },
@@ -948,8 +1090,8 @@ struct AppearanceSettingsView: View {
                     .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                 Text(themeSubtitle(t))
-                    .scaledFont(.labelSmall)
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
             }
 
             Spacer()
@@ -971,14 +1113,14 @@ struct AppearanceSettingsView: View {
                     .foregroundColor(.textPrimary)
                 Spacer()
                 Text("\(Int((TextScale.clamp(textScale) * 100).rounded()))%")
-                    .scaledFont(.labelSmall.monospacedDigit())
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.monospacedDigit().subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
             }
             HStack(spacing: 12) {
                 // Glyphs stay fixed so the slider's ends do not shift
                 // while the user drags.
                 Image(systemName: "textformat.size.smaller")
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .font(.system(size: 12))
                 Slider(
                     value: Binding(
@@ -990,7 +1132,46 @@ struct AppearanceSettingsView: View {
                 )
                 .tint(theme.accent)
                 Image(systemName: "textformat.size.larger")
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .font(.system(size: 14))
+            }
+        }
+        .padding(.vertical, 4)
+        .listRowBackground(Color.cardBackground)
+    }
+
+    /// iOS percent slider row shared by Subtext Size and Text Contrast.
+    private func percentSliderRow_iOS(
+        title: String,
+        value: Double,
+        range: ClosedRange<Double>,
+        step: Double,
+        smallerGlyph: String,
+        largerGlyph: String,
+        set: @escaping (Double) -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(title)
+                    .scaledFont(.bodyMedium)
+                    .foregroundColor(.textPrimary)
+                Spacer()
+                Text("\(Int((value * 100).rounded()))%")
+                    .scaledFont(.labelSmall.monospacedDigit())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+            }
+            HStack(spacing: 12) {
+                Image(systemName: smallerGlyph)
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .font(.system(size: 12))
+                Slider(
+                    value: Binding(get: { value }, set: { set($0) }),
+                    in: range,
+                    step: step
+                )
+                .tint(theme.accent)
+                Image(systemName: largerGlyph)
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .font(.system(size: 14))
             }
         }
@@ -1010,19 +1191,19 @@ struct AppearanceSettingsView: View {
                     .foregroundColor(.textPrimary)
                 Spacer()
                 Text("\(Int(binding.wrappedValue * 100))%")
-                    .scaledFont(.labelSmall)
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
             }
             HStack(spacing: 12) {
                 Image(systemName: "textformat.size.smaller")
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .scaledFont(.system(size: 12))
                 // GH #25: range extended past 125% for TV-across-the-room
                 // readability (fewer, larger items at 150%+).
                 Slider(value: binding, in: 0.85...1.75, step: 0.05)
                     .tint(theme.accent)
                 Image(systemName: "textformat.size.larger")
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .scaledFont(.system(size: 14))
             }
         }
@@ -1030,6 +1211,13 @@ struct AppearanceSettingsView: View {
         .listRowBackground(Color.cardBackground)
     }
     #endif
+
+    private func setSubtextScale(_ value: Double) {
+        let snapped = SubtextScale.clamp(value)
+        guard abs(snapped - subtextScale) > 0.0001 else { return }
+        subtextScale = snapped
+        SyncManager.shared.pushPreferences()
+    }
 
     private func setTextScale(_ value: Double) {
         let snapped = TextScale.clamp(value)
@@ -1057,7 +1245,7 @@ struct AppearanceSettingsView: View {
                 Text(themeLabel + " · " + theme.liquidGlassStyle.displayName)
                     .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                 Text("Applied across the entire app")
-                    .scaledFont(.labelSmall).foregroundColor(.textSecondary)
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
             }
 
             Spacer()

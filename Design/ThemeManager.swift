@@ -192,6 +192,11 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
         didSet { UserDefaults.standard.set(customAccentHex, forKey: "customAccentHex") }
     }
 
+    /// Settings > Appearance > Text Contrast (0...1). @Published so every
+    /// observer re-renders and `Color.contrastText` picks up the new value
+    /// live, the same path a custom accent change takes.
+    @Published var textContrast: Double = TextContrast.stored
+
     private init() {
         selectedTheme    = AppTheme(rawValue: storedTheme) ?? .aerio
         liquidGlassStyle = LiquidGlassStyle(rawValue: storedGlassStyle) ?? .tinted
@@ -220,6 +225,16 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
         appearanceMode   = AppearanceMode(rawValue: storedAppearanceMode) ?? .dark
         useCustomAccent  = UserDefaults.standard.bool(forKey: "useCustomAccent")
         customAccentHex  = UserDefaults.standard.string(forKey: "customAccentHex") ?? "1AC4D8"
+        let contrast = TextContrast.stored
+        if abs(contrast - textContrast) > 0.0001 { textContrast = contrast }
+    }
+
+    /// Sets Text Contrast (snapped to 10% steps) and persists it.
+    func setTextContrast(_ value: Double) {
+        let snapped = TextContrast.clamp(value)
+        guard abs(snapped - textContrast) > 0.0001 else { return }
+        UserDefaults.standard.set(snapped, forKey: TextContrast.key)
+        textContrast = snapped
     }
 
     func setTheme(_ theme: AppTheme) {

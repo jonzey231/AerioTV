@@ -470,7 +470,7 @@ struct ProgramInfoView: View {
                     VStack(alignment: .leading, spacing: 5) {
                         Text(target.channelName.uppercased())
                             .scaledFont(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.textSecondary)
+                            .foregroundColor(Color.contrastText(.textSecondary))
                             .tracking(1.2)
                         Text(target.title)
                             .scaledFont(.system(size: 21, weight: .bold))
@@ -479,8 +479,8 @@ struct ProgramInfoView: View {
                         if let sub = target.subTitle,
                            !EPGText.subtitleIsRedundant(sub, title: target.title, description: target.description) {
                             Text(sub)
-                                .scaledFont(.system(size: 14))
-                                .foregroundColor(.textSecondary)
+                                .scaledFont(.system(size: 14).subtext())
+                                .foregroundColor(Color.contrastText(.textSecondary))
                                 .italic()
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -546,7 +546,7 @@ struct ProgramInfoView: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title.uppercased())
                 .scaledFont(.system(size: 10, weight: .medium))
-                .foregroundColor(.textTertiary)
+                .foregroundColor(Color.contrastText(.textTertiary))
                 .tracking(1)
             Text(value)
                 .scaledFont(.system(size: 13, weight: .medium))
@@ -811,7 +811,7 @@ struct ProgramInfoView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(target.channelName.uppercased())
                         .scaledFont(.system(size: 20, weight: .semibold))
-                        .foregroundColor(.textSecondary)
+                        .foregroundColor(Color.contrastText(.textSecondary))
                         .tracking(1.5)
                     Text(target.title)
                         .scaledFont(.system(size: 38, weight: .bold))
@@ -820,8 +820,8 @@ struct ProgramInfoView: View {
                     if let sub = target.subTitle,
                        !EPGText.subtitleIsRedundant(sub, title: target.title, description: target.description) {
                         Text(sub)
-                            .scaledFont(.system(size: 24))
-                            .foregroundColor(.textSecondary)
+                            .scaledFont(.system(size: 24).subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
                             .italic()
                     }
                     if !titleBadges.isEmpty {
@@ -911,7 +911,7 @@ struct ProgramInfoView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title.uppercased())
                 .scaledFont(.system(size: 16, weight: .medium))
-                .foregroundColor(.textTertiary)
+                .foregroundColor(Color.contrastText(.textTertiary))
                 .tracking(1.2)
             Text(value)
                 .scaledFont(.system(size: 22, weight: .medium))
@@ -927,8 +927,8 @@ struct ProgramInfoView: View {
         if target.description.isEmpty {
             #if os(tvOS)
             Text("No program description provided in XMLTV.")
-                .scaledFont(.system(size: 22))
-                .foregroundColor(.textTertiary)
+                .scaledFont(.system(size: 22).subtext())
+                .foregroundColor(Color.contrastText(.textTertiary))
                 .italic()
             #else
             Text("No program description provided in XMLTV.")
@@ -938,7 +938,7 @@ struct ProgramInfoView: View {
         } else {
             #if os(tvOS)
             Text(target.description)
-                .scaledFont(.system(size: 24))
+                .scaledFont(.system(size: 24).subtext())
                 .foregroundColor(.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             #else

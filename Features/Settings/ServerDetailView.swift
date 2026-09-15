@@ -227,7 +227,7 @@ struct ServerDetailView: View {
                 } footer: {
                     if hasLANConfigured {
                         Text("A checkmark marks the connection in use right now. The local URL is used automatically whenever the server answers on your home network; run Refresh LAN Detection below after a network change.")
-                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
                 .listRowBackground(Color.cardBackground)
@@ -262,7 +262,7 @@ struct ServerDetailView: View {
                             Image(systemName: "pencil")
                                 .foregroundColor(.accentPrimary)
                             Text("Edit Playlist")
-                                .foregroundColor(.accentPrimary)
+                                .foregroundColor(Color.contrastText(.accentPrimary))
                         }
                     }
                     .listRowBackground(Color.cardBackground)
@@ -279,7 +279,7 @@ struct ServerDetailView: View {
                                     .foregroundColor(.accentPrimary)
                             }
                             Text(isTestingConnection ? "Testing..." : "Test Connection")
-                                .foregroundColor(.accentPrimary)
+                                .foregroundColor(Color.contrastText(.accentPrimary))
                         }
                     }
                     .listRowBackground(Color.cardBackground)
@@ -394,7 +394,7 @@ struct ServerDetailView: View {
                     Text(server.isActive
                          ? "Clears this playlist's cached guide data and downloads it fresh from the server. Use this if program cells look wrong or are missing. Takes a few minutes on large playlists."
                          : "Clears this playlist's cached guide data. The fresh fetch will run automatically the next time you make this playlist active.")
-                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
 
                 // MARK: Refresh Everything (nuclear)
@@ -431,7 +431,7 @@ struct ServerDetailView: View {
                     Text(server.isActive
                          ? "Clears every cache (channels, guide data, and On Demand) and reloads this playlist from scratch. Use this if newly-added channels, guide data, or movies and shows are missing or stale after changes on the server."
                          : "Clears every cache (channels, guide data, and On Demand). This playlist reloads automatically the next time you make it active.")
-                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
             
                 // MARK: Danger Zone
@@ -453,7 +453,7 @@ struct ServerDetailView: View {
                     Text("Danger Zone").sectionHeaderStyle()
                 } footer: {
                     Text("Removes this playlist and its credentials from this device. Your server data will not be affected.")
-                        .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
             }
             #if os(iOS)
@@ -605,8 +605,8 @@ struct ServerDetailView: View {
     private func connectionURLRow(_ label: String, value: String, isActiveRoute: Bool) -> some View {
         HStack {
             Text(label)
-                .scaledFont(.bodyMedium)
-                .foregroundColor(.textSecondary)
+                .scaledFont(.bodyMedium.subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
             Spacer()
             if isActiveRoute {
                 Image(systemName: "checkmark.circle.fill")
@@ -638,8 +638,8 @@ struct ServerDetailView: View {
     private func infoRow(_ label: String, value: String, isMonospaced: Bool = false) -> some View {
         HStack {
             Text(label)
-                .scaledFont(.bodyMedium)
-                .foregroundColor(.textSecondary)
+                .scaledFont(.bodyMedium.subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
             Spacer()
             Text(value)
                 .scaledFont(isMonospaced ? .monoSmall : .bodyMedium)
@@ -744,14 +744,14 @@ struct PlaylistListRow: View {
                     .foregroundColor(.textPrimary)
                 HStack(spacing: 6) {
                     Text("\(playlist.channelCount) channels")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                     if let refreshed = playlist.lastRefreshed {
                         Text("·")
-                            .foregroundColor(.textTertiary)
+                            .foregroundColor(Color.contrastText(.textTertiary))
                         Text(refreshed, style: .relative)
-                            .scaledFont(.labelSmall)
-                            .foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
             }
@@ -792,10 +792,10 @@ struct EditPlaylistSheet: View {
                         } else {
                             HStack {
                                 Text("Source")
-                                    .foregroundColor(.textSecondary)
+                                    .foregroundColor(Color.contrastText(.textSecondary))
                                 Spacer()
                                 Text("Local file")
-                                    .foregroundColor(.textTertiary)
+                                    .foregroundColor(Color.contrastText(.textTertiary))
                             }
                             .listRowBackground(Color.cardBackground)
                         }

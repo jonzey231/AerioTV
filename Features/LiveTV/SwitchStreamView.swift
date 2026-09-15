@@ -423,8 +423,8 @@ struct SwitchStreamView: View {
                     Text("Switch Stream")
                         .scaledFont(.system(size: 42, weight: .bold))
                     Text(channelName)
-                        .scaledFont(.system(size: 24))
-                        .foregroundColor(.textSecondary)
+                        .scaledFont(.system(size: 24).subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
                 }
                 Spacer()
             }
@@ -557,7 +557,7 @@ private struct SwitchStreamRowLabel: View {
                 if !meta.isEmpty {
                     Text(meta)
                         .scaledFont(.system(size: 20))
-                        .foregroundColor(isFocused ? .white.opacity(0.85) : .textSecondary)
+                        .foregroundColor(isFocused ? .white.opacity(0.85) : Color.contrastText(.textSecondary))
                 }
             }
             Spacer(minLength: 8)

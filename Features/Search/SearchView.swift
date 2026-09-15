@@ -218,7 +218,7 @@ struct SearchView: View {
                     } label: {
                         Text(s.rawValue)
                             .scaledFont(.labelMedium)
-                            .foregroundColor(scope == s ? .appBackground : .textSecondary)
+                            .foregroundColor(scope == s ? .appBackground : Color.contrastText(.textSecondary))
                             .padding(.horizontal, 14).padding(.vertical, 7)
                             .background(
                                 scope == s
@@ -332,11 +332,11 @@ struct SearchView: View {
                         .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                         .lineLimit(2)
                     Text(text.subtitle)
-                        .scaledFont(.labelSmall).foregroundColor(.textSecondary)
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                         .lineLimit(1)
                     if let detail = text.detail {
                         Text(detail)
-                            .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                             .lineLimit(2)
                     }
 
@@ -349,7 +349,7 @@ struct SearchView: View {
 
                 Image(systemName: "chevron.right")
                     .scaledFont(.system(size: 12))
-                    .foregroundColor(.textTertiary)
+                    .foregroundColor(Color.contrastText(.textTertiary))
             }
             .padding(.vertical, 6)
             .padding(.horizontal, 12)
@@ -368,9 +368,9 @@ struct SearchView: View {
         VStack(spacing: 20) {
             Spacer()
             Image(systemName: "magnifyingglass")
-                .scaledFont(.system(size: 48)).foregroundColor(.textTertiary)
+                .scaledFont(.system(size: 48)).foregroundColor(Color.contrastText(.textTertiary))
             Text("Search for movies, shows,\nor EPG programs")
-                .scaledFont(.bodyMedium).foregroundColor(.textSecondary)
+                .scaledFont(.bodyMedium.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                 .multilineTextAlignment(.center)
             Spacer()
         }
@@ -380,11 +380,11 @@ struct SearchView: View {
         VStack(spacing: 16) {
             Spacer()
             Image(systemName: "doc.text.magnifyingglass")
-                .scaledFont(.system(size: 48)).foregroundColor(.textTertiary)
+                .scaledFont(.system(size: 48)).foregroundColor(Color.contrastText(.textTertiary))
             Text("No results for \"\(query)\"")
                 .scaledFont(.headlineMedium).foregroundColor(.textPrimary)
             Text("Try a different search term or change the scope filter.")
-                .scaledFont(.bodyMedium).foregroundColor(.textSecondary)
+                .scaledFont(.bodyMedium.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                 .multilineTextAlignment(.center)
             Spacer()
         }

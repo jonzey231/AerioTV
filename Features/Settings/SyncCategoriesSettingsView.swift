@@ -110,7 +110,7 @@ struct SyncCategoriesSettingsView: View {
                 Text("Categories").sectionHeaderStyle()
             } footer: {
                 Text(footerText)
-                    .scaledFont(.labelSmall).foregroundColor(.textTertiary)
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
             .listSectionSeparator(.hidden)
         }
@@ -178,8 +178,8 @@ struct SyncCategoriesSettingsView: View {
                 }
 
                 Text(footerText)
-                    .scaledFont(.footnote)
-                    .foregroundColor(.textTertiary)
+                    .scaledFont(.footnote.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
                     .padding(.horizontal, 24)
                     .padding(.bottom, 32)
             }

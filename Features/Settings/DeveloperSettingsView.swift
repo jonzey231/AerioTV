@@ -180,8 +180,8 @@ struct DeveloperSettingsView: View {
                         .sectionHeaderStyle()
                 } footer: {
                     Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as aerio_debug_logs_archive.txt.")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
                 #if os(iOS)
                 .listSectionSeparator(.hidden)
@@ -200,7 +200,7 @@ struct DeveloperSettingsView: View {
                                   ? "rectangle.stack.fill"
                                   : "rectangle.stack")
                                 .scaledFont(.system(size: 16, weight: .medium))
-                                .foregroundColor(unifiedPlayback ? .accentPrimary : .textSecondary)
+                                .foregroundColor(unifiedPlayback ? .accentPrimary : Color.contrastText(.textSecondary))
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
@@ -211,7 +211,7 @@ struct DeveloperSettingsView: View {
                                  ? "On: live playback uses the multiview engine. Required for the AVPlayer options below."
                                  : "Off: legacy single-stream player (mpv only, no AVPlayer or multiview)")
                                 .scaledFont(.labelSmall)
-                                .foregroundColor(unifiedPlayback ? .accentPrimary : .textTertiary)
+                                .foregroundColor(unifiedPlayback ? Color.contrastText(.accentPrimary) : Color.contrastText(.textTertiary))
                         }
 
                         Spacer()
@@ -227,8 +227,8 @@ struct DeveloperSettingsView: View {
                         .sectionHeaderStyle()
                 } footer: {
                     Text("mpv is the default engine and plays every live channel, including HEVC. The two AVPlayer options route specific stream types to Apple's native player; anything AVPlayer cannot render (such as HEVC inside MPEG-TS) automatically falls back to mpv, so turning them on never loses a channel. Unified Playback hosts all of this: a single tile mounts MultiviewContainerView from the first frame, so adding a second stream is seamless. Disable it only if you hit a unified-path regression; the legacy PlayerView covers single-stream playback but has no multiview, mini-player, or AVPlayer support. Live only (VOD always uses the legacy path). Restart playback for changes to take effect.")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.top, 4)
                 }
                 #if os(iOS)
@@ -246,7 +246,7 @@ struct DeveloperSettingsView: View {
                                 .frame(width: 36, height: 36)
                             Image(systemName: avPlayerHLS ? "play.tv.fill" : "play.tv")
                                 .scaledFont(.system(size: 16, weight: .medium))
-                                .foregroundColor(avPlayerHLS ? .accentPrimary : .textSecondary)
+                                .foregroundColor(avPlayerHLS ? .accentPrimary : Color.contrastText(.textSecondary))
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
@@ -257,7 +257,7 @@ struct DeveloperSettingsView: View {
                                  ? "On (default): HLS-capable channels auto-play on Apple's AVPlayer; everything else stays on mpv"
                                  : "Off: every channel uses the mpv engine")
                                 .scaledFont(.labelSmall)
-                                .foregroundColor(avPlayerHLS ? .accentPrimary : .textTertiary)
+                                .foregroundColor(avPlayerHLS ? Color.contrastText(.accentPrimary) : Color.contrastText(.textTertiary))
                         }
 
                         Spacer()
@@ -278,7 +278,7 @@ struct DeveloperSettingsView: View {
                                 .frame(width: 36, height: 36)
                             Image(systemName: avPlayerRemuxTS ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.triangle.2.circlepath.circle")
                                 .scaledFont(.system(size: 16, weight: .medium))
-                                .foregroundColor(avPlayerRemuxTS ? .accentPrimary : .textSecondary)
+                                .foregroundColor(avPlayerRemuxTS ? .accentPrimary : Color.contrastText(.textSecondary))
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
@@ -289,7 +289,7 @@ struct DeveloperSettingsView: View {
                                  ? "On: raw MPEG-TS remuxed to HLS for AVPlayer (HEVC/MPEG-2 fall back to mpv)"
                                  : "Off: raw TS channels use the mpv engine (the default)")
                                 .scaledFont(.labelSmall)
-                                .foregroundColor(avPlayerRemuxTS ? .accentPrimary : .textTertiary)
+                                .foregroundColor(avPlayerRemuxTS ? Color.contrastText(.accentPrimary) : Color.contrastText(.textTertiary))
                         }
 
                         Spacer()
@@ -310,7 +310,7 @@ struct DeveloperSettingsView: View {
                                 .frame(width: 36, height: 36)
                             Image(systemName: mpvEngineEnabled ? "shield.lefthalf.filled" : "shield.slash")
                                 .scaledFont(.system(size: 16, weight: .medium))
-                                .foregroundColor(mpvEngineEnabled ? .accentPrimary : .textSecondary)
+                                .foregroundColor(mpvEngineEnabled ? .accentPrimary : Color.contrastText(.textSecondary))
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
@@ -321,7 +321,7 @@ struct DeveloperSettingsView: View {
                                  ? "On: mpv is the fallback when AVPlayer can't play something"
                                  : "Off: AVPlayer only; unplayable content shows an error (test default)")
                                 .scaledFont(.labelSmall)
-                                .foregroundColor(mpvEngineEnabled ? .accentPrimary : .textTertiary)
+                                .foregroundColor(mpvEngineEnabled ? Color.contrastText(.accentPrimary) : Color.contrastText(.textTertiary))
                         }
 
                         Spacer()
@@ -337,8 +337,8 @@ struct DeveloperSettingsView: View {
                         .sectionHeaderStyle()
                 } footer: {
                     Text("Experimental engine router: live channels whose URL is genuine HLS (.m3u8, typically Xtream Codes sources) play through Apple's native AVPlayer for true HDR (PQ) output, surround sound passthrough, and AirPlay. Channels are presented in the system player without the app's custom chrome, channel flipping, or multiview. Raw MPEG-TS streams (Dispatcharr) are unaffected; AVPlayer cannot play them. Takes effect on the next channel start.")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.top, 4)
                 }
                 #if os(iOS)
@@ -365,7 +365,7 @@ struct DeveloperSettingsView: View {
                                       ? "iphone.gen3.landscape"
                                       : "iphone.gen3")
                                     .scaledFont(.system(size: 16, weight: .medium))
-                                    .foregroundColor(compactChromeiPhone ? .accentPrimary : .textSecondary)
+                                    .foregroundColor(compactChromeiPhone ? .accentPrimary : Color.contrastText(.textSecondary))
                             }
 
                             VStack(alignment: .leading, spacing: 2) {
@@ -376,7 +376,7 @@ struct DeveloperSettingsView: View {
                                      ? "On — Manage Groups lives in the Live TV nav bar"
                                      : "Off — classic layout")
                                     .scaledFont(.labelSmall)
-                                    .foregroundColor(compactChromeiPhone ? .accentPrimary : .textTertiary)
+                                    .foregroundColor(compactChromeiPhone ? Color.contrastText(.accentPrimary) : Color.contrastText(.textTertiary))
                             }
 
                             Spacer()
@@ -404,8 +404,8 @@ struct DeveloperSettingsView: View {
                                         .scaledFont(.bodyMedium)
                                         .foregroundColor(.textPrimary)
                                     Text("Removes the group pills strip above the channel list.")
-                                        .scaledFont(.labelSmall)
-                                        .foregroundColor(.textTertiary)
+                                        .scaledFont(.labelSmall.subtext())
+                                        .foregroundColor(Color.contrastText(.textTertiary))
                                 }
                             }
                             .tint(.accentPrimary)
@@ -417,8 +417,8 @@ struct DeveloperSettingsView: View {
                                         .scaledFont(.bodyMedium)
                                         .foregroundColor(.textPrimary)
                                     Text("Replaces the always-visible search row with the nav-bar search icon.")
-                                        .scaledFont(.labelSmall)
-                                        .foregroundColor(.textTertiary)
+                                        .scaledFont(.labelSmall.subtext())
+                                        .foregroundColor(Color.contrastText(.textTertiary))
                                 }
                             }
                             .tint(.accentPrimary)
@@ -432,8 +432,8 @@ struct DeveloperSettingsView: View {
                              ? "Compact Chrome moves Manage Groups into the Live TV nav bar. The two toggles above let you further reclaim vertical space by hiding the filter pills and/or the search row. All three options revert instantly — no restart required."
                              : "Designed for iPhone landscape. When enabled, Manage Groups moves to the nav bar and two further toggles appear for hiding the filter pills and search row. Reverting restores the classic layout instantly."
                         )
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.top, 4)
                     }
                     #if os(iOS)
@@ -453,7 +453,7 @@ struct DeveloperSettingsView: View {
                                     .foregroundColor(.textPrimary)
                             } icon: {
                                 Image(systemName: "doc.text")
-                                    .foregroundColor(.textSecondary)
+                                    .foregroundColor(Color.contrastText(.textSecondary))
                             }
                             Spacer()
                             // v1.7.x: poll the file size every 2s while the
@@ -467,8 +467,8 @@ struct DeveloperSettingsView: View {
                             // path is actually working.
                             TimelineView(.periodic(from: Date(), by: 2)) { _ in
                                 Text(logSize)
-                                    .scaledFont(.monoSmall)
-                                    .foregroundColor(.textTertiary)
+                                    .scaledFont(.monoSmall.subtext())
+                                    .foregroundColor(Color.contrastText(.textTertiary))
                                     .onAppear { refreshLogSize() }
                                     .onChange(of: Date().timeIntervalSinceReferenceDate) { _, _ in
                                         refreshLogSize()
@@ -500,8 +500,8 @@ struct DeveloperSettingsView: View {
                                             .scaledFont(.bodyMedium)
                                             .foregroundColor(.textPrimary)
                                         Text("Scroll through entries in the app")
-                                            .scaledFont(.labelSmall)
-                                            .foregroundColor(.textTertiary)
+                                            .scaledFont(.labelSmall.subtext())
+                                            .foregroundColor(Color.contrastText(.textTertiary))
                                     }
                                 } icon: {
                                     Image(systemName: "doc.text.magnifyingglass")
@@ -536,12 +536,12 @@ struct DeveloperSettingsView: View {
                                         // so we say so up front instead of the
                                         // iOS-style "Email, Messages, ...".
                                         Text("Send via AirDrop to a nearby Mac or iPhone")
-                                            .scaledFont(.labelSmall)
-                                            .foregroundColor(.textTertiary)
+                                            .scaledFont(.labelSmall.subtext())
+                                            .foregroundColor(Color.contrastText(.textTertiary))
                                         #else
                                         Text("Email, Messages, Discord, Signal…")
-                                            .scaledFont(.labelSmall)
-                                            .foregroundColor(.textTertiary)
+                                            .scaledFont(.labelSmall.subtext())
+                                            .foregroundColor(Color.contrastText(.textTertiary))
                                         #endif
                                     }
                                 } icon: {
@@ -603,7 +603,7 @@ struct DeveloperSettingsView: View {
                                   ? "ladybug.fill"
                                   : "ladybug")
                                 .scaledFont(.system(size: 16, weight: .medium))
-                                .foregroundColor(debugLoggingEnabled ? .accentPrimary : .textSecondary)
+                                .foregroundColor(debugLoggingEnabled ? .accentPrimary : Color.contrastText(.textSecondary))
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
@@ -614,7 +614,7 @@ struct DeveloperSettingsView: View {
                                  ? "Active — writing to aerio_debug_logs.txt"
                                  : "Off — no data is collected")
                                 .scaledFont(.labelSmall)
-                                .foregroundColor(debugLoggingEnabled ? .accentPrimary : .textTertiary)
+                                .foregroundColor(debugLoggingEnabled ? Color.contrastText(.accentPrimary) : Color.contrastText(.textTertiary))
                         }
 
                         Spacer()
@@ -640,8 +640,8 @@ struct DeveloperSettingsView: View {
                         .sectionHeaderStyle()
                 } footer: {
                     Text("When enabled, detailed logs are written to a file in On My iPhone › AerioTV. Logs include network requests, playback events, EPG activity, errors, and app lifecycle events. No personally identifiable information is collected.")
-                        .scaledFont(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.top, 4)
                 }
                 #if os(iOS)
@@ -763,8 +763,8 @@ struct DeveloperSettingsView: View {
                     )
                     if let err = metalHDRTestError {
                         Text(err)
-                            .scaledFont(.caption)
-                            .foregroundColor(.textSecondary)
+                            .scaledFont(.caption.subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
                     }
                     #endif
                 }
@@ -830,15 +830,15 @@ struct DeveloperSettingsView: View {
         HStack(spacing: 16) {
             Image(systemName: "doc.text")
                 .scaledFont(.system(size: 28))
-                .foregroundColor(.textSecondary)
+                .foregroundColor(Color.contrastText(.textSecondary))
                 .frame(width: 36)
             Text("Log File Size")
                 .scaledFont(.system(size: 26, weight: .medium))
                 .foregroundColor(.textPrimary)
             Spacer()
             Text(logSize)
-                .scaledFont(.system(size: 24, design: .monospaced))
-                .foregroundColor(.textTertiary)
+                .scaledFont(.system(size: 24, design: .monospaced).subtext())
+                .foregroundColor(Color.contrastText(.textTertiary))
         }
         .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
         .padding(.horizontal, 20)
@@ -878,8 +878,8 @@ struct DeveloperSettingsView: View {
                           detail: "Timed operations — parse time, load time, memory at session start")
 
             Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as aerio_debug_logs_archive.txt.")
-                .scaledFont(.system(size: 20))
-                .foregroundColor(.textTertiary)
+                .scaledFont(.system(size: 20).subtext())
+                .foregroundColor(Color.contrastText(.textTertiary))
                 .padding(.top, 8)
         }
         .padding(24)
@@ -906,8 +906,8 @@ struct DeveloperSettingsView: View {
                     .scaledFont(.system(size: 24, weight: .semibold))
                     .foregroundColor(.textPrimary)
                 Text(detail)
-                    .scaledFont(.system(size: 20))
-                    .foregroundColor(.textSecondary)
+                    .scaledFont(.system(size: 20).subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
             }
         }
     }
@@ -1000,10 +1000,10 @@ struct LogViewerView: View {
                     VStack(spacing: 12) {
                         Image(systemName: "doc.text")
                             .scaledFont(.system(size: 40))
-                            .foregroundColor(.textTertiary)
+                            .foregroundColor(Color.contrastText(.textTertiary))
                         Text("Log file is empty.")
-                            .scaledFont(.bodyMedium)
-                            .foregroundColor(.textTertiary)
+                            .scaledFont(.bodyMedium.subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
                     }
                 } else {
                     VStack(spacing: 0) {
@@ -1104,8 +1104,8 @@ private func logCategoryRow(icon: String, title: String, detail: String) -> some
                 .scaledFont(.headlineSmall)
                 .foregroundColor(.textPrimary)
             Text(detail)
-                .scaledFont(.labelSmall)
-                .foregroundColor(.textSecondary)
+                .scaledFont(.labelSmall.subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
         }
     }
     .padding(.vertical, 4)
