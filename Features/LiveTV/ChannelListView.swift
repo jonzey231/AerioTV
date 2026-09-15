@@ -2875,6 +2875,10 @@ struct ChannelRow: View {
     /// GH #19 (Android parity): when off, the channel-number column is
     /// hidden. Cross-platform; defaults on.
     @AppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
+    /// Width a hidden number column frees for the logo (column + spacing).
+    private static let tvNumberColumn: CGFloat = 42 + 14
+    private static let wideNumberColumn: CGFloat = 36 + 14
+    private static let compactNumberColumn: CGFloat = 26 + 10
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
     /// Settings > Appearance > Channel List > Show Program Subtitles: some EPG
     /// feeds repeat the description in the sub-title, so the row reads twice.
@@ -3204,7 +3208,12 @@ struct ChannelRow: View {
                     }
 
                     if showChannelLogos {
-                        CachedLogoImage(url: item.logoURL, width: 72, height: 48)
+                        // Numbers off: the logo widens into the freed number
+                        // column (42 + 14 spacing). Height stays, since this
+                        // row is content-sized and a taller logo would grow it.
+                        CachedLogoImage(url: item.logoURL,
+                                        width: showChannelNumbers ? 72 : 72 + Self.tvNumberColumn,
+                                        height: 48)
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
@@ -3341,9 +3350,13 @@ struct ChannelRow: View {
             }
 
             if showChannelLogos {
+                // Numbers off: the logo widens into the freed number column
+                // (width + HStack spacing); height stays so the row keeps
+                // its content-sized height.
                 CachedLogoImage(
                     url: item.logoURL,
-                    width: (isWide ? 50 : 38) * s,
+                    width: ((isWide ? 50 : 38)
+                            + (showChannelNumbers ? 0 : (isWide ? Self.wideNumberColumn : Self.compactNumberColumn))) * s,
                     height: (isWide ? 34 : 26) * s
                 )
             }

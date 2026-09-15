@@ -45,6 +45,8 @@ struct ChannelPickRow: View {
     /// stays visually consistent with the guide/list.
     @AppStorage("ui.showChannelLogos") private var showChannelLogos = true
     @AppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
+    /// Width a hidden number column frees for the logo (56 + 16 spacing).
+    private static let numberColumn: CGFloat = 56 + 16
 
     init(item: ChannelDisplayItem, isPlaying: Bool = false, onSelect: @escaping () -> Void) {
         self.item = item
@@ -77,7 +79,11 @@ struct ChannelPickRow: View {
                 }
 
                 if showChannelLogos {
-                    CachedLogoImage(url: item.logoURL, width: 68, height: 44)
+                    // Numbers off: the logo widens into the freed number
+                    // column; height stays so the row height is unchanged.
+                    CachedLogoImage(url: item.logoURL,
+                                    width: showChannelNumbers ? 68 : 68 + Self.numberColumn,
+                                    height: 44)
                 }
 
                 VStack(alignment: .leading, spacing: 4) {

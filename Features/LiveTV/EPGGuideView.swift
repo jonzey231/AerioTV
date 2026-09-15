@@ -5749,7 +5749,8 @@ struct EPGGuideView: View {
 
     // MARK: - Channel Cell
     private func channelCell(for channel: ChannelDisplayItem) -> some View {
-        GuideChannelButton(channel: channel, onSelect: onSelectChannel)
+        GuideChannelButton(channel: channel, columnWidth: channelColumnWidth,
+                           rowHeight: rowHeight, onSelect: onSelectChannel)
     }
 
     #if os(tvOS)
@@ -7097,6 +7098,10 @@ private struct GuideCornerClock: View {
 
 private struct GuideChannelButton: View {
     let channel: ChannelDisplayItem
+    /// Channel cell size, so the logo can grow into the space a hidden
+    /// number and/or name frees up without changing the column or row.
+    let columnWidth: CGFloat
+    let rowHeight: CGFloat
     let onSelect: (ChannelDisplayItem) -> Void
     @EnvironmentObject private var favoritesStore: FavoritesStore
     /// GH #19 (Android parity): hide the channel number in the guide rail.
@@ -7106,6 +7111,57 @@ private struct GuideChannelButton: View {
     /// GH #73 (ant462, filed on Android; applied here for parity): hide the
     /// channel NAME text in the guide rail, leaving logo and number.
     @AppStorage("ui.showChannelNames") private var showChannelNames = true
+
+    /// Rail logo sizing. Both shown keeps the stock box; a hidden number
+    /// and/or name lets the box grow to the cell's free width and height.
+    /// `iconClear` keeps the grown box below the top-trailing star and
+    /// catch-up clock; the line heights approximate the rail's text rows.
+    private enum LogoMetrics {
+        #if os(tvOS)
+        static let stockWidth: CGFloat = 72
+        static let stockHeight: CGFloat = 48
+        static let horizontalPadding: CGFloat = 8
+        static let numberColumn: CGFloat = 38 + 8   // minWidth + HStack spacing
+        static let nameLine: CGFloat = 22
+        static let textGap: CGFloat = 4
+        static let inset: CGFloat = 8
+        static let iconClear: CGFloat = 26
+        #else
+        static let stockWidth: CGFloat = 40
+        static let stockHeight: CGFloat = 28
+        static let horizontalPadding: CGFloat = 4
+        static let nameLine: CGFloat = 12
+        static let numberLine: CGFloat = 10
+        static let textGap: CGFloat = 4
+        static let inset: CGFloat = 4
+        static let iconClear: CGFloat = 14
+        #endif
+    }
+
+    /// Top inset for a grown logo: clears the corner icons when present.
+    private var logoTopInset: CGFloat {
+        favoritesStore.isFavorite(channel.id) || channel.hasCatchup
+            ? LogoMetrics.iconClear : LogoMetrics.inset
+    }
+
+    /// The logo box for the current toggles, or nil for the stock box (both
+    /// shown, or a cell too small to grow without crowding the icons).
+    private var grownLogoSize: CGSize? {
+        guard !(showChannelNumbers && showChannelNames) else { return nil }
+        var width = columnWidth - LogoMetrics.horizontalPadding * 2
+        var textHeight: CGFloat = 0
+        #if os(tvOS)
+        if showChannelNumbers { width -= LogoMetrics.numberColumn }
+        if showChannelNames { textHeight = LogoMetrics.nameLine + LogoMetrics.textGap }
+        #else
+        if showChannelNames { textHeight += LogoMetrics.nameLine }
+        if showChannelNumbers { textHeight += LogoMetrics.numberLine }
+        if textHeight > 0 { textHeight += LogoMetrics.textGap }
+        #endif
+        let height = rowHeight - logoTopInset - LogoMetrics.inset - textHeight
+        guard width >= LogoMetrics.stockWidth, height >= LogoMetrics.stockHeight else { return nil }
+        return CGSize(width: width, height: height)
+    }
 
     var body: some View {
         let _ = TabProbe.body("GuideChannelRow", key: channel.id)
@@ -7167,7 +7223,8 @@ private struct GuideChannelButton: View {
     private var channelLabel: some View {
         #if os(tvOS)
         // Emby-style: channel number on left, logo + name on right
-        HStack(spacing: 8) {
+        let grown = grownLogoSize
+        return HStack(spacing: 8) {
             // GH #19: number column collapses when numbers are off.
             if showChannelNumbers {
                 Text(channel.number)
@@ -7184,7 +7241,9 @@ private struct GuideChannelButton: View {
                 // applied. Bare AsyncImage hits 401 on Dispatcharr-API
                 // mode and falls back to the placeholder.
                 if channel.logoURL != nil {
-                    CachedLogoImage(url: channel.logoURL, width: 72, height: 48)
+                    CachedLogoImage(url: channel.logoURL,
+                                    width: grown?.width ?? LogoMetrics.stockWidth,
+                                    height: grown?.height ?? LogoMetrics.stockHeight)
                 } else {
                     guidePlaceholder
                 }
@@ -7196,8 +7255,10 @@ private struct GuideChannelButton: View {
                 }
             }
             .frame(maxWidth: .infinity)
+            .padding(.top, grown == nil ? 0 : logoTopInset)
+            .padding(.bottom, grown == nil ? 0 : LogoMetrics.inset)
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, LogoMetrics.horizontalPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         // Catch-up badge (2026-07-20, all-platform parity): a small history
         // clock in the rail's top-right whenever the channel has a
@@ -7212,10 +7273,13 @@ private struct GuideChannelButton: View {
             }
         }
         #else
-        VStack(spacing: 4) {
+        let grown = grownLogoSize
+        return VStack(spacing: 4) {
             // v1.6.23: same auth-aware fix as the tvOS branch above.
             if channel.logoURL != nil {
-                CachedLogoImage(url: channel.logoURL, width: 40, height: 28)
+                CachedLogoImage(url: channel.logoURL,
+                                width: grown?.width ?? LogoMetrics.stockWidth,
+                                height: grown?.height ?? LogoMetrics.stockHeight)
             } else {
                 guidePlaceholder
             }
@@ -7235,7 +7299,9 @@ private struct GuideChannelButton: View {
             }
             .multilineTextAlignment(.center)
         }
-        .padding(.horizontal, 4)
+        .padding(.top, grown == nil ? 0 : logoTopInset)
+        .padding(.bottom, grown == nil ? 0 : LogoMetrics.inset)
+        .padding(.horizontal, LogoMetrics.horizontalPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         // Catch-up badge, phone-scaled (see tvOS branch above).
         .overlay(alignment: .topTrailing) {
