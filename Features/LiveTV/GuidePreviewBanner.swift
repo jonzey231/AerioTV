@@ -71,15 +71,36 @@ final class GuidePreviewArtAnchor: ObservableObject {
     /// 0 means "not measured" (banner not on screen): the mini falls back to
     /// its old constant inset.
     @Published var bottomAbs: CGFloat = 0
+    /// Banner instance that last reported. A clear from any other instance
+    /// is ignored: a remounted banner reports before the old one's
+    /// onDisappear lands, and that late clear used to zero the anchor for
+    /// good (onGeometryChange only fires again when the value changes).
+    private var owner: UUID?
 
-    func report(_ value: CGFloat) {
+    func report(_ value: CGFloat, owner id: UUID) {
+        owner = id
+        guard value > 0 else { return }
         // Equal-value writes still notify every observer (memory:
         // feedback_published_write_on_equal_value).
         let v = value.rounded()
-        if bottomAbs != v { bottomAbs = v }
+        if bottomAbs != v { bottomAbs = v; debugLog("[ART-ANCHOR] report bottom=\(v)") }
     }
 
-    func clear() { if bottomAbs != 0 { bottomAbs = 0 } }
+    func clear(owner id: UUID) {
+        guard owner == id else { return }
+        owner = nil
+        if bottomAbs != 0 { bottomAbs = 0; debugLog("[ART-ANCHOR] cleared") }
+    }
+
+    /// The banner layout itself is gone (Live TV layout switched off
+    /// "preview", or Live TV shown without a banner), so the mini must drop
+    /// to its non-banner placement. The banner's own onDisappear no longer
+    /// clears: a tab switch or rebuild only takes it off screen, and the mini
+    /// keeps its vertical position while stashed on Settings.
+    func clearLayoutGone() {
+        owner = nil
+        if bottomAbs != 0 { bottomAbs = 0; debugLog("[ART-ANCHOR] cleared (banner layout off)") }
+    }
 }
 
 struct GuidePreviewBanner: View {
@@ -97,6 +118,12 @@ struct GuidePreviewBanner: View {
     @ObservedObject private var artCache = GuidePreviewArtCache.shared
     @EnvironmentObject private var nowPlaying: NowPlayingManager
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+    /// Identity for GuidePreviewArtAnchor ownership.
+    @State private var anchorOwner = UUID()
+    /// Last measured art bottom, re-published on appear: the anchor may have
+    /// been cleared (layout toggled off and back on) while the geometry is
+    /// unchanged, so onGeometryChange never fires again.
+    @State private var lastArtBottom: CGFloat = 0
     /// The corner mini player (410 wide, 40 from the trailing edge) sits
     /// over the banner's right end; the copy stops short of it.
     private var trailingReserve: CGFloat {
@@ -123,9 +150,12 @@ struct GuidePreviewBanner: View {
                 // GuidePreviewArtAnchor); the reading is live, so a slot
                 // that resizes when the image lands moves the mini too.
                 .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { maxY in
-                    GuidePreviewArtAnchor.shared.report(maxY)
+                    lastArtBottom = maxY
+                    GuidePreviewArtAnchor.shared.report(maxY, owner: anchorOwner)
                 }
-                .onDisappear { GuidePreviewArtAnchor.shared.clear() }
+                .onAppear {
+                    GuidePreviewArtAnchor.shared.report(lastArtBottom, owner: anchorOwner)
+                }
             if let program {
                 copy(for: program)
                     .frame(maxWidth: .infinity, alignment: .leading)
