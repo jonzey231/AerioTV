@@ -436,6 +436,17 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         firstByteLock.lock(); defer { firstByteLock.unlock() }
         return ingestedBytes
     }
+    /// When the last ingest byte landed, readable from any thread (nil
+    /// until the first one does). The tile's silent-start deadline polls
+    /// this so it can measure SILENCE rather than elapsed time: a feed
+    /// that is crawling in below real time is still alive and must never
+    /// be walked away from (Glitzbr 2026-09-15, an over-the-air
+    /// HDHomeRun feed that degraded to 0.68 of real time was abandoned
+    /// for much worse backups).
+    var lastIngestByteAt: Date? {
+        firstByteLock.lock(); defer { firstByteLock.unlock() }
+        return lastByteAt
+    }
     private var connectedAt: Date?
     private var ingestedBytes: Int64 = 0
     /// When the last ingest byte landed (nil until the first one does).
@@ -2873,6 +2884,87 @@ struct LoadingDetailLine: View {
     }
 }
 
+/// Per-channel learned time-to-first-byte for the live silent-start
+/// deadline (see `AVPlayerMultiviewTile.armFirstByteDeadline`).
+///
+/// Glitzbr 2026-09-15: over-the-air HDHomeRun channels through
+/// Dispatcharr have to LOCK A TUNER before a single byte exists, and a
+/// 12 s client deadline walked away from a working-but-slow source onto
+/// much worse backups. A channel that has historically taken a long time
+/// to produce its first byte earns a proportionally longer budget on
+/// later tunes, with a ceiling so one pathological sample cannot stretch
+/// the wait forever and a TTL so a one-off slow start is forgotten.
+///
+/// Storage is deliberately the SAME shape as `LiveEdgeHoldback`: a
+/// UserDefaults dictionary of values plus a SEPARATE dictionary of learn
+/// stamps, bounded entry count, expiry read by the reader. Device-local,
+/// never synced: like the learned hold-back this is a property of THIS
+/// device's network and provider path.
+enum LiveFirstByteLearner {
+    private static let defaultsKey = "playback.liveFirstByte"
+    private static let learnedAtKey = "playback.liveFirstByteAt"
+
+    /// Ceiling on a single learned sample (seconds).
+    static let maxLearned: Double = 45
+    /// Past this a learned value is ignored and relearned: a tuner's lock
+    /// time is a property of the channel, not of one session.
+    static let ttl: TimeInterval = 24 * 60 * 60
+    /// A faster start pulls the learned value down by half the difference.
+    private static let decayShare: Double = 0.5
+    private static let maxEntries = 400
+
+    /// This channel's learned time-to-first-byte in seconds, or nil when
+    /// nothing is known or the value has expired.
+    static func learned(for key: String) -> Double? {
+        let map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]
+        guard let value = map?[key], value > 0 else { return nil }
+        let stamps = UserDefaults.standard.dictionary(forKey: learnedAtKey) as? [String: Double]
+        guard let stamp = stamps?[key] else { forget(key); return nil }
+        let age = Date().timeIntervalSince1970 - stamp
+        guard age >= 0, age < ttl else { forget(key); return nil }
+        return value
+    }
+
+    /// Record a SUCCESSFUL time-to-first-byte. The stored value is a
+    /// decayed maximum: a slower start raises it at once (that is the
+    /// case we must not walk away from), a faster start pulls it down
+    /// gradually, so one bad tune does not pin the channel and one good
+    /// tune does not erase a genuinely slow tuner.
+    static func record(_ seconds: Double, for key: String) {
+        guard seconds > 0, !key.isEmpty else { return }
+        var map = (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]) ?? [:]
+        var stamps = (UserDefaults.standard.dictionary(forKey: learnedAtKey) as? [String: Double]) ?? [:]
+        let now = Date().timeIntervalSince1970
+        let previous = map[key]
+        let expired = (now - (stamps[key] ?? 0)) > ttl
+        let next: Double
+        if let previous, !expired, seconds < previous {
+            next = previous - (previous - seconds) * decayShare
+        } else {
+            next = seconds
+        }
+        let value = min(max(next, 0.001), maxLearned)
+        map[key] = value
+        stamps[key] = now
+        if map.count > maxEntries { map = [key: value]; stamps = [key: now] }
+        stamps = stamps.filter { map[$0.key] != nil }
+        UserDefaults.standard.set(map, forKey: defaultsKey)
+        UserDefaults.standard.set(stamps, forKey: learnedAtKey)
+        debugLog(String(format: "[FAILOVER] learned first byte %.1fs (observed %.1fs, TTL %.0fh)",
+                        value, seconds, ttl / 3600))
+    }
+
+    /// Drop one stale learned value with its stamp, so an expired entry
+    /// is not re-read on every tune of that channel.
+    private static func forget(_ key: String) {
+        var map = (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]) ?? [:]
+        var stamps = (UserDefaults.standard.dictionary(forKey: learnedAtKey) as? [String: Double]) ?? [:]
+        guard map.removeValue(forKey: key) != nil || stamps.removeValue(forKey: key) != nil else { return }
+        UserDefaults.standard.set(map, forKey: defaultsKey)
+        UserDefaults.standard.set(stamps, forKey: learnedAtKey)
+    }
+}
+
 struct AVPlayerMultiviewTile: View {
     /// The owning tile's id; mute state derives from comparing this to
     /// the store's audioTileID LIVE (never from a captured snapshot,
@@ -3077,6 +3169,14 @@ struct AVPlayerMultiviewTile: View {
     /// Re-rolled every time the deadline is armed; a fired timer whose
     /// token moved on is a stale one and does nothing.
     @State private var firstByteDeadlineToken = UUID()
+    /// When the CURRENT silent-start deadline was armed, and the budget
+    /// it is running with (seconds of SILENCE, see armFirstByteDeadline).
+    @State private var firstByteArmedAt: Date?
+    @State private var firstByteBudget: Double = 28
+    /// When THIS tune first armed a deadline, so a learned
+    /// time-to-first-byte measures the whole tap-to-first-byte rather
+    /// than just the last walk step.
+    @State private var tuneStartedAt: Date?
     /// Streams already walked this tune, so the walk never revisits one.
     @State private var failoverTriedStreamIDs: Set<Int> = []
     /// The stream the walk believes is live right now (seeded from
@@ -3557,25 +3657,89 @@ struct AVPlayerMultiviewTile: View {
 
     // MARK: - No-first-byte stream failover (s7_86.txt:353-395)
 
-    /// Seconds a live ingest may stay connected-but-silent before the
-    /// client starts walking the channel's other streams. Deliberately
-    /// SEPARATE from the ingest's 30 s URLSession request timeout, which
-    /// stays where the Freyguy first-bytes-patience comment put it.
-    private static let firstByteDeadline: Double = 12
+    /// Seconds a live ingest may stay connected-but-SILENT on the FIRST
+    /// attempt of a tune before the client starts walking the channel's
+    /// other streams. Deliberately SEPARATE from the ingest's 30 s
+    /// URLSession request timeout, which stays where the Freyguy
+    /// first-bytes-patience comment put it.
+    ///
+    /// Was 12 s. Raised 2026-09-15 (Glitzbr, over-the-air HDHomeRun
+    /// tuners through Dispatcharr): a tuner has to LOCK before a single
+    /// byte exists, and 12 s walked a working channel onto much worse
+    /// backups.
+    private static let firstTuneFirstByteDeadline: Double = 28
+
+    /// Budget for every ingest AFTER the first of a tune. The server has
+    /// already swapped a stream in behind the same connection, so there
+    /// is no tuner lock left to wait for and failover stays responsive.
+    private static let stepFirstByteDeadline: Double = 12
+
+    /// Hard ceiling on a learned-stretched budget.
+    private static let firstByteBudgetMax: Double = 45
+
+    /// A channel learned to start slowly gets 1.5x its learned
+    /// time-to-first-byte (never less than the base budget).
+    private static let learnedFirstByteHeadroom: Double = 1.5
+
+    /// How often the deadline re-checks silence.
+    private static let silencePollInterval: Double = 0.5
 
     /// Live tune only. Arms (or re-arms, after a failover step) the
     /// deadline; the remuxer's onFirstByte disarms it.
-    private func armFirstByteDeadline() {
+    ///
+    /// The wait measures SILENCE, not wall clock: each poll restarts the
+    /// budget from the last ingest byte, so a slow but live feed is
+    /// never abandoned.
+    private func armFirstByteDeadline(firstAttempt: Bool = true) {
         guard !isVOD, !isDVR, catchup == nil else { return }
         firstByteSeen = false
         firstByteDeadlineToken = UUID()
-        let deadlineToken = firstByteDeadlineToken
-        let token = teardownToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.firstByteDeadline) {
+        let armedAt = Date()
+        firstByteArmedAt = armedAt
+        if firstAttempt { tuneStartedAt = armedAt }
+        let key = liveSourceURL.absoluteString
+        let learned = LiveFirstByteLearner.learned(for: key)
+        let budget: Double
+        if firstAttempt {
+            let stretched = (learned ?? 0) * Self.learnedFirstByteHeadroom
+            budget = min(max(Self.firstTuneFirstByteDeadline, stretched), Self.firstByteBudgetMax)
+        } else {
+            budget = Self.stepFirstByteDeadline
+        }
+        firstByteBudget = budget
+        debugLog(String(format: "[FAILOVER] channel=%@ silent-start budget %.0fs (learned %@, %@)",
+                        channelName, budget,
+                        learned.map { String(format: "%.1fs", $0) } ?? "none",
+                        firstAttempt ? "first attempt" : "walk step"))
+        pollFirstByteSilence(deadlineToken: firstByteDeadlineToken,
+                             token: teardownToken, armedAt: armedAt, budget: budget)
+    }
+
+    /// One tick of the silent-start poll. Re-schedules itself until a
+    /// byte lands (any byte, not just the first) or the ingest has been
+    /// quiet for the whole budget.
+    private func pollFirstByteSilence(deadlineToken: UUID, token: UUID,
+                                      armedAt: Date, budget: Double) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.silencePollInterval) {
             guard token == teardownToken, deadlineToken == firstByteDeadlineToken,
                   !firstByteSeen, !tileStopped, tileError == nil else { return }
-            handleNoFirstByte()
+            // Bytes from BEFORE this arm (a re-armed deadline on the same
+            // open ingest) must not count as activity for this attempt.
+            let lastByte = remuxer?.lastIngestByteAt
+            let since = Date().timeIntervalSince(max(armedAt, lastByte ?? armedAt))
+            guard since >= budget else {
+                pollFirstByteSilence(deadlineToken: deadlineToken, token: token,
+                                     armedAt: armedAt, budget: budget)
+                return
+            }
+            handleNoFirstByte(silentFor: since)
         }
+    }
+
+    /// The budget the current deadline is running with, for the logs and
+    /// the walk's reason text.
+    private var firstByteDeadlineText: String {
+        String(format: "no bytes for %.0fs", firstByteBudget)
     }
 
     /// Wipes the walk. Called on teardown and on every user-initiated
@@ -3591,6 +3755,8 @@ struct AVPlayerMultiviewTile: View {
         failoverSteps = 0
         failoverInFlight = false
         failoverStartedAt = nil
+        firstByteArmedAt = nil
+        tuneStartedAt = nil
     }
 
     /// The remuxer delivered its first byte: disarm, and if we had
@@ -3599,6 +3765,17 @@ struct AVPlayerMultiviewTile: View {
         guard !firstByteSeen else { return }
         firstByteSeen = true
         firstByteDeadlineToken = UUID()
+        // Learn only clean successes on this channel's own stream: a time
+        // measured after a change_stream walk is the backup's, not this
+        // channel's normal tuner-lock time.
+        if failoverSteps == 0, let started = tuneStartedAt {
+            let ttfb = Date().timeIntervalSince(started)
+            if ttfb > 0 {
+                debugLog(String(format: "[FAILOVER] channel=%@ firstByte in %.1fs; learning",
+                                channelName, ttfb))
+                LiveFirstByteLearner.record(ttfb, for: liveSourceURL.absoluteString)
+            }
+        }
         if failoverSteps > 0 {
             let ms = failoverStartedAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? 0
             let id = failoverCurrentStreamID.map(String.init) ?? "unknown"
@@ -3618,8 +3795,8 @@ struct AVPlayerMultiviewTile: View {
         return server
     }
 
-    /// Deadline fired with zero bytes on the wire.
-    private func handleNoFirstByte() {
+    /// Deadline fired: the ingest has been silent for the whole budget.
+    private func handleNoFirstByte(silentFor silentSeconds: Double) {
         guard !failoverInFlight else { return }
         guard let server = failoverServer(),
               let pk = dispatcharrChannelPK,
@@ -3629,12 +3806,15 @@ struct AVPlayerMultiviewTile: View {
             // the 30 s URLSession timeout plus the existing retry ladder
             // exactly as they are.
             statusText = "Reconnecting..."
-            debugLog("[FAILOVER] channel=\(channelName) no first byte in "
-                + "\(Int(Self.firstByteDeadline))s; no switchable streams, staying on the retry path")
+            debugLog(String(format: "[FAILOVER] channel=%@ no bytes for %.0fs (budget %.0fs); "
+                + "no switchable streams, staying on the retry path",
+                            channelName, silentSeconds, firstByteBudget))
             return
         }
         failoverInFlight = true
         if failoverStartedAt == nil { failoverStartedAt = Date() }
+        debugLog(String(format: "[FAILOVER] channel=%@ no bytes for %.0fs (budget %.0fs); "
+            + "walking to the next stream", channelName, silentSeconds, firstByteBudget))
         Task { @MainActor in
             defer { failoverInFlight = false }
             await stepFailover(server: server, channelPK: pk, channelUUID: uuid)
@@ -3694,8 +3874,7 @@ struct AVPlayerMultiviewTile: View {
         }
         guard let target = next else {
             debugLog("[FAILOVER] channel=\(channelName) exhausted \(ids.count) streams")
-            scheduleStandingRetry("no first byte in \(Int(Self.firstByteDeadline))s",
-                                  serverReason: serverReason)
+            scheduleStandingRetry(firstByteDeadlineText, serverReason: serverReason)
             // scheduleStandingRetry's generic copy is wrong here: the
             // streams all answered, none of them delivered. With a server
             // reason in hand, its own words stay in front of the user.
@@ -3719,7 +3898,7 @@ struct AVPlayerMultiviewTile: View {
         // No owner= field here: change_stream already logs the server's
         // own owner flag ([SwitchStream] change_stream ... owner=).
         debugLog("[FAILOVER] channel=\(channelName) stream \(step)/\(ids.count) id=\(target) "
-            + "reason=\(serverReason ?? "no first byte in \(Int(Self.firstByteDeadline))s")")
+            + "reason=\(serverReason ?? "\(firstByteDeadlineText) within the silent-start budget")")
         // The silent-stream entry point deliberately LEAVES the ingest
         // open (Dispatcharr swaps the upstream in place behind it). The
         // 503 entry point has no connection at all - the response WAS the
@@ -3737,7 +3916,7 @@ struct AVPlayerMultiviewTile: View {
             }
             return
         }
-        armFirstByteDeadline()
+        armFirstByteDeadline(firstAttempt: false)
     }
 
     // MARK: - Dispatcharr 503 reasons (Logan 2026-09-12)

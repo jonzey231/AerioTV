@@ -17,6 +17,9 @@ struct MyRecordingsView: View {
     @State private var recordingToDelete: Recording?
     @State private var showDeleteConfirmation = false
     @State private var showDeleteFromServerAlert = false
+    /// "Delete from Device" on a SERVER recording saved to this device:
+    /// removes the local file only, never the server's copy.
+    @State private var showDeleteDeviceCopyAlert = false
     @State private var showDownloadConfirmation = false
 
     // v1.6.8 (B1 Phase 1 / B2-partial): full-screen player
@@ -56,7 +59,18 @@ struct MyRecordingsView: View {
     /// left by a previous run (crash mid-capture) does not leak in here.
     private var visibleRecordings: [Recording] {
         func isCapturing(_ r: Recording) -> Bool { coordinator.activeSessions[r.id] != nil }
-        guard let sid = currentServerID else { return allRecordings.filter(isCapturing) }
+        guard let active = servers.first(where: { $0.isActive }) ?? servers.first else {
+            return allRecordings.filter(isCapturing)
+        }
+        let sid = active.id.uuidString
+        // dvr_access "none": server rows are not listable for this account.
+        // Local captures are the device's own and stay reachable. Mirrors
+        // DVRView.visibleRecordings so the tab and this list agree.
+        if !active.dispatcharrCanViewDVR {
+            return allRecordings.filter {
+                isCapturing($0) || ($0.serverID == sid && $0.destination == .local)
+            }
+        }
         return allRecordings.filter { $0.serverID == sid || isCapturing($0) }
     }
 
@@ -219,6 +233,14 @@ struct MyRecordingsView: View {
                 Text("This will permanently delete this recording from the Dispatcharr server. The file on the server will be removed.")
             }
         }
+        .alert("Delete from Device?", isPresented: $showDeleteDeviceCopyAlert) {
+            Button("Delete", role: .destructive) {
+                if let rec = recordingToDelete { actions.deleteDeviceCopy(rec) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The copy saved on this device will be deleted. The recording stays on the Dispatcharr server.")
+        }
         .alert("Save to Device?", isPresented: $showDownloadConfirmation) {
             Button("Save") {
                 if let rec = recordingToDelete { downloadRecording(rec) }
@@ -285,7 +307,11 @@ struct MyRecordingsView: View {
 
     private func reconcileAll() async {
         guard let active = servers.first(where: { $0.isActive }) ?? servers.first,
-              active.type == .dispatcharrAPI, active.dispatcharrCanViewDVR else { return }
+              active.type == .dispatcharrAPI else { return }
+        // Opportunistic: entering DVR with a missing / stale snapshot
+        // re-probes the account's capabilities before the gate decides.
+        await DispatcharrCapabilityProbe.refreshIfStale(active, reason: "DVR")
+        guard active.dispatcharrCanViewDVR else { return }
         let api = DispatcharrAPI(baseURL: active.effectiveBaseURL,
                                  auth: .apiKey(active.effectiveApiKey),
                                  userAgent: active.effectiveUserAgent,
@@ -349,10 +375,12 @@ struct MyRecordingsView: View {
                 // detection/removal on the server even if the user
                 // didn't toggle it at schedule time. The server
                 // handles idempotency so repeated taps are safe.
-                Button {
-                    runComskip(rec)
-                } label: {
-                    Label("Remove Commercials", systemImage: "scissors")
+                if canManage(rec) {
+                    Button {
+                        runComskip(rec)
+                    } label: {
+                        Label("Remove Commercials", systemImage: "scissors")
+                    }
                 }
             }
         }
@@ -403,13 +431,23 @@ struct MyRecordingsView: View {
             }
         }
 
-        // Delete actions
+        // Delete actions. The on-device copy is always deletable, whatever
+        // the account's DVR access; only the server copy is gated.
         if rec.destination == .local {
             Button(role: .destructive) {
                 recordingToDelete = rec
                 showDeleteConfirmation = true
             } label: {
-                Label("Delete", systemImage: "trash")
+                Label("Delete from Device", systemImage: "trash")
+            }
+        }
+
+        if rec.destination == .dispatcharrServer, actions.hasDeviceCopy(rec) {
+            Button(role: .destructive) {
+                recordingToDelete = rec
+                showDeleteDeviceCopyAlert = true
+            } label: {
+                Label("Delete from Device", systemImage: "trash")
             }
         }
 
@@ -430,15 +468,23 @@ struct MyRecordingsView: View {
                 recordingToDelete = rec
                 showDeleteConfirmation = true
             } label: {
-                Label("Delete", systemImage: "trash")
+                Label("Delete from Device", systemImage: "trash")
             }
         }
-        if rec.destination == .dispatcharrServer {
+        if rec.destination == .dispatcharrServer, actions.hasDeviceCopy(rec) {
+            Button(role: .destructive) {
+                recordingToDelete = rec
+                showDeleteDeviceCopyAlert = true
+            } label: {
+                Label("Delete from Device", systemImage: "trash")
+            }
+        }
+        if rec.destination == .dispatcharrServer, canManage(rec) {
             Button(role: .destructive) {
                 recordingToDelete = rec
                 showDeleteFromServerAlert = true
             } label: {
-                Label("Delete", systemImage: "trash")
+                Label("Delete from Server", systemImage: "trash")
             }
         }
     }

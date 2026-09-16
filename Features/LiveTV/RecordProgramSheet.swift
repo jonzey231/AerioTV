@@ -383,7 +383,7 @@ struct RecordProgramSheet: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Recording requires DVR access on Dispatcharr")
                                 .scaledFont(.footnote.bold())
-                            Text("Scheduling a recording on the Dispatcharr server needs an account with DVR access set to Manage. Your account can watch and record live programs to this device, but not schedule server recordings. Ask your Dispatcharr administrator for access, or wait until the program is airing to record it on this device.")
+                            Text("Scheduling a recording on the Dispatcharr server needs DVR manage access on your account. Your account can watch and record live programs to this device, but not schedule server recordings. Contact your server administrator for more information, or wait until the program is airing to record it on this device.")
                                 .scaledFont(.footnote)
                         }
                     } icon: {
@@ -403,7 +403,7 @@ struct RecordProgramSheet: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Saving to this device")
                                 .scaledFont(.footnote.bold())
-                            Text("Your account can record live programs to this device. Recording to the Dispatcharr server requires DVR access set to Manage.")
+                            Text("Recording to the Dispatcharr server needs DVR manage access on your account. Contact your server administrator for more information.")
                                 .scaledFont(.footnote)
                         }
                     } icon: {
@@ -774,7 +774,7 @@ struct RecordProgramSheet: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Recording requires DVR access on Dispatcharr")
                         .scaledFont(.system(size: 22, weight: .bold))
-                    Text("Scheduling a recording on the Dispatcharr server needs an account with DVR access set to Manage. Your account can watch and record live programs to this device, but not schedule server recordings. Ask your Dispatcharr administrator for access, or wait until the program is airing to record it on this device.")
+                    Text("Scheduling a recording on the Dispatcharr server needs DVR manage access on your account. Your account can watch and record live programs to this device, but not schedule server recordings. Contact your server administrator for more information, or wait until the program is airing to record it on this device.")
                         .scaledFont(.system(size: 20))
                 }
             } icon: {
@@ -795,7 +795,7 @@ struct RecordProgramSheet: View {
             // cannot tell it did not go to the Dispatcharr server DVR.
             if isDispatcharr && !canRecordToServer {
                 Label {
-                    Text("Saving to this device. Recording to the Dispatcharr server requires a Dispatcharr admin account.")
+                    Text("Recording to the Dispatcharr server needs DVR manage access on your account. Contact your server administrator for more information.")
                 } icon: {
                     Image(systemName: "internaldrive.fill")
                         .foregroundColor(.orange)
@@ -1032,13 +1032,33 @@ struct RecordProgramSheet: View {
                                          authMode: server.dispatcharrHeaderMode)
                 // If user has custom buffers, don't let server double-apply offsets.
                 let applyServerOffsets = (preRoll == 0 && postRoll == 0)
-                try? await coordinator.scheduleDispatcharrRecording(
-                    api: api, recording: rec,
-                    channelIntID: channelIntID,
-                    applyServerOffsets: applyServerOffsets,
-                    comskip: comskip,
-                    modelContext: modelContext
-                )
+                // Never `try?` here. A 403 used to make "Record" a silent
+                // no-op: the sheet dismissed, no recording existed on the
+                // server, and the user was told nothing. Re-probe the
+                // account and say exactly what is wrong.
+                do {
+                    try await coordinator.scheduleDispatcharrRecording(
+                        api: api, recording: rec,
+                        channelIntID: channelIntID,
+                        applyServerOffsets: applyServerOffsets,
+                        comskip: comskip,
+                        modelContext: modelContext
+                    )
+                    await DispatcharrCapabilityProbe.promoteIfUnexpectedlyAllowed(server, capability: .manageDvr)
+                } catch let APIError.forbidden(reason) {
+                    debugLog("⚠️ RecordProgramSheet: Dispatcharr refused the recording (403): \(reason ?? "no reason given")")
+                    await DispatcharrCapabilityProbe.handleForbidden(server,
+                                                                     capability: .manageDvr,
+                                                                     serverReason: reason)
+                } catch APIError.unauthorized {
+                    debugLog("⚠️ RecordProgramSheet: Dispatcharr refused the recording (401)")
+                    DispatcharrPermissionNotice.shared.present(
+                        "AerioTV is not signed in to this Dispatcharr server any more. Open Settings > Playlists and run Test Connection.")
+                } catch {
+                    debugLog("⚠️ RecordProgramSheet: scheduling failed: \(error)")
+                    DispatcharrPermissionNotice.shared.present(
+                        "The recording could not be scheduled: \(error.localizedDescription)")
+                }
             }
             // v1.6.8 (B1 Phase 1): wired up local recording for
             // immediate-start cases ("Record from Now" on the

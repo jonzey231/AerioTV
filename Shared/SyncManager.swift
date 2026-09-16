@@ -146,7 +146,10 @@ final class SyncManager: ObservableObject {
         // stores the same preference as `show_remote_hints` and the two
         // are mapped by name.
         showRemoteHintsKey
-    ]
+    ] + PlayerInfoCardSettings.allKeys
+    // Player Info Card row visibility (Settings > App Behaviors). All
+    // six default ON and are only written once the user flips a row,
+    // so an absent key stays absent and older clients ignore them.
     private let syncDoubleKeys  = [
         "networkTimeout",
         // Settings > Appearance > Text Size (0.85 to 1.5). Synced across
@@ -1010,6 +1013,27 @@ final class SyncManager: ObservableObject {
         if server.dispatcharrUserLevel < 10 {
             dict["dispatcharrUserLevel"] = server.dispatcharrUserLevel
         }
+        // Per-user capability snapshot. Syncing ONLY the level (and the
+        // profile ids) is what made a synced playlist arrive with no DVR
+        // permission at all and resolve to view-only on the receiving
+        // device: the whole point of the snapshot is that the level alone
+        // does not determine access. Carry the entire thing. Every key is
+        // omitted when it carries no information, so older clients see an
+        // unchanged payload and ignore what they do not know.
+        if server.dispatcharrIsStaff { dict["dispatcharrIsStaff"] = true }
+        if server.dispatcharrIsSuperuser { dict["dispatcharrIsSuperuser"] = true }
+        if !server.dispatcharrCustomPropertiesJSON.isEmpty {
+            dict["dispatcharrCustomProperties"] = server.dispatcharrCustomPropertiesJSON
+        }
+        if let fetched = server.dispatcharrPermissionsFetchedAt {
+            dict["dispatcharrPermissionsFetchedAt"] = fetched.timeIntervalSince1970
+        }
+        if server.dispatcharrCapabilitiesSchema > 0 {
+            dict["dispatcharrCapabilitiesSchema"] = server.dispatcharrCapabilitiesSchema
+        }
+        if let sysCatchup = server.dispatcharrSystemCatchupEnabled {
+            dict["dispatcharrSystemCatchupEnabled"] = sysCatchup
+        }
         // v1.7.x: cross-device persistence of the connected Dispatcharr
         // user's assigned Channel Profile id(s), used to drive the
         // child-safety Channel Profile filter on the channel list. Only
@@ -1117,6 +1141,17 @@ final class SyncManager: ObservableObject {
             // synced sub-10 value restricts the server-side Record /
             // DVR affordances on this device.
             dispatcharrUserLevel: dict["dispatcharrUserLevel"] as? Int ?? 10,
+            // Per-user capability snapshot. Absent (older sender) leaves
+            // the receiving device with no snapshot, which reads
+            // `.unknown` -> affordances stay ENABLED and the server
+            // decides, rather than the old silent downgrade to view-only.
+            dispatcharrIsStaff: dict["dispatcharrIsStaff"] as? Bool ?? false,
+            dispatcharrIsSuperuser: dict["dispatcharrIsSuperuser"] as? Bool ?? false,
+            dispatcharrCustomPropertiesJSON: dict["dispatcharrCustomProperties"] as? String ?? "",
+            dispatcharrPermissionsFetchedAt: (dict["dispatcharrPermissionsFetchedAt"] as? TimeInterval)
+                .map { Date(timeIntervalSince1970: $0) },
+            dispatcharrCapabilitiesSchema: dict["dispatcharrCapabilitiesSchema"] as? Int ?? 0,
+            dispatcharrSystemCatchupEnabled: dict["dispatcharrSystemCatchupEnabled"] as? Bool,
             // v1.7.x: absent (older sender or a server with no profile
             // assigned) means "" = no filter = show all channels. Only a
             // positively synced non-empty value drives the child-safety
@@ -1522,6 +1557,19 @@ struct SyncedServer: Sendable {
     /// level is omitted to stay back-compat) so non-restricted servers
     /// stay recording-capable.
     let dispatcharrUserLevel: Int
+    /// Per-user capability snapshot from `/api/accounts/users/me/`, synced
+    /// WHOLE. `dispatcharrCustomPropertiesJSON` is the verbatim
+    /// `custom_properties` object (dvr_access, vod_movies_enabled, ...),
+    /// so a device receiving a playlist gates on the same facts as the
+    /// device that probed it. Absent from older senders: the receiver then
+    /// has no snapshot, reads every capability as unknown, and keeps the
+    /// affordances enabled until its own probe runs.
+    let dispatcharrIsStaff: Bool
+    let dispatcharrIsSuperuser: Bool
+    let dispatcharrCustomPropertiesJSON: String
+    let dispatcharrPermissionsFetchedAt: Date?
+    let dispatcharrCapabilitiesSchema: Int
+    let dispatcharrSystemCatchupEnabled: Bool?
     /// v1.7.x: the connected Dispatcharr user's assigned Channel Profile
     /// id(s), comma-joined (`""`, `"44"`, `"44,57"`). Synced so a user
     /// whose account is locked to a "Kids" profile on one device gets the

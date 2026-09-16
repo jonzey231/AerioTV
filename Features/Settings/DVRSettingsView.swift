@@ -42,13 +42,12 @@ struct DVRSettingsView: View {
         activeServer?.type == .dispatcharrAPI
     }
 
-    /// v1.7.x: whether the active Dispatcharr account may record to the
-    /// server (IsAdmin, user_level >= 10). When false (Standard /
-    /// Streamer), the server-side recording destination is hidden
-    /// because every server recording would 403; local recording (this
-    /// device, while foregrounded) is the only path and needs no
-    /// destination choice. True for non-Dispatcharr and admin servers,
-    /// so their UI is unchanged.
+    /// Whether the active Dispatcharr account may record to the server.
+    /// Derived from the probed per-user capability (DVR "manage"), NOT
+    /// from the raw level: an admin can grant manage to a level-1 account
+    /// and can set "view" on a level-1 account, and both cases were wrong
+    /// under the old level test. UNKNOWN (never probed, or the probe
+    /// failed) shows the destination and lets the server answer.
     private var canRecordToServer: Bool {
         activeServer?.dispatcharrCanRecordToServer ?? true
     }

@@ -2016,9 +2016,17 @@ enum VODLibraryCache {
         }
     }
 
-    static func clear() {
-        for kind in [VODItemType.movie, .series] {
+    static func clear() { clear(kinds: [.movie, .series]) }
+
+    /// Drop the on-disk snapshot for specific halves of the library.
+    /// Used when a Dispatcharr account loses `vod_movies_enabled` or
+    /// `vod_series_enabled`: the in-memory store is cleared at the same
+    /// moment, and without this the next launch's `restoreSnapshots`
+    /// would republish the catalog the account may no longer see.
+    static func clear(kinds: [VODItemType]) {
+        for kind in kinds {
             try? FileManager.default.removeItem(at: fileURL(kind: kind))
+            debugLog("[VOD-CACHE] cleared \(kind == .movie ? "movies" : "series") snapshot")
         }
     }
 }

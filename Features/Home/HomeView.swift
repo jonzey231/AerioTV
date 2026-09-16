@@ -282,7 +282,21 @@ final class VODStore: ObservableObject {
         let activeServer = servers.first(where: { $0.isActive })
         guard let server = vodServers.first(where: { $0.isActive }) ?? (activeServer == nil ? vodServers.first : nil) else { return }
         let identity = VODLibraryCache.identity(for: server)
-        if movies.isEmpty, let snap = await VODLibraryCache.load(kind: .movie, identity: identity) {
+        // Dispatcharr 0.30 per-user permissions. The snapshot is a disk cache
+        // written while the account still had access, so restoring it blindly
+        // re-published a full catalog for an account that is now denied --
+        // invisible in the tab bar (the gates hide the tab) but visible to
+        // every direct reader of `VODStore.shared`: global search, "More like
+        // this", and the multiview picker. Drop the stale file instead of
+        // publishing it. UNKNOWN never drops anything.
+        let deniedMovies = server.type == .dispatcharrAPI && !server.dispatcharrCanViewVOD
+        let deniedSeries = server.type == .dispatcharrAPI && !server.dispatcharrCanViewSeries
+        if deniedMovies || deniedSeries {
+            debugLog("[VOD-CACHE] permission denied (movies=\(!deniedMovies) series=\(!deniedSeries)); discarding snapshot")
+            VODLibraryCache.clear(kinds: deniedMovies && deniedSeries ? [.movie, .series]
+                                               : (deniedMovies ? [.movie] : [.series]))
+        }
+        if !deniedMovies, movies.isEmpty, let snap = await VODLibraryCache.load(kind: .movie, identity: identity) {
             let t0 = CFAbsoluteTimeGetCurrent()
             MainThreadWatchdog.shared.begin("publish vod.movies")
             movies = snap.items
@@ -299,7 +313,7 @@ final class VODStore: ObservableObject {
             debugLog("[VOD-CACHE] restored \(snap.items.count) movies from \(Int(Date().timeIntervalSince(snap.at)))s ago (launch, no network)")
             TMDBArtCache.shared.enrich(snap.items, isMovie: true)
         }
-        if series.isEmpty, let snap = await VODLibraryCache.load(kind: .series, identity: identity) {
+        if !deniedSeries, series.isEmpty, let snap = await VODLibraryCache.load(kind: .series, identity: identity) {
             let t0 = CFAbsoluteTimeGetCurrent()
             MainThreadWatchdog.shared.begin("publish vod.series")
             series = snap.items
@@ -375,11 +389,11 @@ final class VODStore: ObservableObject {
                                      auth: .apiKey(server.effectiveApiKey),
                                      userAgent: server.effectiveUserAgent,
                                      authMode: server.dispatcharrHeaderMode)
-            if server.dispatcharrVODMoviesEnabled, let probe = try? await api.probeVODMovies() {
+            if server.dispatcharrCanViewVOD, let probe = try? await api.probeVODMovies() {
                 pendingMoviesProbe = (probe.count, probe.newestCreatedAt)
                 moviesChanged = Self.probeSaysChanged(baseline: restoredMoviesProbe, probe: probe)
             }
-            if server.dispatcharrVODSeriesEnabled, let probe = try? await api.probeVODSeries() {
+            if server.dispatcharrCanViewSeries, let probe = try? await api.probeVODSeries() {
                 pendingSeriesProbe = (probe.count, probe.newestCreatedAt)
                 seriesChanged = Self.probeSaysChanged(baseline: restoredSeriesProbe, probe: probe)
             }
@@ -657,8 +671,16 @@ final class VODStore: ObservableObject {
         }
         // Dispatcharr 0.30: the account's vod_movies_enabled is off. The
         // server would answer with empty lists anyway; skip the sweep.
-        if let active = activeServer, active.type == .dispatcharrAPI, !active.dispatcharrVODMoviesEnabled {
+        // Opportunistic: entering On Demand with a missing / stale
+        // snapshot re-probes before the gate decides anything.
+        if let active = activeServer, active.type == .dispatcharrAPI {
+            await DispatcharrCapabilityProbe.refreshIfStale(active, reason: "On Demand (movies)")
+        }
+        if let active = activeServer, active.type == .dispatcharrAPI, !active.dispatcharrCanViewVOD {
             debugLog("🎬 VODStore.loadMovies: movies disabled for this Dispatcharr account, clearing")
+            // Clear the disk snapshot too, or the next launch restores the
+            // catalog this account may no longer see.
+            VODLibraryCache.clear(kinds: [.movie])
             movies = []; movieCategories = []
             isLoadingMovies = false; moviesError = nil
             lastMoviesServerName = nil; currentMoviesServerID = active.id
@@ -994,8 +1016,12 @@ final class VODStore: ObservableObject {
             return
         }
         // Dispatcharr 0.30: the account's vod_series_enabled is off.
-        if let active = activeServer, active.type == .dispatcharrAPI, !active.dispatcharrVODSeriesEnabled {
+        if let active = activeServer, active.type == .dispatcharrAPI {
+            await DispatcharrCapabilityProbe.refreshIfStale(active, reason: "On Demand (series)")
+        }
+        if let active = activeServer, active.type == .dispatcharrAPI, !active.dispatcharrCanViewSeries {
             debugLog("📺 VODStore.loadSeries: series disabled for this Dispatcharr account, clearing")
+            VODLibraryCache.clear(kinds: [.series])
             series = []; seriesCategories = []
             isLoadingSeries = false; seriesError = nil
             lastSeriesServerName = nil; currentSeriesServerID = active.id
@@ -3110,10 +3136,27 @@ enum TopShelfDataManager {
     /// Sync up to 10 most recent unfinished VOD items to the shared keychain.
     /// Like `syncTopChannels`, this only stores metadata + raw poster URLs —
     /// the extension passes `posterURL` directly to `setImageURL`.
-    static func syncContinueWatching(_ items: [WatchProgress]) {
+    ///
+    /// `servers` gates the rows against Dispatcharr 0.30 per-user
+    /// permissions. Top Shelf keychain items survive app deletion (see
+    /// `clearAll`), so a movie row written while `vod_movies_enabled` was
+    /// true kept rendering on the tvOS home screen (and its deep link kept
+    /// working) after the permission was revoked. The extension is a
+    /// separate process with no access to SwiftData, so the gate has to be
+    /// here, on the write side. An empty `servers` (or an unprobed account)
+    /// denies nothing.
+    static func syncContinueWatching(_ items: [WatchProgress], servers: [ServerConnection] = []) {
         #if os(tvOS)
+        func permitted(_ p: WatchProgress) -> Bool {
+            guard let sid = p.serverID,
+                  let server = servers.first(where: { $0.id.uuidString == sid }) else { return true }
+            // "series" / "episode" rows belong to the series catalog;
+            // everything else is a movie.
+            let isSeries = p.vodType == "series" || p.vodType == "episode" || p.seriesID != nil
+            return isSeries ? server.dispatcharrCanViewSeries : server.dispatcharrCanViewVOD
+        }
         let recent = items
-            .filter { !$0.isFinished }
+            .filter { !$0.isFinished && permitted($0) }
             .sorted { $0.updatedAt > $1.updatedAt }
             .prefix(10)
 
@@ -4140,7 +4183,8 @@ struct MainTabView: View {
     /// mutate the tab set, so the set never changes underneath an active
     /// Settings navigation; deferred changes apply when the user leaves it.
     @State private var tabShowRecordings = false
-    @State private var tabShowVOD = false
+    @State private var tabShowMovies = false
+    @State private var tabShowSeries = false
     @ObservedObject private var tabBarScrollState = TVTabBarScrollState.shared
     #endif
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
@@ -4289,9 +4333,17 @@ struct MainTabView: View {
     /// server has `vodEnabled == false`, so a re-fetch is the only way to
     /// re-populate `vodStore.series`/`movies` and bring `hasVOD` back to
     /// true.
+    ///
+    /// Dispatcharr 0.30 per-user permissions are folded in for the same
+    /// reason: `loadMovies` / `loadSeries` early-return and CLEAR the store
+    /// when the account is denied, so a permission that later flips back to
+    /// allowed needs a re-fetch to repopulate the library and bring the tab
+    /// back. Without these two flags in the key the only recovery was an app
+    /// relaunch. Capability changes reach here because the launch / foreground
+    /// probe writes them onto the observed `ServerConnection`.
     private var vodServerKey: String {
         allServers
-            .map { "\($0.id.uuidString)|\($0.baseURL)|\($0.isActive ? "1" : "0")|\($0.vodEnabled ? "1" : "0")|\($0.supportsVOD ? "1" : "0")" }
+            .map { "\($0.id.uuidString)|\($0.baseURL)|\($0.isActive ? "1" : "0")|\($0.vodEnabled ? "1" : "0")|\($0.supportsVOD ? "1" : "0")|\($0.dispatcharrCanViewVOD ? "1" : "0")|\($0.dispatcharrCanViewSeries ? "1" : "0")" }
             .sorted()
             .joined(separator: ",")
     }
@@ -4325,7 +4377,10 @@ struct MainTabView: View {
     private var dvrReconcileKey: String {
         allServers
             .filter { $0.type == .dispatcharrAPI }
-            .map { "\($0.id.uuidString)" }
+            // dvr_access is part of the key so a permission that flips back
+            // to view/manage re-fires the reconcile at once instead of
+            // waiting out the 2-minute poll below.
+            .map { "\($0.id.uuidString)|\($0.dispatcharrCanViewDVR ? "1" : "0")" }
             .sorted()
             .joined(separator: ",")
     }
@@ -4340,31 +4395,54 @@ struct MainTabView: View {
     /// server version) on every launch so a permission change made on
     /// the server applies without re-adding the playlist. Off the
     /// critical path; a failure leaves the persisted values as they are.
-    private func refreshDispatcharrPermissions() {
-        guard let server = allServers.first(where: { $0.isActive }) ?? allServers.first,
-              server.type == .dispatcharrAPI else { return }
-        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                 auth: .apiKey(server.effectiveApiKey),
-                                 userAgent: server.effectiveUserAgent,
-                                 authMode: server.dispatcharrHeaderMode,
-                                 serverID: server.id,
-                                 savedUsername: server.dispatcharrCredentialType == .usernamePassword
-                                     ? server.username : nil)
+    ///
+    /// Policy (Android parity, 2026-09-15):
+    ///  - COLD LAUNCH always probes, ignoring the ~6 hour TTL. A snapshot
+    ///    younger than the TTL used to short-circuit the launch pass, so a
+    ///    permission change made on the server could NOT be picked up by
+    ///    force quitting and reopening the app, which is exactly what a
+    ///    user (and an admin) tries first. One probe per server per launch
+    ///    (`needsLaunchProbe`), plus the probe's own in-flight dedupe.
+    ///  - The softer triggers stay TTL gated: foreground return and the
+    ///    opportunistic DVR / On Demand entry checks.
+    ///  - Server creation, Test Connection and manual refresh force.
+    /// A failed probe always keeps the last good snapshot.
+    private func refreshDispatcharrPermissions(reason: String = "cold launch",
+                                               isColdLaunch: Bool = true,
+                                               force: Bool = false) {
+        let dispatcharrServers = allServers.filter { $0.type == .dispatcharrAPI }
+        guard !dispatcharrServers.isEmpty else { return }
         Task { @MainActor in
-            guard let user = try? await api.fetchCurrentUser() else {
-                debugLog("[PERMS] users/me unavailable; keeping persisted permissions for \(server.name)")
-                return
+            for server in dispatcharrServers {
+                // RETRY rather than discard. The old code fired once and,
+                // on any transport hiccup, left the device gating on
+                // whatever stale (or absent) snapshot it happened to have
+                // until the next cold launch. Three attempts with a short
+                // backoff costs one request in the healthy case.
+                if isColdLaunch {
+                    // Unconditional, TTL ignored, but only once per server
+                    // per process: the launch orchestrator can re-fire on a
+                    // server-key change within the same launch.
+                    guard DispatcharrCapabilityProbe.needsLaunchProbe(server) else { continue }
+                    DispatcharrCapabilityProbe.noteLaunchProbed(server)
+                } else {
+                    guard force || server.dispatcharrCapabilities.isStale else { continue }
+                }
+                var reached = false
+                for attempt in 1...3 {
+                    reached = await DispatcharrCapabilityProbe.refresh(server, reason: "\(reason) #\(attempt)")
+                    if reached { break }
+                    try? await Task.sleep(for: .seconds(attempt * 3))
+                }
+                if !reached {
+                    debugLog("[PERMS] probe FAILED server=\(server.name) reason=\(reason) "
+                             + "detail=unresolved-after-retries; keeping the last good snapshot "
+                             + "(\(server.dispatcharrCapabilities.probeSummary))")
+                }
             }
-            let version = try? await api.fetchVersion()
-            var level = user.effectiveUserLevel
-            if level < 10, level != server.dispatcharrUserLevel, await api.probeAdminAccess() { level = 10 }
-            var changed = false
-            if level != server.dispatcharrUserLevel {
-                server.dispatcharrUserLevel = level
-                changed = true
-            }
-            if server.applyDispatcharrPermissions(from: user, version: version ?? nil) { changed = true }
-            debugLog("[PERMS] \(server.name): level=\(server.dispatcharrUserLevel) dvr=\(server.dispatcharrEffectiveDVRAccess.rawValue) catchup=\(server.dispatcharrCatchupEnabled) movies=\(server.dispatcharrVODMoviesEnabled) series=\(server.dispatcharrVODSeriesEnabled) version=\(server.dispatcharrServerVersion.isEmpty ? "?" : server.dispatcharrServerVersion)\(changed ? " (changed)" : "")")
+            // Capabilities are synced, so a device that just repaired a
+            // wrong snapshot shares the good one.
+            SyncManager.shared.pushServers(allServers)
         }
     }
 
@@ -4714,6 +4792,11 @@ struct MainTabView: View {
         // throttled to 15 minutes per server.
         refreshGuideIfStale(reason: "foreground")
         checkEPGSourcesForChanges(reason: "foreground")
+        // Foreground after a while: re-read the per-user capability
+        // snapshot so a permission the admin changed while the app was
+        // backgrounded applies without a cold launch. Staleness-gated
+        // (about 6 hours), so a quick app switch costs nothing.
+        refreshDispatcharrPermissions(reason: "foreground", isColdLaunch: false, force: false)
         // Restart the settle window, then queue the quiet VOD sweep behind it
         // (it starts ~20 s from here, once the guide is painted and any tune is
         // past first frame). The DVR poll keeps its own cadence.
@@ -4904,7 +4987,8 @@ struct MainTabView: View {
                     // rather than under it.
                     let visibleTabs = 2
                         + (showRecordingsTab ? 1 : 0)
-                        + (showVODTab ? 2 : 0)
+                        + (showMoviesTab ? 1 : 0)
+                        + (showSeriesTab ? 1 : 0)
                     let barLeading = (geo.size.width - CGFloat(visibleTabs) * 230) / 2
                     VStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: 16) {
@@ -5268,6 +5352,10 @@ struct MainTabView: View {
                             subtitle: item.currentProgram,
                             subtitleStart: item.currentProgramStart,
                             subtitleEnd: item.currentProgramEnd,
+                            programSubtitle: PlayerInfoCardSettings.liveEpisodeTitle(forChannelID: item.id),
+                            programDescription: PlayerInfoCardSettings.liveSynopsis(
+                                forChannelID: item.id,
+                                itemDescription: item.currentProgramDescription),
                             artworkURL: item.logoURL,
                             onMinimize: { withAnimation(.spring(response: 0.35)) { nowPlaying.minimize() } },
                             onClose: { nowPlaying.stop() }
@@ -5671,11 +5759,31 @@ struct MainTabView: View {
     /// with zero movies and zero series (e.g., a bare live-TV-only
     /// M3U) hides the tab entirely — matching the dynamic behaviour
     /// of the DVR and Favorites tabs.
-    private var hasVOD: Bool {
-        !vodStore.movies.isEmpty
-            || !vodStore.series.isEmpty
-            || vodStore.isLoadingMovies
-            || vodStore.isLoadingSeries
+    private var hasVOD: Bool { hasMovies || hasSeries }
+
+    /// Movies half of the former On Demand tab. Dispatcharr 0.30 per-user
+    /// permissions: an account whose `vod_movies_enabled` is explicitly
+    /// false retires the Movies tab even while the series library is
+    /// populated (without this the tab survived on its sibling's content
+    /// and showed an empty grid). UNKNOWN never hides: `dispatcharrCanViewVOD`
+    /// is true for an unprobed / unreadable account.
+    private var hasMovies: Bool {
+        if let active = activeServerForTabs, !active.dispatcharrCanViewVOD { return false }
+        return !vodStore.movies.isEmpty || vodStore.isLoadingMovies
+    }
+
+    /// Series half. Mirrors `hasMovies` against `vod_series_enabled`.
+    private var hasSeries: Bool {
+        if let active = activeServerForTabs, !active.dispatcharrCanViewSeries { return false }
+        return !vodStore.series.isEmpty || vodStore.isLoadingSeries
+    }
+
+    /// The server every tab gate reads. Deliberately the same expression the
+    /// DVR gate uses so the two can never disagree about which playlist is
+    /// live. nil (no servers yet) leaves every capability at UNKNOWN, which
+    /// hides nothing.
+    private var activeServerForTabs: ServerConnection? {
+        allServers.first(where: { $0.isActive }) ?? allServers.first
     }
 
     /// Tab-presence flags the TabView actually reads. On tvOS these come from
@@ -5684,11 +5792,26 @@ struct MainTabView: View {
     /// sibling-tab insertion the way tvOS's are).
     #if os(tvOS)
     private var showRecordingsTab: Bool { tabShowRecordings }
-    private var showVODTab: Bool { tabShowVOD }
+    private var showMoviesTab: Bool { tabShowMovies }
+    private var showSeriesTab: Bool { tabShowSeries }
     #else
     private var showRecordingsTab: Bool { hasRecordings }
-    private var showVODTab: Bool { hasVOD }
+    private var showMoviesTab: Bool { hasMovies }
+    private var showSeriesTab: Bool { hasSeries }
     #endif
+
+    /// Is `tab` currently part of the TabView's child set? Used to bounce a
+    /// selection off a tab that has just been retired (and to reject a
+    /// persisted default tab at launch).
+    private func isTabVisible(_ tab: AppTab) -> Bool {
+        switch tab {
+        case .liveTV, .settings: return true
+        case .favorites:         return false
+        case .dvr:               return showRecordingsTab
+        case .movies:            return showMoviesTab
+        case .tvShows:           return showSeriesTab
+        }
+    }
 
     #if os(tvOS)
     /// One Equatable key combining the nav-state gates, so a SINGLE .onChange
@@ -5751,21 +5874,40 @@ struct MainTabView: View {
             // Diagnostic for the sticky blank-Settings bug: confirm the latch is
             // deferring while in Settings/nav. If a blank ever coincides with a
             // DEFER-less tab-set mutation below, this + the APPLYING line pinpoint it.
-            debugLog("🔶 syncTabVisibility DEFER (settingsPushed=\(isSettingsSubviewPushed) vodPushed=\(isVODDetailPushed) tab=\(selectedTab.rawValue)) live[rec=\(hasRecordings) vod=\(hasVOD)] latched[rec=\(tabShowRecordings) vod=\(tabShowVOD)]")
+            debugLog("🔶 syncTabVisibility DEFER (settingsPushed=\(isSettingsSubviewPushed) vodPushed=\(isVODDetailPushed) tab=\(selectedTab.rawValue)) live[rec=\(hasRecordings) mov=\(hasMovies) ser=\(hasSeries)] latched[rec=\(tabShowRecordings) mov=\(tabShowMovies) ser=\(tabShowSeries)]")
             return
         }
         let recChange = tabShowRecordings != hasRecordings
-        let vodChange = tabShowVOD != hasVOD
+        let movChange = tabShowMovies != hasMovies
+        let serChange = tabShowSeries != hasSeries
+        let vodChange = movChange || serChange
         if recChange || vodChange {
             // A tab APPEARING/DISAPPEARING mutates the TabView child set — the
             // exact action that can tear down a fragile Settings NavigationStack.
             // If the blank recurs, the last such line before it (with tab context)
             // is the culprit trigger.
-            debugLog("🔶 syncTabVisibility APPLYING tab-set change (tab=\(selectedTab.rawValue) settingsPushed=\(isSettingsSubviewPushed) vodPushed=\(isVODDetailPushed)): rec \(tabShowRecordings)→\(hasRecordings) vod \(tabShowVOD)→\(hasVOD)")
+            debugLog("🔶 syncTabVisibility APPLYING tab-set change (tab=\(selectedTab.rawValue) settingsPushed=\(isSettingsSubviewPushed) vodPushed=\(isVODDetailPushed)): rec \(tabShowRecordings)→\(hasRecordings) mov \(tabShowMovies)→\(hasMovies) ser \(tabShowSeries)→\(hasSeries)")
         }
         if recChange { tabShowRecordings = hasRecordings }
-        if vodChange { tabShowVOD = hasVOD }
+        if movChange { tabShowMovies = hasMovies }
+        if serChange { tabShowSeries = hasSeries }
+        // A latch that just retired the selected tab must move the selection
+        // too; the TabView keeps a tag that no longer has a child otherwise
+        // and tvOS lands on a blank pane.
+        redirectIfSelectedTabHidden()
         #endif
+    }
+
+    /// Move the selection somewhere valid when the tab the user is on has
+    /// just been retired (a capability flipped to denied, the library
+    /// drained, the last recording was deleted). Settings and Live TV are
+    /// always present, so Live TV is a safe destination.
+    private func redirectIfSelectedTabHidden() {
+        guard !isTabVisible(selectedTab) else { return }
+        debugLog("🔶 selected tab \(selectedTab.rawValue) is no longer visible; redirecting to Live TV")
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            selectedTab = .liveTV
+        }
     }
 
     // MARK: - Tab Content
@@ -5869,7 +6011,7 @@ struct MainTabView: View {
             // live-TV M3U or a Dispatcharr instance without any VOD
             // ingested) hides the tab entirely, matching the dynamic
             // behaviour of Favorites and DVR.
-            if showVODTab {
+            if showMoviesTab {
                 // Lazy until first shown (2026-09-12 lag hunt): both VOD tabs
                 // observe vodStore, so the launch-time snapshot restore
                 // publishes (5035 movies, 3063 series) used to build and lay
@@ -5884,7 +6026,11 @@ struct MainTabView: View {
                 }
                     .tabItem { Label(AppTab.movies.title, systemImage: AppTab.movies.icon) }
                     .tag(AppTab.movies)
+            }
 
+            // Series is gated independently of Movies: Dispatcharr 0.30 can
+            // deny `vod_series_enabled` while movies stay allowed.
+            if showSeriesTab {
                 LazyTabContent(isSelected: selectedTab == .tvShows) {
                 MoviesView(vodStore: vodStore, isPlaying: $isPlaying,
                            isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested,
@@ -5953,25 +6099,24 @@ struct MainTabView: View {
         // (TabBarScrollTracker).
         .aerioTabBarAutoMinimize()
         // If the user deletes their last recording while on the DVR tab, redirect home.
-        .onChange(of: hasRecordings) { _, nowHasRecordings in
+        .onChange(of: hasRecordings) { _, _ in
             syncTabVisibility()
-            if !nowHasRecordings && selectedTab == .dvr {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                    selectedTab = .liveTV
-                }
-            }
+            redirectIfSelectedTabHidden()
         }
         // If the VOD library drains (e.g., server switched to a
         // pure live-TV source) while the user is on the On Demand
         // tab, redirect home rather than leaving them staring at a
         // tab whose backing content is gone.
-        .onChange(of: hasVOD) { _, nowHasVOD in
+        // Movies and TV Shows are observed separately: denying one half
+        // (vod_movies_enabled / vod_series_enabled) leaves `hasVOD` true, so
+        // a combined observer would never fire for the half that went away.
+        .onChange(of: hasMovies) { _, _ in
             syncTabVisibility()
-            if !nowHasVOD && selectedTab.isVOD {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                    selectedTab = .liveTV
-                }
-            }
+            redirectIfSelectedTabHidden()
+        }
+        .onChange(of: hasSeries) { _, _ in
+            syncTabVisibility()
+            redirectIfSelectedTabHidden()
         }
         // Re-apply any tab-visibility change that was deferred while a Settings
         // subview / VOD detail was open, or while the Settings tab was selected,
@@ -5995,8 +6140,15 @@ struct MainTabView: View {
                 UserDefaults.standard.removeObject(forKey: "launchOnLiveTV")
                 debugLog("🔶 MainTabView.onAppear: launchOnLiveTV=true, set selectedTab=.liveTV")
             } else {
+                // A persisted default tab is a HINT, never an authority: the
+                // Android startup race pinned the DVR tab because the
+                // restored selection was trusted before capabilities had
+                // resolved. Restore only into a tab that is actually part of
+                // the child set right now; the `.onChange` gates above bring
+                // it back on their own if the capability later resolves to
+                // allowed.
                 let restored = AppTab(rawValue: defaultTabRaw) ?? .liveTV
-                selectedTab = restored == .favorites ? .liveTV : restored
+                selectedTab = isTabVisible(restored) ? restored : .liveTV
             }
             configureTabBarAppearance()
             tryShowInitialLoading()
@@ -6326,6 +6478,13 @@ struct MainTabView: View {
         .onReceive(NotificationCenter.default.publisher(for: .aerioOpenVOD)) { notif in
             guard let vodType = notif.userInfo?["vodType"] as? String else { return }
             let target: AppTab = vodType == "movie" ? .movies : .tvShows
+            // A Top Shelf row or deep link can outlive the permission that
+            // created it. Selecting a tag with no matching child is a no-op
+            // in SwiftUI, so refuse the switch explicitly and stay put.
+            guard isTabVisible(target) else {
+                debugLog("🔗 MainTabView: aerioOpenVOD(\(vodType)) ignored, \(target.rawValue) tab is not available")
+                return
+            }
             debugLog("🔗 MainTabView: aerioOpenVOD(\(vodType)) → switch to \(target.rawValue) tab")
             withAnimation { selectedTab = target }
         }
@@ -6454,7 +6613,7 @@ struct MainTabView: View {
         let cacheIsFresh = await cacheLoadHandle.value
 
         debugLog("🟢 [Orchestrator] phase 1 done (channels), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, channels=\(channelStore.channels.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
-        refreshDispatcharrPermissions()
+        refreshDispatcharrPermissions(reason: "cold launch", isColdLaunch: true)
         if !channelStore.channels.isEmpty {
             // Try to short-circuit the expensive `loadAllEPG`
             // path by checking the SwiftData EPG cache first. On
@@ -6903,6 +7062,10 @@ struct MainTabView: View {
                         subtitle: item.currentProgram,
                         subtitleStart: item.currentProgramStart,
                         subtitleEnd: item.currentProgramEnd,
+                        programSubtitle: PlayerInfoCardSettings.liveEpisodeTitle(forChannelID: item.id),
+                        programDescription: PlayerInfoCardSettings.liveSynopsis(
+                            forChannelID: item.id,
+                            itemDescription: item.currentProgramDescription),
                         artworkURL: item.logoURL,
                         onMinimize: { withAnimation(.spring(response: 0.35)) { nowPlaying.minimize() } },
                         onClose: { nowPlaying.stop() }
@@ -6991,6 +7154,10 @@ struct MainTabView: View {
                     subtitle: item.currentProgram,
                     subtitleStart: item.currentProgramStart,
                     subtitleEnd: item.currentProgramEnd,
+                    programSubtitle: PlayerInfoCardSettings.liveEpisodeTitle(forChannelID: item.id),
+                    programDescription: PlayerInfoCardSettings.liveSynopsis(
+                        forChannelID: item.id,
+                        itemDescription: item.currentProgramDescription),
                     artworkURL: item.logoURL,
                     onMinimize: { nowPlaying.minimize() },
                     onClose: { nowPlaying.stop() }
@@ -7314,6 +7481,17 @@ private struct ChannelInfoBanner: View {
     /// `ChannelListView` uses for row subtitles. Returns nil when
     /// neither source has data — the banner then shows just channel
     /// number + name.
+    // Settings > App Behaviors > Player Info Card (2026-09-15). Which
+    // rows this card draws. Card-only: the guide, channel list, mini
+    // player, Now Playing metadata and cast UI are untouched. All
+    // default ON; @AppStorage so a flip re-renders live.
+    @AppStorage(PlayerInfoCardSettings.channelLogoKey) private var showCardLogo = true
+    @AppStorage(PlayerInfoCardSettings.channelNameKey) private var showCardChannelName = true
+    @AppStorage(PlayerInfoCardSettings.programNameKey) private var showCardProgramName = true
+    @AppStorage(PlayerInfoCardSettings.programTimeKey) private var showCardProgramTime = true
+    @AppStorage(PlayerInfoCardSettings.programSubtitleKey) private var showCardProgramSubtitle = true
+    @AppStorage(PlayerInfoCardSettings.programDescriptionKey) private var showCardProgramDescription = true
+
     private func liveProgram(for item: ChannelDisplayItem) -> (title: String, start: Date, end: Date)? {
         if let title = item.currentProgram, !title.isEmpty,
            let start = item.currentProgramStart,
@@ -7326,10 +7504,44 @@ private struct ChannelInfoBanner: View {
         return nil
     }
 
+    /// Episode title + synopsis for the live program (Android parity,
+    /// 2026-09-15). `ChannelDisplayItem` carries a description but no
+    /// episode title, so the subtitle always comes from the bulk-EPG
+    /// store; the description prefers the item field (Xtream +
+    /// Dispatcharr current-programs cache) and falls back to the store.
+    /// Both are pre-trimmed, and a subtitle that just restates the
+    /// title or the synopsis is dropped the way the guide drops it.
+    private func liveProgramDetail(for item: ChannelDisplayItem)
+        -> (subTitle: String, description: String) {
+        let sub = PlayerInfoCardSettings.liveEpisodeTitle(forChannelID: item.id) ?? ""
+        let desc = PlayerInfoCardSettings.liveSynopsis(
+            forChannelID: item.id,
+            itemDescription: item.currentProgramDescription) ?? ""
+        return (sub, desc)
+    }
+
+
+    /// False when every Player Info Card row the user left on has
+    /// nothing to draw, otherwise the card would render as an empty
+    /// black pill. Missing data alone never suppresses the card (the
+    /// channel row still carries number + name).
+    private func hasCardContent(for item: ChannelDisplayItem) -> Bool {
+        if showCardLogo, item.logoURL != nil { return true }
+        if showCardChannelName || !item.number.isEmpty { return true }
+        guard let prog = liveProgram(for: item) else { return false }
+        if showCardProgramName { return true }
+        if showCardProgramTime,
+           airingTimeAndDuration(start: prog.start, end: prog.end) != nil { return true }
+        let detail = liveProgramDetail(for: item)
+        if showCardProgramSubtitle, !detail.subTitle.isEmpty { return true }
+        if showCardProgramDescription, !detail.description.isEmpty { return true }
+        return false
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if shouldRender, let item = nowPlaying.playingItem, nowPlaying.isLive {
+            if shouldRender, let item = nowPlaying.playingItem, nowPlaying.isLive,
+               hasCardContent(for: item) {
                 VStack(alignment: .leading, spacing: 10) {
                     bannerContent(for: item)
                     // The legacy gesture hint chip stack that used to sit
@@ -7397,7 +7609,7 @@ private struct ChannelInfoBanner: View {
     @ViewBuilder
     private func bannerContent(for item: ChannelDisplayItem) -> some View {
         HStack(alignment: .top, spacing: 14) {
-            if item.logoURL != nil {
+            if item.logoURL != nil, showCardLogo {
                 // v1.6.23: route through CachedLogoImage so the
                 // active server's auth headers are applied (fixes
                 // Dispatcharr-API logo 401 → blank-logo regression).
@@ -7406,29 +7618,58 @@ private struct ChannelInfoBanner: View {
             }
 
             VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    if !item.number.isEmpty {
-                        Text(item.number)
-                            .scaledFont(channelNumberFont)
-                            .foregroundColor(.white.opacity(0.55))
+                // The channel number rides with the name row: with
+                // Channel Name off and no number there is nothing to
+                // draw, so the whole row (and its VStack gap) goes.
+                if showCardChannelName || !item.number.isEmpty {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        if !item.number.isEmpty {
+                            Text(item.number)
+                                .scaledFont(channelNumberFont)
+                                .foregroundColor(.white.opacity(0.55))
+                        }
+                        if showCardChannelName {
+                            Text(item.name)
+                                .scaledFont(channelNameFont)
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                        }
                     }
-                    Text(item.name)
-                        .scaledFont(channelNameFont)
-                        .foregroundColor(.white)
-                        .lineLimit(1)
                 }
 
                 if let prog = liveProgram(for: item) {
-                    Text(prog.title)
-                        .scaledFont(programFont)
-                        .foregroundColor(.white.opacity(0.85))
-                        .lineLimit(1)
+                    if showCardProgramName {
+                        Text(prog.title)
+                            .scaledFont(programFont)
+                            .foregroundColor(.white.opacity(0.85))
+                            .lineLimit(1)
+                    }
 
-                    if let timeAndDuration = airingTimeAndDuration(start: prog.start, end: prog.end) {
+                    if showCardProgramTime,
+                       let timeAndDuration = airingTimeAndDuration(start: prog.start, end: prog.end) {
                         Text(timeAndDuration)
                             .scaledFont(timeFont)
                             .foregroundColor(.white.opacity(0.65))
                             .lineLimit(1)
+                    }
+
+                    // Episode title + synopsis (Android parity). Each is
+                    // its own toggle and is skipped entirely when the feed
+                    // has nothing, so the card never grows a blank gap.
+                    let detail = liveProgramDetail(for: item)
+                    if showCardProgramSubtitle, !detail.subTitle.isEmpty {
+                        Text(detail.subTitle)
+                            .scaledFont(subtitleFont)
+                            .italic()
+                            .foregroundColor(.white.opacity(0.75))
+                            .lineLimit(1)
+                    }
+                    if showCardProgramDescription, !detail.description.isEmpty {
+                        Text(detail.description)
+                            .scaledFont(descriptionFont)
+                            .foregroundColor(.white.opacity(0.62))
+                            .lineLimit(descriptionLineLimit)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -7507,6 +7748,30 @@ private struct ChannelInfoBanner: View {
         return .system(size: 18)
         #else
         return .system(size: 12)
+        #endif
+    }
+    /// Episode title: subtext-scaled + italic, the app's convention for
+    /// episode titles in the guide and the Program Info sheet.
+    private var subtitleFont: AerioFont {
+        #if os(tvOS)
+        return .system(size: 20, weight: .medium).subtext()
+        #else
+        return .system(size: 13, weight: .medium).subtext()
+        #endif
+    }
+    /// Synopsis: the smallest row on the card.
+    private var descriptionFont: AerioFont {
+        #if os(tvOS)
+        return .system(size: 17).subtext()
+        #else
+        return .system(size: 11).subtext()
+        #endif
+    }
+    private var descriptionLineLimit: Int {
+        #if os(tvOS)
+        return 3
+        #else
+        return 2
         #endif
     }
     private var verticalPadding: CGFloat {

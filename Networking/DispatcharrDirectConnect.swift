@@ -102,6 +102,14 @@ struct DispatcharrUser: Decodable {
     let vodSeriesEnabled: Bool
     let catchupEnabled: Bool
 
+    /// The FULL `custom_properties` object, re-serialized verbatim, so the
+    /// app can persist one snapshot and derive named capabilities from it
+    /// without knowing every key Dispatcharr may add later
+    /// (`allowed_m3u_profile_ids`, future granular permissions, ...).
+    /// "" when the server sent no object at all, which callers treat as
+    /// "keep the last good snapshot", never as "revoke everything".
+    let customPropertiesJSON: String
+
     /// Effective DVR access, mirroring apps/channels/dvr_access.py.
     var dvrAccess: DispatcharrDVRAccess {
         if effectiveUserLevel >= 10 { return .manage }
@@ -200,6 +208,14 @@ struct DispatcharrUser: Decodable {
         vodMoviesEnabled = p?.vodMoviesEnabled != false
         vodSeriesEnabled = p?.vodSeriesEnabled != false
         catchupEnabled = p?.catchupEnabled != false
+        // Second, key-agnostic pass over the SAME object: keep it whole so
+        // the persisted capability snapshot survives new server-side keys.
+        // A decode miss here is never fatal and never blanks anything.
+        if let raw = (try? c.decodeIfPresent([String: AnyJSON].self, forKey: .customProperties)) ?? nil {
+            customPropertiesJSON = DispatcharrCustomProperties(values: raw).jsonString
+        } else {
+            customPropertiesJSON = ""
+        }
     }
 }
 

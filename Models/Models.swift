@@ -1,5 +1,6 @@
 import SwiftData
 import SwiftUI
+import os
 
 // MARK: - Dispatcharr Auth Header Mode
 /// Per-server Dispatcharr auth header shape.
@@ -246,6 +247,35 @@ final class ServerConnection {
     /// Server version string from /api/core/version/ ("" = unknown).
     var dispatcharrServerVersion: String = ""
 
+    // MARK: Per-user capability snapshot
+    //
+    // Everything below is one SNAPSHOT of `GET /api/accounts/users/me/`
+    // for the account this playlist is connected as. It is additive with
+    // permissive defaults, so existing rows keep working, and it is what
+    // the derived `dispatcharrCapabilities` gates on. The whole
+    // `custom_properties` object is persisted verbatim, so a permission
+    // key Dispatcharr adds later needs no store migration.
+
+    /// `is_staff` from users/me. A Django staff / superuser account is a
+    /// functional admin even when its custom `user_level` is still 0 or 1.
+    var dispatcharrIsStaff: Bool = false
+    var dispatcharrIsSuperuser: Bool = false
+    /// The FULL `custom_properties` JSON object, verbatim. "" = never
+    /// probed (distinct from "{}" = probed, no per-user overrides).
+    var dispatcharrCustomPropertiesJSON: String = ""
+    /// When the snapshot above was last read from the server. nil = never;
+    /// capabilities then read `.unknown` and every affordance stays
+    /// enabled so the server, not a guess, has the last word.
+    var dispatcharrPermissionsFetchedAt: Date? = nil
+    /// Snapshot schema. Bumping `DispatcharrCapabilitySet.currentSchema`
+    /// invalidates every stored snapshot once, forcing one re-probe on
+    /// upgrade (this is how accounts wrongly stuck at view-only repair
+    /// themselves).
+    var dispatcharrCapabilitiesSchema: Int = 0
+    /// `system_settings.catchup_enabled` from `/api/core/settings/`.
+    /// nil = not read (the endpoint needs level >= 1).
+    var dispatcharrSystemCatchupEnabled: Bool? = nil
+
     /// Id of this server's AAC cast output profile from
     /// /api/core/outputprofiles/ (Dispatcharr 0.30 seeds a locked,
     /// active "Web Player (AAC Audio)" profile). nil = not learned yet
@@ -417,40 +447,106 @@ final class ServerConnection {
         type != .dispatcharrAPI || dispatcharrCanManageDVR
     }
 
+    /// The per-user capability snapshot, derived fresh on every read.
+    ///
+    /// Back-compat: when no snapshot has ever been stored (`fetchedAt ==
+    /// nil`, i.e. an upgraded row or a playlist that arrived over iCloud
+    /// from an older sender), the legacy per-flag columns are folded into
+    /// a synthetic `custom_properties` so nothing regresses, but the set
+    /// still reports `hasSnapshot == false` and every capability reads
+    /// `.unknown` -> affordance enabled -> the server decides.
+    var dispatcharrCapabilities: DispatcharrCapabilitySet {
+        let props: DispatcharrCustomProperties
+        let stored = DispatcharrCustomProperties(json: dispatcharrCustomPropertiesJSON)
+        if stored.isPresent {
+            props = stored
+        } else {
+            // Synthesize from the legacy columns so a pre-snapshot row
+            // still derives the same answers it derived before.
+            var values: [String: AnyJSON] = [:]
+            if !dispatcharrDVRAccess.isEmpty { values["dvr_access"] = .string(dispatcharrDVRAccess) }
+            if !dispatcharrVODMoviesEnabled { values["vod_movies_enabled"] = .bool(false) }
+            if !dispatcharrVODSeriesEnabled { values["vod_series_enabled"] = .bool(false) }
+            if !dispatcharrCatchupEnabled { values["catchup_enabled"] = .bool(false) }
+            props = DispatcharrCustomProperties(values: values)
+        }
+        return DispatcharrCapabilitySet(
+            isDispatcharr: type == .dispatcharrAPI,
+            rawUserLevel: dispatcharrUserLevel,
+            isStaff: dispatcharrIsStaff,
+            isSuperuser: dispatcharrIsSuperuser,
+            props: props,
+            systemCatchupEnabled: dispatcharrSystemCatchupEnabled,
+            fetchedAt: dispatcharrPermissionsFetchedAt,
+            schema: dispatcharrCapabilitiesSchema
+        )
+    }
+
     /// Effective DVR access for a Dispatcharr account (0.30 semantics,
     /// mirrors apps/channels/dvr_access.py). Non-Dispatcharr = manage.
     var dispatcharrEffectiveDVRAccess: DispatcharrDVRAccess {
-        guard type == .dispatcharrAPI else { return .manage }
-        if dispatcharrUserLevel >= 10 { return .manage }
-        if dispatcharrUserLevel < 1 { return .none }
-        switch dispatcharrDVRAccess {
-        case "none": return .none
-        case "manage": return .manage
-        default: return .view
-        }
+        dispatcharrCapabilities.dvrAccess
     }
-    /// May list and play recordings (view or manage).
-    var dispatcharrCanViewDVR: Bool { dispatcharrEffectiveDVRAccess != .none }
+    /// May list and play recordings (view or manage). Unknown = yes.
+    var dispatcharrCanViewDVR: Bool { dispatcharrCapabilities.canViewDvr.isAllowed }
     /// May schedule, stop, cancel and delete recordings and rules.
-    var dispatcharrCanManageDVR: Bool { dispatcharrEffectiveDVRAccess == .manage }
+    /// Unknown = yes; a 403 then self-corrects the snapshot.
+    var dispatcharrCanManageDVR: Bool { dispatcharrCapabilities.canManageDvr.isAllowed }
     /// Catch-up / timeshift allowed for this account.
-    var dispatcharrCanUseCatchup: Bool { type != .dispatcharrAPI || dispatcharrCatchupEnabled }
+    var dispatcharrCanUseCatchup: Bool { dispatcharrCapabilities.canUseCatchup.isAllowed }
+    /// Movies catalog allowed for this account.
+    var dispatcharrCanViewVOD: Bool { dispatcharrCapabilities.canViewVod.isAllowed }
+    /// Series catalog allowed for this account.
+    var dispatcharrCanViewSeries: Bool { dispatcharrCapabilities.canViewSeries.isAllowed }
 
-    /// Copies the 0.30 permission flags (and version, when known) from a
-    /// fresh /users/me/ read. Used by Test Connection and the launch
-    /// refresh so server-side permission changes apply without re-adding
-    /// the playlist. Returns true when anything changed.
+    /// Adopts a fresh `users/me` snapshot (and the version, when known).
+    /// Used by Test Connection, the launch / foreground probe and the 403
+    /// self-correction so a permission change on the server applies
+    /// without re-adding the playlist. Returns true when anything changed.
+    ///
+    /// Invariant: an EMPTY read never overwrites a good snapshot. A decode
+    /// that produced no `custom_properties` used to blank
+    /// `dispatcharrDVRAccess`, which demoted a "manage" account to
+    /// view-only until the next successful probe. Now the level / staff
+    /// fields still update, the previous blob is kept, and the snapshot is
+    /// marked stale so the next probe retries.
     @discardableResult
-    func applyDispatcharrPermissions(from user: DispatcharrUser, version: String?) -> Bool {
+    func applyDispatcharrPermissions(from user: DispatcharrUser,
+                                     version: String?,
+                                     systemCatchupEnabled: Bool? = nil) -> Bool {
         var changed = false
         func set<T: Equatable>(_ kp: ReferenceWritableKeyPath<ServerConnection, T>, _ v: T) {
             if self[keyPath: kp] != v { self[keyPath: kp] = v; changed = true }
         }
-        set(\.dispatcharrDVRAccess, user.dvrAccessRaw ?? "")
-        set(\.dispatcharrCatchupEnabled, user.catchupEnabled)
-        set(\.dispatcharrVODMoviesEnabled, user.vodMoviesEnabled)
-        set(\.dispatcharrVODSeriesEnabled, user.vodSeriesEnabled)
+        set(\.dispatcharrIsStaff, user.isStaff)
+        set(\.dispatcharrIsSuperuser, user.isSuperuser)
         if let version, !version.isEmpty { set(\.dispatcharrServerVersion, version) }
+        if let systemCatchupEnabled { set(\.dispatcharrSystemCatchupEnabled, systemCatchupEnabled) }
+
+        let fresh = DispatcharrCustomProperties(json: user.customPropertiesJSON)
+        guard fresh.isPresent else {
+            // No usable blob in this response. Keep whatever we had and
+            // mark the snapshot stale so the next opportunistic probe
+            // tries again, rather than writing an empty grant.
+            debugLog("[PERMS] \(name): users/me carried no custom_properties; keeping the last good snapshot")
+            if dispatcharrPermissionsFetchedAt != nil {
+                set(\.dispatcharrPermissionsFetchedAt, Date(timeIntervalSince1970: 0))
+            }
+            return changed
+        }
+
+        // A key the admin REMOVED must clear our stored value, so we write
+        // the fresh blob wholesale rather than merging into the old one.
+        set(\.dispatcharrCustomPropertiesJSON, fresh.jsonString)
+        // Keep the legacy columns mirrored: older AerioTV builds on other
+        // devices (and the pre-snapshot fallback above) still read them.
+        set(\.dispatcharrDVRAccess, fresh.string("dvr_access")?.lowercased() ?? "")
+        set(\.dispatcharrCatchupEnabled, fresh.bool("catchup_enabled") != false)
+        set(\.dispatcharrVODMoviesEnabled, fresh.bool("vod_movies_enabled") != false)
+        set(\.dispatcharrVODSeriesEnabled, fresh.bool("vod_series_enabled") != false)
+        set(\.dispatcharrCapabilitiesSchema, DispatcharrCapabilitySet.currentSchema)
+        dispatcharrPermissionsFetchedAt = Date()
+        changed = true
         return changed
     }
 
@@ -489,7 +585,7 @@ final class ServerConnection {
     /// member streams or a change-stream endpoint), hiding the affordance
     /// there instead of showing an option that can't work.
     var dispatcharrCanSwitchStream: Bool {
-        type == .dispatcharrAPI && dispatcharrUserLevel >= 10
+        dispatcharrCapabilities.canSwitchStream.isAllowed
     }
 
     /// Parsed list of the connected Dispatcharr user's assigned Channel
@@ -1020,6 +1116,506 @@ final class Recording {
             return "dvr-\(remoteID)"
         case .local:
             return "local-\(id.uuidString)"
+        }
+    }
+}
+
+// MARK: - Dispatcharr per-user capabilities
+//
+// Replaces the old hard "Admin vs Standard" gate. Dispatcharr hands every
+// authenticated account its own permission blob on
+// `GET /api/accounts/users/me/` (Authenticated, any level), which carries
+// `user_level`, `is_staff`, `is_superuser` and the FULL free-form
+// `custom_properties` object (`dvr_access`, `vod_movies_enabled`,
+// `vod_series_enabled`, `catchup_enabled`, `allowed_m3u_profile_ids`, ...).
+// We persist that blob verbatim per ServerConnection and DERIVE named
+// capabilities from it on read, so a new server-side permission key needs
+// no store migration: only a new derived accessor.
+//
+// Tri-state on purpose. `unknown` (we have never successfully probed this
+// account, or the probe failed and left us with nothing) renders the
+// affordance ENABLED and lets the server have the last word. Silently
+// downgrading an unknown account to view-only is the bug this replaces.
+
+/// A free-form JSON value, used to round-trip Dispatcharr's
+/// `custom_properties` object without knowing its keys.
+enum AnyJSON: Codable, Sendable, Equatable {
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case object([String: AnyJSON])
+    case array([AnyJSON])
+    case null
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { self = .null; return }
+        // Bool BEFORE number: JSONDecoder happily reads `true` as 1.
+        if let b = try? c.decode(Bool.self) { self = .bool(b); return }
+        if let d = try? c.decode(Double.self) { self = .number(d); return }
+        if let s = try? c.decode(String.self) { self = .string(s); return }
+        if let a = try? c.decode([AnyJSON].self) { self = .array(a); return }
+        if let o = try? c.decode([String: AnyJSON].self) { self = .object(o); return }
+        self = .null
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .string(let s): try c.encode(s)
+        case .number(let d): try c.encode(d)
+        case .bool(let b): try c.encode(b)
+        case .object(let o): try c.encode(o)
+        case .array(let a): try c.encode(a)
+        case .null: try c.encodeNil()
+        }
+    }
+
+    var boolValue: Bool? { if case .bool(let b) = self { return b }; return nil }
+    var stringValue: String? { if case .string(let s) = self { return s }; return nil }
+    var intArrayValue: [Int]? {
+        guard case .array(let a) = self else { return nil }
+        return a.compactMap { if case .number(let d) = $0 { return Int(d) } else { return nil } }
+    }
+}
+
+/// Typed, key-agnostic reader over a persisted `custom_properties` blob.
+struct DispatcharrCustomProperties: Sendable, Equatable {
+    /// True when we actually have a blob from the server (even an empty
+    /// `{}`), as opposed to "never probed". An empty object is a real
+    /// answer: it means the admin set no per-user overrides.
+    let isPresent: Bool
+    private let values: [String: AnyJSON]
+
+    init(json: String) {
+        let trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let data = trimmed.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([String: AnyJSON].self, from: data) else {
+            isPresent = false
+            values = [:]
+            return
+        }
+        isPresent = true
+        values = decoded
+    }
+
+    init(values: [String: AnyJSON]) {
+        isPresent = true
+        self.values = values
+    }
+
+    static let absent = DispatcharrCustomProperties(json: "")
+
+    /// A key the server did not send reads nil, which every capability
+    /// treats as "server default", exactly as Dispatcharr does.
+    func bool(_ key: String) -> Bool? { values[key]?.boolValue }
+    func string(_ key: String) -> String? { values[key]?.stringValue }
+    func intArray(_ key: String) -> [Int]? { values[key]?.intArrayValue }
+
+    var jsonString: String {
+        guard isPresent,
+              let data = try? JSONEncoder().encode(values),
+              let s = String(data: data, encoding: .utf8) else { return "" }
+        return s
+    }
+}
+
+/// Tri-state answer for one capability.
+enum CapabilityState: String, Sendable {
+    /// We probed and the account may do this.
+    case allowed
+    /// We probed and the account may NOT do this.
+    case denied
+    /// We have no trustworthy snapshot. The affordance stays enabled and
+    /// the server decides; a 403 then self-corrects the snapshot.
+    case unknown
+
+    /// Render the affordance? Unknown renders ENABLED on purpose.
+    var isAllowed: Bool { self != .denied }
+    var isKnown: Bool { self != .unknown }
+}
+
+/// The named capabilities the app gates on. Extend this list (plus the
+/// matching derivation in `DispatcharrCapabilitySet`) as Dispatcharr adds
+/// granular permissions; no store change is needed because the whole
+/// `custom_properties` blob is already persisted.
+enum DispatcharrCapability: String, Sendable, CaseIterable {
+    case viewVod
+    case viewSeries
+    case useCatchup
+    case viewDvr
+    case manageDvr
+    case switchStream
+    case managePlaylists
+    case readServerSettings
+
+    /// What to tell the user when the server says no and our re-probe
+    /// agrees that the account genuinely lacks this.
+    var deniedMessage: String {
+        switch self {
+        case .viewVod:
+            return "Your Dispatcharr account does not have access to movies. Ask your server administrator for VOD access."
+        case .viewSeries:
+            return "Your Dispatcharr account does not have access to TV shows. Ask your server administrator for VOD access."
+        case .useCatchup:
+            return "Catch-up is turned off for your Dispatcharr account. Ask your server administrator to enable it."
+        case .viewDvr:
+            return "Your Dispatcharr account does not have access to recordings. Ask your server administrator for DVR access."
+        case .manageDvr:
+            return "Your Dispatcharr account can view recordings but not manage them. Ask your server administrator for DVR manage access."
+        case .switchStream:
+            return "Switching the active stream needs a Dispatcharr administrator account."
+        case .managePlaylists:
+            return "Editing playlists on the server needs a Dispatcharr administrator account."
+        case .readServerSettings:
+            return "Your Dispatcharr account cannot read server settings."
+        }
+    }
+
+    /// What to tell the user when the server said no but the account's
+    /// own permissions say it should have been allowed. Dispatcharr can
+    /// also refuse on per-user `allowed_networks` (a network policy),
+    /// which has nothing to do with the permission tier.
+    var networkRestrictionMessage: String {
+        "Your Dispatcharr account has permission for this, but the server refused the request. This usually means a network restriction on the account (allowed networks). Ask your server administrator to allow this device's network."
+    }
+}
+
+/// Capabilities derived from one persisted snapshot. Value type: build it
+/// fresh from the model on every read so it can never go stale in place.
+struct DispatcharrCapabilitySet: Sendable {
+    let isDispatcharr: Bool
+    let rawUserLevel: Int
+    let isStaff: Bool
+    let isSuperuser: Bool
+    let props: DispatcharrCustomProperties
+    /// `system_settings.catchup_enabled` from `/api/core/settings/`.
+    /// nil = not read (readable at level >= 1, so a Streamer never sees it).
+    let systemCatchupEnabled: Bool?
+    let fetchedAt: Date?
+    let schema: Int
+
+    /// The level to gate on. A Django staff / superuser is a functional
+    /// admin even when its custom `user_level` is still 0 or 1 (legacy
+    /// superusers never had the level defaulted to 10).
+    var effectiveUserLevel: Int { (isStaff || isSuperuser) ? 10 : rawUserLevel }
+
+    /// Bump to force one re-probe for every user on upgrade. Raised to 1
+    /// so accounts wrongly stuck at view-only (synced playlists arrived
+    /// without any permission payload) repair themselves on first launch.
+    static let currentSchema = 1
+
+    /// Re-probe roughly every six hours from a screen that cares.
+    static let staleAfter: TimeInterval = 6 * 60 * 60
+
+    /// Do we have a snapshot we are willing to gate on?
+    var hasSnapshot: Bool { fetchedAt != nil && schema >= Self.currentSchema }
+
+    var isStale: Bool {
+        guard let fetchedAt else { return true }
+        return schema < Self.currentSchema || Date().timeIntervalSince(fetchedAt) > Self.staleAfter
+    }
+
+    // MARK: Derived capabilities
+
+    /// Mirrors `apps/channels/dvr_access.py`: level >= 10 -> manage,
+    /// level < 1 -> none, else `custom_properties.dvr_access` when it is
+    /// one of none/view/manage, else "view" (an ABSENT key = view).
+    var dvrAccess: DispatcharrDVRAccess {
+        guard isDispatcharr else { return .manage }
+        if effectiveUserLevel >= 10 { return .manage }
+        if effectiveUserLevel < 1 { return .none }
+        switch props.string("dvr_access")?.lowercased() {
+        case "none": return .none
+        case "manage": return .manage
+        default: return .view
+        }
+    }
+
+    var canViewDvr: CapabilityState {
+        guard isDispatcharr else { return .allowed }
+        guard hasSnapshot else { return .unknown }
+        return dvrAccess == .none ? .denied : .allowed
+    }
+
+    var canManageDvr: CapabilityState {
+        guard isDispatcharr else { return .allowed }
+        guard hasSnapshot else { return .unknown }
+        return dvrAccess == .manage ? .allowed : .denied
+    }
+
+    /// `apps/vod/utils.py`: absent = enabled; only an explicit `false`
+    /// disables. A blocked account gets an EMPTY catalog, not a 403.
+    var canViewVod: CapabilityState {
+        guard isDispatcharr else { return .allowed }
+        guard hasSnapshot else { return .unknown }
+        return props.bool("vod_movies_enabled") == false ? .denied : .allowed
+    }
+
+    var canViewSeries: CapabilityState {
+        guard isDispatcharr else { return .allowed }
+        guard hasSnapshot else { return .unknown }
+        return props.bool("vod_series_enabled") == false ? .denied : .allowed
+    }
+
+    /// Catch-up needs BOTH the per-user flag and the server-wide
+    /// `system_settings.catchup_enabled`. Either explicit false denies;
+    /// an unread system setting never denies on its own.
+    var canUseCatchup: CapabilityState {
+        guard isDispatcharr else { return .allowed }
+        guard hasSnapshot else { return .unknown }
+        if props.bool("catchup_enabled") == false { return .denied }
+        if systemCatchupEnabled == false { return .denied }
+        return .allowed
+    }
+
+    /// `POST /proxy/ts/change_stream/<uuid>` and the other /proxy control
+    /// endpoints are still `IsAdmin` server-side, so this stays admin
+    /// only. Non-Dispatcharr servers never expose member streams at all,
+    /// so the affordance is hidden rather than shown-then-failing.
+    var canSwitchStream: CapabilityState {
+        guard isDispatcharr else { return .denied }
+        guard hasSnapshot else { return .unknown }
+        return effectiveUserLevel >= 10 ? .allowed : .denied
+    }
+
+    /// Server-side playlist / M3U account writes are `IsAdmin`.
+    var canManagePlaylists: CapabilityState {
+        guard isDispatcharr else { return .allowed }
+        guard hasSnapshot else { return .unknown }
+        return effectiveUserLevel >= 10 ? .allowed : .denied
+    }
+
+    /// `GET /api/core/settings/` is readable at level >= 1.
+    var canReadServerSettings: CapabilityState {
+        guard isDispatcharr else { return .allowed }
+        guard hasSnapshot else { return .unknown }
+        return effectiveUserLevel >= 1 ? .allowed : .denied
+    }
+
+    func state(of capability: DispatcharrCapability) -> CapabilityState {
+        switch capability {
+        case .viewVod: return canViewVod
+        case .viewSeries: return canViewSeries
+        case .useCatchup: return canUseCatchup
+        case .viewDvr: return canViewDvr
+        case .manageDvr: return canManageDvr
+        case .switchStream: return canSwitchStream
+        case .managePlaylists: return canManagePlaylists
+        case .readServerSettings: return canReadServerSettings
+        }
+    }
+
+    /// Compact, greppable one-liner for the probe log. Deliberately flat
+    /// `key=value` pairs so a tester can verify a permission change with
+    /// `log stream | grep "\[PERMS\]"` (or a grep over the shared log
+    /// file) without reading the app's UI.
+    var probeSummary: String {
+        func flag(_ s: CapabilityState) -> String {
+            switch s {
+            case .allowed: return "true"
+            case .denied: return "false"
+            case .unknown: return "unknown"
+            }
+        }
+        return "level=\(effectiveUserLevel) staff=\(isStaff) su=\(isSuperuser) "
+            + "dvr=\(dvrAccess.rawValue) vod=\(flag(canViewVod)) series=\(flag(canViewSeries)) "
+            + "catchup=\(flag(canUseCatchup)) switch=\(canSwitchStream.rawValue)"
+    }
+
+    var debugDescription: String {
+        "level=\(effectiveUserLevel)(raw \(rawUserLevel), staff=\(isStaff), su=\(isSuperuser)) dvr=\(dvrAccess.rawValue) vod=\(canViewVod.rawValue) series=\(canViewSeries.rawValue) catchup=\(canUseCatchup.rawValue) switch=\(canSwitchStream.rawValue) snapshot=\(hasSnapshot ? "yes" : "NO") schema=\(schema)"
+    }
+}
+
+// MARK: - Capability probe
+
+/// The one place that reads `/api/accounts/users/me/` and writes the
+/// capability snapshot onto a `ServerConnection`.
+///
+/// Every trigger funnels through here so the probe logic (admin fallback
+/// probe, version, server-wide catch-up switch, failure handling) cannot
+/// drift between call sites. A FAILED probe keeps the last good snapshot:
+/// we never revoke on a network error.
+@MainActor
+enum DispatcharrCapabilityProbe {
+
+    private static var inFlight: Set<UUID> = []
+
+    /// Unified-logging channel for the probe. INFO level and always
+    /// compiled in (unlike `debugLog`, whose console half is Debug only),
+    /// so a Release / TestFlight build can be verified with
+    /// `log stream --predicate 'category == "Permissions"'` or simply
+    /// grepping for "[PERMS]".
+    private static let permsLog = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.aerio.app",
+        category: "Permissions")
+
+    /// One line per probe outcome, on both the unified log and the
+    /// on-disk debug log.
+    private static func logProbe(_ line: String) {
+        permsLog.info("\(line, privacy: .public)")
+        debugLog(line)
+    }
+
+    /// Reads users/me and applies the snapshot.
+    ///
+    /// Returns whether the probe REACHED the server, not whether anything
+    /// changed: callers retry on an unreachable server, and retrying a
+    /// successful probe that simply found nothing new is pure waste. A
+    /// change additionally posts `.dispatcharrCapabilitiesDidChange`.
+    @discardableResult
+    static func refresh(_ server: ServerConnection, reason: String) async -> Bool {
+        guard server.type == .dispatcharrAPI else { return false }
+        guard !inFlight.contains(server.id) else { return false }
+        inFlight.insert(server.id)
+        defer { inFlight.remove(server.id) }
+
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode,
+                                 serverID: server.id,
+                                 savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                                     ? server.username : nil)
+        guard let user = try? await api.fetchCurrentUser() else {
+            logProbe("[PERMS] probe FAILED server=\(server.name) reason=\(reason) "
+                     + "detail=users/me-unavailable; keeping the last good snapshot "
+                     + "(\(server.dispatcharrCapabilities.probeSummary))")
+            return false
+        }
+        var level = user.effectiveUserLevel
+        // A legacy superuser can still report a low custom level; the
+        // IsAdmin-gated users LIST endpoint settles it.
+        if level < 10, await api.probeAdminAccess() { level = 10 }
+        let version = (try? await api.fetchVersion()) ?? nil
+        // Only worth asking when the account may read settings at all.
+        var systemCatchup: Bool? = nil
+        if level >= 1 { systemCatchup = (try? await api.fetchSystemCatchupEnabled()) ?? nil }
+
+        var changed = false
+        if server.dispatcharrUserLevel != level {
+            server.dispatcharrUserLevel = level
+            changed = true
+        }
+        if !user.channelProfiles.isEmpty || !server.dispatcharrChannelProfileIDs.isEmpty {
+            let joined = user.channelProfiles.map(String.init).joined(separator: ",")
+            if server.dispatcharrChannelProfileIDs != joined {
+                server.dispatcharrChannelProfileIDs = joined
+                changed = true
+            }
+        }
+        if server.applyDispatcharrPermissions(from: user,
+                                              version: version,
+                                              systemCatchupEnabled: systemCatchup) {
+            changed = true
+        }
+        logProbe("[PERMS] probe OK \(server.dispatcharrCapabilities.probeSummary) "
+                 + "changed=\(changed) server=\(server.name) reason=\(reason)")
+        debugLog("[PERMS] detail \(server.name) (\(reason)): \(server.dispatcharrCapabilities.debugDescription)")
+        if changed { NotificationCenter.default.post(name: .dispatcharrCapabilitiesDidChange, object: nil) }
+        return true
+    }
+
+    /// Servers already probed in THIS process. A cold launch must probe
+    /// regardless of the TTL (a permission change on the server has to be
+    /// picked up by force quitting and reopening), but it should cost
+    /// exactly ONE probe per server per launch, so the launch pass marks
+    /// each server here once it has run.
+    private static var launchProbed: Set<UUID> = []
+
+    /// Has the cold-launch pass already covered this server in this
+    /// process? Callers use it to avoid re-forcing when the launch
+    /// orchestrator re-fires (server key change) inside the same launch.
+    static func needsLaunchProbe(_ server: ServerConnection) -> Bool {
+        !launchProbed.contains(server.id)
+    }
+
+    /// Mark the cold-launch probe as done for this server (recorded even
+    /// when the probe failed, since the launch pass owns its own retry
+    /// with backoff and must not loop forever).
+    static func noteLaunchProbed(_ server: ServerConnection) {
+        launchProbed.insert(server.id)
+    }
+
+    /// Opportunistic refresh for screens that care (DVR, On Demand). Only
+    /// probes when the snapshot is missing, schema-outdated, or older than
+    /// `DispatcharrCapabilitySet.staleAfter` (about 6 hours).
+    static func refreshIfStale(_ server: ServerConnection, reason: String) async {
+        guard server.type == .dispatcharrAPI,
+              server.dispatcharrCapabilities.isStale else { return }
+        await refresh(server, reason: reason)
+    }
+
+    /// Re-probe after the server answered 403 on something we believed the
+    /// account could do, then decide what to tell the user.
+    ///
+    /// - If the fresh snapshot agrees the account lacks `capability`, show
+    ///   the specific permission message.
+    /// - If the snapshot says it SHOULD be allowed, the refusal is very
+    ///   likely a per-user `allowed_networks` policy rather than a level,
+    ///   so say that instead of blaming permissions.
+    @discardableResult
+    static func handleForbidden(_ server: ServerConnection,
+                                capability: DispatcharrCapability,
+                                serverReason: String?) async -> String {
+        await refresh(server, reason: "403 on \(capability.rawValue)")
+        let caps = server.dispatcharrCapabilities
+        let message: String
+        if caps.state(of: capability) == .denied {
+            message = capability.deniedMessage
+        } else {
+            var text = capability.networkRestrictionMessage
+            if let serverReason, !serverReason.isEmpty {
+                text += "\n\nThe server said: \(serverReason)"
+            }
+            message = text
+        }
+        DispatcharrPermissionNotice.shared.present(message)
+        return message
+    }
+
+    /// A 200 on something we believed was denied: our snapshot was wrong
+    /// (or the admin just granted access). Re-probe so the UI promotes the
+    /// affordance instead of staying wrongly hidden.
+    static func promoteIfUnexpectedlyAllowed(_ server: ServerConnection,
+                                             capability: DispatcharrCapability) async {
+        guard server.type == .dispatcharrAPI,
+              server.dispatcharrCapabilities.state(of: capability) == .denied else { return }
+        await refresh(server, reason: "200 on supposedly denied \(capability.rawValue)")
+    }
+}
+
+/// Single, app-wide surface for "the server refused that, and here is
+/// exactly why" messages raised from deep inside action helpers that have
+/// no view of their own.
+@MainActor
+final class DispatcharrPermissionNotice: ObservableObject {
+    static let shared = DispatcharrPermissionNotice()
+    @Published var message: String? = nil
+    var isPresented: Bool { message != nil }
+    func present(_ text: String) { message = text }
+    func dismiss() { message = nil }
+}
+
+extension Notification.Name {
+    /// Posted whenever a capability snapshot changes, so views gating on
+    /// capabilities can re-evaluate without polling.
+    static let dispatcharrCapabilitiesDidChange = Notification.Name("dispatcharrCapabilitiesDidChange")
+}
+
+/// Presents `DispatcharrPermissionNotice` as an alert at the app root.
+struct DispatcharrPermissionNoticeAlert: ViewModifier {
+    @ObservedObject private var notice = DispatcharrPermissionNotice.shared
+
+    func body(content: Content) -> some View {
+        content.alert("Dispatcharr Permissions",
+                      isPresented: Binding(get: { notice.message != nil },
+                                           set: { if !$0 { notice.dismiss() } })) {
+            Button("OK", role: .cancel) { notice.dismiss() }
+        } message: {
+            Text(notice.message ?? "")
         }
     }
 }

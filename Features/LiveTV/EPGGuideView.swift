@@ -1726,21 +1726,17 @@ final class GuideStore: ObservableObject {
         // the fresh value. Launch-time refreshDispatcharrPermissions() is a
         // detached task and can lose the race with the first EPG load, which
         // would silently drop the 0.30 window pass for that run.
-        if server.type == .dispatcharrAPI, server.dispatcharrServerVersion.isEmpty {
-            let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                     auth: .apiKey(server.effectiveApiKey),
-                                     userAgent: server.effectiveUserAgent,
-                                     authMode: server.dispatcharrHeaderMode,
-                                     serverID: server.id,
-                                     savedUsername: server.dispatcharrCredentialType == .usernamePassword
-                                         ? server.username : nil)
-            let version = (try? await api.fetchVersion()) ?? nil
-            if let user = try? await api.fetchCurrentUser() {
-                _ = server.applyDispatcharrPermissions(from: user, version: version)
-            } else if let version, !version.isEmpty {
-                server.dispatcharrServerVersion = version
-            }
-            debugLog("📺 GuideStore.fetchUpcoming: primed Dispatcharr version=\(server.dispatcharrServerVersion.isEmpty ? "?" : server.dispatcharrServerVersion) for \(server.name)")
+        // Capability snapshot, not just the version. The old trigger fired
+        // only when `dispatcharrServerVersion` was blank, so a device whose
+        // version was already known never re-read the per-user permissions
+        // here at all. Now the guide opportunistically refreshes a MISSING
+        // or STALE snapshot (about 6 hours) and gates this same run's grid
+        // window pass on the fresh value; the launch probe is a detached
+        // task and can lose the race with the first EPG load.
+        if server.type == .dispatcharrAPI,
+           server.dispatcharrServerVersion.isEmpty || server.dispatcharrCapabilities.isStale {
+            await DispatcharrCapabilityProbe.refresh(server, reason: "EPG load")
+            debugLog("📺 GuideStore.fetchUpcoming: primed Dispatcharr version=\(server.dispatcharrServerVersion.isEmpty ? "?" : server.dispatcharrServerVersion) caps=\(server.dispatcharrCapabilities.debugDescription) for \(server.name)")
         }
 
         let didRefresh: Bool

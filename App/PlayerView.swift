@@ -910,6 +910,11 @@ struct PlayerView: View {
     /// regular VOD.
     let isDVR: Bool
     let subtitle: String?
+    /// Player Info Card: episode title for the current program, and its
+    /// synopsis. Live callers supply them; VOD/DVR/catch-up leave them
+    /// nil and the two rows simply never draw.
+    let programSubtitle: String?
+    let programDescription: String?
     let subtitleStart: Date?
     let subtitleEnd: Date?
     let artworkURL: URL?
@@ -937,6 +942,7 @@ struct PlayerView: View {
     init(urls: [URL], title: String, headers: [String: String]? = nil,
          isLive: Bool = true, isDVR: Bool = false,
          subtitle: String? = nil, subtitleStart: Date? = nil, subtitleEnd: Date? = nil,
+         programSubtitle: String? = nil, programDescription: String? = nil,
          artworkURL: URL? = nil,
          vodID: String? = nil, vodPosterURL: String? = nil,
          vodServerID: String? = nil, vodType: String = "movie",
@@ -952,6 +958,8 @@ struct PlayerView: View {
         self.isLive = isLive
         self.isDVR = isDVR
         self.subtitle = subtitle
+        self.programSubtitle = programSubtitle
+        self.programDescription = programDescription
         self.subtitleStart = subtitleStart
         self.subtitleEnd = subtitleEnd
         self.artworkURL = artworkURL
@@ -981,7 +989,9 @@ struct PlayerView: View {
         PlayerRootView(
             urls: urls, title: title, headers: headers,
             isLive: isLive, isDVR: isDVR,
-            subtitle: subtitle, subtitleStart: subtitleStart, subtitleEnd: subtitleEnd,
+            subtitle: subtitle,
+            programSubtitle: programSubtitle, programDescription: programDescription,
+            subtitleStart: subtitleStart, subtitleEnd: subtitleEnd,
             artworkURL: artworkURL,
             vodID: vodID, vodPosterURL: vodPosterURL, vodServerID: vodServerID,
             vodType: vodType,
@@ -1021,6 +1031,12 @@ private struct PlayerRootView: View {
     /// Live Rewind engine state: drives the live scrubber window
     /// (fullscreen single live with a rolling buffer session).
     @ObservedObject private var liveRewind = LiveRewindEngine.shared
+    // Settings > App Behaviors > Player Info Card. Card rows only.
+    @AppStorage(PlayerInfoCardSettings.channelNameKey) private var showCardChannelName = true
+    @AppStorage(PlayerInfoCardSettings.programNameKey) private var showCardProgramName = true
+    @AppStorage(PlayerInfoCardSettings.programTimeKey) private var showCardProgramTime = true
+    @AppStorage(PlayerInfoCardSettings.programSubtitleKey) private var showCardProgramSubtitle = true
+    @AppStorage(PlayerInfoCardSettings.programDescriptionKey) private var showCardProgramDescription = true
     let urls: [URL]
     let title: String
     let headers: [String: String]
@@ -1030,6 +1046,9 @@ private struct PlayerRootView: View {
     /// seek clamp.
     let isDVR: Bool
     let subtitle: String?
+    /// See `PlayerView.programSubtitle` / `.programDescription`.
+    var programSubtitle: String? = nil
+    var programDescription: String? = nil
     let subtitleStart: Date?
     let subtitleEnd: Date?
     let artworkURL: URL?
@@ -2868,6 +2887,7 @@ private struct PlayerRootView: View {
 
                         // Title + optional current-program subtitle
                         VStack(alignment: .leading, spacing: 2) {
+                        if showCardChannelName {
                         Text(title)
                             #if os(tvOS)
                             .scaledFont(.system(size: 32, weight: .bold))
@@ -2877,13 +2897,21 @@ private struct PlayerRootView: View {
                             .foregroundColor(.white)
                             .lineLimit(1)
                             .shadow(color: .black.opacity(0.6), radius: 4)
+                        }
 
-                        if let prog = subtitle, !prog.isEmpty {
+                        // Program Name / Program Time are independent
+                        // rows (Player Info Card settings); the block
+                        // still only exists when program data does.
+                        if let prog = subtitle, !prog.isEmpty,
+                           showCardProgramName || showCardProgramTime {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(prog)
-                                    .lineLimit(1)
+                                if showCardProgramName {
+                                    Text(prog)
+                                        .lineLimit(1)
+                                }
                                 // Time range line: show "HH:MM – HH:MM" when both times known,
                                 // "ends HH:MM" when only end time available.
+                                if showCardProgramTime {
                                 Group {
                                     if let start = subtitleStart, let end = subtitleEnd {
                                         HStack(spacing: 3) {
@@ -2899,6 +2927,7 @@ private struct PlayerRootView: View {
                                     }
                                 }
                                 .lineLimit(1)
+                                }
                             }
                             #if os(tvOS)
                             .scaledFont(.system(size: 22, weight: .regular))
@@ -2907,6 +2936,39 @@ private struct PlayerRootView: View {
                             #endif
                             .foregroundColor(.white.opacity(0.72))
                             .shadow(color: .black.opacity(0.5), radius: 3)
+                        }
+
+                        // Episode title + synopsis (Android parity).
+                        // Independent toggles, each drawn only when the
+                        // caller supplied text, so nothing reserves space.
+                        if showCardProgramSubtitle,
+                           let sub = programSubtitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !sub.isEmpty {
+                            Text(sub)
+                                #if os(tvOS)
+                                .scaledFont(.system(size: 20, weight: .medium).subtext())
+                                #else
+                                .scaledFont(.system(size: 13, weight: .medium).subtext())
+                                #endif
+                                .italic()
+                                .foregroundColor(.white.opacity(0.72))
+                                .lineLimit(1)
+                                .shadow(color: .black.opacity(0.5), radius: 3)
+                        }
+                        if showCardProgramDescription,
+                           let desc = programDescription?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !desc.isEmpty {
+                            Text(desc)
+                                #if os(tvOS)
+                                .scaledFont(.system(size: 17).subtext())
+                                .lineLimit(3)
+                                #else
+                                .scaledFont(.system(size: 11).subtext())
+                                .lineLimit(2)
+                                #endif
+                                .foregroundColor(.white.opacity(0.62))
+                                .fixedSize(horizontal: false, vertical: true)
+                                .shadow(color: .black.opacity(0.5), radius: 3)
                         }
                     }
 
@@ -5813,6 +5875,10 @@ struct UnifiedPlayerChrome: View {
     @ObservedObject var progress: PlayerProgressStore
     let title: String
     let programName: String?
+    /// Player Info Card: episode title + synopsis for the current
+    /// program. Nil/empty simply drops the row.
+    var programSubtitle: String? = nil
+    var programDescription: String? = nil
     let programStart: Date?
     let programEnd: Date?
     let canRecord: Bool
@@ -5835,6 +5901,13 @@ struct UnifiedPlayerChrome: View {
     @State private var bandNow = Date()
     private let bandTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
+    // Settings > App Behaviors > Player Info Card. Card rows only.
+    @AppStorage(PlayerInfoCardSettings.channelNameKey) private var showCardChannelName = true
+    @AppStorage(PlayerInfoCardSettings.programNameKey) private var showCardProgramName = true
+    @AppStorage(PlayerInfoCardSettings.programTimeKey) private var showCardProgramTime = true
+    @AppStorage(PlayerInfoCardSettings.programSubtitleKey) private var showCardProgramSubtitle = true
+    @AppStorage(PlayerInfoCardSettings.programDescriptionKey) private var showCardProgramDescription = true
+
     var body: some View {
         ZStack {
             // Top scrim + bar
@@ -5847,31 +5920,65 @@ struct UnifiedPlayerChrome: View {
                     .accessibilityLabel("Close player")
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(title)
-                            .scaledFont(.headline)
-                            .foregroundColor(.white)
-                            .lineLimit(1)
-                            .shadow(color: .black.opacity(0.6), radius: 4)
-                        if let programName, !programName.isEmpty {
+                        if showCardChannelName {
+                            Text(title)
+                                .scaledFont(.headline)
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                                .shadow(color: .black.opacity(0.6), radius: 4)
+                        }
+                        // Program Name and Program Time are independent
+                        // rows (Player Info Card settings), so the time
+                        // line no longer nests inside the name's `if`.
+                        if let programName, !programName.isEmpty,
+                           showCardProgramName || showCardProgramTime {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(programName)
-                                    .lineLimit(1)
-                                if let programStart, let programEnd {
-                                    HStack(spacing: 3) {
-                                        Text(programStart, style: .time)
-                                        Text("-")
-                                        Text(programEnd, style: .time)
-                                    }
-                                } else if let programEnd {
-                                    HStack(spacing: 3) {
-                                        Text("ends")
-                                        Text(programEnd, style: .time)
+                                if showCardProgramName {
+                                    Text(programName)
+                                        .lineLimit(1)
+                                }
+                                if showCardProgramTime {
+                                    if let programStart, let programEnd {
+                                        HStack(spacing: 3) {
+                                            Text(programStart, style: .time)
+                                            Text("-")
+                                            Text(programEnd, style: .time)
+                                        }
+                                    } else if let programEnd {
+                                        HStack(spacing: 3) {
+                                            Text("ends")
+                                            Text(programEnd, style: .time)
+                                        }
                                     }
                                 }
                             }
                             .scaledFont(.system(size: 12, weight: .regular))
                             .foregroundColor(.white.opacity(0.72))
                             .shadow(color: .black.opacity(0.5), radius: 3)
+                        }
+
+                        // Episode title + synopsis (Android parity).
+                        // Independent toggles; an absent value draws
+                        // nothing at all, so no empty gap is reserved.
+                        if showCardProgramSubtitle,
+                           let sub = programSubtitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !sub.isEmpty {
+                            Text(sub)
+                                .scaledFont(.system(size: 13, weight: .medium).subtext())
+                                .italic()
+                                .foregroundColor(.white.opacity(0.72))
+                                .lineLimit(1)
+                                .shadow(color: .black.opacity(0.5), radius: 3)
+                        }
+                        if showCardProgramDescription,
+                           let desc = programDescription?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !desc.isEmpty {
+                            Text(desc)
+                                .scaledFont(.system(size: 11).subtext())
+                                .foregroundColor(.white.opacity(0.62))
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .shadow(color: .black.opacity(0.5), radius: 3)
                         }
                     }
 
@@ -6229,6 +6336,9 @@ struct NativeHLSPlayerScreen: View {
                     progress: progressStore,
                     title: item.name,
                     programName: item.currentProgram,
+                    programSubtitle: PlayerInfoCardSettings.liveEpisodeTitle(forChannelID: item.id),
+                    programDescription: PlayerInfoCardSettings.liveSynopsis(
+                        forChannelID: item.id, itemDescription: item.currentProgramDescription),
                     programStart: item.currentProgramStart,
                     programEnd: item.currentProgramEnd,
                     canRecord: item.streamURL != nil,

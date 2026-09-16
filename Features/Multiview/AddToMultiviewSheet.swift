@@ -183,6 +183,16 @@ struct AddToMultiviewSheet: View {
             iPadOSBody
             #endif
         }
+        // A capability that resolves to denied while the sheet is open must
+        // not leave the picker parked on a source that is no longer listed.
+        .onChange(of: availableSources) { _, sources in
+            if !sources.contains(pickerSource) { selectSource(sources.first ?? .channels) }
+        }
+        .onAppear {
+            if !availableSources.contains(pickerSource) {
+                selectSource(availableSources.first ?? .channels)
+            }
+        }
         // Phase 1 (Step 4): perf-warning alert for VOD / recording adds.
         // Parallel to the channel warning in `SharedSheetModifiers`;
         // separate because the deferred add carries resolved-URL params
@@ -330,7 +340,7 @@ struct AddToMultiviewSheet: View {
     private var iPadSourcePillBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(MultiviewPickerSource.allCases) { source in
+                ForEach(availableSources) { source in
                     Button {
                         withAnimation(.spring(response: 0.25)) {
                             selectSource(source)
@@ -620,7 +630,7 @@ struct AddToMultiviewSheet: View {
     private var tvSourcePillBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
-                ForEach(MultiviewPickerSource.allCases) { source in
+                ForEach(availableSources) { source in
                     Button {
                         withAnimation(.spring(response: 0.25)) {
                             selectSource(source)
@@ -1028,6 +1038,25 @@ struct AddToMultiviewSheet: View {
             ?? servers.first
     }
 
+    /// Sources this account may actually browse (Dispatcharr 0.30 per-user
+    /// permissions). A denied source is dropped from the pill bar rather
+    /// than shown empty, matching how the tab bar retires Movies / TV Shows
+    /// / DVR. UNKNOWN never drops a pill: the `dispatcharrCanView*` flags
+    /// are true for an unprobed or unreadable account. Recordings stay when
+    /// this device has local captures of its own, which are always the
+    /// user's to watch.
+    private var availableSources: [MultiviewPickerSource] {
+        guard let active = activeServer else { return MultiviewPickerSource.allCases }
+        return MultiviewPickerSource.allCases.filter { source in
+            switch source {
+            case .channels:   return true
+            case .movies:     return active.dispatcharrCanViewVOD
+            case .series:     return active.dispatcharrCanViewSeries
+            case .recordings: return active.dispatcharrCanViewDVR || !recordingsFiltered.isEmpty
+            }
+        }
+    }
+
     /// Auth headers for the active server's stream / file requests.
     /// Same shape `VODDetailView.serverHeaders()` and
     /// `MyRecordingsView` hand to the player. Falls back to an empty
@@ -1062,8 +1091,13 @@ struct AddToMultiviewSheet: View {
     /// HLS DVR pipeline. Scheduled / failed rows are omitted (nothing
     /// to play). Search-filtered on the program title.
     private var recordingsFiltered: [Recording] {
-        guard let sid = activeServer?.id.uuidString else { return [] }
-        let scoped = allRecordings.filter { $0.serverID == sid }
+        guard let active = activeServer else { return [] }
+        let sid = active.id.uuidString
+        // dvr_access "none": server recordings are not listable for this
+        // account. Local captures are this device's own and stay available.
+        let scoped = active.dispatcharrCanViewDVR
+            ? allRecordings.filter { $0.serverID == sid }
+            : allRecordings.filter { $0.serverID == sid && $0.destination == .local }
         let playable = scoped.filter { recordingIsPlayable($0) }
         guard !searchText.isEmpty else { return playable }
         let q = searchText.lowercased()

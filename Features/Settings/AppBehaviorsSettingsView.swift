@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 /// Settings → App Behaviors. Surfaces user-toggleable behaviors that
 /// change how the app reacts to launch lifecycle, remote input, and
@@ -17,6 +18,27 @@ import SwiftUI
 /// existing users carry their preferences forward unchanged.
 struct AppBehaviorsSettingsView: View {
     @ObservedObject private var theme = ThemeManager.shared
+    @Query private var servers: [ServerConnection]
+
+    /// Default Landing Tab choices, minus any tab the active Dispatcharr
+    /// account is not permitted to see. Offering "Movies" to an account
+    /// whose `vod_movies_enabled` is false let the user pick a landing tab
+    /// that does not exist (MainTabView then bounces them to Live TV at
+    /// launch). UNKNOWN never removes a row: the `dispatcharrCanView*`
+    /// flags are true for an unprobed or unreadable account.
+    private var selectableTabs: [AppTab] {
+        guard let active = servers.first(where: { $0.isActive }) ?? servers.first else {
+            return AppTab.selectable
+        }
+        return AppTab.selectable.filter { tab in
+            switch tab {
+            case .dvr:     return active.dispatcharrCanViewDVR
+            case .movies:  return active.dispatcharrCanViewVOD
+            case .tvShows: return active.dispatcharrCanViewSeries
+            default:       return true
+            }
+        }
+    }
     #if os(iOS)
     @AppStorage(phoneGroupSelectorKey) private var phoneGroupSelector = "sidebar"
     #endif
@@ -200,6 +222,40 @@ struct AppBehaviorsSettingsView: View {
         )
     }
     private static let badgeKinds = ["NEW", "REPEAT", "LIVE", "PREMIERE", "FINALE"]
+
+    // MARK: - Player Info Card (Logan 2026-09-15, Android parity)
+    //
+    // Which rows the in-player program info card draws while the
+    // chrome is showing. Card-only: the guide, channel list, mini
+    // player, Now Playing metadata and cast UI are untouched. All six
+    // default ON and sync; see PlayerInfoCardSettings.
+    @AppStorage(PlayerInfoCardSettings.channelLogoKey)
+    private var infoCardChannelLogo = true
+    @AppStorage(PlayerInfoCardSettings.channelNameKey)
+    private var infoCardChannelName = true
+    @AppStorage(PlayerInfoCardSettings.programNameKey)
+    private var infoCardProgramName = true
+    @AppStorage(PlayerInfoCardSettings.programTimeKey)
+    private var infoCardProgramTime = true
+    @AppStorage(PlayerInfoCardSettings.programSubtitleKey)
+    private var infoCardProgramSubtitle = true
+    @AppStorage(PlayerInfoCardSettings.programDescriptionKey)
+    private var infoCardProgramDescription = true
+
+    /// The six rows in display order, paired with their bindings.
+    private var playerInfoCardRows: [(key: String, binding: Binding<Bool>)] {
+        [
+            (PlayerInfoCardSettings.channelLogoKey, $infoCardChannelLogo),
+            (PlayerInfoCardSettings.channelNameKey, $infoCardChannelName),
+            (PlayerInfoCardSettings.programNameKey, $infoCardProgramName),
+            (PlayerInfoCardSettings.programTimeKey, $infoCardProgramTime),
+            (PlayerInfoCardSettings.programSubtitleKey, $infoCardProgramSubtitle),
+            (PlayerInfoCardSettings.programDescriptionKey, $infoCardProgramDescription)
+        ]
+    }
+
+    private static let playerInfoCardFooter =
+        "Choose what appears on the program info card in the player while the controls are showing."
     private static func badgeTitle(_ label: String) -> String {
         label.prefix(1) + label.dropFirst().lowercased() + " badge"
     }
@@ -432,7 +488,7 @@ struct AppBehaviorsSettingsView: View {
 
             // MARK: Default Tab
             Section {
-                ForEach(AppTab.selectable, id: \.self) { tab in
+                ForEach(selectableTabs, id: \.self) { tab in
                     Button {
                         defaultTabRaw = tab.rawValue
                     } label: {
@@ -592,6 +648,25 @@ struct AppBehaviorsSettingsView: View {
                 Text("Guide").sectionHeaderStyle()
             } footer: {
                 Text("Show the LIVE, NEW, and season/episode pills on the guide, channel list, and program info. Remembered separately for iPhone/iPad and Apple TV, and synced across your devices of that kind.")
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+            }
+            .listSectionSeparator(.hidden)
+
+            // MARK: Player Info Card
+            Section {
+                ForEach(playerInfoCardRows, id: \.key) { row in
+                    Toggle(isOn: row.binding) {
+                        Text(PlayerInfoCardSettings.title(row.key))
+                            .scaledFont(.bodyMedium)
+                            .foregroundColor(.textPrimary)
+                    }
+                    .tint(theme.accent)
+                    .listRowBackground(Color.cardBackground)
+                }
+            } header: {
+                Text("Player Info Card").sectionHeaderStyle()
+            } footer: {
+                Text(Self.playerInfoCardFooter)
                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
             .listSectionSeparator(.hidden)
@@ -799,7 +874,7 @@ struct AppBehaviorsSettingsView: View {
 
                 // Default Tab
                 SettingsSection("Default Landing Tab", style: .card) {
-                    ForEach(AppTab.selectable, id: \.self) { tab in
+                    ForEach(selectableTabs, id: \.self) { tab in
                         TVSettingsSelectionRow(
                             icon: tab.icon,
                             iconColor: theme.accent,
@@ -883,6 +958,24 @@ struct AppBehaviorsSettingsView: View {
                     }
 
                     Text("Show the LIVE, NEW, and season/episode pills on the guide, channel list, and program info. Remembered separately for Apple TV and iPhone/iPad, and synced across your Apple TVs.")
+                        .scaledFont(.system(size: 22).subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
+                        .padding(.horizontal, 20)
+                        .padding(.top, 4)
+                }
+
+                SettingsSection("Player Info Card", style: .card) {
+                    ForEach(playerInfoCardRows, id: \.key) { row in
+                        TVSettingsToggleRow(
+                            icon: "info.circle",
+                            iconColor: theme.accent,
+                            title: PlayerInfoCardSettings.title(row.key),
+                            subtitle: "",
+                            isOn: row.binding
+                        ) { _ in }
+                    }
+
+                    Text(Self.playerInfoCardFooter)
                         .scaledFont(.system(size: 22).subtext())
                         .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.horizontal, 20)

@@ -2952,6 +2952,39 @@ struct DispatcharrAPI {
         return try? JSONDecoder().decode(VersionBody.self, from: data).version
     }
 
+    /// `/api/core/settings/` -> `system_settings.catchup_enabled`.
+    /// Readable at user_level >= 1, so a Streamer account gets 403 and we
+    /// return nil = "unknown", which never denies catch-up on its own.
+    /// Catch-up needs BOTH this server-wide switch and the per-user
+    /// `custom_properties.catchup_enabled`.
+    func fetchSystemCatchupEnabled() async throws -> Bool? {
+        let url = try buildURL(path: "/api/core/settings/")
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 10
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await dataWithJWTRetry(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        // Shape varies across builds: the flag may sit at the top level or
+        // under `system_settings`. Read permissively; nil = unknown.
+        guard let obj = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        func flag(in dict: [String: Any]) -> Bool? {
+            if let b = dict["catchup_enabled"] as? Bool { return b }
+            if let nested = dict["system_settings"] as? [String: Any],
+               let b = nested["catchup_enabled"] as? Bool { return b }
+            return nil
+        }
+        if let dict = obj as? [String: Any] { return flag(in: dict) }
+        // Some builds answer with a list of {key, value} setting rows.
+        if let list = obj as? [[String: Any]] {
+            for row in list where (row["key"] as? String) == "catchup_enabled" {
+                if let b = row["value"] as? Bool { return b }
+                if let s = row["value"] as? String { return !(s == "false" || s == "0") }
+            }
+        }
+        return nil
+    }
+
     // Cast audio, 2026-09-13: `fetchAACOutputProfile`,
     // `captureAACOutputProfile` and `refreshAACOutputProfileIfDue` are GONE.
     // Cast sessions ingest the plain stream and AC-3 / E-AC-3 passes through
@@ -4253,6 +4286,22 @@ struct DispatcharrAPI {
         try validate(response: response, data: nil)
     }
 
+    /// Pulls DRF's `{"detail": "..."}` (or a short raw body) out of a 403
+    /// so the user sees the server's actual reason instead of generic
+    /// "check your API key" advice.
+    static func forbiddenReason(from data: Data?) -> String? {
+        guard let data, !data.isEmpty else { return nil }
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for key in ["detail", "error", "message"] {
+                if let s = obj[key] as? String, !s.isEmpty { return String(s.prefix(200)) }
+            }
+        }
+        guard let text = String(data: data.prefix(200), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty, !text.hasPrefix("<") else { return nil }
+        return text
+    }
+
     /// Body-aware validation: promotes Dispatcharr's auth-failure 404s
     /// ("No User matches the given query") to `.unauthorized` so callers
     /// can surface the correct "check your API key" message.
@@ -4260,7 +4309,14 @@ struct DispatcharrAPI {
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         switch http.statusCode {
         case 200...299: break
-        case 401, 403: throw APIError.unauthorized
+        // 401 and 403 are DIFFERENT problems and used to collapse into
+        // `.unauthorized`, which told a perfectly-authenticated user to
+        // check their API key. 401 = we are not signed in. 403 = we are
+        // signed in and this account may not do this (a permission tier,
+        // or a per-user allowed_networks policy), so carry the server's
+        // own reason and let the capability layer re-probe and explain.
+        case 401: throw APIError.unauthorized
+        case 403: throw APIError.forbidden(Self.forbiddenReason(from: data))
         case 404:
             // Dispatcharr returns HTTP 404 + {"detail":"No User matches…"} when
             // the API key doesn't exist in the database — this is an auth failure,

@@ -102,6 +102,12 @@ struct SearchView: View {
     @ViewBuilder private var searchContent: some View {
         VStack(spacing: 0) {
             scopePicker.padding(.vertical, 8)
+                // Never leave the selection parked on a chip that the
+                // account's permissions just removed.
+                .onChange(of: availableScopes) { _, scopes in
+                    if !scopes.contains(scope) { scope = .all }
+                }
+                .onAppear { if !availableScopes.contains(scope) { scope = .all } }
 
             if query.isEmpty {
                 searchPrompt
@@ -208,11 +214,32 @@ struct SearchView: View {
         }
     }
 
+    /// The active server for capability gating. Mirrors the tab gates in
+    /// MainTabView so search and the tab bar never disagree.
+    private var searchActiveServer: ServerConnection? {
+        servers.first(where: { $0.isActive }) ?? servers.first
+    }
+
+    /// Scopes this account may search. A Dispatcharr account denied
+    /// `vod_movies_enabled` / `vod_series_enabled` loses the matching chip
+    /// rather than being offered a catalog it cannot see, and loses "All"'s
+    /// VOD half via `vodSearchAllowed` below. UNKNOWN never removes a chip.
+    private var availableScopes: [SearchScope] {
+        guard let active = searchActiveServer else { return SearchScope.allCases }
+        return SearchScope.allCases.filter { s in
+            switch s {
+            case .movies: return active.dispatcharrCanViewVOD
+            case .tv:     return active.dispatcharrCanViewSeries
+            default:      return true
+            }
+        }
+    }
+
     // MARK: - Scope Picker
     private var scopePicker: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(SearchScope.allCases, id: \.self) { s in
+                ForEach(availableScopes, id: \.self) { s in
                     Button {
                         withAnimation(.spring(response: 0.25)) { scope = s }
                     } label: {
@@ -453,10 +480,18 @@ struct SearchView: View {
         // re-fired per keypress). The active playlist's library is already
         // resident in VODStore -- filter that, off the MainActor.
         if scope != .epg {
+            // Dispatcharr 0.30 per-user permissions: a denied half never
+            // contributes results, including under the "All" scope. The
+            // store is normally already empty for a denied account (the
+            // load paths clear it and the snapshot restore is gated), but
+            // search must not depend on that ordering.
+            let active = searchActiveServer
+            let allowMovies = active.map { $0.dispatcharrCanViewVOD } ?? true
+            let allowSeries = active.map { $0.dispatcharrCanViewSeries } ?? true
             // Titles the user hid never surface in search (Logan
             // 2026-09-14): filter here, before the detached match.
-            let movies = HiddenVODStore.shared.visible(VODStore.shared.movies)
-            let series = HiddenVODStore.shared.visible(VODStore.shared.series)
+            let movies = allowMovies ? HiddenVODStore.shared.visible(VODStore.shared.movies) : []
+            let series = allowSeries ? HiddenVODStore.shared.visible(VODStore.shared.series) : []
             let searchScope = scope
             let vodResults: [VODDisplayItem] = await Task.detached(priority: .userInitiated) {
                 let pool: [VODDisplayItem]

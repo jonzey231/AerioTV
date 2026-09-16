@@ -108,13 +108,50 @@ final class ServerConnectionViewModel {
     var discoveredVODSeriesEnabled: Bool = true
     var discoveredServerVersion: String = ""
 
+    /// The account's FULL `custom_properties` blob from /users/me/, kept
+    /// verbatim so Save can persist one capability snapshot (and so a
+    /// permission key Dispatcharr adds later survives with no code change).
+    /// "" = the server sent none.
+    var discoveredCustomPropertiesJSON: String = ""
+    var discoveredIsStaff: Bool = false
+    var discoveredIsSuperuser: Bool = false
+    /// Server-wide `system_settings.catchup_enabled`; nil = not read.
+    var discoveredSystemCatchupEnabled: Bool? = nil
+
+    /// Capabilities as probed during Test Connection, derived exactly the
+    /// way the persisted model derives them, so onboarding and the rest of
+    /// the app can never disagree.
+    var discoveredCapabilities: DispatcharrCapabilitySet {
+        DispatcharrCapabilitySet(
+            isDispatcharr: true,
+            rawUserLevel: discoveredUserLevel,
+            isStaff: discoveredIsStaff,
+            isSuperuser: discoveredIsSuperuser,
+            props: DispatcharrCustomProperties(json: discoveredCustomPropertiesJSON),
+            systemCatchupEnabled: discoveredSystemCatchupEnabled,
+            fetchedAt: discoveredCustomPropertiesJSON.isEmpty ? nil : Date(),
+            schema: DispatcharrCapabilitySet.currentSchema
+        )
+    }
+
+    /// Unknown stays TRUE: the recording-destination picker shows and the
+    /// server decides, rather than onboarding silently hiding it.
+    var discoveredCanManageDVR: Bool { discoveredCapabilities.canManageDvr.isAllowed }
+
     /// Dispatcharr 0.30 permissions from /users/me/ (raw dvr_access so the
-    /// model can keep "unknown" separate from an explicit value).
+    /// model can keep "unknown" separate from an explicit value), plus the
+    /// whole custom_properties blob for the capability snapshot.
     func capturePermissions(from user: DispatcharrUser) {
         discoveredDVRAccess = user.dvrAccessRaw ?? ""
         discoveredCatchupEnabled = user.catchupEnabled
         discoveredVODMoviesEnabled = user.vodMoviesEnabled
         discoveredVODSeriesEnabled = user.vodSeriesEnabled
+        discoveredIsStaff = user.isStaff
+        discoveredIsSuperuser = user.isSuperuser
+        // Never blank a good blob with an empty read.
+        if !user.customPropertiesJSON.isEmpty {
+            discoveredCustomPropertiesJSON = user.customPropertiesJSON
+        }
     }
 
     var isFormValid: Bool {
@@ -252,6 +289,10 @@ final class ServerConnectionViewModel {
         discoveredCatchupEnabled = true
         discoveredVODMoviesEnabled = true
         discoveredVODSeriesEnabled = true
+        discoveredCustomPropertiesJSON = ""
+        discoveredIsStaff = false
+        discoveredIsSuperuser = false
+        discoveredSystemCatchupEnabled = nil
         discoveredServerVersion = ""
 
         // Silent one-shot retry. Some reverse-proxy / LB setups (Cloudflare
@@ -625,6 +666,18 @@ final class ServerConnectionViewModel {
             server.dispatcharrCatchupEnabled = discoveredCatchupEnabled
             server.dispatcharrVODMoviesEnabled = discoveredVODMoviesEnabled
             server.dispatcharrVODSeriesEnabled = discoveredVODSeriesEnabled
+            server.dispatcharrIsStaff = discoveredIsStaff
+            server.dispatcharrIsSuperuser = discoveredIsSuperuser
+            server.dispatcharrSystemCatchupEnabled = discoveredSystemCatchupEnabled
+            // Persist the capability snapshot only when we actually got
+            // one. An empty blob leaves `fetchedAt` nil, so capabilities
+            // read `.unknown` (affordances enabled) until the first probe
+            // succeeds - never a silent downgrade.
+            if !discoveredCustomPropertiesJSON.isEmpty {
+                server.dispatcharrCustomPropertiesJSON = discoveredCustomPropertiesJSON
+                server.dispatcharrCapabilitiesSchema = DispatcharrCapabilitySet.currentSchema
+                server.dispatcharrPermissionsFetchedAt = Date()
+            }
             if !discoveredServerVersion.isEmpty {
                 server.dispatcharrServerVersion = discoveredServerVersion
             }
@@ -678,6 +731,10 @@ final class ServerConnectionViewModel {
         discoveredCatchupEnabled = true
         discoveredVODMoviesEnabled = true
         discoveredVODSeriesEnabled = true
+        discoveredCustomPropertiesJSON = ""
+        discoveredIsStaff = false
+        discoveredIsSuperuser = false
+        discoveredSystemCatchupEnabled = nil
         discoveredServerVersion = ""
         // v1.7.x: matches the property default above. Back-button
         // out of the Configure screen and re-entering should land

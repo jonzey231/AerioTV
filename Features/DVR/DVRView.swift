@@ -54,6 +54,9 @@ struct DVRView: View {
     @State private var recordingToDelete: Recording?
     @State private var showDeleteConfirmation = false
     @State private var showDeleteFromServerAlert = false
+    /// "Delete from Device" on a SERVER recording that was saved to this
+    /// device: removes the local file only, never the server's copy.
+    @State private var showDeleteDeviceCopyAlert = false
     @State private var showDownloadConfirmation = false
     #if os(iOS)
     @State private var tabBarTracker = TabBarScrollTracker()
@@ -115,7 +118,19 @@ struct DVRView: View {
     /// exempt so the user can always stop it (see MyRecordingsView).
     private var visibleRecordings: [Recording] {
         func isCapturing(_ r: Recording) -> Bool { coordinator.activeSessions[r.id] != nil }
-        guard let sid = activeServer?.id.uuidString else { return allRecordings.filter(isCapturing) }
+        guard let active = activeServer else { return allRecordings.filter(isCapturing) }
+        let sid = active.id.uuidString
+        // Dispatcharr 0.30 dvr_access "none": server-side recordings are not
+        // listable for this account, but rows fetched while it still had
+        // access can be sitting in the local store. Show only what this
+        // device recorded itself (plus anything capturing right now, which
+        // the user must always be able to stop). UNKNOWN never filters:
+        // `dispatcharrCanViewDVR` is true for an unprobed account.
+        if !active.dispatcharrCanViewDVR {
+            return allRecordings.filter {
+                isCapturing($0) || ($0.serverID == sid && $0.destination == .local)
+            }
+        }
         return allRecordings.filter { $0.serverID == sid || isCapturing($0) }
     }
 
@@ -292,7 +307,7 @@ struct DVRView: View {
                             progress: progressFraction(rec), canPlay: actions.canPlay(rec),
                             onPrimary: { heroPrimary(rec) },
                             onSecondary: { heroSecondary(rec) },
-                            onStop: { actions.stop(rec) },
+                            onStop: { actions.stop(rec) }, canManage: actions.canManage(rec),
                             onInfo: { showInfo(rec) },
                             focusPrefix: "\(rec.id)",
                             menu: { menuItems(for: rec) })
@@ -380,6 +395,14 @@ struct DVRView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(deleteMessage(device: false))
+        }
+        .alert("Delete from Device?", isPresented: $showDeleteDeviceCopyAlert) {
+            Button("Delete", role: .destructive) {
+                if let rec = recordingToDelete { actions.deleteDeviceCopy(rec) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The copy saved on this device will be deleted. The recording stays on the Dispatcharr server.")
         }
         .alert("Save to Device?", isPresented: $showDownloadConfirmation) {
             Button("Save") {
@@ -519,7 +542,7 @@ struct DVRView: View {
                 inDeck: true,
                 onPrimary: { heroPrimary(rec) },
                 onSecondary: { heroSecondary(rec) },
-                onStop: { actions.stop(rec) },
+                onStop: { actions.stop(rec) }, canManage: actions.canManage(rec),
                 onInfo: { showInfo(rec) },
                 menu: { menuItems(for: rec) })
     }
@@ -693,7 +716,7 @@ struct DVRView: View {
                                 inDeck: true,
                                 onPrimary: { heroPrimary(rec) },
                                 onSecondary: { heroSecondary(rec) },
-                                onStop: { actions.stop(rec) },
+                                onStop: { actions.stop(rec) }, canManage: actions.canManage(rec),
                                 onInfo: { showInfo(rec) },
                                 menu: { menuItems(for: rec) })
                     }
@@ -702,7 +725,7 @@ struct DVRView: View {
                             progress: progressFraction(hero), canPlay: actions.canPlay(hero),
                             onPrimary: { heroPrimary(hero) },
                             onSecondary: { heroSecondary(hero) },
-                            onStop: { actions.stop(hero) },
+                            onStop: { actions.stop(hero) }, canManage: actions.canManage(hero),
                             onInfo: { showInfo(hero) },
                             menu: { menuItems(for: hero) })
                 }
@@ -747,7 +770,7 @@ struct DVRView: View {
                             progress: progressFraction(hero), canPlay: actions.canPlay(hero),
                             onPrimary: { heroPrimary(hero) },
                             onSecondary: { heroSecondary(hero) },
-                            onStop: { actions.stop(hero) },
+                            onStop: { actions.stop(hero) }, canManage: actions.canManage(hero),
                             onInfo: { showInfo(hero) },
                             menu: { menuItems(for: hero) })
                     #endif
@@ -774,7 +797,7 @@ struct DVRView: View {
                                     inDeck: true,
                                     onPrimary: { heroPrimary(rec) },
                                     onSecondary: { heroSecondary(rec) },
-                                    onStop: { actions.stop(rec) },
+                                    onStop: { actions.stop(rec) }, canManage: actions.canManage(rec),
                                     onInfo: { showInfo(rec) },
                                     menu: { menuItems(for: rec) })
                         }
@@ -1352,8 +1375,10 @@ struct DVRView: View {
                 Button { recordingToDelete = rec; showDownloadConfirmation = true } label: {
                     Label("Save to Device", systemImage: "square.and.arrow.down")
                 }
-                Button { actions.runComskip(rec) } label: {
-                    Label("Remove Commercials", systemImage: "scissors")
+                if actions.canManage(rec) {
+                    Button { actions.runComskip(rec) } label: {
+                        Label("Remove Commercials", systemImage: "scissors")
+                    }
                 }
             }
         }
@@ -1366,9 +1391,11 @@ struct DVRView: View {
                     Label("Watch from Beginning", systemImage: "backward.end.fill")
                 }
             }
-            Button { actions.stop(rec) } label: { Label("Stop Recording", systemImage: "stop.fill") }
+            if actions.canManage(rec) {
+                Button { actions.stop(rec) } label: { Label("Stop Recording", systemImage: "stop.fill") }
+            }
         }
-        if rec.isUpcoming {
+        if rec.isUpcoming, actions.canManage(rec) {
             Button(role: .destructive) { actions.cancel(rec) } label: {
                 Label("Cancel Recording", systemImage: "xmark.circle")
             }
@@ -1376,11 +1403,21 @@ struct DVRView: View {
         if !rec.isUpcoming {
             if rec.destination == .local {
                 Button(role: .destructive) { recordingToDelete = rec; showDeleteConfirmation = true } label: {
-                    Label("Delete", systemImage: "trash")
+                    Label("Delete from Device", systemImage: "trash")
                 }
             } else {
-                Button(role: .destructive) { recordingToDelete = rec; showDeleteFromServerAlert = true } label: {
-                    Label("Delete from Server", systemImage: "trash")
+                // A server recording saved with "Save to Device" also has
+                // bytes on this device: offer BOTH, and never gate the
+                // device copy on DVR access (it is the user's own file).
+                if actions.hasDeviceCopy(rec) {
+                    Button(role: .destructive) { recordingToDelete = rec; showDeleteDeviceCopyAlert = true } label: {
+                        Label("Delete from Device", systemImage: "trash")
+                    }
+                }
+                if actions.canManage(rec) {
+                    Button(role: .destructive) { recordingToDelete = rec; showDeleteFromServerAlert = true } label: {
+                        Label("Delete from Server", systemImage: "trash")
+                    }
                 }
             }
         }
@@ -1424,6 +1461,9 @@ struct DVRHero<Menu: View>: View {
     let onPrimary: () -> Void
     let onSecondary: () -> Void
     let onStop: () -> Void
+    /// Dispatcharr 0.30 DVR access: a "view" account never sees Stop
+    /// Recording on the hero (the row menu hides it the same way).
+    var canManage: Bool = true
     /// Phone: a tap on the card itself (outside its buttons) opens the
     /// program info sheet (Logan 2026-09-05).
     var onInfo: (() -> Void)? = nil
@@ -1636,8 +1676,10 @@ struct DVRHero<Menu: View>: View {
                     focusable(MoviesHeroButton(title: "Jump to Live", systemImage: "dot.radiowaves.left.and.right",
                                                isPrimary: false, action: onSecondary), role: "secondary")
                 }
-                focusable(MoviesHeroButton(title: "Stop Recording", systemImage: "stop.fill",
-                                           isPrimary: !canPlay, action: onStop), role: canPlay ? "stop" : "primary")
+                if canManage {
+                    focusable(MoviesHeroButton(title: "Stop Recording", systemImage: "stop.fill",
+                                               isPrimary: !canPlay, action: onStop), role: canPlay ? "stop" : "primary")
+                }
             } else {
                 focusable(MoviesHeroButton(title: progress > 0 ? "Resume" : "Play", systemImage: "play.fill",
                                            isPrimary: true, action: onPrimary), role: "primary")

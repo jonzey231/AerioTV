@@ -754,16 +754,15 @@ struct AddServerView: View {
             AppTextField("Device Name", placeholder: DeviceInfo.modelName,
                          text: $deviceNickname, icon: "iphone")
 
-            // v1.7.x: only offer the recording-destination choice when
-            // the connected account is a Dispatcharr admin (user_level
-            // >= 10). A Standard / Streamer account can't create server
-            // recordings (POST /api/channels/recordings/ 403s), so the
-            // server destination would be a dead end. discoveredUserLevel
-            // is captured during Test Connection, which has already
-            // succeeded by the time this section renders. It defaults to
-            // 10 (admin), so admins and any case where the level wasn't
-            // learned keep the picker.
-            if viewModel.discoveredUserLevel >= 10 {
+            // Only offer the recording-destination choice when the
+            // connected account can actually MANAGE DVR. The raw level
+            // is the wrong test: Dispatcharr resolves DVR access from
+            // `custom_properties.dvr_access` too, so an admin can grant
+            // "manage" to a level-1 account (which this hid) and can set
+            // "view" on one (which this offered, then 403'd). The probed
+            // capability is the honest answer, and an UNKNOWN capability
+            // still shows the picker so the server has the last word.
+            if viewModel.discoveredCanManageDVR {
                 Divider().padding(.vertical, 8)
 
                 Text("Default Recording Destination")

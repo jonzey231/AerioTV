@@ -505,6 +505,11 @@ struct AerioApp: App {
         WindowGroup {
             AppEntryView()
                 .environmentObject(ThemeManager.shared)
+                // One app-wide surface for "Dispatcharr refused that, and
+                // here is exactly why". Raised from action helpers deep in
+                // the DVR paths that have no view of their own; before
+                // this, a denied delete or schedule was a silent no-op.
+                .modifier(DispatcharrPermissionNoticeAlert())
                 .aerioTextScaleRoot(textScale)
                 .aerioSecondaryTextRoot(subtextScale: subtextScale, contrast: textContrast)
                 // GH #33: this Apple TV is a companion HOST -- advertise
@@ -1465,7 +1470,8 @@ struct RootView: View {
                 }
                 // Initial Top Shelf sync for Continue Watching
                 if let all = try? modelContext.fetch(FetchDescriptor<WatchProgress>()) {
-                    TopShelfDataManager.syncContinueWatching(all)
+                    let srv = (try? modelContext.fetch(FetchDescriptor<ServerConnection>())) ?? []
+                    TopShelfDataManager.syncContinueWatching(all, servers: srv)
                 }
                 #endif
             }
@@ -1538,7 +1544,8 @@ struct RootView: View {
                    let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
                     SyncManager.shared.pushWatchProgress(all)
                     #if os(tvOS)
-                    TopShelfDataManager.syncContinueWatching(all)
+                    let srv = (try? ctx.fetch(FetchDescriptor<ServerConnection>())) ?? []
+                    TopShelfDataManager.syncContinueWatching(all, servers: srv)
                     #endif
                 }
             }
@@ -1906,6 +1913,21 @@ struct RootView: View {
                     // at the recording-capable default; only a positively
                     // synced sub-10 value restricts.
                     local.dispatcharrUserLevel = remote.dispatcharrUserLevel
+                    // Adopt the WHOLE per-user capability snapshot, not
+                    // just the level. Adopting the level alone is what let
+                    // a synced playlist arrive with no DVR permission and
+                    // resolve to view-only. A remote with no snapshot
+                    // (older sender) must never clobber a good local one,
+                    // so the adoption is gated on the remote having one.
+                    if remote.dispatcharrPermissionsFetchedAt != nil
+                        || !remote.dispatcharrCustomPropertiesJSON.isEmpty {
+                        local.dispatcharrIsStaff = remote.dispatcharrIsStaff
+                        local.dispatcharrIsSuperuser = remote.dispatcharrIsSuperuser
+                        local.dispatcharrCustomPropertiesJSON = remote.dispatcharrCustomPropertiesJSON
+                        local.dispatcharrPermissionsFetchedAt = remote.dispatcharrPermissionsFetchedAt
+                        local.dispatcharrCapabilitiesSchema = remote.dispatcharrCapabilitiesSchema
+                        local.dispatcharrSystemCatchupEnabled = remote.dispatcharrSystemCatchupEnabled
+                    }
                     // v1.7.x: adopt the connected user's assigned Channel
                     // Profile id(s) so the child-safety channel filter is
                     // consistent across devices. deserialize defaults an
@@ -1982,6 +2004,17 @@ struct RootView: View {
                 // way on this device. Absent in the payload defaults to
                 // 10 (admin = recording-capable) via deserialize.
                 newServer.dispatcharrUserLevel = remote.dispatcharrUserLevel
+                // Inherit the WHOLE per-user capability snapshot so the
+                // new device gates on the same facts. When the sender had
+                // none, the fields stay at their defaults and every
+                // capability reads `.unknown` (affordances enabled) until
+                // this device runs its own probe.
+                newServer.dispatcharrIsStaff = remote.dispatcharrIsStaff
+                newServer.dispatcharrIsSuperuser = remote.dispatcharrIsSuperuser
+                newServer.dispatcharrCustomPropertiesJSON = remote.dispatcharrCustomPropertiesJSON
+                newServer.dispatcharrPermissionsFetchedAt = remote.dispatcharrPermissionsFetchedAt
+                newServer.dispatcharrCapabilitiesSchema = remote.dispatcharrCapabilitiesSchema
+                newServer.dispatcharrSystemCatchupEnabled = remote.dispatcharrSystemCatchupEnabled
                 // v1.7.x: inherit the connected user's assigned Channel
                 // Profile id(s) so the child-safety channel filter applies
                 // the same way on this device. Absent in the payload

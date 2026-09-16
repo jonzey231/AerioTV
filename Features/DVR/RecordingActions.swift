@@ -38,6 +38,49 @@ struct RecordingActions {
     /// Mounts the legacy (mpv) fullScreenCover.
     let present: (PlayingRecording) -> Void
 
+    func server(for rec: Recording) -> ServerConnection? {
+        servers.first(where: { $0.id.uuidString == rec.serverID })
+    }
+
+    /// Every server-side DVR mutation runs through here so a refusal can
+    /// never be a silent no-op again. These calls used to be `try?`, so a
+    /// denied delete looked exactly like a successful one: the row stayed,
+    /// the user tapped again, nothing happened, nothing was logged.
+    ///
+    /// On 403 we re-probe the account's capabilities and then say either
+    /// "your account cannot do this" or, when the permissions say it should
+    /// have worked, that it looks like a network restriction on the account.
+    /// On success we promote a capability we wrongly believed was denied.
+    private func perform(_ capability: DispatcharrCapability,
+                         on rec: Recording,
+                         _ work: @escaping () async throws -> Void) {
+        Task { @MainActor in
+            do {
+                try await work()
+                if let server = server(for: rec) {
+                    await DispatcharrCapabilityProbe.promoteIfUnexpectedlyAllowed(server, capability: capability)
+                }
+            } catch let APIError.forbidden(reason) {
+                debugLog("⚠️ DVR \(capability.rawValue) refused (403): \(reason ?? "no reason given")")
+                if let server = server(for: rec) {
+                    await DispatcharrCapabilityProbe.handleForbidden(server,
+                                                                     capability: capability,
+                                                                     serverReason: reason)
+                } else {
+                    DispatcharrPermissionNotice.shared.present(capability.deniedMessage)
+                }
+            } catch APIError.unauthorized {
+                debugLog("⚠️ DVR \(capability.rawValue) refused (401)")
+                DispatcharrPermissionNotice.shared.present(
+                    "AerioTV is not signed in to this Dispatcharr server any more. Open Settings > Playlists and run Test Connection.")
+            } catch {
+                debugLog("⚠️ DVR \(capability.rawValue) failed: \(error)")
+                DispatcharrPermissionNotice.shared.present(
+                    "That recording action failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     func api(for rec: Recording) -> DispatcharrAPI? {
         guard let server = servers.first(where: { $0.id.uuidString == rec.serverID }),
               server.type == .dispatcharrAPI else { return nil }
@@ -196,15 +239,17 @@ struct RecordingActions {
             if rec.destination == .local {
                 await coordinator.stopLocalRecording(rec, modelContext: modelContext)
             } else if let api = api(for: rec) {
-                try? await coordinator.stopDispatcharrRecording(api: api, recording: rec, modelContext: modelContext)
+                perform(.manageDvr, on: rec) {
+                    try await coordinator.stopDispatcharrRecording(api: api, recording: rec, modelContext: modelContext)
+                }
             }
         }
     }
 
     func cancel(_ rec: Recording) {
         if rec.destination == .dispatcharrServer, let api = api(for: rec) {
-            Task {
-                try? await coordinator.deleteDispatcharrRecording(api: api, recording: rec, modelContext: modelContext)
+            perform(.manageDvr, on: rec) {
+                try await coordinator.deleteDispatcharrRecording(api: api, recording: rec, modelContext: modelContext)
             }
         } else {
             rec.status = .cancelled
@@ -217,30 +262,54 @@ struct RecordingActions {
         coordinator.deleteLocalRecording(rec, modelContext: modelContext)
     }
 
+    /// Dispatcharr 0.30 DVR access: stop / cancel / edit / delete on a
+    /// SERVER recording need "manage". A local recording is this device's
+    /// own file, so it is never gated.
+    func canManage(_ rec: Recording) -> Bool {
+        guard rec.destination == .dispatcharrServer, let server = server(for: rec) else { return true }
+        return server.dispatcharrCanManageDVR
+    }
+
+    /// True when this row has bytes on THIS device: either a local
+    /// recording, or a server recording that was saved to the device with
+    /// "Save to Device" (which stamps `localFilePath` on the server row).
+    func hasDeviceCopy(_ rec: Recording) -> Bool {
+        guard let path = rec.localFilePath, !path.isEmpty else { return false }
+        return FileManager.default.fileExists(atPath: path)
+    }
+
+    /// Deletes only the on-device copy of a SERVER recording, leaving the
+    /// server's recording (and this row) alone. Never touches the network,
+    /// so it is available to every user whatever their DVR access.
+    func deleteDeviceCopy(_ rec: Recording) {
+        guard let path = rec.localFilePath else { return }
+        try? FileManager.default.removeItem(atPath: path)
+        rec.localFilePath = nil
+        rec.fileSizeBytes = 0
+        try? modelContext.save()
+        debugLog("🗑️ Deleted device copy of recording \(rec.programTitle) at \(path)")
+    }
+
     func deleteFromServer(_ rec: Recording) {
         guard let api = api(for: rec) else { return }
-        Task {
-            try? await coordinator.deleteDispatcharrRecording(api: api, recording: rec, modelContext: modelContext)
+        perform(.manageDvr, on: rec) {
+            try await coordinator.deleteDispatcharrRecording(api: api, recording: rec, modelContext: modelContext)
         }
     }
 
     func download(_ rec: Recording) {
         guard let api = api(for: rec) else { return }
-        Task {
-            try? await coordinator.downloadDispatcharrRecording(api: api, recording: rec, modelContext: modelContext)
+        perform(.viewDvr, on: rec) {
+            try await coordinator.downloadDispatcharrRecording(api: api, recording: rec, modelContext: modelContext)
         }
     }
 
     /// Queues server-side comskip on a completed Dispatcharr recording.
     func runComskip(_ rec: Recording) {
         guard let api = api(for: rec), let remoteID = rec.remoteRecordingID else { return }
-        Task {
-            do {
-                try await api.applyComskip(id: remoteID)
-                debugLog("✂️ Queued comskip for recording \(remoteID)")
-            } catch {
-                debugLog("⚠️ applyComskip failed for \(remoteID): \(error)")
-            }
+        perform(.manageDvr, on: rec) {
+            try await api.applyComskip(id: remoteID)
+            debugLog("✂️ Queued comskip for recording \(remoteID)")
         }
     }
 }

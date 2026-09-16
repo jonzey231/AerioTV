@@ -685,23 +685,16 @@ struct ServerDetailView: View {
                 // failed users/me fetch leaves the stored level
                 // unchanged. Re-fetch with the (possibly newly)
                 // discovered header shape.
-                let levelAPI = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                              auth: .apiKey(server.effectiveApiKey),
-                                              userAgent: server.effectiveUserAgent,
-                                              authMode: info.discoveredAuthMode ?? server.dispatcharrHeaderMode)
-                if let user = try? await levelAPI.fetchCurrentUser() {
-                    // effectiveUserLevel folds in is_superuser/is_staff
-                    // (legacy superusers carry level 0); the probe
-                    // settles OLD servers whose /me/ predates those
-                    // fields - see DispatcharrUser.effectiveUserLevel.
-                    var level = user.effectiveUserLevel
-                    if level < 10, await levelAPI.probeAdminAccess() { level = 10 }
-                    if level != server.dispatcharrUserLevel {
-                        server.dispatcharrUserLevel = level
-                        debugLog("SettingsView Test Connection: persisting user_level \(level) for \(server.name)")
-                        SyncManager.shared.pushServers(servers, immediate: true)
-                    }
-                    server.applyDispatcharrPermissions(from: user, version: info.version)
+                // Test Connection re-probes the FULL per-user capability
+                // snapshot, not just the level, through the one shared
+                // probe so this path can never drift from the launch /
+                // foreground / 403 paths. A failed probe keeps the last
+                // good snapshot.
+                if await DispatcharrCapabilityProbe.refresh(server, reason: "Test Connection") {
+                    SyncManager.shared.pushServers(servers, immediate: true)
+                }
+                if let version = info.version, !version.isEmpty {
+                    server.dispatcharrServerVersion = version
                 }
             case .m3uPlaylist:
                 guard let url = URL(string: server.baseURL) else { throw APIError.invalidURL }

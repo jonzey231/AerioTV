@@ -138,6 +138,7 @@
 		A1B2C3D4E5F67890CAFE0001 /* TVPressGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */; };
 		A1B2C3D4E5F67890C10C0001 /* ClockFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890C10C0003 /* ClockFormat.swift */; };
 		A1B2C3D4E5F678905C1A0001 /* SkipIntervals.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F678905C1A0003 /* SkipIntervals.swift */; };
+		A1B2C3D4E5F67890D1C00001 /* PlayerInfoCardSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890D1C00003 /* PlayerInfoCardSettings.swift */; };
 		A1B2C3D4E5F67890E7A70001 /* EventTimeParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890E7A70003 /* EventTimeParser.swift */; };
 		A1B2C3D4E5F67890C0A90001 /* CompanionNowPlaying.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890C0A90003 /* CompanionNowPlaying.swift */; };
 		A1B2C3D4E5F67890C4A10001 /* ChannelNumberEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890C4A10003 /* ChannelNumberEntry.swift */; };
@@ -145,6 +146,7 @@
 		A1B2C3D4E5F67890E9600020 /* EPGText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890E9600030 /* EPGText.swift */; };
 		A1B2C3D4E5F67890C10C0002 /* ClockFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890C10C0003 /* ClockFormat.swift */; };
 		A1B2C3D4E5F678905C1A0002 /* SkipIntervals.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F678905C1A0003 /* SkipIntervals.swift */; };
+		A1B2C3D4E5F67890D1C00002 /* PlayerInfoCardSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890D1C00003 /* PlayerInfoCardSettings.swift */; };
 		A1B2C3D4E5F67890E7A70002 /* EventTimeParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890E7A70003 /* EventTimeParser.swift */; };
 		A1B2C3D4E5F67890C0A90002 /* CompanionNowPlaying.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890C0A90003 /* CompanionNowPlaying.swift */; };
 		A1B2C3D4E5F67890C4A10002 /* ChannelNumberEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890C4A10003 /* ChannelNumberEntry.swift */; };
@@ -404,6 +406,7 @@
 		A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TVPressGesture.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F67890C10C0003 /* ClockFormat.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ClockFormat.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F678905C1A0003 /* SkipIntervals.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SkipIntervals.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F67890D1C00003 /* PlayerInfoCardSettings.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlayerInfoCardSettings.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F67890E7A70003 /* EventTimeParser.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EventTimeParser.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F67890C0A90003 /* CompanionNowPlaying.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CompanionNowPlaying.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F67890C4A10003 /* ChannelNumberEntry.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ChannelNumberEntry.swift; sourceTree = "<group>"; };
@@ -983,6 +986,7 @@
 				A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */,
 				A1B2C3D4E5F67890C10C0003 /* ClockFormat.swift */,
 				A1B2C3D4E5F678905C1A0003 /* SkipIntervals.swift */,
+				A1B2C3D4E5F67890D1C00003 /* PlayerInfoCardSettings.swift */,
 				A1B2C3D4E5F67890E7A70003 /* EventTimeParser.swift */,
 				A1B2C3D4E5F67890C0A90003 /* CompanionNowPlaying.swift */,
 				A1B2C3D4E5F67890C4A10003 /* ChannelNumberEntry.swift */,
@@ -1338,6 +1342,7 @@
 				A1B2C3D4E5F67890CAFE0001 /* TVPressGesture.swift in Sources */,
 				A1B2C3D4E5F67890C10C0001 /* ClockFormat.swift in Sources */,
 				A1B2C3D4E5F678905C1A0001 /* SkipIntervals.swift in Sources */,
+				A1B2C3D4E5F67890D1C00001 /* PlayerInfoCardSettings.swift in Sources */,
 				A1B2C3D4E5F67890E7A70001 /* EventTimeParser.swift in Sources */,
 				A1B2C3D4E5F67890C0A90001 /* CompanionNowPlaying.swift in Sources */,
 				A1B2C3D4E5F67890C4A10001 /* ChannelNumberEntry.swift in Sources */,
@@ -1469,6 +1474,7 @@
 				A1B2C3D4E5F67890CAFE0002 /* TVPressGesture.swift in Sources */,
 				A1B2C3D4E5F67890C10C0002 /* ClockFormat.swift in Sources */,
 				A1B2C3D4E5F678905C1A0002 /* SkipIntervals.swift in Sources */,
+				A1B2C3D4E5F67890D1C00002 /* PlayerInfoCardSettings.swift in Sources */,
 				A1B2C3D4E5F67890E7A70002 /* EventTimeParser.swift in Sources */,
 				A1B2C3D4E5F67890C0A90002 /* CompanionNowPlaying.swift in Sources */,
 				A1B2C3D4E5F67890C4A10002 /* ChannelNumberEntry.swift in Sources */,
