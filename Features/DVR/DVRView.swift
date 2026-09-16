@@ -447,6 +447,17 @@ struct DVRView: View {
             refreshProgress()
             art.resolve(visibleRecordings, modelContext: modelContext)
         }
+        // Leaving this tab, or entering the fullscreen player, cancels and
+        // closes search (Logan 2026-09-16).
+        .onDismissSearch {
+            #if os(iOS)
+            iosSearchFocused = false
+            #endif
+            #if os(tvOS)
+            searchFieldFocused = false
+            #endif
+            if showSearchField || !searchText.isEmpty { clearSearch() }
+        }
         .onChange(of: visibleRecordings.count) { _, _ in
             refreshProgress()
             art.resolve(visibleRecordings, modelContext: modelContext)

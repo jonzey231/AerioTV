@@ -710,6 +710,19 @@ struct MoviesView: View {
                 )
                 .onDisappear { isPlaying = false }
             }
+            // Leaving this tab, or entering the fullscreen player, cancels
+            // and closes search (Logan 2026-09-16).
+            .onDismissSearch {
+                #if os(iOS)
+                iosSearchFocused = false
+                #endif
+                guard showSearchField || !searchText.isEmpty else { return }
+                showSearchField = false
+                searchText = ""
+                selectedProviderID = nil
+                personMatchName = nil
+                personMatches = []
+            }
         }
     }
 

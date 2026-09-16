@@ -152,6 +152,9 @@ struct SearchView: View {
             #else
             .searchable(text: $query, prompt: "Search movies, shows, programs...")
             #endif
+            .onDismissSearch {
+                if !query.isEmpty { query = "" }
+            }
             .onChange(of: query) { _, newValue in
                 scheduleSearch(newValue)
             }

@@ -583,6 +583,15 @@ struct ChannelListView: View {
                     )
                 )
                 #endif
+                // Leaving this tab, or entering the fullscreen player,
+                // cancels and closes search (Logan 2026-09-16).
+                .onDismissSearch {
+                    #if os(iOS)
+                    if phoneSearchPresented { phoneSearchPresented = false }
+                    if iPadSearchPresented { iPadSearchPresented = false }
+                    #endif
+                    if !searchText.isEmpty { searchText = "" }
+                }
                 .onChange(of: searchText)       { _, _ in filterChannels() }
                 .onChange(of: selectedGroup)    { _, _ in filterChannels() }
                 .onChange(of: sortModeRaw)      { _, _ in filterChannels() }

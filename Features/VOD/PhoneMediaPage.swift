@@ -283,6 +283,9 @@ struct PhoneMediaPage: View {
                 .autocorrectionDisabled()
                 .submitLabel(.search)
                 .focused($searchFocused)
+                // The owning tab clears its own search state; this drops the
+                // field's focus so the keyboard cannot follow into PiP.
+                .onDismissSearch { searchFocused = false }
             Button {
                 searchFocused = false
                 withAnimation(.spring(response: 0.25)) { search.onClose() }

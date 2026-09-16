@@ -7722,7 +7722,14 @@ private struct GuideProgramButton: View {
     private func runCellAction(_ action: GuideRemoteAction) {
         switch action {
         case .play:
-            onSelect(channelItem)
+            // Catch-up (Logan 2026-09-16): a single click on a past,
+            // replayable program PLAYS it rather than tuning the channel
+            // live. Select-and-hold keeps the full program menu.
+            if canReplayNow {
+                onWatchCatchup(channelItem, prog)
+            } else {
+                onSelect(channelItem)
+            }
         case .programInfo:
             showCtxDialog = true
         case .programDetails:
@@ -8058,6 +8065,11 @@ private struct GuideProgramButton: View {
                     // playback. See `EPGGuideView.handleMultiviewIntent`.
                     if multiviewStore.isStagingFromGuide {
                         onMultiviewIntent(channelItem)
+                    } else if canReplayNow {
+                        // Catch-up (Logan 2026-09-16): a single tap on a past,
+                        // replayable program PLAYS it. The long-press menu
+                        // still carries record / Program Info / the rest.
+                        onWatchCatchup(channelItem, prog)
                     } else {
                         onSelect(channelItem)
                     }

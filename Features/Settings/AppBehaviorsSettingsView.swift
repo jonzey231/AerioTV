@@ -173,6 +173,27 @@ struct AppBehaviorsSettingsView: View {
     @AppStorage("appBehaviorsAppleTVChannelFlip")
     private var appleTVChannelFlip = true
 
+    #if os(iOS)
+    /// In-Player Gestures (Logan 2026-09-16): a vertical finger slide along
+    /// one screen edge of the fullscreen player changes brightness, the
+    /// other edge changes volume. Touch only, so iPhone / iPad. BOTH OFF by
+    /// default; the recognizer lives in `PlayerView` and is confined to a
+    /// narrow edge band so it cannot fight the swipe-down-for-PiP strip,
+    /// the channel flip, or the seek scrubber.
+    @AppStorage(InPlayerEdgeGestures.brightnessKey)
+    private var edgeBrightnessGesture = false
+    @AppStorage(InPlayerEdgeGestures.volumeKey)
+    private var edgeVolumeGesture = false
+    /// Which edge owns brightness; volume always takes the other.
+    @AppStorage(InPlayerEdgeGestures.brightnessEdgeKey)
+    private var brightnessEdge = InPlayerEdgeGestures.defaultBrightnessEdge
+
+    private static let brightnessEdgeChoices: [(value: String, title: String, other: String, icon: String)] = [
+        ("left", "Left", "right", "arrow.left.to.line"),
+        ("right", "Right", "left", "arrow.right.to.line")
+    ]
+    #endif
+
     /// Extra behind-live buffer cushion (seconds) folded into the live
     /// mpv cache at tune-in to smooth jitter from any live source. Read
     /// live in `MPVPlayerView.setupMPV` from this same key. Default 0
@@ -671,13 +692,13 @@ struct AppBehaviorsSettingsView: View {
             }
             .listSectionSeparator(.hidden)
 
-            // MARK: Channel Flip Gesture
+            // MARK: In-Player Gestures
             //
-            // Single toggle that gates both input paths (Apple TV
-            // d-pad + iPhone/iPad swipe) on the same storage key.
-            // Surfaced on every platform so the user has one
-            // canonical preference no matter which device they're
-            // configuring from.
+            // Everything the fullscreen player recognizes as a finger
+            // gesture lives here: the channel flip (one toggle that gates
+            // both input paths, Apple TV d-pad + iPhone/iPad swipe, on the
+            // same storage key) and the edge slides for brightness and
+            // volume. The edge slides are touch-only and OFF by default.
             Section {
                 Toggle(isOn: $appleTVChannelFlip) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -691,10 +712,63 @@ struct AppBehaviorsSettingsView: View {
                 }
                 .tint(theme.accent)
                 .listRowBackground(Color.cardBackground)
+
+                Toggle(isOn: $edgeBrightnessGesture) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Edge slide for brightness")
+                            .scaledFont(.bodyMedium)
+                            .foregroundColor(.textPrimary)
+                        Text("Slide a finger up or down along one edge of the fullscreen player to change screen brightness.")
+                            .scaledFont(.labelSmall.subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
+                    }
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+
+                Toggle(isOn: $edgeVolumeGesture) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Edge slide for volume")
+                            .scaledFont(.bodyMedium)
+                            .foregroundColor(.textPrimary)
+                        Text("Slide a finger up or down along the other edge of the fullscreen player to change volume.")
+                            .scaledFont(.labelSmall.subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
+                    }
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+
+                if edgeBrightnessGesture || edgeVolumeGesture {
+                    ForEach(Self.brightnessEdgeChoices, id: \.value) { choice in
+                        Button {
+                            brightnessEdge = choice.value
+                        } label: {
+                            HStack {
+                                Image(systemName: choice.icon)
+                                    .scaledFont(.system(size: 15))
+                                    .foregroundColor(theme.accent)
+                                    .frame(width: 24)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Brightness: \(choice.title), Volume: \(choice.other.capitalized)")
+                                        .scaledFont(.bodyMedium)
+                                        .foregroundColor(.textPrimary)
+                                }
+                                Spacer()
+                                if brightnessEdge == choice.value {
+                                    Image(systemName: "checkmark")
+                                        .scaledFont(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(theme.accent)
+                                }
+                            }
+                        }
+                        .listRowBackground(Color.cardBackground)
+                    }
+                }
             } header: {
-                Text("Channel Flip Gesture").sectionHeaderStyle()
+                Text("In-Player Gestures").sectionHeaderStyle()
             } footer: {
-                Text("Turn off if accidental swipes or D-pad presses are flipping channels during playback.")
+                Text("Turn the channel flip off if accidental swipes or D-pad presses are flipping channels during playback. The brightness and volume slides are recognized only in a narrow band at the very edge of the screen, so they do not interfere with swiping down for Picture in Picture or with seeking.")
                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
             .listSectionSeparator(.hidden)

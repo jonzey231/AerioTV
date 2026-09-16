@@ -135,6 +135,14 @@ struct TVShowsView: View {
                         placement: .navigationBarDrawer(displayMode: .always),
                         prompt: "Search series")
             #endif
+            // Leaving this tab, or entering the fullscreen player, cancels
+            // and closes search (Logan 2026-09-16).
+            .onDismissSearch {
+                if !searchText.isEmpty { searchText = "" }
+                #if os(tvOS)
+                if showSearchField { showSearchField = false }
+                #endif
+            }
             .onAppear {
                 hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                 // v1.6.22: only auto-refresh when we genuinely have

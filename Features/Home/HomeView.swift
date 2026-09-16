@@ -3465,7 +3465,15 @@ final class NowPlayingManager: ObservableObject {
     /// used as a Binding anywhere, so the lost `$` projection costs
     /// nothing - `$playingItem` is the only projection in use and stays
     /// a plain @Published below.
-    @Published var playingItem: ChannelDisplayItem? = nil
+    @Published var playingItem: ChannelDisplayItem? = nil {
+        didSet {
+            // Entering the fullscreen player cancels and closes any open
+            // search (Logan 2026-09-16). See SearchDismissCenter.
+            if playingItem != nil, oldValue == nil {
+                SearchDismissCenter.dismissAll(reason: "fullscreen player")
+            }
+        }
+    }
     @Published private var _playingHeaders: [String: String] = [:]
     var playingHeaders: [String: String] {
         get { _playingHeaders }
@@ -3746,6 +3754,10 @@ final class NowPlayingManager: ObservableObject {
         // iPhone has no docked mini (Logan 2026-09-14): every minimize is
         // foreground PiP, which hides the host and calls applyMinimized.
         if UIDevice.current.userInterfaceIdiom == .phone {
+            // The PiP hop tears the host down and rebuilds the tab beneath
+            // it; resign once more here so nothing under it can claim the
+            // keyboard on the way through.
+            SearchDismissCenter.dismissAll(reason: "minimize to PiP")
             ForegroundPiPBridge.shared.request()
             return
         }
@@ -3756,6 +3768,7 @@ final class NowPlayingManager: ObservableObject {
     /// The state half of minimize, without the iPhone PiP routing.
     func applyMinimized() {
         isMinimized = true
+        SearchDismissCenter.resignKeyboard()
         // #42: the chrome can't be visible once we minimize. Clear the shared
         // mirror here so the re-coupled ChannelInfoBanner can't strand on a
         // stale `true` (the .onChange mirror won't fire if the container
@@ -6100,6 +6113,10 @@ struct MainTabView: View {
         }
         .onChange(of: selectedTab) { old, new in
             debugLog("[TAB] switch \(old) -> \(new)")
+            // Leaving a tab cancels and closes its search (Logan
+            // 2026-09-16) so no field is left holding first responder for
+            // the PiP transition to hand the keyboard back to.
+            SearchDismissCenter.dismissAll(reason: "tab \(old) -> \(new)")
             // Entering the DVR tab is the moment recordings must be
             // current; it is also what lets the background poll back off
             // (review 2026-09-11 section 6 proposal 5).
