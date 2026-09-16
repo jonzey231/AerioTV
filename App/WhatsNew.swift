@@ -57,6 +57,23 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.39",
+            title: "What's new in 1.8.39",
+            bullets: [
+                "Switch Stream keeps a single connection, so switching no longer drops the channel",
+                "Dispatcharr permissions now follow your own account instead of assuming admin, so DVR, Movies and TV Shows match what your account can do",
+                "Clear notices when a stream is refused because your account or the provider is out of connections",
+                "A stream that keeps ending backs off instead of fighting other devices for the slot",
+                "Live TV waits longer for a slow channel to start before trying another stream",
+                "Player Info Card: choose what shows on the info card in the player",
+                "Program art in the guide keeps its own shape and scales with Text Size",
+                "Changing a playlist's credentials now signs in as that account",
+                "Apple TV: focus outlines match the rows they highlight",
+                "iCloud Push and Pull now show progress"
+            ],
+            releaseURL: nil
+        ),
+        WhatsNewRelease(
             version: "1.8.38",
             title: "What's new in 1.8.38",
             bullets: [
