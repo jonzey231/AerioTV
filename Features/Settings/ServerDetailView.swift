@@ -251,7 +251,7 @@ struct ServerDetailView: View {
                         }
                     }
                     .disabled(server.isActive)
-                    .listRowBackground(Color.cardBackground)
+                    .tvActionRowChrome()
 
                     #if os(tvOS)
                     // TV: a top-right toolbar button is off the D-pad
@@ -265,7 +265,7 @@ struct ServerDetailView: View {
                                 .foregroundColor(Color.contrastText(.accentPrimary))
                         }
                     }
-                    .listRowBackground(Color.cardBackground)
+                    .tvActionRowChrome()
                     #endif
 
                     Button {
@@ -282,7 +282,7 @@ struct ServerDetailView: View {
                                 .foregroundColor(Color.contrastText(.accentPrimary))
                         }
                     }
-                    .listRowBackground(Color.cardBackground)
+                    .tvActionRowChrome()
 
                     if let result = connectionResult {
                         HStack(spacing: 8) {
@@ -318,7 +318,7 @@ struct ServerDetailView: View {
                             }
                         }
                         .disabled(isRefreshingPlaylist)
-                        .listRowBackground(Color.cardBackground)
+                        .tvActionRowChrome()
                     }
 
                     if hasLANConfigured {
@@ -340,7 +340,7 @@ struct ServerDetailView: View {
                             }
                         }
                         .disabled(tvLANProbe.isProbing)
-                        .listRowBackground(Color.cardBackground)
+                        .tvActionRowChrome()
                         .onChange(of: tvLANProbe.isProbing) { _, nowProbing in
                             if !nowProbing {
                                 lanRefreshAcked = true
@@ -386,7 +386,7 @@ struct ServerDetailView: View {
                         }
                         .foregroundColor(isPurgingEPG ? .textSecondary : .statusWarning)
                     }
-                    .listRowBackground(Color.cardBackground)
+                    .tvActionRowChrome()
                     .disabled(isPurgingEPG)
                 } header: {
                     Text("EPG Cache").sectionHeaderStyle()
@@ -423,7 +423,7 @@ struct ServerDetailView: View {
                         }
                         .foregroundColor(isRefreshingAll ? .textSecondary : .statusWarning)
                     }
-                    .listRowBackground(Color.cardBackground)
+                    .tvActionRowChrome()
                     .disabled(isRefreshingAll || isPurgingEPG)
                 } header: {
                     Text("Full Refresh").sectionHeaderStyle()
@@ -448,7 +448,7 @@ struct ServerDetailView: View {
                         }
                         .foregroundColor(.statusLive)
                     }
-                    .listRowBackground(Color.cardBackground)
+                    .tvActionRowChrome()
                 } header: {
                     Text("Danger Zone").sectionHeaderStyle()
                 } footer: {
@@ -471,7 +471,14 @@ struct ServerDetailView: View {
             // match the rows' corner radius (Logan 2026-09-15). One
             // container-level style covers every button and link in the
             // page; inherited through the environment.
-            .buttonStyle(TVInlineCardRowButtonStyle(cornerRadius: 12))
+            //
+            // `fillsRow` is REQUIRED here: these labels are bare HStacks
+            // of icon + text (several without even a trailing Spacer),
+            // and the row card comes from `.listRowBackground`, which a
+            // ButtonStyle cannot see. Without it the ring measured the
+            // label and drew a small outline around the words, floating
+            // inside the card (Logan 2026-09-15, Refresh Playlist).
+            .buttonStyle(TVInlineCardRowButtonStyle(cornerRadius: 12, fillsRow: true))
             #endif
         }
         .navigationTitle(server.name)
@@ -829,3 +836,28 @@ struct EditPlaylistSheet: View {
 }
 
 // MARK: - Edit Server Sheet
+
+
+// MARK: - tvOS action row chrome
+
+private extension View {
+    /// Row chrome for the playlist detail page's ACTION rows.
+    ///
+    /// On tvOS the card is handed to `TVInlineCardRowButtonStyle
+    /// (fillsRow: true)`, which draws the card fill and the focus ring on
+    /// one rounded rectangle. The list must therefore contribute neither a
+    /// background nor insets, or the style's card would sit inset inside a
+    /// second card with a different corner radius (Logan 2026-09-15). The
+    /// style re-applies the 20pt leading inset the list was providing, so
+    /// the icon and label do not move. iOS is untouched.
+    @ViewBuilder
+    func tvActionRowChrome() -> some View {
+        #if os(tvOS)
+        self
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets())
+        #else
+        self.listRowBackground(Color.cardBackground)
+        #endif
+    }
+}

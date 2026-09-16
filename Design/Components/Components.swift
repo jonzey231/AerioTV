@@ -245,20 +245,58 @@ struct TVInlineCardRowButtonStyle: ButtonStyle {
     /// Corner radius of the tint/ring. 10pt reads correctly for a row
     /// nested inside the standard 12pt Settings card.
     var cornerRadius: CGFloat = 10
+    /// Whether this style owns the whole ROW: its card AND its ring.
+    ///
+    /// A `ButtonStyle` only ever sees `configuration.label`, so on a List
+    /// row whose label is a bare `HStack` of icon + text the ring hugs
+    /// those few points of content. Expanding the label to full width got
+    /// the ring to span the row but left it inset from, and a different
+    /// corner radius than, the card `.listRowBackground` was drawing
+    /// underneath (Logan 2026-09-15, playlist detail > Refresh Playlist).
+    ///
+    /// With this set the style draws the card fill itself, on the SAME
+    /// rounded rectangle as the ring, so the two can never disagree about
+    /// bounds or radius. The call site must clear the row background and
+    /// zero the row insets (`.listRowBackground(Color.clear)` +
+    /// `.listRowInsets(EdgeInsets())`); the padding below replaces the
+    /// insets the list was applying, so row content does not move.
+    var fillsRow: Bool = false
+    /// Row height floor when `fillsRow` is set. Matches the 80pt minimum
+    /// every other tvOS Settings row uses.
+    var rowMinHeight: CGFloat = 80
+    /// Leading/trailing inset for row content when `fillsRow` is set.
+    /// 20pt reproduces the tvOS list row inset it replaces.
+    var rowHorizontalPadding: CGFloat = 20
+    /// Vertical inset for row content when `fillsRow` is set.
+    var rowVerticalPadding: CGFloat = 18
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Color.accentPrimary.opacity(isFocused ? 0.18 : 0))
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(Color.accentPrimary.opacity(isFocused ? 0.65 : 0),
-                                  lineWidth: isFocused ? 2.5 : 0)
-            }
-            .opacity(configuration.isPressed ? 0.7 : 1.0)
-            .animation(.easeInOut(duration: 0.15), value: isFocused)
+        if fillsRow {
+            configuration.label
+                .padding(.horizontal, rowHorizontalPadding)
+                .padding(.vertical, rowVerticalPadding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: rowMinHeight)
+                // Card and ring on one shape: identical bounds, identical
+                // radius, ring inset inside the card by strokeBorder.
+                .background(tvSettingsCardBG(isFocused))
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .opacity(configuration.isPressed ? 0.7 : 1.0)
+                .animation(.easeInOut(duration: 0.15), value: isFocused)
+        } else {
+            configuration.label
+                .background {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(Color.accentPrimary.opacity(isFocused ? 0.18 : 0))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .strokeBorder(Color.accentPrimary.opacity(isFocused ? 0.65 : 0),
+                                      lineWidth: isFocused ? 2.5 : 0)
+                }
+                .opacity(configuration.isPressed ? 0.7 : 1.0)
+                .animation(.easeInOut(duration: 0.15), value: isFocused)
+        }
     }
 }
 
