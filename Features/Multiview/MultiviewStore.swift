@@ -575,7 +575,7 @@ final class MultiviewStore: ObservableObject {
         var tileURL = resolved.url
         if sessionEngine == .avPlayerDirectHLS,
            classifyStreamURL(resolved.url) == .mpegTS,
-           HLSCapabilityStore.shared.isCapable(resolved.url) {
+           HLSCapabilityStore.shared.shouldUseNativeHLS(resolved.url) {
             tileURL = appendingHLSOutputFormat(resolved.url)
         }
         // Commit. `resolved.url` + `resolved.headers` are
@@ -652,7 +652,7 @@ final class MultiviewStore: ObservableObject {
         var tileURL = resolved.url
         if sessionEngine == .avPlayerDirectHLS,
            classifyStreamURL(resolved.url) == .mpegTS,
-           HLSCapabilityStore.shared.isCapable(resolved.url) {
+           HLSCapabilityStore.shared.shouldUseNativeHLS(resolved.url) {
             tileURL = appendingHLSOutputFormat(resolved.url)
         }
         let old = tiles[idx]
@@ -1018,10 +1018,21 @@ final class MultiviewStore: ObservableObject {
         // Channel flip is a tune: start the press-to-picture clock here
         // (review 2026-09-11, marker inventory).
         TuneTimeline.shared.press(item.name)
+        // CHANNEL FLIP ON THE NATIVE-HLS ENGINE (device 2026-09-16: the
+        // banner changed, the picture did not). The two other tile-URL
+        // sites apply the server-side HLS upgrade; this one did not, so a
+        // flip handed the tile a raw-TS URL under a direct-HLS session
+        // lock. Same decision, same single place to change it.
+        var tileURL = resolved.url
+        if sessionEngine == .avPlayerDirectHLS,
+           classifyStreamURL(resolved.url) == .mpegTS,
+           HLSCapabilityStore.shared.shouldUseNativeHLS(resolved.url) {
+            tileURL = appendingHLSOutputFormat(resolved.url)
+        }
         tiles[idx] = MultiviewTile(
             id: tileID,                  // pinned
             item: item,
-            streamURL: resolved.url,
+            streamURL: tileURL,
             headers: resolved.headers,
             addedAt: preservedAddedAt
         )

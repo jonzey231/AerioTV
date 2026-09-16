@@ -485,6 +485,32 @@ enum DispatcharrSessionLimitVerifier {
 final class HLSCapabilityStore: NSObject {
     static let shared = HLSCapabilityStore()
 
+    /// Developer override for ONE server's live engine, so the same
+    /// channel can be compared native-HLS vs remux-TS without changing
+    /// servers (Logan, 2026-09-16). `.auto` is the shipping behavior:
+    /// the probe verdict decides. The two forced values bypass the
+    /// verdict entirely (and suppress the probe, which would otherwise
+    /// be a second client for a question we are not asking).
+    enum EngineOverride: String, CaseIterable, Sendable {
+        case auto
+        case forceNativeHLS
+        case forceRemuxTS
+
+        var label: String {
+            switch self {
+            case .auto:           return "Automatic"
+            case .forceNativeHLS: return "Force Native HLS"
+            case .forceRemuxTS:   return "Force Remux TS"
+            }
+        }
+    }
+
+    private static let overridesKey = "playback.hlsEngineOverrides"
+    /// Host key -> EngineOverride.rawValue. Persisted like the verdicts:
+    /// a developer comparing two engines across relaunches should not
+    /// have to re-set it every launch.
+    private var overrides: [String: String] = [:]
+
     private static let defaultsKey = "playback.hlsCapableHosts"
     /// Persisted verdicts, BOTH ways: host key -> (capable, checkedAt).
     /// Apple TV review 2026-09-11 (session.txt:259-261, 724-728,
@@ -536,8 +562,55 @@ final class HLSCapabilityStore: NSObject {
 
     private override init() {
         capable = Set(UserDefaults.standard.stringArray(forKey: Self.defaultsKey) ?? [])
+        overrides = (UserDefaults.standard.dictionary(forKey: Self.overridesKey) as? [String: String]) ?? [:]
         super.init()
         loadVerdicts()
+    }
+
+    // MARK: - Developer engine override
+
+    /// The host key a developer UI addresses (`host:port`), or nil for a
+    /// URL with no host.
+    func serverKey(_ url: URL) -> String? { hostKey(url) }
+
+    func engineOverride(forKey key: String) -> EngineOverride {
+        overrides[key].flatMap(EngineOverride.init(rawValue:)) ?? .auto
+    }
+
+    func engineOverride(for url: URL) -> EngineOverride {
+        guard let key = hostKey(url) else { return .auto }
+        return engineOverride(forKey: key)
+    }
+
+    func setEngineOverride(_ value: EngineOverride, forKey key: String) {
+        if value == .auto {
+            overrides.removeValue(forKey: key)
+        } else {
+            overrides[key] = value.rawValue
+        }
+        UserDefaults.standard.set(overrides, forKey: Self.overridesKey)
+        debugLog("[HLS-CAP] \(key) engine override -> \(value.rawValue)")
+    }
+
+    /// THE single decision point for "does this live tune take the
+    /// server's native HLS output instead of our TS remuxer?". Callers
+    /// must use this rather than `isCapable` so the developer override is
+    /// honored everywhere (seed tile, added tile, tile swap).
+    ///
+    /// An unknown verdict is NOT a blocker: it answers `false`, which is
+    /// exactly the remux path we ship today.
+    func shouldUseNativeHLS(_ url: URL) -> Bool {
+        switch engineOverride(for: url) {
+        case .forceNativeHLS: return true
+        case .forceRemuxTS:   return false
+        case .auto:           return isCapable(url)
+        }
+    }
+
+    /// True while a forced verdict stands for this host: the capability
+    /// probe has nothing to contribute and must not spend a client on it.
+    func hasEngineOverride(_ url: URL) -> Bool {
+        engineOverride(for: url) != .auto
     }
 
     /// Rehydrate the two-way verdict table. Entries past the TTL are
@@ -788,6 +861,245 @@ final class HLSCapabilityStore: NSObject {
                         didCompleteWithError error: Error?) {
             // Network failure before any response: report unknown.
             report(0)
+        }
+    }
+}
+
+// MARK: - Native HLS client resolution (ONE TUNE = ONE CLIENT)
+
+/// Dispatcharr mints a NEW per-client HLS session on EVERY GET of a
+/// `?output_format=hls` stream URL: the response is a 302 to
+/// `/proxy/hls/<uuid>/client_<id>/index.m3u8`, and that `client_<id>` is
+/// freshly allocated each time. Handing that URL to AVPlayer is therefore
+/// not one connection but as many as AVPlayer happens to request it:
+/// device test 2026-09-16 (Logan's iPhone, one channel, one tune) showed
+/// THREE clients in Dispatcharr's active connections table, same second,
+/// same IP. Every one of them counts against the user's stream limit, and
+/// a player that re-resolves the URL mid-session is polling a different,
+/// just-created session on each refresh instead of following one.
+///
+/// So the app resolves the redirect ITSELF, exactly once per tune, and
+/// hands AVPlayer the resolved per-client playlist URL. After that the
+/// player only ever fetches that playlist and its segments; nothing in
+/// the tune path may touch the `?output_format=hls` URL again.
+enum NativeHLSClientResolver {
+    struct Resolved: Sendable {
+        /// The per-client playlist URL to hand the player.
+        let playlistURL: URL
+        /// `client_<id>` (or the closest path segment), for the log line
+        /// that proves one tune equals one client.
+        let clientID: String
+    }
+
+    /// Why a resolve did not produce a client playlist. The distinction
+    /// decides whether retrying can help.
+    enum Failure: Error, Sendable {
+        /// No response at all (cancelled, timed out, connection refused).
+        case transport
+        /// A response, but not a redirect to a playlist. `status` is the
+        /// HTTP code so the log can say WHY.
+        case notAPlaylist(status: Int)
+
+        /// 429 and 5xx are the server declining for now, not declining
+        /// forever: Dispatcharr answers 503 "Channel is stopping" and 429
+        /// at the stream limit while a previous client is still being
+        /// reaped, and its ghost-client sweep runs about a minute behind
+        /// a teardown. Those are worth another attempt. A clean 200 means
+        /// the server ignored `output_format` and never will.
+        var isWorthRetrying: Bool {
+            switch self {
+            case .transport: return true
+            case .notAPlaylist(let status): return status == 429 || (500...599).contains(status)
+            }
+        }
+
+        var describe: String {
+            switch self {
+            case .transport: return "no response (cancelled, timed out, or refused)"
+            case .notAPlaylist(let status):
+                return status == 0 ? "no usable redirect" : "HTTP \(status), not a playlist redirect"
+            }
+        }
+    }
+
+    /// Resolve with a short backoff. The single-shot version failed once
+    /// on device about 3 s after a successful tune on another channel
+    /// (2026-09-16, US: ESPN 2) and the fallback minted clients on every
+    /// playlist refresh, which is the whole problem this type exists to
+    /// prevent. A lingering previous client (Dispatcharr reaps a stopped
+    /// one roughly 55 s later) makes a transient refusal the most likely
+    /// cause, and a transient refusal is exactly what a retry fixes.
+    static func resolveWithRetry(_ upgradedURL: URL,
+                                 headers: [String: String],
+                                 attempts: Int = 3) async -> Result<Resolved, Failure> {
+        var last: Failure = .transport
+        for attempt in 1...max(1, attempts) {
+            let outcome = await resolveOnce(upgradedURL, headers: headers)
+            switch outcome {
+            case .success(let resolved):
+                if attempt > 1 {
+                    debugLog("[AVP-NHLS] resolve succeeded on attempt \(attempt)")
+                }
+                return .success(resolved)
+            case .failure(let failure):
+                last = failure
+                debugLog("[AVP-NHLS] resolve attempt \(attempt)/\(attempts) failed: \(failure.describe)")
+                guard failure.isWorthRetrying, attempt < attempts else {
+                    return .failure(failure)
+                }
+                // 400 ms, then 1000 ms. Short enough to stay inside a
+                // tune, long enough for a teardown to land.
+                let delay: UInt64 = attempt == 1 ? 400_000_000 : 1_000_000_000
+                try? await Task.sleep(nanoseconds: delay)
+            }
+        }
+        return .failure(last)
+    }
+
+    /// One non-following GET. The redirect target is the answer; the
+    /// request is cancelled at the response headers either way, so the
+    /// server is never asked to stream anything here.
+    ///
+    /// Each call that reaches a 302 mints exactly one client, so callers
+    /// must go through `resolveWithRetry` and use its single answer.
+    static func resolveOnce(_ upgradedURL: URL,
+                            headers: [String: String],
+                            timeout: TimeInterval = 8) async -> Result<Resolved, Failure> {
+        var request = URLRequest(url: upgradedURL)
+        request.timeoutInterval = timeout
+        // Never a cached 302: a cached Location would point at a client
+        // id the server has already reaped.
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+
+        let outcome: (url: URL?, status: Int) = await withCheckedContinuation { continuation in
+            let delegate = RedirectCatcher { url, status in
+                continuation.resume(returning: (url, status))
+            }
+            let session = URLSession(configuration: .ephemeral,
+                                     delegate: delegate,
+                                     delegateQueue: nil)
+            session.dataTask(with: request).resume()
+            session.finishTasksAndInvalidate()
+        }
+        guard let location = outcome.url else {
+            return .failure(outcome.status == 0 ? .transport
+                                                : .notAPlaylist(status: outcome.status))
+        }
+        guard HLSCapabilityStore.redirectLooksLikeHLS(location) else {
+            return .failure(.notAPlaylist(status: outcome.status))
+        }
+        return .success(Resolved(playlistURL: location, clientID: clientID(from: location)))
+    }
+
+    /// `client_<id>` when the path carries one, else the last meaningful
+    /// path segment. Purely for the log line; never used for routing.
+    static func clientID(from url: URL) -> String {
+        let parts = url.pathComponents.filter { $0 != "/" }
+        if let c = parts.first(where: { $0.hasPrefix("client_") }) { return c }
+        let meaningful = parts.filter { !$0.lowercased().hasSuffix(".m3u8") }
+        return meaningful.last ?? "unknown"
+    }
+
+    /// What the resolved client playlist actually contains right now.
+    struct PlaylistWindow: Sendable {
+        /// Segments currently listed.
+        let segmentCount: Int
+        /// Sum of the EXTINF durations: the media the player can reach.
+        let windowSeconds: Double
+        /// Advertised TARGETDURATION. Dispatcharr overstates this (8 for
+        /// roughly 4 s segments), which is why the measured segment
+        /// duration below is the one worth using.
+        let targetDuration: Double
+        /// Mean EXTINF, i.e. what a segment really is.
+        var segmentSeconds: Double {
+            segmentCount > 0 ? windowSeconds / Double(segmentCount) : 0
+        }
+    }
+
+    /// Read the RESOLVED client playlist and report its window. This is
+    /// free in client terms: it is a GET of the per-client playlist URL,
+    /// the same document the player is about to poll, so it mints
+    /// nothing. Never call this with the `?output_format=hls` URL.
+    ///
+    /// Why it is needed (device measurement 2026-09-16, US: ESPN U): a
+    /// freshly minted client playlist starts nearly empty rather than
+    /// exposing the channel's existing window. The loaded range stopped
+    /// at 1.97 s and did not move for 3.8 s, then jumped a whole segment
+    /// - the player had one segment and physically nothing else to
+    /// fetch. Knowing that BEFORE playback lets the tune ask for no more
+    /// than exists.
+    static func inspectPlaylist(_ playlistURL: URL,
+                                headers: [String: String],
+                                timeout: TimeInterval = 5) async -> PlaylistWindow? {
+        var request = URLRequest(url: playlistURL)
+        request.timeoutInterval = timeout
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode ?? 0 < 400,
+              let text = String(data: data, encoding: .utf8),
+              text.contains("#EXTM3U") else { return nil }
+
+        var durations: [Double] = []
+        var target = 0.0
+        for rawLine in text.split(separator: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("#EXTINF:") {
+                // "#EXTINF:3.978,title"
+                let value = line.dropFirst("#EXTINF:".count)
+                    .prefix { $0 != "," }
+                    .trimmingCharacters(in: .whitespaces)
+                if let d = Double(value), d > 0 { durations.append(d) }
+            } else if line.hasPrefix("#EXT-X-TARGETDURATION:") {
+                target = Double(line.dropFirst("#EXT-X-TARGETDURATION:".count)
+                    .trimmingCharacters(in: .whitespaces)) ?? 0
+            }
+        }
+        guard !durations.isEmpty else { return nil }
+        return PlaylistWindow(segmentCount: durations.count,
+                              windowSeconds: durations.reduce(0, +),
+                              targetDuration: target)
+    }
+
+    /// Reports the FIRST redirect's Location and refuses to follow it, so
+    /// exactly one client is minted per call. Carries the HTTP status
+    /// alongside, so a failure can say whether the server refused (429,
+    /// 503) or simply does not do this (200). Status 0 means no response
+    /// reached us at all.
+    private final class RedirectCatcher: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        private let onResult: @Sendable (URL?, Int) -> Void
+        private let lock = NSLock()
+        private var reported = false
+        init(onResult: @escaping @Sendable (URL?, Int) -> Void) { self.onResult = onResult }
+
+        private func report(_ url: URL?, _ status: Int) {
+            lock.lock()
+            let already = reported
+            reported = true
+            lock.unlock()
+            guard !already else { return }
+            onResult(url, status)
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            report(request.url, response.statusCode)
+            completionHandler(nil)
+        }
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                        didReceive response: URLResponse,
+                        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+            report(nil, (response as? HTTPURLResponse)?.statusCode ?? 0)
+            completionHandler(.cancel)
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        didCompleteWithError error: Error?) {
+            report(nil, 0)
         }
     }
 }

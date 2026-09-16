@@ -72,6 +72,71 @@ struct DeveloperSettingsView: View {
 
     @Query private var servers: [ServerConnection]
 
+    /// Developer override for the ACTIVE server's live engine, so the
+    /// same channel can be watched through the server's native HLS
+    /// output and through our TS remuxer back to back (Logan,
+    /// 2026-09-16). Persisted per server host in HLSCapabilityStore, so
+    /// it survives relaunch and does not leak to another server.
+    @State private var liveEngineOverride: HLSCapabilityStore.EngineOverride = .auto
+
+    private var activeServer: ServerConnection? {
+        servers.first(where: { $0.isActive })
+    }
+
+    /// Both of the active server's host keys (public base + LAN local):
+    /// stream URLs flip between them per TVLANProbe, and a forced engine
+    /// must not evaporate when the app moves onto the LAN.
+    private var overrideHostKeys: [String] {
+        guard let server = activeServer else { return [] }
+        var keys: [String] = []
+        for raw in [server.normalizedBaseURL, server.normalizedLocalURL] where !raw.isEmpty {
+            if let url = URL(string: raw),
+               let key = HLSCapabilityStore.shared.serverKey(url),
+               !keys.contains(key) {
+                keys.append(key)
+            }
+        }
+        return keys
+    }
+
+    private func loadLiveEngineOverride() {
+        guard let key = overrideHostKeys.first else {
+            liveEngineOverride = .auto
+            return
+        }
+        liveEngineOverride = HLSCapabilityStore.shared.engineOverride(forKey: key)
+    }
+
+    private func cycleLiveEngineOverride() {
+        let all = HLSCapabilityStore.EngineOverride.allCases
+        let idx = all.firstIndex(of: liveEngineOverride) ?? 0
+        let next = all[(idx + 1) % all.count]
+        liveEngineOverride = next
+        for key in overrideHostKeys {
+            HLSCapabilityStore.shared.setEngineOverride(next, forKey: key)
+        }
+    }
+
+    private var liveEngineOverrideSubtitle: String {
+        guard activeServer != nil else { return "No active server" }
+        switch liveEngineOverride {
+        case .auto:
+            return "Automatic: the capability probe decides (native HLS when the server redirects to a playlist)"
+        case .forceNativeHLS:
+            return "Forced: every live tune on this server requests output_format=hls and plays it direct"
+        case .forceRemuxTS:
+            return "Forced: every live tune on this server uses the on-device TS remuxer"
+        }
+    }
+
+    private var liveEngineOverrideIcon: String {
+        switch liveEngineOverride {
+        case .auto:           return "wand.and.stars"
+        case .forceNativeHLS: return "play.tv.fill"
+        case .forceRemuxTS:   return "arrow.triangle.2.circlepath.circle.fill"
+        }
+    }
+
     @State private var showEnableConfirmation = false
     @State private var showDisableConfirmation = false
     @State private var copiedConfirmation = false
@@ -107,6 +172,7 @@ struct DeveloperSettingsView: View {
             iOSBody
             #endif
         }
+        .onAppear { loadLiveEngineOverride() }
         .navigationTitle("Developer")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
@@ -298,6 +364,48 @@ struct DeveloperSettingsView: View {
                             .labelsHidden()
                             .tint(.accentPrimary)
                     }
+                    .padding(.vertical, 4)
+                    .listRowBackground(Color.cardBackground)
+
+                    // Live engine override for the ACTIVE server: tap to
+                    // cycle Automatic -> Force Native HLS -> Force Remux TS.
+                    Button {
+                        cycleLiveEngineOverride()
+                    } label: {
+                        HStack(spacing: 14) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(liveEngineOverride == .auto
+                                          ? Color.elevatedBackground
+                                          : Color.accentPrimary.opacity(0.18))
+                                    .frame(width: 36, height: 36)
+                                Image(systemName: liveEngineOverrideIcon)
+                                    .scaledFont(.system(size: 16, weight: .medium))
+                                    .foregroundColor(liveEngineOverride == .auto
+                                                     ? Color.contrastText(.textSecondary)
+                                                     : .accentPrimary)
+                            }
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Live Engine for this Server")
+                                    .scaledFont(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                                Text(liveEngineOverrideSubtitle)
+                                    .scaledFont(.labelSmall)
+                                    .foregroundColor(liveEngineOverride == .auto
+                                                     ? Color.contrastText(.textTertiary)
+                                                     : Color.contrastText(.accentPrimary))
+                            }
+
+                            Spacer()
+
+                            Text(liveEngineOverride.label)
+                                .scaledFont(.labelSmall)
+                                .foregroundColor(Color.contrastText(.textSecondary))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(activeServer == nil)
                     .padding(.vertical, 4)
                     .listRowBackground(Color.cardBackground)
 
@@ -715,6 +823,17 @@ struct DeveloperSettingsView: View {
                             : "Off: raw TS channels use the mpv engine (the default)",
                         isOn: $avPlayerRemuxTS
                     ) { _ in }
+
+                    // Live engine override for the ACTIVE server: press to
+                    // cycle Automatic -> Force Native HLS -> Force Remux TS,
+                    // so the same channel can be compared on both engines.
+                    TVSettingsActionRow(
+                        icon: liveEngineOverrideIcon,
+                        label: "Live Engine for this Server: \(liveEngineOverride.label)",
+                        isAccent: liveEngineOverride != .auto
+                    ) {
+                        cycleLiveEngineOverride()
+                    }
 
                     TVSettingsToggleRow(
                         icon: mpvEngineEnabled ? "shield.lefthalf.filled" : "shield.slash",

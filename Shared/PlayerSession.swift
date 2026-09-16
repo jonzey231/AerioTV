@@ -480,26 +480,56 @@ final class PlayerSession: ObservableObject {
             // the background, so the answer is ready for the next tune. An
             // un-probed HLS-capable server takes the remux path once - the
             // pre-probe behavior, with a working direct-HLS fallback.
-            if HLSCapabilityStore.shared.isCapable(url) {
+            // `shouldUseNativeHLS`, not `isCapable`: it folds in the
+            // developer engine override (Developer > Playback Engine >
+            // Live Engine for this Server) so a forced verdict wins here
+            // and at every other upgrade site.
+            if HLSCapabilityStore.shared.shouldUseNativeHLS(url) {
                 routeURL = appendingHLSOutputFormat(url)
                 effectiveFormat = .hls
             }
             // Deferred, never at tune time: the probe is a second GET to
-            // this channel and tripped stream_limit (2026-09-15).
-            HLSCapabilityStore.shared.deferProbe(streamURL: url, headers: headers)
+            // this channel and tripped stream_limit (2026-09-15). A
+            // forced override makes the probe pointless AND costly (one
+            // more client id), so skip it entirely.
+            // Nor when this tune is ALREADY taking the native path: the
+            // probe is one more GET of the `?output_format=hls` URL, and
+            // every one of those mints another server-side client
+            // (device test 2026-09-16: three clients for one tune). The
+            // tune itself now answers the capability question.
+            if !HLSCapabilityStore.shared.hasEngineOverride(url), effectiveFormat != .hls {
+                HLSCapabilityStore.shared.deferProbe(streamURL: url, headers: headers)
+            }
         }
         if PlaybackFeatureFlags.avPlayerForHLS, effectiveFormat == .hls {
-            return ResolvedEngine(engine: .avPlayerDirectHLS, routeURL: routeURL, headers: headers)
+            return logTuneEngine(ResolvedEngine(engine: .avPlayerDirectHLS, routeURL: routeURL, headers: headers))
         }
         if PlaybackFeatureFlags.avPlayerRemuxTS, format == .mpegTS {
-            return ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: url, headers: headers)
+            return logTuneEngine(ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: url, headers: headers))
         }
         // mpv disabled (test flag): unknown live formats go through the
         // TS remux arm and fail visibly if they are not TS.
         if !PlaybackFeatureFlags.mpvEngineEnabled {
-            return ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: url, headers: headers)
+            return logTuneEngine(ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: url, headers: headers))
         }
-        return ResolvedEngine(engine: .mpv, routeURL: url, headers: headers)
+        return logTuneEngine(ResolvedEngine(engine: .mpv, routeURL: url, headers: headers))
+    }
+
+    /// One line per live tune saying which pipeline the resolver picked,
+    /// in the existing [TUNE] style, so a log read answers "native or
+    /// remux?" without inferring it from the URL. Never logs the URL
+    /// itself (credentials).
+    private static func logTuneEngine(_ resolved: ResolvedEngine) -> ResolvedEngine {
+        let name: String
+        switch resolved.engine {
+        case .avPlayerDirectHLS: name = "native-hls"
+        case .avPlayerRemuxTS:   name = "remux-ts"
+        case .mpv:               name = "mpv"
+        }
+        let override = HLSCapabilityStore.shared.engineOverride(for: resolved.routeURL)
+        debugLog("[TUNE] engine=\(name)"
+            + (override == .auto ? "" : " override=\(override.rawValue)"))
+        return resolved
     }
 
     /// TEST (AVPlayer VOD): route a VOD launch through the unified

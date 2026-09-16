@@ -3029,6 +3029,65 @@ struct AVPlayerMultiviewTile: View {
     /// TS, AVPlayer -11850): the same channel re-tuned once through the
     /// on-device TS remux, on the URL without the HLS upgrade.
     @State private var directHLSFallbackURL: URL?
+    /// LiveConnectionRegistry id for a NATIVE-HLS live tile. The remux
+    /// arm registers its own ingest (TSHLSRemuxer), but the direct arm
+    /// used to register nothing, so a native-HLS session looked idle to
+    /// the single-connection rules and the capability probe could open a
+    /// SECOND client id beside it (every ?output_format=hls request mints
+    /// one server-side). AVPlayer owns the socket here, so this is an
+    /// accounting entry, not a socket we hold: opened when the player is
+    /// handed the playlist, closed in `stop()`.
+    @State private var directHLSConnID: UUID?
+    /// A/V START GATE (native server HLS live only). Field report
+    /// 2026-09-16, Logan's iPhone: "I have sound immediately but the
+    /// video doesn't start for a while." Dispatcharr's own HLS output
+    /// carries `#EXT-X-START:TIME-OFFSET=-10.000,PRECISE=YES` over ~4 s
+    /// plain TS segments, so AVPlayer joins MID-GOP: the audio decoder
+    /// has usable frames at that exact point, the video decoder does not
+    /// until the next IDR, and AVPlayer renders the audio it has rather
+    /// than waiting. The result is sound over a blank tile for the rest
+    /// of that GOP. We cannot move the join point without overriding the
+    /// server's placement (measured: the override bought nothing and cost
+    /// a re-position), and we will not ask for a server change.
+    ///
+    /// So: keep the tile SILENT and keep its loading surface up until the
+    /// player layer reports a real picture, then release both in the same
+    /// main-thread hop. Time to first picture is untouched; what changes
+    /// is that nothing is presented until there is a picture to present.
+    /// Live only, native-HLS only - the remux arm never arms this.
+    @State private var avStartGateActive = false
+    @State private var avStartGateAt: CFTimeInterval = 0
+    @State private var avStartGateToken = UUID()
+    /// The gate's two halves. `isReadyForDisplay` alone is NOT enough:
+    /// device log 2026-09-16 released the gate at +2233ms on a decoded
+    /// frame while the item was still not readyToPlay and the rate was
+    /// still 0, so Logan got a frozen picture (and, once the rate finally
+    /// came up at +9184ms, sound over it). The gate now needs a picture
+    /// AND moving playback.
+    @State private var avGateLayerReady = false
+    @State private var avGatePlaying = false
+    /// When both halves first landed, so the video-frame-rate
+    /// confirmation can be time-boxed rather than open-ended.
+    @State private var avGateFrameRateWaitFrom: CFTimeInterval = 0
+    /// The per-client playlist URL this tune resolved ONCE. Every later
+    /// start()/retry on the same tune reuses it: re-fetching the
+    /// `?output_format=hls` URL would mint another server-side client.
+    @State private var resolvedNativeHLSURL: URL?
+    /// The upgrade URL `resolvedNativeHLSURL` belongs to, so a channel
+    /// swap on the same tile cannot inherit the previous channel's
+    /// client.
+    @State private var resolvedNativeHLSFor: URL?
+    @State private var resolvedNativeHLSAt: CFTimeInterval = 0
+    @State private var nativeHLSResolveInFlight = false
+    /// 250 ms buffer-state probe, native-HLS live tunes only. The 9.1 s
+    /// wait is near constant across tunes, so it is a policy and not a
+    /// race, and the only way to name the policy is to watch what the
+    /// item is holding while it refuses to play.
+    @State private var nativeHLSBufferProbe: Timer?
+    /// The resolved client playlist's window as read immediately before
+    /// the player was handed it. Drives the join point and the forward
+    /// buffer, both of which were previously guesses.
+    @State private var nativeHLSWindow: NativeHLSClientResolver.PlaylistWindow?
     private var liveSourceURL: URL { directHLSFallbackURL ?? streamURL }
     @State private var mkvServer: MKVVODServer?
     @State private var statusText: String?
@@ -3214,7 +3273,8 @@ struct AVPlayerMultiviewTile: View {
             if let player {
                 AVPlayerLayerView(player: player,
                                   videoGravity: tileGravity,
-                                  pipStore: pipEnabled ? progressStore : nil)
+                                  pipStore: pipEnabled ? progressStore : nil,
+                                  onReadyForDisplay: { noteAVGateLayerReady() })
                 AVPSubtitleOverlay(store: subtitleStore, timeMs: {
                     let s = player.currentTime().seconds
                     return s.isFinite ? Int64(s * 1000) : 0
@@ -3347,7 +3407,9 @@ struct AVPlayerMultiviewTile: View {
         // and uses the EMITTED value (the store property itself is
         // willSet-old inside this handler).
         .onReceive(MultiviewStore.shared.$audioTileID) { newAudioID in
-            player?.isMuted = (newAudioID != tileID)
+            // The gate outranks ownership while it is up: a tile that
+            // owns audio but has no picture yet stays silent.
+            player?.isMuted = avStartGateActive || (newAudioID != tileID)
         }
         .onChange(of: shouldPause) { _, paused in
             if paused { player?.pause() } else { player?.play() }
@@ -3360,6 +3422,19 @@ struct AVPlayerMultiviewTile: View {
             channelStoppingRetries = 0
             standingRetries = 0
             teardownToken = UUID()
+            // Different channel = different server client. Never inherit
+            // the outgoing channel's resolved playlist.
+            //
+            // `directHLSFallbackURL` belongs to the OUTGOING channel too,
+            // and `liveSourceURL` prefers it over `streamURL`: leaving it
+            // set would pin every later flip to the channel that once
+            // failed over, which is its own "picture stays on the old
+            // channel" bug.
+            directHLSFallbackURL = nil
+            resolvedNativeHLSURL = nil
+            resolvedNativeHLSFor = nil
+            resolvedNativeHLSAt = 0
+            nativeHLSResolveInFlight = false
             // User-initiated tune: the incoming channel starts its own
             // stream-failover walk (s7_86.txt:353-395).
             resetFailoverWalk()
@@ -4539,10 +4614,17 @@ struct AVPlayerMultiviewTile: View {
             // Full headers, not just UA: server-side HLS upgrades hit the
             // same Dispatcharr endpoints as the TS path and expect the
             // same auth.
-            startPlayer(url: sourceURL, requestHeaders: headers)
+            // ONE tune = ONE client. Register before the player asks for
+            // the playlist so nothing else (capability probe, prewarm)
+            // can slip a second ?output_format=hls request in beside it.
+            if directHLSConnID == nil {
+                directHLSConnID = LiveConnectionRegistry.shared.open(
+                    sourceURL, owner: "native-hls#\(tileID.prefix(6))")
+            }
             // No remux ingest here to adopt a warm one; release it now.
             LivePrewarm.shared.cancel(reason: "tile playing direct HLS")
-            debugLog("[AVP-MV] tile playing direct HLS channel=\(channelName)")
+            debugLog("[TUNE] engine=native-hls channel=\(channelName)")
+            startNativeHLS(upgradedURL: sourceURL, headers: headers)
         default:
             statusText = "Preparing..."
             // Live Rewind (task #145, AVPlayer port 2026-08-27): solo
@@ -4918,6 +5000,385 @@ struct AVPlayerMultiviewTile: View {
         }
     }
 
+    /// ONE TUNE = ONE SERVER CLIENT. Resolve Dispatcharr's
+    /// `?output_format=hls` redirect ourselves, exactly once, and hand
+    /// AVPlayer the resolved `/proxy/hls/<uuid>/client_<id>/` playlist.
+    ///
+    /// Device test 2026-09-16 (Logan's iPhone): one tune of one channel
+    /// put THREE clients in Dispatcharr's active connections table, same
+    /// second, same IP. The upgrade URL is not an address, it is a
+    /// factory: every GET of it mints a new client. AVPlayer refreshes a
+    /// live playlist continuously, so handing it that URL means each
+    /// refresh can land on a brand-new, just-created session instead of
+    /// following one - which is also the most likely reason readyToPlay
+    /// took 9.1 s on that tune while VLC starts the same channel
+    /// instantly. Resolving once removes both symptoms at the source.
+    ///
+    /// A tune that has already resolved reuses its answer (retry,
+    /// reconnect, stall recovery, PiP handoff all reach `start()`
+    /// again), so no code path here can mint a second client. A channel
+    /// swap clears it, because that is a different channel.
+    private func startNativeHLS(upgradedURL: URL, headers: [String: String]) {
+        // Reuse window. Inside it, every re-entry to this tune (the 0.5 s
+        // auto-retry, a reconnect, a PiP handoff, a re-start on the same
+        // channel) rides the client we already have instead of minting
+        // another. Past it the previous client has been reaped
+        // server-side anyway - a stopped fetcher is how Dispatcharr ends
+        // an HLS client - so a genuine later reconnect resolves afresh,
+        // which is one client replacing one client, not two at once.
+        let reuseWindow: CFTimeInterval = 15
+        if let resolved = resolvedNativeHLSURL,
+           resolvedNativeHLSFor == upgradedURL,
+           CACurrentMediaTime() - resolvedNativeHLSAt < reuseWindow {
+            debugLog("[AVP-NHLS] reusing resolved client "
+                + "\(NativeHLSClientResolver.clientID(from: resolved)) (no new server client) "
+                + "channel=\(channelName)")
+            // A REUSED client has moved on since we last looked: one
+            // earlier tune resumed a reused client with the playhead
+            // 6 s behind the loaded span (pos 20.47, span 26.49..28.21)
+            // and the picture never came, timing the gate out at 12 s.
+            // So re-read the window before replaying it - free, same
+            // client - and join where the media actually is.
+            let name = channelName
+            let token = teardownToken
+            Task { @MainActor in
+                let window = await NativeHLSClientResolver.inspectPlaylist(resolved, headers: headers)
+                guard token == teardownToken else { return }
+                nativeHLSWindow = window
+                logNativeHLSWindow(window, channel: name)
+                startPlayer(url: resolved, requestHeaders: headers)
+                debugLog("[AVP-MV] tile playing direct HLS channel=\(name)")
+            }
+            return
+        }
+        guard !nativeHLSResolveInFlight else {
+            debugLog("[AVP-NHLS] resolve already in flight; not issuing a second request "
+                + "channel=\(channelName)")
+            return
+        }
+        nativeHLSResolveInFlight = true
+        statusText = "Preparing..."
+        let token = teardownToken
+        let name = channelName
+        Task { @MainActor in
+            let outcome = await NativeHLSClientResolver.resolveWithRetry(
+                upgradedURL, headers: headers)
+            nativeHLSResolveInFlight = false
+            // The tile was torn down (or swapped channels) while the
+            // redirect was in flight: the client we just minted is
+            // reaped by the server the moment nothing fetches it, and
+            // starting a player now would be a stray connection.
+            guard token == teardownToken else {
+                debugLog("[AVP-NHLS] resolve landed after teardown; dropped channel=\(name)")
+                return
+            }
+            guard case .success(let resolved) = outcome else {
+                // LAST RESORT, and deliberately not "hand AVPlayer the
+                // upgrade URL". That fallback was the multi-client bug:
+                // the upgrade URL mints a server client on EVERY playlist
+                // refresh, and Dispatcharr only reaps a stopped client
+                // about 55 s later, so each spurious one holds a slot
+                // against the user's stream limit for a minute. The TS
+                // remux arm has correct connection behavior, so a tune we
+                // cannot resolve goes there instead.
+                let why: String = {
+                    if case .failure(let f) = outcome { return f.describe }
+                    return "unknown"
+                }()
+                debugLog("[AVP-NHLS] RESOLVE FAILED after retries (\(why)); "
+                    + "NOT falling back to the upgrade URL (that mints a client per refresh). "
+                    + "Failing over to the TS remux arm channel=\(name)")
+                fallBackToRemuxAfterResolveFailure()
+                return
+            }
+            resolvedNativeHLSURL = resolved.playlistURL
+            resolvedNativeHLSFor = upgradedURL
+            resolvedNativeHLSAt = CACurrentMediaTime()
+            debugLog("[AVP-NHLS] resolved to client \(resolved.clientID) "
+                + "(one tune = one client) channel=\(name)")
+            // Read the client playlist once before the player sees
+            // it. Same client, no new mint: this is the document
+            // AVPlayer is about to poll anyway.
+            let window = await NativeHLSClientResolver.inspectPlaylist(
+                resolved.playlistURL, headers: headers)
+            guard token == teardownToken else {
+                debugLog("[AVP-NHLS] playlist read landed after teardown; dropped channel=\(name)")
+                return
+            }
+            nativeHLSWindow = window
+            logNativeHLSWindow(window, channel: name)
+            startPlayer(url: resolved.playlistURL, requestHeaders: headers)
+            debugLog("[AVP-MV] tile playing direct HLS channel=\(name)")
+        }
+    }
+
+    /// A tune whose redirect we could not resolve re-tunes through the TS
+    /// remux arm on the plain URL, the same mechanism the direct-HLS
+    /// playback failure already uses.
+    ///
+    /// Deliberately NOT `markNotCapable`: a refusal (429 at the stream
+    /// limit, 503 while a previous client is still being reaped) says
+    /// nothing about whether the server does native HLS, and poisoning
+    /// the persisted verdict would push every later tune onto the remux
+    /// arm for a week over one transient.
+    private func fallBackToRemuxAfterResolveFailure() {
+        guard directHLSFallbackURL == nil else { return }
+        directHLSFallbackURL = removingHLSOutputFormat(streamURL)
+        resolvedNativeHLSURL = nil
+        resolvedNativeHLSFor = nil
+        resolvedNativeHLSAt = 0
+        nativeHLSWindow = nil
+        stop()
+        statusText = "Retrying..."
+        let token = teardownToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard token == teardownToken else { return }
+            start()
+        }
+    }
+
+    /// One line per tune saying what the client playlist actually held
+    /// when we handed it over. A window barely longer than one segment
+    /// is the fresh-client case and predicts a wait at the first
+    /// segment boundary no matter what the player does.
+    private func logNativeHLSWindow(_ window: NativeHLSClientResolver.PlaylistWindow?,
+                                    channel: String) {
+        guard let window else {
+            debugLog("[AVP-NHLS] client playlist unreadable; no window measured channel=\(channel)")
+            return
+        }
+        debugLog(String(format:
+            "[AVP-NHLS] client playlist window %.2fs across %d segments (~%.2fs each, "
+            + "TARGETDURATION %.0f) channel=%@",
+            window.windowSeconds, window.segmentCount, window.segmentSeconds,
+            window.targetDuration, channel))
+    }
+
+    /// Watch what the item is actually holding during the start-up wait.
+    /// Every 250 ms until playback is moving (or 15 s, whichever comes
+    /// first) this prints the loaded range, how much media is buffered
+    /// ahead of the playhead, the three buffer flags, and the item's
+    /// track list. Between them those answer the question directly: a
+    /// loaded range that keeps GROWING while `likelyToKeepUp` stays false
+    /// is a fill requirement we have not met, a range that stops growing
+    /// is the server or the network, and a video track that appears late
+    /// is a decode/keyframe problem rather than a buffering one.
+    private func startNativeHLSBufferProbe(_ item: AVPlayerItem, player: AVPlayer) {
+        nativeHLSBufferProbe?.invalidate()
+        let start = CACurrentMediaTime()
+        let name = channelName
+        // Carries the out-of-range guard's state across ticks. A box
+        // rather than @State: the timer closure is not a view update.
+        let guardState = NativeHLSPositionGuard()
+        // 500 ms, capped at 8 s: enough to see a stalled loaded range and
+        // the step when the next segment lands, at half the log volume of
+        // the 250 ms pass that found this.
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak item] t in
+            guard let item else { t.invalidate(); return }
+            let ms = Int((CACurrentMediaTime() - start) * 1000)
+            let ranges = item.loadedTimeRanges.map { $0.timeRangeValue }
+            let loaded = ranges.reduce(0.0) { $0 + ($1.duration.seconds.isFinite ? $1.duration.seconds : 0) }
+            let span: String = {
+                guard let first = ranges.first, let last = ranges.last,
+                      first.start.seconds.isFinite, last.end.seconds.isFinite else { return "none" }
+                return String(format: "%.2f..%.2f", first.start.seconds, last.end.seconds)
+            }()
+            let pos = item.currentTime().seconds
+            let ahead: Double = {
+                guard let last = ranges.last, last.end.seconds.isFinite, pos.isFinite else { return 0 }
+                return last.end.seconds - pos
+            }()
+            let status: String
+            switch item.status {
+            case .readyToPlay: status = "ready"
+            case .failed:      status = "failed"
+            default:           status = "unknown"
+            }
+            let tracks = item.tracks.map { track -> String in
+                let kind = track.assetTrack?.mediaType.rawValue ?? "?"
+                return "\(kind)\(track.isEnabled ? "" : ":off")"
+            }.joined(separator: ",")
+            debugLog(String(format:
+                "[AVP-NHLS-BUF] +%dms status=%@ loaded=%.2fs span=%@ pos=%.2f ahead=%.2fs "
+                + "likelyToKeepUp=%@ bufferEmpty=%@ bufferFull=%@ tracks=[%@] channel=%@",
+                ms, status, loaded, span, pos.isFinite ? pos : -1, ahead,
+                item.isPlaybackLikelyToKeepUp ? "yes" : "no",
+                item.isPlaybackBufferEmpty ? "yes" : "no",
+                item.isPlaybackBufferFull ? "yes" : "no",
+                tracks, name))
+            // OUT-OF-RANGE GUARD. A playhead that sits outside every
+            // loaded range can never become ready: there is no media at
+            // it. Device 2026-09-16 13:11 spent twelve seconds in exactly
+            // that state (pos 17.12, span 19.14..25.15, bufferFull=yes,
+            // status .unknown) before the gate timed out and the tune
+            // fell back to remux. With no computed join offset this
+            // should no longer be reachable, but the correction is cheap
+            // and the failure is total, so it stays as a backstop: one
+            // second outside the range and we seek to where the media
+            // actually is.
+            let outside = pos.isFinite && !ranges.isEmpty && !ranges.contains { r in
+                let lo = r.start.seconds, hi = r.end.seconds
+                return lo.isFinite && hi.isFinite && pos >= lo - 0.1 && pos <= hi + 0.1
+            }
+            if outside, item.status != .readyToPlay {
+                if guardState.outsideSince == nil { guardState.outsideSince = CACurrentMediaTime() }
+                let held = CACurrentMediaTime() - (guardState.outsideSince ?? 0)
+                if held >= 1.0, guardState.corrections < 2,
+                   let first = ranges.first, first.start.seconds.isFinite {
+                    guardState.corrections += 1
+                    guardState.outsideSince = nil
+                    // Half a segment in, so the correction does not land
+                    // on the boundary the window is about to evict.
+                    let target = first.start.seconds + 2.0
+                    debugLog(String(format:
+                        "[AVP-NHLS-BUF] playhead %.2f is outside the loaded range %@ for %.1fs; "
+                        + "seeking to %.2f (correction %d) channel=%@",
+                        pos, span, held, target, guardState.corrections, name))
+                    player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                                toleranceBefore: .zero, toleranceAfter: .positiveInfinity)
+                }
+            } else {
+                guardState.outsideSince = nil
+            }
+            if ms > 14_000 { t.invalidate() }
+        }
+        // .common so a scroll or a focus animation cannot starve it.
+        RunLoop.main.add(timer, forMode: .common)
+        nativeHLSBufferProbe = timer
+    }
+
+    private func stopNativeHLSBufferProbe() {
+        nativeHLSBufferProbe?.invalidate()
+        nativeHLSBufferProbe = nil
+    }
+
+    /// Arm the A/V start gate for a native-server-HLS live tune: the tile
+    /// stays muted and keeps its loading surface until the player layer
+    /// has a picture.
+    ///
+    /// The timeout is the whole safety story. `isReadyForDisplay` is the
+    /// right signal but not a guaranteed one (an audio-only channel, a
+    /// video track that never decodes, a layer that was already ready
+    /// when a new player was attached), and a gate that never releases is
+    /// a silent tune - strictly worse than the bug being fixed. 2.5 s is
+    /// well past the ~1.0 s this path actually takes on Logan's iPhone
+    /// and still inside the "no worse than ~1.5 s to first picture"
+    /// budget for the normal case, which never reaches it.
+    private func armAVStartGate() {
+        let token = UUID()
+        avStartGateToken = token
+        avStartGateActive = true
+        avGateLayerReady = false
+        avGatePlaying = false
+        avGateFrameRateWaitFrom = 0
+        avStartGateAt = CACurrentMediaTime()
+        statusText = "Preparing..."
+        debugLog("[AVP-GATE] armed: holding audio and the loading surface until "
+            + "a picture AND moving playback channel=\(channelName)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
+            guard avStartGateToken == token, avStartGateActive else { return }
+            releaseAVStartGate(reason: "timeout 12000ms (layerReady=\(avGateLayerReady) "
+                + "playing=\(avGatePlaying))")
+        }
+    }
+
+    /// The layer has a picture. Half the release condition.
+    private func noteAVGateLayerReady() {
+        guard avStartGateActive, !avGateLayerReady else { return }
+        avGateLayerReady = true
+        let ms = Int((CACurrentMediaTime() - avStartGateAt) * 1000)
+        debugLog("[AVP-GATE] picture available at +\(ms)ms from gate arm")
+        releaseAVStartGateIfStarted()
+    }
+
+    /// Playback is actually moving (rate > 0). The other half.
+    private func noteAVGatePlaying() {
+        guard avStartGateActive, !avGatePlaying else { return }
+        avGatePlaying = true
+        let ms = Int((CACurrentMediaTime() - avStartGateAt) * 1000)
+        debugLog("[AVP-GATE] playback moving at +\(ms)ms from gate arm")
+        releaseAVStartGateIfStarted()
+    }
+
+    /// Release only when there is BOTH a decoded picture and a running
+    /// clock. Either alone is a lie: the 2026-09-16 device log released
+    /// on `isReadyForDisplay` at +2233ms and playback did not start for
+    /// another 7 s (readyToPlay at +9.1 s), so Logan watched a frozen
+    /// frame; and `rate > 0` alone is the frozen-clock case the driver
+    /// already documents (session2.txt, eleven ticks of "status playing"
+    /// at pos 0.0s).
+    /// The two halves must be CONCURRENT, not merely both in the past.
+    /// On the 2026-09-16 tune the rate came up at +1.07 s (audio only)
+    /// and the picture arrived at +9.17 s, so "both have happened" was
+    /// satisfied the instant the layer reported ready and the gate
+    /// released onto a picture that was not moving yet - the couple of
+    /// frozen seconds Logan still saw at the end.
+    ///
+    /// The item clock is no use as the tie-breaker, because it advances
+    /// on audio alone (it had been advancing for eight seconds). The
+    /// honest signal is the VIDEO track's own
+    /// `currentVideoFrameRate`: non-zero means frames are actually being
+    /// presented. Re-checked every 250 ms; the gate's timeout is the
+    /// backstop if it never comes up.
+    private func releaseAVStartGateIfStarted() {
+        guard avGateLayerReady, avGatePlaying, avStartGateActive else { return }
+        if avGateFrameRateWaitFrom == 0 { avGateFrameRateWaitFrom = CACurrentMediaTime() }
+        let videoFPS = player?.currentItem?.tracks
+            .first(where: { $0.assetTrack?.mediaType == .video })?
+            .currentVideoFrameRate ?? 0
+        guard videoFPS > 0 else {
+            // BOUNDED. Device 2026-09-16: this line repeated every ~260 ms
+            // for seven seconds and then released at 4.0 fps, while the
+            // good runs released under a second at 6 to 10 fps. So
+            // `currentVideoFrameRate` is a useful signal when it comes up
+            // promptly and an unreliable one when it does not - it reads 0
+            // over a track that is decoding, and waiting on it cost more
+            // than the frozen frame it exists to prevent.
+            //
+            // Treat it as a bonus, not a gate: a picture plus a running
+            // rate already means AVPlayer has a decoded frame on the
+            // layer, so grant it 750 ms to confirm and then trust the
+            // other two signals. That keeps the sub-second releases and
+            // caps the bad case at three quarters of a second instead of
+            // seven, without going back to releasing on isReadyForDisplay
+            // alone (which released onto a frame that was 8 s from
+            // moving).
+            let waited = CACurrentMediaTime() - avGateFrameRateWaitFrom
+            guard waited < 0.75 else {
+                releaseAVStartGate(reason: String(format:
+                    "picture + playback; video frame rate still 0 after %.0fms (signal unreliable)",
+                    waited * 1000))
+                return
+            }
+            let token = avStartGateToken
+            debugLog("[AVP-GATE] picture available but the video track is not presenting "
+                + "frames yet (currentVideoFrameRate=0); still holding")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                guard avStartGateToken == token, avStartGateActive else { return }
+                releaseAVStartGateIfStarted()
+            }
+            return
+        }
+        releaseAVStartGate(reason: String(format: "moving picture (%.1f fps) + playback", videoFPS))
+    }
+
+    /// Release the gate: un-mute per the real audio owner and drop the
+    /// loading surface, in one main-thread hop so sound and picture reach
+    /// the user together. Idempotent; a no-op when no gate is up (the
+    /// remux arm and VOD never arm one, and the layer callback fires for
+    /// them too).
+    private func releaseAVStartGate(reason: String) {
+        guard avStartGateActive else { return }
+        avStartGateActive = false
+        avStartGateToken = UUID()
+        let ms = Int((CACurrentMediaTime() - avStartGateAt) * 1000)
+        stopNativeHLSBufferProbe()
+        player?.isMuted = (MultiviewStore.shared.audioTileID != tileID)
+        if statusText == "Preparing..." { statusText = nil }
+        debugLog("[AVP-GATE] released after \(ms)ms (\(reason)) "
+            + "muted=\(player?.isMuted == true) channel=\(channelName)")
+    }
+
     private func startPlayer(url: URL, requestHeaders: [String: String]) {
         var options: [String: Any] = [:]
         if !requestHeaders.isEmpty {
@@ -4975,7 +5436,90 @@ struct AVPlayerMultiviewTile: View {
         // taught us, and the 6 s floor, then add the user's Stream
         // Buffer. Same 18 s ceiling as before.
         let joinTargetDuration = isLiveTune ? (remuxer?.advertisedTargetDuration.get() ?? 0) : 0
-        if isLiveTune {
+        // NATIVE SERVER HLS (Dispatcharr's own /proxy/hls/<uuid>/client_<id>/
+        // playlist) is NOT our playlist, and the geometry below is written
+        // for ours. Device log 2026-09-16 (iPhone, 192.168.50.163:9192)
+        // shows exactly what that costs: the formula printed
+        // "3x targetDuration 0.0 = 0.0" because its only real input,
+        // `remuxer.advertisedTargetDuration`, does not exist on this path
+        // (there is no remuxer), so the whole term collapsed to the
+        // learned 6.0 s floor and we pinned configuredTimeOffsetFromLive
+        // to a number derived from nothing.
+        //
+        // Worse, setting it at all OVERRIDES the server's own join point.
+        // This playlist carries #EXT-X-START:TIME-OFFSET=-10.000,PRECISE=YES
+        // with 4 s segments and TARGETDURATION 8, i.e. the server has
+        // already told us where to join; our 6 s asked AVPlayer to
+        // re-position to a different, mid-segment point that it must
+        // resolve AFTER parsing the playlist, adding a seek between
+        // "playlist parsed" and "first decodable picture" while the audio
+        // it already has plays out. The steady state in that same log
+        // settled at edge -8 to -9 s, not -6: the server's placement won
+        // anyway, so our override bought nothing and cost the re-position.
+        //
+        // Honor the server: leave configuredTimeOffsetFromLive unset and
+        // let `automaticallyPreservesTimeOffsetFromLive` (set above) ride
+        // the EXT-X-START point. The remux arm is untouched.
+        let isNativeServerHLS = isLiveTune && url.scheme != HLSDelivery.scheme
+        if isNativeServerHLS {
+            debugLog("[AVP-NHLS] join point left to the server (EXT-X-START honored; "
+                + "no configuredTimeOffsetFromLive) channel=\(channelName)")
+            // START-UP POLICY, native server HLS only.
+            //
+            // NO COMPUTED JOIN OFFSET. This is the third and last word on
+            // it, and the reason is arithmetic rather than taste. Our
+            // offset does not replace AVPlayer's live hold-back, it
+            // STACKS on it: with TARGETDURATION 8 the player already
+            // treats the live edge as about 3 x 8 = 24 s before the end
+            // of the playlist, so `configuredTimeOffsetFromLive` of 31.95
+            // asked for a position roughly 56 s before the end of a
+            // 37.59 s window. Device 2026-09-16 13:11 shows exactly that:
+            // pos=17.12 sat BEFORE the earliest loaded media
+            // (span 19.14..25.15), bufferFull=yes because the player had
+            // fetched everything it could, and the item never left
+            // .unknown - there was nothing at the playhead to become
+            // ready with. Two tunes died that way and fell back to remux.
+            //
+            // The earlier 42.22s-back join that worked (42.72 s window)
+            // was the same arithmetic landing inside the window only
+            // because AVPlayer clamped to the seekable start. That is
+            // luck, not design, and it is the difference between the two
+            // logged cases.
+            //
+            // A number computed BEFORE the player has the playlist can
+            // never be safe, because it is measured against a window we
+            // read and the player measures against the window it fetched.
+            // AVPlayer's own default hold-back cannot land outside the
+            // window, because it is derived from the playlist the player
+            // itself holds. So we use it, and we keep our playlist read
+            // for the two things it is actually good for: sizing the
+            // forward buffer from the MEASURED segment duration (the
+            // server's TARGETDURATION overstates it, 8 against ~4 s), and
+            // the log line.
+            if let window = nativeHLSWindow, window.segmentSeconds > 0 {
+                // One measured segment's worth, clamped. Sized to what a
+                // fetch actually delivers rather than to the advertised
+                // target.
+                let forward = max(1.0, min(4.0, window.segmentSeconds))
+                playerItem.preferredForwardBufferDuration = forward
+                debugLog(String(format:
+                    "[AVP-NHLS] start-up policy: join left to AVPlayer's own hold-back "
+                    + "(no configuredTimeOffsetFromLive), fwdBuf %.2fs from measured segment "
+                    + "%.2fs (window %.2fs across %d, TARGETDURATION %.0f) channel=%@",
+                    forward, window.segmentSeconds, window.windowSeconds,
+                    window.segmentCount, window.targetDuration, channelName))
+            } else {
+                playerItem.preferredForwardBufferDuration = 4
+                debugLog("[AVP-NHLS] start-up policy: playlist window unknown; fwdBuf 4s, "
+                    + "join left to AVPlayer channel=\(channelName)")
+            }
+            // Apple documents that preserving the live offset increases
+            // the time to begin playback, and there is no offset of ours
+            // to preserve now that we set none.
+            playerItem.automaticallyPreservesTimeOffsetFromLive = false
+            armAVStartGate()
+        }
+        if isLiveTune, !isNativeServerHLS {
             let floor = max(3 * joinTargetDuration, learned, LiveEdgeHoldback.base)
             let offset = min(18.0, floor + streamBufferSeconds)
             playerItem.configuredTimeOffsetFromLive =
@@ -5033,6 +5577,11 @@ struct AVPlayerMultiviewTile: View {
         // starts a live remux stream; leave it alone.
         debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : "automatic") channel=\(channelName)")
         let avPlayer = AVPlayer(playerItem: playerItem)
+        if isNativeServerHLS {
+            // Needs the player (the out-of-range guard seeks), so it
+            // starts here rather than with the rest of the native policy.
+            startNativeHLSBufferProbe(playerItem, player: avPlayer)
+        }
         // Explicit readyToPlay marker (review 2026-09-11, marker
         // inventory): the log had no discrete line for it, only the
         // layer's isReadyForDisplay, so "how long did AVPlayer take to
@@ -5057,8 +5606,13 @@ struct AVPlayerMultiviewTile: View {
             AirPlayMonitor.shared.attach(avPlayer)
         }
         #endif
-        // Live truth at this instant, never a captured snapshot.
-        avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)
+        // Live truth at this instant, never a captured snapshot. The A/V
+        // start gate, when armed just above, wins over ownership until
+        // there is a picture on the layer.
+        // `isNativeServerHLS` rather than the @State flag: this is the
+        // same call that armed it, and a @State read inside its own
+        // mutating pass is not worth trusting for something audible.
+        avPlayer.isMuted = isNativeServerHLS || (MultiviewStore.shared.audioTileID != tileID)
         // VOD resume (Continue Watching): the store carries the offset
         // the container preloaded; AVPlayer queues the seek until the
         // item is ready, so firing it here is safe and race-free.
@@ -5132,9 +5686,24 @@ struct AVPlayerMultiviewTile: View {
         }
         // First frame closes the press-to-picture clock and releases any
         // display-mode switch that was deferred out of the tune.
+        // Audio-start moment, on the SAME clock as the gate's release
+        // line, so the next device read answers "did sound and picture
+        // arrive together?" without comparing two different origins
+        // (the old log compared "from screen open" against "from layer
+        // attach", which is what made the gap unmeasurable).
+        driver?.onFirstPlay = {
+            let ms = Int((CACurrentMediaTime() - avStartGateAt) * 1000)
+            debugLog("[AVP-GATE] player reached rate>0 at +\(ms)ms from gate arm "
+                + "(gate \(avStartGateActive ? "still holding" : "already released"))")
+            noteAVGatePlaying()
+        }
         driver?.onFirstFrame = {
             // TuneTimeline.firstFrame() is closed by the driver itself at
             // the same moment (it owns the clock-advance detection).
+            // Belt and braces for the gate: the clock has ADVANCED with
+            // rate > 0, which is the strongest "playback really started"
+            // signal this file has.
+            noteAVGatePlaying()
             guard !firstFrameSeen else { return }
             firstFrameSeen = true
             if let pending = pendingDisplayCriteria {
@@ -5270,6 +5839,17 @@ struct AVPlayerMultiviewTile: View {
         driver = nil
         player?.pause()
         player = nil
+        // Release the native-HLS client accounting entry. Dispatcharr has
+        // no documented "release this client" endpoint for
+        // /proxy/hls/<uuid>/client_<id>/: the observed contract is that
+        // the server reaps a client that stops fetching its playlist, the
+        // same way the TS proxy reaps a dropped ingest. Tearing the
+        // AVPlayer down above IS the release; nothing is invented here.
+        if let id = directHLSConnID {
+            directHLSConnID = nil
+            LiveConnectionRegistry.shared.markClosing(id)
+            LiveConnectionRegistry.shared.close(id)
+        }
         #if os(iOS)
         AirPlayMonitor.shared.detach()
         #endif
@@ -5291,6 +5871,14 @@ struct AVPlayerMultiviewTile: View {
         tileError = nil
         readyLocalURL = nil
         sizeObservation = nil
+        // Never leave a torn-down tile holding the audio gate: the next
+        // player on this tile must start from its own arm.
+        avStartGateActive = false
+        avStartGateToken = UUID()
+        avGateLayerReady = false
+        avGatePlaying = false
+        avGateFrameRateWaitFrom = 0
+        stopNativeHLSBufferProbe()
         stallWatchdog?.cancel()
         stallWatchdog = nil
         subtitleStore.reset()
@@ -5396,6 +5984,14 @@ struct AVPlayerMultiviewTile: View {
     }
 }
 
+/// Mutable state for the native-HLS out-of-range playhead guard, held
+/// across buffer-probe ticks. Main-thread only (the probe runs on the
+/// main run loop), so no locking.
+private final class NativeHLSPositionGuard {
+    var outsideSince: CFTimeInterval?
+    var corrections = 0
+}
+
 /// Bare AVPlayerLayer host: video only, no system chrome, sized by
 /// SwiftUI like any other tile content.
 struct AVPlayerLayerView: UIViewRepresentable {
@@ -5414,6 +6010,11 @@ struct AVPlayerLayerView: UIViewRepresentable {
     /// delegate mirrors active state into the store so the tile's
     /// background handler knows iOS is driving the window.
     var pipStore: PlayerProgressStore? = nil
+    /// Fired on the main thread the first time this layer has a picture
+    /// to show. The A/V start gate (native server HLS) waits on it: it
+    /// is the only honest "there is a frame on the video plane" signal,
+    /// and without it the tile un-mutes over a blank layer.
+    var onReadyForDisplay: (() -> Void)? = nil
 
     final class HostView: UIView {
         override class var layerClass: AnyClass { AVPlayerLayer.self }
@@ -5422,6 +6023,11 @@ struct AVPlayerLayerView: UIViewRepresentable {
         /// show, vs the item clock/audio (audio-before-video hunts).
         var readyObservation: NSKeyValueObservation?
         var attachedAt = Date()
+        /// Held on the VIEW, not captured in the observation: SwiftUI
+        /// hands a fresh closure on every render, and the observation is
+        /// registered once in makeUIView.
+        var readyForDisplayHandler: (() -> Void)?
+        var readyForDisplayFired = false
     }
 
     final class PiPCoordinator: NSObject, AVPictureInPictureControllerDelegate {
@@ -5485,17 +6091,29 @@ struct AVPlayerLayerView: UIViewRepresentable {
         view.playerLayer.player = player
         view.playerLayer.videoGravity = videoGravity
         view.attachedAt = Date()
-        view.readyObservation = view.playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { layer, _ in
+        view.readyForDisplayHandler = onReadyForDisplay
+        view.readyObservation = view.playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak view] layer, _ in
+            guard let view else { return }
             let ms = Int(Date().timeIntervalSince(view.attachedAt) * 1000)
             debugLog("[AVP-LAYER] isReadyForDisplay=\(layer.isReadyForDisplay) at +\(ms)ms from layer attach")
+            guard layer.isReadyForDisplay, !view.readyForDisplayFired else { return }
+            view.readyForDisplayFired = true
+            let handler = view.readyForDisplayHandler
+            if Thread.isMainThread { handler?() }
+            else { DispatchQueue.main.async { handler?() } }
         }
         syncPiP(view, context.coordinator)
         return view
     }
 
     func updateUIView(_ view: HostView, context: Context) {
+        view.readyForDisplayHandler = onReadyForDisplay
         if view.playerLayer.player !== player {
             view.playerLayer.player = player
+            // New player on the same host view (retry, version switch,
+            // channel swap): the gate re-arms with it.
+            view.readyForDisplayFired = false
+            view.attachedAt = Date()
         }
         if view.playerLayer.videoGravity != videoGravity {
             view.playerLayer.videoGravity = videoGravity

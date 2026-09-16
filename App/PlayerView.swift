@@ -4701,6 +4701,18 @@ final class AVPlayerProgressDriver {
             if firstFrameRendered, onFirstFrame != nil { onFirstFrame?() }
         }
     }
+    /// Fired once, the instant the player leaves "waiting" for
+    /// `.playing`, i.e. the moment SOUND starts. Deliberately separate
+    /// from `onFirstFrame`: the native-HLS field report (2026-09-16,
+    /// "I have sound immediately but the video doesn't start for a
+    /// while") is precisely a gap between THIS moment and the layer's
+    /// isReadyForDisplay, and nothing in the log measured the two against
+    /// one clock.
+    var onFirstPlay: (() -> Void)? {
+        didSet {
+            if firstPlayLogged, onFirstPlay != nil { onFirstPlay?() }
+        }
+    }
     /// True once the item clock has actually ADVANCED with rate > 0, which
     /// is the only honest "there is moving video" signal available here.
     /// `timeControlStatus == .playing` is NOT that signal: on 2026-09-11
@@ -4927,6 +4939,7 @@ final class AVPlayerProgressDriver {
                         self.firstPlayLogged = true
                         let ms = Int((CACurrentMediaTime() - self.launchStart) * 1000)
                         debugLog("[AVP-STREAM] first frame playing in \(ms)ms from screen open")
+                        self.onFirstPlay?()
                         // NOT the first frame, despite the wording this
                         // line has always carried: it only means the
                         // player accepted a play() request. The real
