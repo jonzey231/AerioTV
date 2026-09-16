@@ -49,6 +49,77 @@ final class SyncManager: ObservableObject {
     /// True while waiting for the initial import after the user first enables sync.
     @Published private(set) var isImporting = false
 
+    // MARK: - Sync Activity (UI progress)
+
+    /// What the sync layer is doing right now, for the quiet progress
+    /// indicator in Settings > Sync (Logan 2026-09-15: a manual Push or
+    /// Pull gave no feedback at all on tvOS or iOS). Only MANUAL /
+    /// immediate operations are tracked - the 2 s and 60 s debounced
+    /// background pushes are deliberately invisible, otherwise the
+    /// indicator would sit spinning for a minute after an unrelated
+    /// preference change.
+    enum SyncActivity: Equatable { case idle, pushing, pulling }
+
+    @Published private(set) var activity: SyncActivity = .idle
+
+    /// Reason the last tracked operation failed, or nil. Cleared when a
+    /// new operation starts. Surfaced inline by the Sync rows, never as
+    /// a blocking alert.
+    @Published private(set) var lastSyncFailure: String?
+
+    /// In-flight tracked operations. A manual Push fans out into four
+    /// separate KVS lanes (servers, preferences, watch progress,
+    /// reminders); the indicator clears only when the last one lands.
+    private var activeOperationCount = 0
+
+    /// When the current tracked run started, and how long the spinner is
+    /// held visible at minimum. A KVS write can land in a few
+    /// milliseconds, and Logan's device feedback (2026-09-15) was that the
+    /// indicator "flashes so briefly it reads as a glitch", so a run that
+    /// finishes sooner keeps the spinner up until this much has elapsed.
+    private var activityStart: Date?
+    private static let minimumActivityDuration: TimeInterval = 0.9
+
+    /// `@Published` writes re-render observers even when the value is
+    /// unchanged, so every assignment below is guarded.
+    private func beginActivity(_ kind: SyncActivity) {
+        activeOperationCount += 1
+        if activityStart == nil { activityStart = Date() }
+        if lastSyncFailure != nil { lastSyncFailure = nil }
+        if activity != kind { activity = kind }
+    }
+
+    private func endActivity(failure: String? = nil) {
+        activeOperationCount = max(0, activeOperationCount - 1)
+        if let failure, lastSyncFailure != failure { lastSyncFailure = failure }
+        guard activeOperationCount == 0, activity != .idle else { return }
+
+        let elapsed = activityStart.map { Date().timeIntervalSince($0) } ?? Self.minimumActivityDuration
+        let remaining = Self.minimumActivityDuration - elapsed
+        guard remaining > 0 else {
+            activityStart = nil
+            activity = .idle
+            return
+        }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+            guard let self else { return }
+            // A new operation may have started during the hold; that run
+            // owns the indicator now.
+            guard self.activeOperationCount == 0, self.activity != .idle else { return }
+            self.activityStart = nil
+            self.activity = .idle
+        }
+    }
+
+    /// Shared completion for a tracked KVS push: `synchronize()` is the
+    /// only signal the store gives us that the write was accepted.
+    private static func pushFailureReason() -> String? {
+        NSUbiquitousKeyValueStore.default.synchronize()
+            ? nil
+            : "iCloud did not accept the update. Check iCloud settings and your network, then try again."
+    }
+
     /// Whether the UserDefaults observer is active.
     private var isObservingDefaults = false
 
@@ -608,6 +679,18 @@ final class SyncManager: ObservableObject {
         }
         pushDebounce = work
 
+        // Manual (immediate) pushes drive the Settings > Sync progress
+        // indicator. `notify` fires whether the item runs or is cancelled
+        // by a newer push, so the counter can never leak.
+        if immediate {
+            beginActivity(.pushing)
+            work.notify(queue: .main) {
+                MainActor.assumeIsolated {
+                    SyncManager.shared.endActivity(failure: SyncManager.pushFailureReason())
+                }
+            }
+        }
+
         if immediate {
             DispatchQueue.main.async(execute: work)
         } else {
@@ -647,6 +730,18 @@ final class SyncManager: ObservableObject {
             }
         }
         prefPushDebounce = work
+
+        // Manual (immediate) pushes drive the Settings > Sync progress
+        // indicator. `notify` fires whether the item runs or is cancelled
+        // by a newer push, so the counter can never leak.
+        if immediate {
+            beginActivity(.pushing)
+            work.notify(queue: .main) {
+                MainActor.assumeIsolated {
+                    SyncManager.shared.endActivity(failure: SyncManager.pushFailureReason())
+                }
+            }
+        }
 
         if immediate {
             DispatchQueue.main.async(execute: work)
@@ -1249,6 +1344,18 @@ final class SyncManager: ObservableObject {
             debugLog("🔵 SyncManager: pushed \(capturedPayload.count) watch progress entries to KVS")
         }
         watchProgressPushDebounce = work
+        // Manual (immediate) pushes drive the Settings > Sync progress
+        // indicator. `notify` fires whether the item runs or is cancelled
+        // by a newer push, so the counter can never leak.
+        if immediate {
+            beginActivity(.pushing)
+            work.notify(queue: .main) {
+                MainActor.assumeIsolated {
+                    SyncManager.shared.endActivity(failure: SyncManager.pushFailureReason())
+                }
+            }
+        }
+
         if immediate {
             DispatchQueue.main.async(execute: work)
         } else {
@@ -1398,6 +1505,18 @@ final class SyncManager: ObservableObject {
             debugLog("🔵 SyncManager: pushed \(capturedPayload.count) reminders to KVS")
         }
         reminderPushDebounce = work
+        // Manual (immediate) pushes drive the Settings > Sync progress
+        // indicator. `notify` fires whether the item runs or is cancelled
+        // by a newer push, so the counter can never leak.
+        if immediate {
+            beginActivity(.pushing)
+            work.notify(queue: .main) {
+                MainActor.assumeIsolated {
+                    SyncManager.shared.endActivity(failure: SyncManager.pushFailureReason())
+                }
+            }
+        }
+
         if immediate {
             DispatchQueue.main.async(execute: work)
         } else {
@@ -1482,6 +1601,10 @@ final class SyncManager: ObservableObject {
         // we Task.yield() between each one to let the main runloop drain
         // queued UI work (doing all four back-to-back once showed a ~1.8s
         // launch hang: channel-fetch callbacks, SwiftUI re-renders, etc.).
+        // Drives the Settings > Sync progress indicator. The merges below
+        // are the slow part of a pull, so the indicator is up for their
+        // whole duration and clears on the last one.
+        beginActivity(.pulling)
         Task { @MainActor in
             let servers   = NSUbiquitousKeyValueStore.default.array(forKey: sKey) as? [[String: Any]]
             let prefs     = NSUbiquitousKeyValueStore.default.dictionary(forKey: pKey)
@@ -1490,8 +1613,13 @@ final class SyncManager: ObservableObject {
 
             guard servers != nil || prefs != nil || wp != nil || reminders != nil else {
                 debugLog("🔵 SyncManager.pullFromCloud: no remote data")
+                SyncManager.shared.endActivity(
+                    failure: "Nothing to pull yet. iCloud has no data from your other devices."
+                )
                 return
             }
+
+            defer { SyncManager.shared.endActivity() }
 
             SyncManager.shared.doMerge(servers: servers, isInitial: false, replace: replace)
             await Task.yield()

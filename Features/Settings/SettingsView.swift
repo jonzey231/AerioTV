@@ -25,6 +25,9 @@ struct SettingsView: View {
     /// the observer fixes the cascade by forcing re-render on every
     /// theme mutation.
     @ObservedObject private var theme = ThemeManager.shared
+    /// Drives the in-row spinner on the Push / Pull rows in every Sync
+    /// pane (iPhone root, iPad detail, tvOS pane).
+    @ObservedObject private var sync = SyncManager.shared
     // v1.6.17: explicit sort order for the Playlists list. `sortOrder`
     // existed since the original model and rides iCloud sync (see
     // SyncManager line 795), but until now the @Query returned
@@ -343,6 +346,7 @@ struct SettingsView: View {
 
                         if iCloudSyncEnabled {
                             Button {
+                                guard sync.activity == .idle else { return }
                                 debugLog("🔵 Sync Now tapped")
                                 SyncManager.shared.pushServers(servers, immediate: true)
                                 SyncManager.shared.pushPreferencesImmediate()
@@ -361,10 +365,17 @@ struct SettingsView: View {
                                             title: "Push to iCloud",
                                             subtitle: syncLastDate > 0
                                                 ? "Send this device's data up  ·  Last synced \(lastSyncedString)"
-                                                : "Send this device's playlists, preferences and progress up")
+                                                : "Send this device's playlists, preferences and progress up",
+                                            isBusy: sync.activity == .pushing)
                             }
                             #if os(iOS)
                             .buttonStyle(PressableButtonStyle())
+                            // Both directions are locked out while either
+                            // one runs so a double tap cannot stack
+                            // operations on top of each other. Not applied
+                            // on tvOS, where `.disabled` would pull the row
+                            // out of the focus engine.
+                            .disabled(sync.activity != .idle)
                             #else
                             .buttonStyle(.plain)
                             #endif
@@ -385,18 +396,27 @@ struct SettingsView: View {
                             // tells the user"). Destructive, so it confirms
                             // first; the alert carries the note.
                             Button {
+                                guard sync.activity == .idle else { return }
                                 showPullConfirm = true
                             } label: {
                                 SettingsRow(icon: "icloud.and.arrow.down",
                                             iconColor: .accentPrimary,
                                             title: "Pull from iCloud",
-                                            subtitle: "Replace this device's data with the iCloud copy")
+                                            subtitle: "Replace this device's data with the iCloud copy",
+                                            isBusy: sync.activity == .pulling)
                             }
                             #if os(iOS)
                             .buttonStyle(PressableButtonStyle())
+                            .disabled(sync.activity != .idle)
                             #else
                             .buttonStyle(.plain)
                             #endif
+
+                            // Failure reason only. The in-flight spinner
+                            // now lives in the Push / Pull rows
+                            // themselves; this renders nothing unless the
+                            // last operation failed.
+                            SyncActivityRow()
                         }
 
                         // v1.6.17 — granular per-category sync controls.
@@ -1165,9 +1185,11 @@ struct SettingsView: View {
                                     title: "Push to iCloud",
                                     subtitle: syncLastDate > 0
                                         ? "Send this device's data up  ·  Last synced \(lastSyncedString)"
-                                        : "Send this device's playlists, preferences and progress up")
+                                        : "Send this device's playlists, preferences and progress up",
+                                    isBusy: sync.activity == .pushing)
                     }
                     .buttonStyle(PressableButtonStyle())
+                    .disabled(sync.activity != .idle)
 
                     // See the Pull note on the iPhone root section above.
                     Button {
@@ -1176,9 +1198,13 @@ struct SettingsView: View {
                         SettingsRow(icon: "icloud.and.arrow.down",
                                     iconColor: .accentPrimary,
                                     title: "Pull from iCloud",
-                                    subtitle: "Replace this device's data with the iCloud copy")
+                                    subtitle: "Replace this device's data with the iCloud copy",
+                                    isBusy: sync.activity == .pulling)
                     }
                     .buttonStyle(PressableButtonStyle())
+                    .disabled(sync.activity != .idle)
+
+                    SyncActivityRow()
                 }
 
                 NavigationLink(destination: SyncCategoriesSettingsView()) {
@@ -1521,8 +1547,13 @@ struct SettingsView: View {
                         icon: "arrow.triangle.2.circlepath.icloud",
                         label: syncLastDate > 0
                             ? "Push to iCloud  ·  Last synced \(lastSyncedString)"
-                            : "Push to iCloud"
+                            : "Push to iCloud",
+                        isBusy: sync.activity == .pushing
                     ) {
+                        // tvOS rows are never `.disabled` (that would drop
+                        // them out of the focus engine), so a run in flight
+                        // swallows the press instead.
+                        guard sync.activity == .idle else { return }
                         SyncManager.shared.pushServers(servers, immediate: true)
                         SyncManager.shared.pushPreferencesImmediate()
                         if let ctx = WatchProgressManager.modelContext,
@@ -1533,10 +1564,14 @@ struct SettingsView: View {
                     }
                     TVSettingsActionRow(
                         icon: "icloud.and.arrow.down",
-                        label: "Pull from iCloud"
+                        label: "Pull from iCloud",
+                        isBusy: sync.activity == .pulling
                     ) {
+                        guard sync.activity == .idle else { return }
                         showPullConfirm = true
                     }
+
+                    SyncActivityRow()
                 }
                 TVSettingsNavRow(destination: SyncCategoriesSettingsView().trackedAsClassicSettingsChild()) {
                     SettingsRow(icon: "slider.horizontal.3",
@@ -1591,7 +1626,11 @@ struct SettingsView: View {
                         .padding(.horizontal, 24)
                         .padding(.vertical, 18)
                     }
-                    .buttonStyle(.plain)
+                    // .plain let tvOS drop its big bright white platter
+                    // behind the row (Logan 2026-09-15). Shared inline-card
+                    // treatment: accent tint + inset accent ring, same as
+                    // the rest of Settings.
+                    .buttonStyle(TVInlineCardRowButtonStyle())
                 }
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(Color.cardBackground))
@@ -1653,7 +1692,7 @@ struct SettingsView: View {
                 .padding(.horizontal, 24)
                 .padding(.vertical, 18)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(TVInlineCardRowButtonStyle())
             .whatsNewSheet(isPresented: $showWhatsNewFromAbout)
         } else {
             tvAboutRow("App Version", value: aboutVersion)
@@ -1695,7 +1734,7 @@ struct SettingsView: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 18)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(TVInlineCardRowButtonStyle())
     }
     #endif
 }

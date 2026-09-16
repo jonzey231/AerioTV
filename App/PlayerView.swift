@@ -4207,7 +4207,13 @@ struct TVPlayerOptionsPanel: View {
                 isSelected: isSelected
             )
         }
-        .buttonStyle(TVNoHighlightButtonStyle())
+        // The pill owns its fill; the SHARED style owns the one focus
+        // ring, traced as a capsule so it matches the pill exactly
+        // (Logan 2026-09-15: the old ring was the style's fixed 14pt
+        // rounded rect and sat proud of the row). Selected rows ring in
+        // white, everything else in the theme accent.
+        .buttonStyle(TVNoHighlightButtonStyle(isSelected: isSelected))
+        .tvFocusRingShape(.capsule)
         .focusEffectDisabled()
         .focused($focusedID, equals: id)
     }
@@ -4248,10 +4254,12 @@ private struct OptionPillLabel: View {
         .background(
             Capsule().fill(pillFill)
         )
+        // Resting hairline only. The focus ring comes from the shared
+        // button style so the pill never shows two stacked outlines.
         .overlay(
-            Capsule().stroke(
-                isFocused ? Color.accentPrimary.opacity(0.70) : Color.white.opacity(0.08),
-                lineWidth: isFocused ? 2.5 : 1
+            Capsule().strokeBorder(
+                Color.white.opacity(isFocused ? 0 : 0.08),
+                lineWidth: 1
             )
         )
         .animation(.easeInOut(duration: 0.15), value: isFocused)

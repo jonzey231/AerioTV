@@ -588,12 +588,12 @@ private struct TVSkipButton: View {
                     Capsule()
                         .fill(isFocused ? Color.accentPrimary.opacity(0.20) : Color.elevatedBackground.opacity(0.6))
                 )
-                .overlay(
-                    Capsule()
-                        .stroke(Color.accentPrimary, lineWidth: isFocused ? 3 : 0)
-                )
         }
+        // Ring comes from the shared style, traced as a capsule so it
+        // matches the button's own pill exactly (Logan 2026-09-15: the
+        // style's fixed 14pt rounded rect sat proud of the pill).
         .buttonStyle(TVNoHighlightButtonStyle())
+        .tvFocusRingShape(.capsule)
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.05 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)

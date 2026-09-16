@@ -465,6 +465,13 @@ struct ServerDetailView: View {
             // detail rows do not stretch the full TV width (matches the
             // server edit screen). The enclosing ZStack centers it.
             .frame(maxWidth: 1200)
+            // Focus visual for Set Active / Edit Playlist / Test
+            // Connection and the rest of the action rows. Without this
+            // tvOS drops its own squared white platter, which did not
+            // match the rows' corner radius (Logan 2026-09-15). One
+            // container-level style covers every button and link in the
+            // page; inherited through the environment.
+            .buttonStyle(TVInlineCardRowButtonStyle(cornerRadius: 12))
             #endif
         }
         .navigationTitle(server.name)

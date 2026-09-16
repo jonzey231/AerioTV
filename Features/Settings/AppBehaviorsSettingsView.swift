@@ -1219,7 +1219,7 @@ struct TVSteppedSegmentStyle: ButtonStyle {
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .background(Capsule().fill(isSelected ? Color.accentPrimary : Color.clear))
-            .overlay(Capsule().stroke(isSelected ? Color.white : Color.accentPrimary, lineWidth: isFocused ? 3 : 0))
+            .overlay(Capsule().strokeBorder(isSelected ? Color.white : Color.accentPrimary, lineWidth: isFocused ? 3 : 0))
             .scaleEffect(isFocused ? 1.05 : 1.0)
             .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
@@ -1373,12 +1373,11 @@ private struct TVCompactButton: View {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(isFocused ? Color.accentPrimary.opacity(0.20) : Color.elevatedBackground)
                 )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.accentPrimary, lineWidth: isFocused ? 3 : 0)
-                )
         }
+        // One ring, from the shared style, traced at the button's own
+        // 12pt radius instead of the style's default 14pt.
         .buttonStyle(TVNoHighlightButtonStyle())
+        .tvFocusRingShape(.rounded(12))
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)

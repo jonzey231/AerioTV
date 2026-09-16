@@ -4350,8 +4350,16 @@ struct MainTabView: View {
 
     /// Changes whenever any server changes — used to trigger channel re-fetch.
     /// Includes isActive so switching the active server always re-fires the task.
+    /// `credentialGeneration` is part of the key so that replacing a
+    /// playlist's credentials re-runs the whole load sequence the way
+    /// switching playlists does. Without it, editing a Dispatcharr
+    /// playlist from one account to another left every already-loaded
+    /// channel, guide, VOD and DVR list in place -- all of it fetched
+    /// as, and filtered for, the PREVIOUS account.
     private var channelServerKey: String {
-        allServers.map { "\($0.id.uuidString)|\($0.baseURL)|\($0.isActive ? "1" : "0")" }
+        allServers.map {
+            "\($0.id.uuidString)|\($0.baseURL)|\($0.isActive ? "1" : "0")|\($0.credentialGeneration)"
+        }
             .sorted()
             .joined(separator: ",")
     }
@@ -4786,8 +4794,20 @@ struct MainTabView: View {
         }
     }
 
+    /// When the app last left the foreground, for the permission re-probe.
+    private static var backgroundedAt: Date?
+    /// Away this long and the next foreground re-reads permissions.
+    private static let foregroundReprobeSeconds: TimeInterval = 60
+
     private func refreshGuideIfStaleOnForeground(from oldPhase: ScenePhase, to newPhase: ScenePhase) {
+        if newPhase != .active { Self.backgroundedAt = Date() }
         guard oldPhase != .active, newPhase == .active else { return }
+        // Away longer than a minute: re-read permissions for real rather than
+        // letting the staleness gate hold an answer from hours ago. Matches
+        // Android's foreground re-probe window.
+        let awayLongEnough = Self.backgroundedAt.map {
+            Date().timeIntervalSince($0) >= Self.foregroundReprobeSeconds
+        } ?? false
         // Independent of the guide staleness gate below: one cheap request,
         // throttled to 15 minutes per server.
         refreshGuideIfStale(reason: "foreground")
@@ -4796,7 +4816,7 @@ struct MainTabView: View {
         // snapshot so a permission the admin changed while the app was
         // backgrounded applies without a cold launch. Staleness-gated
         // (about 6 hours), so a quick app switch costs nothing.
-        refreshDispatcharrPermissions(reason: "foreground", isColdLaunch: false, force: false)
+        refreshDispatcharrPermissions(reason: "foreground", isColdLaunch: false, force: awayLongEnough)
         // Restart the settle window, then queue the quiet VOD sweep behind it
         // (it starts ~20 s from here, once the guide is painted and any tune is
         // past first frame). The DVR poll keeps its own cadence.

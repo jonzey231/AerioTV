@@ -276,6 +276,20 @@ final class ServerConnection {
     /// nil = not read (the endpoint needs level >= 1).
     var dispatcharrSystemCatchupEnabled: Bool? = nil
 
+    /// Bumped every time this playlist's CREDENTIALS change (a different
+    /// Dispatcharr / Xtream account, or the same account's password or
+    /// api key replaced). Everything this app caches per account -- the
+    /// channel list, the guide, VOD, DVR, the capability snapshot -- is
+    /// keyed on the server row, so without an identity counter in that
+    /// key the app kept serving the PREVIOUS account's data after an
+    /// edit (reported 2026-09-15 on iPad: swapped an admin login for a
+    /// standard "aeriotv" login and the app still behaved as admin).
+    /// `MainTabView.channelServerKey` includes this, so a credential
+    /// edit re-runs the whole load orchestrator exactly the way
+    /// switching playlists does. Editing anything else leaves it alone,
+    /// so a name or EPG-URL edit still costs nothing.
+    var credentialGeneration: Int = 0
+
     /// Id of this server's AAC cast output profile from
     /// /api/core/outputprofiles/ (Dispatcharr 0.30 seeds a locked,
     /// active "Web Player (AAC Audio)" profile). nil = not learned yet
@@ -510,6 +524,36 @@ final class ServerConnection {
     /// view-only until the next successful probe. Now the level / staff
     /// fields still update, the previous blob is kept, and the snapshot is
     /// marked stale so the next probe retries.
+    /// Forget everything this row remembers about the account it was
+    /// connected AS, so the next probe starts from a blank slate instead
+    /// of coalescing the new account onto the old one's answers.
+    ///
+    /// Called from `ServerCredentialChange.commit` when an edit replaced
+    /// the credentials. The account-scoped fields are reset to their
+    /// "never probed" defaults; SERVER-scoped fields (version, auth
+    /// header shape, AAC output profile id) are deliberately kept
+    /// because they describe the deployment, not the user.
+    ///
+    /// Note the deliberate asymmetry with `applyDispatcharrPermissions`,
+    /// which never lets an empty read blank a good snapshot: there the
+    /// snapshot still describes the SAME account and a blank read is a
+    /// network artifact. Here the account itself changed, so the old
+    /// snapshot is not "last known good", it is wrong.
+    func resetDispatcharrAccountSnapshot() {
+        dispatcharrUserLevel = 10
+        dispatcharrIsStaff = false
+        dispatcharrIsSuperuser = false
+        dispatcharrCustomPropertiesJSON = ""
+        dispatcharrPermissionsFetchedAt = nil
+        dispatcharrCapabilitiesSchema = 0
+        dispatcharrSystemCatchupEnabled = nil
+        dispatcharrDVRAccess = ""
+        dispatcharrCatchupEnabled = true
+        dispatcharrVODMoviesEnabled = true
+        dispatcharrVODSeriesEnabled = true
+        dispatcharrChannelProfileIDs = ""
+    }
+
     @discardableResult
     func applyDispatcharrPermissions(from user: DispatcharrUser,
                                      version: String?,
@@ -1485,6 +1529,30 @@ enum DispatcharrCapabilityProbe {
                      + "(\(server.dispatcharrCapabilities.probeSummary))")
             return false
         }
+        // SELF-HEAL: does the stored key actually authenticate as the
+        // account whose username this playlist carries?
+        //
+        // users/me answers as whoever the key belongs to. A playlist that
+        // was edited from one Dispatcharr user to another before the
+        // credential-change path existed kept the previous account's
+        // api_key, and that key was still valid server-side, so nothing
+        // ever 401'd and nothing re-authenticated. The username the user
+        // typed is the statement of intent; the username the server echoes
+        // is the fact. When they disagree, the cached identity is stale by
+        // definition and is repaired exactly like a credential edit, so a
+        // broken playlist fixes itself on the next probe instead of
+        // needing the user to re-save credentials.
+        //
+        // Only with a username to compare against: in pure API Key mode
+        // there is nothing the user asserted about WHICH account, so a
+        // mismatch cannot be detected and must not be guessed at.
+        if await healIdentityMismatchIfNeeded(server, serverUsername: user.username) {
+            // The repair re-probed with the new key; that pass owns the
+            // snapshot, and re-applying this stale payload over it would
+            // put the old account's answers straight back.
+            return true
+        }
+
         var level = user.effectiveUserLevel
         // A legacy superuser can still report a low custom level; the
         // IsAdmin-gated users LIST endpoint settles it.
@@ -1515,6 +1583,46 @@ enum DispatcharrCapabilityProbe {
                  + "changed=\(changed) server=\(server.name) reason=\(reason)")
         debugLog("[PERMS] detail \(server.name) (\(reason)): \(server.dispatcharrCapabilities.debugDescription)")
         if changed { NotificationCenter.default.post(name: .dispatcharrCapabilitiesDidChange, object: nil) }
+        return true
+    }
+
+    /// Playlists whose identity mismatch has already been acted on in this
+    /// process. One repair per playlist per app run: if the re-authenticated
+    /// key STILL answers as somebody else, the server is doing something we
+    /// do not model (a shared key, a proxy rewriting the account) and
+    /// repairing again would spin -- log it and leave it alone.
+    private static var identityRepaired: Set<UUID> = []
+
+    /// Compare the username the server echoed against the one saved on the
+    /// playlist and, on a genuine mismatch, re-authenticate.
+    ///
+    /// Returns true when a repair ran (the caller must then abandon the
+    /// payload it was about to apply, since the repair took a fresh
+    /// snapshot of its own).
+    private static func healIdentityMismatchIfNeeded(_ server: ServerConnection,
+                                                     serverUsername: String) async -> Bool {
+        func norm(_ s: String) -> String {
+            s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        let typed = norm(server.username)
+        let actual = norm(serverUsername)
+        guard !typed.isEmpty, !actual.isEmpty, typed != actual else { return false }
+
+        guard !identityRepaired.contains(server.id) else {
+            logProbe("[PERMS] stored key STILL authenticates as '\(serverUsername)' but the "
+                     + "playlist is '\(server.username)' after a repair this run; leaving it "
+                     + "alone (server=\(server.name))")
+            return false
+        }
+        identityRepaired.insert(server.id)
+        logProbe("[PERMS] stored key authenticates as '\(serverUsername)' but the playlist is "
+                 + "'\(server.username)'; re-authenticating (server=\(server.name))")
+
+        // `inFlight` still holds this server for the probe we are inside;
+        // drop it so the repair's own probe is not swallowed as a duplicate.
+        // The caller's `defer` removes it again, which is a no-op.
+        inFlight.remove(server.id)
+        await ServerCredentialChange.repairIdentityMismatch(server: server)
         return true
     }
 

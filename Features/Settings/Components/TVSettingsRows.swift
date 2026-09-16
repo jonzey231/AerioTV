@@ -29,7 +29,7 @@ struct TVSettingsNavRow<Destination: View, Content: View>: View {
                 .background(tvSettingsCardBG(isFocused))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .buttonStyle(TVNoHighlightButtonStyle())
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.02 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
@@ -55,7 +55,7 @@ struct TVSettingsNavButton: View {
                 .background(tvSettingsCardBG(isFocused))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .buttonStyle(TVNoHighlightButtonStyle())
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.02 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
@@ -69,6 +69,12 @@ struct TVSettingsActionRow: View {
     let label: String
     var isAccent: Bool = false
     var isDestructive: Bool = false
+    /// `nil` (the default) lays out no trailing box. Non-nil reserves a
+    /// fixed-size trailing box that holds a spinner while this row's own
+    /// action is in flight, so the row height and focus ring never move
+    /// (Logan 2026-09-15: the indicator belongs in the row that is
+    /// working, not in a pill that flashes below it).
+    var isBusy: Bool? = nil
     let action: () -> Void
     @FocusState private var isFocused: Bool
 
@@ -94,6 +100,16 @@ struct TVSettingsActionRow: View {
                     .scaledFont(.system(size: 26, weight: .medium))
                     .foregroundColor(tint)
                 Spacer()
+                if let isBusy {
+                    ZStack {
+                        if isBusy {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(.accentPrimary)
+                        }
+                    }
+                    .frame(width: 44, height: 44)
+                }
             }
             .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
             .padding(.horizontal, 20)
@@ -101,7 +117,7 @@ struct TVSettingsActionRow: View {
             .background(tvSettingsCardBG(isFocused))
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .buttonStyle(TVNoHighlightButtonStyle())
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.02 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
@@ -148,7 +164,7 @@ struct TVSettingsSelectionRow<Leading: View>: View {
             .background(tvSettingsCardBG(isFocused))
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .buttonStyle(TVNoHighlightButtonStyle())
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.02 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
@@ -225,7 +241,7 @@ struct TVSettingsToggleRow: View {
             .background(tvSettingsCardBG(isFocused))
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .buttonStyle(TVNoHighlightButtonStyle())
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.02 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
@@ -238,9 +254,12 @@ func tvSettingsCardBG(_ focused: Bool) -> some View {
     RoundedRectangle(cornerRadius: 12, style: .continuous)
         .fill(focused ? Color.accentPrimary.opacity(0.18) : Color.cardBackground)
         .overlay {
+            // strokeBorder keeps the focus ring inside the card's own
+            // bounds so it traces the row exactly instead of straddling
+            // the edge and reading as a second, larger outline.
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.accentPrimary.opacity(focused ? 0.65 : 0.10),
-                        lineWidth: focused ? 2.5 : 1)
+                .strokeBorder(Color.accentPrimary.opacity(focused ? 0.65 : 0.10),
+                              lineWidth: focused ? 2.5 : 1)
         }
 }
 #endif
@@ -303,7 +322,11 @@ struct ServerListRow: View {
                         .foregroundColor(server.isActive ? .accentPrimary : Color.contrastText(.textTertiary))
                 }
                 #if os(tvOS)
+                // Standalone icon button: it has no card behind it, so the
+                // shared ring IS its focus visual. Pill-shaped so it hugs
+                // the round checkmark instead of boxing it.
                 .buttonStyle(TVNoHighlightButtonStyle())
+                .tvFocusRingShape(.capsule)
                 #else
                 .buttonStyle(.plain)
                 #endif

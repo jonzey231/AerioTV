@@ -6097,6 +6097,23 @@ enum CatchupSupport {
     /// process; absent = not probed yet.
     private static var nativeSupportCache: [String: Bool] = [:]
 
+    /// Forget the memoized XC credentials for one server.
+    ///
+    /// `xcCredsCache` holds the Django username plus that account's
+    /// `custom_properties.xc_password`, both of which belong to the
+    /// account the playlist was connected as. Editing the playlist to a
+    /// DIFFERENT Dispatcharr user leaves this memo pointing at the old
+    /// account for the rest of the process, so every catch-up playback
+    /// keeps being attributed to (and limited by) the previous user.
+    /// `ServerCredentialChange.commit` calls this. The panel timezone is
+    /// dropped alongside it because it is read from the same handshake;
+    /// `nativeSupportCache` is keyed by base URL and describes the
+    /// SERVER, so it is left alone.
+    static func invalidateCredentials(serverID: UUID) {
+        xcCredsCache.removeValue(forKey: serverID)
+        panelTzCache.removeValue(forKey: serverID)
+    }
+
     /// Native session mint outcome. `.unsupported` = the endpoint 404ed
     /// (stable-tag server or unknown channel uuid) - fall back to XC.
     enum NativeMintResult: Sendable {

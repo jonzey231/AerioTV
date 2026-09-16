@@ -19,6 +19,15 @@ struct SettingsRow: View {
     /// would blend into the fill. Flips the row to white-on-accent, the
     /// native iPadOS sidebar look.
     var selectionContrast: Bool = false
+    /// Shows a native spinner at the row's trailing edge while this
+    /// row's own action is running (Logan 2026-09-15: the separate
+    /// activity pill under the Push / Pull rows flashed so briefly it
+    /// read as a glitch, so the indicator lives in the row that is
+    /// actually working). The trailing box is always laid out, so the
+    /// row's height never changes when the spinner appears.
+    /// `nil` (the default) lays out no trailing box at all, preserving
+    /// the row's original geometry everywhere else it is used.
+    var isBusy: Bool? = nil
     /// Observe ThemeManager so the subtitle's `.textSecondary`
     /// (computed as `theme.accent.opacity(0.65)`) re-evaluates on
     /// theme changes. v1.6.8: parent SettingsView observes
@@ -62,6 +71,25 @@ struct SettingsRow: View {
                         .scaledFont(.bodySmall)
                         .foregroundColor(selectionContrast ? .white.opacity(0.85) : Color.contrastText(.textSecondary))
                 }
+            }
+
+            if let isBusy {
+                Spacer(minLength: 0)
+
+                // Reserved trailing box: present whether or not the
+                // spinner is running so the row keeps a constant height
+                // (and, on tvOS, a constant focus ring).
+                ZStack {
+                    if isBusy {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(selectionContrast ? .white : .accentPrimary)
+                            #if !os(tvOS)
+                            .controlSize(.small)
+                            #endif
+                    }
+                }
+                .frame(width: iconBoxSize, height: iconBoxSize)
             }
         }
         #if os(tvOS)

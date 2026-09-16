@@ -824,3 +824,183 @@ extension DispatcharrAPI {
         }
     }
 }
+
+// MARK: - Credential change (Edit Playlist)
+
+/// What the app remembers about WHICH ACCOUNT a playlist is connected as,
+/// captured when an edit surface opens so Save can tell a credential swap
+/// apart from a rename.
+///
+/// Read through the `effective*` accessors, not the raw SwiftData columns:
+/// `saveCredentialsSynced` blanks the in-memory copies once they reach the
+/// Keychain, so the raw columns are empty for every already-saved row and
+/// comparing them would report "changed" on every single save.
+struct DispatcharrCredentialSnapshot: Equatable {
+    let username: String
+    let password: String
+    let apiKey: String
+    let credentialTypeRaw: String
+
+    /// An in-memory column that is NON-empty is something the user just
+    /// typed, and it wins: `effectivePassword` / `effectiveApiKey` are
+    /// Keychain-first (so a cross-device iCloud update beats a stale local
+    /// item), which means reading them alone would return the OLD value
+    /// for a field the user is in the middle of replacing -- exactly the
+    /// case this type exists to detect. Same precedence
+    /// `SyncManager.saveCredentialsSynced` uses when it persists them.
+    @MainActor
+    static func capture(from server: ServerConnection) -> DispatcharrCredentialSnapshot {
+        DispatcharrCredentialSnapshot(
+            username: server.username,
+            password: server.password.isEmpty ? server.effectivePassword : server.password,
+            apiKey: server.apiKey.isEmpty ? server.effectiveApiKey : server.apiKey,
+            credentialTypeRaw: server.dispatcharrCredentialTypeRaw
+        )
+    }
+}
+
+/// Re-authenticates a playlist end to end when its credentials changed.
+///
+/// The bug this exists for (Logan, iPad, 2026-09-15): Edit Playlist bound
+/// the username and password fields straight at the SwiftData row and Save
+/// did nothing but push them to the Keychain. Every Dispatcharr call
+/// authenticates with `effectiveApiKey`, which still held the api_key
+/// minted for the PREVIOUS account, and that key was still perfectly valid
+/// server-side, so nothing ever 401'd and `silentRebootstrapApiKey` never
+/// ran. The playlist went on acting as the old (admin) account forever:
+/// admin DVR affordances, the old account's channel profiles, the old
+/// account's stream limit, the old account's xc_password for catch-up.
+///
+/// `commit` is the one place that knows how to drop ALL of that. It is
+/// deliberately ordered: local caches first (so nothing in flight can
+/// re-seed them), then the re-login, then the capability probe, and only
+/// then the `credentialGeneration` bump that restarts the load
+/// orchestrator, so channels and VOD are fetched with the new identity's
+/// channel-profile filter already in place rather than being loaded
+/// unfiltered and corrected a moment later.
+@MainActor
+enum ServerCredentialChange {
+
+    /// Apply an Edit Playlist save.
+    ///
+    /// - Parameters:
+    ///   - server: the edited row. Its credential fields must already hold
+    ///     the user's new values (the edit surfaces bind straight to them).
+    ///   - previous: the snapshot taken when the edit surface opened.
+    /// - Returns: true when the credentials actually changed and a
+    ///   re-authentication was kicked off.
+    @discardableResult
+    static func commit(server: ServerConnection,
+                       previous: DispatcharrCredentialSnapshot?) -> Bool {
+        guard let previous else { return false }
+        let current = DispatcharrCredentialSnapshot.capture(from: server)
+        // Compare BEFORE the Keychain write: `saveCredentialsSynced` blanks
+        // the in-memory columns, after which `capture` would read the new
+        // values back out of the Keychain and every comparison would match.
+        guard current != previous else { return false }
+        debugLog("📺 [CRED] credentials changed for \(server.name); re-authenticating as the new account")
+        dropCachedIdentity(server)
+        Task { @MainActor in
+            await reauthenticate(server: server)
+        }
+        return true
+    }
+
+    /// Forget everything the app holds that was derived from the account
+    /// this row USED to be connected as. Shared by the Edit Playlist save
+    /// path and by the self-heal in `DispatcharrCapabilityProbe`.
+    static func dropCachedIdentity(_ server: ServerConnection) {
+        // 1. Nothing may keep streaming (or keep a proxy connection open)
+        //    under the old identity: Dispatcharr counts live connections
+        //    against the OLD user's stream_limit and the player would go on
+        //    sending the old api_key for the life of the connection.
+        PlayerSession.shared.stop()
+
+        // 2. Process-local JWT pair for this row belongs to the old account.
+        DispatcharrTokenStore.shared.clear(serverID: server.id)
+
+        // 3. Memoized XC username + xc_password used by catch-up.
+        CatchupSupport.invalidateCredentials(serverID: server.id)
+
+        // 4. The cached api_key. In Username & Password mode it was MINTED
+        //    for the old account and must be re-minted from the saved
+        //    credentials; in API Key mode the key IS the credential the
+        //    user supplied, so it stays.
+        if server.dispatcharrCredentialType == .usernamePassword {
+            server.apiKey = ""
+            KeychainHelper.delete("apiKey_\(server.id.uuidString)")
+            KeychainHelper.delete("apiKey_\(server.id.uuidString)", synchronizable: true)
+        }
+
+        // 5. Everything derived from users/me for the old account.
+        server.resetDispatcharrAccountSnapshot()
+    }
+
+    /// Re-authenticate a playlist whose stored api_key turned out to belong
+    /// to a DIFFERENT account than its saved username (see
+    /// `DispatcharrCapabilityProbe.refresh`). Same work as a credential
+    /// edit, minus the diff -- the mismatch already is the evidence.
+    ///
+    /// Not merged into `commit`: that one answers "did the user change
+    /// anything?", this one answers "is what we cached still this account?".
+    static func repairIdentityMismatch(server: ServerConnection) async {
+        dropCachedIdentity(server)
+        await reauthenticate(server: server)
+    }
+
+    /// Mint a fresh api_key for the new account (Username & Password mode
+    /// only -- API Key mode has no login to run), take a fresh capability
+    /// snapshot, then bump `credentialGeneration` so the load orchestrator
+    /// re-runs channels / EPG / VOD / DVR under the new identity.
+    private static func reauthenticate(server: ServerConnection) async {
+        defer {
+            // Bumped even when the re-auth failed. The account-scoped
+            // snapshot was already cleared, so the cached channel and VOD
+            // lists still belong to the old user and must not be shown; a
+            // reload that fails is visibly broken, which is the correct
+            // outcome for wrong credentials and is recoverable by fixing
+            // them. Leaving the old data on screen is not.
+            server.credentialGeneration &+= 1
+            NotificationCenter.default.post(name: .dispatcharrCapabilitiesDidChange, object: nil)
+        }
+
+        guard server.type == .dispatcharrAPI else { return }
+
+        if server.dispatcharrCredentialType == .usernamePassword {
+            let username = server.username
+            let password = server.password.isEmpty ? server.effectivePassword : server.password
+            guard !username.isEmpty, !password.isEmpty else {
+                debugLog("📺 [CRED] re-auth SKIP: Username & Password mode with an empty field")
+                return
+            }
+            do {
+                let pair = try await DispatcharrAPI.login(
+                    baseURL: server.effectiveBaseURL,
+                    username: username,
+                    password: password,
+                    userAgent: server.effectiveUserAgent
+                )
+                DispatcharrTokenStore.shared.store(serverID: server.id,
+                                                   access: pair.access,
+                                                   refresh: pair.refresh)
+                let bearerAPI = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                               auth: .bearer(pair.access),
+                                               userAgent: server.effectiveUserAgent)
+                let user = try await bearerAPI.fetchCurrentUser()
+                guard !user.apiKey.isEmpty else {
+                    debugLog("📺 [CRED] re-auth: users/me carried no api_key for '\(user.username)'")
+                    return
+                }
+                server.apiKey = user.apiKey
+                SyncManager.shared.saveCredentialsSynced(for: server)
+                debugLog("📺 [CRED] re-auth OK: now connected as '\(user.username)' (was a different account)")
+            } catch {
+                debugLog("📺 [CRED] re-auth FAILED: \(error.localizedDescription)")
+                return
+            }
+        }
+
+        // Fresh capability snapshot for the NEW account, TTL ignored.
+        await DispatcharrCapabilityProbe.refresh(server, reason: "credential-change")
+    }
+}

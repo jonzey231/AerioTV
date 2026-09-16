@@ -79,6 +79,12 @@ struct EditServerPage: View {
     /// same pattern as `pendingCredentialType`. Mirrors EditServerSheet.
     @State private var pendingBaseURL: String? = nil
 
+    /// Which account this playlist was connected as when the page opened.
+    /// Save diffs against it so a credential swap triggers a full
+    /// re-authentication while a rename or an EPG-URL edit costs nothing.
+    /// See `ServerCredentialChange` for what a swap has to invalidate.
+    @State private var originalCredentials: DispatcharrCredentialSnapshot? = nil
+
     private var baseURLBinding: Binding<String> {
         Binding(
             get: { pendingBaseURL ?? server.baseURL },
@@ -126,7 +132,12 @@ struct EditServerPage: View {
     @MainActor
     private func refreshDirectConnectSession() async {
         let username = server.username
-        let password = server.effectivePassword
+        // Use what the user just TYPED, not the Keychain copy:
+        // `effectivePassword` is Keychain-first, so validating with it
+        // would test the OLD password on a sheet where the user is
+        // replacing it -- reporting success for credentials that are on
+        // their way out, or failure for correct new ones.
+        let password = server.password.isEmpty ? server.effectivePassword : server.password
         let baseURL  = server.effectiveBaseURL
         let userAgent = server.effectiveUserAgent
         let serverID = server.id
@@ -187,6 +198,10 @@ struct EditServerPage: View {
         }
         .onChange(of: server.modelContext == nil) { _, deleted in
             if deleted { dismiss() }
+        }
+        .onAppear {
+            guard server.modelContext != nil, originalCredentials == nil else { return }
+            originalCredentials = DispatcharrCredentialSnapshot.capture(from: server)
         }
     }
 
@@ -401,7 +416,21 @@ struct EditServerPage: View {
                             // surface mirrors iOS Save behavior.
                             commitBaseURLIfStaged()
                             commitCredentialModeIfStaged()
+                            // Diff BEFORE saveCredentialsSynced: that
+                            // call moves the typed values into the
+                            // Keychain and blanks the in-memory
+                            // columns, after which the "did the
+                            // account change?" question can no longer
+                            // be answered.
+                            let credentialsChanged = ServerCredentialChange.commit(
+                                server: server,
+                                previous: originalCredentials
+                            )
                             SyncManager.shared.saveCredentialsSynced(for: server)
+                            if credentialsChanged {
+                                originalCredentials =
+                                    DispatcharrCredentialSnapshot.capture(from: server)
+                            }
                             dismiss()
                         } label: {
                             Text("Save Changes")

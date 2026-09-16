@@ -875,7 +875,7 @@ struct WhatsNewSheet: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.accentPrimary, lineWidth: isFocused ? 2 : 0)
+                .strokeBorder(Color.accentPrimary, lineWidth: isFocused ? 2 : 0)
         )
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
@@ -898,7 +898,7 @@ struct WhatsNewSheet: View {
                     .frame(maxWidth: .infinity, minHeight: 48)
                     .overlay(
                         Capsule()
-                            .stroke(Color.accentPrimary, lineWidth: tvFocus == .disable ? 3 : 0)
+                            .strokeBorder(Color.accentPrimary, lineWidth: tvFocus == .disable ? 3 : 0)
                     )
                     .animation(.easeInOut(duration: 0.15), value: tvFocus == .disable)
             }

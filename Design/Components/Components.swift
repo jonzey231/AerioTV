@@ -146,14 +146,53 @@ struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
 
 /// Suppresses the default tvOS system focus highlight (white glow) and
 /// provides themed focus feedback. The visible focus indicator is the
-/// 2pt accent stroke ring drawn on the focused element. v1.6.21 dropped
+/// accent stroke ring drawn on the focused element. v1.6.21 dropped
 /// the scale, brightness, and shadow effects per user feedback that the
 /// pop-out was distracting and pushed text too close to row borders. The
 /// stroke alone is sufficient to identify focus at TV viewing distance.
 /// Press feedback is a brief opacity dip.
 #if os(tvOS)
+
+// MARK: - Focus ring shape (shared)
+
+/// The outline the shared tvOS focus ring traces. Callers whose control
+/// is not a 14pt rounded rect declare their real shape ONCE, via
+/// `.tvFocusRingShape(_:)` on the control or on any ancestor, and every
+/// `TVNoHighlightButtonStyle` underneath draws a ring that matches the
+/// control exactly instead of a fixed 14pt rectangle sitting proud of it
+/// (Logan 2026-09-15: the player Options rows, the launch Skip button and
+/// the playlist detail rows all showed the squared-off mismatch).
+enum TVFocusRingShape: Equatable {
+    /// Pill. The standing tvOS shape rule for action buttons and chips.
+    case capsule
+    /// Rounded rect at the control's own corner radius.
+    case rounded(CGFloat)
+}
+
+private struct TVFocusRingShapeKey: EnvironmentKey {
+    /// 14pt matches PrimaryButton / SecondaryButton, which is what every
+    /// pre-existing call site inherited, so the default is unchanged.
+    static let defaultValue: TVFocusRingShape = .rounded(14)
+}
+
+extension EnvironmentValues {
+    var tvFocusRingShape: TVFocusRingShape {
+        get { self[TVFocusRingShapeKey.self] }
+        set { self[TVFocusRingShapeKey.self] = newValue }
+    }
+}
+
+extension View {
+    /// Declares the outline the shared tvOS focus ring should trace for
+    /// this view and everything inside it.
+    func tvFocusRingShape(_ shape: TVFocusRingShape) -> some View {
+        environment(\.tvFocusRingShape, shape)
+    }
+}
+
 struct TVNoHighlightButtonStyle: ButtonStyle {
     @Environment(\.isFocused) private var isFocused
+    @Environment(\.tvFocusRingShape) private var ringShape
     /// When false, this style draws NO focus ring of its own and only
     /// dims on press. Use it for buttons that already render their own
     /// complete focus highlight (e.g. the VOD episode row and Play CTA)
@@ -161,23 +200,65 @@ struct TVNoHighlightButtonStyle: ButtonStyle {
     /// nested inside the caller's. Defaults true to preserve every
     /// existing call site.
     var drawsFocusRing: Bool = true
+    /// Standing rule (Logan 2026-09-05): a focused row that is also the
+    /// SELECTED one rings in white; everything else rings in the theme
+    /// accent. Callers that know their selected state pass it here rather
+    /// than drawing a second ring of their own.
+    var isSelected: Bool = false
+
+    private var ringColor: Color { isSelected ? .white : .accentPrimary }
+    private var ringWidth: CGFloat { isSelected ? 3 : 2.5 }
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .overlay(
-                // Accent stroke ring drawn on focus. 14pt corner radius
-                // matches every primary/secondary/affordance button in
-                // this codebase (PrimaryButton, SecondaryButton both
-                // use RoundedRectangle(cornerRadius: 14)). Source-type
-                // rows on Add Playlist use 16pt cards; the slight inset
-                // is invisible at TV viewing distance.
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.accentPrimary,
-                            lineWidth: (drawsFocusRing && isFocused) ? 2 : 0)
-                    .opacity((drawsFocusRing && isFocused) ? 1 : 0)
-                    .animation(.easeInOut(duration: 0.15), value: isFocused)
-            )
+            .overlay {
+                // `strokeBorder` (not `stroke`) keeps the ring INSIDE the
+                // control's bounds. A centered stroke straddles the edge,
+                // which is what made the ring read as sitting proud of the
+                // row even once the corner radius matched.
+                let visible = drawsFocusRing && isFocused
+                Group {
+                    switch ringShape {
+                    case .capsule:
+                        Capsule(style: .continuous)
+                            .strokeBorder(ringColor, lineWidth: visible ? ringWidth : 0)
+                    case .rounded(let radius):
+                        RoundedRectangle(cornerRadius: radius, style: .continuous)
+                            .strokeBorder(ringColor, lineWidth: visible ? ringWidth : 0)
+                    }
+                }
+                .opacity(visible ? 1 : 0)
+                .animation(.easeInOut(duration: 0.15), value: isFocused)
+            }
             .opacity(configuration.isPressed ? 0.7 : 1.0)
+    }
+}
+
+/// Focus treatment for rows that live INSIDE a shared card (the About
+/// pane's list, for example) and therefore have no background of their
+/// own. `.buttonStyle(.plain)` leaves tvOS free to drop its big bright
+/// white platter behind the row (Logan 2026-09-15, Settings > About >
+/// Open Source Licenses); this style suppresses it and gives the row the
+/// same accent tint + inset accent ring the rest of Settings uses.
+struct TVInlineCardRowButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+    /// Corner radius of the tint/ring. 10pt reads correctly for a row
+    /// nested inside the standard 12pt Settings card.
+    var cornerRadius: CGFloat = 10
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.accentPrimary.opacity(isFocused ? 0.18 : 0))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(Color.accentPrimary.opacity(isFocused ? 0.65 : 0),
+                                  lineWidth: isFocused ? 2.5 : 0)
+            }
+            .opacity(configuration.isPressed ? 0.7 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
 }
 
@@ -1286,3 +1367,50 @@ final class HorizontalPanRecognizer: UIPanGestureRecognizer {
     override func reset() { start = nil; super.reset() }
 }
 #endif
+
+// MARK: - iCloud Sync Failure
+
+/// Inline failure reason for a manual iCloud Push or Pull, in the same
+/// red-status treatment neighboring settings rows use for a failed Test
+/// Connection. Deliberately NOT a blocking overlay.
+///
+/// Logan 2026-09-15 (device feedback): the in-flight half of this row
+/// flashed so briefly it read as a glitch, so progress moved INTO the
+/// Push / Pull rows themselves (a native spinner in the row that is
+/// running, see `SettingsRow.isBusy` / `TVSettingsActionRow.isBusy`) and
+/// this row was reduced to the failure case.
+///
+/// Renders nothing when there is nothing to report, so it can sit
+/// unconditionally inside any Sync section on any platform.
+struct SyncActivityRow: View {
+    @ObservedObject private var sync = SyncManager.shared
+
+    #if os(tvOS)
+    private let titleSize: CGFloat = 22
+    private let horizontalPadding: CGFloat = 20
+    private let verticalPadding: CGFloat = 8
+    #else
+    private let titleSize: CGFloat = 14
+    private let horizontalPadding: CGFloat = 0
+    private let verticalPadding: CGFloat = 2
+    #endif
+
+    var body: some View {
+        Group {
+            if let failure = sync.lastSyncFailure {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundColor(.statusLive)
+                    Text(failure)
+                        .scaledFont(.system(size: titleSize).subtext())
+                        .foregroundColor(.statusLive)
+                        .multilineTextAlignment(.leading)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, horizontalPadding)
+                .padding(.vertical, verticalPadding)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: sync.lastSyncFailure)
+    }
+}
