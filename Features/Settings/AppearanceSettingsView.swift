@@ -57,6 +57,11 @@ struct AppearanceSettingsView: View {
     @AppStorage("ui.showChannelNumbers")  private var showChannelNumbers = true
     @AppStorage("ui.showChannelNames")    private var showChannelNames = true
     @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
+    /// Rounded corners on channel logos and program artwork (Logan
+    /// 2026-09-16, Android parity). ON reproduces the shipped look: each
+    /// image takes the corner radius of the cell or card it sits in. OFF
+    /// squares them all. See `LogoCorners` in Typography.swift.
+    @AppStorage(LogoCorners.key) private var roundedLogoCorners = LogoCorners.defaultValue
     @AppStorage(ClockFormat.defaultsKey) private var timeFormat = "system"
 
     private static let timeFormatOptions: [(value: String, label: String, subtitle: String)] = [
@@ -274,7 +279,7 @@ struct AppearanceSettingsView: View {
                         icon: "textformat",
                         iconColor: .accentPrimary,
                         title: "Show Channel Names",
-                        subtitle: "Turn off to hide channel names in the Guide's channel column.",
+                        subtitle: "Turn off to hide channel names in the Live TV list and the Guide's channel column.",
                         isOn: $showChannelNames,
                         onChange: { _ in }
                     )
@@ -287,6 +292,14 @@ struct AppearanceSettingsView: View {
                         subtitle: "Turn off to hide the episode or match name under each program title in the Guide and Live TV list, for EPGs that repeat the description there.",
                         isOn: $showProgramSubtitles,
                         onChange: { _ in }
+                    )
+                    TVSettingsToggleRow(
+                        icon: "square.on.square",
+                        iconColor: .accentPrimary,
+                        title: "Rounded corners on logos and artwork",
+                        subtitle: "Applies to channel logos and program artwork throughout the app.",
+                        isOn: $roundedLogoCorners,
+                        onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
                     )
                 }
 
@@ -825,7 +838,7 @@ struct AppearanceSettingsView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Show Channel Names")
                                 .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                            Text("Turn off to hide channel names in the Guide's channel column.")
+                            Text("Turn off to hide channel names in the Live TV list and the Guide's channel column.")
                                 .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                         }
                     }
@@ -845,6 +858,19 @@ struct AppearanceSettingsView: View {
                     .tint(theme.accent)
                     .listRowBackground(Color.cardBackground)
                     .onChange(of: showProgramSubtitles) { _, _ in
+                        SyncManager.shared.pushPreferencesImmediate()
+                    }
+                    Toggle(isOn: $roundedLogoCorners) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Rounded corners on logos and artwork")
+                                .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                            Text("Applies to channel logos and program artwork throughout the app.")
+                                .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                        }
+                    }
+                    .tint(theme.accent)
+                    .listRowBackground(Color.cardBackground)
+                    .onChange(of: roundedLogoCorners) { _, _ in
                         SyncManager.shared.pushPreferencesImmediate()
                     }
                 } header: {

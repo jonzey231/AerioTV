@@ -7650,8 +7650,10 @@ private struct ChannelInfoBanner: View {
                 // v1.6.23: route through CachedLogoImage so the
                 // active server's auth headers are applied (fixes
                 // Dispatcharr-API logo 401 → blank-logo regression).
-                CachedLogoImage(url: item.logoURL, width: logoSize, height: logoSize)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                // The info card itself is a 14pt continuous rounded rect,
+                // so the logo takes 14 rather than its old fixed 6.
+                CachedLogoImage(url: item.logoURL, width: logoSize, height: logoSize,
+                                containerRadius: 14)
             }
 
             VStack(alignment: .leading, spacing: 3) {

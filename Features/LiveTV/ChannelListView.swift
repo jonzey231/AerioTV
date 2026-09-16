@@ -2895,9 +2895,97 @@ struct ChannelRow: View {
     /// hidden. Cross-platform; defaults on.
     @AppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
     /// Width a hidden number column frees for the logo (column + spacing).
-    private static let tvNumberColumn: CGFloat = 42 + 14
-    private static let wideNumberColumn: CGFloat = 36 + 14
-    private static let compactNumberColumn: CGFloat = 26 + 10
+    // The old fixed number-column widths (42 / 36 / 26 plus HStack spacing)
+    // are gone: the column is measured from the monospaced digit advance so
+    // four-digit and "1500.5" numbers cannot truncate. See
+    // `numberColumnWidth(fontSize:)`, `tvFreedNumberColumn` and
+    // `freedNumberColumn(_:)`.
+    /// GH #73 (Android parity): when off, the channel NAME line is hidden
+    /// in the list row; the program text under it is untouched.
+    @AppStorage("ui.showChannelNames") private var showChannelNames = true
+    /// Numbers AND names both hidden: the logo slot takes the row's full
+    /// height (see `CachedLogoImage.fillsHeight`) and this multiplier
+    /// widens the numbers-off width proportionally, so tall/portrait art
+    /// gets height and wide art still gets room. The image is fit, never
+    /// cropped, and centered in the slot.
+    private static let bothHiddenWidthFactor: CGFloat = 1.5
+    /// True when the row has neither a number column nor a name line.
+    private var logoFillsRow: Bool { !showChannelNumbers && !showChannelNames }
+    /// Height of the row's text column, and so of the row: the SAME for
+    /// every row in the list, computed from the tallest layout a row can
+    /// have at the current Text Size and Subtext Size (Logan 2026-09-16).
+    /// A row with less text leaves the unused lines blank rather than
+    /// collapsing, so the list is uniform and every logo comes out the same
+    /// size by construction. Derived from the row's own font metrics, never
+    /// measured, so there is no geometry feedback and no per-row variation.
+    /// See `ChannelRowTextColumn`.
+    private var uniformTextHeight: CGFloat {
+        #if os(tvOS)
+        return ChannelRowTextColumn.tvOSHeight(showName: showChannelNames,
+                                               showSubtitle: showProgramSubtitles,
+                                               textScale: textScale,
+                                               subtextScale: subtextScale)
+        #else
+        return ChannelRowTextColumn.iOSHeight(isWide: isWide,
+                                              scale: listScaleClamped,
+                                              showName: showChannelNames,
+                                              showSubtitle: showProgramSubtitles,
+                                              textScale: textScale,
+                                              subtextScale: subtextScale)
+        #endif
+    }
+    /// Characters the number column must fit, published by the list from the
+    /// widest number it is showing. See `ChannelNumberColumn`.
+    @Environment(\.aerioChannelNumberChars) private var numberChars
+
+    /// Width of the channel-number column for a rendered point size. Measured
+    /// from the monospaced digit advance, so a four-digit number (or a
+    /// Dispatcharr sub-channel like "1500.5") can never truncate; the old
+    /// fixed 26 / 36 / 42 point columns clipped at four digits.
+    private func numberColumnWidth(fontSize: CGFloat) -> CGFloat {
+        ChannelNumberColumn.width(characters: numberChars,
+                                  fontSize: fontSize * max(1, textScale))
+    }
+
+    // MARK: Leading column (logo over number)
+    //
+    // Logan 2026-09-16, Android parity: the channel number no longer sits
+    // BESIDE the logo, it sits UNDER it, centered, in one leading column.
+    // Nothing competes with the number for width any more, so it can never
+    // truncate however many digits (or "1500.5" sub-channel forms) a
+    // provider hands out, and the logo gets the column's full width in
+    // every state instead of only when numbers are hidden.
+    //
+    // The column width is therefore the OLD numbers-off width in all
+    // states (the logo simply keeps the room the number used to take
+    // beside it), still multiplied by `bothHiddenWidthFactor` when neither
+    // the number nor the name is drawn.
+
+    /// Number point size for this row, before Text Size.
+    private var numberFontSize: CGFloat {
+        #if os(tvOS)
+        return 24
+        #else
+        return (isWide ? 17 : 13) * listScaleClamped
+        #endif
+    }
+
+    /// Gap between the logo and the number under it.
+    private static let stackGap: CGFloat = 4
+
+    /// Width of the leading column: the logo's slot. Never narrower than the
+    /// number needs, so the number stays on one line even for a tiny logo.
+    private func leadingColumnWidth(_ s: CGFloat) -> CGFloat {
+        #if os(tvOS)
+        let base: CGFloat = 72 + numberColumnWidth(fontSize: 24) + 14
+        #else
+        let base: CGFloat = (isWide ? 50 : 38) * s
+            + numberColumnWidth(fontSize: numberFontSize) + (isWide ? 14 : 10) * s
+        #endif
+        let width = logoFillsRow ? base * Self.bothHiddenWidthFactor : base
+        return max(width, numberColumnWidth(fontSize: numberFontSize))
+    }
+
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
     /// Settings > Appearance > Channel List > Show Program Subtitles: some EPG
     /// feeds repeat the description in the sub-title, so the row reads twice.
@@ -3217,30 +3305,43 @@ struct ChannelRow: View {
                 onTap()
             } label: {
                 HStack(spacing: 14) {
-                    // GH #19: number column collapses when numbers are off.
-                    if showChannelNumbers {
-                        Text(item.number)
-                            .scaledFont(.system(size: 24, weight: .bold, design: .monospaced))
-                            .lineLimit(1)
-                            .foregroundColor(Color.contrastText(.textTertiary))
-                            .frame(width: TextScale.grow(42, textScale), alignment: .trailing)
-                    }
-
-                    if showChannelLogos {
-                        // Numbers off: the logo widens into the freed number
-                        // column (42 + 14 spacing). Height stays, since this
-                        // row is content-sized and a taller logo would grow it.
-                        CachedLogoImage(url: item.logoURL,
-                                        width: showChannelNumbers ? 72 : 72 + Self.tvNumberColumn,
-                                        height: 48)
+                    // Leading column: the SHARED ChannelBadge (logo over
+                    // number), the same component the guide's channel column
+                    // uses, so the two surfaces cannot disagree
+                    // (Logan 2026-09-16). The list row keeps the channel name
+                    // in its text column, hence showName: false.
+                    if showChannelLogos || showChannelNumbers {
+                        ChannelBadge(logoURL: item.logoURL,
+                                     number: item.number,
+                                     name: item.name,
+                                     showLogo: showChannelLogos,
+                                     showNumber: showChannelNumbers,
+                                     showName: false,
+                                     width: leadingColumnWidth(1),
+                                     // Row height stays driven by the text
+                                     // column; the badge fills that height.
+                                     maxHeight: max(48, uniformTextHeight),
+                                     numberFontSize: 24,
+                                     // Row card is a 12pt continuous rounded
+                                     // rect; a logo that fills its slot takes
+                                     // that radius, capped so it never reads
+                                     // as a pill.
+                                     containerRadius: 12,
+                                     lineGap: Self.stackGap,
+                                     minimumLogoHeight: 48,
+                                     logoSizedByWidth: true)
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 8) {
-                            Text(item.name)
-                                .scaledFont(.system(size: 26, weight: .semibold))
-                                .foregroundColor(.textPrimary)
-                                .lineLimit(1)
+                            // GH #73: the name line collapses when names are
+                            // off; the badges and program text below stay.
+                            if showChannelNames {
+                                Text(item.name)
+                                    .scaledFont(.system(size: 26, weight: .semibold))
+                                    .foregroundColor(.textPrimary)
+                                    .lineLimit(1)
+                            }
                             // Catch-up badge (2026-07-20, all-platform
                             // parity): history clock beside the name when
                             // the channel has a replayable archive.
@@ -3291,6 +3392,10 @@ struct ChannelRow: View {
                                 .padding(.top, 4)
                         }
                     }
+                    // Every row is the tallest layout's height; a row with less
+                    // text leaves the unused lines blank at the bottom rather
+                    // than collapsing. See `uniformTextHeight`.
+                    .frame(height: uniformTextHeight, alignment: .top)
 
                     Spacer()
                 }
@@ -3359,33 +3464,39 @@ struct ChannelRow: View {
         // iPad vs. iPhone branch before scale is applied.
         let s = listScaleClamped
         return HStack(spacing: (isWide ? 14 : 10) * s) {
-            // GH #19: number column collapses when numbers are off.
-            if showChannelNumbers {
-                Text(item.number)
-                    .scaledFont(.system(size: (isWide ? 17 : 13) * s, weight: .bold, design: .monospaced))
-                    .lineLimit(1)
-                    .foregroundColor(Color.contrastText(.textTertiary))
-                    .frame(width: TextScale.grow((isWide ? 36 : 26) * s, textScale), alignment: .trailing)
-            }
-
-            if showChannelLogos {
-                // Numbers off: the logo widens into the freed number column
-                // (width + HStack spacing); height stays so the row keeps
-                // its content-sized height.
-                CachedLogoImage(
-                    url: item.logoURL,
-                    width: ((isWide ? 50 : 38)
-                            + (showChannelNumbers ? 0 : (isWide ? Self.wideNumberColumn : Self.compactNumberColumn))) * s,
-                    height: (isWide ? 34 : 26) * s
-                )
+            // Leading column: the SHARED ChannelBadge, same component as the
+            // tvOS branch above and the guide's channel column
+            // (Logan 2026-09-16). showName is false here because the row's
+            // text column owns the channel name.
+            if showChannelLogos || showChannelNumbers {
+                ChannelBadge(logoURL: item.logoURL,
+                             number: item.number,
+                             name: item.name,
+                             showLogo: showChannelLogos,
+                             showNumber: showChannelNumbers,
+                             showName: false,
+                             width: leadingColumnWidth(s),
+                             // Row height stays driven by the text column,
+                             // measured below; the badge fills it.
+                             maxHeight: max((isWide ? 34 : 26) * s, uniformTextHeight),
+                             numberFontSize: (isWide ? 17 : 13) * s,
+                             // Same 12pt row card as the tvOS branch.
+                             containerRadius: 12,
+                             lineGap: Self.stackGap,
+                             minimumLogoHeight: (isWide ? 34 : 26) * s,
+                             logoSizedByWidth: true)
             }
 
             VStack(alignment: .leading, spacing: (isWide ? 4 : 2) * s) {
                 HStack(spacing: 5 * s) {
-                    Text(item.name)
-                        .scaledFont(.system(size: (isWide ? 17 : 15) * s, weight: .medium))
-                        .foregroundColor(.textPrimary)
-                        .lineLimit(1)
+                    // GH #73: the name line collapses when names are off;
+                    // the star/catch-up badges and program text stay.
+                    if showChannelNames {
+                        Text(item.name)
+                            .scaledFont(.system(size: (isWide ? 17 : 15) * s, weight: .medium))
+                            .foregroundColor(.textPrimary)
+                            .lineLimit(1)
+                    }
                     // Favorite star, like the guide's channel column
                     // (Logan 2026-09-05).
                     if favoritesStore.isFavorite(item.id) {
@@ -3441,6 +3552,9 @@ struct ChannelRow: View {
                     nowPlayingProgressBar(start: prog.start, end: prog.end)
                 }
             }
+            // Every row is the tallest layout's height; see the tvOS branch
+            // and `uniformTextHeight`.
+            .frame(height: uniformTextHeight, alignment: .top)
 
             Spacer()
 
@@ -4889,28 +5003,109 @@ struct CachedLogoImage: View {
     let url: URL?
     let width: CGFloat
     let height: CGFloat
+    /// Corner radius of the CELL OR CARD this logo sits in. The logo is
+    /// clipped to it when Settings > Appearance > "Rounded corners on logos
+    /// and artwork" is on, and to a square when it is off. Leave at 0 for a
+    /// container that is not rounded (the guide's channel column cell), and
+    /// the logo stays square either way. See `LogoCorners`.
+    var containerRadius: CGFloat = 0
+    /// WIDTH-driven sizing (the Live TV list rows). The logo's box becomes
+    /// the full slot width by `width / aspect`, and `height` only CAPS it:
+    /// a box taller than the cap shrinks to the cap instead. Without this
+    /// the badge sized the logo from the row height, so the same 16:9 source
+    /// drew bigger in a row with more text than in a short one (Logan
+    /// 2026-09-16, iPhone, MLB group). Off for the guide column, whose rows
+    /// are a uniform height already.
+    var sizedByWidth: Bool = false
 
     @State private var uiImage: UIImage?
+    /// Sampled once per image by `LogoTileTest`: true for opaque artwork
+    /// that reaches its own corners, false for a logo that floats on
+    /// transparency. Drives the shared rounding rule below.
+    @State private var isTile: Bool = false
+    @Environment(\.aerioRoundedLogoCorners) private var roundedCorners
+
+    /// The slot the image is fitted into. Callers (ChannelBadge included)
+    /// pass a DEFINITE height: `.frame(maxHeight: .infinity)` cannot work in
+    /// a self-sizing row, which proposes an unspecified height and collapses
+    /// the slot (Logan 2026-09-16, iPhone list row).
+    ///
+    /// Under `sizedByWidth` the height is DERIVED from the image's own
+    /// aspect instead, with `height` as the cap, so every logo of the same
+    /// aspect draws at the same size whatever its row contains.
+    private var slot: CGSize {
+        guard sizedByWidth else { return CGSize(width: width, height: height) }
+        // Before the bitmap lands, reserve a 16:9 box (still capped), which
+        // is what nearly every channel logo turns out to be; the box settles
+        // to the true aspect on decode without moving the row, whose height
+        // the text column owns.
+        let aspect = uiImage.flatMap { img -> CGFloat? in
+            guard img.size.width > 0, img.size.height > 0 else { return nil }
+            return img.size.width / img.size.height
+        } ?? (16.0 / 9.0)
+        return CGSize(width: width, height: min(height, width / max(aspect, 0.01)))
+    }
+
+    /// The image's OWN drawn bounds inside `slot` under `.fit`. The clip and
+    /// the radius cap both key off this, not off the slot: clipping the slot
+    /// would round empty letterbox space, and capping on the slot would let a
+    /// short wide logo become a pill.
+    private func fitted(_ image: UIImage) -> CGSize {
+        LogoCorners.fitted(image: image.size, in: slot)
+    }
+
+    /// The radius actually drawn, through the ONE shared rule: a fitted
+    /// image that fills the slot edge to edge is a tile and takes the
+    /// container's radius (capped); one that floats inside it stays square.
+    private func radius(for fittedSize: CGSize) -> CGFloat {
+        LogoCorners.imageRadius(container: containerRadius,
+                                fitted: fittedSize,
+                                isTile: isTile,
+                                enabled: roundedCorners)
+    }
+
+    /// One sizing rule for both the image and the placeholder.
+    private func sized(_ content: some View) -> some View {
+        content.frame(width: width, height: height)
+    }
 
     var body: some View {
-        Group {
-            if let img = uiImage {
-                Image(uiImage: img).resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: width, height: height)
-            } else {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.accentPrimary.opacity(0.12))
-                        .frame(width: width, height: height)
-                    NoPosterPlaceholder(compact: true)
+        sized(
+            Group {
+                if let img = uiImage {
+                    // Fit by hand rather than with .aspectRatio(.fit) so the
+                    // clip hugs the ART's bounds instead of the slot's.
+                    let box = fitted(img)
+                    Image(uiImage: img).resizable()
+                        .frame(width: box.width, height: box.height)
+                        .clipShape(RoundedRectangle(cornerRadius: radius(for: box),
+                                                    style: .continuous))
+                } else {
+                    ZStack {
+                        // The placeholder tile follows the same rule: it is a
+                        // stand-in for the logo, so it takes the container's
+                        // radius, capped at the 6 it has always drawn so an
+                        // empty slot never looks rounder than the art would.
+                        // The placeholder IS an opaque tile, so it rounds
+                        // with the container, capped at the 6 it has always
+                        // drawn so an empty slot never looks rounder than
+                        // real art would.
+                        RoundedRectangle(cornerRadius: min(LogoCorners.radius(container: containerRadius,
+                                                                              imageShorterSide: min(slot.width, slot.height),
+                                                                              isTile: true,
+                                                                              enabled: roundedCorners), 6),
+                                         style: .continuous)
+                            .fill(Color.accentPrimary.opacity(0.12))
+                        NoPosterPlaceholder(compact: true)
+                    }
                 }
             }
-        }
+        )
         .task(id: url?.absoluteString) {
             guard let url else { return }
             let key = url.absoluteString
             if let cached = LogoCache.shared.image(for: key) {
+                isTile = LogoTileTest.verdict(for: key, image: cached)
                 uiImage = cached
                 return
             }
@@ -4919,10 +5114,147 @@ struct CachedLogoImage: View {
                 // GH #61: decode accepts SVG logos in addition to bitmaps.
                 if let img = AerioImageDecoding.decode(data) {
                     LogoCache.shared.store(img, for: key)
+                    // Sampled once here, cached by URL, so scrolling the
+                    // list or the guide never re-reads pixels.
+                    isTile = LogoTileTest.verdict(for: key, image: img)
                     uiImage = img
                 }
             } catch {}
         }
+    }
+}
+
+// MARK: - ChannelBadge
+//
+// ONE shared leading column for every surface that draws a channel's
+// identity: the Live TV list rows (iPhone, iPad, tvOS) and the guide's
+// channel column on both platforms (Logan 2026-09-16). Before this there
+// were four hand-rolled stacks and they disagreed about order, width and
+// rounding; there is now a single component, and Android is getting the
+// identical one.
+//
+// Fixed vertical order with DEDICATED positions:
+//
+//     logo      (top, all remaining height)
+//     number    (under the logo)
+//     name      (under the number; GUIDE only)
+//
+// A hidden line contributes ZERO height and the logo takes what it frees.
+// The list row keeps the channel name in its own text column, so it passes
+// `showName: false`.
+//
+// The surface supplies the slot (width and max height), its container
+// radius and its point sizes; the badge owns everything inside. The logo is
+// always FITTED (never cropped), centered, and clipped to its fitted bounds
+// through the one shared rounding rule in `LogoCorners`.
+struct ChannelBadge: View {
+    let logoURL: URL?
+    let number: String
+    let name: String
+
+    var showLogo: Bool = true
+    var showNumber: Bool = true
+    /// Guide column only. The Live TV list draws the name in its text column.
+    var showName: Bool = false
+
+    /// The slot this surface gives the badge. `width` is exact (the badge
+    /// only ever widens it to keep the number on one line); `maxHeight` is
+    /// the total the three lines share, the logo taking the remainder.
+    let width: CGFloat
+    let maxHeight: CGFloat
+
+    /// Rendered point sizes BEFORE Text Size (the badge applies it for
+    /// measurement; `scaledFont` applies it for drawing).
+    var numberFontSize: CGFloat
+    var nameFontSize: CGFloat = 0
+
+    /// Corner radius of the CELL OR CARD this badge sits in. 0 for a
+    /// container that is not rounded (the guide's channel column cell), and
+    /// the logo stays square whatever the toggle says.
+    var containerRadius: CGFloat = 0
+
+    /// Gap between the stacked lines.
+    var lineGap: CGFloat = 4
+
+    /// Floor for the logo, so a short row never collapses the art.
+    var minimumLogoHeight: CGFloat = 0
+
+    /// LIST rows: size the logo from the column WIDTH, with the height left
+    /// over only as a cap (see `CachedLogoImage.sizedByWidth`). The guide
+    /// column leaves this off: its rows are a uniform height, so sizing from
+    /// the height there is already consistent row to row.
+    var logoSizedByWidth: Bool = false
+
+    /// Characters the number must fit, published by the list / guide from
+    /// the widest number on screen. See `ChannelNumberColumn`.
+    @Environment(\.aerioChannelNumberChars) private var numberChars
+    @Environment(\.aerioTextScale) private var textScale
+
+    /// Text Size multiplier used for MEASUREMENT only, never below 1 so a
+    /// container designed at 100% does not shrink at 85%.
+    private var measureScale: CGFloat { max(1, textScale) }
+
+    /// Width the widest expected number ("1500.5" and friends) needs on one
+    /// line at the current Text Size. The column can never be narrower, so
+    /// the number never truncates.
+    private var numberWidth: CGFloat {
+        guard showNumber else { return 0 }
+        return ChannelNumberColumn.width(characters: numberChars,
+                                         fontSize: numberFontSize * measureScale)
+    }
+
+    /// Height the number line costs, including its gap. Zero when hidden.
+    private var numberBlock: CGFloat {
+        guard showNumber else { return 0 }
+        return ChannelNumberColumn.lineHeight(fontSize: numberFontSize * measureScale) + lineGap
+    }
+
+    /// Height the name line costs, including its gap. Zero when hidden.
+    private var nameBlock: CGFloat {
+        guard showName, nameFontSize > 0 else { return 0 }
+        let line = UIFont.systemFont(ofSize: max(1, nameFontSize * measureScale), weight: .medium)
+            .lineHeight.rounded(.up)
+        return line + lineGap
+    }
+
+    /// The badge's actual width: never narrower than the number needs.
+    private var slotWidth: CGFloat { max(width, numberWidth) }
+
+    /// The logo's slot: the badge's width by whatever height the number and
+    /// name lines leave.
+    private var logoHeight: CGFloat {
+        max(minimumLogoHeight, maxHeight - numberBlock - nameBlock)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if showLogo {
+                CachedLogoImage(url: logoURL,
+                                width: slotWidth,
+                                height: logoHeight,
+                                containerRadius: containerRadius,
+                                sizedByWidth: logoSizedByWidth)
+            }
+            if showNumber {
+                Text(number)
+                    .scaledFont(.system(size: numberFontSize, weight: .bold, design: .monospaced))
+                    .lineLimit(1)
+                    // The column is sized from the widest expected number, so
+                    // this can never shrink the badge or clip a digit.
+                    .fixedSize(horizontal: true, vertical: false)
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .padding(.top, showLogo ? lineGap : 0)
+            }
+            if showName, nameFontSize > 0 {
+                Text(name)
+                    .scaledFont(.system(size: nameFontSize, weight: .medium))
+                    .lineLimit(1)
+                    .foregroundColor(.textPrimary)
+                    .padding(.top, (showLogo || showNumber) ? lineGap : 0)
+            }
+        }
+        .frame(width: slotWidth)
+        .accessibilityElement(children: .combine)
     }
 }
 

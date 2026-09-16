@@ -212,7 +212,10 @@ struct GuidePreviewBanner: View {
             case .art(let url):
                 // Shared slot: height-locked, width from the art's own
                 // aspect, same as the Program Info sheet (Logan 2026-09-15).
-                ProgramArtSlot(url: url)
+                // The banner is a flat full-width strip on the app
+                // background, not a rounded card, so per the container rule
+                // (Logan 2026-09-16) its art stays square.
+                ProgramArtSlot(url: url, containerRadius: 0)
                     .id(url)
             case .none:
                 // Every source came back empty (static team channels and the
@@ -223,13 +226,13 @@ struct GuidePreviewBanner: View {
                                     height: TextScale.grow(152, textScale))
                         .frame(width: artSlot.maxWidth, height: artSlot.height)
                 } else {
-                    ProgramArtSlot(url: nil)
+                    ProgramArtSlot(url: nil, containerRadius: 0)
                 }
             case .pending:
                 // No placeholder while a lookup is open: the channel logo
                 // flashed before every programme logo while stepping through
                 // channels. Empty space keeps the copy from shifting.
-                ProgramArtSlot(url: nil)
+                ProgramArtSlot(url: nil, containerRadius: 0)
             }
         }
     }
@@ -526,6 +529,13 @@ struct ProgramArtSlot: View {
     var headers: [String: String] = [:]
     var metrics: ProgramArtSlotMetrics = ProgramArtSlotMetrics.slot
     var maxPixel: CGFloat = 800
+    /// Corner radius of the CARD this art sits in. Honored when Settings >
+    /// Appearance > "Rounded corners on logos and artwork" is on, zeroed
+    /// when it is off. Defaults to the slot's own designed radius so a
+    /// caller inside a card of the same shape needs no argument; pass 0 for
+    /// a container with no rounding (the tvOS guide preview strip). See
+    /// `LogoCorners`.
+    var containerRadius: CGFloat? = nil
     /// Kept for callers that want the real bitmap size; the slot uses it
     /// itself to settle its width.
     var onImageLoaded: ((CGSize) -> Void)? = nil
@@ -534,12 +544,30 @@ struct ProgramArtSlot: View {
     @State private var aspect: CGFloat? = nil
     /// App-wide Text Size: the slot grows with it (see `scaled(_:)`).
     @Environment(\.aerioTextScale) private var textScale
+    /// Settings > Appearance > "Rounded corners on logos and artwork".
+    @Environment(\.aerioRoundedLogoCorners) private var roundedCorners
 
     /// The slot's metrics at the current Text Size. Every frame below uses
     /// these, so height, 16:9 reserve and portrait floor scale together.
     private var m: ProgramArtSlotMetrics { metrics.scaled(textScale) }
 
     private var width: CGFloat { m.width(for: url == nil ? nil : aspect) }
+
+    /// The radius actually drawn: the container's (Text-Size-scaled like the
+    /// rest of the slot when it falls back to the slot's own), or 0 when the
+    /// Appearance toggle is off.
+    private var cornerRadius: CGFloat {
+        // The slot already sizes itself to the art's true aspect, so its own
+        // box IS the art's bounds; the cap still guards very short art.
+        LogoCorners.radius(container: containerRadius ?? m.cornerRadius,
+                           imageShorterSide: min(width, m.height),
+                           // The slot draws through AuthPosterImage and never
+                           // sees the bitmap, so it reads the shared verdict
+                           // cache; unknown program art counts as a tile,
+                           // since it is opaque photography.
+                           isTile: LogoTileTest.cachedVerdict(for: url) ?? true,
+                           enabled: roundedCorners)
+    }
 
     var body: some View {
         Color.clear
@@ -562,7 +590,7 @@ struct ProgramArtSlot: View {
                         // so there is nothing left over to letterbox.
                         .aspectRatio(contentMode: .fit)
                         .frame(width: width, height: m.height)
-                        .clipShape(RoundedRectangle(cornerRadius: m.cornerRadius,
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius,
                                                     style: .continuous))
                         .id(url)
                 }

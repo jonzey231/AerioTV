@@ -377,6 +377,9 @@ struct AerioApp: App {
     /// Settings > Appearance > Subtext Size and Text Contrast, injected the
     /// same way. Contrast colors also re-render through ThemeManager.
     @AppStorage(SubtextScale.key) private var subtextScale: Double = SubtextScale.defaultValue
+    /// Settings > Appearance > "Rounded corners on logos and artwork".
+    /// Injected app-wide so every logo and program-art slot re-clips live.
+    @AppStorage(LogoCorners.key) private var roundedLogoCorners: Bool = LogoCorners.defaultValue
     @AppStorage(TextContrast.key) private var textContrast: Double = TextContrast.defaultValue
 
     /// Owned explicitly (vs. letting `.modelContainer(for:)` auto-
@@ -512,6 +515,7 @@ struct AerioApp: App {
                 .modifier(DispatcharrPermissionNoticeAlert())
                 .aerioTextScaleRoot(textScale)
                 .aerioSecondaryTextRoot(subtextScale: subtextScale, contrast: textContrast)
+                .aerioLogoCornersRoot(roundedLogoCorners)
                 // GH #33: this Apple TV is a companion HOST -- advertise
                 // _aeriotv._tcp + run the WS server so an iPhone or Android
                 // phone can control it. Overlay shows the pairing code on the

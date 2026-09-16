@@ -216,7 +216,11 @@ final class SyncManager: ObservableObject {
         // On-screen remote hint strips (Live TV + player). Android
         // stores the same preference as `show_remote_hints` and the two
         // are mapped by name.
-        showRemoteHintsKey
+        showRemoteHintsKey,
+        // Settings > Appearance > "Rounded corners on logos and artwork".
+        // App-wide look, so it syncs like the theme and Text Size rather
+        // than staying per device.
+        LogoCorners.key
     ] + PlayerInfoCardSettings.allKeys
     // Player Info Card row visibility (Settings > App Behaviors). All
     // six default ON and are only written once the user flips a row,

@@ -476,3 +476,365 @@ extension View {
         ThemeReactiveSectionHeader(content: self)
     }
 }
+
+// MARK: - Rounded Corners on Logos and Artwork (Settings > Appearance)
+//
+// One app-wide toggle (Settings > Appearance, "Rounded corners on logos and
+// artwork") that decides whether channel logos and program artwork are
+// clipped to rounded corners or left square.
+//
+// The rule, per Logan 2026-09-16: when the toggle is ON a logo or a piece of
+// program art takes the corner radius of the CELL OR CARD IT SITS IN, not a
+// value of its own. A row card rounded at 12 rounds its logo at 12; the
+// in-player info card rounded at 14 rounds its logo at 14; an image sitting
+// in a container with no rounding at all (the guide's channel column cell,
+// the tvOS guide preview strip) stays square whatever the toggle says.
+// When the toggle is OFF every one of them is square.
+//
+// Call sites therefore pass the radius of their OWN container, and this one
+// helper decides whether it is honored or zeroed. There is no second place
+// that knows about logo corners.
+//
+// Movies, TV Shows and DVR poster art are deliberately NOT covered: those
+// grids have their own poster shape and are out of this toggle's scope.
+enum LogoCorners {
+    /// `@AppStorage` / `UserDefaults` key. Synced through iCloud alongside
+    /// the other app-wide Appearance preferences (see `SyncManager`).
+    static let key = "ui.roundedLogoCorners"
+
+    /// Default ON, so an existing install keeps the shipped look.
+    static let defaultValue = true
+
+    /// Current value straight from `UserDefaults`, for the environment
+    /// default and for non-SwiftUI readers.
+    static var stored: Bool {
+        UserDefaults.standard.object(forKey: key) as? Bool ?? defaultValue
+    }
+
+    /// Never let a logo become a circle or a pill: a radius may not exceed
+    /// this fraction of the drawn image's SHORTER side. A 26pt tall logo in
+    /// a 12pt card therefore rounds at 6.5, not 12 (Logan 2026-09-16, iPhone
+    /// list row: the raw card radius turned small logos into circles).
+    static let maxRadiusFraction: CGFloat = 0.25
+
+    /// The size an image of `image` points draws at when fitted (never
+    /// cropped) inside `slot`. One definition for every surface, so the clip
+    /// always hugs the ART's bounds and not the slot's letterbox space.
+    static func fitted(image: CGSize, in slot: CGSize) -> CGSize {
+        guard image.width > 0, image.height > 0,
+              slot.width > 0, slot.height > 0 else { return slot }
+        let scale = min(slot.width / image.width, slot.height / image.height)
+        return CGSize(width: (image.width * scale).rounded(),
+                      height: (image.height * scale).rounded())
+    }
+
+    /// THE rounding rule. Every artwork surface the toggle covers calls this
+    /// one function rather than clipping on its own (Logan 2026-09-16).
+    ///
+    /// - Toggle off: square, always.
+    /// - Toggle on: round only a TILE, i.e. opaque artwork that reaches its
+    ///   own corners (the event logos). A FLOATING logo, transparent around
+    ///   its edges (NBC Sports Now and most channel marks), shares no corner
+    ///   with anything and stays square. `LogoTileTest` decides, from the
+    ///   decoded image's corner alpha.
+    /// - The radius is the CONTAINER's, capped at `maxRadiusFraction` of the
+    ///   drawn image's shorter side, so a short wide tile never reads as a
+    ///   pill or a circle.
+    ///
+    /// An earlier version decided this geometrically ("does the fitted image
+    /// fill the slot on both axes"). That was wrong on device: a fitted image
+    /// only fills both axes when its aspect happens to match the slot's, so a
+    /// few event logos rounded by coincidence and the rest did not (Logan
+    /// 2026-09-16, iPhone). Opacity, not aspect, is the real distinction.
+    static func imageRadius(container: CGFloat,
+                            fitted: CGSize,
+                            isTile: Bool,
+                            enabled: Bool) -> CGFloat {
+        guard enabled, container > 0, isTile else { return 0 }
+        let shorter = min(fitted.width, fitted.height)
+        guard shorter > 0 else { return 0 }
+        return max(0, min(container, shorter * maxRadiusFraction))
+    }
+
+    /// Convenience for a surface that already knows its drawn art's shorter
+    /// side (a square logo tile, a placeholder, a slot sized to the art's own
+    /// aspect). Same rule, same verdict input.
+    static func radius(container: CGFloat,
+                       imageShorterSide: CGFloat,
+                       isTile: Bool,
+                       enabled: Bool) -> CGFloat {
+        imageRadius(container: container,
+                    fitted: CGSize(width: imageShorterSide, height: imageShorterSide),
+                    isTile: isTile,
+                    enabled: enabled)
+    }
+}
+
+// MARK: - Tile vs. floating logo
+//
+// The rounded-corner toggle may only round artwork that actually reaches its
+// own corners. Channel logos come in two shapes and the difference is
+// opacity, not aspect (Logan 2026-09-16, iPhone: a geometric "does it fill
+// the slot" test rounded a handful of event logos by coincidence and missed
+// every other one):
+//
+//   TILE      opaque to all four corners (event logos, network bugs on a
+//             solid plate). Rounds.
+//   FLOATING  transparent around its edges (NBC Sports Now and most channel
+//             marks). Shares no corner with anything, so it stays square.
+//
+// The verdict is sampled ONCE per image, off a 24x24 downscaled copy drawn
+// into a tiny CGContext, and cached by URL, so scrolling never re-samples.
+@MainActor
+enum LogoTileTest {
+    /// Alpha at or above this counts as opaque.
+    static let opaqueAlpha: CGFloat = 0.9
+    /// Edge of the downscaled copy the corners are read from.
+    private static let sampleEdge = 24
+    /// Patch read at each corner, in downscaled pixels (3x3).
+    private static let patch = 3
+
+    private static var cache: [String: Bool] = [:]
+
+    /// The cached verdict for an image URL, or nil if it has not been
+    /// sampled yet. Surfaces that never see the decoded bitmap (program art
+    /// slots, which draw through `AuthPosterImage`) read this and treat an
+    /// unknown image as a tile: program art is opaque photography, and the
+    /// verdict sharpens as soon as any surface decodes the same URL.
+    static func cachedVerdict(for url: URL?) -> Bool? {
+        guard let url else { return nil }
+        return cache[url.absoluteString]
+    }
+
+    /// The verdict for a decoded image, sampling it the first time only.
+    static func verdict(for key: String, image: UIImage) -> Bool {
+        if let hit = cache[key] { return hit }
+        let value = sample(image)
+        cache[key] = value
+        return value
+    }
+
+    /// True when all four corners (the corner pixel plus a 3x3 patch just
+    /// inside it) are opaque. An image with no alpha channel is a tile by
+    /// definition and is never drawn.
+    private static func sample(_ image: UIImage) -> Bool {
+        guard let cg = image.cgImage else { return true }
+        switch cg.alphaInfo {
+        case .none, .noneSkipFirst, .noneSkipLast:
+            return true
+        default:
+            break
+        }
+        let edge = sampleEdge
+        var pixels = [UInt8](repeating: 0, count: edge * edge * 4)
+        let ok: Bool = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let base = buffer.baseAddress,
+                  let ctx = CGContext(data: base,
+                                      width: edge,
+                                      height: edge,
+                                      bitsPerComponent: 8,
+                                      bytesPerRow: edge * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            ctx.clear(CGRect(x: 0, y: 0, width: edge, height: edge))
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: edge, height: edge))
+            return true
+        }
+        // Undecidable (context allocation failed): treat as floating, which
+        // is the conservative half of the rule - a square logo is never wrong
+        // looking, a wrongly rounded one is.
+        guard ok else { return false }
+
+        let threshold = UInt8(clamping: Int((opaqueAlpha * 255).rounded()))
+        let starts = [0, edge - patch]
+        for originY in starts {
+            for originX in starts {
+                for dy in 0..<patch {
+                    for dx in 0..<patch {
+                        let x = originX + dx
+                        let y = originY + dy
+                        let alpha = pixels[(y * edge + x) * 4 + 3]
+                        if alpha < threshold { return false }
+                    }
+                }
+            }
+        }
+        return true
+    }
+}
+
+private struct AerioRoundedLogoCornersKey: EnvironmentKey {
+    static var defaultValue: Bool { LogoCorners.stored }
+}
+
+extension EnvironmentValues {
+    /// Settings > Appearance > "Rounded corners on logos and artwork".
+    /// Read by `CachedLogoImage`, `ProgramArtSlot` and the few call sites
+    /// that clip a logo themselves.
+    var aerioRoundedLogoCorners: Bool {
+        get { self[AerioRoundedLogoCornersKey.self] }
+        set { self[AerioRoundedLogoCornersKey.self] = newValue }
+    }
+}
+
+extension View {
+    /// Injects the persisted logo-corner preference. Apply once at the app
+    /// root, next to `aerioTextScaleRoot`.
+    func aerioLogoCornersRoot(_ rounded: Bool) -> some View {
+        environment(\.aerioRoundedLogoCorners, rounded)
+    }
+
+}
+
+// MARK: - Channel Number Column (Live TV list, in-player picker)
+//
+// The channel-number column used to be a hard-coded point width (26 on
+// iPhone, 36 on iPad, 42 on tvOS). Those numbers were chosen when channel
+// numbers were two or three digits; a four-digit number like 1500 already
+// truncated to "15..." at 100% Text Size, and Dispatcharr also hands out
+// sub-channel numbers in the "1500.5" form (Logan 2026-09-16, iPhone list
+// with numbers shown and names hidden).
+//
+// The column is now MEASURED: the list finds the widest number it is about
+// to show, and every row sizes its column to that many monospaced
+// characters at the row's actual rendered point size. Monospaced digits all
+// share one advance, so character count is an exact proxy for width, and
+// every row in a list gets the SAME column width, so the logos stay aligned.
+// The number is single line and never truncates or wraps.
+@MainActor
+enum ChannelNumberColumn {
+    /// Floor: a list of single-digit channels still leaves room for four,
+    /// so the column does not visibly jump as the user filters groups.
+    static let minimumCharacters = 4
+    /// Ceiling, so one absurd provider number cannot eat the whole row.
+    static let maximumCharacters = 8
+
+    /// Widest number in a list, in characters, clamped to the range above.
+    /// Stops scanning as soon as it hits the ceiling, so a long channel list
+    /// costs almost nothing per render.
+    static func characters(in numbers: some Sequence<String>) -> Int {
+        var widest = minimumCharacters
+        for number in numbers {
+            let count = number.count
+            if count > widest {
+                widest = min(count, maximumCharacters)
+                if widest == maximumCharacters { break }
+            }
+        }
+        return widest
+    }
+
+    /// Height of one line of the number in the monospaced number style, so a
+    /// stacked leading column can subtract it from the logo's share of the
+    /// row without measuring a second geometry.
+    static func lineHeight(fontSize: CGFloat, weight: UIFont.Weight = .bold) -> CGFloat {
+        UIFont.monospacedSystemFont(ofSize: max(1, fontSize), weight: weight)
+            .lineHeight.rounded(.up)
+    }
+
+    private static var cache: [String: CGFloat] = [:]
+
+    /// Width of `characters` monospaced digits at `fontSize`.
+    ///
+    /// `fontSize` must be the size actually RENDERED, i.e. the call site's
+    /// base size already multiplied by the Live TV List scale and by Text
+    /// Size. Pass it through `max(1, textScale)` the way `TextScale.grow`
+    /// does, so a container never shrinks below its designed width at 85%.
+    static func width(characters: Int, fontSize: CGFloat, weight: UIFont.Weight = .bold) -> CGFloat {
+        let chars = max(1, characters)
+        let size = max(1, fontSize)
+        let key = "\(chars)|\(Int(size.rounded()))|\(weight.rawValue)"
+        if let hit = cache[key] { return hit }
+        let font = UIFont.monospacedSystemFont(ofSize: size, weight: weight)
+        let sample = String(repeating: "0", count: chars)
+        let measured = (sample as NSString).size(withAttributes: [.font: font]).width
+        let value = measured.rounded(.up)
+        cache[key] = value
+        return value
+    }
+}
+
+// MARK: - Channel Row Height (Live TV list)
+//
+// Every Live TV list row is the SAME height: the height of the tallest
+// layout a row can have (channel name, program title, subtitle line, two
+// description lines, progress bar). A row with less text keeps that height
+// and leaves the unused lines blank instead of collapsing (Logan
+// 2026-09-16, iPhone, MLB group: rows with more text drew a bigger logo,
+// because the logo was sized from the row).
+//
+// The height is DERIVED from the same font metrics the row draws with, at
+// the current Text Size and Subtext Size, not hardcoded, so 150% Text Size
+// still fits every line.
+@MainActor
+enum ChannelRowTextColumn {
+    /// One line of the system font at a rendered point size.
+    static func lineHeight(_ size: CGFloat, weight: UIFont.Weight = .regular) -> CGFloat {
+        UIFont.systemFont(ofSize: max(1, size), weight: weight).lineHeight.rounded(.up)
+    }
+
+    /// tvOS row: name 26 semibold, title in a 28pt grown box, 18pt subtitle,
+    /// two 18pt description lines, 5pt progress bar with a 4pt top padding,
+    /// 4pt VStack spacing between the five children.
+    static func tvOSHeight(showName: Bool,
+                           showSubtitle: Bool,
+                           textScale: CGFloat,
+                           subtextScale: CGFloat) -> CGFloat {
+        let gap: CGFloat = 4
+        let sub = textScale * subtextScale
+        var height: CGFloat = 0
+        var children = 0
+        if showName {
+            height += lineHeight(26 * textScale, weight: .semibold); children += 1
+        }
+        height += TextScale.grow(28, sub); children += 1
+        if showSubtitle {
+            height += lineHeight(18 * sub, weight: .regular); children += 1
+        }
+        height += 2 * lineHeight(18 * sub, weight: .regular); children += 1
+        height += 5 + 4; children += 1
+        return (height + gap * CGFloat(max(0, children - 1))).rounded(.up)
+    }
+
+    /// iPhone / iPad row. `s` is the Live TV List display scale; `isWide` is
+    /// the iPad branch. Mirrors `iOSRow` line for line.
+    static func iOSHeight(isWide: Bool,
+                          scale s: CGFloat,
+                          showName: Bool,
+                          showSubtitle: Bool,
+                          textScale: CGFloat,
+                          subtextScale: CGFloat) -> CGFloat {
+        let gap = (isWide ? 4 : 2) * s
+        let sub = textScale * subtextScale
+        let bodySize = (isWide ? 12 : 10) * s * sub
+        var height: CGFloat = 0
+        var children = 0
+        if showName {
+            height += lineHeight((isWide ? 17 : 15) * s * textScale, weight: .medium); children += 1
+        }
+        height += TextScale.grow((isWide ? 20 : 16) * s, sub); children += 1
+        if showSubtitle {
+            height += lineHeight(bodySize); children += 1
+        }
+        height += 2 * lineHeight(bodySize); children += 1
+        height += 3; children += 1
+        return (height + gap * CGFloat(max(0, children - 1))).rounded(.up)
+    }
+}
+
+private struct AerioChannelNumberCharsKey: EnvironmentKey {
+    /// Mirrors `ChannelNumberColumn.minimumCharacters`; spelled out here
+    /// because an `EnvironmentKey` default is evaluated off the main actor.
+    static var defaultValue: Int { 4 }
+}
+
+extension EnvironmentValues {
+    /// Character count the channel-number column must fit, published by the
+    /// Live TV list (and the in-player picker) from the channels it is
+    /// showing, so every row lands on one width. See `ChannelNumberColumn`.
+    var aerioChannelNumberChars: Int {
+        get { self[AerioChannelNumberCharsKey.self] }
+        set { self[AerioChannelNumberCharsKey.self] = newValue }
+    }
+}

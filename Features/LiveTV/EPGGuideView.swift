@@ -7122,7 +7122,9 @@ private struct GuideChannelButton: View {
         static let stockWidth: CGFloat = 72
         static let stockHeight: CGFloat = 48
         static let horizontalPadding: CGFloat = 8
-        static let numberColumn: CGFloat = 38 + 8   // minWidth + HStack spacing
+        /// The number now sits UNDER the logo (Logan 2026-09-16), so it
+        /// costs a line of height rather than a column of width.
+        static let numberLine: CGFloat = 26
         static let nameLine: CGFloat = 22
         static let textGap: CGFloat = 4
         static let inset: CGFloat = 8
@@ -7148,17 +7150,17 @@ private struct GuideChannelButton: View {
     /// The logo box for the current toggles, or nil for the stock box (both
     /// shown, or a cell too small to grow without crowding the icons).
     private var grownLogoSize: CGSize? {
-        guard !(showChannelNumbers && showChannelNames) else { return nil }
-        var width = columnWidth - LogoMetrics.horizontalPadding * 2
+        // The number moved under the logo (Logan 2026-09-16), so nothing
+        // sits beside the logo any more and it can grow into the full cell
+        // width in EVERY state, not just when a toggle is off. This extends
+        // the existing sizing mechanism rather than replacing it: the same
+        // free-space subtraction, with the number counted as a line of
+        // height on both platforms instead of a tvOS side column.
+        let width = columnWidth - LogoMetrics.horizontalPadding * 2
         var textHeight: CGFloat = 0
-        #if os(tvOS)
-        if showChannelNumbers { width -= LogoMetrics.numberColumn }
-        if showChannelNames { textHeight = LogoMetrics.nameLine + LogoMetrics.textGap }
-        #else
         if showChannelNames { textHeight += LogoMetrics.nameLine }
         if showChannelNumbers { textHeight += LogoMetrics.numberLine }
         if textHeight > 0 { textHeight += LogoMetrics.textGap }
-        #endif
         let height = rowHeight - logoTopInset - LogoMetrics.inset - textHeight
         guard width >= LogoMetrics.stockWidth, height >= LogoMetrics.stockHeight else { return nil }
         return CGSize(width: width, height: height)
@@ -7223,42 +7225,35 @@ private struct GuideChannelButton: View {
 
     private var channelLabel: some View {
         #if os(tvOS)
-        // Emby-style: channel number on left, logo + name on right
         let grown = grownLogoSize
-        return HStack(spacing: 8) {
-            // GH #19: number column collapses when numbers are off.
-            if showChannelNumbers {
-                Text(channel.number)
-                    .scaledFont(.system(size: 22, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color.contrastText(.textTertiary))
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .frame(minWidth: 38, alignment: .trailing)
-            }
-
-            VStack(spacing: 4) {
-                // v1.6.23: route through CachedLogoImage so the
-                // active server's auth headers (X-API-Key, etc) are
-                // applied. Bare AsyncImage hits 401 on Dispatcharr-API
-                // mode and falls back to the placeholder.
-                if channel.logoURL != nil {
-                    CachedLogoImage(url: channel.logoURL,
-                                    width: grown?.width ?? LogoMetrics.stockWidth,
-                                    height: grown?.height ?? LogoMetrics.stockHeight)
-                } else {
-                    guidePlaceholder
-                }
-                if showChannelNames {
-                    Text(channel.name)
-                        .scaledFont(.system(size: 18, weight: .medium))
-                        .foregroundColor(.textPrimary)
-                        .lineLimit(1)
-                }
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.top, grown == nil ? 0 : logoTopInset)
-            .padding(.bottom, grown == nil ? 0 : LogoMetrics.inset)
-        }
+        // The SHARED ChannelBadge: logo, number, name, in that fixed order,
+        // the same component the Live TV list rows use, so the two surfaces
+        // cannot disagree (Logan 2026-09-16). The number no longer occupies
+        // a side column, so it cannot be squeezed and the logo gets the
+        // cell's full width. Only what is INSIDE the cell changed; the
+        // guide's Left/Right/clock D-pad handling and focus model are
+        // untouched.
+        return ChannelBadge(logoURL: channel.logoURL,
+                            number: channel.number,
+                            name: channel.name,
+                            showNumber: showChannelNumbers,
+                            showName: showChannelNames,
+                            width: grown?.width ?? LogoMetrics.stockWidth,
+                            // 0 when the cell is too small to grow: the badge
+                            // then falls back to the stock logo box.
+                            maxHeight: grown == nil
+                                ? 0
+                                : rowHeight - logoTopInset - LogoMetrics.inset,
+                            numberFontSize: 22,
+                            nameFontSize: 18,
+                            // The guide's channel cell is not a rounded card,
+                            // so its art stays square whatever the toggle says.
+                            containerRadius: 0,
+                            lineGap: LogoMetrics.textGap,
+                            minimumLogoHeight: LogoMetrics.stockHeight)
+        .frame(maxWidth: .infinity)
+        .padding(.top, grown == nil ? 0 : logoTopInset)
+        .padding(.bottom, grown == nil ? 0 : LogoMetrics.inset)
         .padding(.horizontal, LogoMetrics.horizontalPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         // Catch-up badge (2026-07-20, all-platform parity): a small history
@@ -7275,31 +7270,22 @@ private struct GuideChannelButton: View {
         }
         #else
         let grown = grownLogoSize
-        return VStack(spacing: 4) {
-            // v1.6.23: same auth-aware fix as the tvOS branch above.
-            if channel.logoURL != nil {
-                CachedLogoImage(url: channel.logoURL,
-                                width: grown?.width ?? LogoMetrics.stockWidth,
-                                height: grown?.height ?? LogoMetrics.stockHeight)
-            } else {
-                guidePlaceholder
-            }
-            VStack(spacing: 1) {
-                if showChannelNames {
-                    Text(channel.name)
-                        .scaledFont(.system(size: 10, weight: .medium))
-                        .foregroundColor(.textPrimary)
-                        .lineLimit(1)
-                }
-                // GH #19: hide the number line when numbers are off.
-                if showChannelNumbers {
-                    Text(channel.number)
-                        .scaledFont(.system(size: 8, weight: .bold))
-                        .foregroundColor(Color.contrastText(.textTertiary))
-                }
-            }
-            .multilineTextAlignment(.center)
-        }
+        // Same SHARED ChannelBadge as the tvOS branch and the Live TV list
+        // rows (Logan 2026-09-16), phone point sizes.
+        return ChannelBadge(logoURL: channel.logoURL,
+                            number: channel.number,
+                            name: channel.name,
+                            showNumber: showChannelNumbers,
+                            showName: showChannelNames,
+                            width: grown?.width ?? LogoMetrics.stockWidth,
+                            maxHeight: grown == nil
+                                ? 0
+                                : rowHeight - logoTopInset - LogoMetrics.inset,
+                            numberFontSize: 8,
+                            nameFontSize: 10,
+                            containerRadius: 0,
+                            lineGap: 2,
+                            minimumLogoHeight: LogoMetrics.stockHeight)
         .padding(.top, grown == nil ? 0 : logoTopInset)
         .padding(.bottom, grown == nil ? 0 : LogoMetrics.inset)
         .padding(.horizontal, LogoMetrics.horizontalPadding)
@@ -7317,18 +7303,9 @@ private struct GuideChannelButton: View {
         #endif
     }
 
-    private var guidePlaceholder: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .fill(Color.accentPrimary.opacity(0.12))
-            NoPosterPlaceholder(compact: true)
-        }
-        #if os(tvOS)
-        .frame(width: 72, height: 48)
-        #else
-        .frame(width: 36, height: 24)
-        #endif
-    }
+    // The rail's hand-rolled logo placeholder is gone: ChannelBadge (via
+    // CachedLogoImage) draws the same placeholder tile for a channel with no
+    // logo, so the guide and the list agree there too.
 }
 
 // MARK: - Guide Program Button (own @FocusState for tvOS highlight)
