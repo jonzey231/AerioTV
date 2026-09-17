@@ -497,18 +497,84 @@ extension View {
 //
 // Movies, TV Shows and DVR poster art are deliberately NOT covered: those
 // grids have their own poster shape and are out of this toggle's scope.
+// MARK: - Live TV List view availability (tvOS)
+//
+// Logan 2026-09-16: the Live TV LIST view is removed from the Apple TV UI
+// entirely because it is unusable with a remote. The Guide is the only Live
+// TV presentation on tvOS. The list code is intentionally KEPT and only
+// gated, so flipping this single flag back to `true` restores every entry
+// point (the view-mode controls, the Settings > App Behaviors "Default Live
+// TV View" option, and the list-only Appearance rows) exactly as it was.
+//
+// Nothing here touches persisted state: `defaultLiveTVView` keeps whatever
+// the user chose, and a stored value of "list" simply resolves to Guide at
+// runtime while this flag is off. iPhone and iPad are unaffected; the flag
+// is only consulted from tvOS code paths. Android carries the identical
+// change and the identical labels.
+enum TVListView {
+    /// `false` = Apple TV shows the Guide only. Set to `true` to bring the
+    /// List view and all of its entry points back.
+    static let enabled = false
+}
+
 enum LogoCorners {
-    /// `@AppStorage` / `UserDefaults` key. Synced through iCloud alongside
-    /// the other app-wide Appearance preferences (see `SyncManager`).
-    static let key = "ui.roundedLogoCorners"
+    /// Settings > Appearance > "Rounded corners in List view". Governs the
+    /// Live TV list rows and every other CARD surface on the shared rule:
+    /// the in-player info card, the in-player channel picker, the multiview
+    /// compact row and Program Info art reached from the list. The guide's
+    /// own surfaces moved to `guideKey` (Logan 2026-09-16).
+    /// Synced through iCloud alongside the other app-wide Appearance
+    /// preferences (see `SyncManager`).
+    static let listKey = "ui.roundedLogoCornersList"
 
-    /// Default ON, so an existing install keeps the shipped look.
-    static let defaultValue = true
+    /// Settings > Appearance > "Rounded corners in Guide view". Governs
+    /// every GUIDE surface at `guideRadius`: the guide's channel column
+    /// logo, the guide preview banner's program art, and the Program Info
+    /// sheet's art when that sheet was opened from the guide (Logan
+    /// 2026-09-16, rev 2). Default OFF: the guide is a flat rail and a flat
+    /// strip, not a card. The same sheet reached from the Live TV list, the
+    /// in-player info card, the channel picker and the multiview row stay on
+    /// the List toggle.
+    static let guideKey = "ui.roundedLogoCornersGuide"
 
-    /// Current value straight from `UserDefaults`, for the environment
-    /// default and for non-SwiftUI readers.
-    static var stored: Bool {
-        UserDefaults.standard.object(forKey: key) as? Bool ?? defaultValue
+    /// The single toggle both keys were split out of. Read once by
+    /// `migrateLegacyKeyIfNeeded()` so nobody's current choice changes, then
+    /// left alone. Still the key `SyncManager` carried before the split.
+    static let legacyKey = "ui.roundedLogoCorners"
+
+    /// List default ON, so an existing install keeps the shipped look.
+    static let listDefault = true
+    /// Guide default OFF.
+    static let guideDefault = false
+
+    /// Radius the guide surfaces use when the Guide toggle is on: small,
+    /// because neither the channel column nor the preview banner has a card
+    /// behind the art to be concentric with. Still subject to the shared
+    /// tile test and the 25% cap below.
+    static let guideRadius: CGFloat = 6
+
+    /// Copies a pre-split choice into the List key, once. Called at app
+    /// launch before any view reads the environment.
+    static func migrateLegacyKeyIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: listKey) == nil,
+              let legacy = defaults.object(forKey: legacyKey) as? Bool else { return }
+        defaults.set(legacy, forKey: listKey)
+    }
+
+    /// Current List value straight from `UserDefaults`, for the environment
+    /// default and for non-SwiftUI readers. Falls back to a pre-split value
+    /// so a first read before migration still honors the user's choice.
+    static var storedList: Bool {
+        let defaults = UserDefaults.standard
+        return (defaults.object(forKey: listKey) as? Bool)
+            ?? (defaults.object(forKey: legacyKey) as? Bool)
+            ?? listDefault
+    }
+
+    /// Current Guide value.
+    static var storedGuide: Bool {
+        UserDefaults.standard.object(forKey: guideKey) as? Bool ?? guideDefault
     }
 
     /// Never let a logo become a circle or a pill: a radius may not exceed
@@ -587,12 +653,13 @@ enum LogoCorners {
 // into a tiny CGContext, and cached by URL, so scrolling never re-samples.
 @MainActor
 enum LogoTileTest {
-    /// Alpha at or above this counts as opaque.
-    static let opaqueAlpha: CGFloat = 0.9
+    /// Alpha at or above this counts as opaque. `nonisolated` along with
+    /// `sample(_:)`, which runs on a background task.
+    nonisolated static let opaqueAlpha: CGFloat = 0.9
     /// Edge of the downscaled copy the corners are read from.
-    private static let sampleEdge = 24
+    nonisolated private static let sampleEdge = 24
     /// Patch read at each corner, in downscaled pixels (3x3).
-    private static let patch = 3
+    nonisolated private static let patch = 3
 
     private static var cache: [String: Bool] = [:]
 
@@ -606,7 +673,16 @@ enum LogoTileTest {
         return cache[url.absoluteString]
     }
 
+    /// The cached verdict for a key, without sampling.
+    static func cached(_ key: String) -> Bool? { cache[key] }
+
+    /// Records a verdict sampled off the main thread by `sample(_:)`.
+    static func record(_ value: Bool, for key: String) { cache[key] = value }
+
     /// The verdict for a decoded image, sampling it the first time only.
+    /// Prefer `sample(_:)` on a background task plus `record(_:for:)`: the
+    /// sampling draws a bitmap, and a cache miss on the main actor during a
+    /// fast flick showed up as a main-runloop hang (Logan 2026-09-16).
     static func verdict(for key: String, image: UIImage) -> Bool {
         if let hit = cache[key] { return hit }
         let value = sample(image)
@@ -617,7 +693,7 @@ enum LogoTileTest {
     /// True when all four corners (the corner pixel plus a 3x3 patch just
     /// inside it) are opaque. An image with no alpha channel is a tile by
     /// definition and is never drawn.
-    private static func sample(_ image: UIImage) -> Bool {
+    nonisolated static func sample(_ image: UIImage) -> Bool {
         guard let cg = image.cgImage else { return true }
         switch cg.alphaInfo {
         case .none, .noneSkipFirst, .noneSkipLast:
@@ -665,24 +741,37 @@ enum LogoTileTest {
 }
 
 private struct AerioRoundedLogoCornersKey: EnvironmentKey {
-    static var defaultValue: Bool { LogoCorners.stored }
+    static var defaultValue: Bool { LogoCorners.storedList }
+}
+
+private struct AerioRoundedGuideCornersKey: EnvironmentKey {
+    static var defaultValue: Bool { LogoCorners.storedGuide }
 }
 
 extension EnvironmentValues {
-    /// Settings > Appearance > "Rounded corners on logos and artwork".
-    /// Read by `CachedLogoImage`, `ProgramArtSlot` and the few call sites
-    /// that clip a logo themselves.
+    /// Settings > Appearance > "Rounded corners in List view". Read by
+    /// `CachedLogoImage`, `ProgramArtSlot` and the few call sites that clip
+    /// a logo themselves.
     var aerioRoundedLogoCorners: Bool {
         get { self[AerioRoundedLogoCornersKey.self] }
         set { self[AerioRoundedLogoCornersKey.self] = newValue }
     }
+
+    /// Settings > Appearance > "Rounded corners in Guide view". Read by the
+    /// guide's channel column (through `ChannelBadge`) and by the guide's
+    /// program art (through `ProgramArtSlot(usesGuideCorners:)`).
+    var aerioRoundedGuideCorners: Bool {
+        get { self[AerioRoundedGuideCornersKey.self] }
+        set { self[AerioRoundedGuideCornersKey.self] = newValue }
+    }
 }
 
 extension View {
-    /// Injects the persisted logo-corner preference. Apply once at the app
+    /// Injects both persisted corner preferences. Apply once at the app
     /// root, next to `aerioTextScaleRoot`.
-    func aerioLogoCornersRoot(_ rounded: Bool) -> some View {
-        environment(\.aerioRoundedLogoCorners, rounded)
+    func aerioLogoCornersRoot(list: Bool, guide: Bool) -> some View {
+        environment(\.aerioRoundedLogoCorners, list)
+            .environment(\.aerioRoundedGuideCorners, guide)
     }
 
 }
@@ -769,9 +858,30 @@ enum ChannelNumberColumn {
 // still fits every line.
 @MainActor
 enum ChannelRowTextColumn {
+    /// Memoized: a row body asks for its height on EVERY evaluation, and the
+    /// answer only changes when Text Size, Subtext Size or the display scale
+    /// does. Building five `UIFont`s per row per body showed up in the
+    /// iPhone flick profile (Logan 2026-09-16), so both the per-line metric
+    /// and the finished height are cached.
+    private static var lineCache: [Int: CGFloat] = [:]
+    private static var heightCache: [String: CGFloat] = [:]
+
     /// One line of the system font at a rendered point size.
     static func lineHeight(_ size: CGFloat, weight: UIFont.Weight = .regular) -> CGFloat {
-        UIFont.systemFont(ofSize: max(1, size), weight: weight).lineHeight.rounded(.up)
+        let points = max(1, size)
+        // Quarter-point buckets: finer than any visible difference, coarse
+        // enough that a slider drag settles on a handful of entries.
+        let key = Int((points * 4).rounded()) &* 16 &+ Int(weight.rawValue * 8)
+        if let hit = lineCache[key] { return hit }
+        let value = UIFont.systemFont(ofSize: points, weight: weight).lineHeight.rounded(.up)
+        lineCache[key] = value
+        return value
+    }
+
+    /// Cache key for a row shape.
+    private static func key(_ parts: [CGFloat], _ flags: [Bool]) -> String {
+        parts.map { String(Int(($0 * 100).rounded())) }.joined(separator: ",")
+            + "|" + flags.map { $0 ? "1" : "0" }.joined()
     }
 
     /// tvOS row: name 26 semibold, title in a 28pt grown box, 18pt subtitle,
@@ -781,6 +891,8 @@ enum ChannelRowTextColumn {
                            showSubtitle: Bool,
                            textScale: CGFloat,
                            subtextScale: CGFloat) -> CGFloat {
+        let cacheKey = "tv|" + key([textScale, subtextScale], [showName, showSubtitle])
+        if let hit = heightCache[cacheKey] { return hit }
         let gap: CGFloat = 4
         let sub = textScale * subtextScale
         var height: CGFloat = 0
@@ -794,7 +906,9 @@ enum ChannelRowTextColumn {
         }
         height += 2 * lineHeight(18 * sub, weight: .regular); children += 1
         height += 5 + 4; children += 1
-        return (height + gap * CGFloat(max(0, children - 1))).rounded(.up)
+        let total = (height + gap * CGFloat(max(0, children - 1))).rounded(.up)
+        heightCache[cacheKey] = total
+        return total
     }
 
     /// iPhone / iPad row. `s` is the Live TV List display scale; `isWide` is
@@ -805,6 +919,8 @@ enum ChannelRowTextColumn {
                           showSubtitle: Bool,
                           textScale: CGFloat,
                           subtextScale: CGFloat) -> CGFloat {
+        let cacheKey = "ios|" + key([s, textScale, subtextScale], [isWide, showName, showSubtitle])
+        if let hit = heightCache[cacheKey] { return hit }
         let gap = (isWide ? 4 : 2) * s
         let sub = textScale * subtextScale
         let bodySize = (isWide ? 12 : 10) * s * sub
@@ -819,7 +935,9 @@ enum ChannelRowTextColumn {
         }
         height += 2 * lineHeight(bodySize); children += 1
         height += 3; children += 1
-        return (height + gap * CGFloat(max(0, children - 1))).rounded(.up)
+        let total = (height + gap * CGFloat(max(0, children - 1))).rounded(.up)
+        heightCache[cacheKey] = total
+        return total
     }
 }
 

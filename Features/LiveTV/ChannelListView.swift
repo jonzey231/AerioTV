@@ -50,7 +50,19 @@ struct ChannelListView: View {
     // longer clobbers another form factor's default.
     @AppStorage("defaultLiveTVView") private var defaultLiveTVView = ""
     @AppStorage("channelSortMode") private var sortModeRaw = "number"
-    @State private var showGuideView = false
+    /// Apple TV: the List view is removed from the UI (Logan 2026-09-16,
+    /// unusable with a remote), so the Guide is the only presentation and
+    /// this seeds to `true` -- there is no first-render List flash before
+    /// `.onAppear`. See `TVListView` in Design/Typography.swift.
+    static let guideOnlyPlatform: Bool = {
+        #if os(tvOS)
+        return !TVListView.enabled
+        #else
+        return false
+        #endif
+    }()
+
+    @State private var showGuideView = ChannelListView.guideOnlyPlatform
 
     /// Session-scoped List/Guide choice. The in-screen toggle is deliberately
     /// session-only (never writes defaultLiveTVView), but it lived in plain
@@ -72,13 +84,24 @@ struct ChannelListView: View {
     /// Collapses the iPhone-only chrome (filter pills) when the user
     /// scrolls down in the channel list. Hysteresis (80 / 20) on the
     /// scroll-y trigger prevents jitter near the edges.
-    @State private var isChromeCollapsed: Bool = false
+    ///
+    /// Both scroll-driven chrome flags live in an `@Observable` box rather
+    /// than in `@State` on this view (Logan 2026-09-16, iPhone flick
+    /// hiccup). They used to be read straight from `body` - the
+    /// `safeAreaInset` and `.scrollAwayTabBar` lines below - so every flip
+    /// during a flick invalidated ChannelListView and rebuilt all eleven
+    /// rows: the device log showed ChannelListView=5 bodies/s and
+    /// ChannelRow=58/s for eleven channels. Only the two leaf views that
+    /// actually read the flags re-render now, and this view's body does not
+    /// touch them, so a scroll produces no ChannelListView body at all.
+    /// This is the same standing rule the rest of this file follows: no
+    /// state writes ON THE TAB during a scroll.
+    @State private var chrome = ListScrollChrome()
     #if os(iOS)
-    // Tab bar scroll-away (2026-07-12): its own flag, separate from
-    // isChromeCollapsed. The pills stay position-based (only shown near
+    // Tab bar scroll-away (2026-07-12): its own flag, separate from the
+    // chrome collapse. The pills stay position-based (only shown near
     // the top, like Android's chip row); the BAR is direction-based via
     // TabBarScrollTracker so any upward scroll brings it back mid-list.
-    @State private var isTabBarScrolledAway: Bool = false
     @State private var tabBarTracker = TabBarScrollTracker()
     #endif
     /// GH #55 interactive group swipe: live horizontal offset the list
@@ -689,7 +712,11 @@ struct ChannelListView: View {
                     }()
 
                     #if os(tvOS)
-                    // tvOS always uses Guide view — list view is not offered.
+                    // tvOS always uses Guide view; list view is not offered
+                    // while TVListView.enabled is off. A stored
+                    // defaultLiveTVView of "list" resolves to Guide here and
+                    // the stored value is left untouched, so re-enabling the
+                    // flag restores the user's own choice.
                     showGuideView = true
                     #else
                     // Width-adaptive default: compact (iPhone portrait, folded
@@ -1069,7 +1096,7 @@ struct ChannelListView: View {
                 action: { Task { await channelStore.forceRefresh(servers: servers, modelContext: modelContext) } },
                 actionTitle: "Refresh"
             )
-        } else if showGuideView {
+        } else if showGuideView || Self.guideOnlyPlatform {
             // v1.6.13.x: Outer VStack with a 0-height GHOST CAPTURE
             // POINT as its first child, then the actual padded VStack
             // as its second child. The ghost's position equals
@@ -1775,7 +1802,10 @@ struct ChannelListView: View {
             // form. iPad / tvOS still render the pills above the
             // List in the VStack at the top of `channelListContent`.
             .safeAreaInset(edge: .top, spacing: 0) {
-                if UIDevice.current.userInterfaceIdiom == .phone && !isChromeCollapsed {
+                // The collapse flag is read INSIDE this leaf view, never in
+                // ChannelListView's body, so a flick re-renders the inset
+                // alone instead of every row. See `chrome`.
+                PhoneChromeInset(chrome: chrome) {
                     phoneHeaderRow
                         .background(Color.appBackground)
                         .transition(.move(edge: .top).combined(with: .opacity))
@@ -1796,26 +1826,39 @@ struct ChannelListView: View {
                 geo.contentOffset.y
             } action: { oldY, y in
                 guard UIDevice.current.userInterfaceIdiom == .phone else { return }
-                if y > 80 && !isChromeCollapsed {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        isChromeCollapsed = true
-                    }
-                } else if y < 20 && isChromeCollapsed {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        isChromeCollapsed = false
-                    }
+                // Writes land on the observable box, which only the two leaf
+                // views below observe: reading a property in THIS closure is
+                // not a body dependency, so the list is not invalidated.
+                // A flip is applied at once while the finger is down, and
+                // held back to .idle while the list decelerates: see
+                // ListScrollChrome for the measurement behind that split.
+                let deferred = chrome.isDecelerating
+                if y > 80 && !chrome.targetCollapsed {
+                    chrome.applyCollapsed(true, deferred: deferred)
+                } else if y < 20 && chrome.targetCollapsed {
+                    chrome.applyCollapsed(false, deferred: deferred)
                 }
                 if let hidden = tabBarTracker.update(oldY: oldY, newY: y,
-                                                     hidden: isTabBarScrolledAway) {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        isTabBarScrolledAway = hidden
-                    }
+                                                     hidden: chrome.targetTabBarAway) {
+                    chrome.applyTabBarAway(hidden, deferred: deferred)
+                }
+            }
+            .onScrollPhaseChange { _, phase in
+                guard UIDevice.current.userInterfaceIdiom == .phone else { return }
+                switch phase {
+                case .decelerating, .animating:
+                    chrome.isDecelerating = true
+                case .idle:
+                    chrome.flushPending()
+                default:
+                    chrome.isDecelerating = false
                 }
             }
             // GH #20 (Android parity): tuck the tab bar away on scroll so
             // the list reclaims its height. Phone-only by construction:
             // the observer above never sets the flag on iPad.
-            .scrollAwayTabBar(collapsed: isTabBarScrolledAway)
+            // Reads the flag inside the modifier's own body, not here.
+            .scrollAwayTabBar(observing: chrome)
             // GH #20 follow-up (user report 2026-07-12): on iOS 26 the list's
             // frame stopped at the safe-area line above the tab bar, leaving
             // a dead band that stayed behind when the system minimized the
@@ -3517,7 +3560,7 @@ struct ChannelRow: View {
                         MarqueeText(text: prog.title,
                                     font: .system(size: (isWide ? 15 : 11) * s).subtext(),
                                     color: .contrastText(.accentPrimary.opacity(0.85)),
-                                    isActive: false)  // Static during scroll — saves GPU
+                                    isActive: false)  // Static during scroll: saves GPU
                             .frame(height: TextScale.grow((isWide ? 20 : 16) * s, textScale * subtextScale))
                         nowPlayingTimeRemaining(end: prog.end)
                         // Feed badges (LIVE/NEW/PREMIERE/...) for the
@@ -5017,6 +5060,10 @@ struct CachedLogoImage: View {
     /// 2026-09-16, iPhone, MLB group). Off for the guide column, whose rows
     /// are a uniform height already.
     var sizedByWidth: Bool = false
+    /// Read the GUIDE corner toggle instead of the List one. The guide's
+    /// channel column is the only surface on the guide flag (Logan
+    /// 2026-09-16, the single toggle split in two).
+    var usesGuideCorners: Bool = false
 
     @State private var uiImage: UIImage?
     /// Sampled once per image by `LogoTileTest`: true for opaque artwork
@@ -5024,6 +5071,12 @@ struct CachedLogoImage: View {
     /// transparency. Drives the shared rounding rule below.
     @State private var isTile: Bool = false
     @Environment(\.aerioRoundedLogoCorners) private var roundedCorners
+    @Environment(\.aerioRoundedGuideCorners) private var roundedGuideCorners
+
+    /// Whichever of the two Appearance toggles governs this surface.
+    private var cornersEnabled: Bool {
+        usesGuideCorners ? roundedGuideCorners : roundedCorners
+    }
 
     /// The slot the image is fitted into. Callers (ChannelBadge included)
     /// pass a DEFINITE height: `.frame(maxHeight: .infinity)` cannot work in
@@ -5061,12 +5114,22 @@ struct CachedLogoImage: View {
         LogoCorners.imageRadius(container: containerRadius,
                                 fitted: fittedSize,
                                 isTile: isTile,
-                                enabled: roundedCorners)
+                                enabled: cornersEnabled)
     }
 
     /// One sizing rule for both the image and the placeholder.
     private func sized(_ content: some View) -> some View {
         content.frame(width: width, height: height)
+    }
+
+    /// Samples the corner alpha on a background task and records the
+    /// verdict once, keyed by URL, so no later appearance re-reads pixels.
+    private func sampleOffMain(_ image: UIImage, key: String) async {
+        let verdict = await Task.detached(priority: .utility) {
+            LogoTileTest.sample(image)
+        }.value
+        LogoTileTest.record(verdict, for: key)
+        if isTile != verdict { isTile = verdict }
     }
 
     var body: some View {
@@ -5093,7 +5156,7 @@ struct CachedLogoImage: View {
                         RoundedRectangle(cornerRadius: min(LogoCorners.radius(container: containerRadius,
                                                                               imageShorterSide: min(slot.width, slot.height),
                                                                               isTile: true,
-                                                                              enabled: roundedCorners), 6),
+                                                                              enabled: cornersEnabled), 6),
                                          style: .continuous)
                             .fill(Color.accentPrimary.opacity(0.12))
                         NoPosterPlaceholder(compact: true)
@@ -5105,24 +5168,153 @@ struct CachedLogoImage: View {
             guard let url else { return }
             let key = url.absoluteString
             if let cached = LogoCache.shared.image(for: key) {
-                isTile = LogoTileTest.verdict(for: key, image: cached)
-                uiImage = cached
+                // Re-appearing cell: the verdict is already known for any
+                // logo this session has drawn, so a fast flick never samples
+                // pixels on the main actor. An unknown one (image cached by
+                // another surface) is sampled off-main below.
+                if let known = LogoTileTest.cached(key) {
+                    isTile = known
+                    uiImage = cached
+                } else {
+                    uiImage = cached
+                    await sampleOffMain(cached, key: key)
+                }
                 return
             }
             do {
                 let data = try await LogoFetcher.fetch(url)
                 // GH #61: decode accepts SVG logos in addition to bitmaps.
-                if let img = AerioImageDecoding.decode(data) {
-                    LogoCache.shared.store(img, for: key)
-                    // Sampled once here, cached by URL, so scrolling the
-                    // list or the guide never re-reads pixels.
-                    isTile = LogoTileTest.verdict(for: key, image: img)
-                    uiImage = img
-                }
+                // Decode AND corner sampling both run off the main actor:
+                // together they were the 100 to 220 ms main-runloop hangs
+                // right after launch (Logan 2026-09-16).
+                let decoded: UIImage? = await Task.detached(priority: .utility) {
+                    AerioImageDecoding.decode(data)
+                }.value
+                guard let img = decoded else { return }
+                LogoCache.shared.store(img, for: key)
+                uiImage = img
+                await sampleOffMain(img, key: key)
             } catch {}
         }
     }
 }
+
+// MARK: - Scroll chrome box
+//
+// The two iPhone scroll-driven chrome flags, out of ChannelListView's
+// `@State` and into one `@Observable` box (Logan 2026-09-16). Observation
+// tracks reads PER VIEW BODY: writing here re-renders only the views that
+// read the property, so the flick that used to rebuild every channel row
+// now touches the header inset and the tab-bar modifier alone. Writing from
+// a scroll callback is not a read, so the list is never invalidated.
+@Observable
+@MainActor
+final class ListScrollChrome {
+    /// Filter pills collapsed (position based, 80 / 20 hysteresis).
+    var isCollapsed: Bool = false
+    /// Tab bar tucked away (direction based, see TabBarScrollTracker).
+    var isTabBarAway: Bool = false
+
+    // Deferred flips (Logan 2026-09-16, iPhone flick hiccup on the 11-channel
+    // group). Publishing either flag while the list is DECELERATING removes
+    // or restores the header's `safeAreaInset` under a 0.2 s animation, and
+    // the List relayouts for every frame of it while UIScrollView is still
+    // animating its own deceleration: the iPhone log showed 40 x
+    // [HANG] main runloop turn 120-230 ms through one flick, several landing
+    // directly on [CHROME] collapse=true / tabBarAway=true. The target value
+    // is stashed instead and published when the scroll phase reaches .idle,
+    // so the inset change never competes with deceleration. A flip while the
+    // finger is still down (tracking) is applied immediately as before.
+    @ObservationIgnored var pendingCollapsed: Bool?
+    @ObservationIgnored var pendingTabBarAway: Bool?
+    /// True between the finger lifting and the scroll coming to rest.
+    @ObservationIgnored var isDecelerating = false
+
+    /// What the scroll observer should compare against: the stashed target
+    /// when there is one, otherwise the published value.
+    var targetCollapsed: Bool { pendingCollapsed ?? isCollapsed }
+    var targetTabBarAway: Bool { pendingTabBarAway ?? isTabBarAway }
+
+    func applyCollapsed(_ value: Bool, deferred: Bool) {
+        debugLog("[CHROME] collapse=\(value)\(deferred ? " (deferred to idle)" : "")")
+        guard !deferred else { pendingCollapsed = value; return }
+        pendingCollapsed = nil
+        guard isCollapsed != value else { return }
+        ChromeEventTrace.note("collapse=\(value)")
+        withAnimation(.easeInOut(duration: 0.2)) { isCollapsed = value }
+    }
+
+    func applyTabBarAway(_ value: Bool, deferred: Bool) {
+        debugLog("[CHROME] tabBarAway=\(value)\(deferred ? " (deferred to idle)" : "")")
+        guard !deferred else { pendingTabBarAway = value; return }
+        pendingTabBarAway = nil
+        guard isTabBarAway != value else { return }
+        ChromeEventTrace.note("tabBarAway=\(value)")
+        // No withAnimation: the bar is its own chrome layer and the system
+        // animates the toolbar change. Wrapping it animated the List's
+        // bottom inset along with it.
+        isTabBarAway = value
+    }
+
+    /// Scroll came to rest: publish anything held back during deceleration.
+    func flushPending() {
+        isDecelerating = false
+        if let value = pendingCollapsed {
+            pendingCollapsed = nil
+            if isCollapsed != value {
+                debugLog("[CHROME] collapse=\(value) applied at scroll idle")
+                ChromeEventTrace.note("collapse=\(value)-idle")
+                withAnimation(.easeInOut(duration: 0.2)) { isCollapsed = value }
+            }
+        }
+        if let value = pendingTabBarAway {
+            pendingTabBarAway = nil
+            if isTabBarAway != value {
+                debugLog("[CHROME] tabBarAway=\(value) applied at scroll idle")
+                ChromeEventTrace.note("tabBarAway=\(value)-idle")
+                isTabBarAway = value
+            }
+        }
+    }
+}
+
+/// The last scroll-chrome flip that actually ran, so the [HANG] run loop
+/// observer can NAME what the long turn was doing (Logan 2026-09-16). Main
+/// thread only: written from the scroll callbacks, read from the run loop
+/// observer, both of which run on main.
+enum ChromeEventTrace {
+    nonisolated(unsafe) private static var lastEvent: String?
+    nonisolated(unsafe) private static var lastAt: CFAbsoluteTime = 0
+
+    static func note(_ event: String) {
+        lastEvent = event
+        lastAt = CFAbsoluteTimeGetCurrent()
+    }
+
+    /// " chrome=<event> +<n>ms" when a chrome flip ran in the last two
+    /// seconds, empty otherwise.
+    static func hangContext(now: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()) -> String {
+        guard let lastEvent, lastAt > 0 else { return "" }
+        let dt = now - lastAt
+        guard dt >= 0, dt < 2 else { return "" }
+        return " chrome=\(lastEvent) +\(Int(dt * 1000))ms"
+    }
+}
+
+#if os(iOS)
+/// The phone header's `safeAreaInset` content. Exists purely so the collapse
+/// flag is read in a LEAF body instead of in ChannelListView's.
+private struct PhoneChromeInset<Content: View>: View {
+    let chrome: ListScrollChrome
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        if UIDevice.current.userInterfaceIdiom == .phone && !chrome.isCollapsed {
+            content()
+        }
+    }
+}
+#endif
 
 // MARK: - ChannelBadge
 //
@@ -5133,11 +5325,16 @@ struct CachedLogoImage: View {
 // rounding; there is now a single component, and Android is getting the
 // identical one.
 //
-// Fixed vertical order with DEDICATED positions:
+// Fixed vertical order with DEDICATED positions (Logan 2026-09-16, rev 2:
+// the name moved above the number so the two text lines read title-first):
 //
 //     logo      (top, all remaining height)
-//     number    (under the logo)
-//     name      (under the number; GUIDE only)
+//     name      (under the logo; GUIDE only)
+//     number    (last line)
+//
+// tvOS is the exception: there the number sits in its own column at the
+// cell's LEFT edge and the logo/name column follows it, so the name gets
+// every point the number does not need.
 //
 // A hidden line contributes ZERO height and the logo takes what it frees.
 // The list row keeps the channel name in its own text column, so it passes
@@ -5176,6 +5373,9 @@ struct ChannelBadge: View {
     /// Gap between the stacked lines.
     var lineGap: CGFloat = 4
 
+    /// tvOS only: gap between the leading column and the logo column.
+    var columnGap: CGFloat = 14
+
     /// Floor for the logo, so a short row never collapses the art.
     var minimumLogoHeight: CGFloat = 0
 
@@ -5184,6 +5384,10 @@ struct ChannelBadge: View {
     /// column leaves this off: its rows are a uniform height, so sizing from
     /// the height there is already consistent row to row.
     var logoSizedByWidth: Bool = false
+
+    /// GUIDE column: clip on the "Rounded corners in Guide view" toggle
+    /// rather than the List one. See `CachedLogoImage.usesGuideCorners`.
+    var usesGuideCorners: Bool = false
 
     /// Characters the number must fit, published by the list / guide from
     /// the widest number on screen. See `ChannelNumberColumn`.
@@ -5226,14 +5430,101 @@ struct ChannelBadge: View {
         max(minimumLogoHeight, maxHeight - numberBlock - nameBlock)
     }
 
+    /// tvOS: width of the leading column. The number owns it; with numbers
+    /// hidden there is no leading column at all and the logo column IS the
+    /// badge. Status glyphs live in the surface's own top band now (Logan
+    /// 2026-09-16), so they never take width here.
+    private var leadingColumnWidth: CGFloat {
+        showNumber ? numberWidth : 0
+    }
+
+    /// tvOS: width left for the logo column once the leading column has its
+    /// share. No leading column, the logo column IS the badge.
+    private var logoColumnWidth: CGFloat {
+        guard leadingColumnWidth > 0 else { return slotWidth }
+        return max(0, slotWidth - leadingColumnWidth - columnGap)
+    }
+
+    /// tvOS: the logo's height. Only the name costs height here, since the
+    /// number sits beside the logo rather than under it.
+    private var tvLogoHeight: CGFloat {
+        max(minimumLogoHeight, maxHeight - nameBlock)
+    }
+
     var body: some View {
+        #if os(tvOS)
+        // TV layout (Logan 2026-09-16): the rail is 240 wide but only 110
+        // tall, so three stacked lines squeezed the logo to a sliver. The
+        // number moves to its own fixed-width column on the LEFT, vertically
+        // centered, and the logo takes the height the number used to cost.
+        // iPhone and iPad keep the stacked layout below.
+        HStack(spacing: leadingColumnWidth > 0 ? columnGap : 0) {
+            if leadingColumnWidth > 0 {
+                // The leading column: the channel number, leading aligned.
+                VStack(alignment: .leading, spacing: 0) {
+                    if showNumber {
+                        Text(number)
+                            .scaledFont(.system(size: numberFontSize, weight: .bold, design: .monospaced))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .foregroundColor(Color.contrastText(.textTertiary))
+                            // Sized from the widest number on screen, so it
+                            // never truncates and every row's logo column
+                            // starts level. LEADING (Logan 2026-09-16):
+                            // trailing alignment pushed the number, and with
+                            // it the logo and name, toward the middle of the
+                            // cell, and "NBC Sports NOW HD" truncated.
+                            .frame(width: numberWidth, alignment: .leading)
+                    }
+                }
+                // The column hangs from the TOP so the number sits level
+                // with the top of the logo box. It spans the full slot
+                // height, so the logo column beside it is unaffected.
+                .frame(width: leadingColumnWidth,
+                       height: maxHeight > 0 ? maxHeight : nil,
+                       alignment: .topLeading)
+            }
+            VStack(spacing: 0) {
+                if showLogo {
+                    CachedLogoImage(url: logoURL,
+                                    width: logoColumnWidth,
+                                    height: tvLogoHeight,
+                                    containerRadius: containerRadius,
+                                    sizedByWidth: logoSizedByWidth,
+                                    usesGuideCorners: usesGuideCorners)
+                }
+                // Guide only: the list row keeps the name in its text column.
+                if showName, nameFontSize > 0 {
+                    Text(name)
+                        .scaledFont(.system(size: nameFontSize, weight: .medium))
+                        .lineLimit(1)
+                        .foregroundColor(.textPrimary)
+                        .padding(.top, showLogo ? lineGap : 0)
+                }
+            }
+            .frame(width: logoColumnWidth)
+        }
+        .frame(width: slotWidth)
+        .accessibilityElement(children: .combine)
+        #else
         VStack(spacing: 0) {
             if showLogo {
                 CachedLogoImage(url: logoURL,
                                 width: slotWidth,
                                 height: logoHeight,
                                 containerRadius: containerRadius,
-                                sizedByWidth: logoSizedByWidth)
+                                sizedByWidth: logoSizedByWidth,
+                                usesGuideCorners: usesGuideCorners)
+            }
+            // Name BEFORE number (Logan 2026-09-16): logo, name, number.
+            // The two blocks cost the same height either way, so only the
+            // order and the gap conditions change.
+            if showName, nameFontSize > 0 {
+                Text(name)
+                    .scaledFont(.system(size: nameFontSize, weight: .medium))
+                    .lineLimit(1)
+                    .foregroundColor(.textPrimary)
+                    .padding(.top, showLogo ? lineGap : 0)
             }
             if showNumber {
                 Text(number)
@@ -5243,18 +5534,12 @@ struct ChannelBadge: View {
                     // this can never shrink the badge or clip a digit.
                     .fixedSize(horizontal: true, vertical: false)
                     .foregroundColor(Color.contrastText(.textTertiary))
-                    .padding(.top, showLogo ? lineGap : 0)
-            }
-            if showName, nameFontSize > 0 {
-                Text(name)
-                    .scaledFont(.system(size: nameFontSize, weight: .medium))
-                    .lineLimit(1)
-                    .foregroundColor(.textPrimary)
-                    .padding(.top, (showLogo || showNumber) ? lineGap : 0)
+                    .padding(.top, (showLogo || (showName && nameFontSize > 0)) ? lineGap : 0)
             }
         }
         .frame(width: slotWidth)
         .accessibilityElement(children: .combine)
+        #endif
     }
 }
 

@@ -1025,24 +1025,33 @@ struct VODDetailView: View {
     private func matchRelatedAgainstLibrary() async {
         let recs = relatedCandidates
         guard !recs.isEmpty else { return }
-        let library = item.type == .movie
-            ? VODStore.shared.movies + VODStore.shared.movieSearchResults
-            : VODStore.shared.series + VODStore.shared.seriesSearchResults
-        guard library.count != relatedMatchedCount else { return }
-        relatedMatchedCount = library.count
+        // Two indexed catalog reads (strict tmdb id, then normalized title
+        // for rows that carry no id) plus the resident server-search rows.
+        // The old path built a dictionary over the WHOLE library, which a
+        // paged catalog neither can nor should do.
+        let kind: VODItemType = item.type == .movie ? .movie : .series
+        let searchRows = item.type == .movie
+            ? VODStore.shared.movieSearchResults
+            : VODStore.shared.seriesSearchResults
+        let stamp = VODStore.shared.catalogRevision &+ searchRows.count
+        guard stamp != relatedMatchedCount else { return }
+        relatedMatchedCount = stamp
         let selfID = item.id
-        let hits = await Task.detached(priority: .userInitiated) { () -> [VODDisplayItem] in
-            let matcher = LibraryMatcher(library)
-            var seen: Set<String> = [selfID]
-            var out: [VODDisplayItem] = []
-            for rec in recs {
-                guard let hit = matcher.match(tmdbID: rec.id, title: rec.title), seen.insert(hit.id).inserted else { continue }
-                out.append(hit)
-                if out.count >= 12 { break }
-            }
-            return out
-        }.value
-        debugLog("🎬 Related: \(recs.count) TMDB recommendations -> \(hits.count) in library (\(library.count) titles)")
+        let byTMDB = await VODStore.shared.itemsByTMDBID(kind: kind, tmdbIDs: recs.map(\.id))
+        let byTitle = await VODStore.shared.itemsByNormalizedTitle(
+            kind: kind, titles: recs.map { VODCatalogStore.normalized($0.title) }, requireNoTMDBID: true)
+        let searchMatcher = LibraryMatcher(searchRows)
+        var seen: Set<String> = [selfID]
+        var hits: [VODDisplayItem] = []
+        for rec in recs {
+            let hit = byTMDB[rec.id]
+                ?? byTitle[VODCatalogStore.normalized(rec.title)]
+                ?? searchMatcher.match(tmdbID: rec.id, title: rec.title)
+            guard let hit, seen.insert(hit.id).inserted else { continue }
+            hits.append(hit)
+            if hits.count >= 12 { break }
+        }
+        debugLog("🎬 Related: \(recs.count) TMDB recommendations -> \(hits.count) in the catalog")
         // Hidden titles stay out of Related too.
         relatedItems = HiddenVODStore.shared.visible(hits)
     }
@@ -1126,7 +1135,7 @@ struct VODDetailView: View {
     /// Re-match once the sweep has published more titles.
     private var tvRelatedRefresh: some View {
         Color.clear.frame(height: 0)
-            .onChange(of: item.type == .movie ? relatedLibrary.movies.count : relatedLibrary.series.count) { _, _ in
+            .onChange(of: relatedLibrary.catalogRevision) { _, _ in
                 Task { await matchRelatedAgainstLibrary() }
             }
     }
@@ -3261,9 +3270,15 @@ extension VODStore {
     /// is skipped there.
     @MainActor
     func resolveKnownForItem(_ kf: TMDBKnownForItem, server: ServerConnection?) async -> VODDisplayItem? {
-        let loaded = kf.isMovie ? movies + movieSearchResults : series + seriesSearchResults
-        if let hit = loaded.first(where: { storedTMDBID(of: $0) == kf.id }) { return hit }
+        let kind: VODItemType = kf.isMovie ? .movie : .series
+        let loaded = kf.isMovie ? movieSearchResults : seriesSearchResults
+        // Stored catalog first: a strict tmdb-id match, then a normalized
+        // title match restricted to rows that carry no id.
+        if let hit = await itemsByTMDBID(kind: kind, tmdbIDs: [kf.id])[kf.id] { return hit }
         let wanted = Self.normalizeVodTitle(kf.title)
+        if let hit = await itemsByNormalizedTitle(kind: kind, titles: [wanted],
+                                                  requireNoTMDBID: true)[wanted] { return hit }
+        if let hit = loaded.first(where: { storedTMDBID(of: $0) == kf.id }) { return hit }
         if let hit = loaded.first(where: {
             storedTMDBID(of: $0) == nil && Self.normalizeVodTitle($0.name) == wanted
         }) { return hit }
@@ -3300,7 +3315,7 @@ extension VODStore {
         // title (no id-blank precondition here).
         let hit = rows.first(where: { storedTMDBID(of: $0) == kf.id })
             ?? rows.first(where: { Self.normalizeVodTitle($0.name) == wanted })
-        if let hit { mergeKnownForHit(hit) }
+        if let hit { await mergeKnownForHit(hit) }
         return hit
     }
 }

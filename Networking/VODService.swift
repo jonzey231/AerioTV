@@ -1975,8 +1975,24 @@ enum VODLibraryCache {
         var remoteNewest: String? = nil
     }
 
-    private static func fileURL(kind: VODItemType) -> URL {
-        AppCacheDirectory.url.appendingPathComponent(kind == .movie ? "vod-library-movies.json" : "vod-library-series.json")
+    /// One file PER SERVER (Logan 2026-09-16): switching the active
+    /// playlist must not delete or overwrite another playlist's catalog, so
+    /// switching back is instant. A single shared file per kind used to be
+    /// rewritten by whichever playlist swept last. Only deleting a server
+    /// removes its files.
+    private static func fileURL(kind: VODItemType, identity: String) -> URL {
+        let base = kind == .movie ? "vod-library-movies" : "vod-library-series"
+        return AppCacheDirectory.url.appendingPathComponent("\(base)-\(serverSlug(identity)).json")
+    }
+
+    /// The server UUID out of an identity string ("v2|uuid|baseURL|user"),
+    /// which is both stable across launches and safe in a file name.
+    static func serverSlug(_ identity: String) -> String {
+        let parts = identity.split(separator: "|", omittingEmptySubsequences: false)
+        let raw = parts.count > 2 ? String(parts[parts.count - 3]) : identity
+        let allowed = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-")
+        let cleaned = String(raw.filter { allowed.contains($0) })
+        return cleaned.isEmpty ? "default" : cleaned
     }
 
     /// Playlist identity the snapshot is valid for (same shape as
@@ -1989,7 +2005,7 @@ enum VODLibraryCache {
     /// Decodes off the main actor. nil when there is no file, it belongs to
     /// another playlist, or it does not decode.
     static func load(kind: VODItemType, identity: String) async -> Snapshot? {
-        let url = fileURL(kind: kind)
+        let url = fileURL(kind: kind, identity: identity)
         return await Task.detached(priority: .userInitiated) { () -> Snapshot? in
             guard let data = try? Data(contentsOf: url),
                   let snap = try? JSONDecoder().decode(Snapshot.self, from: data),
@@ -2001,7 +2017,7 @@ enum VODLibraryCache {
     static func save(kind: VODItemType, identity: String, items: [VODDisplayItem], categories: [VODCategory],
                      remoteCount: Int? = nil, remoteNewest: String? = nil) {
         guard !items.isEmpty else { return }
-        let url = fileURL(kind: kind)
+        let url = fileURL(kind: kind, identity: identity)
         let snap = Snapshot(identity: identity, items: items, categories: categories, at: Date(),
                             remoteCount: remoteCount, remoteNewest: remoteNewest)
         Task.detached(priority: .utility) {
@@ -2016,18 +2032,101 @@ enum VODLibraryCache {
         }
     }
 
-    static func clear() { clear(kinds: [.movie, .series]) }
+    /// Every server's files, for a wipe-everything path.
+    static func clearAllServers() {
+        let dir = AppCacheDirectory.url
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        for name in names where name.hasPrefix("vod-library-movies") || name.hasPrefix("vod-library-series") {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+        }
+        debugLog("[VOD-CACHE] cleared every server snapshot")
+    }
 
     /// Drop the on-disk snapshot for specific halves of the library.
     /// Used when a Dispatcharr account loses `vod_movies_enabled` or
     /// `vod_series_enabled`: the in-memory store is cleared at the same
     /// moment, and without this the next launch's `restoreSnapshots`
     /// would republish the catalog the account may no longer see.
-    static func clear(kinds: [VODItemType]) {
+    static func clear(kinds: [VODItemType], identity: String) {
         for kind in kinds {
-            try? FileManager.default.removeItem(at: fileURL(kind: kind))
-            debugLog("[VOD-CACHE] cleared \(kind == .movie ? "movies" : "series") snapshot")
+            try? FileManager.default.removeItem(at: fileURL(kind: kind, identity: identity))
+            debugLog("[VOD-CACHE] cleared \(kind == .movie ? "movies" : "series") snapshot for \(serverSlug(identity))")
         }
+    }
+}
+
+// MARK: - Resumable sweep positions (GH #109 parity)
+
+/// Where the uncapped VOD sweep had reached, per category, so a sweep
+/// killed by process death (or a playlist switch, or jetsam) resumes
+/// instead of walking the whole catalog again. Android does the same:
+/// round-robin over the enabled categories with saved positions.
+///
+/// Tiny file (one integer per category), written every few pages. Lives
+/// beside the library snapshot in the rebuildable cache directory, which
+/// on tvOS is Caches: Application Support is not writable there.
+enum VODSweepProgress {
+    /// Bump when the shape changes; a mismatch is a miss.
+    private static let schema = 1
+
+    struct State: Codable, Sendable {
+        var identity: String
+        /// Category name -> next 1-based page to fetch.
+        var nextPageByCategory: [String: Int]
+        /// Categories whose walk reached the end of the collection.
+        var doneCategories: [String]
+        var at: Date
+    }
+
+    /// One file per server, like the library snapshot: a playlist switch
+    /// must not throw away the other playlist's saved positions.
+    private static func fileURL(kind: VODItemType, identity: String) -> URL {
+        let base = kind == .movie ? "vod-sweep-progress-movies" : "vod-sweep-progress-series"
+        return AppCacheDirectory.url.appendingPathComponent(
+            "\(base)-\(VODLibraryCache.serverSlug(identity)).json")
+    }
+
+    static func identity(for server: ServerConnection) -> String {
+        "v\(schema)|" + VODLibraryCache.identity(for: server)
+    }
+
+    /// Decodes off the main actor. nil when there is nothing usable.
+    static func load(kind: VODItemType, identity: String) async -> State? {
+        let url = fileURL(kind: kind, identity: identity)
+        return await Task.detached(priority: .userInitiated) { () -> State? in
+            guard let data = try? Data(contentsOf: url),
+                  let state = try? JSONDecoder().decode(State.self, from: data),
+                  state.identity == identity else { return nil }
+            return state
+        }.value
+    }
+
+    static func save(kind: VODItemType, identity: String,
+                     nextPageByCategory: [String: Int], doneCategories: [String]) {
+        let url = fileURL(kind: kind, identity: identity)
+        let state = State(identity: identity, nextPageByCategory: nextPageByCategory,
+                          doneCategories: doneCategories, at: Date())
+        Task.detached(priority: .utility) {
+            do {
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                        withIntermediateDirectories: true)
+                let data = try JSONEncoder().encode(state)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                debugLog("[VOD-CAT] progress save failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Only a server DELETE should reach this; a playlist switch keeps the
+    /// other server's positions on disk.
+    static func clear(kind: VODItemType, identity: String) {
+        try? FileManager.default.removeItem(at: fileURL(kind: kind, identity: identity))
+    }
+
+    static func clear(identity: String) {
+        clear(kind: .movie, identity: identity)
+        clear(kind: .series, identity: identity)
     }
 }
 
@@ -2118,6 +2217,55 @@ final class TMDBArtCache: ObservableObject {
                     debugLog("[TMDB-ART] save failed: \(error.localizedDescription)")
                 }
             }
+        }
+    }
+
+    /// Catalog-paged variant of `enrich`. The VOD catalog no longer fits in
+    /// memory, so the art pass walks it with a keyset query a few hundred
+    /// rows at a time and resolves each page before asking for the next.
+    /// A new call for the same kind replaces a running pass.
+    func enrichCatalog(playlistKey: String, isMovie: Bool, priority: [VODDisplayItem] = []) {
+        guard TMDBPosters.isEnabled, let apiKey = TMDBPosters.apiKey else { return }
+        loadIfNeeded()
+        let kindKey = isMovie ? "movie" : "series"
+        enrichTasks[kindKey]?.cancel()
+        let kind: VODItemType = isMovie ? .movie : .series
+        let cutoff = Date().addingTimeInterval(-30 * 86_400)
+        debugLog("[TMDB-ART] enrich \(kindKey): walking the catalog a page at a time")
+        enrichTasks[kindKey] = Task { @MainActor in
+            var resolved = 0
+            var seen = Set<String>()
+            var afterID: Int64 = 0
+            var page = priority
+            var morePages = true
+            while !Task.isCancelled {
+                if page.isEmpty {
+                    guard morePages else { break }
+                    let next = await VODCatalogStore.shared.artPage(
+                        playlistKey: playlistKey, kind: kind, afterID: afterID, limit: 400)
+                    if next.rows.isEmpty { break }
+                    afterID = next.lastID
+                    morePages = next.rows.count == 400
+                    page = next.rows
+                }
+                let batch = page
+                page = []
+                for item in batch {
+                    guard !Task.isCancelled else { return }
+                    let k = Self.key(for: item)
+                    guard seen.insert(k).inserted else { continue }
+                    if let e = entries[k], !(e.poster.isEmpty && e.at < cutoff) { continue }
+                    if let e = await TMDBService.lookupArt(title: item.displayName, isMovie: isMovie, apiKey: apiKey) {
+                        store(e, key: k)
+                        resolved += 1
+                    } else {
+                        // Transport failure or 429: back off and keep going.
+                        try? await Task.sleep(for: .seconds(2))
+                    }
+                    try? await Task.sleep(for: .milliseconds(80))
+                }
+            }
+            debugLog("[TMDB-ART] enrich \(kindKey): done, \(resolved) resolved")
         }
     }
 

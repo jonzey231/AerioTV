@@ -188,6 +188,9 @@ struct AddToMultiviewSheet: View {
         .onChange(of: availableSources) { _, sources in
             if !sources.contains(pickerSource) { selectSource(sources.first ?? .channels) }
         }
+        // VOD lists come from the paged catalog, rebuilt whenever it changes
+        // or the query does.
+        .task(id: vodListKey) { await refreshVODLists() }
         .onAppear {
             if !availableSources.contains(pickerSource) {
                 selectSource(availableSources.first ?? .channels)
@@ -453,9 +456,8 @@ struct AddToMultiviewSheet: View {
                 }
             } else {
                 Section("Series") {
-                    ForEach(seriesFiltered) { item in
-                        seriesRow(item)
-                    }
+                    seriesRows(seriesList)
+                    seriesRows(seriesHits)
                 }
             }
         }
@@ -465,11 +467,8 @@ struct AddToMultiviewSheet: View {
     /// Movies section body (iPad). Each row resolves + adds on tap.
     private var moviesSection: some View {
         Section("Movies") {
-            ForEach(moviesFiltered) { item in
-                if let movie = item.movie {
-                    movieRow(movie)
-                }
-            }
+            movieRows(moviesList)
+            movieRows(movieHits)
         }
     }
 
@@ -683,14 +682,11 @@ struct AddToMultiviewSheet: View {
             }
         case .movies:
             tvSectionHeader("Movies")
-            if moviesFiltered.isEmpty {
+            if moviesEmpty {
                 tvEmptyRow("No movies available")
             }
-            ForEach(moviesFiltered) { item in
-                if let movie = item.movie {
-                    movieRow(movie)
-                }
-            }
+            movieRows(moviesList)
+            movieRows(movieHits)
         case .series:
             tvSeriesContent
         case .recordings:
@@ -736,12 +732,11 @@ struct AddToMultiviewSheet: View {
             }
         } else {
             tvSectionHeader("Series")
-            if seriesFiltered.isEmpty {
+            if seriesEmpty {
                 tvEmptyRow("No series available")
             }
-            ForEach(seriesFiltered) { item in
-                seriesRow(item)
-            }
+            seriesRows(seriesList)
+            seriesRows(seriesHits)
         }
     }
 
@@ -1068,13 +1063,44 @@ struct AddToMultiviewSheet: View {
 
     /// Movies for the active server, search-filtered. The group filter
     /// is channel-only, so VOD sources honour just the search query.
-    private var moviesFiltered: [VODDisplayItem] {
-        searchFilterVOD(vodStore.movies)
+    /// Movies for the active server. The picker reads a WINDOW of the
+    /// paged catalog (or, while searching, the catalog's search hits), so a
+    /// 350,000 title library costs the picker a few MB rather than the whole
+    /// library. Rebuilt by `refreshVODLists`.
+    @State private var moviesList: VODWindowList = .empty
+    @State private var seriesList: VODWindowList = .empty
+    @State private var movieHits: [VODDisplayItem] = []
+    @State private var seriesHits: [VODDisplayItem] = []
+    @State private var vodListTask: Task<Void, Never>?
+
+    private struct VODListKey: Hashable {
+        let revision: Int
+        let movies: Int
+        let series: Int
+        let catalogKey: String?
+        let search: String
+    }
+    private var vodListKey: VODListKey {
+        VODListKey(revision: vodStore.catalogRevision, movies: vodStore.moviesCount,
+                   series: vodStore.seriesCount, catalogKey: vodStore.catalogKey,
+                   search: searchText)
     }
 
-    /// Series for the active server, search-filtered.
-    private var seriesFiltered: [VODDisplayItem] {
-        searchFilterVOD(vodStore.series)
+    private func refreshVODLists() async {
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if q.isEmpty {
+            movieHits = []; seriesHits = []
+            moviesList = await vodStore.library(kind: .movie, hiddenGroups: [], hiddenTitleKeys: [],
+                                                genre: nil, onlyHidden: false,
+                                                sortRaw: MoviesSortOrder.titleAZ.rawValue)
+            seriesList = await vodStore.library(kind: .series, hiddenGroups: [], hiddenTitleKeys: [],
+                                                genre: nil, onlyHidden: false,
+                                                sortRaw: MoviesSortOrder.titleAZ.rawValue)
+        } else {
+            moviesList = .empty; seriesList = .empty
+            movieHits = await vodStore.searchCatalog(kind: .movie, query: q, hiddenTitleKeys: [])
+            seriesHits = await vodStore.searchCatalog(kind: .series, query: q, hiddenTitleKeys: [])
+        }
     }
 
     /// Episodes of the drilled-into series, search-filtered by title.
@@ -1123,13 +1149,26 @@ struct AddToMultiviewSheet: View {
         return false
     }
 
-    /// Case-insensitive substring match on a VOD item's name. The
-    /// group-filter pill bar is channel-only, so VOD lists filter on
-    /// the search query alone.
-    private func searchFilterVOD(_ items: [VODDisplayItem]) -> [VODDisplayItem] {
-        guard !searchText.isEmpty else { return items }
-        let q = searchText.lowercased()
-        return items.filter { $0.name.lowercased().contains(q) }
+    private var moviesEmpty: Bool { moviesList.isEmpty && movieHits.isEmpty }
+    private var seriesEmpty: Bool { seriesList.isEmpty && seriesHits.isEmpty }
+
+    /// Rows for a VOD collection, walking INDEXES so a catalog-backed list
+    /// never reads every row just to build the ForEach. The list is lazy, so
+    /// only the rows on screen are materialized.
+    @ViewBuilder
+    private func movieRows<C: RandomAccessCollection>(_ items: C) -> some View
+    where C.Element == VODDisplayItem, C.Index == Int {
+        ForEach(items.startIndex..<items.endIndex, id: \.self) { index in
+            if let movie = items[index].movie { movieRow(movie) }
+        }
+    }
+
+    @ViewBuilder
+    private func seriesRows<C: RandomAccessCollection>(_ items: C) -> some View
+    where C.Element == VODDisplayItem, C.Index == Int {
+        ForEach(items.startIndex..<items.endIndex, id: \.self) { index in
+            seriesRow(items[index])
+        }
     }
 
     /// Groups eligible to appear in the filter pill bar — the

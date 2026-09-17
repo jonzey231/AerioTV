@@ -8,6 +8,16 @@ import Security
 // Pre-fetches movies and series as soon as VOD servers are available,
 // and re-fetches whenever the server list changes so Movies/Series tabs
 // stay current without waiting for the user to switch to them.
+//
+// GH #109 (2026-09-16): the catalog itself no longer lives here. Titles are
+// written page by page into `VODCatalogStore` (a SQLite file under
+// AppCacheDirectory) as the sweep walks the provider, and the tabs read
+// WINDOWS of it. This object now publishes only what the UI needs to know
+// ABOUT the catalog: how many titles each kind holds, the category list, the
+// loading and error state, and a revision counter the views rebuild their
+// windowed lists from. Memory is therefore flat in the size of the library,
+// which is what lets a 350,000 title Dispatcharr account browse on an Apple
+// TV HD. This matches the Android app's Room-backed VodCatalogStore.
 @MainActor
 final class VODStore: ObservableObject {
 
@@ -17,7 +27,23 @@ final class VODStore: ObservableObject {
     /// plumbing. MainTabView observes this same instance.
     static let shared = VODStore()
 
-    @Published private(set) var movies: [VODDisplayItem] = []
+    private let catalog = VODCatalogStore.shared
+
+    /// The catalog identity the tabs are currently showing: server UUID plus
+    /// base URL plus account, the same string `VODLibraryCache.identity`
+    /// builds. Every catalog read and write is keyed by it, so another
+    /// playlist's rows can never be served here and a playlist switch keeps
+    /// both catalogs on disk.
+    @Published private(set) var catalogKey: String?
+    /// How many titles the catalog holds for this playlist. The views use it
+    /// where they used `movies.count` / `movies.isEmpty`.
+    @Published private(set) var moviesCount = 0
+    @Published private(set) var seriesCount = 0
+    /// Bumped on every catalog change (a sweep page, a completed sweep, a
+    /// restore, a clear). The VOD tabs rebuild their windowed list when it
+    /// moves, exactly as they used to rebuild on a republished array.
+    @Published private(set) var catalogRevision = 0
+
     @Published private(set) var movieCategories: [VODCategory] = []
     @Published private(set) var isLoadingMovies = false
     /// True for the FULL duration of a `loadMovies` call, including
@@ -25,16 +51,9 @@ final class VODStore: ObservableObject {
     /// first partial results publish. Distinct from `isLoadingMovies`
     /// (which intentionally flips to `false` at the first batch so
     /// `MoviesView` can drop its spinner and start showing items).
-    /// Drives the top-level "Syncing…" indicator so users know the
-    /// background fetch is still chewing through categories — we
-    /// saw the indicator hide while 700+ categories were still
-    /// loading, which left no signal that the cascade of
-    /// `@Published movies =` writes would keep triggering view
-    /// invalidations for another minute-plus.
     @Published private(set) var isRefillingMovies = false
     @Published private(set) var moviesError: String?
 
-    @Published private(set) var series: [VODDisplayItem] = []
     @Published private(set) var seriesCategories: [VODCategory] = []
     @Published private(set) var isLoadingSeries = false
     /// True once a sweep has finished at least once this session. The VOD
@@ -58,21 +77,13 @@ final class VODStore: ObservableObject {
     /// `loadMovies` when it begins, retained even when the load
     /// completes with zero results so the views' `.onAppear` retry
     /// guards can tell "we already tried for this server" from
-    /// "this is a fresh server we haven't looked at yet" without
-    /// having to keep their own per-view bookkeeping. v1.6.22:
-    /// promoted from `private` so `MoviesView.onAppear` can check
-    /// it before re-firing `refreshMovies` when `movies.isEmpty`.
+    /// "this is a fresh server we haven't looked at yet".
     @Published private(set) var currentMoviesServerID: UUID? = nil
-    /// Series equivalent of `currentMoviesServerID`. Same v1.6.22
-    /// promotion rationale: `TVShowsView.onAppear` was re-firing
-    /// `refreshSeries` every time the view rebuilt after a load
-    /// that returned zero series (Freyguy1975's repro looped through
-    /// dozens of identical loads). The view now checks this id and
-    /// skips the auto-refresh when we've already attempted a load
-    /// for the active server.
+    /// Series equivalent of `currentMoviesServerID`.
     @Published private(set) var currentSeriesServerID: UUID? = nil
 
-    /// Server-side search results (supplements locally-loaded items when library isn't fully fetched).
+    /// Server-side search results (supplements the stored catalog when the
+    /// sweep has not reached a title yet).
     @Published private(set) var movieSearchResults: [VODDisplayItem] = []
     @Published private(set) var isSearchingMovies = false
     @Published private(set) var seriesSearchResults: [VODDisplayItem] = []
@@ -80,6 +91,63 @@ final class VODStore: ObservableObject {
 
     private var movieSearchTask: Task<Void, Never>?
     private var seriesSearchTask: Task<Void, Never>?
+
+    /// Catalog identities whose pre-catalog JSON snapshot has already been
+    /// imported this launch, so the migration runs at most once per playlist.
+    private var migratedIdentities: Set<String> = []
+
+    // MARK: - Windowed reads
+
+    /// Build the grid's ordered list for one kind. Runs entirely in SQL and
+    /// hands back ids plus rail buckets, never rows: the caller holds about
+    /// 9 bytes per title and the window cache does the rest.
+    func library(kind: VODItemType, hiddenGroups: Set<String>, hiddenTitleKeys: Set<String>,
+                 genre: String?, onlyHidden: Bool, sortRaw: String) async -> VODWindowList {
+        guard let key = catalogKey else { return .empty }
+        return await catalog.buildLibrary(VODCatalogQuery(
+            playlistKey: key, kind: kind, hiddenGroups: hiddenGroups,
+            hiddenTitleKeys: hiddenTitleKeys, genre: genre,
+            onlyHidden: onlyHidden, sortRaw: sortRaw))
+    }
+
+    /// Per-keystroke library search, as a database query off the main actor.
+    func searchCatalog(kind: VODItemType, query: String, hiddenTitleKeys: Set<String>) async -> [VODDisplayItem] {
+        guard let key = catalogKey else { return [] }
+        return await catalog.search(playlistKey: key, kind: kind, query: query,
+                                    hiddenTitleKeys: hiddenTitleKeys)
+    }
+
+    /// Resolve specific provider ids (Continue Watching, Watchlist, deep
+    /// links) with one indexed read instead of a walk of the whole library.
+    func items(kind: VODItemType, ids: [String]) async -> [String: VODDisplayItem] {
+        guard let key = catalogKey else { return [:] }
+        return await catalog.items(playlistKey: key, kind: kind, ids: ids)
+    }
+
+    func itemsByTMDBID(kind: VODItemType, tmdbIDs: [String]) async -> [String: VODDisplayItem] {
+        guard let key = catalogKey else { return [:] }
+        return await catalog.itemsByTMDBID(playlistKey: key, kind: kind, tmdbIDs: tmdbIDs)
+    }
+
+    func itemsByNormalizedTitle(kind: VODItemType, titles: [String], requireNoTMDBID: Bool) async -> [String: VODDisplayItem] {
+        guard let key = catalogKey else { return [:] }
+        return await catalog.itemsByNormalizedTitle(playlistKey: key, kind: kind,
+                                                    titles: titles, requireNoTMDBID: requireNoTMDBID)
+    }
+
+    func itemsByCleanTitle(kind: VODItemType, cleanTitle: String) async -> [VODDisplayItem] {
+        guard let key = catalogKey else { return [] }
+        return await catalog.itemsByCleanTitle(playlistKey: key, kind: kind, cleanTitle: cleanTitle)
+    }
+
+    func recentlyAdded(kind: VODItemType, hiddenGroups: Set<String>,
+                       hiddenTitleKeys: Set<String>) async -> [VODDisplayItem] {
+        guard let key = catalogKey else { return [] }
+        return await catalog.recentlyAdded(playlistKey: key, kind: kind,
+                                           hiddenGroups: hiddenGroups, hiddenTitleKeys: hiddenTitleKeys)
+    }
+
+    private func count(_ kind: VODItemType) -> Int { kind == .series ? seriesCount : moviesCount }
 
     /// Resolves a poster URL string that may be absolute or relative.
     /// Dispatcharr commonly returns relative paths like "/media/posters/xxx.jpg".
@@ -122,56 +190,62 @@ final class VODStore: ObservableObject {
         refreshSeries(servers: servers)
     }
 
-    /// Wipe all in-memory VOD state. Called when a playlist/server is
+    /// Wipe the in-memory VOD state. Called when a playlist/server is
     /// deleted so On Demand stops showing the removed server's movies and
-    /// series (issue #25: Live cleared via ChannelStore but VOD lingered,
-    /// surfacing stale entries that no longer played). The next active
-    /// server (if any) repopulates via `refresh()`; with no server
-    /// remaining, everything stays empty.
+    /// series (issue #25). The catalog rows on disk are NOT touched here: a
+    /// playlist switch must keep the other playlist's catalog so switching
+    /// back is instant. Deleting a playlist removes its rows through
+    /// `deleteCatalog(serverID:)`.
     func clear() {
         cancelBackgroundSweep(reason: "playlist cleared")
+        VODSweepActivity.shared.clearAll()
         moviesTask?.cancel(); moviesTask = nil
         seriesTask?.cancel(); seriesTask = nil
         movieSearchTask?.cancel(); movieSearchTask = nil
         seriesSearchTask?.cancel(); seriesSearchTask = nil
-        movies = []; movieCategories = []; moviesError = nil
+        catalogKey = nil
+        moviesCount = 0; seriesCount = 0
+        movieCategories = []; moviesError = nil
         isLoadingMovies = false; isRefillingMovies = false
-        series = []; seriesCategories = []; seriesError = nil
+        seriesCategories = []; seriesError = nil
         isLoadingSeries = false; isRefillingSeries = false
         movieSearchResults = []; isSearchingMovies = false
         seriesSearchResults = []; isSearchingSeries = false
         currentMoviesServerID = nil; currentSeriesServerID = nil
         lastMoviesServerName = nil; lastSeriesServerName = nil
+        restoredMoviesAt = nil; restoredSeriesAt = nil
+        restoredMoviesProbe = nil; restoredSeriesProbe = nil
+        catalogRevision &+= 1
+        catalog.clearRowCache()
+    }
+
+    /// Delete one server's stored catalog outright: every row, the sweep
+    /// bookkeeping, the categories, the legacy snapshot and position files.
+    /// Only the playlist DELETE path and Refresh Everything reach this.
+    func deleteCatalog(for server: ServerConnection) async {
+        let serverID = server.id
+        await catalog.deleteServer(serverID: serverID)
+        VODLibraryCache.clear(kinds: [.movie, .series], identity: VODLibraryCache.identity(for: server))
+        VODSweepProgress.clear(identity: VODSweepProgress.identity(for: server))
+        migratedIdentities.remove(VODLibraryCache.identity(for: server))
+        if catalogKey == VODLibraryCache.identity(for: server) {
+            moviesCount = 0; seriesCount = 0
+            hasLoadedMovies = false; hasLoadedSeries = false
+            restoredMoviesAt = nil; restoredSeriesAt = nil
+            restoredMoviesProbe = nil; restoredSeriesProbe = nil
+        }
+        catalogRevision &+= 1
     }
 
     /// Identity of the playlist On Demand is currently showing:
     /// "uuid|baseURL|username", not the UUID alone. The URL and username are
     /// part of it because editing a server row in place to point at a
-    /// DIFFERENT panel re-fires the orchestrator with the same UUID — and the
-    /// detail caches are keyed by the provider's own item ids, which collide
-    /// across panels, so that path needs the same wipe a playlist switch
-    /// gets. Distinct from `currentMoviesServerID` / `currentSeriesServerID`,
-    /// which are assigned deep inside the loaders and only once a load gets
-    /// past its guards.
+    /// DIFFERENT panel re-fires the orchestrator with the same UUID.
     private(set) var displayedServerIdentity: String? = nil
 
     /// Rebuild On Demand from scratch for a new playlist, the same way
-    /// channels and the guide are rebuilt.
-    ///
-    /// Before this, a switch only dropped the previous playlist's movies once
-    /// `loadMovies` happened to reach its own server-changed check — which is
-    /// at the END of the sync orchestrator, after channels, EPG, DVR and a 3s
-    /// settle delay. Until then On Demand kept showing the old playlist's
-    /// library, and any load that returned early at a guard never cleared it
-    /// at all.
-    ///
-    /// The detail caches matter more than the lists. They are keyed by the
-    /// provider's own movie/series ids ("1", "2", ...), which collide across
-    /// playlists exactly the way live stream ids do -- the same collision that
-    /// put one playlist's programmes on another's channels. A cached entry
-    /// from the old playlist would be served for the new playlist's item of
-    /// the same id, so the seasons and episodes on screen would belong to a
-    /// different show entirely.
+    /// channels and the guide are rebuilt. The other playlist's catalog
+    /// rows stay on disk; only what is on screen is dropped.
     func beginDisplaying(server: ServerConnection?) {
         let identity = server.map { "\($0.id.uuidString)|\($0.effectiveBaseURL)|\($0.username)" }
         guard displayedServerIdentity != identity else { return }
@@ -193,44 +267,34 @@ final class VODStore: ObservableObject {
         seriesTask = Task { await loadSeries(servers: servers) }
     }
 
-    /// v1.6.21: awaitable variant of `refreshMovies` for the
-    /// initial-sync orchestrator that needs to wait for movies
-    /// to fully complete before kicking off series. The fire-and-
-    /// forget `refreshMovies` sets up a Task and returns immediately,
-    /// which left a race where the orchestrator's wait loop on
-    /// `isRefillingMovies` could fall through before `loadMovies`
-    /// had a chance to flip that flag. Awaiting `task.value`
-    /// guarantees the caller observes a completed (or cancelled)
-    /// load.
-    /// How old the persisted library may be before a LAUNCH re-sweeps it.
-    /// 0 = every launch; default one day. Tester feedback (Freyguy1975,
-    /// 2026-09-07): a large XC library was re-pulled on every open even
-    /// though the tab was already served from the snapshot. User-initiated
-    /// refreshes (pull, Retry, the server sheet) always bypass this.
+    /// How old the persisted catalog may be before a LAUNCH re-sweeps it.
+    /// 0 = every launch; default one day. User-initiated refreshes (pull,
+    /// Retry, the server sheet) always bypass this.
     static let refreshHoursKey = "vodLibraryRefreshHours"
     static var refreshInterval: TimeInterval {
         let d = UserDefaults.standard
         let hours = d.object(forKey: refreshHoursKey) == nil ? 24 : d.integer(forKey: refreshHoursKey)
         return TimeInterval(max(0, hours)) * 3600
     }
-    /// Snapshot timestamps restored this session, so the series gate can
-    /// judge age even when loadMovies performed the restore.
+    /// When each kind's last sweep finished, read back from the catalog's
+    /// sweep state, so the cadence gate can judge age exactly as it did from
+    /// the snapshot file's timestamp.
     private var restoredMoviesAt: Date?
     private var restoredSeriesAt: Date?
 
-    /// True when a restored snapshot is young enough for this launch to
-    /// skip the network sweep.
+    /// True when the stored catalog is young enough for this launch to skip
+    /// the network sweep.
     private func snapshotIsFresh(_ at: Date?, kind: String) -> Bool {
         guard let at else { return false }
         let age = Date().timeIntervalSince(at)
         let limit = Self.refreshInterval
         guard limit > 0, age < limit else { return false }
-        debugLog("[VOD-CACHE] \(kind) snapshot is \(Int(age / 60)) min old (< \(Int(limit / 3600)) h); skipping launch sweep")
+        debugLog("[VOD-CACHE] \(kind) catalog is \(Int(age / 60)) min old (< \(Int(limit / 3600)) h); skipping launch sweep")
         return true
     }
 
-    /// Change-probe baselines the restored snapshots were written under, and
-    /// the probe values the running sweep should persist with its results.
+    /// Change-probe baselines the stored catalog was written under, and the
+    /// probe values the running sweep should persist with its results.
     private var restoredMoviesProbe: (count: Int?, newest: String?)?
     private var restoredSeriesProbe: (count: Int?, newest: String?)?
     private var pendingMoviesProbe: (count: Int?, newest: String?)?
@@ -238,97 +302,114 @@ final class VODStore: ObservableObject {
 
     /// The quiet background sweep (Logan 2026-09-12). One at a time.
     private var backgroundSweepTask: Task<Void, Never>?
-    /// Instrumented publish for the sweep's progressive writes (Logan
-    /// 2026-09-12). session8 shows D-pad presses taking 648 ms (14:54:14.373 ->
-    /// 14:54:15.039) and 869 ms (14:54:15.558 -> 14:54:16.427) while
-    /// `loadMovies` was walking 69 categories, with `[HANG]` 620 ms and 797 ms
-    /// in the same seconds and no breadcrumb. These two helpers put a
-    /// `[PUBLISH]` line and a render breadcrumb on every VOD library write, so
-    /// the next log says whether those stalls are the VOD publishes or the
-    /// per-item construction around them.
-    private func publishMovies(_ items: [VODDisplayItem], _ why: String) {
-        let t0 = CFAbsoluteTimeGetCurrent()
-        MainThreadWatchdog.shared.begin("publish vod.movies")
-        movies = items
-        MainThreadWatchdog.shared.end("publish vod.movies")
-        MainThreadWatchdog.shared.notePublish("publish vod.movies \(items.count) items (\(why))")
-        debugLog("[PUBLISH] vod.movies \(items.count) items took \(Int((CFAbsoluteTimeGetCurrent() - t0) * 1000))ms (\(why))")
+
+    private func publishMovieCount(_ total: Int, _ why: String) {
+        MainThreadWatchdog.shared.notePublish("publish vod.movies \(total) titles (\(why))")
+        moviesCount = total
+        catalogRevision &+= 1
     }
 
-    private func publishSeries(_ items: [VODDisplayItem], _ why: String) {
-        let t0 = CFAbsoluteTimeGetCurrent()
-        MainThreadWatchdog.shared.begin("publish vod.series")
-        series = items
-        MainThreadWatchdog.shared.end("publish vod.series")
-        MainThreadWatchdog.shared.notePublish("publish vod.series \(items.count) items (\(why))")
-        debugLog("[PUBLISH] vod.series \(items.count) items took \(Int((CFAbsoluteTimeGetCurrent() - t0) * 1000))ms (\(why))")
+    private func publishSeriesCount(_ total: Int, _ why: String) {
+        MainThreadWatchdog.shared.notePublish("publish vod.series \(total) titles (\(why))")
+        seriesCount = total
+        catalogRevision &+= 1
     }
 
-    /// Restore-only launch path: publish the persisted snapshots and touch
-    /// nothing on the network.
+    // MARK: - Legacy snapshot migration
+
+    /// First launch after the upgrade: import the pre-catalog per-server JSON
+    /// snapshot into the catalog, off the main actor, so nothing is
+    /// re-downloaded. The imported rows land as generation 0 with the
+    /// snapshot's own completion stamp and change probe, so the cadence gate
+    /// behaves as it did; the first real sweep refreshes them all.
+    private func migrateLegacySnapshots(identity: String) async {
+        guard !migratedIdentities.contains(identity) else { return }
+        migratedIdentities.insert(identity)
+        var imported = 0
+        for kind in [VODItemType.movie, VODItemType.series] {
+            guard let snap = await VODLibraryCache.load(kind: kind, identity: identity) else { continue }
+            let n = await catalog.importLegacySnapshot(kind: kind, playlistKey: identity, snapshot: snap)
+            if n > 0 {
+                imported += n
+                debugLog("[VOD-CAT] migrated \(n) \(kind == .movie ? "movies" : "series") "
+                         + "from the legacy snapshot into the catalog")
+            }
+            // The snapshot has served its purpose; the catalog owns the rows
+            // now and keeping a multi-hundred-MB JSON file around would
+            // defeat the point of the change.
+            VODLibraryCache.clear(kinds: [kind], identity: identity)
+        }
+        if imported > 0 {
+            VODSweepProgress.clear(identity: "v1|" + identity)
+        }
+    }
+
+    /// Adopt `server` as the catalog the tabs read from, importing a legacy
+    /// snapshot when there is one, and publish the stored counts, categories
+    /// and sweep timestamps. This is the launch restore: no network at all.
+    @discardableResult
+    private func adoptCatalog(for server: ServerConnection) async -> String {
+        let identity = VODLibraryCache.identity(for: server)
+        await migrateLegacySnapshots(identity: identity)
+        if catalogKey != identity { catalogKey = identity }
+        let movieState = await catalog.sweepState(playlistKey: identity, kind: .movie)
+        let seriesState = await catalog.sweepState(playlistKey: identity, kind: .series)
+        restoredMoviesAt = movieState?.isOpen == true ? nil : movieState?.completedAt
+        restoredSeriesAt = seriesState?.isOpen == true ? nil : seriesState?.completedAt
+        restoredMoviesProbe = movieState.map { ($0.remoteCount, $0.remoteNewest) }
+        restoredSeriesProbe = seriesState.map { ($0.remoteCount, $0.remoteNewest) }
+        return identity
+    }
+
+    /// Restore-only launch path: publish what the catalog already holds and
+    /// touch nothing on the network.
     ///
-    /// The VOD library now follows the EPG cache rule exactly (Logan
-    /// 2026-09-12): the snapshot IS what the tabs show at launch, and the
-    /// network sweep is a quiet background pass that starts once the app has
-    /// settled. The orchestrator therefore calls this instead of a foreground
-    /// `loadMovies` / `loadSeries`, and `scheduleBackgroundSweep` does the rest.
-    ///
-    /// `currentMoviesServerID` / `currentSeriesServerID` are set only when a
-    /// snapshot actually restored: the VOD tabs' `onAppear` uses them as the
-    /// "already tried this server" guard, and on a first install (no snapshot)
-    /// that guard must stay open so opening the tab still fetches.
+    /// The VOD library follows the EPG cache rule (Logan 2026-09-12): the
+    /// stored catalog IS what the tabs show at launch, and the network sweep
+    /// is a quiet background pass that starts once the app has settled.
     func restoreSnapshots(servers: [ServerConnection]) async {
+        let t0 = CFAbsoluteTimeGetCurrent()
         let vodServers = servers.filter { $0.supportsVOD && $0.vodEnabled }
         let activeServer = servers.first(where: { $0.isActive })
         guard let server = vodServers.first(where: { $0.isActive }) ?? (activeServer == nil ? vodServers.first : nil) else { return }
-        let identity = VODLibraryCache.identity(for: server)
-        // Dispatcharr 0.30 per-user permissions. The snapshot is a disk cache
+        // Dispatcharr 0.30 per-user permissions. The catalog is a disk cache
         // written while the account still had access, so restoring it blindly
-        // re-published a full catalog for an account that is now denied --
+        // re-published a full library for an account that is now denied --
         // invisible in the tab bar (the gates hide the tab) but visible to
         // every direct reader of `VODStore.shared`: global search, "More like
-        // this", and the multiview picker. Drop the stale file instead of
-        // publishing it. UNKNOWN never drops anything.
+        // this", and the multiview picker. Drop the rows instead of
+        // publishing them. UNKNOWN never drops anything.
+        let identity = await adoptCatalog(for: server)
         let deniedMovies = server.type == .dispatcharrAPI && !server.dispatcharrCanViewVOD
         let deniedSeries = server.type == .dispatcharrAPI && !server.dispatcharrCanViewSeries
         if deniedMovies || deniedSeries {
-            debugLog("[VOD-CACHE] permission denied (movies=\(!deniedMovies) series=\(!deniedSeries)); discarding snapshot")
-            VODLibraryCache.clear(kinds: deniedMovies && deniedSeries ? [.movie, .series]
-                                               : (deniedMovies ? [.movie] : [.series]))
+            debugLog("[VOD-CACHE] permission denied (movies=\(!deniedMovies) series=\(!deniedSeries)); discarding the stored catalog")
+            if deniedMovies { await catalog.deleteKind(playlistKey: identity, kind: .movie) }
+            if deniedSeries { await catalog.deleteKind(playlistKey: identity, kind: .series) }
         }
-        if !deniedMovies, movies.isEmpty, let snap = await VODLibraryCache.load(kind: .movie, identity: identity) {
-            let t0 = CFAbsoluteTimeGetCurrent()
-            MainThreadWatchdog.shared.begin("publish vod.movies")
-            movies = snap.items
-            movieCategories = snap.categories
+        let storedMovies = deniedMovies ? 0 : await catalog.count(playlistKey: identity, kind: .movie)
+        let storedSeries = deniedSeries ? 0 : await catalog.count(playlistKey: identity, kind: .series)
+        if storedMovies > 0 {
+            movieCategories = await catalog.categories(playlistKey: identity, kind: .movie)
             isLoadingMovies = false
             hasLoadedMovies = true
-            restoredMoviesAt = snap.at
-            restoredMoviesProbe = (snap.remoteCount, snap.remoteNewest)
             lastMoviesServerName = server.name
             currentMoviesServerID = server.id
-            MainThreadWatchdog.shared.end("publish vod.movies")
-            MainThreadWatchdog.shared.notePublish("publish vod.movies \(snap.items.count) items")
-            debugLog("[PUBLISH] vod.movies \(snap.items.count) items took \(Int((CFAbsoluteTimeGetCurrent() - t0) * 1000))ms (snapshot restore)")
-            debugLog("[VOD-CACHE] restored \(snap.items.count) movies from \(Int(Date().timeIntervalSince(snap.at)))s ago (launch, no network)")
-            TMDBArtCache.shared.enrich(snap.items, isMovie: true)
+            publishMovieCount(storedMovies, "catalog restore")
         }
-        if !deniedSeries, series.isEmpty, let snap = await VODLibraryCache.load(kind: .series, identity: identity) {
-            let t0 = CFAbsoluteTimeGetCurrent()
-            MainThreadWatchdog.shared.begin("publish vod.series")
-            series = snap.items
-            seriesCategories = snap.categories
+        if storedSeries > 0 {
+            seriesCategories = await catalog.categories(playlistKey: identity, kind: .series)
             isLoadingSeries = false
             hasLoadedSeries = true
-            restoredSeriesAt = snap.at
-            restoredSeriesProbe = (snap.remoteCount, snap.remoteNewest)
             lastSeriesServerName = server.name
             currentSeriesServerID = server.id
-            MainThreadWatchdog.shared.end("publish vod.series")
-            MainThreadWatchdog.shared.notePublish("publish vod.series \(snap.items.count) items")
-            debugLog("[PUBLISH] vod.series \(snap.items.count) items took \(Int((CFAbsoluteTimeGetCurrent() - t0) * 1000))ms (snapshot restore)")
-            debugLog("[VOD-CACHE] restored \(snap.items.count) series from \(Int(Date().timeIntervalSince(snap.at)))s ago (launch, no network)")
-            TMDBArtCache.shared.enrich(snap.items, isMovie: false)
+            publishSeriesCount(storedSeries, "catalog restore")
+        }
+        if storedMovies > 0 || storedSeries > 0 {
+            let ms = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+            debugLog("[VOD-CAT] restored \(storedMovies) movies, \(storedSeries) series from the catalog (\(ms)ms)")
+            TMDBArtCache.shared.enrichCatalog(playlistKey: identity, isMovie: true)
+            TMDBArtCache.shared.enrichCatalog(playlistKey: identity, isMovie: false)
         }
     }
 
@@ -359,12 +440,17 @@ final class VODStore: ObservableObject {
             await self?.runBackgroundSweep(servers: servers, reason: reason)
             self?.backgroundSweepTask = nil
         }
+        // The tabs must not vanish between "a sweep is scheduled" and the
+        // gate deciding which kinds it opens: mark both pending now and
+        // stand the unwanted half down once the gate has spoken.
+        VODSweepActivity.shared.markPending([.movie, .series])
     }
 
     func cancelBackgroundSweep(reason: String) {
         guard backgroundSweepTask != nil else { return }
         backgroundSweepTask?.cancel()
         backgroundSweepTask = nil
+        VODSweepActivity.shared.clearAll()
         debugLog("[VOD] background sweep cancelled (\(reason))")
     }
 
@@ -375,11 +461,12 @@ final class VODStore: ObservableObject {
         let activeServer = servers.first(where: { $0.isActive })
         guard let server = vodServers.first(where: { $0.isActive }) ?? (activeServer == nil ? vodServers.first : nil) else {
             debugLog("[VOD] background sweep: gate=skipped reason=\(reason) (no VOD server)")
+            VODSweepActivity.shared.clearAll()
             return
         }
         // (a) Cadence still applies for every provider type.
-        let moviesDueByCadence = !(!movies.isEmpty && snapshotIsFresh(restoredMoviesAt, kind: "movies"))
-        let seriesDueByCadence = !(!series.isEmpty && snapshotIsFresh(restoredSeriesAt, kind: "series"))
+        let moviesDueByCadence = !(moviesCount > 0 && snapshotIsFresh(restoredMoviesAt, kind: "movies"))
+        let seriesDueByCadence = !(seriesCount > 0 && snapshotIsFresh(restoredSeriesAt, kind: "series"))
         // (b) Dispatcharr only: one tiny request per kind can promote a
         // not-yet-due sweep when the library actually moved.
         var moviesChanged = false
@@ -404,6 +491,10 @@ final class VODStore: ObservableObject {
             ? .skipped
             : ((moviesChanged || seriesChanged) && !(moviesDueByCadence || seriesDueByCadence) ? .changed : .cadence)
         debugLog("[VOD] background sweep: gate=\(gate.rawValue) reason=\(reason) movies=\(sweepMovies ? (moviesChanged ? "changed" : "due") : "skip") series=\(sweepSeries ? (seriesChanged ? "changed" : "due") : "skip")")
+        // Only the kinds the gate opened stay pending; the others stand down
+        // now so their tab is not held in a loading state forever.
+        if !sweepMovies { VODSweepActivity.shared.markIdle(.movie) }
+        if !sweepSeries { VODSweepActivity.shared.markIdle(.series) }
         guard gate != .skipped else { return }
         if sweepMovies {
             guard !Task.isCancelled else { return }
@@ -416,7 +507,7 @@ final class VODStore: ObservableObject {
     }
 
     /// A changed count or a newer top row means sweep now. An unknown
-    /// baseline (snapshot written before the probe existed) is NOT a change:
+    /// baseline (a catalog written before the probe existed) is NOT a change:
     /// the cadence setting stays in charge there.
     private static func probeSaysChanged(baseline: (count: Int?, newest: String?)?,
                                          probe: DispatcharrAPI.VODChangeProbe) -> Bool {
@@ -433,9 +524,8 @@ final class VODStore: ObservableObject {
         await task.value
     }
 
-    /// v1.6.21: awaitable variant of `refreshSeries` mirroring
-    /// `refreshMoviesAndWait`. Used by the initial-sync orchestrator
-    /// to sequence series strictly after movies.
+    /// Awaitable variant of `refreshSeries` mirroring `refreshMoviesAndWait`.
+    /// Used by the initial-sync orchestrator to sequence series after movies.
     func refreshSeriesAndWait(servers: [ServerConnection], honorCache: Bool = false) async {
         seriesTask?.cancel()
         let task = Task { await loadSeries(servers: servers, honorCache: honorCache) }
@@ -455,7 +545,6 @@ final class VODStore: ObservableObject {
         let baseURL = server.effectiveBaseURL
         let apiKey  = server.effectiveApiKey
         let sID     = server.id
-        // v1.6.20: capture per-server auth shape for the off-main API client.
         let authMode = server.dispatcharrHeaderMode
         let userAgent = server.effectiveUserAgent
         isSearchingMovies = true
@@ -464,15 +553,6 @@ final class VODStore: ObservableObject {
                                      userAgent: userAgent, authMode: authMode)
             var results: [VODDisplayItem] = []
             var lastPublishTime = Date.distantPast
-            // v1.7.x: widened from 0.5s to 2.0s. On a large library (e.g.
-            // 5000 movies over a ~30s paginated load) the old cadence
-            // republished the whole growing array up to 2x/sec on the main
-            // actor, each reassign forcing a full SwiftUI diff. Under the
-            // tvOS 26.5 SwiftUI runtime that cold-start churn (alongside the
-            // channel/EPG publishes) drives heavy display-list rebuilds that
-            // both produce the watchdog hangs AND raise the odds of the
-            // AttributeGraph "different namespace" abort. The user lands on
-            // Live TV during this load, so a chunkier VOD fill is invisible.
             let publishInterval: TimeInterval = 2.0
             do {
                 for try await batch in api.searchVODMoviesStream(query: query, m3uAccountID: providerID) {
@@ -508,10 +588,6 @@ final class VODStore: ObservableObject {
                     }
                 }
             } catch {
-                // Don't swallow silently. Skip logging when the task was
-                // cancelled (expected on every query change), but surface a
-                // real network/parse failure so an empty result set is
-                // diagnosable instead of mysterious.
                 if !Task.isCancelled {
                     debugLog("🔎 [Search] movie search stream error: \(error.localizedDescription)")
                 }
@@ -535,7 +611,6 @@ final class VODStore: ObservableObject {
         let baseURL = server.effectiveBaseURL
         let apiKey  = server.effectiveApiKey
         let sID     = server.id
-        // v1.6.20: capture per-server auth shape for the off-main API client.
         let authMode = server.dispatcharrHeaderMode
         let userAgent = server.effectiveUserAgent
         isSearchingSeries = true
@@ -544,15 +619,6 @@ final class VODStore: ObservableObject {
                                      userAgent: userAgent, authMode: authMode)
             var results: [VODDisplayItem] = []
             var lastPublishTime = Date.distantPast
-            // v1.7.x: widened from 0.5s to 2.0s. On a large library (e.g.
-            // 5000 movies over a ~30s paginated load) the old cadence
-            // republished the whole growing array up to 2x/sec on the main
-            // actor, each reassign forcing a full SwiftUI diff. Under the
-            // tvOS 26.5 SwiftUI runtime that cold-start churn (alongside the
-            // channel/EPG publishes) drives heavy display-list rebuilds that
-            // both produce the watchdog hangs AND raise the odds of the
-            // AttributeGraph "different namespace" abort. The user lands on
-            // Live TV during this load, so a chunkier VOD fill is invisible.
             let publishInterval: TimeInterval = 2.0
             do {
                 for try await batch in api.searchVODSeriesStream(query: query, m3uAccountID: providerID) {
@@ -570,8 +636,6 @@ final class VODStore: ObservableObject {
                             categoryID: "", categoryName: "Series",
                             serverID: sID, seasons: [], episodeCount: 0
                         )
-                        // Same tmdb-id stamping rationale as the movie
-                        // search mapper above (Known For strict-id tier).
                         show.tmdbID = s.tmdbID ?? ""
                         return VODDisplayItem(series: show)
                     }
@@ -583,8 +647,6 @@ final class VODStore: ObservableObject {
                     }
                 }
             } catch {
-                // Surface real failures; stay quiet on the expected
-                // query-change cancellation (see movie search above).
                 if !Task.isCancelled {
                     debugLog("🔎 [Search] series search stream error: \(error.localizedDescription)")
                 }
@@ -597,22 +659,18 @@ final class VODStore: ObservableObject {
     }
 
     /// Known For deep-link support (Android parity dossier Part 1 sec 6):
-    /// merge a one-shot server-search hit into the browse list BEFORE the
-    /// detail push, so the pushed screen's own lookups can resolve the
-    /// item. Appended only when absent (movies dedupe by id, series too;
-    /// both ids are stable server ids here).
-    func mergeKnownForHit(_ item: VODDisplayItem) {
-        switch item.type {
-        case .movie:
-            guard !movies.contains(where: { $0.id == item.id }) else { return }
-            movies.append(item)
-        case .series:
-            guard !series.contains(where: { $0.id == item.id }) else { return }
-            series.append(item)
-        case .episode:
-            // Known For tiles only ever resolve to movies or series.
-            break
-        }
+    /// write a one-shot server-search hit into the catalog BEFORE the detail
+    /// push, so the pushed screen's own lookups can resolve the item. Written
+    /// under the CURRENT sweep generation so the next finished sweep does not
+    /// treat it as a stale row and delete it.
+    func mergeKnownForHit(_ item: VODDisplayItem) async {
+        guard let key = catalogKey, item.type != .episode else { return }
+        let kind: VODItemType = item.type == .series ? .series : .movie
+        let generation = await catalog.sweepState(playlistKey: key, kind: kind)?.generation ?? 1
+        let written = await catalog.writePage([item], playlistKey: key, kind: kind, generation: generation)
+        guard written > 0 else { return }
+        if kind == .series { publishSeriesCount(seriesCount + written, "known for") }
+        else { publishMovieCount(moviesCount + written, "known for") }
     }
 
     /// Exposes the search-result row mapper for the Known For one-shot
@@ -664,36 +722,34 @@ final class VODStore: ObservableObject {
         // Active server exists but doesn't support VOD (e.g. M3U) — clear and bail silently.
         if let active = activeServer, !active.supportsVOD {
             debugLog("🎬 VODStore.loadMovies: active server doesn't support VOD, clearing")
-            movies = []; movieCategories = []
+            publishMovieCount(0, "no VOD support"); movieCategories = []
             isLoadingMovies = false; moviesError = nil
             lastMoviesServerName = nil; currentMoviesServerID = nil
             return
         }
         // Dispatcharr 0.30: the account's vod_movies_enabled is off. The
         // server would answer with empty lists anyway; skip the sweep.
-        // Opportunistic: entering On Demand with a missing / stale
-        // snapshot re-probes before the gate decides anything.
         if let active = activeServer, active.type == .dispatcharrAPI {
             await DispatcharrCapabilityProbe.refreshIfStale(active, reason: "On Demand (movies)")
         }
         if let active = activeServer, active.type == .dispatcharrAPI, !active.dispatcharrCanViewVOD {
             debugLog("🎬 VODStore.loadMovies: movies disabled for this Dispatcharr account, clearing")
-            // Clear the disk snapshot too, or the next launch restores the
+            // Drop the stored rows too, or the next launch restores the
             // catalog this account may no longer see.
-            VODLibraryCache.clear(kinds: [.movie])
-            movies = []; movieCategories = []
+            let identity = VODLibraryCache.identity(for: active)
+            await catalog.deleteKind(playlistKey: identity, kind: .movie)
+            VODLibraryCache.clear(kinds: [.movie], identity: identity)
+            VODSweepProgress.clear(kind: .movie, identity: VODSweepProgress.identity(for: active))
+            publishMovieCount(0, "movies denied"); movieCategories = []
             isLoadingMovies = false; moviesError = nil
             lastMoviesServerName = nil; currentMoviesServerID = active.id
             return
         }
-        // v1.6.12: also filter by per-server `vodEnabled`. Users with
-        // a "main + sandbox" Dispatcharr setup can disable VOD on the
-        // sandbox to avoid duplicate fetches and the multi-minute
-        // grid wait. Active server with `vodEnabled == false` clears
-        // VOD content (same shape as a non-VOD-capable type).
+        // Users with a "main + sandbox" Dispatcharr setup can disable VOD on
+        // the sandbox. Active server with `vodEnabled == false` clears VOD.
         if let active = activeServer, !active.vodEnabled {
             debugLog("🎬 VODStore.loadMovies: active server has vodEnabled=false, clearing")
-            movies = []; movieCategories = []
+            publishMovieCount(0, "vodEnabled off"); movieCategories = []
             isLoadingMovies = false; moviesError = nil
             lastMoviesServerName = nil; currentMoviesServerID = nil
             return
@@ -704,9 +760,7 @@ final class VODStore: ObservableObject {
         // server is explicitly active — that would show stale data from the wrong server).
         guard let server = vodServers.first(where: { $0.isActive }) ?? (activeServer == nil ? vodServers.first : nil) else {
             // Nothing left to load from, so nothing should still be on screen.
-            // This path used to return with the previous playlist's movies
-            // intact, under an error message saying no server supports VOD.
-            movies = []; movieCategories = []
+            publishMovieCount(0, "no VOD server"); movieCategories = []
             isLoadingMovies = false
             lastMoviesServerName = nil; currentMoviesServerID = nil
             if !servers.isEmpty {
@@ -715,96 +769,81 @@ final class VODStore: ObservableObject {
             return
         }
         lastMoviesServerName = server.name
-        // Clear stale content immediately when switching to a different server so the
-        // loading spinner appears instead of the previous server's movies staying visible.
+        // Switching to a different server shows that server's own catalog,
+        // not the previous one's.
         if currentMoviesServerID != nil && currentMoviesServerID != server.id {
-            movies = []
+            publishMovieCount(0, "server switch")
             movieCategories = []
         }
         currentMoviesServerID = server.id
+
+        // Adopt this playlist's catalog (importing a legacy snapshot the
+        // first time) and publish what it already holds, so the tab is
+        // populated at once; the sweep below refreshes it.
+        let identity = await adoptCatalog(for: server)
+        let sweepIdentity = VODSweepProgress.identity(for: server)
+        let storedMovies = await catalog.count(playlistKey: identity, kind: .movie)
+        let storedSeries = await catalog.count(playlistKey: identity, kind: .series)
+        if storedMovies != moviesCount { publishMovieCount(storedMovies, "catalog restore") }
+        if storedMovies > 0 {
+            if movieCategories.isEmpty { movieCategories = await catalog.categories(playlistKey: identity, kind: .movie) }
+            isLoadingMovies = false
+            hasLoadedMovies = true
+        }
+        // The launch orchestrator runs the series sweep only after the movie
+        // sweep ends (a minute or more), so publish the stored series count
+        // here too; loadSeries then finds it populated.
+        if storedSeries > 0, seriesCount == 0 {
+            publishSeriesCount(storedSeries, "catalog restore (with movies)")
+            if seriesCategories.isEmpty { seriesCategories = await catalog.categories(playlistKey: identity, kind: .series) }
+            isLoadingSeries = false
+            hasLoadedSeries = true
+        }
+
         // A background sweep never raises the spinner over content that is
         // already on screen; the restored list stays visible untouched.
-        isLoadingMovies = !(background && !movies.isEmpty)
-        // `defer` guarantees `isRefillingMovies` returns to false on
-        // every exit path — normal loop completion, circuit-breaker
-        // abort, `Task.isCancelled` early return, per-server-type
-        // branches — without sprinkling resets across each one.
+        isLoadingMovies = !(background && moviesCount > 0)
+        // `defer` guarantees `isRefillingMovies` returns to false on every
+        // exit path without sprinkling resets across each one.
         isRefillingMovies = true
-        defer { isRefillingMovies = false }
+        VODSweepActivity.shared.markRunning(.movie)
+        defer {
+            isRefillingMovies = false
+            VODSweepActivity.shared.markIdle(.movie)
+        }
         var lastProgressivePublish = Date.distantPast
         moviesError = nil
         DebugLogger.shared.log("VODStore loadMovies — \(server.name) (\(server.type.rawValue)) url=\(server.effectiveBaseURL)",
                                category: "Movies", level: .info)
 
-        // Restore the last finished sweep for this playlist so the tab is
-        // populated at once; the sweep below refreshes it in the background.
-        let cacheIdentity = VODLibraryCache.identity(for: server)
-        if movies.isEmpty, let snap = await VODLibraryCache.load(kind: .movie, identity: cacheIdentity) {
-            guard !Task.isCancelled else { isLoadingMovies = false; return }
-            movies = snap.items
-            movieCategories = snap.categories
-            isLoadingMovies = false
-            hasLoadedMovies = true
-            restoredMoviesAt = snap.at
-            debugLog("[VOD-CACHE] restored \(snap.items.count) movies from \(Int(Date().timeIntervalSince(snap.at)))s ago")
-        }
-        // The launch orchestrator runs the series sweep only after the
-        // movie sweep ends (a minute or more), so restore the series
-        // snapshot here too; loadSeries then finds `series` populated and
-        // skips its own restore.
-        if series.isEmpty, let snap = await VODLibraryCache.load(kind: .series, identity: cacheIdentity) {
-            guard !Task.isCancelled else { isLoadingMovies = false; return }
-            series = snap.items
-            seriesCategories = snap.categories
-            isLoadingSeries = false
-            hasLoadedSeries = true
-            restoredSeriesAt = snap.at
-            debugLog("[VOD-CACHE] restored \(snap.items.count) series from \(Int(Date().timeIntervalSince(snap.at)))s ago (with movies)")
-        }
-        if honorCache, !movies.isEmpty, snapshotIsFresh(restoredMoviesAt, kind: "movies") {
+        if honorCache, moviesCount > 0, snapshotIsFresh(restoredMoviesAt, kind: "movies") {
             isLoadingMovies = false
             return
         }
 
-        // Dispatcharr libraries can be enormous (20 000+ items across 40+ pages).
-        // Stream page-by-page so the grid appears after the first 500 items land
-        // rather than after the entire library downloads.
+        // Dispatcharr libraries can be enormous (350 000+ items). Pages are
+        // written to the catalog as they arrive, so the grid appears after
+        // the first page lands and memory never tracks the library size.
         if server.type == .dispatcharrAPI {
             let baseURL = server.effectiveBaseURL
             let apiKey  = server.effectiveApiKey
             let sID     = server.id
-            // v1.6.20: per-server auth shape capture.
             let authMode = server.dispatcharrHeaderMode
             let userAgent = server.effectiveUserAgent
             debugLog("🎬 VODStore.loadMovies: dispatcharr baseURL=\(DebugLogger.sanitize(baseURL)), hasKey=\(!apiKey.isEmpty)")
             let api     = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey),
                                          userAgent: userAgent, authMode: authMode)
 
-            // Fetch categories from the dedicated endpoint and filter to
-            // the ones the user has actually enabled on at least one
-            // M3U account. Dispatcharr's `/api/vod/categories/` returns
-            // EVERY category it ever saw from the provider (467+ on
-            // typical IPTV feeds), including ones the user toggled off
-            // in the admin UI's M3U Group Filter. Without the
-            // `isEnabledOnAnyAccount` gate we'd display XXX / foreign-
-            // language / archived-year buckets that have zero fetchable
-            // content — which is GH #1's primary complaint. Matches
-            // Dispatcharr's own behaviour: the REST API returns movies
-            // only for categories the user enabled for ingest, so the
-            // client should show only the same set.
-            // Network failure here must NOT masquerade as an empty
-            // category list: `movies = []` below hides the On Demand tab
-            // and nothing re-fires the load until vodServerKey changes
-            // (only a manual playlist refresh). Logan hit this during
-            // the 2026-08-13 Dispatcharr VPS migration - the outage
-            // emptied the tab and it stayed gone after the server came
-            // back. Keep the stale library and bail; the next
-            // orchestrator pass or pull-to-refresh retries.
+            // Fetch categories from the dedicated endpoint and filter to the
+            // ones the user has actually enabled on at least one M3U account.
+            // A network failure here must NOT masquerade as an empty category
+            // list: clearing the catalog would hide the On Demand tab and
+            // nothing re-fires the load until vodServerKey changes.
             let apiCats: [DispatcharrVODCategory]
             do {
                 apiCats = try await api.getVODCategories()
             } catch {
-                debugLog("🎬 VODStore.loadMovies: categories fetch FAILED (\(error.localizedDescription)); keeping existing \(movies.count)-item library")
+                debugLog("🎬 VODStore.loadMovies: categories fetch FAILED (\(error.localizedDescription)); keeping existing \(moviesCount)-item library")
                 moviesError = "Could not reach the server"
                 isLoadingMovies = false
                 return
@@ -814,184 +853,240 @@ final class VODStore: ObservableObject {
             }
             debugLog("🎬 VODStore: \(apiCats.count) total categories, \(enabledMovieCats.count) enabled movie categories")
 
-            // Show the category list in Manage Groups immediately so the
-            // user sees the real, accurate group list even before movie
-            // streaming finishes.
+            // Show the category list in Manage Groups immediately.
             movieCategories = enabledMovieCats.map {
                 VODCategory(id: String($0.id), name: $0.name,
                             providerIDs: $0.m3uAccounts.filter(\.enabled).map(\.m3uAccount))
             }
+            await catalog.saveCategories(movieCategories, playlistKey: identity, kind: .movie)
 
-            // If the user has no movie categories enabled anywhere, the
-            // library is empty by construction. Don't fall back to a
-            // flat unfiltered fetch; that was the old bug where we'd
-            // show everything Dispatcharr had.
+            // No enabled movie categories means the library is empty by
+            // construction; never fall back to a flat unfiltered fetch.
             if enabledMovieCats.isEmpty {
-                movies = []
+                await catalog.deleteKind(playlistKey: identity, kind: .movie)
+                publishMovieCount(0, "no enabled categories")
                 isLoadingMovies = false
                 debugLog("🎬 VODStore.loadMovies: no enabled movie categories, nothing to fetch")
                 return
             }
 
-            // v1.7.5: per-category fetch so every movie carries its REAL
-            // Dispatcharr category. The movie LIST response omits the
-            // category (it lives on the m3u_relations reverse relation, not
-            // a top-level field), so the prior single unfiltered sweep
-            // could only tag everything to one fallback bucket, which is
-            // why the On Demand category filter appeared to do nothing
-            // (sjsteve, v1.7.5). Dispatcharr's MovieFilter DOES filter on
-            // `?category=<name>|movie` (apps/vod/api_views.py
-            // filter_category, matching m3u_relations__category name+type),
-            // the same category data TiviMate/iMPlayer filter via the
-            // Xtream `category_id`. So fetch one stream per enabled category
-            // and tag each movie from the category we asked for. Sequential
-            // (not parallel) to avoid saturating Dispatcharr's uwsgi pool.
-            // Dedup by uuid across categories: a movie in two categories is
-            // tagged with whichever loads first. The per-category [VOD-CAT]
-            // counts confirm the server honored the filter (each category a
-            // subset) vs ignored it (first category claims everything).
-            var accumulated: [VODDisplayItem] = []
-            var seenUUIDs: Set<String> = []
+            // Per-category fetch so every movie carries its REAL Dispatcharr
+            // category (the list response omits it). Sequential, not parallel,
+            // to avoid saturating Dispatcharr's uwsgi pool. A movie in two
+            // categories keeps the stamp of whichever page wrote it first,
+            // which the catalog's "do not touch a row this generation already
+            // wrote" rule enforces in SQL.
             var lastError: APIError?
-            let totalCap = 5000   // global memory ceiling on huge libraries
-            // Fair share per category so one big early category can't drain
-            // the whole budget and leave later enabled categories empty
-            // (verified against the test server: 21 enabled movie categories,
-            // several with thousands of titles). Page-align the share to the
-            // 100-item page size so makePageStream stops exactly on a page
-            // boundary (a non-aligned share overshoots by up to a page and
-            // re-starves the tail). All N categories then fit inside totalCap
-            // (21 x 200 = 4200 <= 5000), so every enabled category is
-            // represented; server-side search covers anything past a
-            // category's browsable sample.
-            let perCatCap = max((totalCap / 100 / max(enabledMovieCats.count, 1)) * 100, 100)
-            debugLog("🎬 VODStore.loadMovies: per-category fetch across \(enabledMovieCats.count) enabled categories (cap \(perCatCap)/cat, \(totalCap) total)")
+            var failedCategories: [String] = []
+            // GH #109 parity: NO total cap. Every page the server offers is
+            // stored. Fairness comes from the round-robin walk below, which
+            // takes ONE page per category per rotation. Positions are saved
+            // in the catalog after every few pages, so a sweep killed by
+            // process death, jetsam or a playlist switch resumes where it
+            // stopped rather than restarting.
+            let lanes = enabledMovieCats
+            let plan = await catalog.beginSweep(playlistKey: identity, kind: .movie,
+                                                lanes: lanes.map(\.name))
+            var nextPage = plan.nextPage
+            var finished = plan.done
+            var total = moviesCount
+            if plan.resumed {
+                let mid = nextPage.filter { $0.value > 1 && !finished.contains($0.key) }.count
+                debugLog("🎬 [VOD-CAT] resumed from saved positions kind=movies done=\(finished.count) mid-category=\(mid) stored=\(total)")
+            }
+            debugLog("🎬 [VOD-CAT] sweep start kind=movies server=\(server.name) lanes=\(lanes.count) mode=\(background ? "background" : "foreground") generation=\(plan.generation)")
+            debugLog("🎬 [VOD-CAT] no total cap applied kind=movies (every page the server offers is stored)")
 
-            categoryLoop: for cat in enabledMovieCats {
+            var pagesSinceProgressSave = 0
+            while finished.count < lanes.count {
                 guard !Task.isCancelled else { isLoadingMovies = false; return }
-                let category = VODCategory(id: String(cat.id), name: cat.name)
-                let before = accumulated.count
-                do {
-                    // getVODMoviesStream pins the `|movie` type on the name.
-                    let stream = background
-                        ? api.getVODMoviesStreamLowPriority(category: cat.name, itemCap: perCatCap)
-                        : api.getVODMoviesStream(category: cat.name, itemCap: perCatCap)
-                    for try await batch in stream {
-                        guard !Task.isCancelled else { isLoadingMovies = false; return }
-                        for m in batch {
-                            guard seenUUIDs.insert(m.uuid).inserted else { continue }
-                            let streamURL = api.proxyMovieURL(
-                                uuid: m.uuid,
-                                preferredStreamID: m.streams?.first?.streamID
-                            )
-                            let cp = m.customProperties
-                            var movie = VODMovie(
-                                id: String(m.id), name: m.title,
-                                posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
-                                backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
-                                    .flatMap { VODService.resolveImageURL($0, base: baseURL) },
-                                rating: m.rating ?? "", plot: m.plot ?? "",
-                                genre: m.genre ?? "", releaseDate: m.year.map(String.init) ?? "", duration: "",
-                                cast: cp?.cast ?? "", director: cp?.director ?? "", imdbID: "",
-                                categoryID: category.id,
-                                categoryName: category.name,
-                                streamURL: streamURL, containerExtension: "mp4",
-                                serverID: sID
-                            )
-                            movie.dispatcharrUUID = m.uuid
-                            accumulated.append(VODDisplayItem(movie: movie))
+                // Round-robin rotation: one page per unfinished category.
+                // Admitted at most `pageConcurrency` at a time (one quiet lane
+                // off screen, three while the user is watching the grid grow).
+                let rotation = lanes.filter { !finished.contains($0.name) }
+                var laneIndex = 0
+                while laneIndex < rotation.count {
+                    guard !Task.isCancelled else { isLoadingMovies = false; return }
+                    let limit = max(1, VODSweepActivity.shared.pageConcurrency(for: .movie))
+                    let upper = min(laneIndex + limit, rotation.count)
+                    let requests: [(name: String, catID: String, page: Int)] =
+                        rotation[laneIndex..<upper].map {
+                            (name: $0.name, catID: String($0.id), page: nextPage[$0.name] ?? 1)
                         }
-                        // First batch overall: reveal content + hide the
-                        // spinner. Then accumulate silently; the full set
-                        // publishes once after the sweep. Two publishes
-                        // total preserves the tvOS AttributeGraph-crash
-                        // mitigation (no progressive per-batch churn).
-                        // Never publish a partial list over a fuller one: a
-                        // background refill starts from zero and its first
-                        // batches replaced the full library (Logan
-                        // 2026-09-04: "All TV Shows 62" then 3,062; the
-                        // Continue Watching hero fell back meanwhile).
-                        let growing = accumulated.count >= movies.count
+                    laneIndex = upper
+                    let pages = await withTaskGroup(
+                        of: (String, Result<DispatcharrAPI.VODPageResult<DispatcharrVODMovie>, Error>).self
+                    ) { group in
+                        for req in requests {
+                            group.addTask {
+                                do {
+                                    let r = try await api.fetchVODMoviePage(category: req.name,
+                                                                page: req.page,
+                                                                background: background)
+                                    return (req.name, .success(r))
+                                } catch {
+                                    return (req.name, .failure(error))
+                                }
+                            }
+                        }
+                        var acc: [String: Result<DispatcharrAPI.VODPageResult<DispatcharrVODMovie>, Error>] = [:]
+                        for await item in group { acc[item.0] = item.1 }
+                        return acc
+                    }
+                    // The catalog write, the lane bookkeeping and the 5-page
+                    // checkpoint all run back here on the main actor, one page
+                    // at a time, exactly as they did when lanes were serial.
+                    for req in requests {
+                        guard !Task.isCancelled else { isLoadingMovies = false; return }
+                        guard let outcome = pages[req.name] else { continue }
+                        let cat = req
+                        let category = VODCategory(id: req.catID, name: req.name)
+                        let page = req.page
+                        var written = 0
+                        do {
+                            let result = try outcome.get()
+                            var batch: [VODDisplayItem] = []
+                            batch.reserveCapacity(result.items.count)
+                            for m in result.items {
+                                let streamURL = api.proxyMovieURL(
+                                    uuid: m.uuid,
+                                    preferredStreamID: m.streams?.first?.streamID
+                                )
+                                let cp = m.customProperties
+                                var movie = VODMovie(
+                                    id: String(m.id), name: m.title,
+                                    posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
+                                    backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
+                                        .flatMap { VODService.resolveImageURL($0, base: baseURL) },
+                                    rating: m.rating ?? "", plot: m.plot ?? "",
+                                    genre: m.genre ?? "", releaseDate: m.year.map(String.init) ?? "", duration: "",
+                                    cast: cp?.cast ?? "", director: cp?.director ?? "", imdbID: "",
+                                    categoryID: category.id,
+                                    categoryName: category.name,
+                                    streamURL: streamURL, containerExtension: "mp4",
+                                    serverID: sID
+                                )
+                                movie.dispatcharrUUID = m.uuid
+                                movie.addedAt = m.createdAt.flatMap(VODService.parseISODate)
+                                batch.append(VODDisplayItem(movie: movie))
+                            }
+                            // The page is on disk before the next one is asked
+                            // for, so nothing is held in memory between pages.
+                            written = await catalog.writePage(batch, playlistKey: identity,
+                                                              kind: .movie, generation: plan.generation)
+                            total += written
+                            nextPage[cat.name] = page + 1
+                            if !result.hasMore { finished.insert(cat.name) }
+                            debugLog("🎬 [VOD-CAT] page kind=movies cat=\(cat.name) p=\(page) "
+                                     + "+\(written) total=\(total) "
+                                     + "serverCount=\(result.serverCount.map(String.init) ?? "?")")
+                        } catch let err as APIError {
+                            // One category failing must not abort the whole sweep,
+                            // and its stored titles must survive the cleanup.
+                            lastError = err
+                            finished.insert(cat.name)
+                            failedCategories.append(cat.name)
+                            DebugLogger.shared.logError(err, context: "VODStore.loadMovies(\(server.name)) cat=\(cat.name) p=\(page)")
+                            debugLog("🎬 [VOD-CAT] page kind=movies cat=\(cat.name) p=\(page) failed: \(err.localizedDescription)")
+                        } catch {
+                            finished.insert(cat.name)
+                            failedCategories.append(cat.name)
+                            DebugLogger.shared.log(
+                                "VODStore.loadMovies(\(server.name)) cat=\(cat.name) error: \(error.localizedDescription)",
+                                category: "Movies", level: .warning
+                            )
+                        }
+
+                        // First batch overall: reveal content + hide the spinner.
+                        // Then publish at most every 5 s. A publish is now one
+                        // integer, not a multi-thousand element array.
                         if isLoadingMovies {
-                            if growing { publishMovies(accumulated, "sweep first batch") }
+                            publishMovieCount(total, "sweep first batch")
                             isLoadingMovies = false
                             lastProgressivePublish = Date()
-                        } else if growing, Date().timeIntervalSince(lastProgressivePublish) >= 5 {
-                            // Movies tab (Logan 2026-09-03): a large panel
-                            // sat at the first 100 titles for minutes until
-                            // the sweep finished. Publish at most every 5 s,
-                            // far from the per-batch churn that tripped the
-                            // tvOS AttributeGraph crash.
-                            publishMovies(accumulated, "sweep progressive")
+                        } else if written > 0, Date().timeIntervalSince(lastProgressivePublish) >= 5 {
+                            publishMovieCount(total, "sweep progressive")
                             lastProgressivePublish = Date()
                         }
-                        if accumulated.count >= totalCap { break }
-                        // Quiet sweep pacing: a short pause between pages, and
-                        // a hold while a tune is before first frame or the app
-                        // is backgrounded. The pause is what keeps a 50-page
-                        // walk from behaving like a foreground load.
-                        if background {
-                            try? await Task.sleep(for: .milliseconds(500))
+
+                        // Checkpoint the lane positions every few pages. They are
+                        // rows now, written in the same database as the titles.
+                        pagesSinceProgressSave += 1
+                        if pagesSinceProgressSave >= 5 {
+                            pagesSinceProgressSave = 0
+                            await catalog.saveLanes(playlistKey: identity, kind: .movie,
+                                                    generation: plan.generation,
+                                                    nextPage: nextPage, done: finished)
+                        }
+
+                        // Pacing. A sweep whose own screen is in front of the
+                        // user runs unpaced: the wait is the thing being
+                        // optimized and the growing count is visible. Off screen
+                        // it keeps the quiet pace so it never competes with
+                        // playback, and holds while a tune is before first frame
+                        // or the app is backgrounded.
+                        if VODSweepActivity.shared.isForeground(.movie) {
                             await AppSettleGate.shared.awaitResumeIfPaused()
+                        } else if background {
+                            try? await Task.sleep(for: VODSweepActivity.backgroundPageDelay)
+                            await AppSettleGate.shared.awaitResumeIfPaused()
+                        } else if !MultiviewStore.shared.tiles.isEmpty {
+                            // Cold-load yields to playback (2026-06-29).
+                            try? await Task.sleep(for: .milliseconds(200))
                         }
                     }
-                } catch let err as APIError {
-                    // One category failing must not abort the whole sweep.
-                    lastError = err
-                    DebugLogger.shared.logError(err, context: "VODStore.loadMovies(\(server.name)) cat=\(cat.name)")
-                } catch {
-                    DebugLogger.shared.log(
-                        "VODStore.loadMovies(\(server.name)) cat=\(cat.name) error: \(error.localizedDescription)",
-                        category: "Movies", level: .warning
-                    )
-                }
-                debugLog("🎬 [VOD-CAT] \(cat.name): +\(accumulated.count - before) (total \(accumulated.count))")
-                // Cold-load yields to playback (2026-06-29): when a live stream is
-                // playing, breathe between category sweeps so the main-actor JSON
-                // decode + struct-build bursts don't starve the live decoder on the
-                // same main thread (see the fetchUpcoming note in the orchestrator).
-                // No-op when nothing is playing — full-speed load.
-                if !MultiviewStore.shared.tiles.isEmpty {
-                    try? await Task.sleep(for: .milliseconds(200))
-                }
-                if accumulated.count >= totalCap {
-                    debugLog("🎬 VODStore.loadMovies: hit total cap \(totalCap), stopping category sweep")
-                    break categoryLoop
                 }
             }
 
+            // Close the sweep: rows older generations wrote and this one
+            // never re-confirmed go, except the groups whose lane failed.
+            let deleted = await catalog.finishSweep(playlistKey: identity, kind: .movie,
+                                                    generation: plan.generation,
+                                                    keepCategories: failedCategories,
+                                                    remoteCount: pendingMoviesProbe?.count,
+                                                    remoteNewest: pendingMoviesProbe?.newest)
+            total = await catalog.count(playlistKey: identity, kind: .movie)
             // Surface an error only if the whole sweep produced nothing.
-            if accumulated.isEmpty, let lastError {
+            if total == 0, let lastError {
                 moviesError = lastError.errorDescription
             }
-            publishMovies(accumulated, "sweep complete")
+            publishMovieCount(total, "sweep complete")
             isLoadingMovies = false
             hasLoadedMovies = true
-            debugLog("🎬 VODStore.loadMovies: done, \(accumulated.count) movies across \(enabledMovieCats.count) categories")
-            VODLibraryCache.save(kind: .movie, identity: cacheIdentity, items: accumulated, categories: movieCategories,
-                                 remoteCount: pendingMoviesProbe?.count, remoteNewest: pendingMoviesProbe?.newest)
+            debugLog("🎬 [VOD-CAT] sweep complete kind=movies total=\(total) categories=\(lanes.count) "
+                     + "pruned=\(max(0, deleted)) (movies=\(total) series=\(seriesCount))")
+            debugLog("🎬 VODStore.loadMovies: done, \(total) movies across \(enabledMovieCats.count) categories")
+            VODSweepProgress.clear(kind: .movie, identity: sweepIdentity)
             restoredMoviesProbe = pendingMoviesProbe ?? restoredMoviesProbe
             restoredMoviesAt = Date()
             // TMDB art pass from the store, not the tab: tvOS builds a tab's
             // content on first selection, so a view-driven trigger only ran
-            // once the user visited the tab (log 2026-09-04 22:48).
-            TMDBArtCache.shared.enrich(accumulated, isMovie: true)
+            // once the user visited the tab.
+            TMDBArtCache.shared.enrichCatalog(playlistKey: identity, isMovie: true)
             return
         }
 
-        // Non-Dispatcharr servers (Xtream Codes) — single request, no progressive load needed.
+        // Non-Dispatcharr servers (Xtream Codes): single request.
         do {
             let snap = server.snapshot
             let (raw, cats) = try await VODService.fetchMovies(from: snap)
             guard !Task.isCancelled else { isLoadingMovies = false; return }
             let items = raw.map { VODDisplayItem(movie: $0) }
-            movies = items
+            let plan = await catalog.beginSweep(playlistKey: identity, kind: .movie, lanes: [""])
+            for chunk in stride(from: 0, to: items.count, by: 500) {
+                let slice = Array(items[chunk..<min(chunk + 500, items.count)])
+                _ = await catalog.writePage(slice, playlistKey: identity, kind: .movie, generation: plan.generation)
+            }
+            await catalog.finishSweep(playlistKey: identity, kind: .movie, generation: plan.generation)
             let apiCats = cats.filter { $0.itemCount > 0 }
             // Prefer API-provided categories; fall back to building from movie data
             movieCategories = apiCats.isEmpty
                 ? Self.buildCategories(from: items, using: \.movie?.categoryName)
                 : apiCats
-            VODLibraryCache.save(kind: .movie, identity: cacheIdentity, items: items, categories: movieCategories)
+            await catalog.saveCategories(movieCategories, playlistKey: identity, kind: .movie)
+            publishMovieCount(await catalog.count(playlistKey: identity, kind: .movie), "xtream sweep")
+            restoredMoviesAt = Date()
+            TMDBArtCache.shared.enrichCatalog(playlistKey: identity, isMovie: true)
         } catch let err as APIError {
             guard !Task.isCancelled else { isLoadingMovies = false; return }
             moviesError = err.errorDescription
@@ -1010,7 +1105,7 @@ final class VODStore: ObservableObject {
         debugLog("📺 VODStore.loadSeries: starting, servers=\(servers.count) honorCache=\(honorCache) background=\(background)")
         let activeServer = servers.first(where: { $0.isActive })
         if let active = activeServer, !active.supportsVOD {
-            series = []; seriesCategories = []
+            publishSeriesCount(0, "no VOD support"); seriesCategories = []
             isLoadingSeries = false; seriesError = nil
             lastSeriesServerName = nil; currentSeriesServerID = nil
             return
@@ -1021,27 +1116,25 @@ final class VODStore: ObservableObject {
         }
         if let active = activeServer, active.type == .dispatcharrAPI, !active.dispatcharrCanViewSeries {
             debugLog("📺 VODStore.loadSeries: series disabled for this Dispatcharr account, clearing")
-            VODLibraryCache.clear(kinds: [.series])
-            series = []; seriesCategories = []
+            let identity = VODLibraryCache.identity(for: active)
+            await catalog.deleteKind(playlistKey: identity, kind: .series)
+            VODLibraryCache.clear(kinds: [.series], identity: identity)
+            VODSweepProgress.clear(kind: .series, identity: VODSweepProgress.identity(for: active))
+            publishSeriesCount(0, "series denied"); seriesCategories = []
             isLoadingSeries = false; seriesError = nil
             lastSeriesServerName = nil; currentSeriesServerID = active.id
             return
         }
-        // v1.6.12: per-server VOD toggle — see `loadMovies` for the
-        // rationale. Active server with `vodEnabled == false` clears
-        // series state the same way a non-VOD-capable server does.
         if let active = activeServer, !active.vodEnabled {
             debugLog("📺 VODStore.loadSeries: active server has vodEnabled=false, clearing")
-            series = []; seriesCategories = []
+            publishSeriesCount(0, "vodEnabled off"); seriesCategories = []
             isLoadingSeries = false; seriesError = nil
             lastSeriesServerName = nil; currentSeriesServerID = nil
             return
         }
         let vodServers = servers.filter { $0.supportsVOD && $0.vodEnabled }
         guard let server = vodServers.first(where: { $0.isActive }) ?? (activeServer == nil ? vodServers.first : nil) else {
-            // See the movies path above: clear rather than leave the previous
-            // playlist's series on screen behind an error.
-            series = []; seriesCategories = []
+            publishSeriesCount(0, "no VOD server"); seriesCategories = []
             isLoadingSeries = false
             lastSeriesServerName = nil; currentSeriesServerID = nil
             if !servers.isEmpty {
@@ -1050,34 +1143,35 @@ final class VODStore: ObservableObject {
             return
         }
         lastSeriesServerName = server.name
-        // Clear stale content immediately when switching to a different server.
         if currentSeriesServerID != nil && currentSeriesServerID != server.id {
-            series = []
+            publishSeriesCount(0, "server switch")
             seriesCategories = []
         }
         currentSeriesServerID = server.id
-        // See loadMovies: no spinner over a restored list.
-        isLoadingSeries = !(background && !series.isEmpty)
-        // See `isRefillingMovies` for the rationale. `defer`
-        // guarantees we return to false on every exit path.
+
+        let identity = await adoptCatalog(for: server)
+        let sweepIdentity = VODSweepProgress.identity(for: server)
+        let storedSeries = await catalog.count(playlistKey: identity, kind: .series)
+        if storedSeries != seriesCount { publishSeriesCount(storedSeries, "catalog restore") }
+        if storedSeries > 0 {
+            if seriesCategories.isEmpty { seriesCategories = await catalog.categories(playlistKey: identity, kind: .series) }
+            isLoadingSeries = false
+            hasLoadedSeries = true
+        }
+
+        isLoadingSeries = !(background && seriesCount > 0)
         isRefillingSeries = true
-        defer { isRefillingSeries = false }
+        VODSweepActivity.shared.markRunning(.series)
+        defer {
+            isRefillingSeries = false
+            VODSweepActivity.shared.markIdle(.series)
+        }
         var lastSeriesProgressivePublish = Date()
         seriesError = nil
         DebugLogger.shared.log("VODStore loadSeries — \(server.name) (\(server.type.rawValue)) url=\(server.effectiveBaseURL)",
                                category: "TVShows", level: .info)
 
-        let cacheIdentity = VODLibraryCache.identity(for: server)
-        if series.isEmpty, let snap = await VODLibraryCache.load(kind: .series, identity: cacheIdentity) {
-            guard !Task.isCancelled else { isLoadingSeries = false; return }
-            series = snap.items
-            seriesCategories = snap.categories
-            isLoadingSeries = false
-            hasLoadedSeries = true
-            restoredSeriesAt = snap.at
-            debugLog("[VOD-CACHE] restored \(snap.items.count) series from \(Int(Date().timeIntervalSince(snap.at)))s ago")
-        }
-        if honorCache, !series.isEmpty, snapshotIsFresh(restoredSeriesAt, kind: "series") {
+        if honorCache, seriesCount > 0, snapshotIsFresh(restoredSeriesAt, kind: "series") {
             isLoadingSeries = false
             return
         }
@@ -1086,22 +1180,18 @@ final class VODStore: ObservableObject {
             let baseURL = server.effectiveBaseURL
             let apiKey  = server.effectiveApiKey
             let sID     = server.id
-            // v1.6.20: per-server auth shape capture.
             let authMode = server.dispatcharrHeaderMode
             let userAgent = server.effectiveUserAgent
             let api     = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey),
                                          userAgent: userAgent, authMode: authMode)
 
-            // Mirrors `loadMovies` above — see that function for the
-            // full rationale on why per-enabled-category fetching +
-            // first-category-wins deduping is the shape of the fix.
-            // Same outage guard as loadMovies: a failed fetch keeps the
-            // stale library instead of hiding the On Demand tab.
+            // Mirrors `loadMovies` above. Same outage guard: a failed fetch
+            // keeps the stored library instead of hiding the On Demand tab.
             let apiCats: [DispatcharrVODCategory]
             do {
                 apiCats = try await api.getVODCategories()
             } catch {
-                debugLog("📺 VODStore.loadSeries: categories fetch FAILED (\(error.localizedDescription)); keeping existing \(series.count)-item library")
+                debugLog("📺 VODStore.loadSeries: categories fetch FAILED (\(error.localizedDescription)); keeping existing \(seriesCount)-item library")
                 seriesError = "Could not reach the server"
                 isLoadingSeries = false
                 return
@@ -1115,112 +1205,173 @@ final class VODStore: ObservableObject {
                 VODCategory(id: String($0.id), name: $0.name,
                             providerIDs: $0.m3uAccounts.filter(\.enabled).map(\.m3uAccount))
             }
+            await catalog.saveCategories(seriesCategories, playlistKey: identity, kind: .series)
 
             if enabledSeriesCats.isEmpty {
-                series = []
+                await catalog.deleteKind(playlistKey: identity, kind: .series)
+                publishSeriesCount(0, "no enabled categories")
                 isLoadingSeries = false
                 debugLog("📺 VODStore.loadSeries: no enabled series categories, nothing to fetch")
                 return
             }
 
-            // v1.7.5: per-category fetch (mirrors loadMovies). The series
-            // list response omits the category, so a single unfiltered
-            // sweep could only tag everything to one fallback bucket,
-            // breaking the On Demand category filter. Dispatcharr's
-            // SeriesFilter DOES filter on `?category=<name>|series`
-            // (verified against the live server), so fetch one stream per
-            // enabled category and tag from what we asked for. Sequential;
-            // dedup by uuid across categories.
-            var accumulated: [VODDisplayItem] = []
-            var seenUUIDs: Set<String> = []
             var lastError: APIError?
-            let totalCap = 5000   // global memory ceiling on huge libraries
-            // Fair share per category, page-aligned (see loadMovies) so a
-            // big early category can't drain the budget and leave later
-            // enabled categories empty.
-            let perCatCap = max((totalCap / 100 / max(enabledSeriesCats.count, 1)) * 100, 100)
-            debugLog("📺 VODStore.loadSeries: per-category fetch across \(enabledSeriesCats.count) enabled categories (cap \(perCatCap)/cat, \(totalCap) total)")
+            var failedCategories: [String] = []
+            let lanes = enabledSeriesCats
+            let plan = await catalog.beginSweep(playlistKey: identity, kind: .series,
+                                                lanes: lanes.map(\.name))
+            var nextPage = plan.nextPage
+            var finished = plan.done
+            var total = seriesCount
+            if plan.resumed {
+                let mid = nextPage.filter { $0.value > 1 && !finished.contains($0.key) }.count
+                debugLog("📺 [VOD-CAT] resumed from saved positions kind=series done=\(finished.count) mid-category=\(mid) stored=\(total)")
+            }
+            debugLog("📺 [VOD-CAT] sweep start kind=series server=\(server.name) lanes=\(lanes.count) mode=\(background ? "background" : "foreground") generation=\(plan.generation)")
+            debugLog("📺 [VOD-CAT] no total cap applied kind=series (every page the server offers is stored)")
 
-            categoryLoop: for cat in enabledSeriesCats {
+            var pagesSinceProgressSave = 0
+            while finished.count < lanes.count {
                 guard !Task.isCancelled else { isLoadingSeries = false; return }
-                let category = VODCategory(id: String(cat.id), name: cat.name)
-                let before = accumulated.count
-                do {
-                    // getVODSeriesStream pins the `|series` type on the name.
-                    let stream = background
-                        ? api.getVODSeriesStreamLowPriority(category: cat.name, itemCap: perCatCap)
-                        : api.getVODSeriesStream(category: cat.name, itemCap: perCatCap)
-                    for try await batch in stream {
-                        guard !Task.isCancelled else { isLoadingSeries = false; return }
-                        for s in batch {
-                            guard seenUUIDs.insert(s.uuid).inserted else { continue }
-                            let cp = s.customProperties
-                            var show = VODSeries(
-                                id: String(s.id), name: s.name,
-                                posterURL: s.posterURL.flatMap { resolveURL($0, base: baseURL) },
-                                backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
-                                    .flatMap { VODService.resolveImageURL($0, base: baseURL) },
-                                rating: s.rating ?? "", plot: s.plot ?? "",
-                                genre: s.genre ?? "", releaseDate: s.year.map(String.init) ?? "",
-                                cast: cp?.cast ?? "", director: cp?.director ?? "",
-                                categoryID: category.id,
-                                categoryName: category.name,
-                                serverID: sID, seasons: [], episodeCount: 0
-                            )
-                            show.tmdbID = s.tmdbID ?? ""
-                            show.addedAt = s.createdAt.flatMap(VODService.parseISODate)
-                            accumulated.append(VODDisplayItem(series: show))
+                // Round-robin rotation: one page per unfinished category.
+                // Admitted at most `pageConcurrency` at a time (one quiet lane
+                // off screen, three while the user is watching the grid grow).
+                let rotation = lanes.filter { !finished.contains($0.name) }
+                var laneIndex = 0
+                while laneIndex < rotation.count {
+                    guard !Task.isCancelled else { isLoadingSeries = false; return }
+                    let limit = max(1, VODSweepActivity.shared.pageConcurrency(for: .series))
+                    let upper = min(laneIndex + limit, rotation.count)
+                    let requests: [(name: String, catID: String, page: Int)] =
+                        rotation[laneIndex..<upper].map {
+                            (name: $0.name, catID: String($0.id), page: nextPage[$0.name] ?? 1)
                         }
-                        // Same partial-over-full guard as the movie sweep.
+                    laneIndex = upper
+                    let pages = await withTaskGroup(
+                        of: (String, Result<DispatcharrAPI.VODPageResult<DispatcharrVODSeries>, Error>).self
+                    ) { group in
+                        for req in requests {
+                            group.addTask {
+                                do {
+                                    let r = try await api.fetchVODSeriesPage(category: req.name,
+                                                                page: req.page,
+                                                                background: background)
+                                    return (req.name, .success(r))
+                                } catch {
+                                    return (req.name, .failure(error))
+                                }
+                            }
+                        }
+                        var acc: [String: Result<DispatcharrAPI.VODPageResult<DispatcharrVODSeries>, Error>] = [:]
+                        for await item in group { acc[item.0] = item.1 }
+                        return acc
+                    }
+                    // The catalog write, the lane bookkeeping and the 5-page
+                    // checkpoint all run back here on the main actor, one page
+                    // at a time, exactly as they did when lanes were serial.
+                    for req in requests {
+                        guard !Task.isCancelled else { isLoadingSeries = false; return }
+                        guard let outcome = pages[req.name] else { continue }
+                        let cat = req
+                        let category = VODCategory(id: req.catID, name: req.name)
+                        let page = req.page
+                        var written = 0
+                        do {
+                            let result = try outcome.get()
+                            var batch: [VODDisplayItem] = []
+                            batch.reserveCapacity(result.items.count)
+                            for sItem in result.items {
+                                let cp = sItem.customProperties
+                                var show = VODSeries(
+                                    id: String(sItem.id), name: sItem.name,
+                                    posterURL: sItem.posterURL.flatMap { resolveURL($0, base: baseURL) },
+                                    backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
+                                        .flatMap { VODService.resolveImageURL($0, base: baseURL) },
+                                    rating: sItem.rating ?? "", plot: sItem.plot ?? "",
+                                    genre: sItem.genre ?? "", releaseDate: sItem.year.map(String.init) ?? "",
+                                    cast: cp?.cast ?? "", director: cp?.director ?? "",
+                                    categoryID: category.id,
+                                    categoryName: category.name,
+                                    serverID: sID, seasons: [], episodeCount: 0
+                                )
+                                show.tmdbID = sItem.tmdbID ?? ""
+                                show.addedAt = sItem.createdAt.flatMap(VODService.parseISODate)
+                                batch.append(VODDisplayItem(series: show))
+                            }
+                            written = await catalog.writePage(batch, playlistKey: identity,
+                                                              kind: .series, generation: plan.generation)
+                            total += written
+                            nextPage[cat.name] = page + 1
+                            if !result.hasMore { finished.insert(cat.name) }
+                            debugLog("📺 [VOD-CAT] page kind=series cat=\(cat.name) p=\(page) "
+                                     + "+\(written) total=\(total) "
+                                     + "serverCount=\(result.serverCount.map(String.init) ?? "?")")
+                        } catch let err as APIError {
+                            lastError = err
+                            finished.insert(cat.name)
+                            failedCategories.append(cat.name)
+                            DebugLogger.shared.logError(err, context: "VODStore.loadSeries(\(server.name)) cat=\(cat.name) p=\(page)")
+                            debugLog("📺 [VOD-CAT] page kind=series cat=\(cat.name) p=\(page) failed: \(err.localizedDescription)")
+                        } catch {
+                            finished.insert(cat.name)
+                            failedCategories.append(cat.name)
+                            DebugLogger.shared.log(
+                                "VODStore.loadSeries(\(server.name)) cat=\(cat.name) error: \(error.localizedDescription)",
+                                category: "TVShows", level: .warning
+                            )
+                        }
+
                         if isLoadingSeries {
-                            if accumulated.count >= series.count { publishSeries(accumulated, "sweep first batch") }
+                            publishSeriesCount(total, "sweep first batch")
                             isLoadingSeries = false
-                        } else if accumulated.count >= series.count,
+                            lastSeriesProgressivePublish = Date()
+                        } else if written > 0,
                                   Date().timeIntervalSince(lastSeriesProgressivePublish) >= 5 {
-                            publishSeries(accumulated, "sweep progressive")
+                            publishSeriesCount(total, "sweep progressive")
                             lastSeriesProgressivePublish = Date()
                         }
-                        if accumulated.count >= totalCap { break }
-                        // See loadMovies: pace and hold the quiet sweep.
-                        if background {
-                            try? await Task.sleep(for: .milliseconds(500))
+
+                        pagesSinceProgressSave += 1
+                        if pagesSinceProgressSave >= 5 {
+                            pagesSinceProgressSave = 0
+                            await catalog.saveLanes(playlistKey: identity, kind: .series,
+                                                    generation: plan.generation,
+                                                    nextPage: nextPage, done: finished)
+                        }
+
+                        // See loadMovies: unpaced while the TV Shows screen is
+                        // in front of the user, quiet pace otherwise.
+                        if VODSweepActivity.shared.isForeground(.series) {
                             await AppSettleGate.shared.awaitResumeIfPaused()
+                        } else if background {
+                            try? await Task.sleep(for: VODSweepActivity.backgroundPageDelay)
+                            await AppSettleGate.shared.awaitResumeIfPaused()
+                        } else if !MultiviewStore.shared.tiles.isEmpty {
+                            try? await Task.sleep(for: .milliseconds(200))
                         }
                     }
-                } catch let err as APIError {
-                    lastError = err
-                    DebugLogger.shared.logError(err, context: "VODStore.loadSeries(\(server.name)) cat=\(cat.name)")
-                } catch {
-                    DebugLogger.shared.log(
-                        "VODStore.loadSeries(\(server.name)) cat=\(cat.name) error: \(error.localizedDescription)",
-                        category: "TVShows", level: .warning
-                    )
-                }
-                debugLog("📺 [VOD-CAT] \(cat.name): +\(accumulated.count - before) (total \(accumulated.count))")
-                // Cold-load yields to playback (2026-06-29): pace the series sweep
-                // while a live stream is playing — same rationale as loadMovies and
-                // the orchestrator fetchUpcoming hold. No-op when idle.
-                if !MultiviewStore.shared.tiles.isEmpty {
-                    try? await Task.sleep(for: .milliseconds(200))
-                }
-                if accumulated.count >= totalCap {
-                    debugLog("📺 VODStore.loadSeries: hit total cap \(totalCap), stopping category sweep")
-                    break categoryLoop
                 }
             }
 
-            if accumulated.isEmpty, let lastError {
+            let deleted = await catalog.finishSweep(playlistKey: identity, kind: .series,
+                                                    generation: plan.generation,
+                                                    keepCategories: failedCategories,
+                                                    remoteCount: pendingSeriesProbe?.count,
+                                                    remoteNewest: pendingSeriesProbe?.newest)
+            total = await catalog.count(playlistKey: identity, kind: .series)
+            if total == 0, let lastError {
                 seriesError = lastError.errorDescription
             }
-            publishSeries(accumulated, "sweep complete")
+            publishSeriesCount(total, "sweep complete")
             isLoadingSeries = false
             hasLoadedSeries = true
-            debugLog("📺 VODStore.loadSeries: done, \(accumulated.count) series across \(enabledSeriesCats.count) enabled categories")
-            VODLibraryCache.save(kind: .series, identity: cacheIdentity, items: accumulated, categories: seriesCategories,
-                                 remoteCount: pendingSeriesProbe?.count, remoteNewest: pendingSeriesProbe?.newest)
+            debugLog("📺 [VOD-CAT] sweep complete kind=series total=\(total) categories=\(lanes.count) "
+                     + "pruned=\(max(0, deleted)) (movies=\(moviesCount) series=\(total))")
+            debugLog("📺 VODStore.loadSeries: done, \(total) series across \(enabledSeriesCats.count) enabled categories")
+            VODSweepProgress.clear(kind: .series, identity: sweepIdentity)
             restoredSeriesProbe = pendingSeriesProbe ?? restoredSeriesProbe
             restoredSeriesAt = Date()
-            TMDBArtCache.shared.enrich(accumulated, isMovie: false)
+            TMDBArtCache.shared.enrichCatalog(playlistKey: identity, isMovie: false)
             return
         }
 
@@ -1229,12 +1380,20 @@ final class VODStore: ObservableObject {
             let (rawSeries, cats) = try await VODService.fetchSeries(from: snap)
             guard !Task.isCancelled else { isLoadingSeries = false; return }
             let items = rawSeries.map { VODDisplayItem(series: $0) }
-            series = items
+            let plan = await catalog.beginSweep(playlistKey: identity, kind: .series, lanes: [""])
+            for chunk in stride(from: 0, to: items.count, by: 500) {
+                let slice = Array(items[chunk..<min(chunk + 500, items.count)])
+                _ = await catalog.writePage(slice, playlistKey: identity, kind: .series, generation: plan.generation)
+            }
+            await catalog.finishSweep(playlistKey: identity, kind: .series, generation: plan.generation)
             let apiCats = cats.filter { $0.itemCount > 0 }
             seriesCategories = apiCats.isEmpty
                 ? Self.buildCategories(from: items, using: \.series?.categoryName)
                 : apiCats
-            VODLibraryCache.save(kind: .series, identity: cacheIdentity, items: items, categories: seriesCategories)
+            await catalog.saveCategories(seriesCategories, playlistKey: identity, kind: .series)
+            publishSeriesCount(await catalog.count(playlistKey: identity, kind: .series), "xtream sweep")
+            restoredSeriesAt = Date()
+            TMDBArtCache.shared.enrichCatalog(playlistKey: identity, isMovie: false)
         } catch let err as APIError {
             guard !Task.isCancelled else { isLoadingSeries = false; return }
             seriesError = err.errorDescription
@@ -4208,6 +4367,11 @@ struct MainTabView: View {
     #endif
     @ObservedObject private var favoritesStore = FavoritesStore.shared
     @ObservedObject private var vodStore = VODStore.shared
+    /// Keeps the Movies / TV Shows tabs on screen, in a loading state, for
+    /// the whole life of a catalog sweep (Android parity, Logan 2026-09-16).
+    /// Without this the count drops to 0 at the start of "Refresh
+    /// Everything" and the tab vanished until the first page landed.
+    @ObservedObject private var sweepActivity = VODSweepActivity.shared
     private var isTVOS: Bool {
         #if os(tvOS)
         return true
@@ -4396,8 +4560,13 @@ struct MainTabView: View {
     /// servers (or their identity) changes. The loop itself polls
     /// every 2 minutes internally.
     private var dvrReconcileKey: String {
-        allServers
-            .filter { $0.type == .dispatcharrAPI }
+        // ACTIVE SERVER ONLY (Logan 2026-09-16: inactive server
+        // 192.168.50.163 polled every 2 minutes). The key used to name
+        // every saved Dispatcharr server, and the poll below walked the
+        // same set, so a saved but inactive playlist was hit with
+        // GET /api/channels/recordings/ every 2 minutes forever - on
+        // Logan's iPhone and Apple TV that was a timeout every cycle.
+        activeDispatcharrServers
             // dvr_access is part of the key so a permission that flips back
             // to view/manage re-fires the reconcile at once instead of
             // waiting out the 2-minute poll below.
@@ -4431,7 +4600,18 @@ struct MainTabView: View {
     private func refreshDispatcharrPermissions(reason: String = "cold launch",
                                                isColdLaunch: Bool = true,
                                                force: Bool = false) {
-        let dispatcharrServers = allServers.filter { $0.type == .dispatcharrAPI }
+        // ACTIVE PLAYLIST ONLY (Logan 2026-09-16, Android parity). This used
+        // to walk every saved Dispatcharr server with a 3-attempt retry
+        // ladder each, so one inactive, unreachable saved playlist delayed
+        // the active server's probe by up to ~18 s and filled the log with
+        // "[PERMS] probe FAILED server=..." for a playlist nobody is using.
+        // A server that is not active gates nothing on this device, and the
+        // orchestrator key includes isActive, so switching to it re-fires
+        // this pass and `needsLaunchProbe` lets it through once. Targeted
+        // paths are untouched: Test Connection, server creation, credential
+        // change, and the opportunistic DVR / On Demand refreshIfStale all
+        // probe their own specific server directly.
+        let dispatcharrServers = activeDispatcharrServers
         guard !dispatcharrServers.isEmpty else { return }
         Task { @MainActor in
             for server in dispatcharrServers {
@@ -4440,15 +4620,29 @@ struct MainTabView: View {
                 // whatever stale (or absent) snapshot it happened to have
                 // until the next cold launch. Three attempts with a short
                 // backoff costs one request in the healthy case.
-                if isColdLaunch {
+                // ACTIVE-SERVER CHANGE FORCES A PROBE (Logan 2026-09-16).
+                // Switching the active playlist must re-probe the newly
+                // active server exactly the way a cold launch does: ignore
+                // the ~6 hour TTL AND ignore `launchProbed`. Without this,
+                // a permission changed on server B while server A was
+                // active was not picked up until the next relaunch, because
+                // B was already in `launchProbed` from an earlier pass.
+                let activeChanged = DispatcharrCapabilityProbe.needsActiveServerProbe(server)
+                let mustProbe = force || activeChanged
+                if mustProbe {
+                    // Count it as this launch's probe too, so the cold-launch
+                    // pass does not immediately repeat the same request.
+                    DispatcharrCapabilityProbe.noteLaunchProbed(server)
+                } else if isColdLaunch {
                     // Unconditional, TTL ignored, but only once per server
                     // per process: the launch orchestrator can re-fire on a
                     // server-key change within the same launch.
                     guard DispatcharrCapabilityProbe.needsLaunchProbe(server) else { continue }
                     DispatcharrCapabilityProbe.noteLaunchProbed(server)
                 } else {
-                    guard force || server.dispatcharrCapabilities.isStale else { continue }
+                    guard server.dispatcharrCapabilities.isStale else { continue }
                 }
+                DispatcharrCapabilityProbe.noteActiveServerProbed(server)
                 var reached = false
                 for attempt in 1...3 {
                     reached = await DispatcharrCapabilityProbe.refresh(server, reason: "\(reason) #\(attempt)")
@@ -4459,6 +4653,16 @@ struct MainTabView: View {
                     debugLog("[PERMS] probe FAILED server=\(server.name) reason=\(reason) "
                              + "detail=unresolved-after-retries; keeping the last good snapshot "
                              + "(\(server.dispatcharrCapabilities.probeSummary))")
+                }
+                // Publish unconditionally after an active-server change
+                // (Logan 2026-09-16). `DispatcharrCapabilityProbe.refresh`
+                // only posts when THAT server's stored snapshot changed, but
+                // the thing that changed here is WHICH server is active, so
+                // the Movies / TV Shows tab-visibility observers must
+                // re-evaluate against the new server's permissions without a
+                // relaunch.
+                if activeChanged || force {
+                    NotificationCenter.default.post(name: .dispatcharrCapabilitiesDidChange, object: nil)
                 }
             }
             // Capabilities are synced, so a device that just repaired a
@@ -4472,9 +4676,29 @@ struct MainTabView: View {
     // stream and AC-3 / E-AC-3 passes through to the receiver, so there is no
     // server-side profile to keep in sync.
 
+    /// The Dispatcharr server this device is actually using: the active
+    /// one, or - when nothing is marked active at all - the first saved
+    /// one, so a freshly imported list still works.
+    ///
+    /// ACTIVE ONLY (Logan 2026-09-16: inactive server 192.168.50.163
+    /// polled every 2 minutes). An inactive playlist gates nothing on
+    /// this device, so no periodic or launch-time fetch may touch it.
+    private var activeDispatcharrServers: [ServerConnection] {
+        if let active = allServers.first(where: { $0.isActive && $0.type == .dispatcharrAPI }) {
+            return [active]
+        }
+        // No server is marked active at all: fall back to the first saved
+        // Dispatcharr server rather than going silent.
+        guard allServers.allSatisfy({ !$0.isActive }),
+              let first = allServers.first(where: { $0.type == .dispatcharrAPI }) else { return [] }
+        return [first]
+    }
+
     private func reconcileAllDispatcharrRecordings() async {
-        // DVR access "none": the recordings endpoints answer 403; skip.
-        let dispatcharrServers = allServers.filter { $0.type == .dispatcharrAPI && $0.dispatcharrCanViewDVR }
+        // ACTIVE SERVER ONLY (Logan 2026-09-16: inactive server
+        // 192.168.50.163 polled every 2 minutes). DVR access "none": the
+        // recordings endpoints answer 403; skip.
+        let dispatcharrServers = activeDispatcharrServers.filter { $0.dispatcharrCanViewDVR }
         guard !dispatcharrServers.isEmpty else { return }
         for server in dispatcharrServers {
             let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
@@ -4573,7 +4797,7 @@ struct MainTabView: View {
         } else if vodStore.isLoadingMovies || vodStore.isLoadingSeries {
             vodStage.status = .loading
         } else {
-            let titles = vodStore.movies.count + vodStore.series.count
+            let titles = vodStore.moviesCount + vodStore.seriesCount
             vodStage.status = .done(titles > 0 ? "\(titles) titles" : "")
         }
 
@@ -5802,13 +6026,19 @@ struct MainTabView: View {
     /// is true for an unprobed / unreadable account.
     private var hasMovies: Bool {
         if let active = activeServerForTabs, !active.dispatcharrCanViewVOD { return false }
-        return !vodStore.movies.isEmpty || vodStore.isLoadingMovies
+        return vodStore.moviesCount > 0
+            || vodStore.isLoadingMovies
+            || vodStore.isRefillingMovies
+            || sweepActivity.isActive(.movie)
     }
 
     /// Series half. Mirrors `hasMovies` against `vod_series_enabled`.
     private var hasSeries: Bool {
         if let active = activeServerForTabs, !active.dispatcharrCanViewSeries { return false }
-        return !vodStore.series.isEmpty || vodStore.isLoadingSeries
+        return vodStore.seriesCount > 0
+            || vodStore.isLoadingSeries
+            || vodStore.isRefillingSeries
+            || sweepActivity.isActive(.series)
     }
 
     /// The server every tab gate reads. Deliberately the same expression the
@@ -6906,7 +7136,7 @@ struct MainTabView: View {
         // The call is idempotent (each kind is guarded on `isEmpty`), so a
         // second restore would be harmless anyway.
         await vodRestoreHandle.value
-        debugLog("🟢 [Orchestrator] phase 3 done (restore), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, movies=\(vodStore.movies.count), series=\(vodStore.series.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
+        debugLog("🟢 [Orchestrator] phase 3 done (restore), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, movies=\(vodStore.moviesCount), series=\(vodStore.seriesCount), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         // Phase 4 is no longer a foreground sweep: the snapshots above are what
         // the tabs show, and the network walk is a quiet background pass that
         // starts once the app has settled (guide rendered, any tune past first
@@ -8079,6 +8309,25 @@ extension View {
 /// resting near the top always reveals. Reference type on purpose: the
 /// accumulators are gesture bookkeeping, not display state, so mutating
 /// them must not re-render the view.
+extension View {
+    /// Observing overload: the flag is read inside the modifier's OWN body,
+    /// so a scroll that tucks the bar away does not invalidate the list that
+    /// owns the state (Logan 2026-09-16, iPhone flick hiccup).
+    func scrollAwayTabBar(observing chrome: ListScrollChrome) -> some View {
+        modifier(ScrollAwayTabBarModifier(chrome: chrome))
+    }
+}
+
+/// Reads `ListScrollChrome.isTabBarAway` in its own body, so only this
+/// modifier re-renders when the bar tucks away. See `scrollAwayTabBar`.
+private struct ScrollAwayTabBarModifier: ViewModifier {
+    let chrome: ListScrollChrome
+
+    func body(content: Content) -> some View {
+        content.scrollAwayTabBar(collapsed: chrome.isTabBarAway)
+    }
+}
+
 final class TabBarScrollTracker {
     private var hideDistance: CGFloat = 0
     private var showDistance: CGFloat = 0

@@ -1091,6 +1091,7 @@ private struct LogTextView: UIViewRepresentable {
 
 // MARK: - Log Category Row
 
+@MainActor
 private func logCategoryRow(icon: String, title: String, detail: String) -> some View {
     HStack(alignment: .top, spacing: 12) {
         Image(systemName: icon)

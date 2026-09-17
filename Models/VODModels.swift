@@ -445,6 +445,38 @@ struct ContinueWatchingSection: View {
     /// Observed so hiding a title from this rail removes the card at once.
     @ObservedObject private var hiddenTitles = HiddenVODStore.shared
 
+    /// Titles behind the visible progress rows, resolved from the paged VOD
+    /// catalog by id. The rail used to be handed the WHOLE movie and series
+    /// libraries just to look a dozen ids up, which a 350,000 title catalog
+    /// cannot do. `series` / `movies` remain as an override for callers that
+    /// already hold the rows.
+    @State private var resolvedSeries: [String: VODDisplayItem] = [:]
+    @State private var resolvedMovies: [String: VODDisplayItem] = [:]
+
+    private var resolveKey: String {
+        items.map { "\($0.vodType):\($0.vodID):\($0.seriesID ?? "")" }.joined(separator: ",")
+    }
+
+    private func parentSeries(_ progress: WatchProgress) -> VODDisplayItem? {
+        guard let id = progress.seriesID else { return nil }
+        return resolvedSeries[id] ?? series.first(where: { $0.id == id })
+    }
+
+    private func movieItem(_ progress: WatchProgress) -> VODDisplayItem? {
+        resolvedMovies[progress.vodID] ?? movies.first(where: { $0.id == progress.vodID })
+    }
+
+    private func resolveCatalogRows() async {
+        let seriesIDs = Array(Set(items.compactMap(\.seriesID)))
+        let movieIDs = Array(Set(items.filter { $0.vodType == "movie" }.map(\.vodID)))
+        if !seriesIDs.isEmpty {
+            resolvedSeries = await VODStore.shared.items(kind: .series, ids: seriesIDs)
+        }
+        if !movieIDs.isEmpty {
+            resolvedMovies = await VODStore.shared.items(kind: .movie, ids: movieIDs)
+        }
+    }
+
     private var items: [WatchProgress] {
         allProgress.filter { progress in
             guard progress.vodType == vodType else { return false }
@@ -498,7 +530,7 @@ struct ContinueWatchingSection: View {
                             // movie, or until the series list has loaded).
                             // Drives the long-press "Open Series" action.
                             let parentSeries: VODDisplayItem? = progress.vodType == "episode"
-                                ? series.first(where: { $0.id == progress.seriesID })
+                                ? parentSeries(progress)
                                 : nil
                             Button {
                                 onPlay?(progress)
@@ -536,9 +568,9 @@ struct ContinueWatchingSection: View {
                                 // so the option never depends on catalog
                                 // load timing.
                                 if progress.vodType == "movie", let onOpenMovie {
-                                    let target = movies.first(where: { $0.id == progress.vodID })
+                                    let target = movieItem(progress)
                                         ?? Self.syntheticMovieItem(from: progress)
-                                    let _ = debugLog("[CW-MENU] vodID=\(progress.vodID) moviesLoaded=\(movies.count) catalogMatch=\(movies.contains(where: { $0.id == progress.vodID })) synthesized=\(target != nil && !movies.contains(where: { $0.id == progress.vodID }))")
+                                    let _ = debugLog("[CW-MENU] vodID=\(progress.vodID) catalogMatch=\(movieItem(progress) != nil)")
                                     if let target {
                                         Button {
                                             onOpenMovie(target)
@@ -552,7 +584,7 @@ struct ContinueWatchingSection: View {
                                 // until unhidden from the Hidden category).
                                 if let target = (progress.vodType == "episode"
                                                  ? parentSeries
-                                                 : (movies.first(where: { $0.id == progress.vodID })
+                                                 : (movieItem(progress)
                                                     ?? Self.syntheticMovieItem(from: progress))) {
                                     HiddenVODStore.menuButton(target)
                                 }
@@ -587,6 +619,7 @@ struct ContinueWatchingSection: View {
             // leftmost card would otherwise be passed over.
             .focusSection()
             #endif
+            .task(id: resolveKey) { await resolveCatalogRows() }
         }
     }
 
@@ -614,7 +647,7 @@ struct ContinueWatchingSection: View {
         // Landscape cards (2026-09): prefer the title's backdrop from the
         // loaded catalog; the progress row only stores the poster.
         if p.vodType == "episode" {
-            let show = series.first { $0.id == p.seriesID }
+            let show = parentSeries(p)
             let poster = show?.series?.backdropURL?.absoluteString
                 ?? show?.posterURL?.absoluteString ?? p.posterURL
             let label = episodeLabel(season: p.seasonNumber, episode: p.episodeNumber)
@@ -625,7 +658,7 @@ struct ContinueWatchingSection: View {
             // Series not loaded yet: keep the episode title up top, SxEy below.
             return (poster, p.title, label.isEmpty ? nil : label)
         }
-        let backdrop = movies.first { $0.id == p.vodID }?.movie?.backdropURL?.absoluteString
+        let backdrop = movieItem(p)?.movie?.backdropURL?.absoluteString
         return (backdrop ?? p.posterURL, p.title, nil)
     }
 

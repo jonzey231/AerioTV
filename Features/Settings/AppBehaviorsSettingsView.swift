@@ -979,15 +979,23 @@ struct AppBehaviorsSettingsView: View {
                 // iPad honors) via the same key; Automatic keeps each form
                 // factor on its own default. The in-screen List / Guide pill
                 // stays session-only and never writes here.
-                SettingsSection("Default Live TV View", style: .card) {
-                    ForEach(Self.liveTVViewOptions, id: \.self) { option in
-                        TVSettingsSelectionRow(
-                            icon: liveTVViewIcon(option),
-                            iconColor: theme.accent,
-                            label: liveTVViewLabel(option),
-                            isSelected: defaultLiveTVView == option,
-                            action: { defaultLiveTVView = option }
-                        )
+                // Hidden on Apple TV while the List view is removed from the
+                // tvOS UI (Logan 2026-09-16): Guide would be the only
+                // meaningful choice. The code and the persisted
+                // `defaultLiveTVView` key are untouched, so flipping
+                // TVListView.enabled brings this row and the user's stored
+                // choice straight back.
+                if TVListView.enabled {
+                    SettingsSection("Default Live TV View", style: .card) {
+                        ForEach(Self.liveTVViewOptions, id: \.self) { option in
+                            TVSettingsSelectionRow(
+                                icon: liveTVViewIcon(option),
+                                iconColor: theme.accent,
+                                label: liveTVViewLabel(option),
+                                isSelected: defaultLiveTVView == option,
+                                action: { defaultLiveTVView = option }
+                            )
+                        }
                     }
                 }
 

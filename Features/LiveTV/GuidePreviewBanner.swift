@@ -213,9 +213,13 @@ struct GuidePreviewBanner: View {
                 // Shared slot: height-locked, width from the art's own
                 // aspect, same as the Program Info sheet (Logan 2026-09-15).
                 // The banner is a flat full-width strip on the app
-                // background, not a rounded card, so per the container rule
-                // (Logan 2026-09-16) its art stays square.
-                ProgramArtSlot(url: url, containerRadius: 0)
+                // background, not a rounded card, so it rounds at the small
+                // `guideRadius` - and only when "Rounded corners in Guide
+                // view" is on, since the banner is part of the guide (Logan
+                // 2026-09-16). Toggle off, the art is square as before.
+                ProgramArtSlot(url: url,
+                               containerRadius: LogoCorners.guideRadius,
+                               usesGuideCorners: true)
                     .id(url)
             case .none:
                 // Every source came back empty (static team channels and the
@@ -261,15 +265,16 @@ struct GuidePreviewBanner: View {
             }
             HStack(spacing: 10) {
                 Text("\(shortTimeFormatter.string(from: program.start)) - \(shortTimeFormatter.string(from: program.end))")
-                // Date-coded seasons ("S2026 E905") are not episode identity.
-                if let se = seasonEpisodeLabel(season: program.season, episode: program.episode),
-                   (program.season ?? 0) < 1900 {
-                    Text("·").foregroundColor(Color.contrastText(.textTertiary))
-                    Text(se)
-                }
                 if let left = remainingLabel(program) {
                     Text("·").foregroundColor(Color.contrastText(.textTertiary))
                     Text(left)
+                }
+                // Season/episode sits after the time-left text and before the
+                // LIVE / NEW badges (Logan 2026-09-17), plain text in the same
+                // small style as the time, only when the feed carries numbers.
+                if let se = seasonEpisodeLabel(season: program.season, episode: program.episode) {
+                    Text("·").foregroundColor(Color.contrastText(.textTertiary))
+                    Text(se)
                 }
                 if showEpgBadges {
                     EPGFlagsRow(isLiveBroadcast: program.isLiveBroadcast, isNew: program.isNew,
@@ -536,6 +541,14 @@ struct ProgramArtSlot: View {
     /// a container with no rounding (the tvOS guide preview strip). See
     /// `LogoCorners`.
     var containerRadius: CGFloat? = nil
+    /// GUIDE surfaces: clip on Settings > Appearance > "Rounded corners in
+    /// Guide view" instead of the List one (Logan 2026-09-16). The guide's
+    /// program artwork - the preview banner's art, and Program Info when it
+    /// was opened FROM the guide - rides the guide toggle; the same sheet
+    /// reached from the Live TV list, the in-player info card, the channel
+    /// picker and the multiview row stay on the List toggle. Same radius
+    /// rule either way (`LogoCorners.radius`, tile test plus 25% cap).
+    var usesGuideCorners: Bool = false
     /// Kept for callers that want the real bitmap size; the slot uses it
     /// itself to settle its width.
     var onImageLoaded: ((CGSize) -> Void)? = nil
@@ -544,8 +557,15 @@ struct ProgramArtSlot: View {
     @State private var aspect: CGFloat? = nil
     /// App-wide Text Size: the slot grows with it (see `scaled(_:)`).
     @Environment(\.aerioTextScale) private var textScale
-    /// Settings > Appearance > "Rounded corners on logos and artwork".
+    /// Settings > Appearance > "Rounded corners in List view".
     @Environment(\.aerioRoundedLogoCorners) private var roundedCorners
+    /// Settings > Appearance > "Rounded corners in Guide view".
+    @Environment(\.aerioRoundedGuideCorners) private var roundedGuideCorners
+
+    /// Whichever of the two Appearance toggles governs this surface.
+    private var cornersEnabled: Bool {
+        usesGuideCorners ? roundedGuideCorners : roundedCorners
+    }
 
     /// The slot's metrics at the current Text Size. Every frame below uses
     /// these, so height, 16:9 reserve and portrait floor scale together.
@@ -566,7 +586,7 @@ struct ProgramArtSlot: View {
                            // cache; unknown program art counts as a tile,
                            // since it is opaque photography.
                            isTile: LogoTileTest.cachedVerdict(for: url) ?? true,
-                           enabled: roundedCorners)
+                           enabled: cornersEnabled)
     }
 
     var body: some View {

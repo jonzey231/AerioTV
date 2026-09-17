@@ -193,6 +193,11 @@ struct ProgramInfoView: View {
     /// Phone: the tvOS card layout at phone scale in a glass system sheet,
     /// instead of the navigation form (Logan 2026-09-05).
     var cardLayout = false
+    /// True when the sheet was opened FROM THE GUIDE. The art then clips on
+    /// Settings > Appearance > "Rounded corners in Guide view"; reached from
+    /// the Live TV list (or the DVR) it stays on the List toggle (Logan
+    /// 2026-09-16). Same radius rule either way.
+    var usesGuideCorners = false
     @Environment(\.dismiss) private var dismiss
 
     /// v1.7.x: lazy-loaded category result for Dispatcharr programs
@@ -457,7 +462,8 @@ struct ProgramInfoView: View {
                         // art, no crop, aspect-shaped (Logan 2026-09-15).
                         ProgramArtSlot(url: posterURL,
                                        headers: posterAuthHeaders,
-                                       metrics: ProgramArtSlotMetrics.compactSlot)
+                                       metrics: ProgramArtSlotMetrics.compactSlot,
+                                       usesGuideCorners: usesGuideCorners)
                     }
                     VStack(alignment: .leading, spacing: 5) {
                         Text(target.channelName.uppercased())
@@ -698,7 +704,8 @@ struct ProgramInfoView: View {
                         // anything outside its clamped ratio range and made
                         // the row jump when the bitmap landed.
                         ProgramArtSlot(url: posterURL,
-                                       headers: posterAuthHeaders)
+                                       headers: posterAuthHeaders,
+                                       usesGuideCorners: usesGuideCorners)
                         Spacer()
                     }
                     .listRowBackground(Color.clear)
@@ -796,7 +803,8 @@ struct ProgramInfoView: View {
                     // SAME shared slot, SAME height as the guide preview
                     // banner (Logan 2026-09-15): whole art, no crop, 203 tall,
                     // width from the art's own aspect (16:9 caps it).
-                    ProgramArtSlot(url: posterURL, headers: posterAuthHeaders)
+                    ProgramArtSlot(url: posterURL, headers: posterAuthHeaders,
+                                   usesGuideCorners: usesGuideCorners)
                 }
                 VStack(alignment: .leading, spacing: 10) {
                     Text(target.channelName.uppercased())
@@ -1074,14 +1082,21 @@ extension View {
     /// Liquid Glass with the tvOS card layout (Logan 2026-09-05); iPad
     /// keeps the form sheet.
     @ViewBuilder
-    func programInfoPresenter(item: Binding<ProgramInfoTarget?>) -> some View {
+    /// `usesGuideCorners`: pass true from the GUIDE, so the art follows the
+    /// "Rounded corners in Guide view" toggle. The list and the DVR leave it
+    /// at false and keep the List toggle (Logan 2026-09-16).
+    func programInfoPresenter(item: Binding<ProgramInfoTarget?>,
+                              usesGuideCorners: Bool = false) -> some View {
         if UIDevice.current.userInterfaceIdiom == .phone {
             self.sheet(item: item) { target in
-                ProgramInfoView(target: target, cardLayout: true)
+                ProgramInfoView(target: target, cardLayout: true,
+                                usesGuideCorners: usesGuideCorners)
                     .presentationDetents([.medium, .large])
             }
         } else {
-            self.sheet(item: item) { ProgramInfoView(target: $0) }
+            self.sheet(item: item) {
+                ProgramInfoView(target: $0, usesGuideCorners: usesGuideCorners)
+            }
         }
     }
 }

@@ -247,7 +247,7 @@ final class DVRArtResolver: ObservableObject {
         //    the provider also carries on demand (Logan 2026-09-05). Library
         //    art is TMDB-first itself when a key is set, provider poster
         //    otherwise.
-        return libraryPoster(title: rec.programTitle, isMovie: kind == .movie)
+        return await libraryPoster(title: rec.programTitle, isMovie: kind == .movie)
     }
 
     /// Category pills for the recording's Program Info (Logan 2026-09-10,
@@ -292,14 +292,15 @@ final class DVRArtResolver: ObservableObject {
         debugLog("[DVR-ART] category for \(rec.programTitle) from a same-title guide row: \(borrowed)")
     }
 
-    private func libraryPoster(title: String, isMovie: Bool) -> String? {
+    private func libraryPoster(title: String, isMovie: Bool) async -> String? {
         let wanted = LibraryMatcher.cleanTitle(title).lowercased()
         guard !wanted.isEmpty else { return nil }
-        let store = VODStore.shared
-        let primary = isMovie ? store.movies : store.series
-        let secondary = isMovie ? store.series : store.movies
-        for pool in [primary, secondary] {
-            guard let item = pool.first(where: { LibraryMatcher.cleanTitle($0.name).lowercased() == wanted }) else { continue }
+        // One indexed catalog read per kind on the cleaned title, instead of
+        // a linear walk of a library that no longer lives in memory.
+        let order: [VODItemType] = isMovie ? [.movie, .series] : [.series, .movie]
+        for kind in order {
+            let hits = await VODStore.shared.itemsByCleanTitle(kind: kind, cleanTitle: wanted)
+            guard let item = hits.first else { continue }
             if let url = TMDBArtCache.shared.posterURL(for: item) ?? item.posterURL {
                 debugLog("[DVR-ART] library poster for \(title): \(item.displayName)")
                 return url.absoluteString

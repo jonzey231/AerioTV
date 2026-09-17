@@ -493,24 +493,19 @@ struct SearchView: View {
             let allowSeries = active.map { $0.dispatcharrCanViewSeries } ?? true
             // Titles the user hid never surface in search (Logan
             // 2026-09-14): filter here, before the detached match.
-            let movies = allowMovies ? HiddenVODStore.shared.visible(VODStore.shared.movies) : []
-            let series = allowSeries ? HiddenVODStore.shared.visible(VODStore.shared.series) : []
-            let searchScope = scope
-            let vodResults: [VODDisplayItem] = await Task.detached(priority: .userInitiated) {
-                let pool: [VODDisplayItem]
-                switch searchScope {
-                case .movies: pool = movies
-                case .tv:     pool = series
-                default:      pool = movies + series
-                }
-                return Array(
-                    pool.lazy
-                        .filter { $0.name.localizedCaseInsensitiveContains(lowered) }
-                        .prefix(50)
-                )
-            }.value
-
-            found += vodResults.map { .vod($0) }
+            // The catalog answers this with an indexed query off the main
+            // actor; there is no resident library array to walk any more.
+            let hidden = HiddenVODStore.shared.snapshot(serverID: searchActiveServer?.id.uuidString)
+            var vodResults: [VODDisplayItem] = []
+            if allowMovies, scope != .tv {
+                vodResults += await VODStore.shared.searchCatalog(kind: .movie, query: lowered,
+                                                                  hiddenTitleKeys: hidden)
+            }
+            if allowSeries, scope != .movies {
+                vodResults += await VODStore.shared.searchCatalog(kind: .series, query: lowered,
+                                                                  hiddenTitleKeys: hidden)
+            }
+            found += vodResults.prefix(50).map { .vod($0) }
         }
 
         results = found

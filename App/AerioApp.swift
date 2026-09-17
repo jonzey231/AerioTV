@@ -136,7 +136,15 @@ final class MainThreadWatchdog: @unchecked Sendable {
                 if start > 0 {
                     let ms = Int((now - start) * 1000)
                     if ms >= 100 {
-                        debugLog("[HANG] main runloop turn \(ms)ms\(label.map { " after \($0)" } ?? "")")
+                        #if os(iOS)
+                        // Name the scroll-chrome flip when one ran just
+                        // before this turn: that is what the iPhone flick
+                        // hiccup looked like (Logan 2026-09-16).
+                        let chrome = ChromeEventTrace.hangContext(now: now)
+                        #else
+                        let chrome = ""
+                        #endif
+                        debugLog("[HANG] main runloop turn \(ms)ms\(label.map { " after \($0)" } ?? "")\(chrome)")
                     }
                     // Hand the closed turn to the sampling profiler, which is
                     // already holding the stacks it sampled during it.
@@ -377,9 +385,12 @@ struct AerioApp: App {
     /// Settings > Appearance > Subtext Size and Text Contrast, injected the
     /// same way. Contrast colors also re-render through ThemeManager.
     @AppStorage(SubtextScale.key) private var subtextScale: Double = SubtextScale.defaultValue
-    /// Settings > Appearance > "Rounded corners on logos and artwork".
-    /// Injected app-wide so every logo and program-art slot re-clips live.
-    @AppStorage(LogoCorners.key) private var roundedLogoCorners: Bool = LogoCorners.defaultValue
+    /// Settings > Appearance > "Rounded corners in List view" and
+    /// "Rounded corners in Guide view" (split from one toggle, Logan
+    /// 2026-09-16). Injected app-wide so every logo and program-art slot
+    /// re-clips live.
+    @AppStorage(LogoCorners.listKey) private var roundedLogoCorners: Bool = LogoCorners.listDefault
+    @AppStorage(LogoCorners.guideKey) private var roundedGuideCorners: Bool = LogoCorners.guideDefault
     @AppStorage(TextContrast.key) private var textContrast: Double = TextContrast.defaultValue
 
     /// Owned explicitly (vs. letting `.modelContainer(for:)` auto-
@@ -401,6 +412,10 @@ struct AerioApp: App {
     nonisolated(unsafe) static var sharedContainer: ModelContainer?
 
     init() {
+        // Carries a pre-split "Rounded corners on logos and artwork" choice
+        // into the List key before any view reads it, so nobody's current
+        // setting changes (Logan 2026-09-16).
+        LogoCorners.migrateLegacyKeyIfNeeded()
         #if DEBUG
         // Test-harness hooks, DEBUG builds only. Both read standard
         // launch arguments (UserDefaults maps "-key value" args).
@@ -515,7 +530,7 @@ struct AerioApp: App {
                 .modifier(DispatcharrPermissionNoticeAlert())
                 .aerioTextScaleRoot(textScale)
                 .aerioSecondaryTextRoot(subtextScale: subtextScale, contrast: textContrast)
-                .aerioLogoCornersRoot(roundedLogoCorners)
+                .aerioLogoCornersRoot(list: roundedLogoCorners, guide: roundedGuideCorners)
                 // GH #33: this Apple TV is a companion HOST -- advertise
                 // _aeriotv._tcp + run the WS server so an iPhone or Android
                 // phone can control it. Overlay shows the pairing code on the
@@ -739,7 +754,22 @@ struct AerioApp: App {
         let descriptor = FetchDescriptor<ServerConnection>()
         guard let allServers = try? context.fetch(descriptor),
               !allServers.isEmpty else { return }
-        let servers = allServers.filter { $0.type == .dispatcharrAPI }
+        // ACTIVE SERVER ONLY (Logan 2026-09-16: inactive server
+        // 192.168.50.163 polled every 2 minutes). This warmup used to log
+        // in to EVERY saved Dispatcharr server at launch, so a saved but
+        // inactive playlist got a JWT request (and a timeout) on every cold
+        // start. Only the active playlist can issue requests that need a
+        // warm token. "Test Connection" and credential validation still
+        // target their own named server.
+        let dispatcharrServers = allServers.filter { $0.type == .dispatcharrAPI }
+        let servers: [ServerConnection]
+        if let active = dispatcharrServers.first(where: { $0.isActive }) {
+            servers = [active]
+        } else if allServers.allSatisfy({ !$0.isActive }), let first = dispatcharrServers.first {
+            servers = [first]
+        } else {
+            servers = []
+        }
         guard !servers.isEmpty else { return }
 
         // Build per-server credential snapshots on main (Keychain
@@ -902,8 +932,23 @@ final class TVLANProbe: ObservableObject {
     /// the passed servers, remembers them for future `reprobe()`
     /// calls, and kicks off the probe.
     func probe(servers: [ServerConnection]) {
-        let serversWithoutLocal = servers.filter { $0.localURL.isEmpty }.count
-        let candidates = servers.compactMap { s -> URL? in
+        // ACTIVE SERVER ONLY (Logan 2026-09-16: inactive server
+        // 192.168.50.163 polled every 2 minutes). The probe fired one
+        // request per saved server's localURL on launch, on every
+        // foreground return and on every network transition, so an
+        // inactive playlist's LAN address was polled repeatedly. Only the
+        // active playlist's base URL is ever routed, so only its localURL
+        // can decide the LAN verdict.
+        let probeTargets: [ServerConnection]
+        if let active = servers.first(where: { $0.isActive }) {
+            probeTargets = [active]
+        } else if let first = servers.first, servers.allSatisfy({ !$0.isActive }) {
+            probeTargets = [first]
+        } else {
+            probeTargets = []
+        }
+        let serversWithoutLocal = probeTargets.filter { $0.localURL.isEmpty }.count
+        let candidates = probeTargets.compactMap { s -> URL? in
             guard !s.localURL.isEmpty else { return nil }
             var url = s.localURL.trimmingCharacters(in: .whitespacesAndNewlines)
             if url.hasSuffix("/") { url = String(url.dropLast()) }
@@ -1730,10 +1775,22 @@ struct RootView: View {
     /// successful discovery on any device on the user's Apple ID
     /// permanently fixes the upgrade window for every device.
     private func discoverDispatcharrAuthModeIfNeeded() {
-        let candidates = servers.filter {
-            $0.type == .dispatcharrAPI
-                && $0.isVerified
-                && $0.dispatcharrAuthMode.isEmpty
+        // ACTIVE SERVER ONLY (Logan 2026-09-16: inactive server
+        // 192.168.50.163 polled every 2 minutes). The header-shape probe is
+        // a launch-time network call; running it for saved but inactive
+        // playlists put a request (and a timeout) on servers this device is
+        // not using. The flag is discovered the moment that playlist is made
+        // active, which is the only time it matters.
+        let needsProbe: (ServerConnection) -> Bool = {
+            $0.type == .dispatcharrAPI && $0.isVerified && $0.dispatcharrAuthMode.isEmpty
+        }
+        let candidates: [ServerConnection]
+        if let active = servers.first(where: { $0.isActive }) {
+            candidates = needsProbe(active) ? [active] : []
+        } else if let first = servers.first, servers.allSatisfy({ !$0.isActive }) {
+            candidates = needsProbe(first) ? [first] : []
+        } else {
+            candidates = []
         }
         guard !candidates.isEmpty else { return }
 

@@ -217,10 +217,14 @@ final class SyncManager: ObservableObject {
         // stores the same preference as `show_remote_hints` and the two
         // are mapped by name.
         showRemoteHintsKey,
-        // Settings > Appearance > "Rounded corners on logos and artwork".
-        // App-wide look, so it syncs like the theme and Text Size rather
-        // than staying per device.
-        LogoCorners.key
+        // Settings > Appearance > "Rounded corners in List view" and
+        // "Rounded corners in Guide view". App-wide look, so both sync like
+        // the theme and Text Size rather than staying per device. The
+        // pre-split key is carried too, so a device still on the old build
+        // keeps receiving the List choice.
+        LogoCorners.listKey,
+        LogoCorners.guideKey,
+        LogoCorners.legacyKey
     ] + PlayerInfoCardSettings.allKeys
     // Player Info Card row visibility (Settings > App Behaviors). All
     // six default ON and are only written once the user flips a row,

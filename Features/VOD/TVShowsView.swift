@@ -68,21 +68,39 @@ struct TVShowsView: View {
         return s.authHeaders
     }
 
-    private var filteredShows: [VODDisplayItem] {
-        if !searchText.isEmpty {
-            var combined = vodStore.series.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
-            let localIDs = Set(combined.map { $0.id })
-            combined += vodStore.seriesSearchResults.filter { !localIDs.contains($0.id) }
-            return combined
+    /// The library grid: a windowed view of the stored catalog, rebuilt
+    /// whenever the catalog, the group filter or the playlist changes. Only
+    /// row ids and rail buckets are resident.
+    @State private var libraryShows: VODWindowList = .empty
+    /// Search results: the catalog's own hits plus the server's, bounded.
+    @State private var searchShows: [VODDisplayItem] = []
+    @State private var searchShowsTask: Task<Void, Never>?
+
+    private var showsCount: Int { searchText.isEmpty ? libraryShows.count : searchShows.count }
+
+    private struct ShowsKey: Hashable {
+        let revision: Int
+        let count: Int
+        let catalogKey: String?
+        let hidden: Set<String>
+    }
+    private var showsKey: ShowsKey {
+        ShowsKey(revision: vodStore.catalogRevision, count: vodStore.seriesCount,
+                 catalogKey: vodStore.catalogKey, hidden: hiddenGroups)
+    }
+
+    private func refreshSearchShows() {
+        searchShowsTask?.cancel()
+        let q = searchText
+        guard !q.isEmpty else { searchShows = []; return }
+        let extra = vodStore.seriesSearchResults
+        searchShowsTask = Task { @MainActor in
+            var combined = await vodStore.searchCatalog(kind: .series, query: q, hiddenTitleKeys: [])
+            guard !Task.isCancelled else { return }
+            var ids = Set(combined.map { $0.id })
+            for r in extra where ids.insert(r.id).inserted { combined.append(r) }
+            searchShows = combined
         }
-        var result = vodStore.series
-        if !hiddenGroups.isEmpty {
-            result = result.filter { item in
-                guard let cat = item.series?.categoryName else { return true }
-                return !hiddenGroups.contains(cat)
-            }
-        }
-        return result
     }
 
     /// Whether the navigation stack is at root (no detail pushed).
@@ -93,11 +111,11 @@ struct TVShowsView: View {
             ZStack {
                 Color.appBackground.ignoresSafeArea()
 
-                if vodStore.isLoadingSeries && vodStore.series.isEmpty {
+                if vodStore.isLoadingSeries && vodStore.seriesCount == 0 {
                     LoadingView(message: "Loading series…")
-                } else if let err = vodStore.seriesError, vodStore.series.isEmpty {
+                } else if let err = vodStore.seriesError, vodStore.seriesCount == 0 {
                     errorView(err)
-                } else if vodStore.series.isEmpty {
+                } else if vodStore.seriesCount == 0 {
                     emptyState
                 } else {
                     content
@@ -162,7 +180,7 @@ struct TVShowsView: View {
                 let activeServerID = (servers.first(where: { $0.isActive }) ?? servers.first)?.id
                 let alreadyTriedThisServer = activeServerID != nil
                     && vodStore.currentSeriesServerID == activeServerID
-                if vodStore.series.isEmpty
+                if vodStore.seriesCount == 0
                     && !vodStore.isLoadingSeries
                     && !alreadyTriedThisServer {
                     vodStore.refreshSeries(servers: servers)
@@ -188,6 +206,13 @@ struct TVShowsView: View {
             }
             .onChange(of: searchText) { _, query in
                 vodStore.searchSeries(query: query, servers: servers)
+                refreshSearchShows()
+            }
+            .onChange(of: vodStore.seriesSearchResults.count) { _, _ in refreshSearchShows() }
+            .task(id: showsKey) {
+                libraryShows = await vodStore.library(kind: .series, hiddenGroups: hiddenGroups,
+                                                      hiddenTitleKeys: [], genre: nil,
+                                                      onlyHidden: false, sortRaw: MoviesSortOrder.titleAZ.rawValue)
             }
             .onChange(of: navPath) { _, path in
                 isDetailPushed = !path.isEmpty
@@ -210,14 +235,14 @@ struct TVShowsView: View {
             .onReceive(NotificationCenter.default.publisher(for: .aerioOpenVOD)) { notif in
                 guard let vodType = notif.userInfo?["vodType"] as? String, vodType == "series",
                       let vodID = notif.userInfo?["vodID"] as? String else { return }
-                tryHandleSeriesDeepLink(id: vodID, from: vodStore.series)
+                tryHandleSeriesDeepLink(id: vodID)
             }
-            .onChange(of: vodStore.series) { _, series in
-                // Cold-launch path: deep link came in before the series list
-                // had loaded; try to resolve it now that the data is here.
+            .onChange(of: vodStore.seriesCount) { _, _ in
+                // Cold-launch path: deep link came in before the catalog had
+                // the row; try to resolve it now that it does.
                 guard UserDefaults.standard.string(forKey: "launchVODType") == "series",
                       let pendingID = UserDefaults.standard.string(forKey: "launchVODID") else { return }
-                tryHandleSeriesDeepLink(id: pendingID, from: series)
+                tryHandleSeriesDeepLink(id: pendingID)
             }
             #endif
             .fullScreenCover(item: $resumePlayingURL) { wrapper in
@@ -242,12 +267,39 @@ struct TVShowsView: View {
         }
     }
 
+    /// The poster grid. Generic over the collection, walking INDEXES so a
+    /// catalog-backed list never has to read every row just to build the
+    /// ForEach; LazyVGrid materializes only what it draws.
+    private func showsGrid<C: RandomAccessCollection>(_ items: C) -> some View
+    where C.Element == VODDisplayItem, C.Index == Int {
+        LazyVGrid(columns: columns, spacing: gridRowSpacing) {
+            ForEach(items.startIndex..<items.endIndex, id: \.self) { index in
+                let item = items[index]
+                NavigationLink(value: item) {
+                    VODPosterCard(item: item, headers: dispatcharrHeaders)
+                }
+                #if os(tvOS)
+                .buttonStyle(TVCardButtonStyle())
+                #else
+                .buttonStyle(.plain)
+                #endif
+                .id(VODWindowList.anchorID(index))
+            }
+        }
+    }
+
     #if os(tvOS)
     /// Looks up a series by ID in the given list and pushes its detail view
     /// onto the nav stack. Clears any existing detail first so repeated
     /// deep links don't stack.
-    private func tryHandleSeriesDeepLink(id: String, from series: [VODDisplayItem]) {
-        guard let item = series.first(where: { $0.id == id }) else { return }
+    private func tryHandleSeriesDeepLink(id: String) {
+        Task { @MainActor in
+            guard let item = await vodStore.items(kind: .series, ids: [id])[id] else { return }
+            finishSeriesDeepLink(item)
+        }
+    }
+
+    private func finishSeriesDeepLink(_ item: VODDisplayItem) {
         UserDefaults.standard.removeObject(forKey: "launchVODID")
         UserDefaults.standard.removeObject(forKey: "launchVODType")
         UserDefaults.standard.removeObject(forKey: "launchOnSeries")
@@ -316,9 +368,12 @@ struct TVShowsView: View {
             isPlaying = true
             return
         }
-        // Fallback: find the series in the store and push to its detail view
-        if let item = vodStore.series.first(where: { $0.id == progress.vodID }) {
-            navPath.append(item)
+        // Fallback: find the series in the catalog and push to its detail view
+        let wanted = progress.vodID
+        Task { @MainActor in
+            if let item = await vodStore.items(kind: .series, ids: [wanted])[wanted] {
+                navPath.append(item)
+            }
         }
     }
 
@@ -482,7 +537,7 @@ struct TVShowsView: View {
                 #endif
             }
 
-            if !searchText.isEmpty && vodStore.isSearchingSeries && filteredShows.isEmpty {
+            if !searchText.isEmpty && vodStore.isSearchingSeries && showsCount == 0 {
                 ProgressView("Searching server…")
                     .tint(.accentPrimary)
                     .padding(.top, 60)
@@ -495,20 +550,14 @@ struct TVShowsView: View {
                         activeServerID: (servers.first(where: { $0.isActive }) ?? servers.first)?.id.uuidString,
                         headers: dispatcharrHeaders,
                         onPlay: { progress in resumeFromContinueWatching(progress) },
-                        series: vodStore.series,
                         onOpenSeries: { item in navPath.append(item) }
                     )
 
-                    LazyVGrid(columns: columns, spacing: gridRowSpacing) {
-                        ForEach(filteredShows) { item in
-                            NavigationLink(value: item) {
-                                VODPosterCard(item: item, headers: dispatcharrHeaders)
-                            }
-                            #if os(tvOS)
-                            .buttonStyle(TVCardButtonStyle())
-                            #else
-                            .buttonStyle(.plain)
-                            #endif
+                    Group {
+                        if searchText.isEmpty {
+                            showsGrid(libraryShows)
+                        } else {
+                            showsGrid(searchShows)
                         }
                     }
                     .padding(16)

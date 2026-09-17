@@ -1647,6 +1647,25 @@ enum DispatcharrCapabilityProbe {
         launchProbed.insert(server.id)
     }
 
+    /// The server that was active the last time the active-server probe
+    /// pass ran in this process.
+    private static var lastActiveProbed: UUID?
+
+    /// True when the ACTIVE server is not the one the last probe pass
+    /// covered. Switching the active playlist has to re-probe that server
+    /// the way a cold launch does (Logan 2026-09-16): a permission changed
+    /// on server B while server A was active was otherwise only picked up
+    /// on the next relaunch, because `launchProbed` already held B from
+    /// some earlier pass and the ~6 hour TTL swallowed the refresh.
+    static func needsActiveServerProbe(_ server: ServerConnection) -> Bool {
+        lastActiveProbed != server.id
+    }
+
+    /// Record which server the current probe pass covered as active.
+    static func noteActiveServerProbed(_ server: ServerConnection) {
+        lastActiveProbed = server.id
+    }
+
     /// Opportunistic refresh for screens that care (DVR, On Demand). Only
     /// probes when the snapshot is missing, schema-outdated, or older than
     /// `DispatcharrCapabilitySet.staleAfter` (about 6 hours).

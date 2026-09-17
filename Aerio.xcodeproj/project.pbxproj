@@ -133,6 +133,12 @@
 		97309F3B0C6B3769882EF361 /* VODDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20C769771A1085A303FFC0F0 /* VODDetailView.swift */; };
 		98B0C60D6099DEF55810D175 /* StreamingAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 693A71F4A4429F56337992E6 /* StreamingAPIs.swift */; };
 		9D874ED59E97CB1D868F596D /* VODModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B5CE40DD6A5BBCBB943E551 /* VODModels.swift */; };
+		AA10CA7A0001000000000012 /* VODCatalogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10CA7A0001000000000011 /* VODCatalogStore.swift */; };
+		AA10CA7A0001000000000022 /* VODSweepActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10CA7A0001000000000021 /* VODSweepActivity.swift */; };
+		AA10CA7A0001000000000013 /* VODCatalogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10CA7A0001000000000011 /* VODCatalogStore.swift */; };
+		AA10CA7A0001000000000023 /* VODSweepActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10CA7A0001000000000021 /* VODSweepActivity.swift */; };
+		AA10CA7A0001000000000002 /* VODCatalogModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10CA7A0001000000000001 /* VODCatalogModels.swift */; };
+		AA10CA7A0001000000000003 /* VODCatalogModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10CA7A0001000000000001 /* VODCatalogModels.swift */; };
 		9F9A37C29E5E186E323737C0 /* ChannelListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94C2469FCAE37105952DCC28 /* ChannelListView.swift */; };
 		A133DDDD4444DDDD4444DDDD /* MPMediaItemArtworkShim.m in Sources */ = {isa = PBXBuildFile; fileRef = A111BBBB2222BBBB2222BBBB /* MPMediaItemArtworkShim.m */; };
 		A1B2C3D4E5F67890CAFE0001 /* TVPressGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */; };
@@ -349,6 +355,9 @@
 		29555D1D6559100DF82F2F8A /* ContentProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ContentProvider.swift; path = TopShelfExtension/ContentProvider.swift; sourceTree = "<group>"; };
 		2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = Pods.xcodeproj; sourceTree = "<group>"; };
 		2B5CE40DD6A5BBCBB943E551 /* VODModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VODModels.swift; sourceTree = "<group>"; };
+		AA10CA7A0001000000000011 /* VODCatalogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VODCatalogStore.swift; sourceTree = "<group>"; };
+		AA10CA7A0001000000000021 /* VODSweepActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VODSweepActivity.swift; sourceTree = "<group>"; };
+		AA10CA7A0001000000000001 /* VODCatalogModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VODCatalogModels.swift; sourceTree = "<group>"; };
 		2C791BC8B23CD3EAA3E65BE1 /* AppearanceSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppearanceSettingsView.swift; sourceTree = "<group>"; };
 		330BC3F1B76C2D8A16951BD9 /* Pods-Aerio_tvOS.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Aerio_tvOS.release.xcconfig"; path = "Target Support Files/Pods-Aerio_tvOS/Pods-Aerio_tvOS.release.xcconfig"; sourceTree = "<group>"; };
 		337C9ADFE967736F023EB4CD /* MobileVLCKit-xcframeworks.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "MobileVLCKit-xcframeworks.sh"; sourceTree = "<group>"; };
@@ -757,6 +766,7 @@
 				875B0901B53C33B024AF597F /* Models.swift */,
 				EA33B18A62A3411B6425B661 /* PlaylistModels.swift */,
 				2B5CE40DD6A5BBCBB943E551 /* VODModels.swift */,
+				AA10CA7A0001000000000001 /* VODCatalogModels.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -977,6 +987,8 @@
 				4A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift */,
 				265A7DFCEC12544455827DB3 /* ReminderManager.swift */,
 				4B9C3D4E2F6A718903BB5C6D /* SyncManager.swift */,
+				AA10CA7A0001000000000011 /* VODCatalogStore.swift */,
+				AA10CA7A0001000000000021 /* VODSweepActivity.swift */,
 				4B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift */,
 				F6123CC8F10ADF7063AE0E97 /* ReminderBannerView.swift */,
 				62C0C151EAA6394D32003217 /* DeviceInfo.swift */,
@@ -1328,6 +1340,9 @@
 				B76CD4D353AB0D45EEF9F480 /* Typography.swift in Sources */,
 				353CD0D32CB0D6B2998B1AD4 /* VODDetailView.swift in Sources */,
 				9D874ED59E97CB1D868F596D /* VODModels.swift in Sources */,
+				AA10CA7A0001000000000012 /* VODCatalogStore.swift in Sources */,
+				AA10CA7A0001000000000022 /* VODSweepActivity.swift in Sources */,
+				AA10CA7A0001000000000002 /* VODCatalogModels.swift in Sources */,
 				BA33A33C572E086E61AA73AB /* VODService.swift in Sources */,
 				8D2CF5152AE5713290F75C94 /* WelcomeView.swift in Sources */,
 				1868ADFE12C568F8FC5FED53 /* StreamingAPIs.swift in Sources */,
@@ -1460,6 +1475,9 @@
 				6BA60E4727C61B8943535F4E /* Typography.swift in Sources */,
 				97309F3B0C6B3769882EF361 /* VODDetailView.swift in Sources */,
 				B743C668A35FABC8A1BECB16 /* VODModels.swift in Sources */,
+				AA10CA7A0001000000000013 /* VODCatalogStore.swift in Sources */,
+				AA10CA7A0001000000000023 /* VODSweepActivity.swift in Sources */,
+				AA10CA7A0001000000000003 /* VODCatalogModels.swift in Sources */,
 				D707545F75A250B3657868F5 /* VODService.swift in Sources */,
 				58753215820D219D87D24402 /* WelcomeView.swift in Sources */,
 				98B0C60D6099DEF55810D175 /* StreamingAPIs.swift in Sources */,

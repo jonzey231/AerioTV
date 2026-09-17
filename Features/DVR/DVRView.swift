@@ -537,12 +537,12 @@ struct DVRView: View {
                 get: { selectedKind?.label },
                 set: { label in selectedKind = kinds.first { $0.label == label } }
             ),
-            items: library.map { rec in
-                PhoneGridItem(id: rec.id.uuidString) { AnyView(card(rec, inGrid: true)) }
-            },
+            itemCount: library.count,
+            cell: { index in AnyView(card(library[index], inGrid: true)) },
             railLetters: railLetters,
             railTarget: { letter in
-                library.first { AlphabetRail.bucket(for: $0.programTitle) == letter }?.id.uuidString
+                library.firstIndex { AlphabetRail.bucket(for: $0.programTitle) == letter }
+                    .map(VODWindowList.anchorID)
             }
         )
     }

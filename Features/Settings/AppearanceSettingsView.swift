@@ -58,10 +58,14 @@ struct AppearanceSettingsView: View {
     @AppStorage("ui.showChannelNames")    private var showChannelNames = true
     @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
     /// Rounded corners on channel logos and program artwork (Logan
-    /// 2026-09-16, Android parity). ON reproduces the shipped look: each
+    /// 2026-09-16, Android parity), split into two rows: List view covers
+    /// the Live TV rows and every other card surface, Guide view covers the
+    /// guide's channel column alone. ON reproduces the shipped look: each
     /// image takes the corner radius of the cell or card it sits in. OFF
-    /// squares them all. See `LogoCorners` in Typography.swift.
-    @AppStorage(LogoCorners.key) private var roundedLogoCorners = LogoCorners.defaultValue
+    /// squares them. See `LogoCorners` in Typography.swift.
+    @AppStorage(LogoCorners.listKey) private var roundedLogoCorners = LogoCorners.listDefault
+    /// Default OFF: the guide's channel column is a flat rail, not a card.
+    @AppStorage(LogoCorners.guideKey) private var roundedGuideCorners = LogoCorners.guideDefault
     @AppStorage(ClockFormat.defaultsKey) private var timeFormat = "system"
 
     private static let timeFormatOptions: [(value: String, label: String, subtitle: String)] = [
@@ -256,13 +260,25 @@ struct AppearanceSettingsView: View {
                     }
                 }
 
-                // Channel List (issue #28 logos + GH #19 numbers)
-                tvAppearanceSection("Channel List") {
+                // Guide Presentation (issue #28 logos + GH #19 numbers).
+                // Renamed from "Channel List" on 2026-09-16 (Logan): the
+                // Live TV List view is gone from the tvOS UI, so everything
+                // left in this section describes the Guide's channel column.
+                // Android uses the same label. Rows that only affect the List
+                // view are hidden behind TVListView.enabled, not deleted.
+                tvAppearanceSection(
+                    TVListView.enabled ? "Channel List" : "Guide Presentation",
+                    footer: TVListView.enabled
+                        ? nil
+                        : "Turn logos or numbers off to give long channel names more room in the Guide's channel column."
+                ) {
                     TVSettingsToggleRow(
                         icon: "tv.fill",
                         iconColor: .accentPrimary,
                         title: "Show Channel Logos",
-                        subtitle: "Turn off to hide channel logos so longer channel names get the full row width.",
+                        subtitle: TVListView.enabled
+                            ? "Turn off to hide channel logos so longer channel names get the full row width."
+                            : "Display each channel's logo in the Guide's channel column.",
                         isOn: $showChannelLogos,
                         onChange: { _ in }
                     )
@@ -270,7 +286,9 @@ struct AppearanceSettingsView: View {
                         icon: "number",
                         iconColor: .accentPrimary,
                         title: "Show Channel Numbers",
-                        subtitle: "Turn off to hide channel numbers in the Live TV list and Guide.",
+                        subtitle: TVListView.enabled
+                            ? "Turn off to hide channel numbers in the Live TV list and Guide."
+                            : "Display each channel's number in the Guide's channel column.",
                         isOn: $showChannelNumbers,
                         onChange: { _ in }
                     )
@@ -279,7 +297,9 @@ struct AppearanceSettingsView: View {
                         icon: "textformat",
                         iconColor: .accentPrimary,
                         title: "Show Channel Names",
-                        subtitle: "Turn off to hide channel names in the Live TV list and the Guide's channel column.",
+                        subtitle: TVListView.enabled
+                            ? "Turn off to hide channel names in the Live TV list and the Guide's channel column."
+                            : "Turn off to hide channel names in the Guide's channel column.",
                         isOn: $showChannelNames,
                         onChange: { _ in }
                     )
@@ -289,16 +309,31 @@ struct AppearanceSettingsView: View {
                         icon: "text.alignleft",
                         iconColor: .accentPrimary,
                         title: "Show Program Subtitles",
-                        subtitle: "Turn off to hide the episode or match name under each program title in the Guide and Live TV list, for EPGs that repeat the description there.",
+                        subtitle: TVListView.enabled
+                            ? "Turn off to hide the episode or match name under each program title in the Guide and Live TV list, for EPGs that repeat the description there."
+                            : "Turn off to hide the episode or match name under each program title in the Guide, for EPGs that repeat the description there.",
                         isOn: $showProgramSubtitles,
                         onChange: { _ in }
                     )
+                    // List-only: hidden while the tvOS List view is gone
+                    // (Logan 2026-09-16). The key and the toggle code stay so
+                    // TVListView.enabled restores it untouched.
+                    if TVListView.enabled {
+                        TVSettingsToggleRow(
+                            icon: "square.on.square",
+                            iconColor: .accentPrimary,
+                            title: "Rounded corners in List view",
+                            subtitle: "Rounds channel logos and program artwork in the Live TV list and on the app's cards.",
+                            isOn: $roundedLogoCorners,
+                            onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
+                        )
+                    }
                     TVSettingsToggleRow(
-                        icon: "square.on.square",
+                        icon: "square.grid.3x3",
                         iconColor: .accentPrimary,
-                        title: "Rounded corners on logos and artwork",
-                        subtitle: "Applies to channel logos and program artwork throughout the app.",
-                        isOn: $roundedLogoCorners,
+                        title: "Rounded corners in Guide view",
+                        subtitle: "Rounds channel logos in the Guide's channel column.",
+                        isOn: $roundedGuideCorners,
                         onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
                     )
                 }
@@ -337,7 +372,9 @@ struct AppearanceSettingsView: View {
     /// tvOS section header + grouped content. Rows inside already supply
     /// their own card background via `tvSettingsCardBG`, so the section
     /// wrapper only provides a section title — no outer card.
-    private func tvAppearanceSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+    private func tvAppearanceSection(_ title: String,
+                                     footer: String? = nil,
+                                     @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title.uppercased())
                 .scaledFont(.system(size: 22, weight: .bold))
@@ -346,6 +383,13 @@ struct AppearanceSettingsView: View {
                 .padding(.leading, 20)
             VStack(alignment: .leading, spacing: 8) {
                 content()
+            }
+            if let footer, !footer.isEmpty {
+                Text(footer)
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .padding(.leading, 20)
+                    .padding(.trailing, 40)
             }
         }
     }
@@ -862,15 +906,28 @@ struct AppearanceSettingsView: View {
                     }
                     Toggle(isOn: $roundedLogoCorners) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Rounded corners on logos and artwork")
+                            Text("Rounded corners in List view")
                                 .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                            Text("Applies to channel logos and program artwork throughout the app.")
+                            Text("Rounds channel logos and program artwork in the Live TV list and on the app's cards.")
                                 .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                         }
                     }
                     .tint(theme.accent)
                     .listRowBackground(Color.cardBackground)
                     .onChange(of: roundedLogoCorners) { _, _ in
+                        SyncManager.shared.pushPreferencesImmediate()
+                    }
+                    Toggle(isOn: $roundedGuideCorners) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Rounded corners in Guide view")
+                                .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                            Text("Rounds channel logos in the Guide's channel column.")
+                                .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                        }
+                    }
+                    .tint(theme.accent)
+                    .listRowBackground(Color.cardBackground)
+                    .onChange(of: roundedGuideCorners) { _, _ in
                         SyncManager.shared.pushPreferencesImmediate()
                     }
                 } header: {

@@ -6615,6 +6615,72 @@ extension DispatcharrAPI {
         makeBackgroundPageStream(firstPath: Self.backgroundSeriesPath(category: category), itemCap: itemCap)
     }
 
+    // MARK: - Resumable category page walk (GH #109 parity, 2026-09-16)
+    //
+    // The Android app removed its total VOD cap: every page the server
+    // offers is stored, swept round-robin over the enabled categories with
+    // saved positions so process death resumes instead of restarting. The
+    // page streams above cannot express that (they own their own cursor and
+    // never report the server's collection count), so the sweep drives this
+    // explicit per-page fetch instead: give it a category and a 1-based page
+    // number, get back the rows, the server's count for that filter, and
+    // whether another page exists.
+
+    /// One page of a resumable VOD category walk.
+    struct VODPageResult<T: Decodable & Sendable>: Sendable {
+        let items: [T]
+        /// DRF `count` for this filter, i.e. what the server says the
+        /// category holds in total. nil when the endpoint answered a bare
+        /// array instead of a page.
+        let serverCount: Int?
+        /// True when DRF reported a `next` link, so the walk continues.
+        let hasMore: Bool
+    }
+
+    func fetchVODMoviePage(category: String?, page: Int,
+                           background: Bool) async throws -> VODPageResult<DispatcharrVODMovie> {
+        try await fetchVODPage(path: Self.pagedVODPath(collection: "movies", type: "movie",
+                                                       category: category, page: page),
+                               background: background)
+    }
+
+    func fetchVODSeriesPage(category: String?, page: Int,
+                            background: Bool) async throws -> VODPageResult<DispatcharrVODSeries> {
+        try await fetchVODPage(path: Self.pagedVODPath(collection: "series", type: "series",
+                                                       category: category, page: page),
+                               background: background)
+    }
+
+    /// Same `name|type` category filter the stream paths use, plus DRF's
+    /// explicit `page` so a saved position can be resumed directly.
+    private static func pagedVODPath(collection: String, type: String,
+                                     category: String?, page: Int) -> String {
+        var path = "/api/vod/\(collection)/?page_size=100&page=\(max(1, page))"
+        if let category, !category.isEmpty {
+            let typed = category.contains("|") ? category : "\(category)|\(type)"
+            let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
+            path += "&category=\(encoded)"
+        }
+        return path
+    }
+
+    private func fetchVODPage<T: Decodable & Sendable>(path: String,
+                                                       background: Bool) async throws -> VODPageResult<T> {
+        var request = URLRequest(url: try buildURL(path: path))
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        // The sweep never competes with playback.
+        if background { request.networkServiceType = .background }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        if let list = try? Self.jsonDecoder.decode([T].self, from: data) {
+            return VODPageResult(items: list, serverCount: list.count, hasMore: false)
+        }
+        let wrapped = try Self.jsonDecoder.decode(DispatcharrResultsWrapper<T>.self, from: data)
+        return VODPageResult(items: wrapped.results,
+                             serverCount: wrapped.count,
+                             hasMore: wrapped.next != nil && !wrapped.results.isEmpty)
+    }
+
     /// Mirrors the private `moviesPath`: the `name|type` category filter
     /// Dispatcharr's MovieFilter matches on.
     private static func backgroundMoviesPath(category: String?) -> String {
