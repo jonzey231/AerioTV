@@ -404,9 +404,13 @@ struct CustomCategoryEditor: View {
     var body: some View {
         List {
             Section {
-                TextField("Match string (e.g. Horror)", text: $entry.match)
+                // Phase 3: the shared Settings field, so this name box
+                // has the same label/helper/focus shape as every other
+                // text entry in Settings.
+                SettingsTextField("Name",
+                                  placeholder: "Match string (e.g. Horror)",
+                                  text: $entry.match)
                     .listRowBackground(Color.cardBackground)
-                    .autocorrectionDisabled()
                 ColorPicker("Color", selection: colorBinding, supportsOpacity: false)
                     .listRowBackground(Color.cardBackground)
                 HStack {

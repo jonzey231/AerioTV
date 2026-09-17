@@ -105,14 +105,24 @@ struct DVRSettingsView: View {
         List {
             // MARK: - Default Buffers
             Section {
-                bufferPicker(label: "Start early (pre-roll)",
-                             selection: $defaultPreRoll,
-                             options: [0, 5, 10, 15, 30],
-                             customAction: { showCustomPreRoll = true })
-                bufferPicker(label: "End late (post-roll)",
-                             selection: $defaultPostRoll,
-                             options: [0, 5, 10, 15, 30, 60],
-                             customAction: { showCustomPostRoll = true })
+                // Phase 3, item 3: the buffer Menus became SettingsChoicePickers.
+                // The picker only renders a fixed list, so "Custom…" stays as
+                // its own row directly underneath, exactly as before.
+                SettingsChoicePicker("Start early (pre-roll)",
+                                     options: bufferOptions(preRollStops, current: defaultPreRoll),
+                                     selection: $defaultPreRoll)
+                customBufferRow(isCustom: !preRollStops.contains(defaultPreRoll)) {
+                    customPreRollValue = defaultPreRoll > 0 ? defaultPreRoll : 5
+                    showCustomPreRoll = true
+                }
+
+                SettingsChoicePicker("End late (post-roll)",
+                                     options: bufferOptions(postRollStops, current: defaultPostRoll),
+                                     selection: $defaultPostRoll)
+                customBufferRow(isCustom: !postRollStops.contains(defaultPostRoll)) {
+                    customPostRollValue = defaultPostRoll > 0 ? defaultPostRoll : 5
+                    showCustomPostRoll = true
+                }
             } header: {
                 Text("Default Recording Buffers")
                     .sectionHeaderStyle()
@@ -127,13 +137,19 @@ struct DVRSettingsView: View {
             // there's no destination choice to present.
             if isDispatcharr, canRecordToServer, let server = activeServer {
                 Section {
-                    Picker("Default destination", selection: Binding(
-                        get: { server.defaultRecordingDestination },
-                        set: { server.defaultRecordingDestination = $0; try? modelContext.save() }
-                    )) {
-                        Text("Dispatcharr server").tag(RecordingDestination.dispatcharrServer)
-                        Text("This device").tag(RecordingDestination.local)
-                    }
+                    // Phase 3, item 3: was a native menu Picker; now the shared
+                    // picker, carrying the icons and subtitles tvOS already had.
+                    // The SwiftData write stays in onChange so the save travels
+                    // with it.
+                    SettingsChoicePicker(
+                        "Default destination",
+                        options: destinationOptions,
+                        selection: Binding(
+                            get: { server.defaultRecordingDestination },
+                            set: { server.defaultRecordingDestination = $0 }
+                        ),
+                        onChange: { _ in try? modelContext.save() }
+                    )
                 } header: {
                     Text("Recording Destination")
                         .sectionHeaderStyle()
@@ -272,17 +288,16 @@ struct DVRSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
                 SettingsSection("Start Early (Pre-Roll)", style: .plain) {
-                    ForEach([0, 5, 10, 15, 30], id: \.self) { mins in
-                        TVSettingsSelectionRow(
-                            label: mins == 0 ? "None" : "\(mins) minutes",
-                            isSelected: defaultPreRoll == mins,
-                            action: { defaultPreRoll = mins }
-                        )
-                    }
+                    // Phase 3, item 3: shared picker for the fixed stops;
+                    // "Custom…" stays its own row because the picker only
+                    // renders a fixed list.
+                    SettingsChoicePicker("Start early (pre-roll)",
+                                         options: bufferOptions(preRollStops, current: defaultPreRoll),
+                                         selection: $defaultPreRoll)
                     TVSettingsActionRow(
                         icon: "slider.horizontal.3",
                         label: "Custom…",
-                        isAccent: ![0, 5, 10, 15, 30].contains(defaultPreRoll),
+                        isAccent: !preRollStops.contains(defaultPreRoll),
                         action: {
                             customPreRollValue = defaultPreRoll > 0 ? defaultPreRoll : 5
                             showCustomPreRoll = true
@@ -291,17 +306,13 @@ struct DVRSettingsView: View {
                 }
 
                 SettingsSection("End Late (Post-Roll)", style: .plain) {
-                    ForEach([0, 5, 10, 15, 30, 60], id: \.self) { mins in
-                        TVSettingsSelectionRow(
-                            label: mins == 0 ? "None" : "\(mins) minutes",
-                            isSelected: defaultPostRoll == mins,
-                            action: { defaultPostRoll = mins }
-                        )
-                    }
+                    SettingsChoicePicker("End late (post-roll)",
+                                         options: bufferOptions(postRollStops, current: defaultPostRoll),
+                                         selection: $defaultPostRoll)
                     TVSettingsActionRow(
                         icon: "slider.horizontal.3",
                         label: "Custom…",
-                        isAccent: ![0, 5, 10, 15, 30, 60].contains(defaultPostRoll),
+                        isAccent: !postRollStops.contains(defaultPostRoll),
                         action: {
                             customPostRollValue = defaultPostRoll > 0 ? defaultPostRoll : 5
                             showCustomPostRoll = true
@@ -311,25 +322,15 @@ struct DVRSettingsView: View {
 
                 if isDispatcharr, canRecordToServer, let server = activeServer {
                     SettingsSection("Recording Destination", style: .plain) {
-                        TVSettingsSelectionRow(
-                            icon: "server.rack",
-                            label: "Dispatcharr server",
-                            subtitle: "Keeps recording even when AerioTV is closed",
-                            isSelected: server.defaultRecordingDestination == .dispatcharrServer,
-                            action: {
-                                server.defaultRecordingDestination = .dispatcharrServer
-                                try? modelContext.save()
-                            }
-                        )
-                        TVSettingsSelectionRow(
-                            icon: "internaldrive",
-                            label: "This device",
-                            subtitle: "Requires AerioTV to remain open",
-                            isSelected: server.defaultRecordingDestination == .local,
-                            action: {
-                                server.defaultRecordingDestination = .local
-                                try? modelContext.save()
-                            }
+                        // Phase 3, item 3: same option list as iOS now.
+                        SettingsChoicePicker(
+                            "Default destination",
+                            options: destinationOptions,
+                            selection: Binding(
+                                get: { server.defaultRecordingDestination },
+                                set: { server.defaultRecordingDestination = $0 }
+                            ),
+                            onChange: { _ in try? modelContext.save() }
                         )
                     }
                 }
@@ -453,25 +454,53 @@ struct DVRSettingsView: View {
 
     // MARK: - Helpers
 
+    /// The fixed buffer stops. Named so both platforms and the "Custom…"
+    /// highlight test share one list (Phase 3).
+    private var preRollStops: [Int] { [0, 5, 10, 15, 30] }
+    private var postRollStops: [Int] { [0, 5, 10, 15, 30, 60] }
+
+    /// Buffer choices, with the stored value appended when it is a custom
+    /// number. Without that the collapsed iOS row would read "Not set" for
+    /// a perfectly valid 20-minute pre-roll (Phase 3).
+    private func bufferOptions(_ stops: [Int], current: Int) -> [SettingsChoice<Int>] {
+        var options = stops.map { SettingsChoice($0, $0 == 0 ? "None" : "\($0) minutes") }
+        if !stops.contains(current) {
+            options.append(SettingsChoice(current, "\(current) minutes"))
+        }
+        return options
+    }
+
+    /// Recording destinations. Phase 3 gave iOS the icons and subtitles that
+    /// only tvOS used to show.
+    private var destinationOptions: [SettingsChoice<RecordingDestination>] {
+        [
+            SettingsChoice(.dispatcharrServer, "Dispatcharr server",
+                           subtitle: "Keeps recording even when AerioTV is closed",
+                           icon: "server.rack"),
+            SettingsChoice(.local, "This device",
+                           subtitle: "Requires AerioTV to remain open",
+                           icon: "internaldrive"),
+        ]
+    }
+
     #if os(iOS)
+    /// The "Custom…" escape hatch, now a row of its own under the picker.
+    /// Accent-tinted while the stored value is off the fixed stops, matching
+    /// the tvOS action row (Phase 3).
     @ViewBuilder
-    private func bufferPicker(label: String, selection: Binding<Int>,
-                              options: [Int], customAction: @escaping () -> Void) -> some View {
-        HStack {
-            Text(label)
-            Spacer()
-            Menu {
-                ForEach(options, id: \.self) { mins in
-                    Button(mins == 0 ? "None" : "\(mins) min") {
-                        selection.wrappedValue = mins
-                    }
-                }
-                Divider()
-                Button("Custom…", action: customAction)
-            } label: {
-                Text(selection.wrappedValue == 0 ? "None" : "\(selection.wrappedValue) min")
-                    .foregroundColor(Color.contrastText(.accentPrimary))
+    private func customBufferRow(isCustom: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: "slider.horizontal.3")
+                    .scaledFont(.system(size: 15, weight: .semibold))
+                    .foregroundColor(theme.accent)
+                    .frame(width: 22)
+                Text("Custom…")
+                    .scaledFont(.bodyMedium)
+                    .foregroundColor(isCustom ? Color.contrastText(.accentPrimary) : .textPrimary)
+                Spacer()
             }
+            .contentShape(Rectangle())
         }
     }
     #endif

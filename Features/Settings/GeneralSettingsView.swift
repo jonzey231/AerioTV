@@ -98,15 +98,17 @@ struct GeneralSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
                 SettingsSection("Startup", style: .plain) {
-                    ForEach(selectableTabs, id: \.self) { tab in
-                        TVSettingsSelectionRow(
-                            icon: tab.icon,
-                            iconColor: theme.accent,
-                            label: tab.title,
-                            isSelected: defaultTabRaw == tab.rawValue,
-                            action: { defaultTabRaw = tab.rawValue }
-                        )
-                    }
+                    // Phase 3, item 3: the hand-rolled tab list is now one
+                    // SettingsChoicePicker so Startup asks its question the
+                    // same way every other page does.
+                    SettingsChoicePicker(
+                        "Default Landing Tab",
+                        options: selectableTabs.map {
+                            SettingsChoice($0.rawValue, $0.title, icon: $0.icon)
+                        },
+                        selection: $defaultTabRaw,
+                        footer: "The tab shown when the app first launches."
+                    )
 
                     TVSettingsToggleRow(
                         icon: "bolt.horizontal",
@@ -150,28 +152,18 @@ struct GeneralSettingsView: View {
         List {
             // MARK: Startup
             Section {
-                ForEach(selectableTabs, id: \.self) { tab in
-                    Button {
-                        defaultTabRaw = tab.rawValue
-                    } label: {
-                        HStack {
-                            Image(systemName: tab.icon)
-                                .scaledFont(.system(size: 15))
-                                .foregroundColor(theme.accent)
-                                .frame(width: 24)
-                            Text(tab.title)
-                                .scaledFont(.bodyMedium)
-                                .foregroundColor(.textPrimary)
-                            Spacer()
-                            if defaultTabRaw == tab.rawValue {
-                                Image(systemName: "checkmark")
-                                    .scaledFont(.system(size: 14, weight: .semibold))
-                                    .foregroundColor(theme.accent)
-                            }
-                        }
-                    }
-                    .listRowBackground(Color.cardBackground)
-                }
+                // Phase 3, item 3: one row that pushes the choice page
+                // instead of a check list that pushed the toggles below it
+                // off screen. The footer moved onto the pushed page.
+                SettingsChoicePicker(
+                    "Default Landing Tab",
+                    options: selectableTabs.map {
+                        SettingsChoice($0.rawValue, $0.title, icon: $0.icon)
+                    },
+                    selection: $defaultTabRaw,
+                    footer: "The tab shown when the app first launches."
+                )
+                .listRowBackground(Color.cardBackground)
 
                 Toggle(isOn: $skipLoadingScreen) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -222,8 +214,8 @@ struct GeneralSettingsView: View {
                 Text("Startup").sectionHeaderStyle()
             } footer: {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("The tab shown when the app first launches.")
-                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                    // Phase 3: the landing-tab line lives on the picker's
+                    // pushed page now, so it is not repeated here.
                     Text(UIDevice.current.userInterfaceIdiom == .pad
                          ? "Skipping the loading screen may cause brief UI stutter while data loads. Resume picks up the last channel you watched in the corner mini-player; press Play/Pause to expand."
                          : "Skipping the loading screen may cause brief UI stutter while data loads.")

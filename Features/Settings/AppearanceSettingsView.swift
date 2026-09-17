@@ -43,6 +43,49 @@ struct AppearanceSettingsView: View {
         ("24", "24-hour", "19:30"),
     ]
 
+    // MARK: - Phase 3 shared option lists
+    // One list per question, used by both platforms, so iOS and tvOS
+    // cannot drift apart on titles, subtitles or order again.
+
+    private static var timeFormatChoices: [SettingsChoice<String>] {
+        timeFormatOptions.map { SettingsChoice($0.value, $0.label, subtitle: $0.subtitle, icon: "clock") }
+    }
+
+    private static let timeFormatFootnote = "System follows your device's clock setting. Applies to the Guide, program info, search, and recordings."
+
+    private var appearanceModeChoices: [SettingsChoice<AppearanceMode>] {
+        AppearanceMode.allCases.map { mode in
+            SettingsChoice(mode, mode.displayName,
+                           subtitle: appearanceModeSubtitle(mode),
+                           icon: mode == .dark ? "moon.fill"
+                                 : mode == .light ? "sun.max.fill"
+                                 : "circle.lefthalf.filled")
+        }
+    }
+
+    /// Writes through `ThemeManager` (never a raw property assignment)
+    /// and keeps the immediate preference push the segmented control
+    /// used to do from `.onChange`.
+    private var appearanceModeSelection: Binding<AppearanceMode> {
+        Binding(
+            get: { theme.appearanceMode },
+            set: { theme.setAppearanceMode($0) }
+        )
+    }
+
+    private var liquidGlassChoices: [SettingsChoice<LiquidGlassStyle>] {
+        LiquidGlassStyle.allCases.map {
+            SettingsChoice($0, $0.displayName, subtitle: liquidGlassDescription($0))
+        }
+    }
+
+    private var liquidGlassSelection: Binding<LiquidGlassStyle> {
+        Binding(
+            get: { theme.liquidGlassStyle },
+            set: { theme.setLiquidGlassStyle($0) }
+        )
+    }
+
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
@@ -88,25 +131,16 @@ struct AppearanceSettingsView: View {
                         )
                     }
 
-                    // Appearance mode (Dark / Light / System). No segmented
-                    // idiom on the remote, so three selection rows mirroring
-                    // the theme rows above. Orthogonal to the theme choice.
-                    ForEach(AppearanceMode.allCases, id: \.self) { mode in
-                        TVSettingsSelectionRow(
-                            label: mode.displayName,
-                            subtitle: appearanceModeSubtitle(mode),
-                            isSelected: theme.appearanceMode == mode,
-                            action: { theme.setAppearanceMode(mode) },
-                            leading: {
-                                Image(systemName: mode == .dark ? "moon.fill"
-                                      : mode == .light ? "sun.max.fill"
-                                      : "circle.lefthalf.filled")
-                                    .font(.system(size: 24))  // glyph in a fixed box: not text, stays fixed
-                                    .foregroundColor(theme.accent)
-                                    .frame(width: 28, height: 28)
-                            }
-                        )
-                    }
+                    // Appearance mode (Dark / Light / System). Phase 3:
+                    // the shared picker, which stays inline on tvOS and
+                    // mirrors the theme rows above. Orthogonal to the
+                    // theme choice.
+                    SettingsChoicePicker("Appearance",
+                                         options: appearanceModeChoices,
+                                         selection: appearanceModeSelection,
+                                         onChange: { _ in
+                                             SyncManager.shared.pushPreferencesImmediate()
+                                         })
 
                     // Custom accent toggle
                     TVSettingsToggleRow(
@@ -117,39 +151,25 @@ struct AppearanceSettingsView: View {
                     ) { _ in }
 
                     if theme.useCustomAccent {
-                        HStack {
-                            Text("Hex")
-                                .scaledFont(.system(size: 26, weight: .medium).subtext())
-                                .foregroundColor(Color.contrastText(.textSecondary))
-                            Spacer()
-                            TextField("2DD4BF", text: $theme.customAccentHex)
-                                .textFieldStyle(.plain)
-                                .scaledFont(.system(size: 26, design: .monospaced))
-                                .foregroundColor(.textPrimary)
-                                .multilineTextAlignment(.trailing)
-                                .frame(width: 200)
-                                .autocorrectionDisabled()
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 10)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .fill(Color.elevatedBackground)
-                                )
-                        }
-                        .padding(.horizontal, 20)
+                        // Phase 3: the shared Settings field replaces the
+                        // hand-styled trailing box, so the hex entry gets
+                        // the same label, helper line and focus outline
+                        // as every other field in Settings.
+                        SettingsTextField("Hex Color",
+                                          placeholder: "2DD4BF",
+                                          text: $theme.customAccentHex,
+                                          helper: "Six hex digits, for example 2DD4BF.",
+                                          autocapitalization: .characters)
+                            .padding(.horizontal, 20)
                     }
                 }
 
                 // Liquid Glass
                 tvAppearanceSection("Glass Effect") {
-                    ForEach(LiquidGlassStyle.allCases, id: \.self) { style in
-                        TVSettingsSelectionRow(
-                            label: style.displayName,
-                            subtitle: liquidGlassDescription(style),
-                            isSelected: theme.liquidGlassStyle == style,
-                            action: { theme.setLiquidGlassStyle(style) }
-                        )
-                    }
+                    // Phase 3: shared picker, inline on tvOS.
+                    SettingsChoicePicker("Glass Effect",
+                                         options: liquidGlassChoices,
+                                         selection: liquidGlassSelection)
                 }
 
                 // Preview
@@ -176,19 +196,17 @@ struct AppearanceSettingsView: View {
                 // Time Format: every clock in the app (guide header, cell
                 // ranges, program info, search, recordings).
                 tvAppearanceSection("Time Format") {
-                    ForEach(Self.timeFormatOptions, id: \.value) { option in
-                        TVSettingsSelectionRow(
-                            icon: "clock",
-                            iconColor: .accentPrimary,
-                            label: option.label,
-                            subtitle: option.subtitle,
-                            isSelected: timeFormat == option.value,
-                            action: {
-                                timeFormat = option.value
-                                SyncManager.shared.pushPreferencesImmediate()
-                            }
-                        )
-                    }
+                    // Phase 3: shared picker; the push moves onto the
+                    // picker's onChange so the write and its side effect
+                    // stay in one place.
+                    SettingsChoicePicker("Time Format",
+                                         options: Self.timeFormatChoices,
+                                         selection: $timeFormat,
+                                         footer: Self.timeFormatFootnote,
+                                         icon: "clock",
+                                         onChange: { _ in
+                                             SyncManager.shared.pushPreferencesImmediate()
+                                         })
                 }
 
             }
@@ -471,33 +489,17 @@ struct AppearanceSettingsView: View {
 
                 // MARK: Liquid Glass
                 Section {
-                    ForEach(LiquidGlassStyle.allCases, id: \.self) { style in
-                        Button {
-                            theme.setLiquidGlassStyle(style)
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(style.displayName)
-                                        .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                                    Text(liquidGlassDescription(style))
-                                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
-                                }
-                                Spacer()
-                                if theme.liquidGlassStyle == style {
-                                    Image(systemName: "checkmark")
-                                        .scaledFont(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(theme.accent)
-                                }
-                            }
-                        }
+                    // Phase 3: four inline check rows collapse to one row
+                    // that pushes the choice page, carrying the footnote.
+                    SettingsChoicePicker("Glass Effect",
+                                         options: liquidGlassChoices,
+                                         selection: liquidGlassSelection,
+                                         footer: liquidGlassFootnote)
                         .listRowBackground(Color.cardBackground)
-                    }
-                } header: {
-                    Text("Glass Effect").sectionHeaderStyle()
-                } footer: {
-                    Text(liquidGlassFootnote)
-                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
+                // Phase 3: no Section header. The picker row already says
+                // "Glass Effect"; a header repeating it read as two labels
+                // for one control.
                 .listSectionSeparator(.hidden)
 
                 // MARK: Preview Swatch
@@ -558,34 +560,20 @@ struct AppearanceSettingsView: View {
 
                 // MARK: Time Format
                 Section {
-                    ForEach(Self.timeFormatOptions, id: \.value) { option in
-                        Button {
-                            timeFormat = option.value
-                            SyncManager.shared.pushPreferencesImmediate()
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(option.label)
-                                        .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                                    Text(option.subtitle)
-                                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
-                                }
-                                Spacer()
-                                if timeFormat == option.value {
-                                    Image(systemName: "checkmark")
-                                        .scaledFont(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(theme.accent)
-                                }
-                            }
-                        }
+                    // Phase 3: one row that pushes the choice page; the
+                    // Section footer moved onto the picker.
+                    SettingsChoicePicker("Time Format",
+                                         options: Self.timeFormatChoices,
+                                         selection: $timeFormat,
+                                         footer: Self.timeFormatFootnote,
+                                         icon: "clock",
+                                         onChange: { _ in
+                                             SyncManager.shared.pushPreferencesImmediate()
+                                         })
                         .listRowBackground(Color.cardBackground)
-                    }
-                } header: {
-                    Text("Time Format").sectionHeaderStyle()
-                } footer: {
-                    Text("System follows your device's clock setting. Applies to the Guide, program info, search, and recordings.")
-                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
+                // Phase 3: no Section header, for the same reason as
+                // Glass Effect above.
                 .listSectionSeparator(.hidden)
 
             }
@@ -615,24 +603,16 @@ struct AppearanceSettingsView: View {
         // Appearance mode — a surface luminance axis orthogonal to the
         // hue/identity themes. Defaults to Dark; selecting a theme never
         // changes the mode, and vice versa.
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Appearance")
-                .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-            Picker("Appearance", selection: Binding(
-                get: { theme.appearanceMode },
-                set: { theme.setAppearanceMode($0) }
-            )) {
-                ForEach(AppearanceMode.allCases, id: \.self) { mode in
-                    Text(mode.displayName).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .onChange(of: theme.appearanceMode) { _, _ in
-                SyncManager.shared.pushPreferencesImmediate()
-            }
-        }
-        .tint(theme.accent)
-        .listRowBackground(Color.cardBackground)
+        // Phase 3: the segmented control becomes the shared picker row,
+        // so Appearance asks its question the same way as every other
+        // one-of-N setting (and the same way as tvOS and Android).
+        SettingsChoicePicker("Appearance",
+                             options: appearanceModeChoices,
+                             selection: appearanceModeSelection,
+                             onChange: { _ in
+                                 SyncManager.shared.pushPreferencesImmediate()
+                             })
+            .listRowBackground(Color.cardBackground)
 
         // Custom accent color toggle
         Toggle(isOn: $theme.useCustomAccent) {
@@ -667,27 +647,22 @@ struct AppearanceSettingsView: View {
             .listRowBackground(Color.cardBackground)
             #endif
 
-            // Hex field for power users who want to paste a specific value
-            HStack {
-                Text("Hex")
-                    .scaledFont(.bodyMedium.subtext()).foregroundColor(Color.contrastText(.textSecondary))
-                Spacer()
-                TextField("2DD4BF", text: Binding(
-                    get: { theme.customAccentHex },
-                    set: { newValue in
-                        let allowed: Set<Character> = Set("0123456789ABCDEFabcdef")
-                        let cleaned = newValue.filter { allowed.contains($0) }.uppercased()
-                        theme.customAccentHex = String(cleaned.prefix(6))
-                    }
-                ))
-                    .scaledFont(.monoSmall)
-                    .foregroundColor(.textPrimary)
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 90)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.characters)
-            }
-            .listRowBackground(Color.cardBackground)
+            // Hex field for power users who want to paste a specific
+            // value. Phase 3: the shared Settings field; the filtering
+            // and uppercasing binding is unchanged.
+            SettingsTextField("Hex Color",
+                              placeholder: "2DD4BF",
+                              text: Binding(
+                                get: { theme.customAccentHex },
+                                set: { newValue in
+                                    let allowed: Set<Character> = Set("0123456789ABCDEFabcdef")
+                                    let cleaned = newValue.filter { allowed.contains($0) }.uppercased()
+                                    theme.customAccentHex = String(cleaned.prefix(6))
+                                }
+                              ),
+                              helper: "Six hex digits, for example 2DD4BF.",
+                              autocapitalization: .characters)
+                .listRowBackground(Color.cardBackground)
         }
     }
 

@@ -270,7 +270,6 @@ func tvSettingsCardBG(_ focused: Bool) -> some View {
 // MARK: - Server List Row
 struct ServerListRow: View {
     let server: ServerConnection
-    var onSetActive: (() -> Void)? = nil
 
     private var hasLANConfigured: Bool {
         server.type != .m3uPlaylist && !server.localURL.isEmpty
@@ -338,23 +337,21 @@ struct ServerListRow: View {
 
     private var rowContent: some View {
         HStack(spacing: 14) {
-            // Active server indicator — tapping sets this server as the active one
-            if let onSetActive {
-                Button(action: onSetActive) {
-                    Image(systemName: server.isActive ? "checkmark.circle.fill" : "circle")
-                        .scaledFont(.system(size: checkmarkSize))
-                        .foregroundColor(server.isActive ? .accentPrimary : Color.contrastText(.textTertiary))
-                }
-                #if os(tvOS)
-                // Standalone icon button: it has no card behind it, so the
-                // shared ring IS its focus visual. Pill-shaped so it hugs
-                // the round checkmark instead of boxing it.
-                .buttonStyle(TVNoHighlightButtonStyle())
-                .tvFocusRingShape(.capsule)
-                #else
-                .buttonStyle(.plain)
-                #endif
-            }
+            // Active playlist INDICATOR, not a control.
+            //
+            // Phase 3 item 5 (Logan 2026-09-17): the circle used to be a
+            // tappable button that switched the active playlist, which
+            // gave the row two different tap targets and two different
+            // outcomes depending on where your finger (or the focus
+            // engine) landed. Selecting a playlist now always opens its
+            // detail, on every form factor, and Set Active is the first
+            // row of that page's Actions section. The glyph stays so the
+            // active playlist is still obvious at a glance.
+            Image(systemName: server.isActive ? "checkmark.circle.fill" : "circle")
+                .scaledFont(.system(size: checkmarkSize))
+                .foregroundColor(server.isActive ? .accentPrimary : Color.contrastText(.textTertiary))
+                .accessibilityHidden(!server.isActive)
+                .accessibilityLabel("Active playlist")
 
             ZStack {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)

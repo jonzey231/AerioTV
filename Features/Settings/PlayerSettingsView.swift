@@ -65,6 +65,18 @@ struct PlayerSettingsView: View {
     private static let playerInfoCardFooter =
         "Choose what appears on the program info card in the player while the controls are showing."
 
+    /// Phase 3, item 4: the master row's subtitle. WHICH lines show
+    /// matters more than how many, so this lists them rather than
+    /// counting ("All 6", "Logo, name, time", "None"). Built from the
+    /// same ordered array the rows come from, so iOS and tvOS read
+    /// identically.
+    private var playerInfoCardSummary: String {
+        let enabled = playerInfoCardRows
+            .filter { $0.binding.wrappedValue }
+            .map { PlayerInfoCardSettings.title($0.key) }
+        return SettingsSummary.list(enabled, of: playerInfoCardRows.count)
+    }
+
     // MARK: - Live Rewind
     @AppStorage("liveRewindEnabled") private var liveRewindEnabled = false
     @AppStorage("liveRewindDepthMinutes") private var liveRewindDepthMinutes = 30
@@ -85,6 +97,42 @@ struct PlayerSettingsView: View {
             return v < 10 ? String(format: "~%.1f GB", v) : "~\(Int(v.rounded())) GB"
         }
         return "Uses up to \(gb(4)) in HD, \(gb(8)) in FHD, or \(gb(20)) in UHD while you watch."
+    }
+
+    /// Phase 3, item 3: one option list for "Rewind up to" on both
+    /// platforms. tvOS used to print its own "15m" / "1h" segments while
+    /// iOS said "15 minutes" / "1 hour"; both now go through
+    /// `depthLabel`, so the wording finally agrees.
+    private var rewindDepthOptions: [SettingsChoice<Int>] {
+        Self.rewindDepthSteps.map { SettingsChoice($0, depthLabel($0)) }
+    }
+
+    /// Phase 3, item 4: subtitle for the Live Rewind subgroup card.
+    private var liveRewindSummary: String {
+        liveRewindEnabled ? depthLabel(liveRewindDepthMinutes) : "Off"
+    }
+
+    /// Phase 3, item 3: Buffer Size as a single pushed choice on iOS and
+    /// an inline check list on tvOS. Same copy as before, same
+    /// "streamBufferSize" key.
+    private var bufferSizeOptions: [SettingsChoice<String>] {
+        bufferOptions.map { SettingsChoice($0.id, $0.label, subtitle: $0.detail) }
+    }
+
+    /// Phase 3, item 3: the multiview audio focus marker.
+    private var audioFocusOptions: [SettingsChoice<String>] {
+        MultiviewAudioFocusStyle.allCases.map {
+            SettingsChoice($0.rawValue, $0.displayName, subtitle: $0.subtitle)
+        }
+    }
+
+    /// Phase 3, item 3: Tile Corners. The tvOS icons now ride along on
+    /// iOS too, so the choice page matches the TV list.
+    private var tileCornerOptions: [SettingsChoice<Bool>] {
+        [
+            SettingsChoice(false, "Square", icon: "square"),
+            SettingsChoice(true, "Rounded", icon: "square.dashed")
+        ]
     }
 
     // MARK: - Playback
@@ -126,10 +174,6 @@ struct PlayerSettingsView: View {
     @AppStorage(multiviewTileCornersRoundedKey)
     private var cornersRounded: Bool = false
 
-    private var selectedStyle: MultiviewAudioFocusStyle {
-        MultiviewAudioFocusStyle(rawValue: audioFocusStyleRaw) ?? .centerIcon
-    }
-
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
@@ -154,18 +198,26 @@ struct PlayerSettingsView: View {
     private var iOSBody: some View {
         List {
             // MARK: Info Card
+            // Phase 3, item 4: six bare switches became one master row
+            // that says what the card currently shows. The section
+            // header is gone because the subgroup row carries the title.
             Section {
-                ForEach(playerInfoCardRows, id: \.key) { row in
-                    Toggle(isOn: row.binding) {
-                        Text(PlayerInfoCardSettings.title(row.key))
-                            .scaledFont(.bodyMedium)
-                            .foregroundColor(.textPrimary)
+                SettingsSubgroup("Info Card",
+                                 summary: playerInfoCardSummary,
+                                 icon: "rectangle.on.rectangle",
+                                 iconColor: theme.accent,
+                                 footer: Self.playerInfoCardFooter) {
+                    ForEach(playerInfoCardRows, id: \.key) { row in
+                        Toggle(isOn: row.binding) {
+                            Text(PlayerInfoCardSettings.title(row.key))
+                                .scaledFont(.bodyMedium)
+                                .foregroundColor(.textPrimary)
+                        }
+                        .tint(theme.accent)
+                        .listRowBackground(Color.cardBackground)
                     }
-                    .tint(theme.accent)
-                    .listRowBackground(Color.cardBackground)
                 }
-            } header: {
-                Text("Info Card").sectionHeaderStyle()
+                .listRowBackground(Color.cardBackground)
             } footer: {
                 Text(Self.playerInfoCardFooter)
                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
@@ -184,6 +236,48 @@ struct PlayerSettingsView: View {
                 }
                 .tint(theme.accent)
                 .listRowBackground(Color.cardBackground)
+
+                // Phase 3, item 4: depth and channel retention used to be
+                // two more top-level sections. They are settings ABOUT
+                // Live Rewind, so they now sit under one subgroup inside
+                // the same card. Every gate and key is unchanged.
+                if liveRewindEnabled {
+                    SettingsSubgroup("Live Rewind",
+                                     summary: liveRewindSummary,
+                                     icon: "gobackward.30",
+                                     iconColor: theme.accent,
+                                     footer: "How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. Keeping recent channels live holds an extra stream connection per channel; opening a channel beyond the limit drops the oldest.") {
+                        SettingsChoicePicker(
+                            "Rewind up to",
+                            options: rewindDepthOptions,
+                            selection: $liveRewindDepthMinutes,
+                            footer: "How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. \(depthEstimate(liveRewindDepthMinutes))",
+                            iconColor: theme.accent
+                        )
+                        .listRowBackground(Color.cardBackground)
+
+                        Toggle(isOn: $liveRewindRetainChannels) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Keep Recent Channels Live")
+                                    .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                                Text("Flipped-away channels keep buffering so their rewind timeline survives")
+                                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                            }
+                        }
+                        .tint(theme.accent)
+                        .listRowBackground(Color.cardBackground)
+
+                        if liveRewindRetainChannels {
+                            steppedSliderRow_iOS(
+                                title: "Channels to keep",
+                                values: [1, 2, 3, 4, 5],
+                                selection: $liveRewindRetainCount,
+                                label: { "\($0)" }
+                            )
+                        }
+                    }
+                    .listRowBackground(Color.cardBackground)
+                }
             } header: {
                 Text("Live Rewind").sectionHeaderStyle()
             } footer: {
@@ -191,43 +285,6 @@ struct PlayerSettingsView: View {
                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
             .listSectionSeparator(.hidden)
-
-            if liveRewindEnabled {
-                Section {
-                    steppedSliderRow_iOS(
-                        title: "Rewind up to",
-                        values: Self.rewindDepthSteps,
-                        selection: $liveRewindDepthMinutes,
-                        label: depthLabel
-                    )
-                } header: {
-                    Text("Keep Available").sectionHeaderStyle()
-                } footer: {
-                    Text("How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. \(depthEstimate(liveRewindDepthMinutes))")
-                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
-                }
-                .listSectionSeparator(.hidden)
-
-                Section {
-                    Toggle(isOn: $liveRewindRetainChannels) {
-                        Text("Keep Recent Channels Live")
-                    }
-                    if liveRewindRetainChannels {
-                        steppedSliderRow_iOS(
-                            title: "Channels to keep",
-                            values: [1, 2, 3, 4, 5],
-                            selection: $liveRewindRetainCount,
-                            label: { "\($0)" }
-                        )
-                    }
-                } header: {
-                    Text("Channel Retention").sectionHeaderStyle()
-                } footer: {
-                    Text("Keeps recently watched channels buffering after you flip away, so returning brings the full rewind timeline back. Each kept channel holds an extra stream connection and uses bandwidth while it runs. Opening a channel beyond the limit drops the oldest.")
-                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
-                }
-                .listSectionSeparator(.hidden)
-            }
 
             // MARK: Playback
             Section {
@@ -247,29 +304,15 @@ struct PlayerSettingsView: View {
                 StreamBufferSlider(value: $streamBufferSeconds)
                     .listRowBackground(Color.cardBackground)
 
-                ForEach(bufferOptions) { opt in
-                    Button {
-                        streamBufferSize = opt.id
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(opt.label)
-                                    .scaledFont(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                                Text(opt.detail)
-                                    .scaledFont(.labelSmall.subtext())
-                                    .foregroundColor(Color.contrastText(.textSecondary))
-                            }
-                            Spacer()
-                            if streamBufferSize == opt.id {
-                                Image(systemName: "checkmark")
-                                    .scaledFont(.system(size: 14, weight: .semibold))
-                                    .foregroundColor(theme.accent)
-                            }
-                        }
-                    }
-                    .listRowBackground(Color.cardBackground)
-                }
+                // Phase 3, item 3: four inline check rows became one row.
+                SettingsChoicePicker(
+                    "Buffer Size",
+                    options: bufferSizeOptions,
+                    selection: $streamBufferSize,
+                    footer: "Buffer Size controls how much stream data is pre-loaded. Larger buffers reduce stuttering on poor connections but add startup delay.",
+                    iconColor: theme.accent
+                )
+                .listRowBackground(Color.cardBackground)
 
                 Toggle(isOn: $autoRecoverFrozenStreams) {
                     Text("Auto-Recover Frozen Streams")
@@ -284,7 +327,9 @@ struct PlayerSettingsView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("How far the skip buttons move in live rewind, catch-up, recordings, movies, and TV shows, including the cast remote and the Lock Screen controls.")
                         .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
-                    Text("Stream Buffer adds extra buffer to smooth jitter and stutter on live streams from any source. Higher is smoother but adds delay behind live. 0 keeps the lowest latency. Buffer Size controls how much stream data is pre-loaded. Larger buffers reduce stuttering on poor connections but add startup delay.")
+                    // Phase 3: the Buffer Size sentence moved onto the
+                    // picker's own page, so it is not repeated here.
+                    Text("Stream Buffer adds extra buffer to smooth jitter and stutter on live streams from any source. Higher is smoother but adds delay behind live. 0 keeps the lowest latency.")
                         .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     Text("If a live stream stops sending video, the player reloads it to recover. Turn Auto-Recover off if live channels restart or stutter during commercial breaks (a brief freeze may show instead). Applies to the next channel you tune.")
                         .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
@@ -369,31 +414,15 @@ struct PlayerSettingsView: View {
 
             // MARK: Multiview
             Section {
-                ForEach(MultiviewAudioFocusStyle.allCases) { style in
-                    Button {
-                        audioFocusStyleRaw = style.rawValue
-                    } label: {
-                        HStack(alignment: .top, spacing: 12) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(style.displayName)
-                                    .scaledFont(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                                Text(style.subtitle)
-                                    .scaledFont(.labelSmall.subtext())
-                                    .foregroundColor(Color.contrastText(.textTertiary))
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            Spacer(minLength: 8)
-                            if selectedStyle == style {
-                                Image(systemName: "checkmark")
-                                    .scaledFont(.system(size: 14, weight: .semibold))
-                                    .foregroundColor(theme.accent)
-                                    .padding(.top, 2)
-                            }
-                        }
-                    }
-                    .listRowBackground(Color.cardBackground)
-                }
+                // Phase 3, item 3.
+                SettingsChoicePicker(
+                    "Audio Focus Indicator",
+                    options: audioFocusOptions,
+                    selection: $audioFocusStyleRaw,
+                    footer: "Choose how Aerio marks the tile that currently owns audio when watching multiple streams at once.",
+                    iconColor: theme.accent
+                )
+                .listRowBackground(Color.cardBackground)
 
                 Toggle(isOn: $paddingEnabled) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -406,21 +435,21 @@ struct PlayerSettingsView: View {
                 .tint(theme.accent)
                 .listRowBackground(Color.cardBackground)
 
-                Picker("Tile Corners", selection: $cornersRounded) {
-                    Text("Square").tag(false)
-                    Text("Rounded").tag(true)
-                }
-                .pickerStyle(.segmented)
+                // Phase 3, item 3: the last .segmented Picker on this
+                // page becomes the same row shape as every other choice.
+                SettingsChoicePicker(
+                    "Tile Corners",
+                    options: tileCornerOptions,
+                    selection: $cornersRounded,
+                    footer: "Square keeps the cinema-grid look; rounded softens each tile with a 12pt radius.",
+                    iconColor: theme.accent
+                )
                 .listRowBackground(Color.cardBackground)
             } header: {
+                // Phase 3: the audio focus and tile corner copy now lives
+                // on those pickers' own pages, so the section footer that
+                // only restated them is gone.
                 Text("Multiview").sectionHeaderStyle()
-            } footer: {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Choose how Aerio marks the tile that currently owns audio when watching multiple streams at once.")
-                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
-                    Text("Square keeps the cinema-grid look; rounded softens each tile with a 12pt radius.")
-                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
-                }
             }
             .listSectionSeparator(.hidden)
         }
@@ -474,20 +503,30 @@ struct PlayerSettingsView: View {
     private var tvOSBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
+                // Phase 3, item 4: the six info-card switches now sit
+                // under a master row that summarizes them, same strings
+                // as iOS.
                 SettingsSection("Info Card", style: .card) {
-                    ForEach(playerInfoCardRows, id: \.key) { row in
-                        TVSettingsToggleRow(
-                            icon: "info.circle",
-                            iconColor: theme.accent,
-                            title: PlayerInfoCardSettings.title(row.key),
-                            subtitle: "",
-                            isOn: row.binding
-                        ) { _ in }
+                    SettingsSubgroup("Info Card",
+                                     summary: playerInfoCardSummary,
+                                     icon: "rectangle.on.rectangle",
+                                     iconColor: theme.accent,
+                                     footer: Self.playerInfoCardFooter) {
+                        ForEach(playerInfoCardRows, id: \.key) { row in
+                            TVSettingsToggleRow(
+                                icon: "info.circle",
+                                iconColor: theme.accent,
+                                title: PlayerInfoCardSettings.title(row.key),
+                                subtitle: "",
+                                isOn: row.binding
+                            ) { _ in }
+                        }
                     }
-
-                    tvFooter(Self.playerInfoCardFooter)
                 }
 
+                // Phase 3, item 4: "Keep Available" and "Channel
+                // Retention" were two more cards for settings that only
+                // exist because Live Rewind is on. One card now.
                 SettingsSection("Live Rewind", style: .card) {
                     TVSettingsToggleRow(
                         icon: "gobackward.30",
@@ -497,39 +536,36 @@ struct PlayerSettingsView: View {
                         isOn: $liveRewindEnabled
                     ) { _ in }
                     tvFooter("Buffers the channel you are watching so you can pause and rewind live TV. Uses device storage while you watch; buffered video is removed automatically.")
-                }
 
-                if liveRewindEnabled {
-                    SettingsSection("Keep Available", style: .card) {
-                        tvSteppedSegmentsRow(
-                            title: "Rewind up to",
-                            values: Self.rewindDepthSteps,
-                            selection: $liveRewindDepthMinutes,
-                            segmentLabel: { m in
-                                if m < 60 { return "\(m)m" }
-                                return m % 60 == 0 ? "\(m / 60)h" : "\(m)m"
-                            }
-                        )
-                        tvFooter("How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. \(depthEstimate(liveRewindDepthMinutes))")
-                    }
-
-                    SettingsSection("Channel Retention", style: .card) {
-                        TVSettingsToggleRow(
-                            icon: "rectangle.stack.badge.play",
-                            iconColor: theme.accent,
-                            title: "Keep Recent Channels Live",
-                            subtitle: "Flipped-away channels keep buffering so their rewind timeline survives",
-                            isOn: $liveRewindRetainChannels
-                        ) { _ in }
-                        if liveRewindRetainChannels {
-                            tvSteppedSegmentsRow(
-                                title: "Channels to keep",
-                                values: [1, 2, 3, 4, 5],
-                                selection: $liveRewindRetainCount,
-                                segmentLabel: { "\($0)" }
+                    if liveRewindEnabled {
+                        SettingsSubgroup("Live Rewind",
+                                         summary: liveRewindSummary,
+                                         icon: "gobackward.30",
+                                         iconColor: theme.accent) {
+                            SettingsChoicePicker(
+                                "Rewind up to",
+                                options: rewindDepthOptions,
+                                selection: $liveRewindDepthMinutes,
+                                footer: "How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. \(depthEstimate(liveRewindDepthMinutes))"
                             )
+
+                            TVSettingsToggleRow(
+                                icon: "rectangle.stack.badge.play",
+                                iconColor: theme.accent,
+                                title: "Keep Recent Channels Live",
+                                subtitle: "Flipped-away channels keep buffering so their rewind timeline survives",
+                                isOn: $liveRewindRetainChannels
+                            ) { _ in }
+                            if liveRewindRetainChannels {
+                                tvSteppedSegmentsRow(
+                                    title: "Channels to keep",
+                                    values: [1, 2, 3, 4, 5],
+                                    selection: $liveRewindRetainCount,
+                                    segmentLabel: { "\($0)" }
+                                )
+                            }
+                            tvFooter("Each kept channel holds an extra stream connection and uses bandwidth while it runs. Opening a channel beyond the limit drops the oldest.")
                         }
-                        tvFooter("Each kept channel holds an extra stream connection and uses bandwidth while it runs. Opening a channel beyond the limit drops the oldest.")
                     }
                 }
 
@@ -551,15 +587,13 @@ struct PlayerSettingsView: View {
                     StreamBufferSlider(value: $streamBufferSeconds)
                     tvFooter("Extra buffer to smooth jitter and stutter on live streams from any source. Higher is smoother but adds delay behind live. 0 keeps the lowest latency. Applies to the next channel you tune. Press left or right on the Siri Remote to adjust.")
 
-                    ForEach(bufferOptions) { opt in
-                        TVSettingsSelectionRow(
-                            label: opt.label,
-                            subtitle: opt.detail,
-                            isSelected: streamBufferSize == opt.id,
-                            action: { streamBufferSize = opt.id }
-                        )
-                    }
-                    tvFooter("Buffer Size controls how much stream data is pre-loaded. Larger buffers reduce stuttering on poor connections but add startup delay.")
+                    // Phase 3, item 3: same option list as iOS.
+                    SettingsChoicePicker(
+                        "Buffer Size",
+                        options: bufferSizeOptions,
+                        selection: $streamBufferSize,
+                        footer: "Buffer Size controls how much stream data is pre-loaded. Larger buffers reduce stuttering on poor connections but add startup delay."
+                    )
 
                     TVSettingsToggleRow(
                         icon: "arrow.clockwise.circle",
@@ -583,14 +617,13 @@ struct PlayerSettingsView: View {
                 }
 
                 SettingsSection("Multiview", style: .card) {
-                    ForEach(MultiviewAudioFocusStyle.allCases) { style in
-                        TVSettingsSelectionRow(
-                            label: style.displayName,
-                            subtitle: style.subtitle,
-                            isSelected: selectedStyle == style,
-                            action: { audioFocusStyleRaw = style.rawValue }
-                        )
-                    }
+                    // Phase 3, item 3.
+                    SettingsChoicePicker(
+                        "Audio Focus Indicator",
+                        options: audioFocusOptions,
+                        selection: $audioFocusStyleRaw,
+                        footer: "Choose how Aerio marks the tile that currently owns audio when watching multiple streams at once."
+                    )
 
                     TVSettingsToggleRow(
                         icon: "rectangle.split.2x1",
@@ -601,19 +634,12 @@ struct PlayerSettingsView: View {
                         onChange: { _ in }
                     )
 
-                    TVSettingsSelectionRow(
-                        icon: "square",
-                        iconColor: theme.accent,
-                        label: "Square",
-                        isSelected: !cornersRounded,
-                        action: { cornersRounded = false }
-                    )
-                    TVSettingsSelectionRow(
-                        icon: "square.dashed",
-                        iconColor: theme.accent,
-                        label: "Rounded",
-                        isSelected: cornersRounded,
-                        action: { cornersRounded = true }
+                    // Phase 3, item 3.
+                    SettingsChoicePicker(
+                        "Tile Corners",
+                        options: tileCornerOptions,
+                        selection: $cornersRounded,
+                        footer: "Square keeps the cinema-grid look; rounded softens each tile with a 12pt radius."
                     )
                 }
             }

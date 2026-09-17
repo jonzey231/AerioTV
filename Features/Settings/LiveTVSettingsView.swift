@@ -37,6 +37,18 @@ struct LiveTVSettingsView: View {
     @AppStorage(phoneGroupSelectorKey) private var phoneGroupSelector = "sidebar"
     #endif
 
+    // MARK: Groups
+    /// Phase 3 item 6: the group Live TV opens on. Apple already READ this
+    /// key (ChannelListView.applyDefaultGroupIfNeeded, Manage Groups sets
+    /// it) but only Manage Groups could change it, while Android exposed it
+    /// in Settings. Same key, same sentinels: "" = All Channels,
+    /// "favorites", "recentlyWatched", "collection:<name>", anything else
+    /// is a literal group name.
+    @AppStorage("defaultChannelGroup") private var defaultChannelGroup = ""
+    /// The active playlist's groups. ChannelStore is already playlist
+    /// scoped, and it is what Manage Groups builds its token list from.
+    @ObservedObject private var channelStore = ChannelStore.shared
+
     // MARK: Badges
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
     @AppStorage("ui.hiddenEpgBadges") private var hiddenEpgBadgesRaw = ""
@@ -83,6 +95,36 @@ struct LiveTVSettingsView: View {
             }
         )
     }
+
+    /// Phase 3 item 4: what the five badge sub-toggles currently add up to
+    /// ("All 5" / "3 of 5" / "None"), so the master row says the state
+    /// without the reader opening it. Same string on iOS, tvOS and Android.
+    private var badgesSummary: String {
+        let hidden = Set(hiddenEpgBadgesRaw.split(separator: "\n").map(String.init))
+        let shown = Self.badgeKinds.filter { !hidden.contains($0) }.count
+        return SettingsSummary.count(on: shown, of: Self.badgeKinds.count)
+    }
+
+    /// Phase 3 item 6. Fixed entries first, in the order Manage Groups
+    /// pins them, then the active playlist's groups (name is both the
+    /// label and the stored value). Collections are not offered here: they
+    /// are picked from the Live TV collection row, and a stale
+    /// "collection:" value still shows as "Not set" rather than being lost.
+    private var defaultGroupOptions: [SettingsChoice<String>] {
+        var options: [SettingsChoice<String>] = [
+            SettingsChoice("", "All Channels", icon: "tv"),
+            SettingsChoice("favorites", "Favorites", icon: "star.fill"),
+            SettingsChoice("recentlyWatched", "Recently Watched", icon: "clock")
+        ]
+        options += channelStore.orderedGroups.map {
+            SettingsChoice($0, $0, icon: "folder")
+        }
+        return options
+    }
+
+    /// Mirrored verbatim by Android so the two stores read the same.
+    private static let defaultGroupFooter =
+        "The group Live TV opens on. Groups come from the active playlist."
 
     /// Summary text for the "Add more categories" disclosure row.
     fileprivate var moreCategoriesSummary: String {
@@ -207,69 +249,62 @@ struct LiveTVSettingsView: View {
                     SyncManager.shared.pushPreferencesImmediate()
                 }
 
-                ForEach(Self.liveTVViewOptions, id: \.self) { option in
-                    Button {
-                        defaultLiveTVView = option
-                    } label: {
-                        HStack {
-                            Image(systemName: liveTVViewIcon(option))
-                                .scaledFont(.system(size: 15))
-                                .foregroundColor(theme.accent)
-                                .frame(width: 24)
-                            Text(liveTVViewLabel(option))
-                                .scaledFont(.bodyMedium)
-                                .foregroundColor(.textPrimary)
-                            Spacer()
-                            if defaultLiveTVView == option {
-                                Image(systemName: "checkmark")
-                                    .scaledFont(.system(size: 14, weight: .semibold))
-                                    .foregroundColor(theme.accent)
-                            }
-                        }
-                    }
-                    .listRowBackground(Color.cardBackground)
-                }
+                // Phase 3 item 3: one row that pushes the choice page,
+                // instead of three inline check rows. The old section
+                // footer moved into the picker, which is where it is now
+                // read.
+                SettingsChoicePicker(
+                    "Default Live TV View",
+                    options: Self.liveTVViewOptions.map {
+                        SettingsChoice($0, liveTVViewLabel($0), icon: liveTVViewIcon($0))
+                    },
+                    selection: $defaultLiveTVView,
+                    footer: "The layout Live TV opens in. Automatic uses List on compact, portrait phones and Guide on regular width (unfolded foldable, iPad, Apple TV). You can still switch anytime with the List / Guide button; that switch lasts for the current session and does not change this default.",
+                    icon: "rectangle.grid.1x2"
+                )
+                .listRowBackground(Color.cardBackground)
             } header: {
                 Text("List view").sectionHeaderStyle()
-            } footer: {
-                Text("The layout Live TV opens in. Automatic uses List on compact, portrait phones and Guide on regular width (unfolded foldable, iPad, Apple TV). You can still switch anytime with the List / Guide button; that switch lasts for the current session and does not change this default.")
-                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
             .listSectionSeparator(.hidden)
 
-            // MARK: Groups (phone)
-            if UIDevice.current.userInterfaceIdiom == .phone {
-                Section {
-                    ForEach([true, false], id: \.self) { sidebar in
-                        Button {
-                            phoneGroupSelector = sidebar ? "sidebar" : "pills"
-                        } label: {
-                            HStack {
-                                Image(systemName: sidebar ? "sidebar.leading" : "capsule.lefthalf.filled")
-                                    .scaledFont(.system(size: 15))
-                                    .foregroundColor(theme.accent)
-                                    .frame(width: 24)
-                                Text(sidebar ? "Sidebar Menu" : "Top Group Pills")
-                                    .scaledFont(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                                Spacer()
-                                if (phoneGroupSelector != "pills") == sidebar {
-                                    Image(systemName: "checkmark")
-                                        .scaledFont(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(theme.accent)
-                                }
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    }
-                } header: {
-                    Text("Groups").sectionHeaderStyle()
-                } footer: {
-                    Text("How channel groups are picked in Live TV. Sidebar Menu opens a drawer from the header, where a long press also reorders groups. Top Group Pills put the group row at the top instead.")
-                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+            // MARK: Groups
+            // Group Selection stays PHONE ONLY (it describes the phone's
+            // header drawer vs pill row); Default Group is Phase 3 item 6
+            // and applies everywhere, so the section itself is no longer
+            // gated.
+            Section {
+                if UIDevice.current.userInterfaceIdiom == .phone {
+                    SettingsChoicePicker(
+                        "Group Selection",
+                        options: [
+                            SettingsChoice("sidebar", "Sidebar Menu", icon: "sidebar.leading"),
+                            SettingsChoice("pills", "Top Group Pills", icon: "capsule.lefthalf.filled")
+                        ],
+                        selection: $phoneGroupSelector,
+                        footer: "How channel groups are picked in Live TV. Sidebar Menu opens a drawer from the header, where a long press also reorders groups. Top Group Pills put the group row at the top instead.",
+                        icon: "sidebar.leading"
+                    )
+                    .listRowBackground(Color.cardBackground)
                 }
-                .listSectionSeparator(.hidden)
+
+                SettingsChoicePicker(
+                    "Default Group",
+                    options: defaultGroupOptions,
+                    selection: $defaultChannelGroup,
+                    footer: Self.defaultGroupFooter,
+                    icon: "square.grid.2x2",
+                    onChange: { _ in
+                        // Same side effect Manage Groups' setDefault has:
+                        // the key is synced, so push it right away.
+                        SyncManager.shared.pushPreferencesImmediate()
+                    }
+                )
+                .listRowBackground(Color.cardBackground)
+            } header: {
+                Text("Groups").sectionHeaderStyle()
             }
+            .listSectionSeparator(.hidden)
 
             // MARK: Badges
             Section {
@@ -286,15 +321,24 @@ struct LiveTVSettingsView: View {
                 .tint(theme.accent)
                 .listRowBackground(Color.cardBackground)
                 if showEpgBadges {
-                    ForEach(Self.badgeKinds, id: \.self) { kind in
-                        Toggle(isOn: badgeShownBinding(kind)) {
-                            Text(Self.badgeTitle(kind))
-                                .scaledFont(.bodyMedium)
-                                .foregroundColor(.textPrimary)
+                    // Phase 3 item 4: the five per-kind switches fold into
+                    // one master row that reports the count. Storage blob
+                    // and bindings are untouched.
+                    SettingsSubgroup("Badge Types",
+                                     summary: badgesSummary,
+                                     icon: "tag",
+                                     footer: "Which badges appear. Turning one off hides it everywhere badges are shown.") {
+                        ForEach(Self.badgeKinds, id: \.self) { kind in
+                            Toggle(isOn: badgeShownBinding(kind)) {
+                                Text(Self.badgeTitle(kind))
+                                    .scaledFont(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                            }
+                            .tint(theme.accent)
+                            .listRowBackground(Color.cardBackground)
                         }
-                        .tint(theme.accent)
-                        .listRowBackground(Color.cardBackground)
                     }
+                    .listRowBackground(Color.cardBackground)
                 }
             } header: {
                 Text("Badges").sectionHeaderStyle()
@@ -534,15 +578,15 @@ struct LiveTVSettingsView: View {
                             isOn: $roundedLogoCorners,
                             onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
                         )
-                        ForEach(Self.liveTVViewOptions, id: \.self) { option in
-                            TVSettingsSelectionRow(
-                                icon: liveTVViewIcon(option),
-                                iconColor: theme.accent,
-                                label: liveTVViewLabel(option),
-                                isSelected: defaultLiveTVView == option,
-                                action: { defaultLiveTVView = option }
-                            )
-                        }
+                        // Phase 3 item 3: same inline rows, now built by the
+                        // shared picker so tvOS and iOS offer one control.
+                        SettingsChoicePicker(
+                            "Default Live TV View",
+                            options: Self.liveTVViewOptions.map {
+                                SettingsChoice($0, liveTVViewLabel($0), icon: liveTVViewIcon($0))
+                            },
+                            selection: $defaultLiveTVView
+                        )
                     }
                 }
 
@@ -568,17 +612,31 @@ struct LiveTVSettingsView: View {
 
                 // MARK: Groups
                 SettingsSection("Groups", style: .plain) {
-                    TVSettingsSelectionRow(
-                        label: "Top Group Pills",
-                        isSelected: !remote.useGroupSidebar,
-                        action: { remote.useGroupSidebar = false }
+                    // Phase 3 item 3. The tvOS binding stays the remote
+                    // store's Bool; only the rows are shared now.
+                    SettingsChoicePicker(
+                        "Group Selection",
+                        options: [
+                            SettingsChoice(false, "Top Group Pills"),
+                            SettingsChoice(true, "Sidebar Menu")
+                        ],
+                        selection: $remote.useGroupSidebar,
+                        footer: "How channel groups are picked in the guide. Top Group Pills keep the group row above the grid; Sidebar Menu hides that row and opens when you hold Left in the guide (or from whichever button you set to Open sidebar in Remote Control). Only one is active at a time."
                     )
-                    TVSettingsSelectionRow(
-                        label: "Sidebar Menu",
-                        isSelected: remote.useGroupSidebar,
-                        action: { remote.useGroupSidebar = true }
+
+                    // Phase 3 item 6: Apple read "defaultChannelGroup" but
+                    // only Manage Groups could set it; Android had it in
+                    // Settings.
+                    SettingsChoicePicker(
+                        "Default Group",
+                        options: defaultGroupOptions,
+                        selection: $defaultChannelGroup,
+                        footer: Self.defaultGroupFooter,
+                        onChange: { _ in
+                            // Matches Manage Groups' setDefault.
+                            SyncManager.shared.pushPreferencesImmediate()
+                        }
                     )
-                    tvFooter("How channel groups are picked in the guide. Top Group Pills keep the group row above the grid; Sidebar Menu hides that row and opens when you hold Left in the guide (or from whichever button you set to Open sidebar in Remote Control). Only one is active at a time.")
                 }
 
                 // MARK: Badges
@@ -592,14 +650,23 @@ struct LiveTVSettingsView: View {
                     ) { _ in }
 
                     if showEpgBadges {
-                        ForEach(Self.badgeKinds, id: \.self) { kind in
-                            TVSettingsToggleRow(
-                                icon: "tag",
-                                iconColor: theme.accent,
-                                title: Self.badgeTitle(kind),
-                                subtitle: "",
-                                isOn: badgeShownBinding(kind)
-                            ) { _ in }
+                        // Phase 3 item 4: same five toggles, now under a
+                        // master row carrying the same summary string the
+                        // phone shows.
+                        SettingsSubgroup("Badge Types",
+                                         summary: badgesSummary,
+                                         icon: "tag",
+                                         iconColor: theme.accent,
+                                         footer: "Which badges appear. Turning one off hides it everywhere badges are shown.") {
+                            ForEach(Self.badgeKinds, id: \.self) { kind in
+                                TVSettingsToggleRow(
+                                    icon: "tag",
+                                    iconColor: theme.accent,
+                                    title: Self.badgeTitle(kind),
+                                    subtitle: "",
+                                    isOn: badgeShownBinding(kind)
+                                ) { _ in }
+                            }
                         }
                     }
 

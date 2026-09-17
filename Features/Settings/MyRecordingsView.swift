@@ -832,10 +832,11 @@ private struct TVRecordingRow<Menu: View>: View {
                     .fill(Color.cardBackground)
             )
             .overlay(
+                // Phase 3: the one Settings ring, at the standard width.
                 RoundedRectangle(cornerRadius: 14)
-                    .stroke(isFocused ? Color.accentPrimary : Color.clear, lineWidth: 3)
+                    .strokeBorder(isFocused ? Color.accentPrimary : Color.clear,
+                                  lineWidth: SettingsMetrics.tvFocusRingWidth)
             )
-            .scaleEffect(isFocused ? 1.02 : 1.0)
             .animation(.easeInOut(duration: 0.15), value: isFocused)
             .overlay(
                 TVPressOverlay(
@@ -895,10 +896,9 @@ private struct DVRSegmentPillButtonStyle: ButtonStyle {
         let focused = isFocused
         return configuration.label
             .scaledFont(.system(size: 22, weight: .medium))
-            .foregroundColor(
-                isSelected ? .appBackground
-                           : (focused ? .white : .textSecondary)
-            )
+            // Phase 3: focus no longer flips the label to bright white;
+            // the accent ring is the focus visual.
+            .foregroundColor(isSelected ? .appBackground : .textSecondary)
             .padding(.horizontal, 26)
             .padding(.vertical, 13)
             .background(
@@ -907,9 +907,9 @@ private struct DVRSegmentPillButtonStyle: ButtonStyle {
             )
             .overlay(
                 Capsule()
-                    .stroke(focused && !isSelected ? Color.accentPrimary : Color.clear, lineWidth: 2)
+                    .strokeBorder(focused ? Color.accentPrimary : Color.clear,
+                                  lineWidth: SettingsMetrics.tvFocusRingWidth)
             )
-            .scaleEffect(focused ? 1.05 : 1.0)
             .opacity(focused ? 1.0 : (isSelected ? 1.0 : 0.85))
             .animation(.easeInOut(duration: 0.15), value: focused)
     }

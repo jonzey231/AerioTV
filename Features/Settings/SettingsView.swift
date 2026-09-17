@@ -2,6 +2,12 @@ import SwiftUI
 import SwiftData
 
 struct SettingsView: View {
+    /// The ONE hint under the playlist list, on iPhone, iPad and Apple
+    /// TV, and the same string Android uses (Settings redesign Phase 3
+    /// item 5). It replaces the two gesture hints that used to teach
+    /// tap-the-circle and long-press.
+    static let playlistFooterHint = "Select a playlist to open it; Set Active is in its Actions"
+
     #if os(tvOS)
     @Binding var selectedTab: AppTab
     /// Mirrors "is a Settings subview currently pushed" up to
@@ -322,8 +328,7 @@ struct SettingsView: View {
                         } else {
                             ForEach(servers) { server in
                                 NavigationLink(destination: ServerDetailView(server: server)) {
-                                    ServerListRow(server: server,
-                                                  onSetActive: servers.count > 1 ? { setActiveServer(server) } : nil)
+                                    ServerListRow(server: server)
                                 }
                                 #if os(iOS)
                                 .buttonStyle(PressableButtonStyle())
@@ -373,15 +378,13 @@ struct SettingsView: View {
                     } footer: {
                         if !servers.isEmpty {
                             VStack(alignment: .leading, spacing: 4) {
-                                Label("Tap ○ to set the active playlist", systemImage: "checkmark.circle")
-                                    #if os(tvOS)
-                                    .scaledFont(.system(size: 20, weight: .regular).subtext())
-                                    .foregroundColor(Color.contrastText(.textSecondary))
-                                    #else
-                                    .scaledFont(.labelSmall.subtext())
-                                    .foregroundColor(Color.contrastText(.textTertiary))
-                                    #endif
-                                Label("Long press to edit or delete", systemImage: "hand.tap")
+                                // Phase 3 item 5: one sentence, identical
+                                // to the Android string. The old pair
+                                // ("Tap ○ to set the active playlist" /
+                                // "Long press to edit or delete") taught
+                                // two hidden gestures for something the
+                                // detail page now does in the open.
+                                Label(Self.playlistFooterHint, systemImage: "list.bullet")
                                     #if os(tvOS)
                                     .scaledFont(.system(size: 20, weight: .regular).subtext())
                                     .foregroundColor(Color.contrastText(.textSecondary))
@@ -633,12 +636,17 @@ struct SettingsView: View {
 
     // MARK: - Active Server
 
+    // Phase 3 item 5: the only remaining caller is the tvOS row's
+    // long-press context menu. Everywhere else, activation happens on
+    // the playlist detail page's Set Active row.
+    #if os(tvOS)
     private func setActiveServer(_ server: ServerConnection) {
         // Delegates to the shared routine (ServerDetailView.swift) so the
         // root activation and the detail page's Set Active row stay in
         // lockstep (GH #22 stop-old-source behavior included).
         performSetActiveServer(server, servers: Array(servers), modelContext: modelContext)
     }
+    #endif
 
     // MARK: - Reorder helpers (v1.6.17)
 
@@ -907,8 +915,7 @@ struct SettingsView: View {
                 } else {
                     ForEach(servers) { server in
                         NavigationLink(destination: ServerDetailView(server: server)) {
-                            ServerListRow(server: server,
-                                          onSetActive: servers.count > 1 ? { setActiveServer(server) } : nil)
+                            ServerListRow(server: server)
                         }
                         .buttonStyle(PressableButtonStyle())
                         .listRowBackground(Color.cardBackground)
@@ -944,10 +951,9 @@ struct SettingsView: View {
             } footer: {
                 if !servers.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
-                        Label("Tap ○ to set the active playlist", systemImage: "checkmark.circle")
-                            .scaledFont(.labelSmall.subtext())
-                            .foregroundColor(Color.contrastText(.textTertiary))
-                        Label("Long press to edit or delete", systemImage: "hand.tap")
+                        // Phase 3 item 5: same one-line hint as the phone
+                        // and the TV, and the same string as Android.
+                        Label(Self.playlistFooterHint, systemImage: "list.bullet")
                             .scaledFont(.labelSmall.subtext())
                             .foregroundColor(Color.contrastText(.textTertiary))
                         if servers.count > 1 {
@@ -1097,8 +1103,7 @@ struct SettingsView: View {
                 } else {
                     ForEach(servers) { server in
                         TVSettingsNavRow(destination: ServerDetailView(server: server).trackedAsClassicSettingsChild()) {
-                            ServerListRow(server: server,
-                                          onSetActive: servers.count > 1 ? { setActiveServer(server) } : nil)
+                            ServerListRow(server: server)
                         }
                         .contextMenu {
                             if servers.count > 1 {
@@ -1147,7 +1152,12 @@ struct SettingsView: View {
                     showAddServer = true
                 }
                 if !servers.isEmpty {
-                    Label("Long press for options: switch playlist, edit, or delete", systemImage: "hand.tap")
+                    // Phase 3 item 5: the TV gets the same sentence as the
+                    // phone and the iPad. Long press still opens the
+                    // reorder / edit / delete menu; it is no longer the
+                    // only way to switch the active playlist, so it is no
+                    // longer what the hint has to teach.
+                    Label(Self.playlistFooterHint, systemImage: "list.bullet")
                         .scaledFont(.system(size: 24, weight: .medium))
                         .foregroundColor(.textPrimary.opacity(0.7))
                         .padding(.top, 12)

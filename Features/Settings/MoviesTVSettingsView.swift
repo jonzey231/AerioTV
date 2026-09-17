@@ -19,6 +19,23 @@ struct MoviesTVSettingsView: View {
     private static let vodRefreshChoices: [(hours: Int, title: String)] = [
         (0, "Every Launch"), (24, "Daily"), (168, "Weekly")
     ]
+    /// Shared explanation for the refresh choices, on both platforms.
+    private static let vodRefreshFootnote = "Live TV channels refresh on every launch. Movies and TV Shows open from the saved library and re-sweep the provider on this schedule. Pull down on either tab to refresh right away."
+    /// Phase 3: one option list for both platforms. The subtitles used
+    /// to be tvOS-only; folding them into the shared choices means the
+    /// iOS choice page finally explains what each interval does too.
+    private static var vodRefreshOptions: [SettingsChoice<Int>] {
+        vodRefreshChoices.map { choice in
+            SettingsChoice(
+                choice.hours,
+                choice.title,
+                subtitle: choice.hours == 0
+                    ? "Re-sweep the provider library on every launch"
+                    : "Open from the saved library; re-sweep the provider \(choice.hours == 24 ? "once a day" : "once a week")",
+                icon: choice.hours == 0 ? "arrow.clockwise" : "calendar"
+            )
+        }
+    }
 
     /// Master toggle for the TMDB-by-title poster fallback.
     @AppStorage(TMDBPosters.enabledDefaultsKey)
@@ -27,8 +44,6 @@ struct MoviesTVSettingsView: View {
     /// Keychain (never persisted in @AppStorage).
     @State private var tmdbKeyDraft = ""
     @State private var tmdbTestState: TMDBKeyTestState = .idle
-    /// Eye toggle to reveal the entered key (masked by default).
-    @State private var tmdbKeyVisible = false
 
     enum TMDBKeyTestState: Equatable { case idle, testing, valid, invalid, saved }
 
@@ -98,30 +113,18 @@ struct MoviesTVSettingsView: View {
         List {
             // MARK: Refresh library
             Section {
-                ForEach(Self.vodRefreshChoices, id: \.hours) { choice in
-                    Button {
-                        vodRefreshHours = choice.hours
-                    } label: {
-                        HStack {
-                            Text(choice.title)
-                                .scaledFont(.bodyMedium)
-                                .foregroundColor(.textPrimary)
-                            Spacer()
-                            if vodRefreshHours == choice.hours {
-                                Image(systemName: "checkmark")
-                                    .scaledFont(.system(size: 14, weight: .semibold))
-                                    .foregroundColor(theme.accent)
-                            }
-                        }
-                    }
+                // Phase 3: the inline check list became one row that
+                // pushes the choice page; its footer moved onto the
+                // picker, so the Section footer would only repeat it.
+                SettingsChoicePicker("Refresh library",
+                                     options: Self.vodRefreshOptions,
+                                     selection: $vodRefreshHours,
+                                     footer: Self.vodRefreshFootnote,
+                                     icon: "arrow.clockwise")
                     .listRowBackground(Color.cardBackground)
-                }
-            } header: {
-                Text("Refresh library").sectionHeaderStyle()
-            } footer: {
-                Text("Live TV channels refresh on every launch. Movies and TV Shows open from the saved library and re-sweep the provider on this schedule. Pull down on either tab to refresh right away.")
-                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
+            // Phase 3: no Section header. The picker row already says
+            // "Refresh library".
             .listSectionSeparator(.hidden)
 
             // MARK: Posters
@@ -140,28 +143,15 @@ struct MoviesTVSettingsView: View {
                 .listRowBackground(Color.cardBackground)
 
                 if tmdbPostersEnabled {
-                    HStack(spacing: 8) {
-                        Group {
-                            if tmdbKeyVisible {
-                                TextField("TMDB API Key", text: $tmdbKeyDraft)
-                            } else {
-                                SecureField("TMDB API Key", text: $tmdbKeyDraft)
-                            }
-                        }
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
+                    // Phase 3: one shared field for both platforms. It
+                    // owns the reveal eye, so the ad-hoc eye button and
+                    // its visibility state are gone.
+                    SettingsTextField("TMDB API Key",
+                                      placeholder: "API Key or Read Access Token",
+                                      text: $tmdbKeyDraft,
+                                      isSecure: true)
                         .onChange(of: tmdbKeyDraft) { _, _ in tmdbTestState = .idle }
-
-                        Button {
-                            tmdbKeyVisible.toggle()
-                        } label: {
-                            Image(systemName: tmdbKeyVisible ? "eye.slash" : "eye")
-                                .foregroundColor(Color.contrastText(.textSecondary))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(tmdbKeyVisible ? "Hide key" : "Show key")
-                    }
-                    .listRowBackground(Color.cardBackground)
+                        .listRowBackground(Color.cardBackground)
 
                     HStack(spacing: 12) {
                         Button {
@@ -250,18 +240,12 @@ struct MoviesTVSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
                 SettingsSection("Refresh library", style: .card) {
-                    ForEach(Self.vodRefreshChoices, id: \.hours) { choice in
-                        TVSettingsSelectionRow(
-                            icon: choice.hours == 0 ? "arrow.clockwise" : "calendar",
-                            iconColor: theme.accent,
-                            label: choice.title,
-                            subtitle: choice.hours == 0
-                                ? "Re-sweep the provider library on every launch"
-                                : "Open from the saved library; re-sweep the provider \(choice.hours == 24 ? "once a day" : "once a week")",
-                            isSelected: vodRefreshHours == choice.hours,
-                            action: { vodRefreshHours = choice.hours }
-                        )
-                    }
+                    // Phase 3: same options and copy as iOS, still inline
+                    // here because a push costs an extra Back press.
+                    SettingsChoicePicker("Refresh library",
+                                         options: Self.vodRefreshOptions,
+                                         selection: $vodRefreshHours,
+                                         footer: Self.vodRefreshFootnote)
                 }
 
                 SettingsSection("Posters", style: .card) {
@@ -274,15 +258,14 @@ struct MoviesTVSettingsView: View {
                     ) { _ in }
 
                     if tmdbPostersEnabled {
-                        // Same field component as the onboarding password
-                        // field (AddServerView): types correctly on tvOS, and
-                        // revealWhenFocused shows the key while focused since
-                        // the in-box eye button can't be reached by the remote.
-                        AppTextField("TMDB API Key",
-                                     placeholder: "API Key or Read Access Token",
-                                     text: $tmdbKeyDraft,
-                                     isSecure: true,
-                                     revealWhenFocused: true)
+                        // Phase 3: the same shared field the iOS page uses.
+                        // It already asks for reveal-on-focus on secure
+                        // fields, which is the only reveal the Siri Remote
+                        // can reach.
+                        SettingsTextField("TMDB API Key",
+                                          placeholder: "API Key or Read Access Token",
+                                          text: $tmdbKeyDraft,
+                                          isSecure: true)
                             .onChange(of: tmdbKeyDraft) { _, _ in tmdbTestState = .idle }
 
                         HStack(spacing: 24) {

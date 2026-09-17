@@ -819,7 +819,13 @@ struct DeveloperSettingsView: View {
                     tvLogCategoryCard
                 }
             }
+            // Phase 3 item 7: the same centered reading column every other
+            // tvOS Settings page uses. Inside the split view's pane this is
+            // already the cap; it matters when Developer is pushed as a
+            // classic child, where the content otherwise ran the full width.
+            .frame(maxWidth: SettingsMetrics.tvReadingColumnWidth, alignment: .leading)
             .padding(48)
+            .frame(maxWidth: .infinity)
         }
         .fullScreenCover(item: $metalHDRTestItem) { item in
             MetalHDRTestScreen(url: item.url)

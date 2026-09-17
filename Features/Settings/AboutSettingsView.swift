@@ -275,8 +275,12 @@ struct AboutSettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.top, 12)
             }
+            // Phase 3 item 7: centered reading column, same as every other
+            // tvOS Settings page.
+            .frame(maxWidth: SettingsMetrics.tvReadingColumnWidth, alignment: .leading)
             .padding(.horizontal, 40)
             .padding(.vertical, 40)
+            .frame(maxWidth: .infinity)
         }
         .sheet(item: $tvQRLink) { link in
             TVQRLinkSheet(link: link)
