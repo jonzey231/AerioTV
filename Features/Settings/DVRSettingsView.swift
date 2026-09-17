@@ -138,7 +138,7 @@ struct DVRSettingsView: View {
                     Text("Recording Destination")
                         .sectionHeaderStyle()
                 } footer: {
-                    Text("Server-side recordings are recommended — they continue even when AerioTV is closed.")
+                    Text("Server-side recordings are recommended: they continue even when AerioTV is closed.")
                 }
                 .listRowBackground(Color.cardBackground)
             }

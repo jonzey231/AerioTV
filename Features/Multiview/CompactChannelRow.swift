@@ -256,16 +256,26 @@ struct CompactChannelRow: View {
             // v1.6.23: route through CachedLogoImage so the active
             // server's auth headers are applied (fixes Dispatcharr-API
             // logo 401 → placeholder regression).
-            CachedLogoImage(url: item.logoURL, width: logoSize, height: logoSize)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            // The logo tile and its placeholder share an 8pt shape; that
+            // tile is this logo's container.
+            CachedLogoImage(url: item.logoURL, width: logoSize, height: logoSize,
+                            containerRadius: 8)
         } else {
             logoPlaceholder
                 .frame(width: logoSize, height: logoSize)
         }
     }
 
+    @Environment(\.aerioRoundedLogoCorners) private var roundedLogoCorners
+
     private var logoPlaceholder: some View {
-        RoundedRectangle(cornerRadius: 8, style: .continuous)
+        RoundedRectangle(cornerRadius: LogoCorners.radius(container: 8,
+                                                          imageShorterSide: logoSize,
+                                                          // The placeholder plate is opaque
+                                                          // to its corners: a tile.
+                                                          isTile: true,
+                                                          enabled: roundedLogoCorners),
+                         style: .continuous)
             .fill(Color.secondary.opacity(0.15))
             .overlay(
                 Image(systemName: "tv")

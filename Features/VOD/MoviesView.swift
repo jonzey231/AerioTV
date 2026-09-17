@@ -124,6 +124,13 @@ struct MoviesView: View {
     /// Movies or TV shows: one library view, two data sources.
     var kind: VODItemType = .movie
 
+    /// Sweep progress + screen presence (Logan 2026-09-16). The view reports
+    /// whether it is actually in front of the user, which is what lets the
+    /// catalog sweep drop its background pacing while the user is watching
+    /// the count grow, and reads back "a sweep is running" for the header.
+    @ObservedObject private var sweepActivity = VODSweepActivity.shared
+    @Environment(\.scenePhase) private var scenePhase
+
     private var tab: AppTab { kind == .series ? .tvShows : .movies }
     private var kindString: String { kind == .series ? "series" : "movie" }
     /// WatchProgress rows that feed this tab's Continue Watching hero.
@@ -131,18 +138,38 @@ struct MoviesView: View {
     private var kindTitle: String { kind == .series ? "TV Shows" : "Movies" }
     private var kindLower: String { kind == .series ? "TV shows" : "movies" }
     private var kindIcon: String { kind == .series ? "tv" : "film.stack" }
-    private var libraryItems: [VODDisplayItem] { kind == .series ? vodStore.series : vodStore.movies }
+    /// How many titles the catalog holds for this tab. The library itself
+    /// is never materialized: `derived.library` is a windowed view of the
+    /// catalog, and this count is what the empty / loading gates test.
+    private var libraryCount: Int { kind == .series ? vodStore.seriesCount : vodStore.moviesCount }
     private var libraryCategories: [VODCategory] { kind == .series ? vodStore.seriesCategories : vodStore.movieCategories }
     private var searchResults: [VODDisplayItem] { kind == .series ? vodStore.seriesSearchResults : vodStore.movieSearchResults }
     private var isSearchingLibrary: Bool { kind == .series ? vodStore.isSearchingSeries : vodStore.isSearchingMovies }
     private var isLoadingLibrary: Bool { kind == .series ? vodStore.isLoadingSeries : vodStore.isLoadingMovies }
     private var libraryError: String? { kind == .series ? vodStore.seriesError : vodStore.moviesError }
     private var hasLoadedLibrary: Bool { kind == .series ? vodStore.hasLoadedSeries : vodStore.hasLoadedMovies }
+    /// True while this tab's catalog sweep is still walking the provider, so
+    /// the header can say "Updating" and the user knows the count is still
+    /// growing (Android parity, Logan 2026-09-16). Only shown once there is
+    /// something on screen: with an empty library the full LoadingView is
+    /// already saying the same thing. `isRefilling*` covers the sweep the
+    /// store itself is running; `VODSweepActivity` covers the scheduled one
+    /// that has not started yet (the series sweep waits for the movie sweep).
+    private var isUpdatingLibrary: Bool {
+        guard libraryCount > 0 else { return false }
+        let refilling = kind == .series ? vodStore.isRefillingSeries : vodStore.isRefillingMovies
+        return refilling || sweepActivity.isActive(kind)
+    }
     /// Background TMDB art pass over the library once a sweep completes
     /// (hero titles first so the carousel gets its art immediately).
     private func enrichArt() {
-        guard hasLoadedLibrary else { return }
-        TMDBArtCache.shared.enrich(libraryItems, isMovie: kind == .movie, priority: heroPages.map(\.item))
+        guard hasLoadedLibrary, let key = vodStore.catalogKey else { return }
+        TMDBArtCache.shared.enrichCatalog(playlistKey: key, isMovie: kind == .movie,
+                                          priority: heroPages.map(\.item))
+    }
+    /// Tell the sweep whether this tab is really in front of the user.
+    private func reportScreenPresence() {
+        VODSweepActivity.shared.setOnScreen(kind, isSelected && scenePhase == .active)
     }
     private func applyPendingDerived() {
         guard let p = pendingDerived else { return }
@@ -465,18 +492,35 @@ struct MoviesView: View {
     /// director text contains the query, plus the TMDB person's films
     /// that exist in the library (personMatches). Sorted by the tab's
     /// sort order (Logan 2026-09-04).
-    private var searchHits: [VODDisplayItem] {
+    private var searchHits: [VODDisplayItem] { catalogSearchHits }
+
+    /// Library hits for the current query, answered by a catalog query
+    /// instead of a walk of an in-memory array (the array is gone, and on a
+    /// 350k library the walk was the whole point of the change). Refreshed
+    /// per keystroke, off the main actor, by `refreshSearchHits`.
+    @State private var catalogSearchHits: [VODDisplayItem] = []
+    @State private var searchHitsTask: Task<Void, Never>?
+
+    /// Re-runs the library half of the search. Kept per keystroke by design
+    /// (feedback: VOD search fires per keystroke BY DESIGN); the work is now
+    /// one indexed LIKE on a background queue rather than a full scan.
+    private func refreshSearchHits() {
+        searchHitsTask?.cancel()
         let q = searchText
-        var combined = libraryItems.filter {
-            $0.name.localizedCaseInsensitiveContains(q)
-                || ($0.castText.localizedCaseInsensitiveContains(q))
-                || ($0.directorText.localizedCaseInsensitiveContains(q))
+        guard !q.isEmpty else { catalogSearchHits = []; return }
+        let hidden = hiddenKeys
+        let onlyHidden = showingHiddenOnly
+        let sort = sortOrder
+        let extra = searchResults + personMatches
+        let k = kind
+        searchHitsTask = Task { @MainActor in
+            var combined = await vodStore.searchCatalog(kind: k, query: q, hiddenTitleKeys: onlyHidden ? [] : hidden)
+            guard !Task.isCancelled else { return }
+            var ids = Set(combined.map { $0.id })
+            for r in extra where ids.insert(r.id).inserted { combined.append(r) }
+            combined = HiddenVODStore.apply(combined, hiddenKeys: hidden, onlyHidden: onlyHidden)
+            catalogSearchHits = MoviesView.sortItems(combined, by: sort)
         }
-        var ids = Set(combined.map { $0.id })
-        for r in searchResults where ids.insert(r.id).inserted { combined.append(r) }
-        for r in personMatches where ids.insert(r.id).inserted { combined.append(r) }
-        combined = HiddenVODStore.apply(combined, hiddenKeys: hiddenKeys, onlyHidden: showingHiddenOnly)
-        return MoviesView.sortItems(combined, by: sortOrder)
     }
 
     private var filteredMovies: [VODDisplayItem] {
@@ -491,16 +535,9 @@ struct MoviesView: View {
             }
             return searchHits
         }
-        var result = libraryItems
-        // Exclude movies belonging to hidden groups
-        let hidden = effectiveHiddenGroups
-        if !hidden.isEmpty {
-            result = result.filter { item in
-                guard let cat = item.categoryName else { return true }
-                return !hidden.contains(cat)
-            }
-        }
-        return HiddenVODStore.apply(result, hiddenKeys: hiddenKeys, onlyHidden: showingHiddenOnly)
+        // Not searching: the grid reads `libraryMovies`, the windowed
+        // catalog list, and never this array.
+        return []
     }
 
     /// Whether the navigation stack is at root (no detail pushed).
@@ -512,14 +549,14 @@ struct MoviesView: View {
             ZStack {
                 Color.appBackground.ignoresSafeArea()
 
-                if libraryItems.isEmpty && (isLoadingLibrary || (!hasLoadedLibrary && libraryError == nil)) {
+                if libraryCount == 0 && (isLoadingLibrary || (!hasLoadedLibrary && libraryError == nil)) {
                     // Before the first sweep of this session has run (the
                     // series sweep starts after the movie one), this is
                     // "loading", not "No TV Shows" (Logan 2026-09-04).
                     LoadingView(message: "Loading \(kindLower)…")
-                } else if let err = libraryError, libraryItems.isEmpty {
+                } else if let err = libraryError, libraryCount == 0 {
                     errorView(err)
-                } else if libraryItems.isEmpty {
+                } else if libraryCount == 0 {
                     emptyState
                 } else {
                     content
@@ -560,17 +597,22 @@ struct MoviesView: View {
             .toolbar(.hidden, for: .navigationBar)
             #endif
             .task(id: libraryKey) {
-                let movies = libraryItems
+                // The filter and the sort run in SQL and hand back row ids
+                // plus rail buckets, never rows: about 9 bytes per title, so
+                // a 350,000 title library costs a few MB here instead of the
+                // gigabytes the mapped array needed.
                 let hidden = effectiveHiddenGroups
-                let genre = selectedGenre
-                let sort = sortOrder
+                let genre = selectedGenre == MoviesView.hiddenPillLabel ? nil : selectedGenre
                 let hiddenIDs = hiddenKeys
                 let onlyHidden = showingHiddenOnly
-                let result = await Task.detached(priority: .userInitiated) {
-                    MoviesView.computeDerived(movies: movies, hidden: hidden, genre: genre, sort: sort,
-                                              hiddenIDs: hiddenIDs, onlyHidden: onlyHidden)
-                }.value
+                let list = await vodStore.library(kind: kind, hiddenGroups: hidden,
+                                                  hiddenTitleKeys: hiddenIDs, genre: genre,
+                                                  onlyHidden: onlyHidden, sortRaw: sortOrderRaw)
                 guard !Task.isCancelled else { return }
+                let recent = await vodStore.recentlyAdded(kind: kind, hiddenGroups: hidden,
+                                                          hiddenTitleKeys: hiddenIDs)
+                guard !Task.isCancelled else { return }
+                let result = LibraryDerived(library: list, recentlyAdded: recent)
                 #if os(tvOS)
                 // Held while the bar is hidden OR the scroll is moving: the
                 // library sweep republishes every 5 s and each rebuild of a
@@ -599,7 +641,15 @@ struct MoviesView: View {
                 pushRouter.push = { navPath.append($0) }
                 refreshDispatcharrHeaders(); refreshHeroPages(); refreshWatchlistItems()
                 enrichArt()
+                reportScreenPresence()
             }
+            // Screen presence for the sweep's foreground mode (Logan
+            // 2026-09-16). Both VOD tabs stay MOUNTED in the TabView, so
+            // appear / disappear alone is not enough: the tab has to be the
+            // selected one AND the app has to be active.
+            .onChange(of: isSelected) { _, _ in reportScreenPresence() }
+            .onChange(of: scenePhase) { _, _ in reportScreenPresence() }
+            .onDisappear { VODSweepActivity.shared.setOnScreen(kind, false) }
             .onChange(of: heroPagesKey) { _, _ in refreshHeroPages() }
             .onChange(of: hasLoadedLibrary) { _, loaded in if loaded { enrichArt() } }
             .onChange(of: TMDBArtCache.shared.version) { _, _ in heroPages = heroPages.map { applyBackdrop($0) } }
@@ -621,7 +671,7 @@ struct MoviesView: View {
                 let activeServerID = (servers.first(where: { $0.isActive }) ?? servers.first)?.id
                 let alreadyTriedThisServer = activeServerID != nil
                     && vodStore.currentMoviesServerID == activeServerID
-                if libraryItems.isEmpty
+                if libraryCount == 0
                     && !isLoadingLibrary
                     && !alreadyTriedThisServer {
                     refreshLibrary()
@@ -657,7 +707,13 @@ struct MoviesView: View {
                 if query.isEmpty { selectedProviderID = nil }
                 searchLibrary(query, providerID: selectedProviderID)
                 searchPeople(query)
+                // Library half of the search: a catalog query per keystroke,
+                // off the main actor.
+                refreshSearchHits()
             }
+            .onChange(of: searchResults.count) { _, _ in refreshSearchHits() }
+            .onChange(of: personMatches.count) { _, _ in refreshSearchHits() }
+            .onChange(of: sortOrderRaw) { _, _ in if isSearching { refreshSearchHits() } }
             .task(id: activeServerIDString) { await loadProviderNames() }
             .onChange(of: navPath) { _, path in
                 isDetailPushed = !path.isEmpty
@@ -681,14 +737,14 @@ struct MoviesView: View {
             .onReceive(NotificationCenter.default.publisher(for: .aerioOpenVOD)) { notif in
                 guard let vodType = notif.userInfo?["vodType"] as? String, vodType == kindString,
                       let vodID = notif.userInfo?["vodID"] as? String else { return }
-                tryHandleMovieDeepLink(id: vodID, from: libraryItems)
+                tryHandleMovieDeepLink(id: vodID)
             }
-            .onChange(of: libraryItems) { _, movies in
+            .onChange(of: libraryCount) { _, _ in
                 // Cold-launch path: deep link stored launchVODID in UserDefaults,
-                // and now the movies list just finished loading.
+                // and now the catalog just gained rows.
                 guard UserDefaults.standard.string(forKey: "launchVODType") == kindString,
                       let pendingID = UserDefaults.standard.string(forKey: "launchVODID") else { return }
-                tryHandleMovieDeepLink(id: pendingID, from: movies)
+                tryHandleMovieDeepLink(id: pendingID)
             }
             #endif
             .fullScreenCover(item: $resumePlayingURL) { wrapper in
@@ -710,6 +766,19 @@ struct MoviesView: View {
                 )
                 .onDisappear { isPlaying = false }
             }
+            // Leaving this tab, or entering the fullscreen player, cancels
+            // and closes search (Logan 2026-09-16).
+            .onDismissSearch {
+                #if os(iOS)
+                iosSearchFocused = false
+                #endif
+                guard showSearchField || !searchText.isEmpty else { return }
+                showSearchField = false
+                searchText = ""
+                selectedProviderID = nil
+                personMatchName = nil
+                personMatches = []
+            }
         }
     }
 
@@ -718,8 +787,14 @@ struct MoviesView: View {
     /// onto the nav stack. Clears any existing detail first so repeated
     /// deep links don't stack. Clears the UserDefaults deep-link markers
     /// on success so the cold-launch handler doesn't re-fire later.
-    private func tryHandleMovieDeepLink(id: String, from movies: [VODDisplayItem]) {
-        guard let item = movies.first(where: { $0.id == id }) else { return }
+    private func tryHandleMovieDeepLink(id: String) {
+        Task { @MainActor in
+            guard let item = await vodStore.items(kind: kind, ids: [id])[id] else { return }
+            finishMovieDeepLink(item)
+        }
+    }
+
+    private func finishMovieDeepLink(_ item: VODDisplayItem) {
         UserDefaults.standard.removeObject(forKey: "launchVODID")
         UserDefaults.standard.removeObject(forKey: "launchVODType")
         UserDefaults.standard.removeObject(forKey: "launchOnMovies")
@@ -783,9 +858,12 @@ struct MoviesView: View {
             isPlaying = true
             return
         }
-        // Fallback: find the title in the store and push to its detail view
-        if let key = heroKey(progress), let item = libraryItems.first(where: { $0.id == key }) {
-            navPath.append(item)
+        // Fallback: find the title in the catalog and push to its detail view
+        if let key = heroKey(progress) {
+            let k = kind
+            Task { @MainActor in
+                if let item = await vodStore.items(kind: k, ids: [key])[key] { navPath.append(item) }
+            }
         }
     }
 
@@ -932,18 +1010,6 @@ struct MoviesView: View {
     private var heroProgress: WatchProgress? { movieProgress.first }
 
     /// Library minus hidden groups, before genre and sort.
-    private var visibleMovies: [VODDisplayItem] {
-        HiddenVODStore.apply(MoviesView.visible(libraryItems, hidden: effectiveHiddenGroups),
-                             hiddenKeys: hiddenKeys, onlyHidden: showingHiddenOnly)
-    }
-
-    nonisolated private static func visible(_ movies: [VODDisplayItem], hidden: Set<String>) -> [VODDisplayItem] {
-        guard !hidden.isEmpty else { return movies }
-        return movies.filter { item in
-            guard let cat = item.categoryName else { return true }
-            return !hidden.contains(cat)
-        }
-    }
 
     // Perf (Logan 2026-09-03: 4 fps scrolling the grid): these used to be
     // computed properties, so every body evaluation (every focus move and
@@ -951,18 +1017,26 @@ struct MoviesView: View {
     // with a localized compare, several times over. They are now computed
     // once per input change, off the main thread, into `derived`.
     struct LibraryDerived: Equatable {
-        var library: [VODDisplayItem] = []
+        /// The grid's list: a windowed view of the catalog, not an array of
+        /// titles. Only the row ids and rail buckets are resident.
+        var library: VODWindowList = .empty
         var recentlyAdded: [VODDisplayItem] = []
-        var railLetters: Set<String> = []
-        /// First grid row id per rail letter.
-        var firstGridID: [String: String] = [:]
+        /// Rail letters present in the library, straight off the window list.
+        var railLetters: Set<String> { library.railLetters }
+        /// First grid row anchor per rail letter. Index based, so a rail jump
+        /// never reads a row to know where to go.
+        var firstGridID: [String: String] { library.firstAnchorByLetter }
+
+        static func == (lhs: LibraryDerived, rhs: LibraryDerived) -> Bool {
+            lhs.library === rhs.library && lhs.recentlyAdded.map(\.id) == rhs.recentlyAdded.map(\.id)
+        }
     }
     @State private var derived = LibraryDerived()
 
     private struct LibraryKey: Hashable {
+        let revision: Int
         let count: Int
-        let firstID: String?
-        let lastID: String?
+        let catalogKey: String?
         let hidden: Set<String>
         let genre: String?
         let sort: String
@@ -970,14 +1044,16 @@ struct MoviesView: View {
         let onlyHidden: Bool
     }
     private var libraryKey: LibraryKey {
-        LibraryKey(count: libraryItems.count,
-                   firstID: libraryItems.first?.id,
-                   lastID: libraryItems.last?.id,
+        LibraryKey(revision: vodStore.catalogRevision,
+                   count: libraryCount,
+                   catalogKey: vodStore.catalogKey,
                    hidden: effectiveHiddenGroups, genre: selectedGenre, sort: sortOrderRaw,
                    hiddenIDs: hiddenKeys, onlyHidden: showingHiddenOnly)
     }
 
     /// The library sort, also applied to search results (Logan 2026-09-04).
+    /// The library grid itself is sorted in SQL; this stays for the search
+    /// result array, which is bounded.
     nonisolated static func sortItems(_ items: [VODDisplayItem], by sort: MoviesSortOrder) -> [VODDisplayItem] {
         var library = items
         let keys = Dictionary(uniqueKeysWithValues: library.map {
@@ -1023,43 +1099,6 @@ struct MoviesView: View {
         return library
     }
 
-    nonisolated private static func computeDerived(movies: [VODDisplayItem], hidden: Set<String>,
-                                       genre: String?, sort: MoviesSortOrder,
-                                       hiddenIDs: Set<String>, onlyHidden: Bool) -> LibraryDerived {
-        // Hidden titles drop out of every list; the Hidden category flips
-        // the test so only they remain.
-        let visible = HiddenVODStore.apply(Self.visible(movies, hidden: hidden),
-                                           hiddenKeys: hiddenIDs, onlyHidden: onlyHidden)
-
-        let dated = visible.filter { $0.addedAt != nil }
-        let recent: [VODDisplayItem] = dated.isEmpty ? [] : Array(dated.sorted {
-            let a = $0.addedAt ?? .distantPast
-            let b = $1.addedAt ?? .distantPast
-            if a != b { return a > b }
-            return $0.id < $1.id
-        }.prefix(20))
-
-        var library = visible
-        if let g = genre, g != MoviesView.hiddenPillLabel {
-            library = library.filter { $0.categoryName == g }
-        }
-        // Precomputed folded keys: one localized fold per title instead of
-        // one localized compare per comparison.
-        // Same stripped title the rail buckets on, so a rail jump lands on
-        // the sorted run for that letter ("4K: Thor" sorts under T).
-        library = MoviesView.sortItems(library, by: sort)
-
-        var letters: Set<String> = []
-        var firstID: [String: String] = [:]
-        for item in library {
-            let bucket = AlphabetRail.bucket(for: item.name)
-            if firstID[bucket] == nil { firstID[bucket] = "grid-\(item.id)" }
-            letters.insert(bucket)
-        }
-        return LibraryDerived(library: library, recentlyAdded: recent,
-                              railLetters: letters, firstGridID: firstID)
-    }
-
     /// Up to 20 newest titles by source add time (cached).
     private var recentlyAdded: [VODDisplayItem] { derived.recentlyAdded }
 
@@ -1084,16 +1123,26 @@ struct MoviesView: View {
 
     private var heroPagesKey: String {
         let progress = movieProgress.prefix(12).map { "\($0.vodID)|\($0.positionMs)" }.joined(separator: ",")
-        return "\(progress)#\(libraryItems.count)#\(recentlyAdded.first?.id ?? "")#\(effectiveHiddenGroups.count)#\(hiddenKeys.count)#\(showingHiddenOnly)#\(isLoadingLibrary)"
+        return "\(progress)#\(libraryCount)#\(recentlyAdded.first?.id ?? "")#\(effectiveHiddenGroups.count)#\(hiddenKeys.count)#\(showingHiddenOnly)#\(isLoadingLibrary)"
     }
 
+    @State private var heroPagesTask: Task<Void, Never>?
+
     private func refreshHeroPages() {
+        heroPagesTask?.cancel()
         let progress = Array(movieProgress.prefix(12))
-        var byID: [String: VODDisplayItem] = [:]
-        if !progress.isEmpty {
-            let wanted = Set(progress.compactMap(heroKey))
-            for m in libraryItems where wanted.contains(m.id) && byID[m.id] == nil { byID[m.id] = m }
+        let wanted = Array(Set(progress.compactMap(heroKey)))
+        let k = kind
+        heroPagesTask = Task { @MainActor in
+            // One indexed read for the dozen resume rows, instead of a linear
+            // walk of the whole library on every body pass.
+            let byID = wanted.isEmpty ? [:] : await vodStore.items(kind: k, ids: wanted)
+            guard !Task.isCancelled else { return }
+            applyHeroPages(progress: progress, byID: byID)
         }
+    }
+
+    private func applyHeroPages(progress: [WatchProgress], byID: [String: VODDisplayItem]) {
         let resumes: [MoviesHeroPage] = progress.compactMap { p in
             guard let key = heroKey(p) else { return nil }
             // Series rows have no synthetic fallback: the episode row does
@@ -1158,7 +1207,7 @@ struct MoviesView: View {
     }
 
     /// The library grid: visible movies, genre-filtered, sorted (cached).
-    private var libraryMovies: [VODDisplayItem] { derived.library }
+    private var libraryMovies: VODWindowList { derived.library }
 
     private func cycleSort() {
         let all = MoviesSortOrder.allCases
@@ -1178,10 +1227,13 @@ struct MoviesView: View {
 
     private var watchlistKey: String {
         let rows = watchlistEntries.map { "\($0.vodID)|\($0.serverID ?? "")" }.joined(separator: ",")
-        return "\(rows)#\(activeServerIDString ?? "")#\(libraryItems.count)"
+        return "\(rows)#\(activeServerIDString ?? "")#\(libraryCount)"
     }
 
+    @State private var watchlistTask: Task<Void, Never>?
+
     private func refreshWatchlistItems() {
+        watchlistTask?.cancel()
         let sid = activeServerIDString
         let rows = watchlistEntries.filter { e in
             guard e.vodType == kindString else { return false }
@@ -1189,12 +1241,17 @@ struct MoviesView: View {
             return e.serverID == nil || e.serverID == sid
         }
         guard !rows.isEmpty else { watchlistItems = []; return }
-        let wanted = Set(rows.map(\.vodID))
-        var byID: [String: VODDisplayItem] = [:]
-        for m in libraryItems where wanted.contains(m.id) && byID[m.id] == nil { byID[m.id] = m }
-        watchlistItems = HiddenVODStore.apply(
-            rows.compactMap { e in byID[e.vodID] ?? MoviesView.syntheticItem(from: e) },
-            hiddenKeys: hiddenKeys, onlyHidden: false)
+        let wanted = Array(Set(rows.map(\.vodID)))
+        let hidden = hiddenKeys
+        let k = kind
+        watchlistTask = Task { @MainActor in
+            // Indexed read for the saved ids, not a walk of the catalog.
+            let byID = await vodStore.items(kind: k, ids: wanted)
+            guard !Task.isCancelled else { return }
+            watchlistItems = HiddenVODStore.apply(
+                rows.compactMap { e in byID[e.vodID] ?? MoviesView.syntheticItem(from: e) },
+                hiddenKeys: hidden, onlyHidden: false)
+        }
     }
 
     private static func syntheticItem(from e: WatchlistEntry) -> VODDisplayItem? {
@@ -1334,7 +1391,7 @@ struct MoviesView: View {
     /// Phone: the shared media page (Logan 2026-09-09, one template for
     /// Movies, TV Shows and DVR). This view only supplies data and cards.
     private var phoneContent: some View {
-        let gridItems = isSearching ? filteredMovies : libraryMovies
+        let gridCount = isSearching ? filteredMovies.count : libraryMovies.count
         let watchlistPages = watchlistItems.map { MoviesHeroPage(item: $0, progress: nil) }
         return VStack(spacing: 0) {
             if !hiddenGroups.isEmpty && searchText.isEmpty {
@@ -1350,7 +1407,8 @@ struct MoviesView: View {
                     }),
                 ],
                 headerTitle: isSearching ? "Results" : "All \(kindTitle)",
-                headerCount: gridItems.count,
+                headerCount: gridCount,
+                headerIsUpdating: !isSearching && isUpdatingLibrary,
                 search: PhoneSearch(isActive: $showSearchField, text: $searchText,
                                     placeholder: "Search \(kindLower)", onClose: clearSearch),
                 searchExtras: phoneSearchExtras,
@@ -1364,22 +1422,22 @@ struct MoviesView: View {
                 onFilter: { showManageGroups = true },
                 pills: genrePills,
                 selectedPill: $selectedGenre,
-                items: gridItems.map { item in
-                    PhoneGridItem(id: item.id) {
-                        AnyView(
-                            NavigationLink(value: item) {
-                                VODPosterCard(item: item, headers: dispatcharrHeaders)
-                            }
-                            .buttonStyle(.plain)
-                            .contextMenu { watchlistMenuButton(item) }
-                        )
-                    }
+                itemCount: gridCount,
+                cell: { index in
+                    let item = isSearching ? filteredMovies[index] : libraryMovies[index]
+                    return AnyView(
+                        NavigationLink(value: item) {
+                            VODPosterCard(item: item, headers: dispatcharrHeaders)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu { watchlistMenuButton(item) }
+                    )
                 },
                 emptyView: isSearching && !isSearchingLibrary ? {
                     AnyView(Text("No results").scaledFont(.labelMedium.subtext()).foregroundColor(Color.contrastText(.textTertiary)))
                 } : nil,
                 railLetters: railLetters,
-                railTarget: { letter in firstGridID(for: letter).map { String($0.dropFirst("grid-".count)) } },
+                railTarget: { letter in firstGridID(for: letter) },
                 footer: TMDBPosters.isEnabled
                     ? { AnyView(TMDBAttributionView(style: .long)) }
                     : nil
@@ -1660,9 +1718,9 @@ struct MoviesView: View {
                             // is the one shelf under the hero. recentlyAdded still
                             // feeds the hero's fallback page.
 
-                            let gridItems = isSearching ? filteredMovies : libraryMovies
+                            let gridCount = isSearching ? filteredMovies.count : libraryMovies.count
                             libraryHeader(title: isSearching ? "Results" : "All \(kindTitle)",
-                                          count: gridItems.count, showPills: !isSearching,
+                                          count: gridCount, showPills: !isSearching,
                                           onTitleTap: {
                                               // Phone (Logan 2026-09-05): the title scrolls the
                                               // library to the top of the page, rail and all.
@@ -1700,7 +1758,13 @@ struct MoviesView: View {
                                     .padding(.leading, contentLeadingInset)
                                 }
                             }
-                            railCatcherAndGrid(gridItems)
+                            Group {
+                                if isSearching {
+                                    railCatcherAndGrid(filteredMovies)
+                                } else {
+                                    railCatcherAndGrid(libraryMovies)
+                                }
+                            }
                                 .background(GeometryReader { g in
                                     Color.clear.preference(
                                         key: GridTopKey.self,
@@ -1993,13 +2057,18 @@ struct MoviesView: View {
                                 // sort can drop it; a stale id is a silent
                                 // no-op that strands focus on the rail),
                                 // else the first row, which is always built.
-                                let items = isSearching ? filteredMovies : libraryMovies
-                                if let last = lastGridFocus, items.contains(where: { $0.id == last }) {
-                                    gridFocus = last
-                                } else if let first = items.first?.id {
-                                    gridFocus = first
-                                } else {
+                                // Return to the last focused poster when the
+                                // grid still has rows; the id is validated by
+                                // the focus engine, and a first-row fallback
+                                // is always built. Never a membership scan:
+                                // that would read the whole catalog.
+                                let count = isSearching ? filteredMovies.count : libraryMovies.count
+                                if count == 0 {
                                     heroFocusRequest = true
+                                } else if let last = lastGridFocus {
+                                    gridFocus = last
+                                } else {
+                                    gridFocus = isSearching ? filteredMovies[0].id : libraryMovies[0].id
                                 }
                                 #endif
                             },
@@ -2011,10 +2080,12 @@ struct MoviesView: View {
                         ) { letter in
                             let found = firstGridID(for: letter)
                             debugLog("[RAIL] movies jump \(letter) id=\(found ?? "nil") pitch=\(geometryBox.rowPitch) width=\(geometryBox.gridWidth) gridTop=\(geometryBox.gridTopVisible) offset=\(geometryBox.contentOffsetY)")
-                            guard let id = found else { return }
-                            let itemID = String(id.dropFirst("grid-".count))
-                            if let index = libraryMovies.firstIndex(where: { $0.id == itemID }),
-                               geometryBox.rowPitch > 0, geometryBox.gridWidth > 0 {
+                            guard let id = found,
+                                  let index = Int(id.dropFirst("grid-row-".count)),
+                                  index < libraryMovies.count else { return }
+                            // One row read for the landing title, not a scan.
+                            let itemID = libraryMovies[index].id
+                            if geometryBox.rowPitch > 0, geometryBox.gridWidth > 0 {
                                 #if os(tvOS)
                                 let cols = tvGridColumns
                                 #else
@@ -2328,14 +2399,16 @@ struct MoviesView: View {
         }
     }
 
-    private func railCatcherAndGrid(_ items: [VODDisplayItem]) -> some View {
+    private func railCatcherAndGrid<C: RandomAccessCollection>(_ items: C) -> some View
+    where C.Element == VODDisplayItem, C.Index == Int {
         posterGrid(items).padding(.leading, contentLeadingInset)
     }
     #else
     private var railFocusRequestBinding: Binding<String?> { .constant(nil) }
     private var heroFocusRequestBinding: Binding<Bool> { .constant(false) }
 
-    private func railCatcherAndGrid(_ items: [VODDisplayItem]) -> some View {
+    private func railCatcherAndGrid<C: RandomAccessCollection>(_ items: C) -> some View
+    where C.Element == VODDisplayItem, C.Index == Int {
         posterGrid(items).padding(.leading, contentLeadingInset)
     }
     #endif
@@ -2354,6 +2427,10 @@ struct MoviesView: View {
                     Text("\(count)")
                         .scaledFont(.labelMedium.subtext())
                         .foregroundColor(Color.contrastText(.textTertiary))
+                    // The count is still growing: say so rather than let the
+                    // user read a partial library as the whole one (Logan
+                    // 2026-09-16, Android parity).
+                    if isUpdatingLibrary { VODUpdatingBadge() }
                 }
                 .contentShape(Rectangle())
                 #if os(iOS)
@@ -2528,17 +2605,24 @@ struct MoviesView: View {
                 personMatchName = nil; personMatches = []
                 return
             }
-            // Library index once; every candidate's credits match against it.
-            let library = libraryItems
-            let matcher = await Task.detached(priority: .userInitiated) { LibraryMatcher(library) }.value
+            // Each candidate's credits are matched with two indexed
+            // catalog reads (strict tmdb id, then normalized title for rows
+            // that carry no id). The old path built a dictionary over the
+            // WHOLE library for every search, which a 350k catalog cannot do.
             var best: (name: String, hits: [VODDisplayItem])? = nil
             for person in people {
                 guard !Task.isCancelled else { return }
                 let credits = await TMDBService.personCredits(personID: person.id, isMovie: kind == .movie, apiKey: apiKey)
+                guard !credits.isEmpty else { continue }
+                let byTMDB = await vodStore.itemsByTMDBID(kind: kind, tmdbIDs: credits.map(\.id))
+                let titles = credits.map { VODCatalogStore.normalized($0.title) }
+                let byTitle = await vodStore.itemsByNormalizedTitle(kind: kind, titles: titles,
+                                                                    requireNoTMDBID: true)
                 var seen = Set<String>()
                 var hits: [VODDisplayItem] = []
                 for c in credits {
-                    guard let hit = matcher.match(tmdbID: c.id, title: c.title), seen.insert(hit.id).inserted else { continue }
+                    let hit = byTMDB[c.id] ?? byTitle[VODCatalogStore.normalized(c.title)]
+                    guard let hit, seen.insert(hit.id).inserted else { continue }
                     hits.append(hit)
                 }
                 if hits.count > (best?.hits.count ?? 0) { best = (person.name, hits) }
@@ -2673,9 +2757,18 @@ struct MoviesView: View {
     }
 
     /// The library grid (also the search results grid).
-    private func posterGrid(_ items: [VODDisplayItem]) -> some View {
+    ///
+    /// Generic over the collection so the same grid serves the search result
+    /// array and `VODWindowList`, the catalog-backed library. The `ForEach`
+    /// walks INDEXES, never the elements: an item-id identity would have to
+    /// read every row in the catalog just to build the list, which is exactly
+    /// what the windowed store exists to avoid. LazyVGrid only materializes
+    /// the rows it draws, so only a window of titles is ever resident.
+    private func posterGrid<C: RandomAccessCollection>(_ items: C) -> some View
+    where C.Element == VODDisplayItem, C.Index == Int {
         LazyVGrid(columns: columns, spacing: gridRowSpacing) {
-            ForEach(items) { item in
+            ForEach(items.startIndex..<items.endIndex, id: \.self) { index in
+                let item = items[index]
                 NavigationLink(value: item) {
                     VODPosterCard(item: item, headers: dispatcharrHeaders)
                 }
@@ -2686,10 +2779,10 @@ struct MoviesView: View {
                 .buttonStyle(.plain)
                 #endif
                 .contextMenu { watchlistMenuButton(item) }
-                .id("grid-\(item.id)")
+                .id(VODWindowList.anchorID(index))
                 .background(GeometryReader { g in
                     Color.clear.onAppear {
-                        if item.id == items.first?.id {
+                        if index == items.startIndex {
                             geometryBox.rowPitch = g.size.height + gridRowSpacing
                         }
                     }

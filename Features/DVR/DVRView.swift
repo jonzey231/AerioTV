@@ -447,6 +447,17 @@ struct DVRView: View {
             refreshProgress()
             art.resolve(visibleRecordings, modelContext: modelContext)
         }
+        // Leaving this tab, or entering the fullscreen player, cancels and
+        // closes search (Logan 2026-09-16).
+        .onDismissSearch {
+            #if os(iOS)
+            iosSearchFocused = false
+            #endif
+            #if os(tvOS)
+            searchFieldFocused = false
+            #endif
+            if showSearchField || !searchText.isEmpty { clearSearch() }
+        }
         .onChange(of: visibleRecordings.count) { _, _ in
             refreshProgress()
             art.resolve(visibleRecordings, modelContext: modelContext)
@@ -526,12 +537,12 @@ struct DVRView: View {
                 get: { selectedKind?.label },
                 set: { label in selectedKind = kinds.first { $0.label == label } }
             ),
-            items: library.map { rec in
-                PhoneGridItem(id: rec.id.uuidString) { AnyView(card(rec, inGrid: true)) }
-            },
+            itemCount: library.count,
+            cell: { index in AnyView(card(library[index], inGrid: true)) },
             railLetters: railLetters,
             railTarget: { letter in
-                library.first { AlphabetRail.bucket(for: $0.programTitle) == letter }?.id.uuidString
+                library.firstIndex { AlphabetRail.bucket(for: $0.programTitle) == letter }
+                    .map(VODWindowList.anchorID)
             }
         )
     }

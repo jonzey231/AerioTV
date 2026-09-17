@@ -1,5 +1,56 @@
 import Foundation
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
+
+// MARK: - Search dismissal
+
+extension Notification.Name {
+    /// Broadcast whenever every open search field in the app must close.
+    static let aerioDismissSearch = Notification.Name("AerioDismissSearch")
+}
+
+/// One switchboard for "close any open search, everywhere" (Logan
+/// 2026-09-16).
+///
+/// The bug: a search field left open on a tab kept its first responder
+/// alive. Fullscreening media and then swiping down for Picture in
+/// Picture handed first-responder status back to that field, so the
+/// keyboard reappeared over the PiP transition.
+///
+/// The fix: every tab with a search field listens for
+/// `.aerioDismissSearch` and closes itself (clears text, drops focus,
+/// leaves the search UI shut). `dismissAll` also resigns first responder
+/// app-wide, which is what actually stops the keyboard from being
+/// re-summoned as views are torn down and rebuilt around PiP.
+enum SearchDismissCenter {
+    @MainActor
+    static func dismissAll(reason: String) {
+        debugLog("[SEARCH] dismiss all (\(reason))")
+        NotificationCenter.default.post(name: .aerioDismissSearch, object: nil)
+        resignKeyboard()
+    }
+
+    /// Drop the keyboard without touching any search state. Called again
+    /// on the PiP hop so a field that re-mounts cannot take focus back.
+    @MainActor
+    static func resignKeyboard() {
+        #if canImport(UIKit) && !os(tvOS)
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
+    }
+}
+
+extension View {
+    /// Run `action` when any part of the app asks open searches to close.
+    func onDismissSearch(_ action: @escaping () -> Void) -> some View {
+        onReceive(NotificationCenter.default.publisher(for: .aerioDismissSearch)) { _ in
+            action()
+        }
+    }
+}
 
 /// Top-level playback-mode arbiter.
 ///

@@ -84,7 +84,13 @@ struct ChannelPickRow: View {
                     // column; height stays so the row height is unchanged.
                     CachedLogoImage(url: item.logoURL,
                                     width: showChannelNumbers ? 68 : 68 + Self.numberColumn,
-                                    height: 44)
+                                    height: 44,
+                                    // The picker row's card is a 12pt
+                                    // continuous rounded rect; the radius is
+                                    // capped at a quarter of the logo's
+                                    // shorter side so a 44pt-tall logo
+                                    // rounds at 11, never into a pill.
+                                    containerRadius: 12)
                 }
 
                 VStack(alignment: .leading, spacing: 4) {

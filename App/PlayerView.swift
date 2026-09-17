@@ -289,6 +289,334 @@ struct VideoScalePinch: ViewModifier {
         }
     }
 }
+
+// MARK: - In-Player Gestures: edge slide for brightness / volume
+
+/// Settings → App Behaviors → In-Player Gestures (Logan 2026-09-16).
+///
+/// A vertical finger slide along ONE screen edge of the fullscreen player
+/// adjusts screen brightness; the other edge adjusts system volume. Touch
+/// only (iPhone / iPad); tvOS has no equivalent and is untouched.
+///
+/// Both toggles default OFF so nothing changes for existing users. The
+/// recognizer is deliberately narrow and conservative so it cannot steal
+/// the gestures that already live on the player:
+///   - the top-strip swipe down (PiP / minimize) is excluded outright,
+///     because an edge slide must START below `PlayerTopStripSwipe`'s strip
+///   - the channel flip needs 40pt of travel, this engages at 12pt inside
+///     a band that is at most 64pt wide, so the two never see the same drag
+///   - the seek scrubber is its own gesture on the timeline bar, which sits
+///     well inside the band on every layout
+enum InPlayerEdgeGestures {
+    static let brightnessKey = "appBehaviorsEdgeBrightnessGesture"
+    static let volumeKey = "appBehaviorsEdgeVolumeGesture"
+    /// "left" or "right": which edge owns BRIGHTNESS. Volume takes the other.
+    static let brightnessEdgeKey = "appBehaviorsBrightnessEdge"
+    static let defaultBrightnessEdge = "left"
+
+    /// Band width: a slim ribbon at each edge, scaled a little for iPad.
+    static func bandWidth(for width: CGFloat) -> CGFloat {
+        min(64, max(28, width * 0.08))
+    }
+
+    /// Travel that walks the value from 0 to 1.
+    static func fullTravel(for height: CGFloat) -> CGFloat {
+        max(180, height * 0.6)
+    }
+
+    enum Kind { case brightness, volume }
+
+    /// Which adjustment (if any) a drag starting at `start` owns.
+    static func kind(startX: CGFloat,
+                     startY: CGFloat,
+                     width: CGFloat,
+                     height: CGFloat,
+                     brightnessEnabled: Bool,
+                     volumeEnabled: Bool,
+                     brightnessOnLeft: Bool) -> Kind? {
+        guard width > 0, height > 0 else { return nil }
+        // Never compete with the PiP / minimize strip.
+        guard !PlayerTopStripSwipe.startsInStrip(startY, height: height) else { return nil }
+        let band = bandWidth(for: width)
+        let onLeft: Bool
+        if startX <= band {
+            onLeft = true
+        } else if startX >= width - band {
+            onLeft = false
+        } else {
+            return nil
+        }
+        let wanted: Kind = (onLeft == brightnessOnLeft) ? .brightness : .volume
+        switch wanted {
+        case .brightness: return brightnessEnabled ? .brightness : nil
+        case .volume: return volumeEnabled ? .volume : nil
+        }
+    }
+}
+
+/// System volume, driven the only way iOS sanctions: the hidden slider
+/// inside an `MPVolumeView` that is mounted (offscreen) in the window.
+/// Reads come from `AVAudioSession.outputVolume`, which is always live.
+@MainActor
+final class SystemVolumeBridge {
+    static let shared = SystemVolumeBridge()
+    private init() {}
+
+    /// Registered by `SystemVolumeHost` while the player is on screen.
+    weak var slider: UISlider?
+
+    var level: Float {
+        AVAudioSession.sharedInstance().outputVolume
+    }
+
+    func set(_ value: Float) {
+        guard let slider else { return }
+        let clamped = min(1, max(0, value))
+        // setValue(_:animated:) alone does not notify the system route;
+        // sendActions is what actually moves the hardware volume.
+        slider.setValue(clamped, animated: false)
+        slider.sendActions(for: .valueChanged)
+    }
+}
+
+/// 1x1 offscreen `MPVolumeView` host. Mirrors the offscreen
+/// `AVRoutePickerView` pattern already used by the AirPlay button: the view
+/// has to be in the hierarchy for its slider to control the hardware.
+struct SystemVolumeHost: UIViewRepresentable {
+    func makeUIView(context: Context) -> MPVolumeView {
+        let v = MPVolumeView(frame: CGRect(x: -1000, y: -1000, width: 1, height: 1))
+        v.showsRouteButton = false
+        v.isHidden = false
+        v.alpha = 0.001
+        v.isUserInteractionEnabled = false
+        return v
+    }
+
+    func updateUIView(_ uiView: MPVolumeView, context: Context) {
+        bind(uiView)
+        // The slider is not always a subview on the first layout pass.
+        if SystemVolumeBridge.shared.slider == nil {
+            DispatchQueue.main.async { bind(uiView) }
+        }
+    }
+
+    private func bind(_ v: MPVolumeView) {
+        if let s = v.subviews.compactMap({ $0 as? UISlider }).first {
+            SystemVolumeBridge.shared.slider = s
+        }
+    }
+}
+
+/// Live flag for "an edge slide currently owns the touch". The edge
+/// recognizer is attached with `.simultaneousGesture` on the unified
+/// (multiview) and native-HLS hosts, so the gestures that sit beside it,
+/// the channel flip above all, read this to stand down. Cleared a beat
+/// after the finger lifts, because SwiftUI does not order the `onEnded`
+/// callbacks of simultaneous gestures.
+@MainActor
+final class EdgeAdjustState: ObservableObject {
+    static let shared = EdgeAdjustState()
+    private init() {}
+    @Published private(set) var isEngaged = false
+
+    private var clearTask: Task<Void, Never>?
+
+    func engage() {
+        clearTask?.cancel()
+        clearTask = nil
+        if !isEngaged { isEngaged = true }
+    }
+
+    func release() {
+        clearTask?.cancel()
+        clearTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            isEngaged = false
+        }
+    }
+}
+
+/// The edge-slide recognizer, HUD and volume plumbing as one modifier so
+/// every fullscreen touch host carries identical behavior (Logan
+/// 2026-09-16 device pass: the iPhone live player is the unified
+/// single-tile multiview host, NOT the legacy `PlayerRootView` chrome, so
+/// the gesture has to live on all of them).
+struct InPlayerEdgeGestureModifier: ViewModifier {
+    /// Host-side gate: only recognize while the surface is really playable.
+    let isEnabled: Bool
+    /// Named in the engage log so the device log says which host fired.
+    let host: String
+
+    @AppStorage(InPlayerEdgeGestures.brightnessKey)
+    private var edgeBrightnessGesture = false
+    @AppStorage(InPlayerEdgeGestures.volumeKey)
+    private var edgeVolumeGesture = false
+    @AppStorage(InPlayerEdgeGestures.brightnessEdgeKey)
+    private var brightnessEdge = InPlayerEdgeGestures.defaultBrightnessEdge
+
+    @State private var hostSize: CGSize = .zero
+    @State private var kind: InPlayerEdgeGestures.Kind?
+    @State private var base: Double = 0
+    @State private var value: Double = 0
+    @State private var hudVisible = false
+    /// Held apart from `kind` so the HUD keeps its icon while it lingers.
+    @State private var hudKind: InPlayerEdgeGestures.Kind = .brightness
+    @State private var hideTask: Task<Void, Never>?
+
+    private var gesturesOn: Bool { edgeBrightnessGesture || edgeVolumeGesture }
+    private var active: Bool { gesturesOn && isEnabled }
+
+    /// Fall back to the key window when the host has not measured yet.
+    private var measured: CGSize {
+        if hostSize.width > 0, hostSize.height > 0 { return hostSize }
+        let frame = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first { $0.isKeyWindow }?
+            .frame ?? UIScreen.main.bounds
+        return frame.size
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { hostSize = $0 }
+            // The offscreen MPVolumeView only needs to exist while the
+            // volume slide is switched on.
+            .background {
+                if edgeVolumeGesture {
+                    SystemVolumeHost().frame(width: 1, height: 1).allowsHitTesting(false)
+                }
+            }
+            .overlay(alignment: .center) {
+                if hudVisible, gesturesOn {
+                    EdgeAdjustHUD(kind: hudKind, value: value)
+                }
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { v in _ = handleChanged(v) }
+                    .onEnded { _ in end() },
+                including: active ? .all : .subviews
+            )
+            .onDisappear {
+                hideTask?.cancel()
+                hideTask = nil
+                if kind != nil { end() }
+            }
+    }
+
+    private func currentValue(_ k: InPlayerEdgeGestures.Kind) -> Double {
+        switch k {
+        case .brightness: return Double(UIScreen.main.brightness)
+        case .volume: return Double(SystemVolumeBridge.shared.level)
+        }
+    }
+
+    /// Returns true once the slide owns this drag.
+    @discardableResult
+    private func handleChanged(_ v: DragGesture.Value) -> Bool {
+        guard active else { return false }
+        let dy = v.translation.height
+        let dx = abs(v.translation.width)
+        let size = measured
+
+        if kind == nil {
+            // Engage early (12pt) and only on a clearly vertical drag, so a
+            // horizontal swipe from the bezel still reaches its owner.
+            guard abs(dy) > 12, abs(dy) > dx * 1.5 else { return false }
+            guard let k = InPlayerEdgeGestures.kind(
+                startX: v.startLocation.x,
+                startY: v.startLocation.y,
+                width: size.width,
+                height: size.height,
+                brightnessEnabled: edgeBrightnessGesture,
+                volumeEnabled: edgeVolumeGesture,
+                brightnessOnLeft: brightnessEdge != "right"
+            ) else { return false }
+            kind = k
+            hudKind = k
+            base = currentValue(k)
+            EdgeAdjustState.shared.engage()
+            hideTask?.cancel()
+            withAnimation(.easeOut(duration: 0.12)) { hudVisible = true }
+            debugLog("[GESTURE] edge slide \(k == .brightness ? "brightness" : "volume") engaged host=\(host) band=\(Int(InPlayerEdgeGestures.bandWidth(for: size.width))) startX=\(Int(v.startLocation.x)) base=\(String(format: "%.2f", base))")
+        }
+        guard let k = kind else { return false }
+
+        // Up = more. Travel is measured against the host height.
+        let travel = InPlayerEdgeGestures.fullTravel(for: size.height)
+        let next = min(1, max(0, base - Double(dy) / Double(travel)))
+        value = next
+        switch k {
+        case .brightness: UIScreen.main.brightness = CGFloat(next)
+        case .volume: SystemVolumeBridge.shared.set(Float(next))
+        }
+        return true
+    }
+
+    private func end() {
+        guard kind != nil else { return }
+        kind = nil
+        EdgeAdjustState.shared.release()
+        hideTask?.cancel()
+        hideTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeIn(duration: 0.2)) { hudVisible = false }
+        }
+    }
+}
+
+extension View {
+    /// Attach the In-Player Gestures edge slides to a fullscreen touch host.
+    func inPlayerEdgeGestures(isEnabled: Bool, host: String) -> some View {
+        modifier(InPlayerEdgeGestureModifier(isEnabled: isEnabled, host: host))
+    }
+}
+
+/// Transient readout shown while an edge slide is adjusting. Styled to
+/// match the Video Scale toast (centered capsule, no hit testing).
+struct EdgeAdjustHUD: View {
+    let kind: InPlayerEdgeGestures.Kind
+    let value: Double
+
+    private var icon: String {
+        switch kind {
+        case .brightness:
+            return value < 0.5 ? "sun.min.fill" : "sun.max.fill"
+        case .volume:
+            if value <= 0.001 { return "speaker.slash.fill" }
+            return value < 0.5 ? "speaker.wave.1.fill" : "speaker.wave.3.fill"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .scaledFont(.title3.weight(.semibold))
+                .frame(width: 26)
+            Capsule()
+                .fill(Color.white.opacity(0.25))
+                .frame(width: 110, height: 6)
+                .overlay(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.white)
+                        .frame(width: max(0, min(110, 110 * value)), height: 6)
+                }
+            Text("\(Int((value * 100).rounded()))%")
+                .scaledFont(.subheadline.weight(.semibold))
+                .monospacedDigit()
+                .frame(width: 46, alignment: .trailing)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 12)
+        .background(Color.black.opacity(0.55), in: Capsule())
+        .allowsHitTesting(false)
+        .transition(.opacity)
+    }
+}
 #endif
 
 extension View {
@@ -1101,15 +1429,24 @@ private struct PlayerRootView: View {
     private var appleTVChannelFlip = true
 
     #if os(iOS)
+    /// True while an In-Player edge slide owns the touch; the root drag
+    /// (minimize / channel flip) stands down for its duration.
+    @ObservedObject private var edgeAdjust = EdgeAdjustState.shared
+
     /// Key window height (iPad split screen safe); the swipe-down minimize
     /// travel and the top-strip bounds are both measured against it.
     private var playerWindowHeight: CGFloat {
+        playerWindowFrame.height
+    }
+
+    private var playerWindowFrame: CGRect {
         UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap { $0.windows }
             .first { $0.isKeyWindow }?
-            .frame.height ?? UIScreen.main.bounds.height
+            .frame ?? UIScreen.main.bounds
     }
+
     #endif
 
     // Skip Intervals (Settings > App Behaviors): the skip buttons and a
@@ -1482,10 +1819,15 @@ private struct PlayerRootView: View {
         // Release a forced-landscape lock when the player closes so the
         // rest of the app returns to the device's own orientation.
         .onDisappear { if forcedLandscape { requestOrientation(landscape: false) } }
+        // In-Player Gestures (Settings → App Behaviors): the edge slides for
+        // brightness and volume. Same modifier on every fullscreen touch
+        // host so behavior and priority are identical.
+        .inPlayerEdgeGestures(isEnabled: state == .playing, host: "PlayerRootView")
         .gesture(
             DragGesture()
                 .onChanged { value in
-                    guard state == .playing, value.translation.height > 0 else { return }
+                    guard state == .playing, !edgeAdjust.isEngaged else { return }
+                    guard value.translation.height > 0 else { return }
                     // Top-strip swipe down (Logan 2026-09-14): follows the
                     // finger at a damped rate with chrome up or down; it
                     // never flips (see onEnded).
@@ -1503,7 +1845,14 @@ private struct PlayerRootView: View {
                     dragOffset = value.translation.height
                 }
                 .onEnded { value in
-                    guard state == .playing else { return }
+                    // An edge slide owns the whole drag: never also minimize,
+                    // flip channels, or seek off the same gesture.
+                    guard state == .playing, !edgeAdjust.isEngaged else {
+                        if dragOffset != 0 {
+                            withAnimation(.spring(response: 0.3)) { dragOffset = 0 }
+                        }
+                        return
+                    }
 
                     // Top-strip swipe down: minimize (onMinimize ->
                     // NowPlayingManager.minimize, which on iPhone is foreground
@@ -6518,6 +6867,8 @@ struct NativeHLSPlayerScreen: View {
         // pins the chrome visible; resume restarts the hide clock
         // (mpv chrome parity).
         .statusBarHidden()
+        // In-Player Gestures: edge slides for brightness / volume.
+        .inPlayerEdgeGestures(isEnabled: player != nil, host: "NativeHLSPlayerScreen")
         // Top-strip swipe down (Logan 2026-09-14). This screen is a
         // fullScreenCover whose dismissal tears the player down, so it
         // cannot hand its layer to a foreground PiP window; it always

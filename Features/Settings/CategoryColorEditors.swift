@@ -113,7 +113,7 @@ struct MoreCategoriesView: View {
             } header: {
                 Text("Additional Buckets").sectionHeaderStyle()
             } footer: {
-                Text("Toggle a bucket on to include its aliases in the matcher. Defaults cover Sports, Movies, Kids, and News — these are extras for feeds that heavily tag Documentary, Drama, Sitcoms, etc.")
+                Text("Toggle a bucket on to include its aliases in the matcher. Defaults cover Sports, Movies, Kids, and News: these are extras for feeds that heavily tag Documentary, Drama, Sitcoms, etc.")
                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
 
@@ -415,7 +415,7 @@ struct CustomCategoryEditor: View {
                 }
                 .listRowBackground(Color.cardBackground)
             } footer: {
-                Text("Matching is case-insensitive and uses `contains` — entering \"Horror\" will colour any program whose XMLTV category includes the word horror.")
+                Text("Matching is case-insensitive and uses `contains`: entering \"Horror\" will colour any program whose XMLTV category includes the word horror.")
                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
 

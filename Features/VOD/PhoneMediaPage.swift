@@ -56,13 +56,21 @@ struct PhoneMediaPage: View {
     var rows: [PhoneRow] = []
     let headerTitle: String
     let headerCount: Int
+    /// Shows the small "Updating" spinner beside the count while the page's
+    /// library is still being swept (Logan 2026-09-16, Android parity).
+    var headerIsUpdating: Bool = false
     var search: PhoneSearch? = nil
     var searchExtras: [PhoneRow] = []
     let sortMenu: () -> AnyView
     var onFilter: (() -> Void)? = nil
     var pills: [String] = []
     var selectedPill: Binding<String?> = .constant(nil)
-    let items: [PhoneGridItem]
+    /// The library grid, addressed by INDEX rather than handed an array of
+    /// cells. The catalog is paged (GH #109) and a 350,000 title library can
+    /// never be mapped into a cell array, so the page asks for one cell at a
+    /// time and LazyVGrid only ever builds the ones on screen.
+    let itemCount: Int
+    let cell: (Int) -> AnyView
     var emptyView: (() -> AnyView)? = nil
     var railLetters: Set<String> = []
     /// Id of the first grid item for a rail letter.
@@ -127,7 +135,7 @@ struct PhoneMediaPage: View {
                                 if !isSearching, !pills.isEmpty {
                                     pillRow
                                 }
-                                if items.isEmpty, let emptyView {
+                                if itemCount == 0, let emptyView {
                                     emptyView()
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 48)
@@ -161,7 +169,7 @@ struct PhoneMediaPage: View {
                         // park offset is set once as it appears. Writes go to
                         // the rail's own observable so only the fade wrapper
                         // re-renders.
-                        let want = gridTopY <= 110 && !isSearching && items.count >= 9
+                        let want = gridTopY <= 110 && !isSearching && itemCount >= 9
                         let rail = box.phoneRail
                         if want != rail.visible {
                             if want { rail.top = (max(0, gridTopY) / 8).rounded() * 4 }
@@ -225,6 +233,7 @@ struct PhoneMediaPage: View {
                 Text("\(headerCount)")
                     .scaledFont(.labelMedium.subtext())
                     .foregroundColor(Color.contrastText(.textTertiary))
+                if headerIsUpdating { VODUpdatingBadge() }
             }
             .contentShape(Rectangle())
             .onTapGesture {
@@ -283,6 +292,9 @@ struct PhoneMediaPage: View {
                 .autocorrectionDisabled()
                 .submitLabel(.search)
                 .focused($searchFocused)
+                // The owning tab clears its own search state; this drops the
+                // field's focus so the keyboard cannot follow into PiP.
+                .onDismissSearch { searchFocused = false }
             Button {
                 searchFocused = false
                 withAnimation(.spring(response: 0.25)) { search.onClose() }
@@ -316,14 +328,13 @@ struct PhoneMediaPage: View {
 
     private var grid: some View {
         let columns = Array(repeating: GridItem(.flexible(), spacing: columnSpacing), count: 3)
-        let firstID = items.first?.id
         return LazyVGrid(columns: columns, spacing: rowSpacing) {
-            ForEach(items) { item in
-                item.cell()
-                    .id("grid-\(item.id)")
+            ForEach(0..<itemCount, id: \.self) { index in
+                cell(index)
+                    .id(VODWindowList.anchorID(index))
                     .background(GeometryReader { g in
                         Color.clear.onAppear {
-                            if item.id == firstID { box.rowPitch = g.size.height + rowSpacing }
+                            if index == 0 { box.rowPitch = g.size.height + rowSpacing }
                         }
                     })
             }
@@ -342,7 +353,10 @@ struct PhoneMediaPage: View {
 
     private func jump(to letter: String, proxy: ScrollViewProxy) {
         guard let id = railTarget(letter) else { return }
-        if let index = items.firstIndex(where: { $0.id == id }), box.rowPitch > 0 {
+        // The rail target is an index anchor ("grid-row-N"), so the row is
+        // arithmetic: no scan of the library to find where to land.
+        let index = Int(id.dropFirst("grid-row-".count)) ?? -1
+        if index >= 0, box.rowPitch > 0 {
             // Absolute offset: scrollTo(id) silently no-ops for lazy grid
             // rows not yet built.
             let row = index / 3
@@ -354,7 +368,7 @@ struct PhoneMediaPage: View {
             }
         } else {
             withAnimation(.easeInOut(duration: 0.25)) {
-                proxy.scrollTo("grid-\(id)", anchor: .top)
+                proxy.scrollTo(id, anchor: .top)
             }
         }
     }

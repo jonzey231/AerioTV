@@ -230,6 +230,11 @@ struct MultiviewContainerView: View {
     @AppStorage("appBehaviorsAppleTVChannelFlip")
     private var appleTVChannelFlip = true
 
+    #if os(iOS)
+    /// True while an In-Player edge slide owns the touch.
+    @ObservedObject private var edgeAdjust = EdgeAdjustState.shared
+    #endif
+
     #if os(tvOS)
     /// Remote Control #195: the player's Left-press "Channels" overlay
     /// (Apple GH #54 OSD side-menu) and the "Recently Watched" overlay.
@@ -868,7 +873,9 @@ struct MultiviewContainerView: View {
                     guard chromeState.isVisible,
                           nowPlaying.isLive,
                           store.tiles.count == 1,
-                          !nowPlaying.isMinimized else { return }
+                          !nowPlaying.isMinimized,
+                          // An In-Player edge slide owns its own drag.
+                          !edgeAdjust.isEngaged else { return }
                     // The top strip belongs to the swipe-down PiP /
                     // minimize gesture below, never to a flip.
                     guard !PlayerTopStripSwipe.startsInStrip(
@@ -914,6 +921,14 @@ struct MultiviewContainerView: View {
                         }
                     }
                 }
+        )
+        // In-Player Gestures (Settings → App Behaviors): edge slides for
+        // brightness / volume. This is the host the iPhone actually shows
+        // for a plain channel play (unified single-tile path), so the
+        // slides have to live here as well as on the legacy chrome.
+        .inPlayerEdgeGestures(
+            isEnabled: store.tiles.count == 1 && !nowPlaying.isMinimized,
+            host: "MultiviewContainerView"
         )
         .onGeometryChange(for: CGFloat.self) { proxy in
             proxy.size.height

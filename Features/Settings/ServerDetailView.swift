@@ -79,6 +79,17 @@ func performServerCascadeDelete(_ server: ServerConnection,
         for r in stale { modelContext.delete(r) }
         debugLog("🗑️ Deleted \(stale.count) orphaned server-side Recording rows for server \(sid)")
     }
+    // Rebuildable on-disk caches are keyed per server and are kept across
+    // playlist switches so switching back is instant (Logan 2026-09-16).
+    // DELETING the playlist is the one moment they are removed.
+    let vodIdentity = VODLibraryCache.identity(for: server)
+    VODLibraryCache.clear(kinds: [.movie, .series], identity: vodIdentity)
+    VODSweepProgress.clear(identity: VODSweepProgress.identity(for: server))
+    // The paged VOD catalog (GH #109) is keyed per server and survives a
+    // playlist switch; deleting the playlist is what removes its rows.
+    let deletedServer = server
+    Task { await VODStore.shared.deleteCatalog(for: deletedServer) }
+    EPGGridCoverage.clear(identity: EPGGridCoverage.identity(serverID: sid, server: server))
     modelContext.delete(server)
     try? modelContext.save()
     // Issue #25: wipe in-memory VOD so On Demand stops
@@ -560,8 +571,14 @@ struct ServerDetailView: View {
                     //    "Refresh EPG Data" leaves this in place, which is
                     //    how stale guide data can survive that action.
                     await EPGCache.shared.invalidateAll()
-                    // 3. Drop all On Demand (movies + series) state.
+                    // 3. Drop all On Demand state, INCLUDING this server's
+                    //    stored catalog: its rows, sweep state and lanes, the
+                    //    legacy snapshot and the sweep position files. Only
+                    //    this server's; another playlist's catalog is what
+                    //    makes switching back instant and is never touched.
                     VODStore.shared.clear()
+                    await VODStore.shared.deleteCatalog(for: server)
+                    debugLog("[VOD-CAT] refresh everything: catalog cleared for server=\(server.name), full sweep starting")
                     // 4. Reload from scratch for the active playlist:
                     //    channels are re-fetched (newly-added channels
                     //    appear), the guide is rebuilt and re-cached, and

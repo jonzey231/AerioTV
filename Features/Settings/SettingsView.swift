@@ -25,9 +25,6 @@ struct SettingsView: View {
     /// the observer fixes the cascade by forcing re-render on every
     /// theme mutation.
     @ObservedObject private var theme = ThemeManager.shared
-    /// Drives the in-row spinner on the Push / Pull rows in every Sync
-    /// pane (iPhone root, iPad detail, tvOS pane).
-    @ObservedObject private var sync = SyncManager.shared
     // v1.6.17: explicit sort order for the Playlists list. `sortOrder`
     // existed since the original model and rides iCloud sync (see
     // SyncManager line 795), but until now the @Query returned
@@ -46,24 +43,9 @@ struct SettingsView: View {
     @State private var serverToDelete: ServerConnection? = nil
     @State private var serverToEdit: ServerConnection? = nil
     @State private var showDeleteAlert = false
-    /// Drives the confirmation alert for the "Clear iCloud Data"
-    /// destructive action in the iCloud Sync section.
-    @State private var showClearICloudConfirm = false
-    @State private var showPullConfirm = false
-    /// Optional confirmation toast shown after a successful Clear
-    /// iCloud Data invocation. Auto-dismisses after a couple of
-    /// seconds so the user gets feedback without an extra tap.
-    @State private var clearICloudConfirmationVisible = false
-    // Tracks whether the one-time swipe-hint peek has been shown.
-    @State private var copiedAbout = false
-    /// Presents the What's New sheet on demand from the App Version
-    /// row. Independent of the launch-time presentation in RootView:
-    /// opening it here never changes the "seen" gating logic.
-    @State private var showWhatsNewFromAbout = false
-    /// iPad About pane's Open Source Licenses sheet.
-    @State private var showOSSLicensesPad = false
+    /// Read-only here: the Sync row's value on the Settings root. The
+    /// toggle itself lives on SyncSettingsView.
     @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = false
-    @AppStorage("syncLastDate") private var syncLastDate: Double = 0
     #if os(tvOS)
     @State private var navPath = NavigationPath()
     /// Tracks classic-`NavigationLink` pushes that bypass `navPath`
@@ -77,6 +59,10 @@ struct SettingsView: View {
     // selection falls back to Playlists.
     @Environment(\.horizontalSizeClass) private var hSizeClass
     @State private var padSelection: SettingsRoute? = .category(.playlists)
+    /// iPhone push stack. Only the `aerio://settings/<page>` deep link
+    /// writes to it; the visible rows stay classic
+    /// `NavigationLink(destination:)` pushes.
+    @State private var phonePath = NavigationPath()
     #endif
 
     var body: some View {
@@ -108,6 +94,92 @@ struct SettingsView: View {
         // (ServerDetailView, DVR → MyRecordingsView) opt into the
         // same pop mechanism despite bypassing `navPath`.
         settingsNavigationStack
+            // aerio://settings/<page>. Warm app: the notification. Cold
+            // launch: the page parked on SettingsDeepLink before this view
+            // existed, consumed on the first mount.
+            .onAppear {
+                if let page = SettingsDeepLink.shared.consumePending() {
+                    applySettingsDeepLink(page)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .aerioOpenSettingsPage)) { note in
+                guard let raw = note.userInfo?["page"] as? String,
+                      let page = SettingsDeepLinkPage(rawValue: raw) else { return }
+                _ = SettingsDeepLink.shared.consumePending()
+                applySettingsDeepLink(page)
+            }
+    }
+
+    // MARK: - Settings deep link
+
+    /// Drives the existing navigation for a `aerio://settings/<page>` URL.
+    /// Unknown pages arrive here already folded into `.root`.
+    @MainActor
+    private func applySettingsDeepLink(_ page: SettingsDeepLinkPage) {
+        let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+        debugLog("🔗 SettingsView: deep link page=\(page.rawValue)")
+        // A short hop off the current turn so the navigation container has
+        // finished mounting (cold launch lands here inside the first
+        // onAppear, before the stack/rail can accept a programmatic move).
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            #if os(tvOS)
+            switch page {
+            case .root:
+                navPath = NavigationPath()
+                tvSelection = .category(.playlists)
+                railReturnToken += 1
+            case .playlistDetail:
+                navPath = NavigationPath()
+                if let server = activeServer { tvSelection = .server(server.id) }
+                tvDetailFocusToken += 1
+            case .editPlaylist:
+                if let server = activeServer {
+                    tvSelection = .server(server.id)
+                    navPath = NavigationPath()
+                    navPath.append(SettingsRoute.editServer(server.id))
+                }
+            default:
+                navPath = NavigationPath()
+                if let dest = page.category {
+                    tvSelection = .category(dest)
+                    tvDetailFocusToken += 1
+                }
+            }
+            #else
+            let isPad = UIDevice.current.userInterfaceIdiom == .pad && hSizeClass == .regular
+            switch page {
+            case .root:
+                phonePath = NavigationPath()
+                padSelection = .category(.playlists)
+            case .playlistDetail:
+                guard let server = activeServer else { return }
+                if isPad {
+                    padSelection = .server(server.id)
+                } else {
+                    phonePath = NavigationPath()
+                    phonePath.append(SettingsRoute.server(server.id))
+                }
+            case .editPlaylist:
+                guard let server = activeServer else { return }
+                // Edit is a sheet on both iPhone and iPad.
+                if isPad { padSelection = .server(server.id) } else { phonePath = NavigationPath() }
+                serverToEdit = server
+            case .remote:
+                // Remote Control is tvOS-only: fall back to the root.
+                phonePath = NavigationPath()
+                padSelection = .category(.playlists)
+            default:
+                guard let dest = page.category else { return }
+                if isPad {
+                    padSelection = .category(dest)
+                } else {
+                    phonePath = NavigationPath()
+                    phonePath.append(SettingsRoute.category(dest))
+                }
+            }
+            #endif
+        }
     }
 
     @ViewBuilder
@@ -144,7 +216,7 @@ struct SettingsView: View {
         if UIDevice.current.userInterfaceIdiom == .pad && hSizeClass == .regular {
             padSplitRoot
         } else {
-            NavigationStack { settingsContent }
+            NavigationStack(path: $phonePath) { settingsContent }
         }
         #endif
     }
@@ -297,190 +369,78 @@ struct SettingsView: View {
                     .listSectionSeparator(.hidden)
                     #endif
 
+                    // MARK: - App
+                    Section {
+                        NavigationLink(destination: LiveTVSettingsView()) {
+                            SettingsRow(icon: "tv.fill", iconColor: .accentPrimary,
+                                        title: "Live TV", subtitle: "Guide, groups, badges, colors")
+                        }
+                        #if os(iOS)
+                        .buttonStyle(PressableButtonStyle())
+                        #endif
+                        NavigationLink(destination: PlayerSettingsView()) {
+                            SettingsRow(icon: "play.rectangle.fill", iconColor: .accentPrimary,
+                                        title: "Player", subtitle: "Info card, rewind, gestures, multiview")
+                        }
+                        #if os(iOS)
+                        .buttonStyle(PressableButtonStyle())
+                        #endif
+                        NavigationLink(destination: MoviesTVSettingsView()) {
+                            SettingsRow(icon: "film.fill", iconColor: .accentPrimary,
+                                        title: "Movies & TV Shows", subtitle: "Library refresh, posters")
+                        }
+                        #if os(iOS)
+                        .buttonStyle(PressableButtonStyle())
+                        #endif
+                        NavigationLink(destination: DVRSettingsView()) {
+                            SettingsRow(icon: "record.circle", iconColor: .red,
+                                        title: "DVR", subtitle: "Recordings, buffers, storage")
+                        }
+                        #if os(iOS)
+                        .buttonStyle(PressableButtonStyle())
+                        #endif
+                    } header: {
+                        Text("App")
+                            .sectionHeaderStyle()
+                    }
+                    .listRowBackground(Color.cardBackground)
+                    #if os(iOS)
+                    .listSectionSeparator(.hidden)
+                    #endif
+
+                    // MARK: - Device
                     Section {
                         NavigationLink(destination: AppearanceSettingsView()) {
                             SettingsRow(icon: "paintbrush.fill", iconColor: .accentPrimary,
-                                        title: "Appearance", subtitle: "Theme, scale & category colors")
+                                        title: "Appearance", subtitle: "Theme, text size, time format")
                         }
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
-                        NavigationLink(destination: AppBehaviorsSettingsView()) {
+                        NavigationLink(destination: GeneralSettingsView()) {
                             SettingsRow(icon: "switch.2", iconColor: .accentPrimary,
-                                        title: "App Behaviors", subtitle: "Default tab, launch & gestures")
+                                        title: "General", subtitle: "Startup, refresh, network")
                         }
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
-                        NavigationLink(destination: MultiviewSettingsView()) {
-                            SettingsRow(icon: "rectangle.split.2x2.fill", iconColor: .accentPrimary,
-                                        title: "Multiview", subtitle: "Audio focus, tile spacing & corners")
-                        }
-                        #if os(iOS)
-                        .buttonStyle(PressableButtonStyle())
-                        #endif
-                        NavigationLink(destination: NetworkSettingsView()) {
-                            SettingsRow(icon: "network", iconColor: .accentSecondary,
-                                        title: "Network", subtitle: "Timeout, buffer & background refresh")
-                        }
-                        #if os(iOS)
-                        .buttonStyle(PressableButtonStyle())
-                        #endif
-                    } header: {
-                        Text("App Settings")
-                            .sectionHeaderStyle()
-                    }
-                    .listRowBackground(Color.cardBackground)
-
-                    // MARK: - iCloud Sync
-                    Section {
-                        Toggle(isOn: $iCloudSyncEnabled) {
+                        NavigationLink(destination: SyncSettingsView()) {
                             SettingsRow(icon: "icloud.fill", iconColor: .accentPrimary,
-                                        title: "iCloud Sync",
-                                        subtitle: "Sync playlists, preferences, and watch progress")
-                        }
-                        .tint(ThemeManager.shared.accent)
-                        .onChange(of: iCloudSyncEnabled) { _, enabled in
-                            SyncManager.shared.syncSettingChanged(enabled: enabled)
-                        }
-
-                        if iCloudSyncEnabled {
-                            Button {
-                                guard sync.activity == .idle else { return }
-                                debugLog("🔵 Sync Now tapped")
-                                SyncManager.shared.pushServers(servers, immediate: true)
-                                SyncManager.shared.pushPreferencesImmediate()
-                                if let ctx = WatchProgressManager.modelContext,
-                                   let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
-                                    SyncManager.shared.pushWatchProgress(all, immediate: true)
-                                }
-                                // v1.6.17 — also push reminders so toggling
-                                // a category back on can be followed by a
-                                // one-tap "push everything" rather than
-                                // waiting for the next reminder edit.
-                                SyncManager.shared.pushReminders(immediate: true)
-                            } label: {
-                                SettingsRow(icon: "arrow.triangle.2.circlepath.icloud",
-                                            iconColor: .accentPrimary,
-                                            title: "Push to iCloud",
-                                            subtitle: syncLastDate > 0
-                                                ? "Send this device's data up  ·  Last synced \(lastSyncedString)"
-                                                : "Send this device's playlists, preferences and progress up",
-                                            isBusy: sync.activity == .pushing)
-                            }
-                            #if os(iOS)
-                            .buttonStyle(PressableButtonStyle())
-                            // Both directions are locked out while either
-                            // one runs so a double tap cannot stack
-                            // operations on top of each other. Not applied
-                            // on tvOS, where `.disabled` would pull the row
-                            // out of the focus engine.
-                            .disabled(sync.activity != .idle)
-                            #else
-                            .buttonStyle(.plain)
-                            #endif
-
-                            // The other direction. Without this the only manual
-                            // control was push-only, so the device that needed
-                            // the data had no way to ask for it -- and on an
-                            // Apple TV, tapping the push button would send the
-                            // TV's older state UP and clobber what the phone had
-                            // just added (Logan, 2026-08-11: "If I add a playlist
-                            // on my iPhone and want to immediately pull it to my
-                            // Apple TV, there's no way to do that").
-                            //
-                            // This REPLACES local state with the cloud copy,
-                            // matching Android's "Pull Config from Drive"
-                            // (Logan, 2026-08-11: "I'd prefer the full
-                            // overwrite. Just make sure there's a note that
-                            // tells the user"). Destructive, so it confirms
-                            // first; the alert carries the note.
-                            Button {
-                                guard sync.activity == .idle else { return }
-                                showPullConfirm = true
-                            } label: {
-                                SettingsRow(icon: "icloud.and.arrow.down",
-                                            iconColor: .accentPrimary,
-                                            title: "Pull from iCloud",
-                                            subtitle: "Replace this device's data with the iCloud copy",
-                                            isBusy: sync.activity == .pulling)
-                            }
-                            #if os(iOS)
-                            .buttonStyle(PressableButtonStyle())
-                            .disabled(sync.activity != .idle)
-                            #else
-                            .buttonStyle(.plain)
-                            #endif
-
-                            // Failure reason only. The in-flight spinner
-                            // now lives in the Push / Pull rows
-                            // themselves; this renders nothing unless the
-                            // last operation failed.
-                            SyncActivityRow()
-                        }
-
-                        // v1.6.17 — granular per-category sync controls.
-                        // Stays accessible even when iCloudSyncEnabled is off
-                        // so the Delete actions work for stale-state cleanup.
-                        NavigationLink(destination: SyncCategoriesSettingsView()) {
-                            SettingsRow(icon: "slider.horizontal.3",
-                                        iconColor: .accentPrimary,
-                                        title: "Sync Categories",
-                                        subtitle: "Choose what syncs across your devices")
+                                        title: "Sync", subtitle: syncValueLabel)
                         }
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
-                        #endif
-
-                        // v1.6.12: destructive action — wipe everything
-                        // this app has parked in iCloud. Always offered
-                        // (even when Sync is currently off) so a user
-                        // who toggled Sync off can still purge stale
-                        // cloud state without re-enabling first.
-                        Button(role: .destructive) {
-                            showClearICloudConfirm = true
-                        } label: {
-                            SettingsRow(icon: "trash.circle.fill",
-                                        iconColor: .statusLive,
-                                        title: "Clear iCloud Data",
-                                        subtitle: "Wipe synced playlists, preferences, watch progress, and credentials from iCloud")
-                        }
-                        #if os(iOS)
-                        .buttonStyle(PressableButtonStyle())
-                        #else
-                        .buttonStyle(.plain)
                         #endif
                     } header: {
-                        Text("Sync").sectionHeaderStyle()
-                    } footer: {
-                        Text("Playlists, preferences, and VOD watch progress sync across all devices signed into the same Apple ID. Credentials are stored securely in iCloud Keychain.")
-                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                        Text("Device")
+                            .sectionHeaderStyle()
                     }
                     .listRowBackground(Color.cardBackground)
                     #if os(iOS)
                     .listSectionSeparator(.hidden)
                     #endif
 
-                    // MARK: - DVR Section
-                    Section {
-                        NavigationLink(destination: DVRSettingsView()) {
-                            SettingsRow(icon: "record.circle", iconColor: .red,
-                                        title: "DVR",
-                                        subtitle: "Recordings, buffers & storage")
-                        }
-                        #if os(iOS)
-                        .buttonStyle(PressableButtonStyle())
-                        #endif
-                        .listRowBackground(Color.cardBackground)
-                    } header: {
-                        Text("DVR")
-                            .sectionHeaderStyle()
-                    }
-                    #if os(iOS)
-                    .listSectionSeparator(.hidden)
-                    #endif
-
-                    // MARK: - Developer Section
+                    // MARK: - Developer & About
                     Section {
                         NavigationLink(destination: DeveloperSettingsView()) {
                             SettingsRow(icon: "ladybug.fill", iconColor: .accentSecondary,
@@ -490,111 +450,15 @@ struct SettingsView: View {
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
-                        .listRowBackground(Color.cardBackground)
-                    } header: {
-                        Text("Developer")
-                            .sectionHeaderStyle()
-                    }
-                    #if os(iOS)
-                    .listSectionSeparator(.hidden)
-                    #endif
-
-                    // MARK: - About Section
-                    Section {
-                        infoRow("Device",          value: aboutDevice)
-                            .listRowBackground(Color.cardBackground)
-                        infoRow("System",          value: aboutSystem)
-                            .listRowBackground(Color.cardBackground)
-                        appVersionRow
-                            .listRowBackground(Color.cardBackground)
-                        infoRow("First Installed", value: aboutInstallDate)
-                            .listRowBackground(Color.cardBackground)
-                        infoRow("Last Updated",    value: aboutUpdateDate)
-                            .listRowBackground(Color.cardBackground)
-
-                        Button {
-                            #if os(iOS)
-                            UIPasteboard.general.string = aboutCopyText
-                            #endif
-                            copiedAbout = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                                copiedAbout = false
-                            }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: copiedAbout ? "checkmark.circle.fill" : "doc.on.doc")
-                                    .scaledFont(.system(size: 14, weight: .medium))
-                                    .foregroundColor(copiedAbout ? .accentPrimary : Color.contrastText(.textSecondary))
-                                Text(copiedAbout ? "Copied!" : "Copy to Clipboard")
-                                    .scaledFont(.bodyMedium)
-                                    .foregroundColor(copiedAbout ? Color.contrastText(.accentPrimary) : Color.contrastText(.textSecondary))
-                                Spacer()
-                            }
+                        NavigationLink(destination: AboutSettingsView()) {
+                            SettingsRow(icon: "info.circle.fill", iconColor: .accentPrimary,
+                                        title: "About", subtitle: AboutInfo.version)
                         }
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
-                        .listRowBackground(Color.cardBackground)
-
-                        NavigationLink {
-                            OpenSourceLicensesView()
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: "doc.text")
-                                    .scaledFont(.system(size: 14, weight: .medium))
-                                    .foregroundColor(Color.contrastText(.textSecondary))
-                                Text("Open Source Licenses")
-                                    .scaledFont(.bodyMedium.subtext())
-                                    .foregroundColor(Color.contrastText(.textSecondary))
-                                Spacer()
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-
-                        Link(destination: URL(string: "https://github.com/jonzey231/AerioTV")!) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "link")
-                                    .scaledFont(.system(size: 14, weight: .medium))
-                                    .foregroundColor(Color.contrastText(.textSecondary))
-                                Text("Developer Website")
-                                    .scaledFont(.bodyMedium.subtext())
-                                    .foregroundColor(Color.contrastText(.textSecondary))
-                                Spacer()
-                                Image(systemName: "arrow.up.right.square")
-                                    .scaledFont(.system(size: 12))
-                                    .foregroundColor(Color.contrastText(.textTertiary))
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-
-                        Link(destination: URL(string: "https://github.com/jonzey231/AerioTV/issues")!) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "exclamationmark.bubble")
-                                    .scaledFont(.system(size: 14, weight: .medium))
-                                    .foregroundColor(Color.contrastText(.textSecondary))
-                                Text("Report an Issue")
-                                    .scaledFont(.bodyMedium.subtext())
-                                    .foregroundColor(Color.contrastText(.textSecondary))
-                                Spacer()
-                                Image(systemName: "arrow.up.right.square")
-                                    .scaledFont(.system(size: 12))
-                                    .foregroundColor(Color.contrastText(.textTertiary))
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-
-                    } header: {
-                        Text("About")
-                            .sectionHeaderStyle()
-                    } footer: {
-                        Text("In loving memory of Jesse Mann aka EPG Guru")
-                            .scaledFont(.footnote.subtext())
-                            .italic()
-                            .foregroundColor(Color.contrastText(.textTertiary))
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.top, 8)
-                            .padding(.bottom, 4)
                     }
+                    .listRowBackground(Color.cardBackground)
                     #if os(iOS)
                     .listSectionSeparator(.hidden)
                     #endif
@@ -635,31 +499,60 @@ struct SettingsView: View {
             }
             #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
+            #if os(iOS)
+            // Value-based routes exist on iPhone purely for the
+            // `aerio://settings/<page>` deep link; the visible rows still
+            // push their destinations directly.
+            .navigationDestination(for: SettingsRoute.self) { route in
+                switch route {
+                case .category(.liveTV):         LiveTVSettingsView()
+                case .category(.player):         PlayerSettingsView()
+                case .category(.moviesTV):       MoviesTVSettingsView()
+                case .category(.dvr):            DVRSettingsView()
+                case .category(.appearance):     AppearanceSettingsView()
+                case .category(.general):        GeneralSettingsView()
+                case .category(.sync):           SyncSettingsView()
+                case .category(.syncCategories): SyncCategoriesSettingsView()
+                case .category(.developer):      DeveloperSettingsView()
+                case .category(.about):          AboutSettingsView()
+                case .server(let id):
+                    if let server = servers.first(where: { $0.id == id }) {
+                        ServerDetailView(server: server)
+                    }
+                // Playlists is the root itself; Remote Control is tvOS-only;
+                // Edit is a sheet here and My Recordings is its own tab.
+                case .category(.playlists), .category(.remoteControl),
+                     .editServer, .myRecordings:
+                    EmptyView()
+                }
+            }
+            #endif
             #if os(tvOS)
             .navigationDestination(for: SettingsRoute.self) { route in
                 switch route {
-                case .category(.appearance):     AppearanceSettingsView()
-                case .category(.appBehaviors):   AppBehaviorsSettingsView()
-                case .category(.remoteControl):  RemoteControlSettingsView()
-                case .category(.multiview):      MultiviewSettingsView()
-                case .category(.network):        NetworkSettingsView()
+                case .category(.liveTV):         LiveTVSettingsView()
+                case .category(.player):         PlayerSettingsView()
+                case .category(.moviesTV):       MoviesTVSettingsView()
                 case .category(.dvr):            DVRSettingsView()
+                case .category(.appearance):     AppearanceSettingsView()
+                case .category(.general):        GeneralSettingsView()
+                case .category(.remoteControl):  RemoteControlSettingsView()
+                case .category(.sync):           SyncSettingsView()
                 case .category(.syncCategories): SyncCategoriesSettingsView()
                 case .category(.developer):      DeveloperSettingsView()
-                // Phase 3 pane hosts; nothing pushes these yet.
-                case .category(.playlists), .category(.sync), .category(.about):
+                case .category(.about):          AboutSettingsView()
+                // Pane host; nothing pushes this.
+                case .category(.playlists):
                     EmptyView()
                 case .editServer(let id):
                     // The route carries the server id, so editing the SAME
                     // server twice in a row just pushes a fresh route value.
-                    // This deletes the old serverToEdit onChange bridge and
-                    // its onDisappear-reset re-push hack.
                     if let server = servers.first(where: { $0.id == id }) {
                         EditServerPage(server: server)
                     }
                 case .server, .myRecordings:
-                    // Rail/sidebar targets from Phase 3 on; ServerDetailView
-                    // and MyRecordingsView remain classic pushes today.
+                    // Rail/sidebar targets; ServerDetailView and
+                    // MyRecordingsView remain classic pushes today.
                     EmptyView()
                 }
             }
@@ -691,146 +584,13 @@ struct SettingsView: View {
                 EditServerSheet(server: server)
             }
             #endif
-            .alert("Clear iCloud Data?", isPresented: $showClearICloudConfirm) {
-                Button("Clear", role: .destructive) {
-                    debugLog("🔵 Clear iCloud Data confirmed")
-                    SyncManager.shared.clearAllICloudData(localServers: servers)
-                    clearICloudConfirmationVisible = true
-                    Task {
-                        try? await Task.sleep(nanoseconds: 2_500_000_000)
-                        await MainActor.run { clearICloudConfirmationVisible = false }
-                    }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Wipes synced playlists, preferences, watch progress, and credentials from iCloud. This device's data is preserved. iCloud Sync stays enabled, so your local state will replace whatever was on iCloud the next time the app pushes.")
-            }
-            .alert("Pull from iCloud?", isPresented: $showPullConfirm) {
-                Button("Replace This Device", role: .destructive) {
-                    debugLog("🔵 Pull from iCloud confirmed (replace)")
-                    SyncManager.shared.pullFromCloud(force: true, replace: true)
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("This replaces this device's playlists and watch progress with the copy in iCloud. Playlists or progress on this device that are not in iCloud are removed. Preferences merge normally. If this device has the newest changes, push them up first.")
-            }
-            .overlay(alignment: .bottom) {
-                if clearICloudConfirmationVisible {
-                    Text("iCloud data cleared")
-                        .scaledFont(.subheadline.weight(.semibold))
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 12)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .padding(.bottom, 24)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-            .animation(.easeInOut(duration: 0.25), value: clearICloudConfirmationVisible)
     }
 
-    // MARK: - Sync computed properties
+    // MARK: - Root row values
 
-    /// Human-readable "X minutes ago" string for the last sync timestamp.
-    private var lastSyncedString: String {
-        guard syncLastDate > 0 else { return "" }
-        let interval = Date().timeIntervalSince1970 - syncLastDate
-        switch interval {
-        case ..<60:      return "just now"
-        case ..<3600:    return "\(Int(interval / 60))m ago"
-        case ..<86400:   return "\(Int(interval / 3600))h ago"
-        default:         return "\(Int(interval / 86400))d ago"
-        }
-    }
-
-    // MARK: - About computed properties
-
-    private var aboutDevice: String { DeviceInfo.modelName }
-
-    private var aboutSystem: String {
-#if canImport(UIKit)
-        return "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)"
-#else
-        let v = ProcessInfo.processInfo.operatingSystemVersion
-        return "macOS \(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
-#endif
-    }
-
-    private var aboutVersion: String {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
-        let build   = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
-        return "\(version) (\(build))"
-    }
-
-    private var aboutInstallDate: String { DeviceInfo.firstInstalledText }
-
-    private var aboutUpdateDate: String { DeviceInfo.lastUpdatedText }
-
-    private var aboutCopyText: String {
-        [
-            "AerioTV \(aboutVersion)",
-            "Device: \(aboutDevice)",
-            "System: \(aboutSystem)",
-            "First Installed: \(aboutInstallDate)",
-            "Last Updated: \(aboutUpdateDate)"
-        ].joined(separator: "\n")
-    }
-
-    /// Whether a curated What's New entry exists for the running
-    /// build. When there isn't one the App Version row stays inert
-    /// text, exactly as before.
-    private var hasWhatsNew: Bool { WhatsNewStore.currentRelease != nil }
-
-#if !os(tvOS)
-    /// App Version row. When the running build ships release notes the
-    /// row becomes a quiet button that re-opens the same What's New
-    /// sheet the app shows after an update: version, then a "What's
-    /// New" label and a chevron. Launch-time presentation is untouched.
-    @ViewBuilder
-    private var appVersionRow: some View {
-        if hasWhatsNew {
-            Button {
-                showWhatsNewFromAbout = true
-            } label: {
-                HStack {
-                    Text("App Version")
-                        .scaledFont(.bodyMedium.subtext())
-                        .foregroundColor(Color.contrastText(.textSecondary))
-                    Spacer()
-                    Text(aboutVersion)
-                        .scaledFont(.bodyMedium)
-                        .foregroundColor(.textPrimary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text("What's New")
-                        .scaledFont(.caption.subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
-                    Image(systemName: "chevron.right")
-                        .scaledFont(.system(size: 12, weight: .semibold))
-                        .foregroundColor(Color.contrastText(.textTertiary))
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .whatsNewSheet(isPresented: $showWhatsNewFromAbout)
-        } else {
-            infoRow("App Version", value: aboutVersion)
-        }
-    }
-#endif
-
-    private func infoRow(_ label: String, value: String, isMonospaced: Bool = false) -> some View {
-        HStack {
-            Text(label)
-                .scaledFont(.bodyMedium.subtext())
-                .foregroundColor(Color.contrastText(.textSecondary))
-            Spacer()
-            Text(value)
-                .scaledFont(isMonospaced ? .monoSmall : .bodyMedium)
-                .foregroundColor(.textPrimary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-    }
+    /// The Sync row's value: the whole page is behind one row now, so the
+    /// root still says whether iCloud Sync is on.
+    private var syncValueLabel: String { iCloudSyncEnabled ? "On" : "Off" }
 
     // MARK: - Active Server
 
@@ -903,8 +663,7 @@ struct SettingsView: View {
         }
         .background(Color.appBackground.ignoresSafeArea())
         // Presentations duplicated from the iPhone chain (only one idiom
-        // branch is mounted, so they never double-present). Candidate for
-        // a shared modifier in Phase 5.
+        // branch is mounted, so they never double-present).
         .sheet(isPresented: $showAddServer) {
             NavigationStack { AddServerView(onSave: { _ in }) }
         }
@@ -921,47 +680,12 @@ struct SettingsView: View {
         } message: {
             Text("This will remove \"\(serverToDelete?.name ?? "this playlist")\" from the app. Your server data will not be affected.")
         }
-        .alert("Clear iCloud Data?", isPresented: $showClearICloudConfirm) {
-            Button("Clear", role: .destructive) {
-                debugLog("🔵 Clear iCloud Data confirmed")
-                SyncManager.shared.clearAllICloudData(localServers: servers)
-                clearICloudConfirmationVisible = true
-                Task {
-                    try? await Task.sleep(nanoseconds: 2_500_000_000)
-                    await MainActor.run { clearICloudConfirmationVisible = false }
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Wipes synced playlists, preferences, watch progress, and credentials from iCloud. This device's data is preserved. iCloud Sync stays enabled, so your local state will replace whatever was on iCloud the next time the app pushes.")
-        }
-        .alert("Pull from iCloud?", isPresented: $showPullConfirm) {
-            Button("Replace This Device", role: .destructive) {
-                debugLog("🔵 Pull from iCloud confirmed (replace)")
-                SyncManager.shared.pullFromCloud(force: true, replace: true)
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This replaces this device's playlists and watch progress with the copy in iCloud. Playlists or progress on this device that are not in iCloud are removed. Preferences merge normally. If this device has the newest changes, push them up first.")
-        }
-        .overlay(alignment: .bottom) {
-            if clearICloudConfirmationVisible {
-                Text("iCloud data cleared")
-                    .scaledFont(.subheadline.weight(.semibold))
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 12)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .padding(.bottom, 24)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
-        .animation(.easeInOut(duration: 0.25), value: clearICloudConfirmationVisible)
     }
 
     /// Sidebar: Playlists as an ordinary item (matching the tvOS rail
     /// ruling of 2026-08-04 and Android tablet, superseding the Rev 2
     /// embed-playlist-rows design), then the categories in the frozen
-    /// order. Remote Control stays hidden until #195.
+    /// order. Remote Control stays tvOS-only.
     /// One sidebar row: the selectionContrast flag flips the row to
     /// white-on-accent while it sits on the selection pill (Logan's
     /// feedback 2026-08-04: the accent-tinted subtitle was unreadable
@@ -998,7 +722,23 @@ struct SettingsView: View {
                               title: "Playlists",
                               subtitle: servers.first(where: { $0.isActive })?.name)
 
-                Text("App Settings")
+                Text("App")
+                    .scaledFont(.title3.weight(.semibold))
+                    .foregroundColor(Color.contrastText(.textSecondary))
+                    .padding(.horizontal, 14)
+                    .padding(.top, 18)
+                    .padding(.bottom, 6)
+
+                padSidebarRow(.liveTV, icon: "tv.fill", iconColor: .accentPrimary,
+                              title: "Live TV", subtitle: "Guide, groups, badges, colors")
+                padSidebarRow(.player, icon: "play.rectangle.fill", iconColor: .accentPrimary,
+                              title: "Player", subtitle: "Info card, rewind, gestures, multiview")
+                padSidebarRow(.moviesTV, icon: "film.fill", iconColor: .accentPrimary,
+                              title: "Movies & TV Shows", subtitle: "Library refresh, posters")
+                padSidebarRow(.dvr, icon: "record.circle", iconColor: .red,
+                              title: "DVR", subtitle: "Recordings, buffers, storage")
+
+                Text("Device")
                     .scaledFont(.title3.weight(.semibold))
                     .foregroundColor(Color.contrastText(.textSecondary))
                     .padding(.horizontal, 14)
@@ -1006,26 +746,20 @@ struct SettingsView: View {
                     .padding(.bottom, 6)
 
                 padSidebarRow(.appearance, icon: "paintbrush.fill", iconColor: .accentPrimary,
-                              title: "Appearance", subtitle: "Theme, scale & category colors")
-                padSidebarRow(.appBehaviors, icon: "switch.2", iconColor: .accentPrimary,
-                              title: "App Behaviors", subtitle: "Default tab, launch & gestures")
-                padSidebarRow(.multiview, icon: "rectangle.split.2x2.fill", iconColor: .accentPrimary,
-                              title: "Multiview", subtitle: "Audio focus, tile spacing & corners")
-                padSidebarRow(.network, icon: "network", iconColor: .accentSecondary,
-                              title: "Network", subtitle: "Timeout, buffer & background refresh")
+                              title: "Appearance", subtitle: "Theme, text size, time format")
+                padSidebarRow(.general, icon: "switch.2", iconColor: .accentPrimary,
+                              title: "General", subtitle: "Startup, refresh, network")
+                padSidebarRow(.sync, icon: "icloud.fill", iconColor: .accentPrimary,
+                              title: "Sync", subtitle: syncValueLabel)
 
                 Divider()
                     .background(Color.borderSubtle)
                     .padding(.vertical, 12)
 
-                padSidebarRow(.sync, icon: "icloud.fill", iconColor: .accentPrimary,
-                              title: "Sync", subtitle: "iCloud sync & categories")
-                padSidebarRow(.dvr, icon: "record.circle", iconColor: .red,
-                              title: "DVR", subtitle: "Recordings, buffers & storage")
                 padSidebarRow(.developer, icon: "ladybug.fill", iconColor: .accentSecondary,
                               title: "Developer", subtitle: "Debug logging & diagnostics")
                 padSidebarRow(.about, icon: "info.circle.fill", iconColor: .accentPrimary,
-                              title: "About", subtitle: "Version & links")
+                              title: "About", subtitle: AboutInfo.version)
             }
             .padding(.horizontal, 12)
             .padding(.top, 24)
@@ -1047,15 +781,16 @@ struct SettingsView: View {
     private func padDetail(for route: SettingsRoute) -> some View {
         switch route {
         case .category(.playlists):      padPlaylistsPane
-        case .category(.appearance):     AppearanceSettingsView()
-        case .category(.appBehaviors):   AppBehaviorsSettingsView()
-        case .category(.multiview):      MultiviewSettingsView()
-        case .category(.network):        NetworkSettingsView()
+        case .category(.liveTV):         LiveTVSettingsView()
+        case .category(.player):         PlayerSettingsView()
+        case .category(.moviesTV):       MoviesTVSettingsView()
         case .category(.dvr):            DVRSettingsView()
+        case .category(.appearance):     AppearanceSettingsView()
+        case .category(.general):        GeneralSettingsView()
+        case .category(.sync):           SyncSettingsView()
         case .category(.syncCategories): SyncCategoriesSettingsView()
         case .category(.developer):      DeveloperSettingsView()
-        case .category(.sync):           padSyncPane
-        case .category(.about):          padAboutPane
+        case .category(.about):          AboutSettingsView()
         case .server(let id):
             if let server = servers.first(where: { $0.id == id }) {
                 ServerDetailView(server: server)
@@ -1063,8 +798,8 @@ struct SettingsView: View {
                 Color.appBackground
             }
         case .category(.remoteControl), .editServer, .myRecordings:
-            // RemoteControlSettingsView is tvOS-only (its sidebar row is
-            // hidden until #195); the pushes never target a pane.
+            // RemoteControlSettingsView is tvOS-only; the pushes never
+            // target a pane.
             Color.appBackground
         }
     }
@@ -1154,191 +889,6 @@ struct SettingsView: View {
         // directly through .onMove without edit mode.
     }
 
-    /// Sync pane: the iPhone root's Sync section as a detail page
-    /// (same rows, same copy).
-    private var padSyncPane: some View {
-        List {
-            Section {
-                Toggle(isOn: $iCloudSyncEnabled) {
-                    SettingsRow(icon: "icloud.fill", iconColor: .accentPrimary,
-                                title: "iCloud Sync",
-                                subtitle: "Sync playlists, preferences, and watch progress")
-                }
-                .tint(ThemeManager.shared.accent)
-                .onChange(of: iCloudSyncEnabled) { _, enabled in
-                    SyncManager.shared.syncSettingChanged(enabled: enabled)
-                }
-
-                if iCloudSyncEnabled {
-                    Button {
-                        debugLog("🔵 Sync Now tapped")
-                        SyncManager.shared.pushServers(servers, immediate: true)
-                        SyncManager.shared.pushPreferencesImmediate()
-                        if let ctx = WatchProgressManager.modelContext,
-                           let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
-                            SyncManager.shared.pushWatchProgress(all, immediate: true)
-                        }
-                        SyncManager.shared.pushReminders(immediate: true)
-                    } label: {
-                        SettingsRow(icon: "arrow.triangle.2.circlepath.icloud",
-                                    iconColor: .accentPrimary,
-                                    title: "Push to iCloud",
-                                    subtitle: syncLastDate > 0
-                                        ? "Send this device's data up  ·  Last synced \(lastSyncedString)"
-                                        : "Send this device's playlists, preferences and progress up",
-                                    isBusy: sync.activity == .pushing)
-                    }
-                    .buttonStyle(PressableButtonStyle())
-                    .disabled(sync.activity != .idle)
-
-                    // See the Pull note on the iPhone root section above.
-                    Button {
-                        showPullConfirm = true
-                    } label: {
-                        SettingsRow(icon: "icloud.and.arrow.down",
-                                    iconColor: .accentPrimary,
-                                    title: "Pull from iCloud",
-                                    subtitle: "Replace this device's data with the iCloud copy",
-                                    isBusy: sync.activity == .pulling)
-                    }
-                    .buttonStyle(PressableButtonStyle())
-                    .disabled(sync.activity != .idle)
-
-                    SyncActivityRow()
-                }
-
-                NavigationLink(destination: SyncCategoriesSettingsView()) {
-                    SettingsRow(icon: "slider.horizontal.3",
-                                iconColor: .accentPrimary,
-                                title: "Sync Categories",
-                                subtitle: "Choose what syncs across your devices")
-                }
-                .buttonStyle(PressableButtonStyle())
-
-                Button(role: .destructive) {
-                    showClearICloudConfirm = true
-                } label: {
-                    SettingsRow(icon: "trash.circle.fill",
-                                iconColor: .statusLive,
-                                title: "Clear iCloud Data",
-                                subtitle: "Wipe synced playlists, preferences, watch progress, and credentials from iCloud")
-                }
-                .buttonStyle(PressableButtonStyle())
-            } footer: {
-                Text("Playlists, preferences, and VOD watch progress sync across all devices signed into the same Apple ID. Credentials are stored securely in iCloud Keychain.")
-                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
-            }
-            .listRowBackground(Color.cardBackground)
-        }
-        .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
-        .navigationTitle("Sync")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-
-    /// About pane: the iPhone root's About section as a detail page.
-    private var padAboutPane: some View {
-        List {
-            Section {
-                infoRow("Device",          value: aboutDevice)
-                    .listRowBackground(Color.cardBackground)
-                infoRow("System",          value: aboutSystem)
-                    .listRowBackground(Color.cardBackground)
-                appVersionRow
-                    .listRowBackground(Color.cardBackground)
-                infoRow("First Installed", value: aboutInstallDate)
-                    .listRowBackground(Color.cardBackground)
-                infoRow("Last Updated",    value: aboutUpdateDate)
-                    .listRowBackground(Color.cardBackground)
-
-                Button {
-                    UIPasteboard.general.string = aboutCopyText
-                    copiedAbout = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        copiedAbout = false
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: copiedAbout ? "checkmark.circle.fill" : "doc.on.doc")
-                            .scaledFont(.system(size: 14, weight: .medium))
-                            .foregroundColor(copiedAbout ? .accentPrimary : Color.contrastText(.textSecondary))
-                        Text(copiedAbout ? "Copied!" : "Copy to Clipboard")
-                            .scaledFont(.bodyMedium)
-                            .foregroundColor(copiedAbout ? Color.contrastText(.accentPrimary) : Color.contrastText(.textSecondary))
-                        Spacer()
-                    }
-                }
-                .buttonStyle(PressableButtonStyle())
-                .listRowBackground(Color.cardBackground)
-
-                Button {
-                    showOSSLicensesPad = true
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "doc.text")
-                            .scaledFont(.system(size: 14, weight: .medium))
-                            .foregroundColor(Color.contrastText(.textSecondary))
-                        Text("Open Source Licenses")
-                            .scaledFont(.bodyMedium.subtext())
-                            .foregroundColor(Color.contrastText(.textSecondary))
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .scaledFont(.system(size: 12))
-                            .foregroundColor(Color.contrastText(.textTertiary))
-                    }
-                }
-                .buttonStyle(PressableButtonStyle())
-                .listRowBackground(Color.cardBackground)
-                .sheet(isPresented: $showOSSLicensesPad) {
-                    OpenSourceLicensesView(standalone: true)
-                }
-
-                Link(destination: URL(string: "https://github.com/jonzey231/AerioTV")!) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "link")
-                            .scaledFont(.system(size: 14, weight: .medium))
-                            .foregroundColor(Color.contrastText(.textSecondary))
-                        Text("Developer Website")
-                            .scaledFont(.bodyMedium.subtext())
-                            .foregroundColor(Color.contrastText(.textSecondary))
-                        Spacer()
-                        Image(systemName: "arrow.up.right.square")
-                            .scaledFont(.system(size: 12))
-                            .foregroundColor(Color.contrastText(.textTertiary))
-                    }
-                }
-                .listRowBackground(Color.cardBackground)
-
-                Link(destination: URL(string: "https://github.com/jonzey231/AerioTV/issues")!) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.bubble")
-                            .scaledFont(.system(size: 14, weight: .medium))
-                            .foregroundColor(Color.contrastText(.textSecondary))
-                        Text("Report an Issue")
-                            .scaledFont(.bodyMedium.subtext())
-                            .foregroundColor(Color.contrastText(.textSecondary))
-                        Spacer()
-                        Image(systemName: "arrow.up.right.square")
-                            .scaledFont(.system(size: 12))
-                            .foregroundColor(Color.contrastText(.textTertiary))
-                    }
-                }
-                .listRowBackground(Color.cardBackground)
-            } footer: {
-                Text("In loving memory of Jesse Mann aka EPG Guru")
-                    .scaledFont(.footnote.subtext())
-                    .italic()
-                    .foregroundColor(Color.contrastText(.textTertiary))
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.top, 8)
-                    .padding(.bottom, 4)
-            }
-        }
-        .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
-        .navigationTitle("About")
-        .navigationBarTitleDisplayMode(.inline)
-    }
     #endif
 
     // MARK: - tvOS Settings Layout
@@ -1353,6 +903,9 @@ struct SettingsView: View {
     @State private var tvFocusInDetail = false
     /// Incremented to order the split view to put focus back on the rail.
     @State private var railReturnToken = 0
+    /// Incremented to order the split view to move focus into the detail
+    /// pane (the deep-link screenshot path).
+    @State private var tvDetailFocusToken = 0
     private var tvRailItems: [TVSettingsRailItem] {
         var items: [TVSettingsRailItem] = []
         // Playlists is an ordinary tab: its pane lists the playlists like
@@ -1367,34 +920,37 @@ struct SettingsView: View {
             iconColor: .accentPrimary,
             subtitle: servers.first(where: { $0.isActive })?.name))
         items.append(TVSettingsRailItem(
-            id: "appearance", route: .category(.appearance), label: "Appearance",
-            icon: "paintbrush.fill", iconColor: .accentPrimary, subtitle: "Theme, scale & category colors"))
+            id: "live-tv", route: .category(.liveTV), label: "Live TV",
+            icon: "tv.fill", iconColor: .accentPrimary, subtitle: "Guide, groups, badges, colors"))
         items.append(TVSettingsRailItem(
-            id: "app-behaviors", route: .category(.appBehaviors), label: "App Behaviors",
-            icon: "switch.2", iconColor: .accentPrimary, subtitle: "Default tab, launch & gestures"))
+            id: "player", route: .category(.player), label: "Player",
+            icon: "play.rectangle.fill", iconColor: .accentPrimary, subtitle: "Info card, rewind, gestures, multiview"))
+        items.append(TVSettingsRailItem(
+            id: "movies-tv", route: .category(.moviesTV), label: "Movies & TV Shows",
+            icon: "film.fill", iconColor: .accentPrimary, subtitle: "Library refresh, posters"))
+        items.append(TVSettingsRailItem(
+            id: "dvr", route: .category(.dvr), label: "DVR",
+            icon: "record.circle", iconColor: .red, subtitle: "Recordings, buffers, storage"))
+        items.append(TVSettingsRailItem(
+            id: "appearance", route: .category(.appearance), label: "Appearance",
+            icon: "paintbrush.fill", iconColor: .accentPrimary, subtitle: "Theme, text size, time format"))
+        items.append(TVSettingsRailItem(
+            id: "general", route: .category(.general), label: "General",
+            icon: "switch.2", iconColor: .accentPrimary, subtitle: "Startup, refresh, network"))
         // Remote Control (#195/#196): live now that the player executor,
         // overlays, and guide dispatch all run the map.
         items.append(TVSettingsRailItem(
             id: "remote-control", route: .category(.remoteControl), label: "Remote Control",
-            icon: "av.remote", iconColor: .accentPrimary, subtitle: "Customize what the Siri Remote buttons do"))
-        items.append(TVSettingsRailItem(
-            id: "multiview", route: .category(.multiview), label: "Multiview",
-            icon: "rectangle.split.2x2.fill", iconColor: .accentPrimary, subtitle: "Audio focus, tile spacing & corners"))
-        items.append(TVSettingsRailItem(
-            id: "network", route: .category(.network), label: "Network",
-            icon: "network", iconColor: .accentSecondary, subtitle: "Timeout, buffer & background refresh"))
+            icon: "av.remote", iconColor: .accentPrimary, subtitle: "Customize remote buttons"))
         items.append(TVSettingsRailItem(
             id: "sync", route: .category(.sync), label: "Sync",
-            icon: "icloud.fill", iconColor: .accentPrimary, subtitle: "iCloud sync & categories"))
-        items.append(TVSettingsRailItem(
-            id: "dvr", route: .category(.dvr), label: "DVR",
-            icon: "record.circle", iconColor: .red, subtitle: "Recordings, buffers & storage"))
+            icon: "icloud.fill", iconColor: .accentPrimary, subtitle: syncValueLabel))
         items.append(TVSettingsRailItem(
             id: "developer", route: .category(.developer), label: "Developer",
             icon: "ladybug.fill", iconColor: .accentSecondary, subtitle: "Debug logging & diagnostics"))
         items.append(TVSettingsRailItem(
             id: "about", route: .category(.about), label: "About",
-            icon: "info.circle.fill", iconColor: .accentPrimary, subtitle: "Version & links"))
+            icon: "info.circle.fill", iconColor: .accentPrimary, subtitle: AboutInfo.version))
         return items
     }
 
@@ -1403,7 +959,8 @@ struct SettingsView: View {
             items: tvRailItems,
             selection: $tvSelection,
             focusInDetail: $tvFocusInDetail,
-            railReturnToken: railReturnToken
+            railReturnToken: railReturnToken,
+            detailFocusToken: tvDetailFocusToken
         ) { route in
             tvDetailPane(for: route)
         }
@@ -1420,16 +977,17 @@ struct SettingsView: View {
                 Color.appBackground
             }
         case .category(.playlists):      tvPlaylistsPane
-        case .category(.appearance):     AppearanceSettingsView()
-        case .category(.appBehaviors):   AppBehaviorsSettingsView()
-        case .category(.remoteControl):  RemoteControlSettingsView()
-        case .category(.multiview):      MultiviewSettingsView()
-        case .category(.network):        NetworkSettingsView()
+        case .category(.liveTV):         LiveTVSettingsView()
+        case .category(.player):         PlayerSettingsView()
+        case .category(.moviesTV):       MoviesTVSettingsView()
         case .category(.dvr):            DVRSettingsView()
+        case .category(.appearance):     AppearanceSettingsView()
+        case .category(.general):        GeneralSettingsView()
+        case .category(.remoteControl):  RemoteControlSettingsView()
+        case .category(.sync):           SyncSettingsView()
         case .category(.syncCategories): SyncCategoriesSettingsView()
         case .category(.developer):      DeveloperSettingsView()
-        case .category(.sync):           tvSyncPane
-        case .category(.about):          tvAboutPane
+        case .category(.about):          AboutSettingsView()
         case .editServer, .myRecordings: Color.appBackground
         }
     }
@@ -1520,222 +1078,6 @@ struct SettingsView: View {
         }
     }
 
-    /// The Sync pane: the root-inline iCloud toggles moved into a pane
-    /// (Rev 2 canon amendment 2 — layout only, same copy and order),
-    /// followed by the Sync Categories nav row exactly as the root had it.
-    private var tvSyncPane: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-                TVSettingsToggleRow(
-                    icon: "icloud.fill",
-                    iconColor: .accentPrimary,
-                    title: "iCloud Sync",
-                    subtitle: "Sync playlists, preferences, and watch progress",
-                    isOn: $iCloudSyncEnabled
-                ) { enabled in
-                    SyncManager.shared.syncSettingChanged(enabled: enabled)
-                }
-
-                if iCloudSyncEnabled {
-                    // "Sync Now" was ambiguous on the one device where the
-                    // direction matters most: on an Apple TV it pushed the
-                    // TV's older state UP and clobbered what the phone had
-                    // just added, with no way to ask for the phone's copy.
-                    // Named directions plus a real Pull, matching the iPhone
-                    // and iPad panes.
-                    TVSettingsActionRow(
-                        icon: "arrow.triangle.2.circlepath.icloud",
-                        label: syncLastDate > 0
-                            ? "Push to iCloud  ·  Last synced \(lastSyncedString)"
-                            : "Push to iCloud",
-                        isBusy: sync.activity == .pushing
-                    ) {
-                        // tvOS rows are never `.disabled` (that would drop
-                        // them out of the focus engine), so a run in flight
-                        // swallows the press instead.
-                        guard sync.activity == .idle else { return }
-                        SyncManager.shared.pushServers(servers, immediate: true)
-                        SyncManager.shared.pushPreferencesImmediate()
-                        if let ctx = WatchProgressManager.modelContext,
-                           let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
-                            SyncManager.shared.pushWatchProgress(all, immediate: true)
-                        }
-                        SyncManager.shared.pushReminders(immediate: true)
-                    }
-                    TVSettingsActionRow(
-                        icon: "icloud.and.arrow.down",
-                        label: "Pull from iCloud",
-                        isBusy: sync.activity == .pulling
-                    ) {
-                        guard sync.activity == .idle else { return }
-                        showPullConfirm = true
-                    }
-
-                    SyncActivityRow()
-                }
-                TVSettingsNavRow(destination: SyncCategoriesSettingsView().trackedAsClassicSettingsChild()) {
-                    SettingsRow(icon: "slider.horizontal.3",
-                                iconColor: .accentPrimary,
-                                title: "Sync Categories",
-                                subtitle: "Choose what syncs across your devices")
-                }
-                TVSettingsActionRow(
-                    icon: "trash.circle.fill",
-                    label: "Clear iCloud Data",
-                    isDestructive: true
-                ) {
-                    showClearICloudConfirm = true
-                }
-            }
-            .padding(.horizontal, 40)
-            .padding(.vertical, 40)
-        }
-    }
-
-    /// The About pane: the root About rows plus the memorial line
-    /// (Rev 2 canon amendment 2 — layout only).
-    private var tvAboutPane: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(spacing: 0) {
-                    tvAboutRow("Device",          value: aboutDevice)
-                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAboutRow("System",          value: aboutSystem)
-                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAppVersionRow
-                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAboutRow("First Installed", value: aboutInstallDate)
-                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAboutRow("Last Updated",    value: aboutUpdateDate)
-                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAboutLinkRow("Developer Website", urlString: "https://github.com/jonzey231/AerioTV")
-                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAboutLinkRow("Report an Issue",   urlString: "https://github.com/jonzey231/AerioTV/issues/new")
-                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    Button {
-                        showOSSLicenses = true
-                    } label: {
-                        HStack {
-                            Text("Open Source Licenses")
-                                .scaledFont(.system(size: 26, weight: .medium))
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .scaledFont(.system(size: 20))
-                                .opacity(0.5)
-                        }
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 18)
-                    }
-                    // .plain let tvOS drop its big bright white platter
-                    // behind the row (Logan 2026-09-15). Shared inline-card
-                    // treatment: accent tint + inset accent ring, same as
-                    // the rest of Settings.
-                    .buttonStyle(TVInlineCardRowButtonStyle())
-                }
-                .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.cardBackground))
-                .padding(.bottom, 8)
-
-                Text("In loving memory of Jesse Mann aka EPG Guru")
-                    .scaledFont(.system(size: 22).subtext())
-                    .italic()
-                    .foregroundColor(Color.contrastText(.textTertiary))
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.top, 12)
-            }
-            .padding(.horizontal, 40)
-            .padding(.vertical, 40)
-        }
-        .sheet(item: $tvQRLink) { link in
-            TVQRLinkSheet(link: link)
-        }
-        .fullScreenCover(isPresented: $showOSSLicenses) {
-            OpenSourceLicensesView(standalone: true)
-        }
-    }
-
-    /// Presents the Open Source Licenses takeover (GPL/LGPL notice
-    /// obligations; mirrors Android's Settings > About entry).
-    @State private var showOSSLicenses = false
-
-
-    /// Non-nil presents the About-row QR sheet.
-    @State private var tvQRLink: TVQRLink?
-
-    /// App Version row on Apple TV. Focusable when the build ships
-    /// release notes so the remote can select it and re-open the What's
-    /// New cover (Menu/Back closes it, same as at launch). Matches the
-    /// other focusable About rows.
-    @ViewBuilder
-    private var tvAppVersionRow: some View {
-        if hasWhatsNew {
-            Button {
-                showWhatsNewFromAbout = true
-            } label: {
-                HStack {
-                    Text("App Version")
-                        .scaledFont(.system(size: 26, weight: .medium).subtext())
-                        .foregroundColor(Color.contrastText(.textSecondary))
-                    Spacer()
-                    Text(aboutVersion)
-                        .scaledFont(.system(size: 26))
-                        .foregroundColor(.textPrimary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text("What's New")
-                        .scaledFont(.system(size: 22).subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
-                    Image(systemName: "chevron.right")
-                        .scaledFont(.system(size: 20))
-                        .opacity(0.5)
-                }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 18)
-            }
-            .buttonStyle(TVInlineCardRowButtonStyle())
-            .whatsNewSheet(isPresented: $showWhatsNewFromAbout)
-        } else {
-            tvAboutRow("App Version", value: aboutVersion)
-        }
-    }
-
-    private func tvAboutRow(_ label: String, value: String) -> some View {
-        HStack {
-            Text(label)
-                .scaledFont(.system(size: 26, weight: .medium).subtext())
-                .foregroundColor(Color.contrastText(.textSecondary))
-            Spacer()
-            Text(value)
-                .scaledFont(.system(size: 26))
-                .foregroundColor(.textPrimary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 18)
-    }
-
-    /// External-link About row: focusable, presents the URL as a QR the
-    /// user scans with a phone (Android parity P2; the row used to be
-    /// inert text the user had to retype).
-    private func tvAboutLinkRow(_ label: String, urlString: String) -> some View {
-        Button {
-            tvQRLink = TVQRLink(title: label, url: urlString)
-        } label: {
-            HStack {
-                Text(label)
-                    .scaledFont(.system(size: 26, weight: .medium).subtext())
-                    .foregroundColor(Color.contrastText(.textSecondary))
-                Spacer()
-                Image(systemName: "qrcode")
-                    .scaledFont(.system(size: 24))
-                    .foregroundColor(.textPrimary)
-            }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 18)
-        }
-        .buttonStyle(TVInlineCardRowButtonStyle())
-    }
     #endif
 }
 

@@ -136,7 +136,15 @@ final class MainThreadWatchdog: @unchecked Sendable {
                 if start > 0 {
                     let ms = Int((now - start) * 1000)
                     if ms >= 100 {
-                        debugLog("[HANG] main runloop turn \(ms)ms\(label.map { " after \($0)" } ?? "")")
+                        #if os(iOS)
+                        // Name the scroll-chrome flip when one ran just
+                        // before this turn: that is what the iPhone flick
+                        // hiccup looked like (Logan 2026-09-16).
+                        let chrome = ChromeEventTrace.hangContext(now: now)
+                        #else
+                        let chrome = ""
+                        #endif
+                        debugLog("[HANG] main runloop turn \(ms)ms\(label.map { " after \($0)" } ?? "")\(chrome)")
                     }
                     // Hand the closed turn to the sampling profiler, which is
                     // already holding the stacks it sampled during it.
@@ -377,6 +385,12 @@ struct AerioApp: App {
     /// Settings > Appearance > Subtext Size and Text Contrast, injected the
     /// same way. Contrast colors also re-render through ThemeManager.
     @AppStorage(SubtextScale.key) private var subtextScale: Double = SubtextScale.defaultValue
+    /// Settings > Appearance > "Rounded corners in List view" and
+    /// "Rounded corners in Guide view" (split from one toggle, Logan
+    /// 2026-09-16). Injected app-wide so every logo and program-art slot
+    /// re-clips live.
+    @AppStorage(LogoCorners.listKey) private var roundedLogoCorners: Bool = LogoCorners.listDefault
+    @AppStorage(LogoCorners.guideKey) private var roundedGuideCorners: Bool = LogoCorners.guideDefault
     @AppStorage(TextContrast.key) private var textContrast: Double = TextContrast.defaultValue
 
     /// Owned explicitly (vs. letting `.modelContainer(for:)` auto-
@@ -398,6 +412,19 @@ struct AerioApp: App {
     nonisolated(unsafe) static var sharedContainer: ModelContainer?
 
     init() {
+        // Carries a pre-split "Rounded corners on logos and artwork" choice
+        // into the List key before any view reads it, so nobody's current
+        // setting changes (Logan 2026-09-16).
+        LogoCorners.migrateLegacyKeyIfNeeded()
+        // Launch-argument twin of the aerio://settings/<page> deep link,
+        // for the tvOS Simulator (where `simctl openurl` raises an
+        // undismissable confirmation) and for any headless run:
+        //   -settingsPage <page>  /  AERIO_SETTINGS_PAGE=<page>
+        // Parked here, before any view mounts, so it behaves exactly like
+        // a cold-launch URL. All configurations; a no-op without it.
+        Task { @MainActor in
+            SettingsDeepLink.applyLaunchArgumentIfPresent()
+        }
         #if DEBUG
         // Test-harness hooks, DEBUG builds only. Both read standard
         // launch arguments (UserDefaults maps "-key value" args).
@@ -512,6 +539,7 @@ struct AerioApp: App {
                 .modifier(DispatcharrPermissionNoticeAlert())
                 .aerioTextScaleRoot(textScale)
                 .aerioSecondaryTextRoot(subtextScale: subtextScale, contrast: textContrast)
+                .aerioLogoCornersRoot(list: roundedLogoCorners, guide: roundedGuideCorners)
                 // GH #33: this Apple TV is a companion HOST -- advertise
                 // _aeriotv._tcp + run the WS server so an iPhone or Android
                 // phone can control it. Overlay shows the pairing code on the
@@ -551,6 +579,20 @@ struct AerioApp: App {
                     // marker is absent.
                     MetalHDRAutoRun.checkAndRun()
                     #endif
+                }
+                // Settings deep link (all platforms, all configurations):
+                //   aerio://settings            → Settings root
+                //   aerio://settings/<page>     → that Settings page
+                // Used by the automated screenshot runs via
+                // `xcrun simctl openurl`. Inert unless such a URL arrives,
+                // and it never swallows the Top Shelf links below (those
+                // use different hosts and are handled by their own
+                // .onOpenURL on tvOS).
+                .onOpenURL { url in
+                    guard url.scheme == "aerio" else { return }
+                    if SettingsDeepLink.handle(url) {
+                        debugLog("🔗 Settings deep link: \(url.absoluteString)")
+                    }
                 }
                 #if os(tvOS)
                 .onOpenURL { url in
@@ -735,7 +777,22 @@ struct AerioApp: App {
         let descriptor = FetchDescriptor<ServerConnection>()
         guard let allServers = try? context.fetch(descriptor),
               !allServers.isEmpty else { return }
-        let servers = allServers.filter { $0.type == .dispatcharrAPI }
+        // ACTIVE SERVER ONLY (Logan 2026-09-16: inactive server
+        // 192.168.50.163 polled every 2 minutes). This warmup used to log
+        // in to EVERY saved Dispatcharr server at launch, so a saved but
+        // inactive playlist got a JWT request (and a timeout) on every cold
+        // start. Only the active playlist can issue requests that need a
+        // warm token. "Test Connection" and credential validation still
+        // target their own named server.
+        let dispatcharrServers = allServers.filter { $0.type == .dispatcharrAPI }
+        let servers: [ServerConnection]
+        if let active = dispatcharrServers.first(where: { $0.isActive }) {
+            servers = [active]
+        } else if allServers.allSatisfy({ !$0.isActive }), let first = dispatcharrServers.first {
+            servers = [first]
+        } else {
+            servers = []
+        }
         guard !servers.isEmpty else { return }
 
         // Build per-server credential snapshots on main (Keychain
@@ -898,8 +955,23 @@ final class TVLANProbe: ObservableObject {
     /// the passed servers, remembers them for future `reprobe()`
     /// calls, and kicks off the probe.
     func probe(servers: [ServerConnection]) {
-        let serversWithoutLocal = servers.filter { $0.localURL.isEmpty }.count
-        let candidates = servers.compactMap { s -> URL? in
+        // ACTIVE SERVER ONLY (Logan 2026-09-16: inactive server
+        // 192.168.50.163 polled every 2 minutes). The probe fired one
+        // request per saved server's localURL on launch, on every
+        // foreground return and on every network transition, so an
+        // inactive playlist's LAN address was polled repeatedly. Only the
+        // active playlist's base URL is ever routed, so only its localURL
+        // can decide the LAN verdict.
+        let probeTargets: [ServerConnection]
+        if let active = servers.first(where: { $0.isActive }) {
+            probeTargets = [active]
+        } else if let first = servers.first, servers.allSatisfy({ !$0.isActive }) {
+            probeTargets = [first]
+        } else {
+            probeTargets = []
+        }
+        let serversWithoutLocal = probeTargets.filter { $0.localURL.isEmpty }.count
+        let candidates = probeTargets.compactMap { s -> URL? in
             guard !s.localURL.isEmpty else { return nil }
             var url = s.localURL.trimmingCharacters(in: .whitespacesAndNewlines)
             if url.hasSuffix("/") { url = String(url.dropLast()) }
@@ -1363,7 +1435,15 @@ struct RootView: View {
                 // opacity transition finish so the sheet animates in
                 // cleanly instead of racing the splash fade.
                 let isExistingUser = hasCompletedOnboarding || hasAnySource
-                if !showOnboarding && WhatsNewStore.shouldShow(isExistingUser: isExistingUser) {
+                // A launch driven by -settingsPage / AERIO_SETTINGS_PAGE or
+                // by a parked aerio://settings link is a screenshot run: the
+                // sheet would sit over the page being captured. Short-circuit
+                // BEFORE `shouldShow`, which writes the fresh-install marker
+                // as a side effect, so the notes are neither shown nor
+                // consumed and the user still sees them next launch.
+                if !showOnboarding
+                    && !SettingsDeepLink.shared.isAutomatedLaunch
+                    && WhatsNewStore.shouldShow(isExistingUser: isExistingUser) {
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 600_000_000)
                         // Re-check after the delay: if the user
@@ -1379,7 +1459,12 @@ struct RootView: View {
                 // onboarding or What's New. If either modal claims this
                 // launch, the next clean launch asks instead. Users who
                 // already found the toggle are seeded silently.
-                if !liveRewindPromptSeen {
+                // Skipped entirely on a screenshot launch (-settingsPage /
+                // AERIO_SETTINGS_PAGE or a parked aerio://settings link):
+                // the alert would cover the Settings page being captured.
+                // Nothing is written, so the prompt still arrives on the
+                // user's next ordinary launch.
+                if !liveRewindPromptSeen && !SettingsDeepLink.shared.isAutomatedLaunch {
                     if liveRewindEnabled {
                         liveRewindPromptSeen = true
                     } else {
@@ -1726,10 +1811,22 @@ struct RootView: View {
     /// successful discovery on any device on the user's Apple ID
     /// permanently fixes the upgrade window for every device.
     private func discoverDispatcharrAuthModeIfNeeded() {
-        let candidates = servers.filter {
-            $0.type == .dispatcharrAPI
-                && $0.isVerified
-                && $0.dispatcharrAuthMode.isEmpty
+        // ACTIVE SERVER ONLY (Logan 2026-09-16: inactive server
+        // 192.168.50.163 polled every 2 minutes). The header-shape probe is
+        // a launch-time network call; running it for saved but inactive
+        // playlists put a request (and a timeout) on servers this device is
+        // not using. The flag is discovered the moment that playlist is made
+        // active, which is the only time it matters.
+        let needsProbe: (ServerConnection) -> Bool = {
+            $0.type == .dispatcharrAPI && $0.isVerified && $0.dispatcharrAuthMode.isEmpty
+        }
+        let candidates: [ServerConnection]
+        if let active = servers.first(where: { $0.isActive }) {
+            candidates = needsProbe(active) ? [active] : []
+        } else if let first = servers.first, servers.allSatisfy({ !$0.isActive }) {
+            candidates = needsProbe(first) ? [first] : []
+        } else {
+            candidates = []
         }
         guard !candidates.isEmpty else { return }
 

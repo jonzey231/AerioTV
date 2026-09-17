@@ -6,8 +6,8 @@ import SwiftUI
 ///
 /// tvOS port of the Android `RemoteControlSettingsScreen.kt`. Lets the
 /// user retarget each Siri Remote button per context (fullscreen player
-/// vs. TV guide) and pick the two companion guide behaviours: where a
-/// channel starts playing, and how channel groups are chosen. Every
+/// vs. TV guide) and pick where a channel starts playing. Group
+/// selection moved to Settings > Live TV in the 2026-09-17 regroup. Every
 /// control writes straight through `RemoteControlStore.shared`, which
 /// persists the map and syncs it across the user's Apple TVs.
 ///
@@ -110,7 +110,6 @@ struct RemoteControlSettingsView: View {
 
                 hintsSection
                 playChannelsInSection
-                groupSelectionSection
                 whileWatchingSection
                 inTheGuideSection
                 additionalButtonsSection
@@ -162,23 +161,6 @@ struct RemoteControlSettingsView: View {
                 action: { store.tuneInMini = true }
             )
             sectionFooter("Where a channel starts playing when you press Select on it in Live TV. Mini Player keeps you browsing with the channel in the corner; press Select on it again to go full screen.")
-        }
-    }
-
-    /// 2. How groups are picked in the guide (bound to `useGroupSidebar`).
-    private var groupSelectionSection: some View {
-        SettingsSection("Group Selection", style: .card) {
-            TVSettingsSelectionRow(
-                label: "Top Group Pills",
-                isSelected: !store.useGroupSidebar,
-                action: { store.useGroupSidebar = false }
-            )
-            TVSettingsSelectionRow(
-                label: "Sidebar Menu",
-                isSelected: store.useGroupSidebar,
-                action: { store.useGroupSidebar = true }
-            )
-            sectionFooter("How channel groups are picked in the guide. Top Group Pills keep the group row above the grid; Sidebar Menu hides that row and opens when you hold Left in the guide (or from whichever button you set to Open sidebar below). Only one is active at a time.")
         }
     }
 
