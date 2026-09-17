@@ -5274,8 +5274,8 @@ struct AVPlayerMultiviewTile: View {
     }
 
     /// Watch what the item is actually holding during the start-up wait.
-    /// Every 250 ms until playback is moving (or 15 s, whichever comes
-    /// first) this prints the loaded range, how much media is buffered
+    /// Once a second for the first 30 s of the tune this prints the
+    /// loaded range, how much media is buffered
     /// ahead of the playhead, the three buffer flags, and the item's
     /// track list. Between them those answer the question directly: a
     /// loaded range that keeps GROWING while `likelyToKeepUp` stays false
@@ -5289,10 +5289,12 @@ struct AVPlayerMultiviewTile: View {
         // Carries the out-of-range guard's state across ticks. A box
         // rather than @State: the timer closure is not a view update.
         let guardState = NativeHLSPositionGuard()
-        // 500 ms, capped at 8 s: enough to see a stalled loaded range and
-        // the step when the next segment lands, at half the log volume of
-        // the 250 ms pass that found this.
-        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak item] t in
+        // Once a second for the first 30 s of the tune. It used to stop
+        // at the gate release, which on a cold join was about a second
+        // in - exactly before the several-second freeze that followed
+        // (field 2026-09-17 18:54:26), so the stall left no trace. The
+        // probe now outlives the gate and covers the whole start-up.
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak item] t in
             guard let item else { t.invalidate(); return }
             let ms = Int((CACurrentMediaTime() - start) * 1000)
             let ranges = item.loadedTimeRanges.map { $0.timeRangeValue }
@@ -5359,7 +5361,7 @@ struct AVPlayerMultiviewTile: View {
             } else {
                 guardState.outsideSince = nil
             }
-            if ms > 14_000 { t.invalidate() }
+            if ms > 30_000 { t.invalidate() }
         }
         // .common so a scroll or a focus animation cannot starve it.
         RunLoop.main.add(timer, forMode: .common)
@@ -5441,6 +5443,28 @@ struct AVPlayerMultiviewTile: View {
     /// backstop if it never comes up.
     private func releaseAVStartGateIfStarted() {
         guard avGateLayerReady, avGatePlaying, avStartGateActive else { return }
+        // SHORT-WINDOW RUNWAY (field 2026-09-17 18:54:26, cold channel):
+        // the client playlist held 14.65 s across 6 fast-start segments,
+        // EXT-X-START -10 put the join at pos 8.72 in a 4.45..10.55
+        // window, so AVPlayer started 1.8 s from the live edge, presented
+        // one frame, and then froze for several seconds while it built
+        // its own live hold-back (AVP-PERF edge walked -10 to -17 s).
+        // Releasing on that first frame hands the user a picture with no
+        // runway behind it. So on a cold window - shorter than three
+        // target durations - keep holding until there is real media
+        // ahead of the playhead. A warm join with a full window never
+        // trips this and keeps today's behavior exactly.
+        if let hold = shortWindowRunwayHold() {
+            debugLog(String(format:
+                "[AVP-GATE] short window (%.1fs): waiting for %.1fs ahead (now %.1fs)",
+                hold.window, hold.needed, hold.have))
+            let token = avStartGateToken
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                guard avStartGateToken == token, avStartGateActive else { return }
+                releaseAVStartGateIfStarted()
+            }
+            return
+        }
         if avGateFrameRateWaitFrom == 0 { avGateFrameRateWaitFrom = CACurrentMediaTime() }
         let videoFPS = player?.currentItem?.tracks
             .first(where: { $0.assetTrack?.mediaType == .video })?
@@ -5481,6 +5505,36 @@ struct AVPlayerMultiviewTile: View {
         releaseAVStartGate(reason: String(format: "moving picture (%.1f fps) + playback", videoFPS))
     }
 
+    /// Media loaded ahead of the playhead right now, in seconds.
+    private func forwardBufferSeconds() -> Double {
+        guard let item = player?.currentItem else { return 0 }
+        let pos = item.currentTime().seconds
+        guard pos.isFinite else { return 0 }
+        guard let end = item.loadedTimeRanges
+            .map({ $0.timeRangeValue.end.seconds })
+            .filter({ $0.isFinite })
+            .max() else { return 0 }
+        return max(0, end - pos)
+    }
+
+    /// Non-nil while a native-HLS tune that joined a SHORT playlist
+    /// window still lacks the forward buffer to play through. Capped at
+    /// 8 s from the gate arm, comfortably inside the gate's own 12 s
+    /// timeout, so this can never be the reason a tune stays silent.
+    private func shortWindowRunwayHold() -> (window: Double, needed: Double, have: Double)? {
+        guard let w = nativeHLSWindow, w.windowSeconds > 0 else { return nil }
+        // TARGETDURATION is the server's own statement of a segment; a
+        // playlist that omits it falls back to what its segments measure.
+        let target = w.targetDuration > 0 ? w.targetDuration : w.segmentSeconds
+        guard target > 0, w.windowSeconds < target * 3 else { return nil }
+        guard CACurrentMediaTime() - avStartGateAt < 8.0 else { return nil }
+        // Never ask for more runway than the window can hold.
+        let needed = min(6.0, w.windowSeconds / 2)
+        let have = forwardBufferSeconds()
+        guard have < needed else { return nil }
+        return (w.windowSeconds, needed, have)
+    }
+
     /// Release the gate: un-mute per the real audio owner and drop the
     /// loading surface, in one main-thread hop so sound and picture reach
     /// the user together. Idempotent; a no-op when no gate is up (the
@@ -5491,7 +5545,9 @@ struct AVPlayerMultiviewTile: View {
         avStartGateActive = false
         avStartGateToken = UUID()
         let ms = Int((CACurrentMediaTime() - avStartGateAt) * 1000)
-        stopNativeHLSBufferProbe()
+        // The buffer probe deliberately keeps running past the release:
+        // the interesting stall is the one AFTER the first frame. It
+        // stops on its own 30 s cap, and on teardown in stop().
         player?.isMuted = (MultiviewStore.shared.audioTileID != tileID)
         if statusText == "Preparing..." { statusText = nil }
         debugLog("[AVP-GATE] released after \(ms)ms (\(reason)) "
