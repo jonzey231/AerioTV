@@ -14,21 +14,31 @@ import SwiftUI
 #if os(tvOS)
 /// Segment chip for `tvSteppedSegmentsRow`. Mirrors `MoviesPillStyle`
 /// (Capsule, owned focus visual so the system white platter never shows)
-/// at the row's original compact padding. Focused: white ring when
-/// selected, accent ring when not.
+/// at the row's original compact padding.
+///
+/// Phase 3 (Logan 2026-09-17): the chip used to ring WHITE at 3pt when it
+/// was both focused and selected, and to scale up 5%. Both read as the
+/// bright, oversized focus treatment the standing rule forbids, so the
+/// chip now draws the one Settings ring: theme accent at
+/// `SettingsMetrics.tvFocusRingWidth`, no scale bump. Selection is still
+/// legible on its own, from the filled accent capsule.
 struct TVSteppedSegmentStyle: ButtonStyle {
     let isSelected: Bool
     @Environment(\.isFocused) private var isFocused
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundColor(isSelected ? .appBackground : (isFocused ? .white : .textSecondary))
+            .foregroundColor(isSelected ? .appBackground : .textSecondary)
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .background(Capsule().fill(isSelected ? Color.accentPrimary : Color.clear))
-            .overlay(Capsule().strokeBorder(isSelected ? Color.white : Color.accentPrimary, lineWidth: isFocused ? 3 : 0))
-            .scaleEffect(isFocused ? 1.05 : 1.0)
+            .overlay(
+                Capsule().strokeBorder(
+                    Color.accentPrimary,
+                    lineWidth: isFocused ? SettingsMetrics.tvFocusRingWidth : 0)
+            )
             .animation(.easeInOut(duration: 0.15), value: isFocused)
+            .opacity(configuration.isPressed ? 0.7 : 1.0)
     }
 }
 #endif
@@ -125,10 +135,12 @@ struct StreamBufferSlider: View {
                 .fill(isFocused ? Color.accentPrimary.opacity(0.12) : Color.elevatedBackground)
         )
         .overlay(
+            // Phase 3: the one Settings ring (accent, standard width). The
+            // track used to ring at 3pt and scale up; both are gone.
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Color.accentPrimary, lineWidth: isFocused ? 3 : 0)
+                .strokeBorder(Color.accentPrimary,
+                              lineWidth: isFocused ? SettingsMetrics.tvFocusRingWidth : 0)
         )
-        .scaleEffect(isFocused ? 1.02 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
         .overlay(
             TVPressOverlay(
@@ -186,7 +198,6 @@ struct TVCompactButton: View {
         .buttonStyle(TVNoHighlightButtonStyle())
         .tvFocusRingShape(.rounded(12))
         .focused($isFocused)
-        .scaleEffect(isFocused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
         .disabled(disabled)
     }

@@ -245,7 +245,11 @@ struct SingleCategoryColorEditor: View {
                             .scaledFont(.system(size: 14, weight: .semibold))
                         Text("Reset to Default")
                     }
-                    .foregroundColor(.statusWarning)
+                    // Phase 3: reset rows carry the same danger color as
+                    // the DVR Danger Zone. The hardcoded orange was the
+                    // only action-row color in Settings that ignored the
+                    // destructive role.
+                    .foregroundColor(.red)
                 }
                 .listRowBackground(Color.cardBackground)
             } footer: {

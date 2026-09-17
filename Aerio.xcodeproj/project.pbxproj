@@ -16,7 +16,13 @@
 		5E783C4A3D74F99510FB9AD5 /* SettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E786BF6077FA6A633F43AD7 /* SettingsSection.swift */; };
 		5E781BAFD54382D25F834CDD /* SettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E786BF6077FA6A633F43AD7 /* SettingsSection.swift */; };
 		5E78653AC914E3F01DD09F7B /* SettingsMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E78541B1A57691D92ACD32B /* SettingsMetrics.swift */; };
+		853136D0782A7ABB2ED6D735 /* SettingsSubgroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EA416D347F722E14878998A /* SettingsSubgroup.swift */; };
+		60605874B0501017DD6C675F /* SettingsChoicePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4E68D585F224FA9D6F7A6C3 /* SettingsChoicePicker.swift */; };
+		9F446FE905EAF6861FF15914 /* SettingsTextField.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2319C78BB8AC801A0932DBCE /* SettingsTextField.swift */; };
 		5E78D9FC554EA8FD1F8E2855 /* SettingsMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E78541B1A57691D92ACD32B /* SettingsMetrics.swift */; };
+		ADCEFA5AE027B52DD56A0D0B /* SettingsSubgroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EA416D347F722E14878998A /* SettingsSubgroup.swift */; };
+		FC5277CDDCA028991C62AE81 /* SettingsChoicePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4E68D585F224FA9D6F7A6C3 /* SettingsChoicePicker.swift */; };
+		BCDF7E0F704CA13AC20C4842 /* SettingsTextField.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2319C78BB8AC801A0932DBCE /* SettingsTextField.swift */; };
 		5E7788A6AC6F15F4804AC5D7 /* TVSettingsRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77D250DD29BDCAEAA1E4F3 /* TVSettingsRows.swift */; };
 		5E77623636D6D388D3926ECA /* TVSettingsRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77D250DD29BDCAEAA1E4F3 /* TVSettingsRows.swift */; };
 		5E77169DCEFE3D1DACB4112E /* SettingsRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77857F44BAC0D4211F7D69 /* SettingsRow.swift */; };
@@ -342,6 +348,9 @@
 		5EAA00DL1000000000000001 /* SettingsDeepLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsDeepLink.swift; sourceTree = "<group>"; };
 		5E786BF6077FA6A633F43AD7 /* SettingsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSection.swift; sourceTree = "<group>"; };
 		5E78541B1A57691D92ACD32B /* SettingsMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsMetrics.swift; sourceTree = "<group>"; };
+		5EA416D347F722E14878998A /* SettingsSubgroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSubgroup.swift; sourceTree = "<group>"; };
+		B4E68D585F224FA9D6F7A6C3 /* SettingsChoicePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsChoicePicker.swift; sourceTree = "<group>"; };
+		2319C78BB8AC801A0932DBCE /* SettingsTextField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsTextField.swift; sourceTree = "<group>"; };
 		5E77D250DD29BDCAEAA1E4F3 /* TVSettingsRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVSettingsRows.swift; sourceTree = "<group>"; };
 		5E77857F44BAC0D4211F7D69 /* SettingsRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsRow.swift; sourceTree = "<group>"; };
 		46392B1A3F9F7A8DAB800DC8 /* SettingsControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsControls.swift; sourceTree = "<group>"; };
@@ -567,6 +576,9 @@
 			children = (
 				5E786BF6077FA6A633F43AD7 /* SettingsSection.swift */,
 				5E78541B1A57691D92ACD32B /* SettingsMetrics.swift */,
+				5EA416D347F722E14878998A /* SettingsSubgroup.swift */,
+				B4E68D585F224FA9D6F7A6C3 /* SettingsChoicePicker.swift */,
+				2319C78BB8AC801A0932DBCE /* SettingsTextField.swift */,
 				5E77D250DD29BDCAEAA1E4F3 /* TVSettingsRows.swift */,
 				5E77857F44BAC0D4211F7D69 /* SettingsRow.swift */,
 				46392B1A3F9F7A8DAB800DC8 /* SettingsControls.swift */,
@@ -1347,6 +1359,9 @@
 				5EAA00DL1000000000000002 /* SettingsDeepLink.swift in Sources */,
 				5E781BAFD54382D25F834CDD /* SettingsSection.swift in Sources */,
 				5E78D9FC554EA8FD1F8E2855 /* SettingsMetrics.swift in Sources */,
+				ADCEFA5AE027B52DD56A0D0B /* SettingsSubgroup.swift in Sources */,
+				FC5277CDDCA028991C62AE81 /* SettingsChoicePicker.swift in Sources */,
+				BCDF7E0F704CA13AC20C4842 /* SettingsTextField.swift in Sources */,
 				5E77623636D6D388D3926ECA /* TVSettingsRows.swift in Sources */,
 				5E77CB4F7943348FDE99CCFD /* SettingsRow.swift in Sources */,
 				2D246927DDE0C2E0B2BA2B5B /* SettingsControls.swift in Sources */,
@@ -1487,6 +1502,9 @@
 				5EAA00DL1000000000000003 /* SettingsDeepLink.swift in Sources */,
 				5E783C4A3D74F99510FB9AD5 /* SettingsSection.swift in Sources */,
 				5E78653AC914E3F01DD09F7B /* SettingsMetrics.swift in Sources */,
+				853136D0782A7ABB2ED6D735 /* SettingsSubgroup.swift in Sources */,
+				60605874B0501017DD6C675F /* SettingsChoicePicker.swift in Sources */,
+				9F446FE905EAF6861FF15914 /* SettingsTextField.swift in Sources */,
 				5E7788A6AC6F15F4804AC5D7 /* TVSettingsRows.swift in Sources */,
 				5E77169DCEFE3D1DACB4112E /* SettingsRow.swift in Sources */,
 				814776352C25C6D44E86A0D2 /* SettingsControls.swift in Sources */,

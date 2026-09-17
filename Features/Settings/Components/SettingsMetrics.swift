@@ -23,6 +23,16 @@ enum SettingsMetrics {
     /// Row subtitle / footnote.
     static let tvFootnoteSize: CGFloat = 20
 
+    // MARK: tvOS focus visuals (Phase 3)
+    /// The ONE focus ring width for every Settings control on tvOS.
+    /// Matches the guide's ring. Phase 3 rule (Logan 2026-09-17): focus
+    /// rings are never bright white and never oversized, so nothing in
+    /// Settings draws a 3pt or 4pt ring, and controls do not scale up on
+    /// focus (the ring alone reads at TV distance).
+    static let tvFocusRingWidth: CGFloat = 2
+    /// Resting hairline around a Settings card.
+    static let tvCardBorderWidth: CGFloat = 1
+
     // MARK: tvOS layout
     /// The v1.7.5 centered reading column, to be extended to every detail
     /// page in Phase 3 (today only Network / EditServerPage / ServerDetail

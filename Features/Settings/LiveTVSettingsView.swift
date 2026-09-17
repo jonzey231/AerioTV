@@ -410,7 +410,8 @@ struct LiveTVSettingsView: View {
                             .scaledFont(.system(size: 14, weight: .semibold))
                         Text("Reset Colors to Defaults").scaledFont(.bodyMedium)
                     }
-                    .foregroundColor(.statusWarning)
+                    // Phase 3: same danger color as the DVR Danger Zone.
+                    .foregroundColor(.red)
                 }
                 .listRowBackground(Color.cardBackground)
                 .disabled(!enableCategoryColors)

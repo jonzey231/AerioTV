@@ -229,9 +229,10 @@ struct TVSettingsToggleRow: View {
                         .frame(width: 10, height: 10)
                     Text(isOn ? "On" : "Off")
                         .scaledFont(.system(size: 26, weight: .semibold))
-                        .foregroundColor(isOn
-                            ? (isFocused ? .white : iconColor)
-                            : (isFocused ? .white : .textTertiary))
+                        // Phase 3: focus no longer flips this to bright
+                        // white. The row's accent ring and tint carry the
+                        // focus state; the value keeps its own meaning.
+                        .foregroundColor(isOn ? iconColor : Color.contrastText(.textSecondary))
                 }
                 .padding(.leading, 16)
             }
@@ -259,7 +260,9 @@ func tvSettingsCardBG(_ focused: Bool) -> some View {
             // the edge and reading as a second, larger outline.
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(Color.accentPrimary.opacity(focused ? 0.65 : 0.10),
-                              lineWidth: focused ? 2.5 : 1)
+                              lineWidth: focused
+                                  ? SettingsMetrics.tvFocusRingWidth
+                                  : SettingsMetrics.tvCardBorderWidth)
         }
 }
 #endif
@@ -452,7 +455,7 @@ struct TVSettingsTextField: View {
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(Color.accentPrimary.opacity(focused ? 1.0 : 0.0),
-                        lineWidth: focused ? 3 : 0)
+                        lineWidth: focused ? SettingsMetrics.tvFocusRingWidth : 0)
                 .animation(.easeInOut(duration: 0.15), value: focused)
         )
     }
