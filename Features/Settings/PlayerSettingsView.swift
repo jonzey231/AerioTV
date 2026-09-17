@@ -506,12 +506,16 @@ struct PlayerSettingsView: View {
                 // Phase 3, item 4: the six info-card switches now sit
                 // under a master row that summarizes them, same strings
                 // as iOS.
-                SettingsSection("Info Card", style: .card) {
-                    SettingsSubgroup("Info Card",
-                                     summary: playerInfoCardSummary,
-                                     icon: "rectangle.on.rectangle",
-                                     iconColor: theme.accent,
-                                     footer: Self.playerInfoCardFooter) {
+                // No SettingsSection wrapper: the subgroup's master row
+                // already says "Info Card", so a section header above it
+                // labeled the same group twice. The subgroup draws the
+                // card itself.
+                SettingsSubgroup("Info Card",
+                                 summary: playerInfoCardSummary,
+                                 icon: "rectangle.on.rectangle",
+                                 iconColor: theme.accent,
+                                 footer: Self.playerInfoCardFooter,
+                                 drawsCard: true) {
                         ForEach(playerInfoCardRows, id: \.key) { row in
                             TVSettingsToggleRow(
                                 icon: "info.circle",
@@ -520,7 +524,6 @@ struct PlayerSettingsView: View {
                                 subtitle: "",
                                 isOn: row.binding
                             ) { _ in }
-                        }
                     }
                 }
 
@@ -538,10 +541,15 @@ struct PlayerSettingsView: View {
                     tvFooter("Buffers the channel you are watching so you can pause and rewind live TV. Uses device storage while you watch; buffered video is removed automatically.")
 
                     if liveRewindEnabled {
+                        // No master row here: the section header and the
+                        // toggle above it already say "Live Rewind", and a
+                        // third label for the same group is noise on a TV.
+                        // iPhone still pushes a page titled "Live Rewind".
                         SettingsSubgroup("Live Rewind",
                                          summary: liveRewindSummary,
                                          icon: "gobackward.30",
-                                         iconColor: theme.accent) {
+                                         iconColor: theme.accent,
+                                         showsMasterRow: false) {
                             SettingsChoicePicker(
                                 "Rewind up to",
                                 options: rewindDepthOptions,

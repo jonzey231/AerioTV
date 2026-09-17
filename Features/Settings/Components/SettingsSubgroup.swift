@@ -60,6 +60,15 @@ struct SettingsSubgroup<Content: View>: View {
     /// Explanatory copy: the pushed page's footer on iPhone, a footnote
     /// under the inline block everywhere else.
     var footer: String? = nil
+    /// tvOS only: draw the `.card` chrome around the whole block, so the
+    /// call site does not need a `SettingsSection` whose header would
+    /// just repeat the master row's title.
+    var drawsCard: Bool = false
+    /// tvOS only: suppress the master row. Set it where an enclosing
+    /// section header and its own master toggle already name the group
+    /// (Live Rewind), so the group is not labeled three times on one
+    /// screen. iPhone still pushes a page titled `title`.
+    var showsMasterRow: Bool = true
     @ViewBuilder let content: Content
 
     init(_ title: String,
@@ -67,12 +76,16 @@ struct SettingsSubgroup<Content: View>: View {
          icon: String = "switch.2",
          iconColor: Color = .accentPrimary,
          footer: String? = nil,
+         drawsCard: Bool = false,
+         showsMasterRow: Bool = true,
          @ViewBuilder content: () -> Content) {
         self.title = title
         self.summary = summary
         self.icon = icon
         self.iconColor = iconColor
         self.footer = footer
+        self.drawsCard = drawsCard
+        self.showsMasterRow = showsMasterRow
         self.content = content()
     }
 
@@ -118,12 +131,28 @@ struct SettingsSubgroup<Content: View>: View {
     // MARK: tvOS - always inline
 
     #if os(tvOS)
+    @ViewBuilder
     private var tvBody: some View {
+        if drawsCard {
+            tvStack
+                .padding(20)
+                .background(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color.cardBackground)
+                )
+        } else {
+            tvStack
+        }
+    }
+
+    private var tvStack: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SettingsRow(icon: icon, iconColor: iconColor,
-                        title: title, subtitle: summary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 20)
+            if showsMasterRow {
+                SettingsRow(icon: icon, iconColor: iconColor,
+                            title: title, subtitle: summary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+            }
             content
             if let footer, !footer.isEmpty {
                 Text(footer)

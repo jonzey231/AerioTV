@@ -131,17 +131,6 @@ struct AppearanceSettingsView: View {
                         )
                     }
 
-                    // Appearance mode (Dark / Light / System). Phase 3:
-                    // the shared picker, which stays inline on tvOS and
-                    // mirrors the theme rows above. Orthogonal to the
-                    // theme choice.
-                    SettingsChoicePicker("Appearance",
-                                         options: appearanceModeChoices,
-                                         selection: appearanceModeSelection,
-                                         onChange: { _ in
-                                             SyncManager.shared.pushPreferencesImmediate()
-                                         })
-
                     // Custom accent toggle
                     TVSettingsToggleRow(
                         icon: "paintpalette.fill", iconColor: theme.accent,
@@ -162,6 +151,22 @@ struct AppearanceSettingsView: View {
                                           autocapitalization: .characters)
                             .padding(.horizontal, 20)
                     }
+                }
+
+                // Appearance mode (Dark / Light / System). Phase 3: it
+                // used to trail the Color Theme list with no header of
+                // its own, so once both were plain check rows there was
+                // nothing to say where one choice ended and the other
+                // began. It gets its own section. The two are
+                // orthogonal: the theme picks the hues, this picks
+                // light or dark surfaces.
+                tvAppearanceSection("Appearance") {
+                    SettingsChoicePicker("Appearance",
+                                         options: appearanceModeChoices,
+                                         selection: appearanceModeSelection,
+                                         onChange: { _ in
+                                             SyncManager.shared.pushPreferencesImmediate()
+                                         })
                 }
 
                 // Liquid Glass
