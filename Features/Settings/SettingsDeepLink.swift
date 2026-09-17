@@ -97,6 +97,39 @@ final class SettingsDeepLink {
         return true
     }
 
+    /// The `-settingsPage <page>` launch argument (UserDefaults maps
+    /// `-key value` args into the argument domain) or the
+    /// `AERIO_SETTINGS_PAGE` environment variable.
+    ///
+    /// This is the tvOS Simulator path: `simctl openurl` there raises a
+    /// system "Open in AerioTV?" confirmation that nothing can dismiss,
+    /// because the tvOS Simulator takes no synthetic input. A launch
+    /// argument needs no confirmation:
+    ///
+    ///   xcrun simctl launch --terminate-running-process <udid> \
+    ///       app.molinete.aerio -settingsPage livetv
+    ///
+    /// Neither source is persisted; both are read once per launch.
+    nonisolated static func pageFromLaunchEnvironment() -> SettingsDeepLinkPage? {
+        let raw = UserDefaults.standard.string(forKey: "settingsPage")
+            ?? ProcessInfo.processInfo.environment["AERIO_SETTINGS_PAGE"]
+        guard let raw, !raw.isEmpty else { return nil }
+        return SettingsDeepLinkPage(rawValue: raw.lowercased()) ?? .root
+    }
+
+    /// Parks the launch-argument page exactly like a cold-launch deep link,
+    /// so the rest of the flow (MainTabView peek, SettingsView consume) is
+    /// identical. Called once from `AerioApp.init`.
+    static func applyLaunchArgumentIfPresent() {
+        guard let page = pageFromLaunchEnvironment() else { return }
+        shared.pending = page
+        NotificationCenter.default.post(
+            name: .aerioOpenSettingsPage,
+            object: nil,
+            userInfo: ["page": page.rawValue]
+        )
+    }
+
     /// Takes the pending page, clearing it so a later mount does not
     /// re-navigate.
     func consumePending() -> SettingsDeepLinkPage? {

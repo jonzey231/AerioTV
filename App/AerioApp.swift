@@ -416,6 +416,15 @@ struct AerioApp: App {
         // into the List key before any view reads it, so nobody's current
         // setting changes (Logan 2026-09-16).
         LogoCorners.migrateLegacyKeyIfNeeded()
+        // Launch-argument twin of the aerio://settings/<page> deep link,
+        // for the tvOS Simulator (where `simctl openurl` raises an
+        // undismissable confirmation) and for any headless run:
+        //   -settingsPage <page>  /  AERIO_SETTINGS_PAGE=<page>
+        // Parked here, before any view mounts, so it behaves exactly like
+        // a cold-launch URL. All configurations; a no-op without it.
+        Task { @MainActor in
+            SettingsDeepLink.applyLaunchArgumentIfPresent()
+        }
         #if DEBUG
         // Test-harness hooks, DEBUG builds only. Both read standard
         // launch arguments (UserDefaults maps "-key value" args).
