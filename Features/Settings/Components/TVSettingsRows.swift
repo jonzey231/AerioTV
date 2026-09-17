@@ -312,6 +312,27 @@ struct ServerListRow: View {
         }
     }
 
+    /// The badge + URL line. `showURL` false is the narrow fallback
+    /// offered to `ViewThatFits`.
+    @ViewBuilder
+    private func serverSubtitleRow(showURL: Bool) -> some View {
+        HStack(spacing: 6) {
+            ServerTypeBadge(type: server.type)
+            if hasLANConfigured {
+                LANWANBadge(isLAN: isOnLAN)
+            }
+            if showURL {
+                Text(server.effectiveBaseURL)
+                    .scaledFont(.monoSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    // Yield to the badges when space runs short.
+                    .layoutPriority(-1)
+            }
+        }
+    }
+
     private var rowContent: some View {
         HStack(spacing: 14) {
             // Active server indicator — tapping sets this server as the active one
@@ -345,16 +366,13 @@ struct ServerListRow: View {
                 Text(server.name)
                     .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
-                HStack(spacing: 6) {
-                    ServerTypeBadge(type: server.type)
-                    if hasLANConfigured {
-                        LANWANBadge(isLAN: isOnLAN)
-                    }
-                    Text(server.effectiveBaseURL)
-                        .scaledFont(.monoSmall.subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                // Badges first, URL last. At narrow widths (a 50% iPad
+                // Split View) the URL truncates and then drops out
+                // entirely, rather than squeezing the type badge into a
+                // three-line block beside it.
+                ViewThatFits(in: .horizontal) {
+                    serverSubtitleRow(showURL: true)
+                    serverSubtitleRow(showURL: false)
                 }
             }
 

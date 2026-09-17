@@ -14,6 +14,11 @@ struct SettingsRow: View {
     let iconColor: Color
     let title: String
     var subtitle: String? = nil
+    /// Optional cap on the subtitle's line count. The iPad Settings
+    /// sidebar passes 1 so a long value (an active playlist's name) ends
+    /// in an ellipsis instead of wrapping the row taller; everywhere else
+    /// keeps the unlimited default.
+    var subtitleLineLimit: Int? = nil
     /// iPad sidebar (Phase 4): true while the row sits on the accent
     /// selection pill, where the normal accent-tinted subtitle and icon
     /// would blend into the fill. Flips the row to white-on-accent, the
@@ -70,6 +75,8 @@ struct SettingsRow: View {
                     Text(subtitle)
                         .scaledFont(.bodySmall)
                         .foregroundColor(selectionContrast ? .white.opacity(0.85) : Color.contrastText(.textSecondary))
+                        .lineLimit(subtitleLineLimit)
+                        .truncationMode(.tail)
                 }
             }
 

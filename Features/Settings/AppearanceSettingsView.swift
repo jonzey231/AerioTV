@@ -17,6 +17,26 @@ struct AppearanceSettingsView: View {
 
     @AppStorage(ClockFormat.defaultsKey) private var timeFormat = "system"
 
+    #if os(iOS)
+    /// Measured width of this page, used to pick the Color Theme layout.
+    /// The two-column tile grid needs real room: in a narrow Slide Over
+    /// (about 400 pt) the tiles are so narrow that theme names break
+    /// mid-word ("AerioT/V", "Monochro/me"), so the page falls back to
+    /// the stacked single-column rows. Measured, not inferred from the
+    /// size class, because an iPad Slide Over and an iPad Split View pane
+    /// report the same compact class at very different widths.
+    ///
+    /// Written only from onAppear/onChange (never during body
+    /// evaluation), and it feeds a layout CHOICE rather than a sibling's
+    /// padding, so there is no measure-then-resize loop.
+    @State private var pageWidth: CGFloat = 0
+    /// Below this the theme tiles cannot hold their longest name.
+    private static let themeGridMinWidth: CGFloat = 500
+    private var useThemeTileGrid: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad && pageWidth >= Self.themeGridMinWidth
+    }
+    #endif
+
     private static let timeFormatOptions: [(value: String, label: String, subtitle: String)] = [
         ("system", "System", "Follow the device's clock setting."),
         ("12", "12-hour", "7:30 PM"),
@@ -383,9 +403,10 @@ struct AppearanceSettingsView: View {
         List {
                 // MARK: Color Theme
                 Section {
-                    // Phase 5 (plan A2 density): iPad shows the themes as a
-                    // two-column tile grid; iPhone keeps the stacked rows.
-                    if UIDevice.current.userInterfaceIdiom == .pad {
+                    // Phase 5 (plan A2 density): a wide iPad page shows the
+                    // themes as a two-column tile grid; iPhone and any
+                    // narrow page (Slide Over) keep the stacked rows.
+                    if useThemeTileGrid {
                         LazyVGrid(columns: [GridItem(.flexible(), spacing: 10),
                                             GridItem(.flexible(), spacing: 10)],
                                   spacing: 10) {
@@ -425,20 +446,20 @@ struct AppearanceSettingsView: View {
                     // below so the last theme tile ends its own pill
                     // instead of visually fusing with the Appearance card
                     // (Logan's report 2026-08-04).
-                    if UIDevice.current.userInterfaceIdiom != .pad {
+                    if !useThemeTileGrid {
                         appearanceModeAndAccentRows
                     }
                 } header: {
                     Text("Color Theme").sectionHeaderStyle()
                 } footer: {
-                    if UIDevice.current.userInterfaceIdiom != .pad {
+                    if !useThemeTileGrid {
                         Text("Colors used throughout the app.")
                             .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
                 .listSectionSeparator(.hidden)
 
-                if UIDevice.current.userInterfaceIdiom == .pad {
+                if useThemeTileGrid {
                     Section {
                         appearanceModeAndAccentRows
                     } footer: {
@@ -570,6 +591,13 @@ struct AppearanceSettingsView: View {
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
+            .background {
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { pageWidth = geo.size.width }
+                        .onChange(of: geo.size.width) { _, width in pageWidth = width }
+                }
+            }
             // See SettingsView for rationale — SwiftUI List cells
             // cache their rendered content even when the parent
             // re-renders, leaving accent-derived text colors

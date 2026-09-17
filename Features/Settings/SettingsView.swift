@@ -65,6 +65,9 @@ struct SettingsView: View {
     /// picks the right target (sidebar selection vs. phone push) in every
     /// width case, including Split View and Stage Manager.
     @State private var padSplitActive = false
+    /// Tint strength for the selected sidebar row. Faint on purpose: the
+    /// row reads as selected without becoming a solid block.
+    private static let padSidebarSelectionOpacity: Double = 0.16
     /// iPhone push stack. Only the `aerio://settings/<page>` deep link
     /// writes to it; the visible rows stay classic
     /// `NavigationLink(destination:)` pushes.
@@ -759,10 +762,13 @@ struct SettingsView: View {
     /// ruling of 2026-08-04 and Android tablet, superseding the Rev 2
     /// embed-playlist-rows design), then the categories in the frozen
     /// order. Remote Control stays tvOS-only.
-    /// One sidebar row: the selectionContrast flag flips the row to
-    /// white-on-accent while it sits on the selection pill (Logan's
-    /// feedback 2026-08-04: the accent-tinted subtitle was unreadable
-    /// on the accent fill).
+    /// One sidebar row. Phase 2 (2026-09-17, Logan): the selected row is
+    /// a FAINT tonal tint, matching the Android tablet sidebar, not the
+    /// old solid accent block with white text. The fill is the live
+    /// ThemeManager accent at low opacity so it follows the chosen
+    /// theme, the title stays textPrimary and the subtitle keeps its
+    /// ordinary color, the icon is unchanged, and there is no border or
+    /// ring. Same corner radius as before.
     private func padSidebarRow(_ dest: SettingsDestination, icon: String,
                                iconColor: Color, title: String,
                                subtitle: String?) -> some View {
@@ -772,12 +778,13 @@ struct SettingsView: View {
         } label: {
             SettingsRow(icon: icon, iconColor: iconColor,
                         title: title, subtitle: subtitle,
-                        selectionContrast: selected)
+                        subtitleLineLimit: 1)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(selected ? theme.accent : Color.clear))
+                    .fill(selected ? theme.accent.opacity(Self.padSidebarSelectionOpacity)
+                                   : Color.clear))
         }
         .buttonStyle(.plain)
     }

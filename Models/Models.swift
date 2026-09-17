@@ -92,8 +92,8 @@ enum ServerType: String, Codable, CaseIterable {
 
     var description: String {
         switch self {
-        case .m3uPlaylist: return "Any M3U playlist URL — works with Dispatcharr, any IPTV provider"
-        case .xtreamCodes: return "Xtream Codes API — live TV, VOD movies & series"
+        case .m3uPlaylist: return "Any M3U playlist URL: works with Dispatcharr, any IPTV provider"
+        case .xtreamCodes: return "Xtream Codes API: live TV, VOD movies & series"
         case .dispatcharrAPI: return "Connect to Dispatcharr with your admin login or a personal API key (*AerioTV is not officially affiliated with the Dispatcharr project)"
         }
     }

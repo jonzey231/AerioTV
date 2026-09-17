@@ -749,6 +749,11 @@ struct ServerTypeBadge: View {
                 .scaledFont(.system(size: iconSize, weight: .semibold))
             Text(type.displayName)
                 .scaledFont(.labelSmall)
+                // The badge is an identity chip, not prose: it stays on
+                // one line at every width. Without this it wrapped to
+                // three lines beside a truncated URL in a 50% Split View.
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
         .foregroundColor(type.color)
         .padding(.horizontal, hPad)
