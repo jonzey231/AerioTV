@@ -1459,7 +1459,12 @@ struct RootView: View {
                 // onboarding or What's New. If either modal claims this
                 // launch, the next clean launch asks instead. Users who
                 // already found the toggle are seeded silently.
-                if !liveRewindPromptSeen {
+                // Skipped entirely on a screenshot launch (-settingsPage /
+                // AERIO_SETTINGS_PAGE or a parked aerio://settings link):
+                // the alert would cover the Settings page being captured.
+                // Nothing is written, so the prompt still arrives on the
+                // user's next ordinary launch.
+                if !liveRewindPromptSeen && !SettingsDeepLink.shared.isAutomatedLaunch {
                     if liveRewindEnabled {
                         liveRewindPromptSeen = true
                     } else {
