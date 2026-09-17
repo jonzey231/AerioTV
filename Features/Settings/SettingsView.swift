@@ -820,7 +820,7 @@ struct SettingsView: View {
         // overlays, and guide dispatch all run the map.
         items.append(TVSettingsRailItem(
             id: "remote-control", route: .category(.remoteControl), label: "Remote Control",
-            icon: "av.remote", iconColor: .accentPrimary, subtitle: "Customize what the Siri Remote buttons do"))
+            icon: "av.remote", iconColor: .accentPrimary, subtitle: "Customize remote buttons"))
         items.append(TVSettingsRailItem(
             id: "sync", route: .category(.sync), label: "Sync",
             icon: "icloud.fill", iconColor: .accentPrimary, subtitle: syncValueLabel))
