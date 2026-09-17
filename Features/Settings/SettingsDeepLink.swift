@@ -130,6 +130,15 @@ final class SettingsDeepLink {
         )
     }
 
+    /// True when this launch exists to screenshot a Settings page: either a
+    /// `-settingsPage` / AERIO_SETTINGS_PAGE argument, or a parked deep link
+    /// that arrived before the UI mounted. Callers use it to hold back
+    /// launch-time modals (What's New) WITHOUT marking them seen, so the
+    /// user still gets the notes on their next ordinary launch.
+    var isAutomatedLaunch: Bool {
+        hasPending || Self.pageFromLaunchEnvironment() != nil
+    }
+
     /// Takes the pending page, clearing it so a later mount does not
     /// re-navigate.
     func consumePending() -> SettingsDeepLinkPage? {

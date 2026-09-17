@@ -1435,7 +1435,15 @@ struct RootView: View {
                 // opacity transition finish so the sheet animates in
                 // cleanly instead of racing the splash fade.
                 let isExistingUser = hasCompletedOnboarding || hasAnySource
-                if !showOnboarding && WhatsNewStore.shouldShow(isExistingUser: isExistingUser) {
+                // A launch driven by -settingsPage / AERIO_SETTINGS_PAGE or
+                // by a parked aerio://settings link is a screenshot run: the
+                // sheet would sit over the page being captured. Short-circuit
+                // BEFORE `shouldShow`, which writes the fresh-install marker
+                // as a side effect, so the notes are neither shown nor
+                // consumed and the user still sees them next launch.
+                if !showOnboarding
+                    && !SettingsDeepLink.shared.isAutomatedLaunch
+                    && WhatsNewStore.shouldShow(isExistingUser: isExistingUser) {
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 600_000_000)
                         // Re-check after the delay: if the user
