@@ -18,22 +18,28 @@ import Foundation
 /// CaseIterable means no rail or sidebar builder can ever list it by
 /// accident.
 ///
-/// Raw values are EXPLICIT and match the legacy route strings exactly
-/// ("app-behaviors", "dvr-settings"), because Swift's derived raw values
-/// would not. Nothing persists these strings; they only document the
-/// mechanical conversion from the old switch.
+/// Raw values are EXPLICIT ("dvr-settings", "live-tv") because Swift's
+/// derived raw values would not match. Nothing persists these strings.
+///
+/// Phase 1 regroup (2026-09-17): `appBehaviors`, `multiview` and
+/// `network` are gone; their rows live on `liveTV`, `player`, `moviesTV`
+/// and `general`.
 enum SettingsDestination: String, Hashable, CaseIterable {
-    case playlists      = "playlists"       // Phase 3 pane: playlist list (rail lists categories only)
-    case appearance     = "appearance"
-    case appBehaviors   = "app-behaviors"
-    case remoteControl  = "remote-control"
-    case multiview      = "multiview"
-    case network        = "network"
+    case playlists      = "playlists"       // pane: playlist list (rail lists categories only)
+    // App
+    case liveTV         = "live-tv"
+    case player         = "player"
+    case moviesTV       = "movies-tv"
     case dvr            = "dvr-settings"
-    case sync           = "sync"            // Phase 3 pane host for the root Sync toggles
+    // Device
+    case appearance     = "appearance"
+    case general        = "general"
+    case remoteControl  = "remote-control"
+    case sync           = "sync"
     case syncCategories = "sync-categories"
+    // Last section
     case developer      = "developer"
-    case about          = "about"           // Phase 3 pane host for the About rows
+    case about          = "about"
 }
 
 /// Everything the Settings navigation can route to. `.category` covers the
