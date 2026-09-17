@@ -3079,6 +3079,10 @@ struct AVPlayerMultiviewTile: View {
     @State private var resolvedNativeHLSFor: URL?
     @State private var resolvedNativeHLSAt: CFTimeInterval = 0
     @State private var nativeHLSResolveInFlight = false
+    /// Channel name the current native-HLS client belongs to, so an
+    /// in-place channel flip can name both ends of the re-tune in one
+    /// line. Set when the tune is handed to the native-HLS arm.
+    @State private var nativeHLSChannelName: String?
     /// 250 ms buffer-state probe, native-HLS live tunes only. The 9.1 s
     /// wait is near constant across tunes, so it is a policy and not a
     /// race, and the only way to name the policy is to watch what the
@@ -3417,6 +3421,22 @@ struct AVPlayerMultiviewTile: View {
         // In-place channel swap on the same tile id (the container
         // swaps `tile.streamURL` without changing tile identity).
         .onChange(of: streamURL) { oldURL, newURL in
+            // NATIVE HLS CHANNEL FLIP (field 2026-09-17, iPhone: "US:
+            // ESPN 2" -> "US: ESPN U" under Force Native HLS). The swap
+            // is in place - the tile view is never torn down - so the
+            // re-tune runs entirely through the stop()/start() pair
+            // below: stop() drops the AVPlayer (which is what ends the
+            // old client's playlist polling, the only way Dispatcharr
+            // reaps an HLS client) and closes its connection-registry
+            // entry, and start() routes the new URL back through
+            // startNativeHLS -> NativeHLSClientResolver, one client per
+            // tune, replacing the AVPlayerItem behind the same A/V start
+            // gate a fresh tune uses.
+            if classifyStreamURL(newURL) == .hls || classifyStreamURL(oldURL) == .hls {
+                debugLog("[AVP-NHLS] flip re-tune "
+                    + "\(nativeHLSChannelName ?? "unknown") -> \(channelName)")
+                nativeHLSChannelName = nil
+            }
             mismatchAutoRetries = 0
             serverBusyRetries = 0
             channelStoppingRetries = 0
@@ -4624,6 +4644,7 @@ struct AVPlayerMultiviewTile: View {
             // No remux ingest here to adopt a warm one; release it now.
             LivePrewarm.shared.cancel(reason: "tile playing direct HLS")
             debugLog("[TUNE] engine=native-hls channel=\(channelName)")
+            nativeHLSChannelName = channelName
             startNativeHLS(upgradedURL: sourceURL, headers: headers)
         default:
             statusText = "Preparing..."

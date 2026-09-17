@@ -1036,6 +1036,21 @@ final class MultiviewStore: ObservableObject {
             headers: resolved.headers,
             addedAt: preservedAddedAt
         )
+        // SEED-TILE ROUTE PIN (field 2026-09-17, iPhone: swiping
+        // "US: ESPN 2" -> "US: ESPN U" under Force Native HLS logged the
+        // flip and never re-tuned). `MultiviewTileView.avPlayerTileURL`
+        // hands the FIRST tile `sessionRouteURL` instead of
+        // `tile.streamURL` under a direct-HLS lock, so an in-place swap
+        // on the seed tile changed nothing the tile could see: its
+        // `onChange(of: streamURL)` never fired, the native HLS client
+        // was never re-resolved, and the old channel kept playing. The
+        // route URL is per-tune, not per-session, so retarget it with
+        // the swap.
+        if sessionEngine == .avPlayerDirectHLS,
+           sessionRouteURL != nil,
+           tiles.first?.id == tileID {
+            sessionRouteURL = tileURL
+        }
         DebugLogger.shared.log(
             "[MV-Tile] swapTileContent: tile id=\(tileID) \(previousName) -> \(item.name)",
             category: "Playback", level: .info
