@@ -1011,10 +1011,25 @@ enum NativeHLSClientResolver {
         /// roughly 4 s segments), which is why the measured segment
         /// duration below is the one worth using.
         let targetDuration: Double
+        /// `#EXT-X-MEDIA-SEQUENCE`, 0 when the playlist omits it. A
+        /// client whose sequence has advanced has rolled segments off
+        /// the front, which is growth even when the count held still.
+        var mediaSequence: Int = 0
         /// Mean EXTINF, i.e. what a segment really is.
         var segmentSeconds: Double {
             segmentCount > 0 ? windowSeconds / Double(segmentCount) : 0
         }
+    }
+
+    /// One read of a client playlist, with the refusals kept separate
+    /// from "nothing usable came back". A cold start needs the
+    /// difference: a 4xx/5xx is the server saying no and ends the wait,
+    /// while an unparseable or empty body during a provider connect is
+    /// simply not an answer yet.
+    enum PlaylistProbe: Sendable {
+        case window(PlaylistWindow)
+        case httpError(status: Int)
+        case unreadable
     }
 
     /// Read the RESOLVED client playlist and report its window. This is
@@ -1032,20 +1047,39 @@ enum NativeHLSClientResolver {
     static func inspectPlaylist(_ playlistURL: URL,
                                 headers: [String: String],
                                 timeout: TimeInterval = 5) async -> PlaylistWindow? {
+        if case .window(let w) = await probePlaylist(playlistURL, headers: headers,
+                                                     timeout: timeout) {
+            return w
+        }
+        return nil
+    }
+
+    /// `inspectPlaylist` with the refusal preserved. Same single GET of
+    /// the per-client playlist, so it mints nothing either.
+    static func probePlaylist(_ playlistURL: URL,
+                              headers: [String: String],
+                              timeout: TimeInterval = 5) async -> PlaylistProbe {
         var request = URLRequest(url: playlistURL)
         request.timeoutInterval = timeout
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode ?? 0 < 400,
-              let text = String(data: data, encoding: .utf8),
-              text.contains("#EXTM3U") else { return nil }
+        guard let (data, response) = try? await URLSession.shared.data(for: request) else {
+            return .unreadable
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status < 400 else { return .httpError(status: status) }
+        guard let text = String(data: data, encoding: .utf8),
+              text.contains("#EXTM3U") else { return .unreadable }
 
         var durations: [Double] = []
         var target = 0.0
+        var sequence = 0
         for rawLine in text.split(separator: "\n") {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            if line.hasPrefix("#EXTINF:") {
+            if line.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") {
+                sequence = Int(line.dropFirst("#EXT-X-MEDIA-SEQUENCE:".count)
+                    .trimmingCharacters(in: .whitespaces)) ?? 0
+            } else if line.hasPrefix("#EXTINF:") {
                 // "#EXTINF:3.978,title"
                 let value = line.dropFirst("#EXTINF:".count)
                     .prefix { $0 != "," }
@@ -1056,10 +1090,11 @@ enum NativeHLSClientResolver {
                     .trimmingCharacters(in: .whitespaces)) ?? 0
             }
         }
-        guard !durations.isEmpty else { return nil }
-        return PlaylistWindow(segmentCount: durations.count,
-                              windowSeconds: durations.reduce(0, +),
-                              targetDuration: target)
+        guard !durations.isEmpty else { return .unreadable }
+        return .window(PlaylistWindow(segmentCount: durations.count,
+                                      windowSeconds: durations.reduce(0, +),
+                                      targetDuration: target,
+                                      mediaSequence: sequence))
     }
 
     /// Reports the FIRST redirect's Location and refuses to follow it, so

@@ -2326,16 +2326,96 @@ final class AVPStallWatchdog {
     private let mediaBytes: (() -> Int64)?
     private var lastMediaBytes: Int64 = -1
 
+    /// NATIVE HLS COLD START (field 2026-09-17, 18:43:25 to 18:43:38 on
+    /// the new server code): a channel nobody was watching sat at
+    /// `.unknown` for the full 12 s no-ready deadline while the provider
+    /// was still being connected upstream, died, and the automatic retry
+    /// - reusing the same client, by then warm - was ready in 1 s. The
+    /// deadline was measuring the provider's connect time, not a wedge.
+    ///
+    /// The client playlist says which one it is: while Dispatcharr is
+    /// still filling it, each read shows more segments or a higher media
+    /// sequence, and a brand-new client legitimately holds fewer than 3.
+    /// `mediaBytes` cannot see this (AVPlayer owns the socket on this
+    /// arm, there is no loopback server to count bytes), so the growth
+    /// probe is the native-HLS equivalent of the slow-link check.
+    ///
+    /// Armed for a FRESH native-HLS client only. A reused (warm) client
+    /// keeps the original deadline unchanged.
+    struct NativeHLSColdStart: Sendable {
+        /// The RESOLVED per-client playlist. Never the
+        /// `?output_format=hls` URL: reading that mints clients.
+        let playlistURL: URL
+        let headers: [String: String]
+        /// Hard cap on the extended wait, measured from the first poll.
+        var maxSeconds: TimeInterval = 30
+        /// Growth must arrive at least this often to keep extending.
+        var noGrowthSeconds: TimeInterval = 12
+    }
+    private let coldStart: NativeHLSColdStart?
+    private var coldStartFrom: CFTimeInterval = 0
+    private var coldStartLastGrowthAt: CFTimeInterval = 0
+    private var coldStartSegments = -1
+    private var coldStartSequence = -1
+    private var coldStartProbeInFlight = false
+    /// A 4xx/5xx from the client playlist: the server is refusing, which
+    /// no amount of waiting fixes. Ends the extension immediately.
+    private var coldStartHTTPError: Int?
+
     init(player: AVPlayer, item: AVPlayerItem, label: String,
          interval: TimeInterval = 4.0,
          mediaBytes: (() -> Int64)? = nil,
+         coldStart: NativeHLSColdStart? = nil,
          onDead: @escaping (String) -> Void) {
         self.player = player
         self.item = item
         self.label = label
         self.interval = interval
         self.mediaBytes = mediaBytes
+        self.coldStart = coldStart
         self.onDead = onDead
+    }
+
+    /// Fire-and-forget read of the client playlist, at most one in
+    /// flight. Records growth (more segments, or a higher media
+    /// sequence) and any refusal.
+    private func probeColdStartGrowth() {
+        guard let coldStart, !coldStartProbeInFlight, coldStartHTTPError == nil else { return }
+        coldStartProbeInFlight = true
+        Task { @MainActor [weak self] in
+            let probe = await NativeHLSClientResolver.probePlaylist(
+                coldStart.playlistURL, headers: coldStart.headers)
+            guard let self, !self.cancelled, !self.fired else { return }
+            self.coldStartProbeInFlight = false
+            switch probe {
+            case .httpError(let status):
+                self.coldStartHTTPError = status
+            case .unreadable:
+                break
+            case .window(let w):
+                if w.segmentCount > self.coldStartSegments
+                    || w.mediaSequence > self.coldStartSequence {
+                    self.coldStartLastGrowthAt = CACurrentMediaTime()
+                }
+                self.coldStartSegments = max(self.coldStartSegments, w.segmentCount)
+                self.coldStartSequence = max(self.coldStartSequence, w.mediaSequence)
+            }
+        }
+    }
+
+    /// Seconds waited so far when the tune still deserves more time, nil
+    /// when the extension is over (capped out, refused, or the playlist
+    /// stopped growing).
+    private func coldStartExtension() -> CFTimeInterval? {
+        guard let coldStart, coldStartHTTPError == nil else { return nil }
+        let now = CACurrentMediaTime()
+        let elapsed = now - coldStartFrom
+        guard elapsed < coldStart.maxSeconds else { return nil }
+        // A brand-new client legitimately holds almost nothing; that is
+        // the state this whole extension exists for.
+        if coldStartSegments >= 0, coldStartSegments < 3 { return elapsed }
+        guard now - coldStartLastGrowthAt < coldStart.noGrowthSeconds else { return nil }
+        return elapsed
     }
 
     /// True when the media stream received bytes since the last poll.
@@ -2347,7 +2427,11 @@ final class AVPStallWatchdog {
         return now > lastMediaBytes
     }
 
-    func start() { schedule() }
+    func start() {
+        coldStartFrom = CACurrentMediaTime()
+        coldStartLastGrowthAt = coldStartFrom
+        schedule()
+    }
     func cancel() { cancelled = true }
 
     private func schedule() {
@@ -2391,11 +2475,18 @@ final class AVPStallWatchdog {
                 die("never became ready (~\(Int(interval * 15))s, stream \(progressing ? "still advancing" : "stalled"))")
                 return
             }
+            if coldStart != nil { probeColdStartGrowth() }
             if unknownPolls >= 3 {
                 if progressing {
                     debugLog("[AVP-WATCHDOG] \(label): .unknown ~\(Int(interval) * unknownPolls)s but media stream advancing (slow link); waiting")
+                } else if let status = coldStartHTTPError {
+                    die("native HLS cold start: client playlist HTTP \(status)")
+                    return
+                } else if let elapsed = coldStartExtension() {
+                    debugLog("[AVP-NHLS] cold start: playlist growing "
+                        + "(\(max(coldStartSegments, 0)) segments) at +\(Int(elapsed))s")
                 } else {
-                    die("never became ready (~\(Int(interval * 3))s at .unknown)")
+                    die("never became ready (~\(Int(interval) * unknownPolls)s at .unknown)")
                     return
                 }
             }
@@ -3079,6 +3170,11 @@ struct AVPlayerMultiviewTile: View {
     @State private var resolvedNativeHLSFor: URL?
     @State private var resolvedNativeHLSAt: CFTimeInterval = 0
     @State private var nativeHLSResolveInFlight = false
+    /// True while the native-HLS client this tile is playing was minted
+    /// by THIS tune. Only a fresh client gets the cold-start extension:
+    /// a reused (warm) client is already filled, so its deadline stays
+    /// exactly where it was.
+    @State private var nativeHLSClientIsFresh = false
     /// Channel name the current native-HLS client belongs to, so an
     /// in-place channel flip can name both ends of the re-tune in one
     /// line. Set when the tune is handed to the native-HLS arm.
@@ -5051,6 +5147,7 @@ struct AVPlayerMultiviewTile: View {
         if let resolved = resolvedNativeHLSURL,
            resolvedNativeHLSFor == upgradedURL,
            CACurrentMediaTime() - resolvedNativeHLSAt < reuseWindow {
+            nativeHLSClientIsFresh = false
             debugLog("[AVP-NHLS] reusing resolved client "
                 + "\(NativeHLSClientResolver.clientID(from: resolved)) (no new server client) "
                 + "channel=\(channelName)")
@@ -5115,6 +5212,7 @@ struct AVPlayerMultiviewTile: View {
             resolvedNativeHLSURL = resolved.playlistURL
             resolvedNativeHLSFor = upgradedURL
             resolvedNativeHLSAt = CACurrentMediaTime()
+            nativeHLSClientIsFresh = true
             debugLog("[AVP-NHLS] resolved to client \(resolved.clientID) "
                 + "(one tune = one client) channel=\(name)")
             // Read the client playlist once before the player sees
@@ -5815,9 +5913,21 @@ struct AVPlayerMultiviewTile: View {
         // channel swap (currentItem changes); stop() invalidates it on teardown.
         stallWatchdog?.cancel()
         let progressServer = mkvServer
+        // Cold-start extension, native HLS live only, fresh client only:
+        // a channel nobody was watching can spend the whole 12 s no-ready
+        // deadline on the provider's upstream connect. See
+        // AVPStallWatchdog.NativeHLSColdStart.
+        let coldStart: AVPStallWatchdog.NativeHLSColdStart? = {
+            guard !isVOD, !isDVR, catchup == nil,
+                  nativeHLSClientIsFresh,
+                  let resolved = resolvedNativeHLSURL, resolved == url else { return nil }
+            return AVPStallWatchdog.NativeHLSColdStart(playlistURL: resolved,
+                                                       headers: requestHeaders)
+        }()
         let watchdog = AVPStallWatchdog(
             player: avPlayer, item: playerItem, label: "tile \(channelName)",
             mediaBytes: progressServer.map { s in { s.mediaBytesStreamed } },
+            coldStart: coldStart,
             onDead: { failOrFallback($0) })
         watchdog.start()
         stallWatchdog = watchdog
@@ -5899,6 +6009,7 @@ struct AVPlayerMultiviewTile: View {
         avGateLayerReady = false
         avGatePlaying = false
         avGateFrameRateWaitFrom = 0
+        nativeHLSClientIsFresh = false
         stopNativeHLSBufferProbe()
         stallWatchdog?.cancel()
         stallWatchdog = nil
