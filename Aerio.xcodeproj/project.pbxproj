@@ -10,6 +10,8 @@
 		5E7AAC31F09DF14FF7413C87 /* TVSettingsSplitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E7AC29D180954F5DB932FF1 /* TVSettingsSplitView.swift */; };
 		5E7AD5452EC3506ECA3B504C /* TVSettingsSplitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E7AC29D180954F5DB932FF1 /* TVSettingsSplitView.swift */; };
 		5E7976A11FAC74DB0DAFF9BA /* SettingsDestination.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E791F286A06CD88BBA7B4C9 /* SettingsDestination.swift */; };
+		5EAA00DL1000000000000002 /* SettingsDeepLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EAA00DL1000000000000001 /* SettingsDeepLink.swift */; };
+		5EAA00DL1000000000000003 /* SettingsDeepLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EAA00DL1000000000000001 /* SettingsDeepLink.swift */; };
 		5E79FE129A3D5750CD959ADB /* SettingsDestination.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E791F286A06CD88BBA7B4C9 /* SettingsDestination.swift */; };
 		5E783C4A3D74F99510FB9AD5 /* SettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E786BF6077FA6A633F43AD7 /* SettingsSection.swift */; };
 		5E781BAFD54382D25F834CDD /* SettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E786BF6077FA6A633F43AD7 /* SettingsSection.swift */; };
@@ -337,6 +339,7 @@
 /* Begin PBXFileReference section */
 		5E7AC29D180954F5DB932FF1 /* TVSettingsSplitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVSettingsSplitView.swift; sourceTree = "<group>"; };
 		5E791F286A06CD88BBA7B4C9 /* SettingsDestination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsDestination.swift; sourceTree = "<group>"; };
+		5EAA00DL1000000000000001 /* SettingsDeepLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsDeepLink.swift; sourceTree = "<group>"; };
 		5E786BF6077FA6A633F43AD7 /* SettingsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSection.swift; sourceTree = "<group>"; };
 		5E78541B1A57691D92ACD32B /* SettingsMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsMetrics.swift; sourceTree = "<group>"; };
 		5E77D250DD29BDCAEAA1E4F3 /* TVSettingsRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVSettingsRows.swift; sourceTree = "<group>"; };
@@ -876,6 +879,7 @@
 				2C791BC8B23CD3EAA3E65BE1 /* AppearanceSettingsView.swift */,
 				5E7AC29D180954F5DB932FF1 /* TVSettingsSplitView.swift */,
 				5E791F286A06CD88BBA7B4C9 /* SettingsDestination.swift */,
+				5EAA00DL1000000000000001 /* SettingsDeepLink.swift */,
 				5E7754FE5E34995DE10F87DF /* Components */,
 				5E77CB834788CB7F421D46C0 /* ServerDetailView.swift */,
 				5E777A2C7FE24BBFC1EF4FC8 /* EditServerSheet.swift */,
@@ -1340,6 +1344,7 @@
 				FD65778E5A378FA718D5D0E2 /* SettingsView.swift in Sources */,
 				5E7AD5452EC3506ECA3B504C /* TVSettingsSplitView.swift in Sources */,
 				5E79FE129A3D5750CD959ADB /* SettingsDestination.swift in Sources */,
+				5EAA00DL1000000000000002 /* SettingsDeepLink.swift in Sources */,
 				5E781BAFD54382D25F834CDD /* SettingsSection.swift in Sources */,
 				5E78D9FC554EA8FD1F8E2855 /* SettingsMetrics.swift in Sources */,
 				5E77623636D6D388D3926ECA /* TVSettingsRows.swift in Sources */,
@@ -1479,6 +1484,7 @@
 				2DD98124C6F98D06EFED419A /* SettingsView.swift in Sources */,
 				5E7AAC31F09DF14FF7413C87 /* TVSettingsSplitView.swift in Sources */,
 				5E7976A11FAC74DB0DAFF9BA /* SettingsDestination.swift in Sources */,
+				5EAA00DL1000000000000003 /* SettingsDeepLink.swift in Sources */,
 				5E783C4A3D74F99510FB9AD5 /* SettingsSection.swift in Sources */,
 				5E78653AC914E3F01DD09F7B /* SettingsMetrics.swift in Sources */,
 				5E7788A6AC6F15F4804AC5D7 /* TVSettingsRows.swift in Sources */,

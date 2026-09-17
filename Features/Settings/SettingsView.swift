@@ -59,6 +59,10 @@ struct SettingsView: View {
     // selection falls back to Playlists.
     @Environment(\.horizontalSizeClass) private var hSizeClass
     @State private var padSelection: SettingsRoute? = .category(.playlists)
+    /// iPhone push stack. Only the `aerio://settings/<page>` deep link
+    /// writes to it; the visible rows stay classic
+    /// `NavigationLink(destination:)` pushes.
+    @State private var phonePath = NavigationPath()
     #endif
 
     var body: some View {
@@ -90,6 +94,92 @@ struct SettingsView: View {
         // (ServerDetailView, DVR → MyRecordingsView) opt into the
         // same pop mechanism despite bypassing `navPath`.
         settingsNavigationStack
+            // aerio://settings/<page>. Warm app: the notification. Cold
+            // launch: the page parked on SettingsDeepLink before this view
+            // existed, consumed on the first mount.
+            .onAppear {
+                if let page = SettingsDeepLink.shared.consumePending() {
+                    applySettingsDeepLink(page)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .aerioOpenSettingsPage)) { note in
+                guard let raw = note.userInfo?["page"] as? String,
+                      let page = SettingsDeepLinkPage(rawValue: raw) else { return }
+                _ = SettingsDeepLink.shared.consumePending()
+                applySettingsDeepLink(page)
+            }
+    }
+
+    // MARK: - Settings deep link
+
+    /// Drives the existing navigation for a `aerio://settings/<page>` URL.
+    /// Unknown pages arrive here already folded into `.root`.
+    @MainActor
+    private func applySettingsDeepLink(_ page: SettingsDeepLinkPage) {
+        let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+        debugLog("🔗 SettingsView: deep link page=\(page.rawValue)")
+        // A short hop off the current turn so the navigation container has
+        // finished mounting (cold launch lands here inside the first
+        // onAppear, before the stack/rail can accept a programmatic move).
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            #if os(tvOS)
+            switch page {
+            case .root:
+                navPath = NavigationPath()
+                tvSelection = .category(.playlists)
+                railReturnToken += 1
+            case .playlistDetail:
+                navPath = NavigationPath()
+                if let server = activeServer { tvSelection = .server(server.id) }
+                tvDetailFocusToken += 1
+            case .editPlaylist:
+                if let server = activeServer {
+                    tvSelection = .server(server.id)
+                    navPath = NavigationPath()
+                    navPath.append(SettingsRoute.editServer(server.id))
+                }
+            default:
+                navPath = NavigationPath()
+                if let dest = page.category {
+                    tvSelection = .category(dest)
+                    tvDetailFocusToken += 1
+                }
+            }
+            #else
+            let isPad = UIDevice.current.userInterfaceIdiom == .pad && hSizeClass == .regular
+            switch page {
+            case .root:
+                phonePath = NavigationPath()
+                padSelection = .category(.playlists)
+            case .playlistDetail:
+                guard let server = activeServer else { return }
+                if isPad {
+                    padSelection = .server(server.id)
+                } else {
+                    phonePath = NavigationPath()
+                    phonePath.append(SettingsRoute.server(server.id))
+                }
+            case .editPlaylist:
+                guard let server = activeServer else { return }
+                // Edit is a sheet on both iPhone and iPad.
+                if isPad { padSelection = .server(server.id) } else { phonePath = NavigationPath() }
+                serverToEdit = server
+            case .remote:
+                // Remote Control is tvOS-only: fall back to the root.
+                phonePath = NavigationPath()
+                padSelection = .category(.playlists)
+            default:
+                guard let dest = page.category else { return }
+                if isPad {
+                    padSelection = .category(dest)
+                } else {
+                    phonePath = NavigationPath()
+                    phonePath.append(SettingsRoute.category(dest))
+                }
+            }
+            #endif
+        }
     }
 
     @ViewBuilder
@@ -126,7 +216,7 @@ struct SettingsView: View {
         if UIDevice.current.userInterfaceIdiom == .pad && hSizeClass == .regular {
             padSplitRoot
         } else {
-            NavigationStack { settingsContent }
+            NavigationStack(path: $phonePath) { settingsContent }
         }
         #endif
     }
@@ -409,6 +499,34 @@ struct SettingsView: View {
             }
             #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
+            #if os(iOS)
+            // Value-based routes exist on iPhone purely for the
+            // `aerio://settings/<page>` deep link; the visible rows still
+            // push their destinations directly.
+            .navigationDestination(for: SettingsRoute.self) { route in
+                switch route {
+                case .category(.liveTV):         LiveTVSettingsView()
+                case .category(.player):         PlayerSettingsView()
+                case .category(.moviesTV):       MoviesTVSettingsView()
+                case .category(.dvr):            DVRSettingsView()
+                case .category(.appearance):     AppearanceSettingsView()
+                case .category(.general):        GeneralSettingsView()
+                case .category(.sync):           SyncSettingsView()
+                case .category(.syncCategories): SyncCategoriesSettingsView()
+                case .category(.developer):      DeveloperSettingsView()
+                case .category(.about):          AboutSettingsView()
+                case .server(let id):
+                    if let server = servers.first(where: { $0.id == id }) {
+                        ServerDetailView(server: server)
+                    }
+                // Playlists is the root itself; Remote Control is tvOS-only;
+                // Edit is a sheet here and My Recordings is its own tab.
+                case .category(.playlists), .category(.remoteControl),
+                     .editServer, .myRecordings:
+                    EmptyView()
+                }
+            }
+            #endif
             #if os(tvOS)
             .navigationDestination(for: SettingsRoute.self) { route in
                 switch route {
@@ -785,6 +903,9 @@ struct SettingsView: View {
     @State private var tvFocusInDetail = false
     /// Incremented to order the split view to put focus back on the rail.
     @State private var railReturnToken = 0
+    /// Incremented to order the split view to move focus into the detail
+    /// pane (the deep-link screenshot path).
+    @State private var tvDetailFocusToken = 0
     private var tvRailItems: [TVSettingsRailItem] {
         var items: [TVSettingsRailItem] = []
         // Playlists is an ordinary tab: its pane lists the playlists like
@@ -838,7 +959,8 @@ struct SettingsView: View {
             items: tvRailItems,
             selection: $tvSelection,
             focusInDetail: $tvFocusInDetail,
-            railReturnToken: railReturnToken
+            railReturnToken: railReturnToken,
+            detailFocusToken: tvDetailFocusToken
         ) { route in
             tvDetailPane(for: route)
         }

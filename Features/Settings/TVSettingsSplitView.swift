@@ -44,6 +44,10 @@ struct TVSettingsSplitView<Detail: View>: View {
     /// Incremented by the host to force focus back onto the rail
     /// (the Menu-in-detail path).
     let railReturnToken: Int
+    /// Incremented by the host to push focus INTO the detail pane (the
+    /// `aerio://settings/<page>` screenshot path, which selects a rail item
+    /// programmatically and then needs focus on the pane it opened).
+    var detailFocusToken: Int = 0
     @ViewBuilder let detail: (SettingsRoute) -> Detail
 
     private enum Pane: Hashable { case rail, detail }
@@ -100,6 +104,9 @@ struct TVSettingsSplitView<Detail: View>: View {
         }
         .onChange(of: railReturnToken) { _, _ in
             assertRailFocus()
+        }
+        .onChange(of: detailFocusToken) { _, _ in
+            assertDetailFocus()
         }
         // Down from the Settings pill lands geometrically in the detail
         // pane (the pill is far right; the nearest row below it is a
@@ -167,6 +174,19 @@ struct TVSettingsSplitView<Detail: View>: View {
                 focusedRow = target
                 try? await Task.sleep(nanoseconds: 60_000_000)
                 if focusedRow == target { break }
+            }
+        }
+    }
+
+    /// Move focus into the detail pane, retrying while the pane realizes
+    /// (same dropped-FocusState-write problem `assertRailFocus` solves).
+    private func assertDetailFocus() {
+        flushPendingSelection()
+        Task { @MainActor in
+            for _ in 0..<10 {
+                focusedPane = .detail
+                try? await Task.sleep(nanoseconds: 60_000_000)
+                if focusedPane == .detail { break }
             }
         }
     }

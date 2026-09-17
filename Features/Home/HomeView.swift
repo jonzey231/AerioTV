@@ -5804,6 +5804,13 @@ struct MainTabView: View {
         .onChange(of: theme.selectedTheme)   { _, _ in configureTabBarAppearance() }
         .onChange(of: theme.useCustomAccent) { _, _ in configureTabBarAppearance() }
         .onChange(of: theme.customAccentHex) { _, _ in configureTabBarAppearance() }
+        // aerio://settings/<page> -> select the Settings tab. SettingsView
+        // itself drives the navigation once it is mounted. This sits on the
+        // outer body, not on `tabContentView`: one more modifier on that
+        // chain tips the tvOS type-checker budget.
+        .onReceive(NotificationCenter.default.publisher(for: .aerioOpenSettingsPage)) { _ in
+            selectSettingsTabForDeepLink()
+        }
     }
 
     #if os(iOS)
@@ -6417,6 +6424,14 @@ struct MainTabView: View {
                 let restored = AppTab(rawValue: defaultTabRaw) ?? .liveTV
                 selectedTab = isTabVisible(restored) ? restored : .liveTV
             }
+            // Cold launch via aerio://settings/<page>: the URL is delivered
+            // before this view exists, so the notification above landed with
+            // nobody listening. The pending page is still parked on
+            // SettingsDeepLink (peek only; SettingsView consumes it).
+            if SettingsDeepLink.shared.hasPending {
+                debugLog("🔗 MainTabView.onAppear: pending Settings deep link → Settings tab")
+                selectedTab = .settings
+            }
             configureTabBarAppearance()
             tryShowInitialLoading()
             #if os(tvOS)
@@ -6764,6 +6779,13 @@ struct MainTabView: View {
             debugLog("🔗 MainTabView: aerioJumpToGuideProgram → switch to Live TV tab")
             withAnimation { selectedTab = .liveTV }
         }
+    }
+
+    /// Selects the Settings tab for a `aerio://settings/<page>` deep link.
+    @MainActor
+    private func selectSettingsTabForDeepLink() {
+        debugLog("🔗 MainTabView: aerioOpenSettingsPage -> switch to Settings tab")
+        withAnimation { selectedTab = .settings }
     }
 
     /// v1.6.13: Channel/EPG load orchestrator. Pulled out of the

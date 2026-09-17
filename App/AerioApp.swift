@@ -571,6 +571,20 @@ struct AerioApp: App {
                     MetalHDRAutoRun.checkAndRun()
                     #endif
                 }
+                // Settings deep link (all platforms, all configurations):
+                //   aerio://settings            → Settings root
+                //   aerio://settings/<page>     → that Settings page
+                // Used by the automated screenshot runs via
+                // `xcrun simctl openurl`. Inert unless such a URL arrives,
+                // and it never swallows the Top Shelf links below (those
+                // use different hosts and are handled by their own
+                // .onOpenURL on tvOS).
+                .onOpenURL { url in
+                    guard url.scheme == "aerio" else { return }
+                    if SettingsDeepLink.handle(url) {
+                        debugLog("🔗 Settings deep link: \(url.absoluteString)")
+                    }
+                }
                 #if os(tvOS)
                 .onOpenURL { url in
                     // Handle Top Shelf deep links:
