@@ -59,6 +59,12 @@ struct SettingsView: View {
     // selection falls back to Playlists.
     @Environment(\.horizontalSizeClass) private var hSizeClass
     @State private var padSelection: SettingsRoute? = .category(.playlists)
+    /// Phase 2 (2026-09-17): whether the Settings tab is currently wide
+    /// enough for two panes. Written by the GeometryReader at the tab
+    /// root; read by the deep-link handler so `aerio://settings/<page>`
+    /// picks the right target (sidebar selection vs. phone push) in every
+    /// width case, including Split View and Stage Manager.
+    @State private var padSplitActive = false
     /// iPhone push stack. Only the `aerio://settings/<page>` deep link
     /// writes to it; the visible rows stay classic
     /// `NavigationLink(destination:)` pushes.
@@ -147,7 +153,9 @@ struct SettingsView: View {
                 }
             }
             #else
-            let isPad = UIDevice.current.userInterfaceIdiom == .pad && hSizeClass == .regular
+            // Phase 2: the split is width-driven, so the deep link
+            // follows the CURRENT layout rather than the size class.
+            let isPad = padSplitActive
             switch page {
             case .root:
                 phonePath = NavigationPath()
@@ -213,8 +221,36 @@ struct SettingsView: View {
         // Phase 4 (plan A2): explicit idiom fork rather than trusting
         // NavigationSplitView's collapse heuristics, so the iPhone view
         // tree stays byte-identical.
-        if UIDevice.current.userInterfaceIdiom == .pad && hSizeClass == .regular {
-            padSplitRoot
+        //
+        // Phase 2 (2026-09-17): the fork is now decided by the Settings
+        // tab's AVAILABLE WIDTH, not by the horizontal size class alone.
+        // iPad Split View at 50% and Stage Manager windows report a
+        // compact size class but are still 600 pt or wider, so they now
+        // get two panes; a narrow Slide Over stays a single list. The
+        // iPhone is excluded by idiom, so its tree is untouched.
+        //
+        // Measured with a GeometryReader and nothing else: no preference
+        // keys, and nothing derived from the geometry feeds a sibling's
+        // padding (that shape loops the layout, per the iPhone Guide
+        // regression of 2026-09).
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            GeometryReader { geo in
+                let width = geo.size.width
+                let height = geo.size.height
+                let split = SettingsMetrics.padWantsSplit(width: width, height: height)
+                Group {
+                    if split {
+                        padSplitRoot(availableWidth: width)
+                    } else {
+                        NavigationStack(path: $phonePath) { settingsContent }
+                    }
+                }
+                .frame(width: width, height: height)
+                .onAppear { padSplitActive = split }
+                .onChange(of: split) { _, nowSplit in
+                    handleSplitChange(toSplit: nowSplit)
+                }
+            }
         } else {
             NavigationStack(path: $phonePath) { settingsContent }
         }
@@ -641,7 +677,37 @@ struct SettingsView: View {
     // MARK: - iPad split root (Phase 4, plan A2)
 
     #if os(iOS)
-    private var padSplitRoot: some View {
+    /// Carries the current page across a single-list <-> split
+    /// transition (rotation, Split View drag, Stage Manager resize).
+    ///
+    /// `padSelection` is plain @State on SettingsView, which stays
+    /// mounted through the transition, so the sidebar selection survives
+    /// by itself. What needs help is the OTHER direction of the same
+    /// idea: when two panes collapse to one list, the page the user was
+    /// reading has to become a push, and when the list expands back it
+    /// has to become the sidebar selection again.
+    @MainActor
+    private func handleSplitChange(toSplit nowSplit: Bool) {
+        padSplitActive = nowSplit
+        let root = SettingsRoute.category(.playlists)
+        if nowSplit {
+            // List -> split. Nothing to do beyond clearing the push: the
+            // selection we are about to show is already in padSelection
+            // (seeded below on the way down, or left from the last time
+            // the window was wide).
+            phonePath = NavigationPath()
+        } else {
+            // Split -> list. Push the pane the user was on so the page
+            // does not vanish under them; Playlists IS the list root, so
+            // it pushes nothing.
+            phonePath = NavigationPath()
+            if let selection = padSelection, selection != root {
+                phonePath.append(selection)
+            }
+        }
+    }
+
+    private func padSplitRoot(availableWidth: CGFloat) -> some View {
         // Hand-rolled split (plan A2 risk R4 fallback): NavigationSplitView
         // on the iOS 27 SDK proposes the SCREEN width to its detail column
         // inside a TabView, so List-backed panes overflowed the column and
@@ -650,9 +716,16 @@ struct SettingsView: View {
         // the detail column its true width, like the tvOS rail.
         HStack(spacing: 0) {
             padSidebar
-                .frame(width: 340)
+                // Phase 2: 280 pt from 600 to 839, 320 pt at 840 and up
+                // (was a flat 340). Matches the Android tablet rail.
+                .frame(width: SettingsMetrics.sidebarWidth(forAvailableWidth: availableWidth))
             NavigationStack {
                 padDetail(for: padSelection ?? .category(.playlists))
+                    // Readable-width cap, centered, reusing the tvOS
+                    // reading column. Panes narrower than the cap simply
+                    // fill, so 600 to 839 pt is unaffected.
+                    .frame(maxWidth: SettingsMetrics.padDetailContentCap)
+                    .frame(maxWidth: .infinity)
                     .background(Color.appBackground.ignoresSafeArea())
             }
             // Rekey the stack on selection change so pages pushed from a
