@@ -168,13 +168,13 @@ struct DeveloperSettingsView: View {
 
                 // MARK: - What's Logged
                 Section {
-                    logCategoryRow(icon: "network",                title: "Network",     detail: "All API requests — URL, method, status code, duration, payload size")
+                    logCategoryRow(icon: "network",                title: "Network",     detail: "All API requests: URL, method, status code, duration, payload size")
                     logCategoryRow(icon: "play.rectangle.fill",    title: "Playback",    detail: "Stream URLs loaded, player state transitions, DVR mode, failover attempts")
                     logCategoryRow(icon: "calendar",               title: "EPG",         detail: "Current program fetches, upcoming program loads, decode errors")
                     logCategoryRow(icon: "antenna.radiowaves.left.and.right", title: "Channels", detail: "Channel list loads, server type, item counts, timing")
                     logCategoryRow(icon: "app.badge",              title: "Lifecycle",   detail: "App foreground/background, launch, scene transitions")
                     logCategoryRow(icon: "exclamationmark.triangle.fill", title: "Errors", detail: "Caught exceptions with full context, source file and line number")
-                    logCategoryRow(icon: "gauge.with.dots.needle.67percent", title: "Performance", detail: "Timed operations — parse time, load time, memory at session start")
+                    logCategoryRow(icon: "gauge.with.dots.needle.67percent", title: "Performance", detail: "Timed operations: parse time, load time, memory at session start")
                 } header: {
                     Text("What's Captured")
                         .sectionHeaderStyle()
@@ -373,8 +373,8 @@ struct DeveloperSettingsView: View {
                                     .scaledFont(.bodyMedium)
                                     .foregroundColor(.textPrimary)
                                 Text(compactChromeiPhone
-                                     ? "On — Manage Groups lives in the Live TV nav bar"
-                                     : "Off — classic layout")
+                                     ? "On: Manage Groups lives in the Live TV nav bar"
+                                     : "Off: classic layout")
                                     .scaledFont(.labelSmall)
                                     .foregroundColor(compactChromeiPhone ? Color.contrastText(.accentPrimary) : Color.contrastText(.textTertiary))
                             }
@@ -429,7 +429,7 @@ struct DeveloperSettingsView: View {
                             .sectionHeaderStyle()
                     } footer: {
                         Text(compactChromeiPhone
-                             ? "Compact Chrome moves Manage Groups into the Live TV nav bar. The two toggles above let you further reclaim vertical space by hiding the filter pills and/or the search row. All three options revert instantly — no restart required."
+                             ? "Compact Chrome moves Manage Groups into the Live TV nav bar. The two toggles above let you further reclaim vertical space by hiding the filter pills and/or the search row. All three options revert instantly: no restart required."
                              : "Designed for iPhone landscape. When enabled, Manage Groups moves to the nav bar and two further toggles appear for hiding the filter pills and search row. Reverting restores the classic layout instantly."
                         )
                         .scaledFont(.labelSmall.subtext())
@@ -611,8 +611,8 @@ struct DeveloperSettingsView: View {
                                 .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text(debugLoggingEnabled
-                                 ? "Active — writing to aerio_debug_logs.txt"
-                                 : "Off — no data is collected")
+                                 ? "Active: writing to aerio_debug_logs.txt"
+                                 : "Off: no data is collected")
                                 .scaledFont(.labelSmall)
                                 .foregroundColor(debugLoggingEnabled ? Color.contrastText(.accentPrimary) : Color.contrastText(.textTertiary))
                         }
@@ -670,8 +670,8 @@ struct DeveloperSettingsView: View {
                         iconColor: debugLoggingEnabled ? .accentPrimary : .textSecondary,
                         title: "Debug Logging",
                         subtitle: debugLoggingEnabled
-                            ? "Active — writing to aerio_debug_logs.txt"
-                            : "Off — no data is collected",
+                            ? "Active: writing to aerio_debug_logs.txt"
+                            : "Off: no data is collected",
                         isOn: Binding(
                             get: { debugLoggingEnabled },
                             set: { newValue in
@@ -857,7 +857,7 @@ struct DeveloperSettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             tvLogCategory(icon: "network",
                           title: "Network",
-                          detail: "All API requests — URL, method, status code, duration, payload size")
+                          detail: "All API requests: URL, method, status code, duration, payload size")
             tvLogCategory(icon: "play.rectangle.fill",
                           title: "Playback",
                           detail: "Stream URLs loaded, player state transitions, DVR mode, failover attempts")
@@ -875,7 +875,7 @@ struct DeveloperSettingsView: View {
                           detail: "Caught exceptions with full context, source file and line number")
             tvLogCategory(icon: "gauge.with.dots.needle.67percent",
                           title: "Performance",
-                          detail: "Timed operations — parse time, load time, memory at session start")
+                          detail: "Timed operations: parse time, load time, memory at session start")
 
             Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as aerio_debug_logs_archive.txt.")
                 .scaledFont(.system(size: 20).subtext())
@@ -1011,7 +1011,7 @@ struct LogViewerView: View {
                             HStack(spacing: 6) {
                                 Image(systemName: "exclamationmark.triangle")
                                     .scaledFont(.system(size: 12, weight: .semibold))
-                                Text("Showing last \(maxLines) lines — share the file for the full log")
+                                Text("Showing last \(maxLines) lines: share the file for the full log")
                                     .scaledFont(.labelSmall)
                             }
                             .foregroundColor(.statusWarning)

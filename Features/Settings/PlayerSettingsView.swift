@@ -27,10 +27,10 @@ private struct BufferOption: Identifiable {
     let cachingMs: Int  // VLC :network-caching value in milliseconds
 }
 private let bufferOptions: [BufferOption] = [
-    BufferOption(id: "small",   label: "Small",       detail: "300 ms — fast, stable networks",   cachingMs: 300),
-    BufferOption(id: "default", label: "Default",     detail: "1 second — recommended",           cachingMs: 1_000),
-    BufferOption(id: "large",   label: "Large",       detail: "3 seconds — unstable connections", cachingMs: 3_000),
-    BufferOption(id: "xlarge",  label: "Extra Large", detail: "8 seconds — very poor networks",   cachingMs: 8_000),
+    BufferOption(id: "small",   label: "Small",       detail: "300 ms: fast, stable networks",   cachingMs: 300),
+    BufferOption(id: "default", label: "Default",     detail: "1 second: recommended",           cachingMs: 1_000),
+    BufferOption(id: "large",   label: "Large",       detail: "3 seconds: unstable connections", cachingMs: 3_000),
+    BufferOption(id: "xlarge",  label: "Extra Large", detail: "8 seconds: very poor networks",   cachingMs: 8_000),
 ]
 
 struct PlayerSettingsView: View {
