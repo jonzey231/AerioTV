@@ -57,6 +57,21 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.40",
+            title: "What's new in 1.8.40",
+            bullets: [
+                "Movies and TV Shows show your whole library with no cap, stored on the device and resumed after a restart",
+                "Switching playlists keeps each playlist's guide and library, and permissions refresh on switch",
+                "Refresh Everything rebuilds the library from scratch",
+                "Rounded corners are separate toggles for List view and Guide view",
+                "Apple TV: the guide is the only Live TV view, with the channel number and icons in a band above a larger logo",
+                "Season and episode now appear with the program details instead of in the guide cells",
+                "iPhone: smoother channel list scrolling",
+                "In-player brightness and volume gestures"
+            ],
+            releaseURL: nil
+        ),
+        WhatsNewRelease(
             version: "1.8.39",
             title: "What's new in 1.8.39",
             bullets: [
