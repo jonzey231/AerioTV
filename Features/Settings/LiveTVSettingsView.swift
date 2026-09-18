@@ -37,18 +37,6 @@ struct LiveTVSettingsView: View {
     @AppStorage(phoneGroupSelectorKey) private var phoneGroupSelector = "sidebar"
     #endif
 
-    // MARK: Groups
-    /// Phase 3 item 6: the group Live TV opens on. Apple already READ this
-    /// key (ChannelListView.applyDefaultGroupIfNeeded, Manage Groups sets
-    /// it) but only Manage Groups could change it, while Android exposed it
-    /// in Settings. Same key, same sentinels: "" = All Channels,
-    /// "favorites", "recentlyWatched", "collection:<name>", anything else
-    /// is a literal group name.
-    @AppStorage("defaultChannelGroup") private var defaultChannelGroup = ""
-    /// The active playlist's groups. ChannelStore is already playlist
-    /// scoped, and it is what Manage Groups builds its token list from.
-    @ObservedObject private var channelStore = ChannelStore.shared
-
     // MARK: Badges
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
     @AppStorage("ui.hiddenEpgBadges") private var hiddenEpgBadgesRaw = ""
@@ -104,27 +92,6 @@ struct LiveTVSettingsView: View {
         let shown = Self.badgeKinds.filter { !hidden.contains($0) }.count
         return SettingsSummary.count(on: shown, of: Self.badgeKinds.count)
     }
-
-    /// Phase 3 item 6. Fixed entries first, in the order Manage Groups
-    /// pins them, then the active playlist's groups (name is both the
-    /// label and the stored value). Collections are not offered here: they
-    /// are picked from the Live TV collection row, and a stale
-    /// "collection:" value still shows as "Not set" rather than being lost.
-    private var defaultGroupOptions: [SettingsChoice<String>] {
-        var options: [SettingsChoice<String>] = [
-            SettingsChoice("", "All Channels", icon: "tv"),
-            SettingsChoice("favorites", "Favorites", icon: "star.fill"),
-            SettingsChoice("recentlyWatched", "Recently Watched", icon: "clock")
-        ]
-        options += channelStore.orderedGroups.map {
-            SettingsChoice($0, $0, icon: "folder")
-        }
-        return options
-    }
-
-    /// Mirrored verbatim by Android so the two stores read the same.
-    private static let defaultGroupFooter =
-        "The group Live TV opens on. Groups come from the active playlist."
 
     /// Summary text for the "Add more categories" disclosure row.
     fileprivate var moreCategoriesSummary: String {
@@ -268,13 +235,18 @@ struct LiveTVSettingsView: View {
             }
             .listSectionSeparator(.hidden)
 
-            // MARK: Groups
-            // Group Selection stays PHONE ONLY (it describes the phone's
-            // header drawer vs pill row); Default Group is Phase 3 item 6
-            // and applies everywhere, so the section itself is no longer
-            // gated.
-            Section {
-                if UIDevice.current.userInterfaceIdiom == .phone {
+            // MARK: Group Selection
+            // Logan 2026-09-17: the Default Group picker is gone. The
+            // default group is chosen in Live TV's Manage Groups sheet,
+            // which already has that action; Settings does not need a
+            // second place to set it. The "defaultChannelGroup" key and
+            // that sheet are untouched.
+            //
+            // Group Selection is the only row left, and it describes the
+            // phone's header drawer vs pill row, so the whole section is
+            // phone only again and takes the row's name.
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                Section {
                     SettingsChoicePicker(
                         "Group Selection",
                         options: [
@@ -286,25 +258,11 @@ struct LiveTVSettingsView: View {
                         icon: "sidebar.leading"
                     )
                     .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Group Selection").sectionHeaderStyle()
                 }
-
-                SettingsChoicePicker(
-                    "Default Group",
-                    options: defaultGroupOptions,
-                    selection: $defaultChannelGroup,
-                    footer: Self.defaultGroupFooter,
-                    icon: "square.grid.2x2",
-                    onChange: { _ in
-                        // Same side effect Manage Groups' setDefault has:
-                        // the key is synced, so push it right away.
-                        SyncManager.shared.pushPreferencesImmediate()
-                    }
-                )
-                .listRowBackground(Color.cardBackground)
-            } header: {
-                Text("Groups").sectionHeaderStyle()
+                .listSectionSeparator(.hidden)
             }
-            .listSectionSeparator(.hidden)
 
             // MARK: Badges
             Section {
@@ -610,8 +568,11 @@ struct LiveTVSettingsView: View {
                     )
                 }
 
-                // MARK: Groups
-                SettingsSection("Groups", style: .plain) {
+                // MARK: Group Selection
+                // Logan 2026-09-17: Default Group removed here too; it is
+                // set in Manage Groups. Group Selection is the only row
+                // left, so the section takes its name.
+                SettingsSection("Group Selection", style: .plain) {
                     // Phase 3 item 3. The tvOS binding stays the remote
                     // store's Bool; only the rows are shared now.
                     SettingsChoicePicker(
@@ -622,20 +583,6 @@ struct LiveTVSettingsView: View {
                         ],
                         selection: $remote.useGroupSidebar,
                         footer: "How channel groups are picked in the guide. Top Group Pills keep the group row above the grid; Sidebar Menu hides that row and opens when you hold Left in the guide (or from whichever button you set to Open sidebar in Remote Control). Only one is active at a time."
-                    )
-
-                    // Phase 3 item 6: Apple read "defaultChannelGroup" but
-                    // only Manage Groups could set it; Android had it in
-                    // Settings.
-                    SettingsChoicePicker(
-                        "Default Group",
-                        options: defaultGroupOptions,
-                        selection: $defaultChannelGroup,
-                        footer: Self.defaultGroupFooter,
-                        onChange: { _ in
-                            // Matches Manage Groups' setDefault.
-                            SyncManager.shared.pushPreferencesImmediate()
-                        }
                     )
                 }
 
