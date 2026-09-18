@@ -75,6 +75,9 @@ struct DVRSettingsView: View {
         } message: {
             Text("This will permanently remove all locally stored recordings from this device. Server-side recordings are not affected.")
         }
+        #if os(iOS)
+        // iOS only: the TV steps through the stops instead, so nothing
+        // there opens these.
         .sheet(isPresented: $showCustomPreRoll) {
             customBufferSheet(title: "Custom Pre-Roll", value: $customPreRollValue) {
                 defaultPreRoll = customPreRollValue
@@ -85,7 +88,6 @@ struct DVRSettingsView: View {
                 defaultPostRoll = customPostRollValue
             }
         }
-        #if os(iOS)
         .sheet(isPresented: $showFolderPicker) {
             FolderPickerView { url in
                 guard url.startAccessingSecurityScopedResource() else { return }
@@ -287,37 +289,42 @@ struct DVRSettingsView: View {
     private var tvOSBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
-                SettingsSection("Start Early (Pre-Roll)", style: .plain) {
-                    // Phase 3, item 3: shared picker for the fixed stops;
-                    // "Custom…" stays its own row because the picker only
-                    // renders a fixed list.
-                    SettingsChoicePicker("Start early (pre-roll)",
-                                         options: bufferOptions(preRollStops, current: defaultPreRoll),
-                                         selection: $defaultPreRoll)
-                    TVSettingsActionRow(
-                        icon: "slider.horizontal.3",
-                        label: "Custom…",
-                        isAccent: !preRollStops.contains(defaultPreRoll),
-                        action: {
-                            customPreRollValue = defaultPreRoll > 0 ? defaultPreRoll : 5
-                            showCustomPreRoll = true
-                        }
+                // Logan 2026-09-17: six check rows plus a Custom row,
+                // twice, was most of this page for a question that is
+                // "how many minutes". Both are one stepper now, shaped
+                // like the Appearance page's Text Size row. The TV drops
+                // the Custom escape hatch entirely: entering an
+                // arbitrary number on a remote is worse than picking a
+                // stop, and a custom value set on the phone still syncs
+                // here, still displays, and survives until stepped away.
+                // iOS keeps its picker page and its Custom row. Android
+                // gets the identical stepper.
+                // One section, as on iOS: two steppers no longer need a
+                // heading each, and a heading that just repeats the row
+                // beneath it says the same thing twice.
+                SettingsSection("Default Recording Buffers", style: .plain) {
+                    TVSettingsStepperRow(
+                        title: "Start early (pre-roll)",
+                        stops: preRollStops,
+                        value: $defaultPreRoll,
+                        label: bufferStepperLabel,
+                        decreaseLabel: "Less pre-roll",
+                        increaseLabel: "More pre-roll"
                     )
-                }
-
-                SettingsSection("End Late (Post-Roll)", style: .plain) {
-                    SettingsChoicePicker("End late (post-roll)",
-                                         options: bufferOptions(postRollStops, current: defaultPostRoll),
-                                         selection: $defaultPostRoll)
-                    TVSettingsActionRow(
-                        icon: "slider.horizontal.3",
-                        label: "Custom…",
-                        isAccent: !postRollStops.contains(defaultPostRoll),
-                        action: {
-                            customPostRollValue = defaultPostRoll > 0 ? defaultPostRoll : 5
-                            showCustomPostRoll = true
-                        }
+                    TVSettingsStepperRow(
+                        title: "End late (post-roll)",
+                        stops: postRollStops,
+                        value: $defaultPostRoll,
+                        label: bufferStepperLabel,
+                        decreaseLabel: "Less post-roll",
+                        increaseLabel: "More post-roll"
                     )
+                    Text("Applied to new recordings by default. Sports events often run past their scheduled time.")
+                        .scaledFont(.system(size: SettingsMetrics.tvFootnoteSize).subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
+                        .padding(.horizontal, 20)
+                        .padding(.top, 4)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if isDispatcharr, canRecordToServer, let server = activeServer {
@@ -456,8 +463,15 @@ struct DVRSettingsView: View {
 
     /// The fixed buffer stops. Named so both platforms and the "Custom…"
     /// highlight test share one list (Phase 3).
-    private var preRollStops: [Int] { [0, 5, 10, 15, 30] }
+    private var preRollStops: [Int] { [0, 5, 10, 15, 30, 60] }
     private var postRollStops: [Int] { [0, 5, 10, 15, 30, 60] }
+
+    /// The compact spelling for the tvOS stepper, where the value sits
+    /// between a minus and a plus and has to stay on one line. The iOS
+    /// picker page keeps the long form ("5 minutes"), which has room.
+    private func bufferStepperLabel(_ mins: Int) -> String {
+        mins == 0 ? "None" : "\(mins) min"
+    }
 
     /// Buffer choices, with the stored value appended when it is a custom
     /// number. Without that the collapsed iOS row would read "Not set" for

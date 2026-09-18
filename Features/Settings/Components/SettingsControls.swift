@@ -43,6 +43,87 @@ struct TVSteppedSegmentStyle: ButtonStyle {
 }
 #endif
 
+#if os(tvOS)
+/// One-row stepper for a short ladder of numbers: label on the left,
+/// the current value in the middle, a minus and a plus capsule around
+/// it. Mirrors the Appearance page's Text Size row, including its focus
+/// visual (`TVSteppedSegmentStyle`: theme accent ring at the standard
+/// Settings width, never white, no scale bump). Left/Right move focus
+/// between the two buttons; Select steps the value.
+///
+/// Why it exists (Logan 2026-09-17): the DVR pre-roll and post-roll
+/// choices rendered as six check rows each, plus a Custom row, which is
+/// a whole screen of TV real estate for "how many minutes early". One
+/// row says the same thing. Android is getting the identical control.
+///
+/// A value that is NOT one of `stops` (a custom number set on the phone,
+/// which syncs) is displayed as-is and survives until the user steps
+/// away from it: minus goes to the nearest stop below, plus to the
+/// nearest stop above.
+struct TVSettingsStepperRow: View {
+    let title: String
+    let stops: [Int]
+    @Binding var value: Int
+    /// How a value reads in the middle of the row, e.g. "None" / "5 min".
+    let label: (Int) -> String
+    var decreaseLabel: String = "Decrease"
+    var increaseLabel: String = "Increase"
+
+    private var sortedStops: [Int] { stops.sorted() }
+    private var previousStop: Int? { sortedStops.last(where: { $0 < value }) }
+    private var nextStop: Int? { sortedStops.first(where: { $0 > value }) }
+
+    var body: some View {
+        HStack(spacing: 24) {
+            Text(title)
+                .scaledFont(.system(size: SettingsMetrics.tvRowTitleSize, weight: .medium))
+                .foregroundColor(.textPrimary)
+                .lineLimit(1)
+            Spacer(minLength: 12)
+
+            Button {
+                if let previousStop { value = previousStop }
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 22, weight: .semibold))
+                    .frame(minWidth: 28)
+            }
+            .buttonStyle(TVSteppedSegmentStyle(isSelected: false))
+            .disabled(previousStop == nil)
+            .opacity(previousStop == nil ? 0.4 : 1)
+            .accessibilityLabel(decreaseLabel)
+
+            Text(label(value))
+                .scaledFont(.system(size: 26, weight: .semibold).monospacedDigit())
+                .foregroundColor(Color.contrastText(.accentPrimary))
+                .lineLimit(1)
+                .frame(minWidth: 140)
+
+            Button {
+                if let nextStop { value = nextStop }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 22, weight: .semibold))
+                    .frame(minWidth: 28)
+            }
+            .buttonStyle(TVSteppedSegmentStyle(isSelected: false))
+            .disabled(nextStop == nil)
+            .opacity(nextStop == nil ? 0.4 : 1)
+            .accessibilityLabel(increaseLabel)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.cardBackground)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(title)
+        .accessibilityValue(label(value))
+    }
+}
+#endif
+
 // MARK: - Stream Buffer Slider (reusable, platform-split)
 
 /// Reusable "Stream Buffer" control for Settings → App Behaviors.
