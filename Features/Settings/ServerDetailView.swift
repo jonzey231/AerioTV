@@ -495,6 +495,16 @@ struct ServerDetailView: View {
         .navigationTitle(server.name)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
+        #else
+        // tvOS: hide the navigation bar, exactly as every other pushed
+        // Settings page does. This page was the one that set a
+        // navigationTitle without hiding the bar, so tvOS drew the
+        // playlist name as a large system title UNDER the list, which
+        // showed through the first Connection Details row as a faint
+        // oversized "Test" behind "Type". The title stays set for
+        // VoiceOver and for the back affordance; it is just not drawn
+        // a second time.
+        .toolbar(.hidden, for: .navigationBar)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
         #if os(iOS)
