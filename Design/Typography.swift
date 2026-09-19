@@ -817,11 +817,23 @@ enum ChannelNumberColumn {
     /// Height of one line of the number in the monospaced number style, so a
     /// stacked leading column can subtract it from the logo's share of the
     /// row without measuring a second geometry.
+    /// Memoized for the same reason `ChannelRowTextColumn.lineHeight` is: the
+    /// guide column's badge asks for this on EVERY body evaluation, and a
+    /// `UIFont` lookup per badge per press showed up as guide navigation lag
+    /// on Apple TV (1.8.40). The answer only moves when Text Size does.
     static func lineHeight(fontSize: CGFloat, weight: UIFont.Weight = .bold) -> CGFloat {
-        UIFont.monospacedSystemFont(ofSize: max(1, fontSize), weight: weight)
+        let points = max(1, fontSize)
+        // Quarter-point buckets: finer than any visible difference, coarse
+        // enough that a slider drag settles on a handful of entries.
+        let key = Int((points * 4).rounded()) &* 16 &+ Int(weight.rawValue * 8)
+        if let hit = lineCache[key] { return hit }
+        let value = UIFont.monospacedSystemFont(ofSize: points, weight: weight)
             .lineHeight.rounded(.up)
+        lineCache[key] = value
+        return value
     }
 
+    private static var lineCache: [Int: CGFloat] = [:]
     private static var cache: [String: CGFloat] = [:]
 
     /// Width of `characters` monospaced digits at `fontSize`.

@@ -31,7 +31,10 @@ struct TVSettingsNavRow<Destination: View, Content: View>: View {
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
+        // No focus scale: a focused row must share its siblings'
+        // exact frame (Logan 2026-09-19 - the 1.02 bump made the
+        // focused row read as wider than its neighbours). The
+        // accent ring and fill carry focus.
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
 }
@@ -57,7 +60,38 @@ struct TVSettingsNavButton: View {
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
+        // No focus scale: a focused row must share its siblings'
+        // exact frame (Logan 2026-09-19 - the 1.02 bump made the
+        // focused row read as wider than its neighbours). The
+        // accent ring and fill carry focus.
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+/// The card row every tvOS Settings control that OPENS something (an
+/// option sheet, a sub-page) is built on when it is a Button rather than
+/// a NavigationLink: same card, same accent 2pt focus ring, same 1.02
+/// focus scale as `TVSettingsNavRow`, with caller-supplied content.
+struct TVSettingsCardButtonRow<Content: View>: View {
+    let action: () -> Void
+    @ViewBuilder let content: Content
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            content
+                .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 6)
+                .background(tvSettingsCardBG(isFocused))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
+        .focused($isFocused)
+        // No focus scale: a focused row must share its siblings'
+        // exact frame (Logan 2026-09-19 - the 1.02 bump made the
+        // focused row read as wider than its neighbours). The
+        // accent ring and fill carry focus.
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
 }
@@ -93,9 +127,9 @@ struct TVSettingsActionRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 16) {
-                Image(systemName: icon)
-                    .scaledFont(.system(size: 26))
-                    .foregroundColor(iconTint)
+                // Phase 3 item 5: tiled, so an action row matches the
+                // toggle and nav rows it sits beside.
+                SettingsIconTile(icon: icon, color: iconTint)
                 Text(label)
                     .scaledFont(.system(size: 26, weight: .medium))
                     .foregroundColor(tint)
@@ -119,7 +153,79 @@ struct TVSettingsActionRow: View {
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
+        // No focus scale: a focused row must share its siblings'
+        // exact frame (Logan 2026-09-19 - the 1.02 bump made the
+        // focused row read as wider than its neighbours). The
+        // accent ring and fill carry focus.
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+/// Action row built on `SettingsRow`, so it carries the TILED icon and
+/// the standard row metrics every other Settings row uses. Added for the
+/// rebuilt playlist detail page (Logan 2026-09-19: the EPG / Full Refresh
+/// / Danger rows had small inline glyphs while the rest of Settings had
+/// tiles). `titleColor` keeps a warning or destructive row amber or red
+/// without changing its shape.
+struct TVSettingsTileActionRow: View {
+    let icon: String
+    var iconColor: Color = .accentPrimary
+    let title: String
+    var subtitle: String? = nil
+    var titleColor: Color? = nil
+    /// Non-nil reserves the fixed trailing spinner box (see `SettingsRow`)
+    /// so the row height and its focus ring never move while it works.
+    var isBusy: Bool? = nil
+    let action: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            SettingsRow(icon: icon, iconColor: iconColor, title: title,
+                        subtitle: subtitle, titleColor: titleColor,
+                        isBusy: isBusy)
+                .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 6)
+                .background(tvSettingsCardBG(isFocused))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
+        .focused($isFocused)
+        // No focus scale: a focused row must share its siblings'
+        // exact frame (Logan 2026-09-19 - the 1.02 bump made the
+        // focused row read as wider than its neighbours). The
+        // accent ring and fill carry focus.
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+/// A read-only block that is nonetheless ONE focus stop.
+///
+/// Why (Logan 2026-09-19, playlist detail page): tvOS scrolls by moving
+/// focus, so a tall stack of non-focusable rows below the last button can
+/// never be reached - the Connection Details and Dispatcharr User
+/// Permissions blocks were cut off at the bottom edge forever. Wrapping
+/// each block in a single focusable card gives the focus engine somewhere
+/// to go, which scrolls the block into view, without adding a focus stop
+/// per line. Select does nothing.
+struct TVSettingsReadOnlyCard<Content: View>: View {
+    @ViewBuilder let content: Content
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 20)
+        .background(tvSettingsCardBG(isFocused))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        // A plain `.focusable(true)`: no tap gesture, so Select is inert
+        // and no "focusable without an action" warning is produced.
+        .focusable(true)
+        .focused($isFocused)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
 }
@@ -166,7 +272,10 @@ struct TVSettingsSelectionRow<Leading: View>: View {
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
+        // No focus scale: a focused row must share its siblings'
+        // exact frame (Logan 2026-09-19 - the 1.02 bump made the
+        // focused row read as wider than its neighbours). The
+        // accent ring and fill carry focus.
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
 }
@@ -244,7 +353,10 @@ struct TVSettingsToggleRow: View {
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
+        // No focus scale: a focused row must share its siblings'
+        // exact frame (Logan 2026-09-19 - the 1.02 bump made the
+        // focused row read as wider than its neighbours). The
+        // accent ring and fill carry focus.
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
 }
@@ -270,6 +382,15 @@ func tvSettingsCardBG(_ focused: Bool) -> some View {
 // MARK: - Server List Row
 struct ServerListRow: View {
     let server: ServerConnection
+    /// iOS only: when non-nil the leading indicator becomes its own
+    /// borderless button that activates this playlist without opening
+    /// the row's detail link. tvOS passes nil and keeps one focus stop.
+    var onActivate: (() -> Void)? = nil
+
+    init(server: ServerConnection, onActivate: (() -> Void)? = nil) {
+        self.server = server
+        self.onActivate = onActivate
+    }
 
     private var hasLANConfigured: Bool {
         server.type != .m3uPlaylist && !server.localURL.isEmpty
@@ -281,14 +402,12 @@ struct ServerListRow: View {
 
     #if os(tvOS)
     private let checkmarkSize: CGFloat = 28
-    private let iconBoxSize: CGFloat = 48
-    private let iconFontSize: CGFloat = 22
     private let statusDotSize: CGFloat = 12
+    private let chevronSize: CGFloat = 22
     #else
     private let checkmarkSize: CGFloat = 22
-    private let iconBoxSize: CGFloat = 36
-    private let iconFontSize: CGFloat = 16
     private let statusDotSize: CGFloat = 8
+    private let chevronSize: CGFloat = 13
     #endif
 
     var body: some View {
@@ -314,66 +433,82 @@ struct ServerListRow: View {
         }
     }
 
-    /// The badge + URL line. `showURL` false is the narrow fallback
-    /// offered to `ViewThatFits`.
+    /// Phase 3 (Logan 2026-09-18): the row's second line is plain text -
+    /// "<Type> · <N> channels" - and NEVER the playlist URL, matching
+    /// Android. The channel count is only shown when it is already in
+    /// memory: `ChannelStore` holds the active playlist's channels, and
+    /// nothing on `ServerConnection` stores a per-playlist count, so an
+    /// inactive playlist shows its type alone rather than triggering a
+    /// fetch or a SwiftData count during scroll. Read non-observing so a
+    /// channel load can't re-render Settings rows mid-scroll.
+    private var subtitleText: String {
+        // Phase 3 item 10: the SHORT type name, identical on tvOS and
+        // the phones ("Dispatcharr", "Xtream Codes", "M3U Playlist").
+        let type = server.type.shortName
+        guard server.isActive else { return type }
+        let n = ChannelStore.shared.channels.count
+        return n > 0 ? "\(type) · \(n) channels" : type
+    }
+
+    private var indicatorGlyph: some View {
+        Image(systemName: server.isActive ? "checkmark.circle.fill" : "circle")
+            .scaledFont(.system(size: checkmarkSize))
+            .foregroundColor(server.isActive ? .accentPrimary : Color.contrastText(.textTertiary))
+    }
+
     @ViewBuilder
-    private func serverSubtitleRow(showURL: Bool) -> some View {
-        HStack(spacing: 6) {
-            ServerTypeBadge(type: server.type)
-            if hasLANConfigured {
-                LANWANBadge(isLAN: isOnLAN)
+    private var activeIndicator: some View {
+        #if os(iOS)
+        if let onActivate, !server.isActive {
+            Button(action: onActivate) {
+                indicatorGlyph
+                    // 44pt target without changing the drawn size.
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
-            if showURL {
-                Text(server.effectiveBaseURL)
-                    .scaledFont(.monoSmall.subtext())
-                    .foregroundColor(Color.contrastText(.textTertiary))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    // Yield to the badges when space runs short.
-                    .layoutPriority(-1)
-            }
+            // .borderless keeps the button out of the row's
+            // NavigationLink: a plain Image or a default-styled button
+            // inside a List row would just trigger the link.
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Set as active playlist")
+        } else {
+            // Already active (or no action supplied): same 44pt box so
+            // every row's leading column measures the same, but inert.
+            indicatorGlyph
+                .frame(width: 44, height: 44)
+                .accessibilityHidden(!server.isActive)
+                .accessibilityLabel("Active playlist")
         }
+        #else
+        indicatorGlyph
+            .accessibilityHidden(!server.isActive)
+            .accessibilityLabel("Active playlist")
+        #endif
     }
 
     private var rowContent: some View {
         HStack(spacing: 14) {
-            // Active playlist INDICATOR, not a control.
-            //
-            // Phase 3 item 5 (Logan 2026-09-17): the circle used to be a
-            // tappable button that switched the active playlist, which
-            // gave the row two different tap targets and two different
-            // outcomes depending on where your finger (or the focus
-            // engine) landed. Selecting a playlist now always opens its
-            // detail, on every form factor, and Set Active is the first
-            // row of that page's Actions section. The glyph stays so the
-            // active playlist is still obvious at a glance.
-            Image(systemName: server.isActive ? "checkmark.circle.fill" : "circle")
-                .scaledFont(.system(size: checkmarkSize))
-                .foregroundColor(server.isActive ? .accentPrimary : Color.contrastText(.textTertiary))
-                .accessibilityHidden(!server.isActive)
-                .accessibilityLabel("Active playlist")
+            // Active playlist indicator. On iOS it is also a control
+            // (Logan 2026-09-18): tapping the radio activates the
+            // playlist through the same `performSetActiveServer` path as
+            // the detail page's Set Active row, while the rest of the row
+            // still opens the detail. On tvOS it stays a pure glyph so
+            // the row keeps exactly one focus stop.
+            activeIndicator
 
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(server.type.color.opacity(0.2))
-                    .frame(width: iconBoxSize, height: iconBoxSize)
-                Image(systemName: server.type.systemIcon)
-                    .scaledFont(.system(size: iconFontSize, weight: .medium))
-                    .foregroundColor(server.type.color)
-            }
-
+            // The type-icon tile is gone (Logan 2026-09-18): with the
+            // radio as the leading element a second leading tile read as
+            // two competing markers, and the type now says its name in
+            // the subtitle. Same single-leading-element look as Android.
             VStack(alignment: .leading, spacing: 3) {
                 Text(server.name)
                     .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
-                // Badges first, URL last. At narrow widths (a 50% iPad
-                // Split View) the URL truncates and then drops out
-                // entirely, rather than squeezing the type badge into a
-                // three-line block beside it.
-                ViewThatFits(in: .horizontal) {
-                    serverSubtitleRow(showURL: true)
-                    serverSubtitleRow(showURL: false)
-                }
+                    .lineLimit(1)
+                Text(subtitleText)
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .lineLimit(1)
             }
 
             Spacer()
@@ -381,6 +516,10 @@ struct ServerListRow: View {
             Circle()
                 .fill(server.isVerified ? Color.statusOnline : Color.textTertiary)
                 .frame(width: statusDotSize, height: statusDotSize)
+
+            Image(systemName: "chevron.right")
+                .scaledFont(.system(size: chevronSize, weight: .semibold))
+                .foregroundColor(Color.contrastText(.textTertiary))
         }
         #if os(tvOS)
         .padding(.vertical, 16)

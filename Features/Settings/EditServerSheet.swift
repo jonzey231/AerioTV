@@ -60,6 +60,24 @@ struct EditServerSheet: View {
     /// See `ServerCredentialChange` for what a swap has to invalidate.
     @State private var originalCredentials: DispatcharrCredentialSnapshot? = nil
 
+    /// Save is no longer fire-and-forget. A credential change is verified
+    /// against the server BEFORE anything is persisted or dropped; the
+    /// sheet shows "Saving…", stays open with the typed values when the
+    /// server rejects them, and dismisses only once the save went through.
+    @State private var isSaving = false
+    @State private var saveErrorMessage: String? = nil
+
+    /// Stage source for the "Saving Changes" cover: the same staged screen
+    /// the Add Playlist flow shows, so a save is never a bare label over an
+    /// editable form. See `PlaylistSaveRunner`.
+    @StateObject private var saveProgress = PlaylistSaveProgress()
+
+    /// Anchor for scrolling the "Save Failed" section back into view after a
+    /// rejected save: the cover was covering the form, so the message has to
+    /// come to the user rather than wait to be found.
+    private enum FormAnchor: Hashable { case saveError }
+    @State private var formScrollAnchor: FormAnchor? = nil
+
     /// Binds the URL TextField. Reads through to the model until the user
     /// types; writes stage into `pendingBaseURL` only.
     private var baseURLBinding: Binding<String> {
@@ -113,6 +131,52 @@ struct EditServerSheet: View {
         guard let pending = pendingCredentialType else { return }
         server.dispatcharrCredentialTypeRaw = (pending == .apiKey) ? "" : pending.rawValue
         pendingCredentialType = nil
+    }
+
+    /// Save Playlist.
+    ///
+    /// Bug (Android parity audit, 2026-09-18): Save used to persist and
+    /// dismiss in the same tap while the re-login ran detached, so wrong
+    /// credentials closed the sheet, wiped the cached identity and left
+    /// the playlist visibly broken with the failure only in the debug log.
+    /// Now a credential change is VERIFIED first: nothing is persisted or
+    /// dropped until the server accepts the typed values, the sheet shows
+    /// "Saving…" meanwhile, a rejection keeps the sheet open with what was
+    /// typed, and dismiss happens only on success.
+    @MainActor
+    private func saveEdits() async {
+        guard !isSaving else { return }
+        saveErrorMessage = nil
+        // Raises the "Saving Changes" cover over the form: nothing can be
+        // edited, and no gesture dismisses it, until the save resolves.
+        // Cleared explicitly (not in a `defer`) so the cover is gone BEFORE
+        // the sheet itself dismisses on success.
+        isSaving = true
+
+        let typedBaseURL = (pendingBaseURL ?? server.baseURL)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let mode = effectiveCredentialType
+        let message = await PlaylistSaveRunner.run(
+            server: server,
+            typedBaseURL: typedBaseURL,
+            credentialType: mode,
+            originalCredentials: originalCredentials,
+            progress: saveProgress,
+            commitStaged: {
+                commitBaseURLIfStaged()
+                commitCredentialModeIfStaged()
+            }
+        )
+        isSaving = false
+        if let message {
+            // Back to the form with everything typed still in place, and the
+            // "Save Failed" section brought into view at the top.
+            saveErrorMessage = message
+            formScrollAnchor = .saveError
+            return
+        }
+        originalCredentials = DispatcharrCredentialSnapshot.capture(from: server)
+        dismiss()
     }
 
     /// v1.7.x: render the cached api_key as `i_•••••cudvh13H1A`
@@ -242,45 +306,68 @@ struct EditServerSheet: View {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel") { dismiss() }
                         .foregroundColor(.accentPrimary)
+                        .disabled(isSaving)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Save") {
-                        // v1.7.x (Round 1 review): commit any
-                        // staged credential-mode change before
-                        // persisting credentials. Cancel skips
-                        // this step, so toggling the picker and
-                        // backing out leaves the model unchanged.
-                        commitBaseURLIfStaged()
-                        commitCredentialModeIfStaged()
-                        // Diff BEFORE saveCredentialsSynced: that call
-                        // moves the typed values into the Keychain and
-                        // blanks the in-memory columns, after which the
-                        // "did the account change?" question can no
-                        // longer be answered.
-                        let credentialsChanged = ServerCredentialChange.commit(
-                            server: server,
-                            previous: originalCredentials
-                        )
-                        SyncManager.shared.saveCredentialsSynced(for: server)
-                        if credentialsChanged {
-                            originalCredentials = DispatcharrCredentialSnapshot.capture(from: server)
-                        }
-                        dismiss()
-                    }
-                    .foregroundColor(.accentPrimary)
-                    .fontWeight(.semibold)
-                    .disabled(server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
-                              (pendingBaseURL ?? server.baseURL)
-                                  .trimmingCharacters(in: .whitespaces).isEmpty)
+                    // The inline "Saving…" label is gone: the staged
+                    // "Saving Changes" cover below reports progress now.
+                    Button("Save") { Task { await saveEdits() } }
+                        .foregroundColor(.accentPrimary)
+                        .fontWeight(.semibold)
+                        .disabled(isSaving ||
+                                  server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
+                                  (pendingBaseURL ?? server.baseURL)
+                                      .trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
+        }
+        // The same staged screen the Add Playlist flow shows, titled "Saving
+        // Changes". Covers the form so nothing can be edited mid-save, and
+        // carries no dismissal affordance.
+        .fullScreenCover(isPresented: $isSaving) {
+            ServerSyncView(mode: .saving(stages: saveProgress.stages),
+                           title: "Saving Changes")
         }
     }
 
     // MARK: - iOS Form
     #if os(iOS)
     private var iOSEditForm: some View {
+        ScrollViewReader { proxy in
+            iOSEditFormBody
+                .onChange(of: formScrollAnchor) { _, anchor in
+                    guard let anchor else { return }
+                    withAnimation { proxy.scrollTo(anchor, anchor: .top) }
+                    formScrollAnchor = nil
+                }
+        }
+    }
+
+    private var iOSEditFormBody: some View {
         Form {
+            // Save Failed: the server rejected the new credentials (or the
+            // verification fetch failed). Standard Settings section chrome
+            // so it reads as part of the form, not as an alert.
+            if let saveErrorMessage {
+                Section {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .foregroundColor(.statusLive)
+                        Text(saveErrorMessage)
+                            .scaledFont(.bodySmall)
+                            .foregroundColor(.statusLive)
+                    }
+                    .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Save Failed").sectionHeaderStyle()
+                } footer: {
+                    Text("Your entries are still here. Fix them and tap Save again.")
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
+                }
+                .id(FormAnchor.saveError)
+            }
+
             Section {
                 // Phase 3 item 2: one field style across Settings. The bare
                 // Form TextField/SecureField rows are now SettingsTextField,

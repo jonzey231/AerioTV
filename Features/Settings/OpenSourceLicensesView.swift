@@ -3369,7 +3369,13 @@ struct OpenSourceLicensesView: View {
         if standalone {
             NavigationStack { listBody }
         } else {
+            // Pushed from About, so it lives under the floating tab bar
+            // and needs the same chrome as every other Settings page.
+            #if os(iOS)
+            listBody.settingsPhoneTabBarChrome()
+            #else
             listBody
+            #endif
         }
         #endif
     }

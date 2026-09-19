@@ -440,7 +440,7 @@ struct MoviesView: View {
     #endif
     @State private var scrollIsIdle = true
 
-    /// User-tunable UI scale (0.85–1.25). Only consumed on iPad / Mac Catalyst
+    /// User-tunable UI scale (0.85-1.5). Only consumed on iPad / Mac Catalyst
     /// where the default 120 px minimum can feel cramped on wide displays;
     /// iPhone grids stay at their designed minimums (user scale is a no-op in
     /// the ternary below), and tvOS ignores the setting entirely.
@@ -456,7 +456,7 @@ struct MoviesView: View {
     private var columns: [GridItem] {
         // On iPhone the phone-sized minimum is always used. On iPad / Mac the
         // user's uiScale slider stretches the minimum so posters read larger.
-        let clamped = max(0.85, min(1.25, uiScale))
+        let clamped = max(0.85, min(1.5, uiScale))
         let isRegular = UIDevice.current.userInterfaceIdiom != .phone
         // Phone: three across, like the mockup (Logan 2026-09-05).
         if !isRegular { return Array(repeating: GridItem(.flexible(), spacing: 8), count: 3) }
@@ -1440,7 +1440,9 @@ struct MoviesView: View {
                 railTarget: { letter in firstGridID(for: letter) },
                 footer: TMDBPosters.isEnabled
                     ? { AnyView(TMDBAttributionView(style: .long)) }
-                    : nil
+                    : nil,
+                owningTab: kind == .series ? .tvShows : .movies,
+                isAtRoot: isAtRoot
             )
         }
     }
@@ -1794,6 +1796,20 @@ struct MoviesView: View {
                 .coordinateSpace(name: "moviesScroll")
                 .scrollPosition(scrollPositionBinding)
                 .onChange(of: scrollPositionTick) { _, _ in }
+                #if os(iOS)
+                // iPad: re-tapping the tab you are already on takes the page
+                // back to the top (phone does the same through
+                // PhoneMediaPage). Skipped while a detail is pushed - that
+                // re-tap is UIKit's pop.
+                .onReceive(
+                    NotificationCenter.default.publisher(for: .aerioTabReselected)
+                ) { note in
+                    let tab: AppTab = kind == .series ? .tvShows : .movies
+                    guard isAtRoot,
+                          (note.userInfo?["tab"] as? String) == tab.rawValue else { return }
+                    withAnimation(.easeInOut(duration: 0.3)) { scrollContent(toY: 0) }
+                }
+                #endif
                 .onPreferenceChange(GridTopKey.self) { gridTopY in
                     guard let gridTopY else { return }
                     geometryBox.gridTopVisible = gridTopY
@@ -4095,6 +4111,13 @@ extension Notification.Name {
     /// MainTabView got Menu while the current tab had scrolled its bar
     /// away: the tab scrolls back to the top and shows the bar.
     static let aerioTabScrollToTop = Notification.Name("aerioTabScrollToTop")
+    /// iPhone/iPad: the user tapped the tab they are already on. The tab
+    /// brings itself home: a pushed page pops first, otherwise its main
+    /// scroll container animates to the top and the floating bar re-expands.
+    /// userInfo["tab"] is the AppTab rawValue, so a tab only reacts to its
+    /// own re-tap. Posted once per tap (never during a scroll) by
+    /// MainTabView's selection binding.
+    static let aerioTabReselected = Notification.Name("aerioTabReselected")
     /// tvOS: Down from the nav circles on Live TV; the tab focuses its entry
     /// point (Channel Preview description or the first channel).
     static let aerioLiveTVEntryFromTop = Notification.Name("aerioLiveTVEntryFromTop")

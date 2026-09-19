@@ -59,6 +59,13 @@ struct SyncCategoriesSettingsView: View {
         .navigationTitle("Sync Categories")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
+        #else
+        // tvOS draws `.navigationTitle` as an oversized system title that
+        // sits OVER the scrolling rows (Logan's Apple TV pass 2026-09-19
+        // caught "Sync Categories" printed across the middle of the list).
+        // Every other tvOS Settings page hides the bar and draws its own
+        // heading; this pushed page was the one that did not.
+        .toolbar(.hidden, for: .navigationBar)
         #endif
         .alert(
             pendingDeleteCategory.map { "Remove \($0.displayName) from iCloud?" } ?? "",
@@ -115,6 +122,12 @@ struct SyncCategoriesSettingsView: View {
             .listSectionSeparator(.hidden)
         }
         .scrollContentBackground(.hidden)
+        #if os(iOS)
+        // Phase 3 (Logan 2026-09-18): floating tab bar parity -
+        // content runs under the bar, the bar tucks away on scroll,
+        // and the last row clears it.
+        .settingsPhoneTabBarChrome()
+        #endif
         .listStyle(.insetGrouped)
     }
 
@@ -152,6 +165,12 @@ struct SyncCategoriesSettingsView: View {
     private var tvOSBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
+                // Own heading, now that the system bar is hidden above.
+                Text("Sync Categories")
+                    .scaledFont(.system(size: 38, weight: .semibold))
+                    .foregroundColor(.textPrimary)
+                    .padding(.horizontal, 24)
+
                 SettingsSection("Categories", style: .compactCard) {
                     ForEach(SyncCategory.allCases) { category in
                         TVSettingsToggleRow(
@@ -183,7 +202,10 @@ struct SyncCategoriesSettingsView: View {
                     .padding(.horizontal, 24)
                     .padding(.bottom, 32)
             }
-            .padding(.horizontal, 60)
+            // Same reading column every other tvOS Settings pane uses, so
+            // a pushed page does not stretch edge to edge on a 4K set.
+            .frame(maxWidth: SettingsMetrics.tvReadingColumnWidth)
+            .frame(maxWidth: .infinity, alignment: .center)
             .padding(.top, 32)
         }
     }

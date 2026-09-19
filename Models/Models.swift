@@ -74,6 +74,20 @@ enum ServerType: String, Codable, CaseIterable {
         }
     }
 
+    /// The SHORT name, for a playlist row's second line. Phase 3 item 10
+    /// (Logan 2026-09-19): the tvOS list read "Dispatcharr Direct Connect
+    /// · 799 channels" while the phones read "Dispatcharr · N channels",
+    /// because the row used `displayName`, which is the long label the
+    /// Add Playlist type chooser needs. Both platforms now use this, so
+    /// the subtitle is identical everywhere.
+    var shortName: String {
+        switch self {
+        case .m3uPlaylist:    return "M3U Playlist"
+        case .xtreamCodes:    return "Xtream Codes"
+        case .dispatcharrAPI: return "Dispatcharr"
+        }
+    }
+
     var systemIcon: String {
         switch self {
         case .m3uPlaylist: return "doc.text.fill"
@@ -552,6 +566,9 @@ final class ServerConnection {
         dispatcharrVODMoviesEnabled = true
         dispatcharrVODSeriesEnabled = true
         dispatcharrChannelProfileIDs = ""
+        // The display-only account facts describe the OLD account, so they
+        // are wrong the moment the credentials change.
+        DispatcharrAccountFactsStore.clear(id)
     }
 
     @discardableResult
@@ -1579,6 +1596,24 @@ enum DispatcharrCapabilityProbe {
                                               systemCatchupEnabled: systemCatchup) {
             changed = true
         }
+        // Display-only facts for the Playlist Detail permissions section.
+        // The username is whatever the server echoed (an API-key playlist
+        // never typed one); the profile names are only asked for when the
+        // account actually has profiles assigned, and a 403 / failure just
+        // leaves the ids to be shown instead.
+        var facts = DispatcharrAccountFactsStore.load(server.id)
+        facts.username = user.username
+        let assignedIDs = server.dispatcharrProfileIDList
+        if assignedIDs.isEmpty {
+            facts.profileNames = []
+        } else if let profiles = try? await api.listChannelProfiles() {
+            let names = assignedIDs.compactMap { id in
+                profiles.first(where: { $0.id == id })?.name
+            }
+            if !names.isEmpty { facts.profileNames = names }
+        }
+        DispatcharrAccountFactsStore.save(facts, for: server.id)
+
         logProbe("[PERMS] probe OK \(server.dispatcharrCapabilities.probeSummary) "
                  + "changed=\(changed) server=\(server.name) reason=\(reason)")
         debugLog("[PERMS] detail \(server.name) (\(reason)): \(server.dispatcharrCapabilities.debugDescription)")
@@ -1730,6 +1765,55 @@ extension Notification.Name {
     /// Posted whenever a capability snapshot changes, so views gating on
     /// capabilities can re-evaluate without polling.
     static let dispatcharrCapabilitiesDidChange = Notification.Name("dispatcharrCapabilitiesDidChange")
+}
+
+// MARK: - Per-playlist account facts (display only)
+
+/// The two account facts the SwiftData capability snapshot does NOT already
+/// hold: the username the server echoed on `/api/accounts/users/me/` (a
+/// playlist connected with an API key never typed one) and the readable
+/// names of the Channel Profiles assigned to that account (the model stores
+/// only ids). Read by the "Dispatcharr User Permissions" section on the
+/// Playlist Detail page.
+///
+/// Deliberately NOT new SwiftData columns: two display strings are not worth
+/// a store change, and everything else that section shows is already
+/// persisted on the server row.
+///
+/// Rules: `UserDefaults.standard` only (never the iCloud key-value store, so
+/// it is not synced), keyed by server id, no credentials, and cleared
+/// whenever the playlist forgets which account it is connected as.
+struct DispatcharrAccountFacts: Codable, Equatable {
+    /// Username as echoed by the server. "" = unknown.
+    var username: String = ""
+    /// Names of the account-assigned Channel Profiles. Empty = none
+    /// assigned (all channels), or the names were not readable.
+    var profileNames: [String] = []
+}
+
+enum DispatcharrAccountFactsStore {
+    private static func key(_ serverID: UUID) -> String {
+        "dispatcharrAccountFacts.\(serverID.uuidString)"
+    }
+
+    static func load(_ serverID: UUID) -> DispatcharrAccountFacts {
+        guard let data = UserDefaults.standard.data(forKey: key(serverID)),
+              let facts = try? JSONDecoder().decode(DispatcharrAccountFacts.self, from: data)
+        else { return DispatcharrAccountFacts() }
+        return facts
+    }
+
+    /// Writes only on a real change, so the probe on every launch does not
+    /// churn the defaults file.
+    static func save(_ facts: DispatcharrAccountFacts, for serverID: UUID) {
+        guard facts != load(serverID),
+              let data = try? JSONEncoder().encode(facts) else { return }
+        UserDefaults.standard.set(data, forKey: key(serverID))
+    }
+
+    static func clear(_ serverID: UUID) {
+        UserDefaults.standard.removeObject(forKey: key(serverID))
+    }
 }
 
 /// Presents `DispatcharrPermissionNotice` as an alert at the app root.

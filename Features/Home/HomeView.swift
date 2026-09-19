@@ -151,7 +151,9 @@ final class VODStore: ObservableObject {
 
     /// Resolves a poster URL string that may be absolute or relative.
     /// Dispatcharr commonly returns relative paths like "/media/posters/xxx.jpg".
-    private func resolveURL(_ raw: String, base: String) -> URL? {
+    /// `nonisolated static` so the off-main page mappers below can use it:
+    /// it is pure string and URL shaping and touches no store state.
+    nonisolated private static func resolveURL(_ raw: String, base: String) -> URL? {
         guard !raw.isEmpty else { return nil }
         if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
             // SSRF gate: a malicious VOD source could emit poster URLs that
@@ -165,6 +167,97 @@ final class VODStore: ObservableObject {
         // Relative path — prepend server base URL.
         let separator = raw.hasPrefix("/") ? "" : "/"
         return URL(string: base + separator + raw)
+    }
+
+    // MARK: - Off-main page mapping (guide navigation lag, 1.8.40)
+    //
+    // The uncapped sweep maps every page the provider offers, about 100 items
+    // at a time, for as long as the walk takes: tens of minutes on a large
+    // library at roughly two pages a second. That mapping used to run on the
+    // main actor with the rest of the per-page bookkeeping, so each page
+    // landed as a burst of main-thread work and a remote press that arrived
+    // in the guide during a burst waited for it. That is the lag users
+    // reported in 1.8.40.
+    //
+    // Nothing in the mapping needs the main actor: it is pure string, date
+    // and URL shaping over Sendable value types, and the rows go straight
+    // into `VODCatalogStore`, which is already off-main. What stays on the
+    // main actor per page is only the lane bookkeeping, the count publish and
+    // the log line, which `sweepPageMainHop` times.
+    //
+    // `Task.detached` rather than a `nonisolated async` function so the hop
+    // off the actor is explicit and cannot depend on the language mode's
+    // isolation defaults.
+    nonisolated private static func mapMoviePage(
+        _ items: [DispatcharrVODMovie], api: DispatcharrAPI, baseURL: String,
+        sID: UUID, category: VODCategory
+    ) -> [VODDisplayItem] {
+        var batch: [VODDisplayItem] = []
+        batch.reserveCapacity(items.count)
+        for m in items {
+            let streamURL = api.proxyMovieURL(
+                uuid: m.uuid,
+                preferredStreamID: m.streams?.first?.streamID
+            )
+            let cp = m.customProperties
+            var movie = VODMovie(
+                id: String(m.id), name: m.title,
+                posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
+                backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
+                    .flatMap { VODService.resolveImageURL($0, base: baseURL) },
+                rating: m.rating ?? "", plot: m.plot ?? "",
+                genre: m.genre ?? "", releaseDate: m.year.map(String.init) ?? "", duration: "",
+                cast: cp?.cast ?? "", director: cp?.director ?? "", imdbID: "",
+                categoryID: category.id,
+                categoryName: category.name,
+                streamURL: streamURL, containerExtension: "mp4",
+                serverID: sID
+            )
+            movie.dispatcharrUUID = m.uuid
+            movie.addedAt = m.createdAt.flatMap(VODService.parseISODate)
+            batch.append(VODDisplayItem(movie: movie))
+        }
+        return batch
+    }
+
+    /// Series half of `mapMoviePage`. Same shape, same reasons.
+    nonisolated private static func mapSeriesPage(
+        _ items: [DispatcharrVODSeries], baseURL: String,
+        sID: UUID, category: VODCategory
+    ) -> [VODDisplayItem] {
+        var batch: [VODDisplayItem] = []
+        batch.reserveCapacity(items.count)
+        for sItem in items {
+            let cp = sItem.customProperties
+            var show = VODSeries(
+                id: String(sItem.id), name: sItem.name,
+                posterURL: sItem.posterURL.flatMap { resolveURL($0, base: baseURL) },
+                backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
+                    .flatMap { VODService.resolveImageURL($0, base: baseURL) },
+                rating: sItem.rating ?? "", plot: sItem.plot ?? "",
+                genre: sItem.genre ?? "", releaseDate: sItem.year.map(String.init) ?? "",
+                cast: cp?.cast ?? "", director: cp?.director ?? "",
+                categoryID: category.id,
+                categoryName: category.name,
+                serverID: sID, seasons: [], episodeCount: 0
+            )
+            show.tmdbID = sItem.tmdbID ?? ""
+            show.addedAt = sItem.createdAt.flatMap(VODService.parseISODate)
+            batch.append(VODDisplayItem(series: show))
+        }
+        return batch
+    }
+
+    /// Debug-only budget check for what a single sweep page still costs the
+    /// main actor. A user log can confirm the 1.8.40 fix with one grep: the
+    /// line should be absent, and was routinely tens of milliseconds when the
+    /// mapping ran here.
+    private func noteSweepPageMainHop(_ started: CFAbsoluteTime, kind: String,
+                                      category: String, page: Int) {
+        let ms = (CFAbsoluteTimeGetCurrent() - started) * 1000
+        guard ms > 8 else { return }
+        debugLog("[VOD-CAT] main hop \(Int(ms.rounded()))ms kind=\(kind) "
+                 + "cat=\(category) page=\(page)")
     }
 
     /// Detects whether an error is specifically a request timeout
@@ -257,6 +350,41 @@ final class VODStore: ObservableObject {
         VODDetailCaches.reset()
     }
 
+    // MARK: - First-page gate (Edit Playlist > Save)
+
+    /// One-shot "the first page of this kind is on disk, or this kind is
+    /// known to be empty" gate.
+    ///
+    /// The Edit Playlist save screen arms it, wipes the catalog the OLD
+    /// account wrote, starts the FOREGROUND sweep and waits on this, so its
+    /// Movies / TV Shows rows complete as soon as there is something to show
+    /// and the uncapped sweep goes on running in the background, exactly as
+    /// it does after Add Playlist. Never block a save on a full sweep: a
+    /// 350k-title library takes minutes.
+    private var armedFirstPage: Set<VODItemType> = []
+    private var firstPageWaiters: [VODItemType: [CheckedContinuation<Int, Never>]] = [:]
+
+    func armFirstVODPage(_ kinds: [VODItemType]) {
+        for kind in kinds { armedFirstPage.insert(kind) }
+    }
+
+    /// Fired from the sweep's own first-batch publish and, as a catch-all,
+    /// from every `loadMovies` / `loadSeries` exit path, so a kind that
+    /// short-circuits (denied, no categories, unreachable) resolves too.
+    /// Idempotent: only the first call for an armed kind counts.
+    fileprivate func noteFirstVODPage(_ kind: VODItemType, count: Int) {
+        guard armedFirstPage.remove(kind) != nil else { return }
+        let waiters = firstPageWaiters.removeValue(forKey: kind) ?? []
+        for waiter in waiters { waiter.resume(returning: count) }
+    }
+
+    func awaitFirstVODPage(_ kind: VODItemType) async -> Int {
+        guard armedFirstPage.contains(kind) else { return count(kind) }
+        return await withCheckedContinuation { continuation in
+            firstPageWaiters[kind, default: []].append(continuation)
+        }
+    }
+
     func refreshMovies(servers: [ServerConnection]) {
         moviesTask?.cancel()
         moviesTask = Task { await loadMovies(servers: servers) }
@@ -303,15 +431,29 @@ final class VODStore: ObservableObject {
     /// The quiet background sweep (Logan 2026-09-12). One at a time.
     private var backgroundSweepTask: Task<Void, Never>?
 
-    private func publishMovieCount(_ total: Int, _ why: String) {
+    /// Publish a kind's title count, and the catalog revision the VOD grids
+    /// rebuild from.
+    ///
+    /// Both writes are guarded on a REAL change (the equal-value `@Published`
+    /// rule): a write with the value already there still re-renders every
+    /// observer, and the progressive sweep publish used to bump
+    /// `catalogRevision` unconditionally every 5 s for tens of minutes. Pass
+    /// `rowsChanged: false` only where the catalog's rows provably did not
+    /// move; a playlist switch, a page write and a sweep's pruning all leave
+    /// it `true` so the grids rebuild even when the count happens to match.
+    private func publishMovieCount(_ total: Int, _ why: String, rowsChanged: Bool = true) {
+        let countChanged = moviesCount != total
+        guard countChanged || rowsChanged else { return }
         MainThreadWatchdog.shared.notePublish("publish vod.movies \(total) titles (\(why))")
-        moviesCount = total
+        if countChanged { moviesCount = total }
         catalogRevision &+= 1
     }
 
-    private func publishSeriesCount(_ total: Int, _ why: String) {
+    private func publishSeriesCount(_ total: Int, _ why: String, rowsChanged: Bool = true) {
+        let countChanged = seriesCount != total
+        guard countChanged || rowsChanged else { return }
         MainThreadWatchdog.shared.notePublish("publish vod.series \(total) titles (\(why))")
-        seriesCount = total
+        if countChanged { seriesCount = total }
         catalogRevision &+= 1
     }
 
@@ -561,7 +703,7 @@ final class VODStore: ObservableObject {
                         let cp = m.customProperties
                         var movie = VODMovie(
                             id: String(m.id), name: m.title,
-                            posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
+                            posterURL: m.posterURL.flatMap { Self.resolveURL($0, base: baseURL) },
                             backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
                                 .flatMap { VODService.resolveImageURL($0, base: baseURL) },
                             rating: m.rating ?? "", plot: m.plot ?? "",
@@ -627,7 +769,7 @@ final class VODStore: ObservableObject {
                         let cp = s.customProperties
                         var show = VODSeries(
                             id: String(s.id), name: s.name,
-                            posterURL: s.posterURL.flatMap { resolveURL($0, base: baseURL) },
+                            posterURL: s.posterURL.flatMap { Self.resolveURL($0, base: baseURL) },
                             backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
                                 .flatMap { VODService.resolveImageURL($0, base: baseURL) },
                             rating: s.rating ?? "", plot: s.plot ?? "",
@@ -679,7 +821,7 @@ final class VODStore: ObservableObject {
     func makeSearchMovieItem(_ m: DispatcharrVODMovie, api: DispatcharrAPI, baseURL: String, serverID: UUID) -> VODDisplayItem {
         let movie = VODMovie(
             id: String(m.id), name: m.title,
-            posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
+            posterURL: m.posterURL.flatMap { Self.resolveURL($0, base: baseURL) },
             backdropURL: nil,
             rating: m.rating ?? "", plot: m.plot ?? "",
             genre: m.genre ?? "", releaseDate: m.year.map(String.init) ?? "", duration: "",
@@ -699,7 +841,7 @@ final class VODStore: ObservableObject {
         let cp = s.customProperties
         var show = VODSeries(
             id: String(s.id), name: s.name,
-            posterURL: s.posterURL.flatMap { resolveURL($0, base: baseURL) },
+            posterURL: s.posterURL.flatMap { Self.resolveURL($0, base: baseURL) },
             backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
                 .flatMap { VODService.resolveImageURL($0, base: baseURL) },
             rating: s.rating ?? "", plot: s.plot ?? "",
@@ -717,12 +859,15 @@ final class VODStore: ObservableObject {
     /// the app is not in the foreground, and no spinner over restored content.
     private func loadMovies(servers: [ServerConnection], honorCache: Bool = false,
                             background: Bool = false) async {
+        // Catch-all for the first-page gate: every exit path resolves it, so a
+        // waiter can never hang on a kind that short-circuited.
+        defer { noteFirstVODPage(.movie, count: moviesCount) }
         debugLog("🎬 VODStore.loadMovies: starting, servers=\(servers.count) honorCache=\(honorCache) background=\(background)")
         let activeServer = servers.first(where: { $0.isActive })
         // Active server exists but doesn't support VOD (e.g. M3U) — clear and bail silently.
         if let active = activeServer, !active.supportsVOD {
             debugLog("🎬 VODStore.loadMovies: active server doesn't support VOD, clearing")
-            publishMovieCount(0, "no VOD support"); movieCategories = []
+            publishMovieCount(0, "no VOD support", rowsChanged: false); movieCategories = []
             isLoadingMovies = false; moviesError = nil
             lastMoviesServerName = nil; currentMoviesServerID = nil
             return
@@ -749,7 +894,7 @@ final class VODStore: ObservableObject {
         // the sandbox. Active server with `vodEnabled == false` clears VOD.
         if let active = activeServer, !active.vodEnabled {
             debugLog("🎬 VODStore.loadMovies: active server has vodEnabled=false, clearing")
-            publishMovieCount(0, "vodEnabled off"); movieCategories = []
+            publishMovieCount(0, "vodEnabled off", rowsChanged: false); movieCategories = []
             isLoadingMovies = false; moviesError = nil
             lastMoviesServerName = nil; currentMoviesServerID = nil
             return
@@ -760,7 +905,7 @@ final class VODStore: ObservableObject {
         // server is explicitly active — that would show stale data from the wrong server).
         guard let server = vodServers.first(where: { $0.isActive }) ?? (activeServer == nil ? vodServers.first : nil) else {
             // Nothing left to load from, so nothing should still be on screen.
-            publishMovieCount(0, "no VOD server"); movieCategories = []
+            publishMovieCount(0, "no VOD server", rowsChanged: false); movieCategories = []
             isLoadingMovies = false
             lastMoviesServerName = nil; currentMoviesServerID = nil
             if !servers.isEmpty {
@@ -772,7 +917,7 @@ final class VODStore: ObservableObject {
         // Switching to a different server shows that server's own catalog,
         // not the previous one's.
         if currentMoviesServerID != nil && currentMoviesServerID != server.id {
-            publishMovieCount(0, "server switch")
+            publishMovieCount(0, "server switch", rowsChanged: false)
             movieCategories = []
         }
         currentMoviesServerID = server.id
@@ -933,9 +1078,11 @@ final class VODStore: ObservableObject {
                         for await item in group { acc[item.0] = item.1 }
                         return acc
                     }
-                    // The catalog write, the lane bookkeeping and the 5-page
-                    // checkpoint all run back here on the main actor, one page
-                    // at a time, exactly as they did when lanes were serial.
+                    // The lane bookkeeping and the 5-page checkpoint run back
+                    // here on the main actor, one page at a time, exactly as
+                    // they did when lanes were serial. The MAPPING does not:
+                    // see `mapMoviePage` for why, and `noteSweepPageMainHop`
+                    // for what is left.
                     for req in requests {
                         guard !Task.isCancelled else { isLoadingMovies = false; return }
                         guard let outcome = pages[req.name] else { continue }
@@ -943,37 +1090,23 @@ final class VODStore: ObservableObject {
                         let category = VODCategory(id: req.catID, name: req.name)
                         let page = req.page
                         var written = 0
+                        // Clocks the MAIN-ACTOR portion only, so it is started
+                        // after the last `await` of the page and read before
+                        // the next one.
+                        var mainHopStart = CFAbsoluteTimeGetCurrent()
                         do {
                             let result = try outcome.get()
-                            var batch: [VODDisplayItem] = []
-                            batch.reserveCapacity(result.items.count)
-                            for m in result.items {
-                                let streamURL = api.proxyMovieURL(
-                                    uuid: m.uuid,
-                                    preferredStreamID: m.streams?.first?.streamID
-                                )
-                                let cp = m.customProperties
-                                var movie = VODMovie(
-                                    id: String(m.id), name: m.title,
-                                    posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
-                                    backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
-                                        .flatMap { VODService.resolveImageURL($0, base: baseURL) },
-                                    rating: m.rating ?? "", plot: m.plot ?? "",
-                                    genre: m.genre ?? "", releaseDate: m.year.map(String.init) ?? "", duration: "",
-                                    cast: cp?.cast ?? "", director: cp?.director ?? "", imdbID: "",
-                                    categoryID: category.id,
-                                    categoryName: category.name,
-                                    streamURL: streamURL, containerExtension: "mp4",
-                                    serverID: sID
-                                )
-                                movie.dispatcharrUUID = m.uuid
-                                movie.addedAt = m.createdAt.flatMap(VODService.parseISODate)
-                                batch.append(VODDisplayItem(movie: movie))
-                            }
+                            // Off the main actor: about 100 items of string,
+                            // date and URL shaping per page.
+                            let batch = await Task.detached(priority: .utility) {
+                                Self.mapMoviePage(result.items, api: api, baseURL: baseURL,
+                                                  sID: sID, category: category)
+                            }.value
                             // The page is on disk before the next one is asked
                             // for, so nothing is held in memory between pages.
                             written = await catalog.writePage(batch, playlistKey: identity,
                                                               kind: .movie, generation: plan.generation)
+                            mainHopStart = CFAbsoluteTimeGetCurrent()
                             total += written
                             nextPage[cat.name] = page + 1
                             if !result.hasMore { finished.insert(cat.name) }
@@ -1002,12 +1135,18 @@ final class VODStore: ObservableObject {
                         // integer, not a multi-thousand element array.
                         if isLoadingMovies {
                             publishMovieCount(total, "sweep first batch")
+                            // Enough on disk for the Edit Playlist save screen
+                            // to complete its Movies row; the sweep keeps going.
+                            noteFirstVODPage(.movie, count: total)
                             isLoadingMovies = false
                             lastProgressivePublish = Date()
                         } else if written > 0, Date().timeIntervalSince(lastProgressivePublish) >= 5 {
                             publishMovieCount(total, "sweep progressive")
                             lastProgressivePublish = Date()
                         }
+
+                        noteSweepPageMainHop(mainHopStart, kind: "movies",
+                                             category: cat.name, page: page)
 
                         // Checkpoint the lane positions every few pages. They are
                         // rows now, written in the same database as the titles.
@@ -1028,7 +1167,7 @@ final class VODStore: ObservableObject {
                         if VODSweepActivity.shared.isForeground(.movie) {
                             await AppSettleGate.shared.awaitResumeIfPaused()
                         } else if background {
-                            try? await Task.sleep(for: VODSweepActivity.backgroundPageDelay)
+                            try? await Task.sleep(for: VODSweepActivity.shared.backgroundPageDelay(for: .movie))
                             await AppSettleGate.shared.awaitResumeIfPaused()
                         } else if !MultiviewStore.shared.tiles.isEmpty {
                             // Cold-load yields to playback (2026-06-29).
@@ -1050,7 +1189,7 @@ final class VODStore: ObservableObject {
             if total == 0, let lastError {
                 moviesError = lastError.errorDescription
             }
-            publishMovieCount(total, "sweep complete")
+            publishMovieCount(total, "sweep complete", rowsChanged: deleted > 0)
             isLoadingMovies = false
             hasLoadedMovies = true
             debugLog("🎬 [VOD-CAT] sweep complete kind=movies total=\(total) categories=\(lanes.count) "
@@ -1102,10 +1241,12 @@ final class VODStore: ObservableObject {
     /// See `loadMovies` for what `background` changes.
     private func loadSeries(servers: [ServerConnection], honorCache: Bool = false,
                             background: Bool = false) async {
+        // See `loadMovies`: catch-all so the first-page gate always resolves.
+        defer { noteFirstVODPage(.series, count: seriesCount) }
         debugLog("📺 VODStore.loadSeries: starting, servers=\(servers.count) honorCache=\(honorCache) background=\(background)")
         let activeServer = servers.first(where: { $0.isActive })
         if let active = activeServer, !active.supportsVOD {
-            publishSeriesCount(0, "no VOD support"); seriesCategories = []
+            publishSeriesCount(0, "no VOD support", rowsChanged: false); seriesCategories = []
             isLoadingSeries = false; seriesError = nil
             lastSeriesServerName = nil; currentSeriesServerID = nil
             return
@@ -1127,14 +1268,14 @@ final class VODStore: ObservableObject {
         }
         if let active = activeServer, !active.vodEnabled {
             debugLog("📺 VODStore.loadSeries: active server has vodEnabled=false, clearing")
-            publishSeriesCount(0, "vodEnabled off"); seriesCategories = []
+            publishSeriesCount(0, "vodEnabled off", rowsChanged: false); seriesCategories = []
             isLoadingSeries = false; seriesError = nil
             lastSeriesServerName = nil; currentSeriesServerID = nil
             return
         }
         let vodServers = servers.filter { $0.supportsVOD && $0.vodEnabled }
         guard let server = vodServers.first(where: { $0.isActive }) ?? (activeServer == nil ? vodServers.first : nil) else {
-            publishSeriesCount(0, "no VOD server"); seriesCategories = []
+            publishSeriesCount(0, "no VOD server", rowsChanged: false); seriesCategories = []
             isLoadingSeries = false
             lastSeriesServerName = nil; currentSeriesServerID = nil
             if !servers.isEmpty {
@@ -1144,7 +1285,7 @@ final class VODStore: ObservableObject {
         }
         lastSeriesServerName = server.name
         if currentSeriesServerID != nil && currentSeriesServerID != server.id {
-            publishSeriesCount(0, "server switch")
+            publishSeriesCount(0, "server switch", rowsChanged: false)
             seriesCategories = []
         }
         currentSeriesServerID = server.id
@@ -1266,9 +1407,8 @@ final class VODStore: ObservableObject {
                         for await item in group { acc[item.0] = item.1 }
                         return acc
                     }
-                    // The catalog write, the lane bookkeeping and the 5-page
-                    // checkpoint all run back here on the main actor, one page
-                    // at a time, exactly as they did when lanes were serial.
+                    // See the movies sweep: the lane bookkeeping stays on the
+                    // main actor, the per-page MAPPING does not.
                     for req in requests {
                         guard !Task.isCancelled else { isLoadingSeries = false; return }
                         guard let outcome = pages[req.name] else { continue }
@@ -1276,30 +1416,16 @@ final class VODStore: ObservableObject {
                         let category = VODCategory(id: req.catID, name: req.name)
                         let page = req.page
                         var written = 0
+                        var mainHopStart = CFAbsoluteTimeGetCurrent()
                         do {
                             let result = try outcome.get()
-                            var batch: [VODDisplayItem] = []
-                            batch.reserveCapacity(result.items.count)
-                            for sItem in result.items {
-                                let cp = sItem.customProperties
-                                var show = VODSeries(
-                                    id: String(sItem.id), name: sItem.name,
-                                    posterURL: sItem.posterURL.flatMap { resolveURL($0, base: baseURL) },
-                                    backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
-                                        .flatMap { VODService.resolveImageURL($0, base: baseURL) },
-                                    rating: sItem.rating ?? "", plot: sItem.plot ?? "",
-                                    genre: sItem.genre ?? "", releaseDate: sItem.year.map(String.init) ?? "",
-                                    cast: cp?.cast ?? "", director: cp?.director ?? "",
-                                    categoryID: category.id,
-                                    categoryName: category.name,
-                                    serverID: sID, seasons: [], episodeCount: 0
-                                )
-                                show.tmdbID = sItem.tmdbID ?? ""
-                                show.addedAt = sItem.createdAt.flatMap(VODService.parseISODate)
-                                batch.append(VODDisplayItem(series: show))
-                            }
+                            let batch = await Task.detached(priority: .utility) {
+                                Self.mapSeriesPage(result.items, baseURL: baseURL,
+                                                   sID: sID, category: category)
+                            }.value
                             written = await catalog.writePage(batch, playlistKey: identity,
                                                               kind: .series, generation: plan.generation)
+                            mainHopStart = CFAbsoluteTimeGetCurrent()
                             total += written
                             nextPage[cat.name] = page + 1
                             if !result.hasMore { finished.insert(cat.name) }
@@ -1323,6 +1449,9 @@ final class VODStore: ObservableObject {
 
                         if isLoadingSeries {
                             publishSeriesCount(total, "sweep first batch")
+                            // See the movies sweep: unblocks the save screen's
+                            // TV Shows row without waiting for the full sweep.
+                            noteFirstVODPage(.series, count: total)
                             isLoadingSeries = false
                             lastSeriesProgressivePublish = Date()
                         } else if written > 0,
@@ -1330,6 +1459,9 @@ final class VODStore: ObservableObject {
                             publishSeriesCount(total, "sweep progressive")
                             lastSeriesProgressivePublish = Date()
                         }
+
+                        noteSweepPageMainHop(mainHopStart, kind: "series",
+                                             category: cat.name, page: page)
 
                         pagesSinceProgressSave += 1
                         if pagesSinceProgressSave >= 5 {
@@ -1344,7 +1476,7 @@ final class VODStore: ObservableObject {
                         if VODSweepActivity.shared.isForeground(.series) {
                             await AppSettleGate.shared.awaitResumeIfPaused()
                         } else if background {
-                            try? await Task.sleep(for: VODSweepActivity.backgroundPageDelay)
+                            try? await Task.sleep(for: VODSweepActivity.shared.backgroundPageDelay(for: .series))
                             await AppSettleGate.shared.awaitResumeIfPaused()
                         } else if !MultiviewStore.shared.tiles.isEmpty {
                             try? await Task.sleep(for: .milliseconds(200))
@@ -1362,7 +1494,7 @@ final class VODStore: ObservableObject {
             if total == 0, let lastError {
                 seriesError = lastError.errorDescription
             }
-            publishSeriesCount(total, "sweep complete")
+            publishSeriesCount(total, "sweep complete", rowsChanged: deleted > 0)
             isLoadingSeries = false
             hasLoadedSeries = true
             debugLog("📺 [VOD-CAT] sweep complete kind=series total=\(total) categories=\(lanes.count) "
@@ -1522,6 +1654,26 @@ final class ChannelStore: ObservableObject {
         loadTask?.cancel()
         epgEnrichTask?.cancel()
         loadTask = Task { await load(server: server) }
+    }
+
+    /// Channels only, awaitable. Used by the Edit Playlist save screen so its
+    /// "Loading channels" row completes on the real channel fetch instead of a
+    /// timer. Deliberately does NOT pull the guide: the credential change
+    /// bumped `credentialGeneration`, and the launch orchestrator owns the EPG
+    /// pass that follows. Unlike `refresh`, there is no idempotent early-out,
+    /// the list on screen belongs to the previous account and must be replaced.
+    func reloadChannelsAndWait(servers: [ServerConnection]) async {
+        guard let server = servers.first(where: { $0.isActive }) ?? servers.first else { return }
+        activeServer = server
+        currentChannelServerID = server.id
+        RecentChannelsStore.shared.setScope(playlistID: server.id.uuidString)
+        channels = []; orderedGroups = []; error = nil
+        isLoading = true
+        loadTask?.cancel()
+        epgEnrichTask?.cancel()
+        let task = Task { await load(server: server) }
+        loadTask = task
+        await task.value
     }
 
     /// Called by pull-to-refresh — always re-fetches channels AND EPG.
@@ -4366,12 +4518,23 @@ struct MainTabView: View {
     @ObservedObject private var foregroundPiP = ForegroundPiPBridge.shared
     #endif
     @ObservedObject private var favoritesStore = FavoritesStore.shared
-    @ObservedObject private var vodStore = VODStore.shared
+    /// NOT observed (1.8.40 guide navigation lag): the sweep publishes a
+    /// progressive count every 5 s for as long as an uncapped walk takes, and
+    /// observing the store here invalidated `MainTabView.body` (and the Live
+    /// TV subtree under it) on every one of them. The tab bar's own needs live
+    /// on `vodFacts`, which only publishes on a real transition; this
+    /// reference stays for the imperative calls and for the initial-sync
+    /// cover's title count, neither of which wants a body dependency.
+    private let vodStore = VODStore.shared
     /// Keeps the Movies / TV Shows tabs on screen, in a loading state, for
     /// the whole life of a catalog sweep (Android parity, Logan 2026-09-16).
     /// Without this the count drops to 0 at the start of "Refresh
-    /// Everything" and the tab vanished until the first page landed.
-    @ObservedObject private var sweepActivity = VODSweepActivity.shared
+    /// Everything" and the tab vanished until the first page landed. Folded
+    /// into `vodFacts` for the same reason as the store above.
+    private let sweepActivity = VODSweepActivity.shared
+    /// The two tab-gate booleans plus the background-work flags, on an
+    /// observable that changes only when one of them really flips.
+    @ObservedObject private var vodFacts = VODCatalogFacts.shared
     private var isTVOS: Bool {
         #if os(tvOS)
         return true
@@ -4790,13 +4953,28 @@ struct MainTabView: View {
         // VOD stage — only really meaningful for servers that expose
         // a VOD library. For pure live-TV sources (M3U), the stage
         // resolves immediately to a "not available" done state.
-        let hasVODServer = allServers.contains { $0.supportsVOD }
+        // Permission- and toggle-gated the same way Edit Playlist > Save
+        // gates its Movies / TV Shows rows (2026-09-18): the row is not a
+        // claim that a library is loading when On Demand is off for the
+        // playlist, or when the Direct Connect account may view neither
+        // movies nor series.
+        let hasVODServer = allServers.contains { server in
+            guard server.supportsVOD, server.vodEnabled else { return false }
+            guard server.type == .dispatcharrAPI else { return true }
+            return server.dispatcharrCanViewVOD || server.dispatcharrCanViewSeries
+        }
         var vodStage = SyncStage(id: "vod", label: "Loading VOD")
         if !hasVODServer {
-            vodStage.status = .done("No VOD on this source")
-        } else if vodStore.isLoadingMovies || vodStore.isLoadingSeries {
+            vodStage.status = .done(
+                allServers.contains { $0.supportsVOD } ? "Not available for this account"
+                                                       : "No VOD on this source")
+        } else if vodFacts.isLoadingMovies || vodFacts.isLoadingSeries {
             vodStage.status = .loading
         } else {
+            // A plain read, not an observation: this stage is only on screen
+            // during the initial sync cover, which re-renders on the channel
+            // and guide stages anyway, and the count is settled by the time
+            // the stage stops saying "loading".
             let titles = vodStore.moviesCount + vodStore.seriesCount
             vodStage.status = .done(titles > 0 ? "\(titles) titles" : "")
         }
@@ -5158,9 +5336,9 @@ struct MainTabView: View {
     /// see the ongoing background activity.
     private var isAnyBackgroundWork: Bool {
         channelStore.isLoading || channelStore.isEPGLoading || guideStore.isLoading
-            || vodStore.isLoadingMovies || vodStore.isLoadingSeries
-            || vodStore.isRefillingMovies || vodStore.isRefillingSeries
-            || vodStore.isSearchingMovies || vodStore.isSearchingSeries
+            || vodFacts.isLoadingMovies || vodFacts.isLoadingSeries
+            || vodFacts.isRefillingMovies || vodFacts.isRefillingSeries
+            || vodFacts.isSearchingMovies || vodFacts.isSearchingSeries
     }
 
     /// Short identifier labels used by the heartbeat log. Terse
@@ -6031,21 +6209,48 @@ struct MainTabView: View {
     /// populated (without this the tab survived on its sibling's content
     /// and showed an empty grid). UNKNOWN never hides: `dispatcharrCanViewVOD`
     /// is true for an unprobed / unreadable account.
+    ///
+    /// The catalog half of this ("stored titles, or a sweep that will store
+    /// some") comes from `vodFacts`, so a progressive count publish cannot
+    /// re-evaluate this body; the permission half stays here, where the active
+    /// server lives.
     private var hasMovies: Bool {
         if let active = activeServerForTabs, !active.dispatcharrCanViewVOD { return false }
-        return vodStore.moviesCount > 0
-            || vodStore.isLoadingMovies
-            || vodStore.isRefillingMovies
-            || sweepActivity.isActive(.movie)
+        return vodFacts.hasMovies
     }
 
     /// Series half. Mirrors `hasMovies` against `vod_series_enabled`.
     private var hasSeries: Bool {
         if let active = activeServerForTabs, !active.dispatcharrCanViewSeries { return false }
-        return vodStore.seriesCount > 0
-            || vodStore.isLoadingSeries
-            || vodStore.isRefillingSeries
-            || sweepActivity.isActive(.series)
+        return vodFacts.hasSeries
+    }
+
+    /// Wires `vodFacts` to the two objects it folds, once. The closure is the
+    /// ONLY place the tab bar's catalog truth is computed, so the store and the
+    /// sweep activity can never disagree about whether a tab belongs on screen.
+    private func startVODCatalogFacts() {
+        let facts = VODCatalogFacts.shared
+        let store = vodStore
+        let activity = sweepActivity
+        facts.start(
+            recompute: { @MainActor in
+                facts.apply(
+                    hasMovies: store.moviesCount > 0
+                        || store.isLoadingMovies
+                        || store.isRefillingMovies
+                        || activity.isActive(.movie),
+                    hasSeries: store.seriesCount > 0
+                        || store.isLoadingSeries
+                        || store.isRefillingSeries
+                        || activity.isActive(.series),
+                    isLoadingMovies: store.isLoadingMovies,
+                    isLoadingSeries: store.isLoadingSeries,
+                    isRefillingMovies: store.isRefillingMovies,
+                    isRefillingSeries: store.isRefillingSeries,
+                    isSearchingMovies: store.isSearchingMovies,
+                    isSearchingSeries: store.isSearchingSeries)
+            },
+            sources: [store.objectWillChange, activity.objectWillChange])
     }
 
     /// The server every tab gate reads. Deliberately the same expression the
@@ -6254,8 +6459,41 @@ struct MainTabView: View {
     }
     #endif
 
+    /// Re-tapping the tab you are already on (iPhone / iPad).
+    ///
+    /// The floating bar is the system's `TabView` bar, and the ONLY signal it
+    /// gives for a re-tap is a selection write with the value already there,
+    /// so the binding is where this is intercepted. Popping a pushed page is
+    /// UIKit's own re-tap behaviour on the `NavigationStack` inside the tab
+    /// (that is why Settings already did it, and Movies / TV Shows / DVR get
+    /// it for free); what was missing is the AT-ROOT half. Every tab gets one
+    /// `.aerioTabReselected` post and decides for itself what its top is,
+    /// scrolling only when it is at root - the pop wins this tap, the next tap
+    /// scrolls. One write per tap, nothing during a scroll.
+    private var tabSelection: Binding<AppTab> {
+        Binding(
+            get: { selectedTab },
+            set: { tapped in
+                guard tapped == selectedTab else {
+                    selectedTab = tapped
+                    return
+                }
+                #if os(iOS)
+                debugLog("[TAB] reselect \(tapped.rawValue) (vodPushed=\(isVODDetailPushed))")
+                // The scroll trackers swallow a programmatic jump, so the bar
+                // is expanded here rather than waiting for the scroll to
+                // report it (each tab also clears its own collapsed flag).
+                TabBarCollapseState.shared.set(false)
+                NotificationCenter.default.post(
+                    name: .aerioTabReselected, object: nil,
+                    userInfo: ["tab": tapped.rawValue])
+                #endif
+            }
+        )
+    }
+
     private var tabContentView: some View {
-        TabView(selection: $selectedTab) {
+        TabView(selection: tabSelection) {
             ChannelListView()
                 .tabItem { Label(AppTab.liveTV.title, systemImage: AppTab.liveTV.icon) }
                 .tag(AppTab.liveTV)
@@ -6348,6 +6586,12 @@ struct MainTabView: View {
             TabBarCollapseState.shared.set(false)
             #endif
         }
+        .onChange(of: selectedTab, initial: true) { _, new in
+            // Lets the quiet catalog sweep slow its page pace while the guide
+            // owns the screen (1.8.40 guide navigation lag). Plain state on
+            // `VODSweepActivity`, so this publishes nothing.
+            sweepActivity.setLiveTVOnScreen(new == .liveTV)
+        }
         .onChange(of: selectedTab) { old, new in
             debugLog("[TAB] switch \(old) -> \(new)")
             // Leaving a tab cancels and closes its search (Logan
@@ -6407,6 +6651,7 @@ struct MainTabView: View {
         }
         #endif
         .onAppear {
+            startVODCatalogFacts()
             syncTabVisibility()
             debugLog("🔶 MainTabView.onAppear: allServers=\(allServers.count), selectedTab=\(selectedTab), thread=\(Thread.current)")
             if UserDefaults.standard.bool(forKey: "launchOnLiveTV") {

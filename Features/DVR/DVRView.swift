@@ -543,7 +543,12 @@ struct DVRView: View {
             railTarget: { letter in
                 library.firstIndex { AlphabetRail.bucket(for: $0.programTitle) == letter }
                     .map(VODWindowList.anchorID)
-            }
+            },
+            // DVR pushes through plain NavigationLinks with no path to read,
+            // so this page cannot tell a pushed detail from its root. UIKit
+            // pops the detail on the same re-tap either way; the scroll just
+            // lands on the list the pop is uncovering.
+            owningTab: .dvr
         )
     }
 
@@ -846,6 +851,14 @@ struct DVRView: View {
         #endif
         .scrollPosition($scrollPosition)
         #if os(iOS)
+        // iPad: re-tapping the DVR tab while on it brings the page back to the
+        // top (phone does the same inside PhoneMediaPage).
+        .onReceive(
+            NotificationCenter.default.publisher(for: .aerioTabReselected)
+        ) { note in
+            guard (note.userInfo?["tab"] as? String) == AppTab.dvr.rawValue else { return }
+            withAnimation(.easeInOut(duration: 0.3)) { scrollPosition.scrollTo(edge: .top) }
+        }
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in
             // Same tracker as Movies and Live TV (hide after 48 pt down, show
             // after 12 pt up); the flag is read, not observed, so no DVR

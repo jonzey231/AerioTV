@@ -87,17 +87,22 @@ func groupSidebarLabel(_ token: String) -> String {
 /// stays inside the row's footprint.
 /// Plain text rows (Logan 2026-09-05: not pills): a quiet wash on focus,
 /// accent text + tint for the active group, inset accent border on focus.
-private struct GroupSidebarRowButtonStyle: ButtonStyle {
+/// Applied directly to the row content rather than through a ButtonStyle: the
+/// rows are focusable views with separate tap and long-press gestures (a
+/// Button fires its action on release and would swallow the long press, same
+/// reason the guide cells avoid one), so `focused` is passed in from the
+/// panel's `@FocusState` instead of read from the button environment.
+private struct GroupSidebarRowChrome: ViewModifier {
     let isActive: Bool
-    @Environment(\.isFocused) private var isFocused
+    let isFocused: Bool
 
-    func makeBody(configuration: Configuration) -> some View {
+    func body(content: Content) -> some View {
         let focused = isFocused
         let fg: Color = focused ? .white : (isActive ? .accentPrimary : .textPrimary)
         let bg: Color = focused
             ? Color.white.opacity(0.16)
             : (isActive ? Color.accentPrimary.opacity(0.12) : .clear)
-        return configuration.label
+        return content
             .scaledFont(.system(size: groupSidebarRowFontSize, weight: isActive ? .semibold : .regular))
             .foregroundColor(fg)
             .lineLimit(1)
@@ -112,7 +117,6 @@ private struct GroupSidebarRowButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(focused ? Color.accentPrimary : Color.clear, lineWidth: 3)
             )
-            .opacity(configuration.isPressed ? 0.7 : 1.0)
             .animation(.easeInOut(duration: 0.15), value: focused)
     }
 }
@@ -152,8 +156,22 @@ struct GroupSidebarPanel: View {
     let onManageGroups: (() -> Void)?
     /// Warning dot on that button when groups are currently hidden.
     let hiddenGroupCount: Int
+    /// Long press on a row sets that group as the Live TV default, or clears
+    /// the default when the row is already the pinned one (Logan 2026-09-17).
+    /// The host performs the toggle through `DefaultChannelGroupStore`; nil
+    /// leaves the rows select-only.
+    let onSetDefault: ((String) -> Void)?
+
+    /// Copy for the default-group hint under the "Groups" header.
+    static let defaultGroupHint = "Hold Select on a group to set it as default."
+
+    /// Synced on-screen hints preference (Settings > Remote Control).
+    @AppStorage(showRemoteHintsKey) private var showRemoteHints = true
 
     @FocusState private var focusedToken: String?
+    /// Mirrors the stored default so the thumbtack moves the moment a long
+    /// press lands (a plain UserDefaults read in the body never re-renders).
+    @State private var defaultToken: String = DefaultChannelGroupStore.current
 
     init(groups: [String],
          selectedToken: String,
@@ -162,6 +180,7 @@ struct GroupSidebarPanel: View {
          onRowFocused: ((String) -> Void)? = nil,
          onManageGroups: (() -> Void)? = nil,
          hiddenGroupCount: Int = 0,
+         onSetDefault: ((String) -> Void)? = nil,
          fixedWidth: CGFloat? = nil) {
         self.fixedWidth = fixedWidth
         self.groups = groups
@@ -171,6 +190,7 @@ struct GroupSidebarPanel: View {
         self.onRowFocused = onRowFocused
         self.onManageGroups = onManageGroups
         self.hiddenGroupCount = hiddenGroupCount
+        self.onSetDefault = onSetDefault
     }
 
     /// The row that should receive focus + be scrolled into view. Mirrors the
@@ -220,12 +240,27 @@ struct GroupSidebarPanel: View {
             }
             .padding(.leading, 20)
 
+            // Hint (Logan 2026-09-18): the long press that pins a default
+            // group is invisible otherwise. Plain Text, never focusable, so
+            // the rail's focus order is unchanged. Only shown where the
+            // press actually does something, and only while on-screen hints
+            // are enabled (Settings > Remote Control > On-Screen Hints).
+            if showRemoteHints, onSetDefault != nil {
+                Text(Self.defaultGroupHint)
+                    .scaledFont(.system(size: 18).subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 20)
+                    .padding(.trailing, 16)
+                    .focusable(false)
+                    .accessibilityHidden(true)
+            }
+
             ScrollViewReader { proxy in
                 ScrollView {
-                    let defaultToken = UserDefaults.standard.string(forKey: "defaultChannelGroup") ?? ""
                     LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(groups, id: \.self) { token in
-                            groupRow(token, defaultToken: defaultToken)
+                            groupRow(token)
                                 .id(token)
                         }
                     }
@@ -236,7 +271,10 @@ struct GroupSidebarPanel: View {
                 // GuideGroupSidebarPane this fires first and calls the same
                 // closure the pane passes down.
                 .onExitCommand { onDismiss() }
-                .onAppear { assertInitialFocus(using: proxy) }
+                .onAppear {
+                    defaultToken = DefaultChannelGroupStore.current
+                    assertInitialFocus(using: proxy)
+                }
                 .onChange(of: focusedToken) { _, token in
                     if let token { onRowFocused?(token) }
                 }
@@ -249,27 +287,44 @@ struct GroupSidebarPanel: View {
         .background(fixedWidth == nil ? Color.appBackground : Color.clear)
     }
 
+    /// One sidebar row.
+    ///
+    /// Not a `Button`: a tvOS Button fires its action on RELEASE, which would
+    /// swallow the long press (the same reason the guide cells use a focusable
+    /// view with separate gestures). The row is a focusable view with an
+    /// `.onTapGesture` for select and an `.onLongPressGesture` for the default
+    /// group, so SwiftUI resolves exactly one of the two per press: holding
+    /// past the threshold sets/clears the default and the release does NOT
+    /// also select the group.
     @ViewBuilder
-    private func groupRow(_ token: String, defaultToken: String) -> some View {
-        let isDefault = defaultToken == token || (token == groupSidebarAllToken && defaultToken.isEmpty)
-        Button {
-            onSelect(token)
-        } label: {
-            HStack(spacing: 8) {
-                if token == ChannelListView.favoritesToken {
-                    Image(systemName: "star.fill").scaledFont(.system(size: 22, weight: .medium))
-                } else if token == ChannelListView.recentlyWatchedToken {
-                    Image(systemName: "clock.arrow.circlepath").scaledFont(.system(size: 22, weight: .medium))
-                }
-                Text(groupSidebarLabel(token))
-                    .lineLimit(1)
-                if isDefault {
-                    Image(systemName: "pin.fill").scaledFont(.system(size: 14, weight: .semibold)).opacity(0.7)
-                }
+    private func groupRow(_ token: String) -> some View {
+        let isDefault = token == defaultToken
+            || (token == groupSidebarAllToken && defaultToken.isEmpty)
+        HStack(spacing: 8) {
+            if token == ChannelListView.favoritesToken {
+                Image(systemName: "star.fill").scaledFont(.system(size: 22, weight: .medium))
+            } else if token == ChannelListView.recentlyWatchedToken {
+                Image(systemName: "clock.arrow.circlepath").scaledFont(.system(size: 22, weight: .medium))
+            }
+            Text(groupSidebarLabel(token))
+                .lineLimit(1)
+            if isDefault {
+                Image(systemName: "pin.fill").scaledFont(.system(size: 14, weight: .semibold)).opacity(0.7)
             }
         }
-        .buttonStyle(GroupSidebarRowButtonStyle(isActive: token == selectedToken))
+        .modifier(GroupSidebarRowChrome(isActive: token == selectedToken,
+                                        isFocused: focusedToken == token))
+        .contentShape(Rectangle())
+        .focusable()
         .focused($focusedToken, equals: token)
+        .onTapGesture { onSelect(token) }
+        .onLongPressGesture(minimumDuration: 0.45) {
+            guard let onSetDefault else { return }
+            onSetDefault(token)
+            // The host writes through DefaultChannelGroupStore; re-read it so
+            // the thumbtack lands on (or leaves) this row immediately.
+            defaultToken = DefaultChannelGroupStore.current
+        }
     }
 
     /// Scroll the active row to center, then re-assert focus onto it until the
@@ -313,6 +368,9 @@ struct GuideGroupSidebarPane: View {
     /// `GroupSidebarPanel.onManageGroups`.
     let onManageGroups: (() -> Void)?
     let hiddenGroupCount: Int
+    /// See `GroupSidebarPanel.onSetDefault`: long press a row to set or clear
+    /// the default Live TV group.
+    let onSetDefault: ((String) -> Void)?
 
     @Namespace private var sidebarFocusNS
 
@@ -350,7 +408,9 @@ struct GuideGroupSidebarPane: View {
          onPreview: ((String) -> Void)? = nil,
          onCommit: (() -> Void)? = nil,
          onManageGroups: (() -> Void)? = nil,
-         hiddenGroupCount: Int = 0) {
+         hiddenGroupCount: Int = 0,
+         onSetDefault: ((String) -> Void)? = nil) {
+        self.onSetDefault = onSetDefault
         self.groups = groups
         self.selectedToken = selectedToken
         self.onSelect = onSelect
@@ -371,6 +431,7 @@ struct GuideGroupSidebarPane: View {
                 onRowFocused: onPreview,
                 onManageGroups: onManageGroups,
                 hiddenGroupCount: hiddenGroupCount,
+                onSetDefault: onSetDefault,
                 fixedWidth: fittedContentWidth
             )
             .padding(.top, 4)

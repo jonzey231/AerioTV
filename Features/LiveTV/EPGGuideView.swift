@@ -4735,6 +4735,16 @@ struct EPGGuideView: View {
     /// rail. Matches the Android guide, which narrowed its rail for the same
     /// reason.
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    /// Channel rows back to the first channel, timeline untouched. The scroll
+    /// trackers treat a jump this large as programmatic and never report it,
+    /// so the tab bar is expanded here instead of waiting for the scroll.
+    private func scrollChannelRowsToTop(_ proxy: ScrollViewProxy) {
+        withAnimation(.easeInOut(duration: 0.25)) {
+            proxy.scrollTo("guide.top", anchor: .top)
+            if guideTabBarHidden { guideTabBarHidden = false }
+        }
+    }
     #endif
     #if os(tvOS)
     /// Programmatic focus target for a channel row's left-hand cell.
@@ -4915,7 +4925,11 @@ struct EPGGuideView: View {
     /// header height, pixels-per-hour, and per-cell font sizes — see
     /// `GuideProgramButton.cellContent`) scales together. tvOS uses fixed
     /// constants because the slider isn't exposed there.
-    @AppStorage("guideScale") private var guideScale: Double = 1.0
+    @AppStorage("guideScale") private var guideScaleRaw: Double = 1.0
+    /// Clamp to the slider range (85-150%, Logan 2026-09-18) so a value
+    /// saved under the old 175% range, or a corrupted UserDefaults value,
+    /// can't blow up the grid metrics.
+    private var guideScale: CGFloat { CGFloat(max(0.85, min(1.5, guideScaleRaw))) }
     /// Width-adaptive: a 100pt rail eats roughly a quarter of a 375pt phone,
     /// so compact width narrows it to 78pt. Regular width (iPad, unfolded
     /// foldable) keeps 100pt. Both still scale with guideScale.
@@ -5529,11 +5543,21 @@ struct EPGGuideView: View {
                     debugLog("🧭 [GuideFocus] scrollToTop(epg) final force-top, focus=\(focusedProgramID ?? "nil")")
                 }
                 #else
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    proxy.scrollTo("guide.top", anchor: .top)
-                }
+                scrollChannelRowsToTop(proxy)
                 #endif
             }
+            #if os(iOS)
+            // Tapping the Live TV tab while already on it: channel rows go
+            // back to the top. The timeline is left where it is - there is no
+            // reset-to-now on the iOS guide, and the hours the user scrolled
+            // to are not "a pushed page" to come back from.
+            .onReceive(
+                NotificationCenter.default.publisher(for: .aerioTabReselected)
+            ) { note in
+                guard (note.userInfo?["tab"] as? String) == AppTab.liveTV.rawValue else { return }
+                scrollChannelRowsToTop(proxy)
+            }
+            #endif
             #if os(tvOS)
             // Remote Control #196: mapped guide actions posted by
             // GuideRemoteDispatch (hold-Left / hold-Right / hold-Select
@@ -7516,7 +7540,9 @@ private struct GuideProgramButton: View {
     /// User-controllable guide scale (see `EPGGuideView.guideScale`). Multiplies
     /// the iOS/iPadOS/Mac per-cell font sizes so text scales with the grid.
     /// tvOS sizes stay fixed.
-    @AppStorage("guideScale") private var guideScale: Double = 1.0
+    @AppStorage("guideScale") private var guideScaleRaw: Double = 1.0
+    /// Same 85-150% clamp as `EPGGuideView.guideScale`.
+    private var guideScale: CGFloat { CGFloat(max(0.85, min(1.5, guideScaleRaw))) }
     #endif
     #if os(tvOS)
     // The cell is now a SwiftUI-native focusable, so its focus drives this

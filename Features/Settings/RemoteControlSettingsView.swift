@@ -104,10 +104,6 @@ struct RemoteControlSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
-                Text("Remote Control")
-                    .scaledFont(.system(size: 40, weight: .bold))
-                    .foregroundColor(.textPrimary)
-
                 hintsSection
                 playChannelsInSection
                 whileWatchingSection
@@ -136,11 +132,11 @@ struct RemoteControlSettingsView: View {
     /// 0. On-screen remote hints (Logan 2026-09-11). Top of the section
     /// list; the Live TV strip and the player strip both observe it.
     private var hintsSection: some View {
-        SettingsSection("On-Screen Hints", style: .card) {
+        SettingsSection("On-Screen Hints", style: .plain) {
             TVSettingsToggleRow(
                 icon: "questionmark.circle",
                 iconColor: .accentPrimary,
-                title: "Show remote hints",
+                title: "Show Remote Hints",
                 subtitle: "Key reminders on Live TV and in the player",
                 isOn: $showRemoteHints
             ) { _ in }
@@ -149,7 +145,7 @@ struct RemoteControlSettingsView: View {
 
     /// 1. Where a channel starts playing (bound to `tuneInMini`).
     private var playChannelsInSection: some View {
-        SettingsSection("Play Channels In", style: .card) {
+        SettingsSection("Play Channels In", style: .plain) {
             TVSettingsSelectionRow(
                 label: "Full Screen",
                 isSelected: !store.tuneInMini,
@@ -166,7 +162,7 @@ struct RemoteControlSettingsView: View {
 
     /// 3. One row per user-facing player slot.
     private var whileWatchingSection: some View {
-        SettingsSection("While Watching", style: .card) {
+        SettingsSection("While Watching", style: .plain) {
             ForEach(Self.playerSlots, id: \.self) { slot in
                 playerSlotRow(slot)
             }
@@ -176,7 +172,7 @@ struct RemoteControlSettingsView: View {
 
     /// 4. Guide-context Select / Left / Right rows.
     private var inTheGuideSection: some View {
-        SettingsSection("In the TV Guide", style: .card) {
+        SettingsSection("In the TV Guide", style: .plain) {
             ForEach(Self.guideSlots, id: \.self) { slot in
                 guideSlotRow(slot)
             }
@@ -186,7 +182,7 @@ struct RemoteControlSettingsView: View {
 
     /// 5. Dedicated remote buttons, player context.
     private var additionalButtonsSection: some View {
-        SettingsSection("Additional Buttons", style: .card) {
+        SettingsSection("Additional Buttons", style: .plain) {
             ForEach(Self.additionalPlayerSlots, id: \.self) { slot in
                 playerSlotRow(slot)
             }
@@ -196,7 +192,7 @@ struct RemoteControlSettingsView: View {
 
     /// 6. Guarded reset.
     private var resetSection: some View {
-        SettingsSection("Reset", style: .card) {
+        SettingsSection("Reset", style: .plain) {
             TVSettingsActionRow(
                 icon: "arrow.counterclockwise",
                 label: "Reset to Defaults",
@@ -216,18 +212,15 @@ struct RemoteControlSettingsView: View {
     /// value label and pushed highlight both update after an edit.
     private func playerSlotRow(_ slot: RemoteSlot) -> some View {
         let current = store.playerAction(slot)
-        return TVSettingsNavRow(
-            destination: TVSlotChoiceListView(
-                title: displayName(slot),
-                choices: Self.playerActionChoices,
-                current: current,
-                displayName: { displayName($0) },
-                onSelect: { store.setPlayerAction(slot, $0) }
-            )
-            .trackedAsClassicSettingsChild()
-        ) {
-            slotRowLabel(name: displayName(slot), value: displayName(current))
-        }
+        // Logan 2026-09-19: the action list is a pop-up sheet now, not a
+        // pushed page. The list is long, so it scrolls inside the card.
+        return TVSlotChoiceRow(
+            title: displayName(slot),
+            choices: Self.playerActionChoices,
+            current: current,
+            displayName: { displayName($0) },
+            onSelect: { store.setPlayerAction(slot, $0) }
+        )
     }
 
     /// A guide-context slot row: pushes the curated guide choice list for
@@ -236,34 +229,13 @@ struct RemoteControlSettingsView: View {
         // Effective action, so Left (hold) reads Open sidebar in Sidebar
         // Menu mode, which is what the press actually does.
         let current = store.effectiveGuideAction(slot)
-        return TVSettingsNavRow(
-            destination: TVSlotChoiceListView(
-                title: displayName(slot),
-                choices: Self.guideActionChoices(for: slot),
-                current: current,
-                displayName: { displayName($0) },
-                onSelect: { store.setGuideAction(slot, $0) }
-            )
-            .trackedAsClassicSettingsChild()
-        ) {
-            slotRowLabel(name: displayName(slot), value: displayName(current))
-        }
-    }
-
-    private func slotRowLabel(name: String, value: String) -> some View {
-        HStack(spacing: 16) {
-            Text(name)
-                .scaledFont(.system(size: 26, weight: .medium))
-                .foregroundColor(.textPrimary)
-            Spacer(minLength: 12)
-            Text(value)
-                .scaledFont(.system(size: 24))
-                .foregroundColor(Color.contrastText(.accentPrimary))
-                .lineLimit(1)
-            Image(systemName: "chevron.right")
-                .scaledFont(.system(size: 20, weight: .semibold))
-                .foregroundColor(Color.contrastText(.textTertiary))
-        }
+        return TVSlotChoiceRow(
+            title: displayName(slot),
+            choices: Self.guideActionChoices(for: slot),
+            current: current,
+            displayName: { displayName($0) },
+            onSelect: { store.setGuideAction(slot, $0) }
+        )
     }
 
     // MARK: - Section scaffold (copied from AppBehaviorsSettingsView)
@@ -361,55 +333,54 @@ private func displayName(_ action: GuideRemoteAction) -> String {
     }
 }
 
-// MARK: - Pushed choice list
+// MARK: - Slot choice row + pop-up sheet
 
-/// Pushed list of curated action choices for one remote slot. A plain
-/// `List` of `TVSettingsSelectionRow`s (deliberately NOT a native
-/// `Picker` wheel, which focus-traps on tvOS). Selecting an option
-/// commits it through `onSelect` and pops back to the map.
+/// One remote-slot row: slot name, its current action, chevron. Select
+/// opens the shared pop-up option sheet (`TVSettingsSheetCard`) with the
+/// curated action list for that slot; the list is long, so it scrolls
+/// inside the card. Deliberately NOT a native `Picker` wheel, which
+/// focus-traps on tvOS.
 ///
-/// Generic over the action enum so the same view backs both the player
-/// and guide pickers; `Hashable` gives us `ForEach` identity plus the
-/// `==` used to highlight the current choice.
-private struct TVSlotChoiceListView<Action: Hashable>: View {
+/// Generic over the action enum so the same row backs both the player and
+/// guide pickers; `Hashable` gives `ForEach` identity plus the `==` that
+/// marks the current choice.
+private struct TVSlotChoiceRow<Action: Hashable>: View {
     let title: String
     let choices: [Action]
     let current: Action
     let displayName: (Action) -> String
     let onSelect: (Action) -> Void
 
-    @Environment(\.dismiss) private var dismiss
+    @State private var isSheetPresented = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text(title)
-                .scaledFont(.system(size: 40, weight: .bold))
-                .foregroundColor(.textPrimary)
-                .padding(.horizontal, 80)
-                .padding(.top, 60)
-                .padding(.bottom, 24)
-
-            List {
-                ForEach(choices, id: \.self) { action in
-                    TVSettingsSelectionRow(
-                        label: displayName(action),
-                        isSelected: action == current,
-                        action: {
-                            onSelect(action)
-                            dismiss()
-                        }
-                    )
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 6, leading: 80, bottom: 6, trailing: 80))
-                }
+        TVSettingsCardButtonRow(action: { isSheetPresented = true }) {
+            HStack(spacing: 16) {
+                Text(title)
+                    .scaledFont(.system(size: SettingsMetrics.tvRowTitleSize, weight: .medium))
+                    .foregroundColor(.textPrimary)
+                Spacer(minLength: 12)
+                Text(displayName(current))
+                    .scaledFont(.system(size: SettingsMetrics.tvEyebrowSize))
+                    .foregroundColor(Color.contrastText(.accentPrimary))
+                    .lineLimit(1)
+                Image(systemName: "chevron.right")
+                    .scaledFont(.system(size: 20, weight: .semibold))
+                    .foregroundColor(Color.contrastText(.textTertiary))
             }
-            .listStyle(.plain)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.appBackground.ignoresSafeArea())
-        .navigationTitle(title)
-        .toolbar(.hidden, for: .navigationBar)
-        .toolbarBackground(Color.appBackground, for: .navigationBar)
+        .fullScreenCover(isPresented: $isSheetPresented) {
+            // Shared single-choice sheet: it owns the focus state inside the
+            // cover, which is what makes focus open on the current action.
+            TVSettingsSingleChoiceSheet(
+                title: title,
+                options: choices.map { SettingsChoice($0, displayName($0)) },
+                selection: current
+            ) { action in
+                onSelect(action)
+                isSheetPresented = false
+            }
+        }
     }
 }
 

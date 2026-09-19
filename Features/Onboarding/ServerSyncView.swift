@@ -81,9 +81,20 @@ struct ServerSyncView: View {
             stages: [SyncStage],
             onContinueAnyway: () -> Void
         )
+
+        /// Edit Playlist > Save (2026-09-18, Android parity). Same screen,
+        /// same rows, driven by `PlaylistSaveProgress` instead of by this
+        /// view or by MainTabView's stores. There is no Skip and no
+        /// dismissal: the cover owns the screen until the save resolves,
+        /// so nothing in the form can be edited mid-save.
+        case saving(stages: [SyncStage])
     }
 
     let mode: Mode
+    /// Headline over the stage card. "Setting Up" for the add and launch
+    /// flows; Edit Playlist passes "Saving Changes". Parameterized rather
+    /// than forked into a second view so the two screens cannot drift.
+    var title: String = "Setting Up"
     @Environment(\.dismiss) private var dismiss
 
     // MARK: Onboarding-only state
@@ -131,6 +142,8 @@ struct ServerSyncView: View {
             return onboardingStages
         case .initialLaunch(let stages, _):
             return stages
+        case .saving(let stages):
+            return stages
         }
     }
 
@@ -138,7 +151,15 @@ struct ServerSyncView: View {
         switch mode {
         case .onboarding:     return !allDone
         case .initialLaunch:  return true
+        case .saving:         return true
         }
+    }
+
+    /// True while a save is in flight: the cover swallows Menu / Back and
+    /// offers no dismissal affordance at all.
+    private var isSavingMode: Bool {
+        if case .saving = mode { return true }
+        return false
     }
 
     // MARK: Body
@@ -159,7 +180,7 @@ struct ServerSyncView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                         .shadow(color: .accentPrimary.opacity(0.3), radius: 20, y: 4)
 
-                    Text("Setting Up")
+                    Text(title)
                         .scaledFont(.headlineLarge)
                         .foregroundColor(.textPrimary)
                 }
@@ -204,6 +225,13 @@ struct ServerSyncView: View {
             }
         }
         .interactiveDismissDisabled(interactiveDismissDisabled)
+        // While saving, Menu / Back must not tear the cover down and drop
+        // the user back into a form that is being written through. The
+        // modifier is applied ONLY in saving mode so the add and launch
+        // covers keep whatever Menu behavior they have today.
+        #if os(tvOS)
+        .modifier(SwallowExitCommand(active: isSavingMode))
+        #endif
         .task {
             await runOnboardingIfNeeded()
         }
@@ -272,6 +300,11 @@ struct ServerSyncView: View {
                 #endif
             }
             .animation(.easeInOut(duration: 0.25), value: isTakingTooLong)
+
+        case .saving:
+            // No Skip: abandoning a half-applied credential change is the
+            // one outcome this screen exists to prevent.
+            EmptyView()
         }
     }
 
@@ -387,15 +420,35 @@ struct ServerSyncView: View {
         }()
         updateStage("epg", status: .done(epgDetail))
 
-        // Stage 2: VOD
+        // Stage 2: VOD. Permission-gated the same way Edit Playlist > Save
+        // gates its Movies / TV Shows rows (2026-09-18): the row used to be
+        // shown, and the library fetched, for every VOD-capable source even
+        // when the account that was just added may not view movies OR series,
+        // or when On Demand is turned off for the playlist. The capability
+        // snapshot is taken first so the decision uses the NEW account's
+        // flags, not whatever an earlier playlist left behind.
+        if server.type == .dispatcharrAPI {
+            await DispatcharrCapabilityProbe.refreshIfStale(server, reason: "Setting Up (VOD)")
+        }
+        let vodAllowed: Bool = {
+            guard server.supportsVOD, server.vodEnabled else { return false }
+            guard server.type == .dispatcharrAPI else { return true }
+            return server.dispatcharrCanViewVOD || server.dispatcharrCanViewSeries
+        }()
         updateStage("vod", status: .loading)
-        let vodCount = await loadVOD(snap: snap)
-        guard !Task.isCancelled else { return }
-        updateStage("vod", status: .done(
-            snap.type == .m3uPlaylist
-                ? "M3U playlists don't expose VOD"
-                : (vodCount > 0 ? "\(vodCount) titles" : "No VOD available")
-        ))
+        if !vodAllowed {
+            updateStage("vod", status: .done(
+                snap.type == .m3uPlaylist
+                    ? "M3U playlists don't expose VOD"
+                    : (server.vodEnabled
+                       ? "Not available for this account"
+                       : "On Demand is off for this playlist")
+            ))
+        } else {
+            let vodCount = await loadVOD(snap: snap)
+            guard !Task.isCancelled else { return }
+            updateStage("vod", status: .done(vodCount > 0 ? "\(vodCount) titles" : "No VOD available"))
+        }
 
         // Stage 3: DVR — reconcile Dispatcharr recordings (server-side scheduler).
         // XC and M3U servers have no DVR API; mark the stage done with a note.
@@ -564,6 +617,274 @@ struct ServerSyncView: View {
         // Brief yield so the user sees the "loading" dot before the checkmark.
         try? await Task.sleep(nanoseconds: 600_000_000)
         return "Synced"
+    }
+}
+
+#if os(tvOS)
+/// Swallows the Menu / Back press while a save is applying. Applied
+/// conditionally so only the `.saving` cover changes behavior.
+private struct SwallowExitCommand: ViewModifier {
+    let active: Bool
+    func body(content: Content) -> some View {
+        if active {
+            content.onExitCommand { /* ignored while saving */ }
+        } else {
+            content
+        }
+    }
+}
+#endif
+
+// MARK: - Playlist Save Progress (Edit Playlist > Save)
+
+/// One row of the "Saving Changes" screen.
+///
+/// Casing follows the rows the Add Playlist / launch cover already shows
+/// ("Loading EPG", "Loading DVR", "Loading preferences"): sentence case,
+/// no trailing ellipsis, so a user who added the playlist yesterday and
+/// edits it today reads the same screen.
+enum PlaylistSaveStep: String {
+    case verify
+    case channels
+    case movies
+    case tvShows
+    case finish
+
+    var label: String {
+        switch self {
+        case .verify:   return "Verifying credentials"
+        case .channels: return "Loading channels"
+        case .movies:   return "Loading movies"
+        case .tvShows:  return "Loading TV shows"
+        case .finish:   return "Finishing up"
+        }
+    }
+}
+
+/// Stage source for `ServerSyncView(.saving)`. Rows are APPENDED as the
+/// save path reaches them, never pre-listed, so a row on screen always
+/// means that work is really happening: the Movies / TV Shows rows, for
+/// instance, are only added after the capability probe for the new
+/// credentials has answered.
+@MainActor
+final class PlaylistSaveProgress: ObservableObject {
+    @Published private(set) var stages: [SyncStage] = []
+
+    private var runStart = CFAbsoluteTimeGetCurrent()
+    private var stepStart: [String: CFAbsoluteTime] = [:]
+
+    func reset() {
+        stages = []
+        stepStart = [:]
+        runStart = CFAbsoluteTimeGetCurrent()
+        debugLog("[SAVE] begin")
+    }
+
+    /// Add a row without starting it. Used for the Movies / TV Shows pair
+    /// so both appear as soon as the gate allows them.
+    func show(_ steps: [PlaylistSaveStep]) {
+        for step in steps where !stages.contains(where: { $0.id == step.rawValue }) {
+            withAnimation(.easeInOut(duration: 0.3)) {
+                stages.append(SyncStage(id: step.rawValue, label: step.label))
+            }
+        }
+    }
+
+    func begin(_ step: PlaylistSaveStep) {
+        show([step])
+        stepStart[step.rawValue] = CFAbsoluteTimeGetCurrent()
+        set(step, .loading)
+        debugLog("[SAVE] \(step.rawValue) start +\(sinceStart())ms")
+    }
+
+    func finish(_ step: PlaylistSaveStep, detail: String = "") {
+        set(step, .done(detail))
+        debugLog("[SAVE] \(step.rawValue) done in \(sinceStep(step))ms (+\(sinceStart())ms)"
+                 + (detail.isEmpty ? "" : ": \(detail)"))
+    }
+
+    func fail(_ step: PlaylistSaveStep, message: String) {
+        set(step, .failed(message))
+        debugLog("[SAVE] \(step.rawValue) FAILED after \(sinceStep(step))ms (+\(sinceStart())ms)")
+    }
+
+    /// Why a row is NOT on screen. Log only, no row.
+    func skip(_ step: PlaylistSaveStep, _ why: String) {
+        debugLog("[SAVE] \(step.rawValue) skipped (\(why)) +\(sinceStart())ms")
+    }
+
+    private func set(_ step: PlaylistSaveStep, _ status: SyncStage.StageStatus) {
+        guard let idx = stages.firstIndex(where: { $0.id == step.rawValue }) else { return }
+        withAnimation(.easeInOut(duration: 0.3)) {
+            stages[idx].status = status
+        }
+    }
+
+    private func sinceStart() -> Int {
+        Int((CFAbsoluteTimeGetCurrent() - runStart) * 1000)
+    }
+
+    private func sinceStep(_ step: PlaylistSaveStep) -> Int {
+        guard let t = stepStart[step.rawValue] else { return 0 }
+        return Int((CFAbsoluteTimeGetCurrent() - t) * 1000)
+    }
+}
+
+/// The Edit Playlist save, shared by the iOS sheet and the tvOS page so
+/// the two cannot drift. Verifies first, then applies, then does the work
+/// each visible row claims. Returns nil on success, or the server's own
+/// message for the form's "Save Failed" section.
+@MainActor
+enum PlaylistSaveRunner {
+
+    static func run(server: ServerConnection,
+                    typedBaseURL: String,
+                    credentialType: DispatcharrCredentialType,
+                    originalCredentials: DispatcharrCredentialSnapshot?,
+                    progress: PlaylistSaveProgress,
+                    commitStaged: () -> Void) async -> String? {
+        progress.reset()
+
+        let credentialsChanged = ServerCredentialChange.credentialsChanged(
+            server: server,
+            previous: originalCredentials,
+            credentialType: credentialType
+        )
+        let urlChanged = typedBaseURL != server.baseURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // A rename, a User-Agent edit or a Guide Days change costs no login
+        // round trip at all, only a credential swap or a new URL does.
+        let needsVerify = credentialsChanged || (urlChanged && server.type != .m3uPlaylist)
+
+        if needsVerify {
+            if let message = await ServerCredentialChange.verify(
+                server: server,
+                baseURL: typedBaseURL,
+                credentialType: credentialType,
+                onStep: { progress.begin($0) }
+            ) {
+                progress.fail(.verify, message: message)
+                return message
+            }
+            progress.finish(.verify)
+        } else {
+            progress.skip(.verify, "no credential or URL change")
+        }
+
+        commitStaged()
+
+        if credentialsChanged {
+            // Drops the old account's cached identity, re-mints the api_key
+            // and takes a FRESH capability snapshot before anything below
+            // decides which rows to show.
+            if let message = await ServerCredentialChange.applyChange(
+                server: server,
+                // The row is already on screen and done when a verify ran
+                // (a credential change always verifies first); re-beginning
+                // it would bounce it back to a spinner.
+                onStep: needsVerify ? nil : { progress.begin($0) }
+            ) {
+                progress.fail(.verify, message: message)
+                return message
+            }
+        } else if urlChanged, server.type == .dispatcharrAPI {
+            // Same panel, new address: permissions still have to be re-read
+            // before the Movies / TV Shows rows are decided.
+            await DispatcharrCapabilityProbe.refresh(server, reason: "playlist URL change")
+        }
+        SyncManager.shared.saveCredentialsSynced(for: server)
+
+        let identityChanged = credentialsChanged || urlChanged
+        let servers = allServers(around: server)
+
+        // Channels: only the ACTIVE playlist has any on screen, and only a
+        // new identity or address invalidates them.
+        if identityChanged, server.isActive {
+            progress.begin(.channels)
+            await ChannelStore.shared.reloadChannelsAndWait(servers: servers)
+            let n = ChannelStore.shared.channels.count
+            progress.finish(.channels, detail: n > 0 ? "\(n) channels" : "")
+        } else {
+            progress.skip(.channels, identityChanged ? "inactive playlist" : "no identity change")
+        }
+
+        await runVODStagesIfNeeded(server: server,
+                                   servers: servers,
+                                   identityChanged: identityChanged,
+                                   progress: progress)
+
+        // Finishing up: push the edited row (and its credentials) to iCloud
+        // and tell every capability-gated surface to re-read the snapshot.
+        progress.begin(.finish)
+        SyncManager.shared.pushServers(servers, immediate: true)
+        NotificationCenter.default.post(name: .dispatcharrCapabilitiesDidChange, object: nil)
+        progress.finish(.finish)
+        return nil
+    }
+
+    /// Movies / TV Shows. A row appears only when that catalog is really
+    /// being rebuilt: the playlist is active, its identity changed, On
+    /// Demand is on for it, and (Direct Connect) the NEW account may view
+    /// that kind. The on-disk catalog belongs to the OLD account, so it is
+    /// wiped and a foreground sweep started; the row completes on the first
+    /// stored page (or a zero answer) and the sweep then finishes in the
+    /// background exactly as it does after Add Playlist.
+    private static func runVODStagesIfNeeded(server: ServerConnection,
+                                             servers: [ServerConnection],
+                                             identityChanged: Bool,
+                                             progress: PlaylistSaveProgress) async {
+        guard identityChanged, server.isActive else {
+            progress.skip(.movies, identityChanged ? "inactive playlist" : "no identity change")
+            progress.skip(.tvShows, identityChanged ? "inactive playlist" : "no identity change")
+            return
+        }
+        guard server.supportsVOD else {
+            progress.skip(.movies, "source has no VOD"); progress.skip(.tvShows, "source has no VOD")
+            return
+        }
+        guard server.vodEnabled else {
+            progress.skip(.movies, "On Demand off for this playlist")
+            progress.skip(.tvShows, "On Demand off for this playlist")
+            return
+        }
+        let isDirect = server.type == .dispatcharrAPI
+        let wantMovies = !isDirect || server.dispatcharrCanViewVOD
+        let wantSeries = !isDirect || server.dispatcharrCanViewSeries
+        if !wantMovies { progress.skip(.movies, "account may not view movies") }
+        if !wantSeries { progress.skip(.tvShows, "account may not view TV shows") }
+        guard wantMovies || wantSeries else { return }
+
+        if wantMovies { progress.show([.movies]) }
+        if wantSeries { progress.show([.tvShows]) }
+
+        // The stored rows, the legacy snapshot and the saved sweep positions
+        // were all written as the old account. Nothing of it may survive.
+        let store = VODStore.shared
+        store.clear()
+        await store.deleteCatalog(for: server)
+
+        if wantMovies {
+            progress.begin(.movies)
+            store.armFirstVODPage([.movie])
+            store.refreshMovies(servers: servers)
+            let n = await store.awaitFirstVODPage(.movie)
+            progress.finish(.movies, detail: n > 0 ? "\(n) titles" : "No movies available")
+        }
+        if wantSeries {
+            progress.begin(.tvShows)
+            store.armFirstVODPage([.series])
+            store.refreshSeries(servers: servers)
+            let n = await store.awaitFirstVODPage(.series)
+            progress.finish(.tvShows, detail: n > 0 ? "\(n) titles" : "No TV shows available")
+        }
+    }
+
+    /// Every configured playlist, read off the edited row's own context.
+    /// The stores need the whole list to pick the active one.
+    private static func allServers(around server: ServerConnection) -> [ServerConnection] {
+        guard let context = server.modelContext else { return [server] }
+        let all = (try? context.fetch(FetchDescriptor<ServerConnection>())) ?? []
+        return all.isEmpty ? [server] : all
     }
 }
 

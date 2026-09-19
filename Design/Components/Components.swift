@@ -144,6 +144,33 @@ struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
 
 // MARK: - Shared tvOS Button Style
 
+// =====================================================================
+// tvOS FOCUS VISUAL CHECKLIST - read before adding any focusable control
+// (Logan's standing rule, restated 2026-09-19 after a third round of
+// device screenshots showed white platters in Settings.)
+//
+//  1. NEVER `.buttonStyle(.plain)` or the default style on tvOS. Both
+//     let the system paint its white lozenge platter (lift + shadow)
+//     behind the label. Every focusable control owns its focus visual.
+//  2. Own it with `@FocusState` + `.focused($isFocused)` on the control
+//     itself, NOT with `@Environment(\.isFocused)` inside a ButtonStyle:
+//     the environment value does not reach a style hosted inside a
+//     hand-built (non-List) card, which is why the Appearance stepper
+//     rows showed no focus at all.
+//  3. Suppress the platter with `TVNoHighlightButtonStyle`. Pass
+//     `drawsFocusRing: false` when the control draws its own ring.
+//  4. In SETTINGS the ring is ALWAYS the theme accent at
+//     `SettingsMetrics.tvFocusRingWidth` (2pt), traced on the control's
+//     OWN shape (`.tvFocusRingShape(_:)` or `settingsStyle: true`).
+//     Never white, never 3pt or 4pt, never a glow or shadow.
+//  5. No scale-up beyond the 1.02 the standard Settings rows use.
+//  6. Selection is the FILL or the checkmark, focus is the RING. A
+//     focused+selected control must stay readable without turning white.
+//  7. Text fields: accent 2pt outline on the box, never a white field
+//     highlight (`DarkFocusTextFieldRepresentable` keeps the interior
+//     dark).
+// =====================================================================
+
 /// Suppresses the default tvOS system focus highlight (white glow) and
 /// provides themed focus feedback. The visible focus indicator is the
 /// accent stroke ring drawn on the focused element. v1.6.21 dropped
@@ -205,9 +232,19 @@ struct TVNoHighlightButtonStyle: ButtonStyle {
     /// accent. Callers that know their selected state pass it here rather
     /// than drawing a second ring of their own.
     var isSelected: Bool = false
+    /// Settings surface: the ONE ring, theme accent at
+    /// `SettingsMetrics.tvFocusRingWidth`, whatever the selection state.
+    /// Logan's standing rule forbids the white / oversized ring inside
+    /// Settings, so every Settings call site sets this.
+    var settingsStyle: Bool = false
 
-    private var ringColor: Color { isSelected ? .white : .accentPrimary }
-    private var ringWidth: CGFloat { isSelected ? 3 : 2.5 }
+    private var ringColor: Color {
+        (isSelected && !settingsStyle) ? .white : .accentPrimary
+    }
+    private var ringWidth: CGFloat {
+        if settingsStyle { return SettingsMetrics.tvFocusRingWidth }
+        return isSelected ? 3 : 2.5
+    }
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -292,7 +329,7 @@ struct TVInlineCardRowButtonStyle: ButtonStyle {
                 .overlay {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .strokeBorder(Color.accentPrimary.opacity(isFocused ? 0.65 : 0),
-                                      lineWidth: isFocused ? 2.5 : 0)
+                                      lineWidth: isFocused ? SettingsMetrics.tvFocusRingWidth : 0)
                 }
                 .opacity(configuration.isPressed ? 0.7 : 1.0)
                 .animation(.easeInOut(duration: 0.15), value: isFocused)
@@ -406,7 +443,7 @@ struct TMDBAttributionView: View {
                 .scaledFont(font.subtext())
                 .foregroundColor(Color.contrastText(.textTertiary))
                 .fixedSize(horizontal: false, vertical: true)
-            Text("TMDB data is used only after configuring a TMDB API key in Settings > App Behaviors.")
+            Text("TMDB data is used only after configuring a TMDB API key in Settings > Movies & TV Shows.")
                 .scaledFont(font.subtext())
                 .foregroundColor(Color.contrastText(.textTertiary))
                 .fixedSize(horizontal: false, vertical: true)
@@ -515,13 +552,15 @@ struct AppTextField: View {
     var isSecure: Bool = false
     var autocapitalization: TextInputAutocapitalization = .never
     var autocorrection: Bool = false
-    /// tvOS-only: auto-reveal the text while the field is focused (re-masks
-    /// on blur). On tvOS the focus engine can't move sideways off a focused
-    /// UITextField onto the in-box eye button, so the tap-to-reveal eye is
-    /// unreachable by the Siri Remote; revealing on focus is the reliable
-    /// equivalent. Default false keeps every existing call site (including
-    /// the onboarding password fields) tap-to-reveal only.
-    var revealWhenFocused: Bool = false
+    // SECURITY, removed 2026-09-19 (Logan's Apple TV review): there used
+    // to be a `revealWhenFocused` flag here that unmasked a secure field
+    // while the field itself was focused, on the theory that the Siri
+    // Remote could not reach the in-box eye button. The eye IS reachable
+    // (verified on device), and the flag printed the TMDB API key in
+    // plain text on the TV the moment the field took focus. A secure
+    // field now stays masked whenever reveal is off, focused or not, on
+    // every platform; the eye toggle is the ONLY thing that reveals it.
+    // Do not reintroduce a focus-driven reveal.
 
     @FocusState private var isFocused: Bool
 
@@ -540,6 +579,11 @@ struct AppTextField: View {
     /// icon tint on tvOS the way `isFocused` does on iOS.
     @State private var isFocusedTV: Bool = false
 
+    #if os(tvOS)
+    /// Focus of the secure-reveal eye button (tvOS owns its own ring).
+    @FocusState private var eyeFocused: Bool
+    #endif
+
     init(_ title: String,
          placeholder: String,
          text: Binding<String>,
@@ -547,8 +591,7 @@ struct AppTextField: View {
          keyboardType: UIKeyboardType = .default,
          isSecure: Bool = false,
          autocapitalization: TextInputAutocapitalization = .never,
-         autocorrection: Bool = false,
-         revealWhenFocused: Bool = false) {
+         autocorrection: Bool = false) {
         self.title = title
         self.placeholder = placeholder
         self._text = text
@@ -557,7 +600,6 @@ struct AppTextField: View {
         self.isSecure = isSecure
         self.autocapitalization = autocapitalization
         self.autocorrection = autocorrection
-        self.revealWhenFocused = revealWhenFocused
     }
 
     var body: some View {
@@ -584,24 +626,38 @@ struct AppTextField: View {
                 DarkFocusTextFieldRepresentable(
                     text: $text,
                     placeholder: placeholder,
-                    // Reveal when the eye is toggled OR (for reveal-on-focus
-                    // callers) whenever the field itself is focused.
-                    isSecure: isSecure && !passwordVisible && !(revealWhenFocused && isFocusedTV),
+                    // Masked unless the user toggled the eye. Focus does
+                    // NOT reveal (see the security note above).
+                    isSecure: isSecure && !passwordVisible,
                     fontSize: 26,
                     horizontalInset: 0,   // the HStack already pads horizontally
                     onFocusChange: { isFocusedTV = $0 }
                 )
                 if isSecure {
+                    // `.buttonStyle(.plain)` let tvOS drop its white
+                    // platter behind the eye (Logan 2026-09-19, Movies &
+                    // TV Shows > TMDB API Key). It now owns its focus
+                    // visual like every other Settings control: accent
+                    // 2pt ring on its own capsule, no platter.
                     Button {
                         passwordVisible.toggle()
                     } label: {
                         Image(systemName: passwordVisible ? "eye.slash" : "eye")
                             .font(.system(size: 22))  // glyph in a fixed box: not text, stays fixed
-                            .foregroundColor(Color.contrastText(.textTertiary))
-                            .frame(width: 36, height: 36)
+                            .foregroundColor(eyeFocused
+                                             ? Color.contrastText(.accentPrimary)
+                                             : Color.contrastText(.textTertiary))
+                            .frame(width: 44, height: 44)
+                            .background(
+                                Capsule().fill(Color.accentPrimary
+                                    .opacity(eyeFocused ? 0.18 : 0))
+                            )
                             .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(TVNoHighlightButtonStyle(settingsStyle: true))
+                    .tvFocusRingShape(.capsule)
+                    .focused($eyeFocused)
+                    .animation(.easeInOut(duration: 0.15), value: eyeFocused)
                     .accessibilityLabel(passwordVisible ? "Hide password" : "Show password")
                 }
             }
@@ -615,8 +671,11 @@ struct AppTextField: View {
                     // highlight). At rest there is no border at all - the
                     // elevatedBackground fill is the field; a resting grey
                     // borderSubtle stroke read as an unwanted inner outline.
-                    .stroke(Color.accentPrimary.opacity(isFocusedTV ? 1 : 0),
-                            lineWidth: isFocusedTV ? 3 : 0)
+                    // Standing rule: the field's focus outline is the one
+                    // Settings ring (accent, 2pt). It used to draw 3pt,
+                    // which read as the oversized highlight.
+                    .strokeBorder(Color.accentPrimary.opacity(isFocusedTV ? 1 : 0),
+                                  lineWidth: isFocusedTV ? SettingsMetrics.tvFocusRingWidth : 0)
                     .animation(.easeInOut(duration: 0.15), value: isFocusedTV)
             )
         }

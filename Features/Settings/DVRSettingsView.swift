@@ -110,7 +110,7 @@ struct DVRSettingsView: View {
                 // Phase 3, item 3: the buffer Menus became SettingsChoicePickers.
                 // The picker only renders a fixed list, so "Custom…" stays as
                 // its own row directly underneath, exactly as before.
-                SettingsChoicePicker("Start early (pre-roll)",
+                SettingsChoicePicker("Start Early (Pre-Roll)",
                                      options: bufferOptions(preRollStops, current: defaultPreRoll),
                                      selection: $defaultPreRoll)
                 customBufferRow(isCustom: !preRollStops.contains(defaultPreRoll)) {
@@ -118,7 +118,7 @@ struct DVRSettingsView: View {
                     showCustomPreRoll = true
                 }
 
-                SettingsChoicePicker("End late (post-roll)",
+                SettingsChoicePicker("End Late (Post-Roll)",
                                      options: bufferOptions(postRollStops, current: defaultPostRoll),
                                      selection: $defaultPostRoll)
                 customBufferRow(isCustom: !postRollStops.contains(defaultPostRoll)) {
@@ -144,7 +144,7 @@ struct DVRSettingsView: View {
                     // The SwiftData write stays in onChange so the save travels
                     // with it.
                     SettingsChoicePicker(
-                        "Default destination",
+                        "Default Destination",
                         options: destinationOptions,
                         selection: Binding(
                             get: { server.defaultRecordingDestination },
@@ -240,25 +240,12 @@ struct DVRSettingsView: View {
 
             // MARK: - Recording Behavior
             Section {
-                Toggle("Keep device awake during recording", isOn: $keepAwake)
+                Toggle("Keep Device Awake During Recording", isOn: $keepAwake)
             } header: {
                 Text("Behavior")
                     .sectionHeaderStyle()
             } footer: {
                 Text("When enabled, the screen won't turn off while a local recording is in progress. Recommended to prevent recording interruption.")
-            }
-            .listRowBackground(Color.cardBackground)
-
-            // MARK: - My Recordings
-            Section {
-                NavigationLink(destination: MyRecordingsView()) {
-                    SettingsRow(icon: "film.stack", iconColor: .red,
-                                title: "My Recordings",
-                                subtitle: "\(recordingCount) recordings")
-                }
-            } header: {
-                Text("Recordings")
-                    .sectionHeaderStyle()
             }
             .listRowBackground(Color.cardBackground)
 
@@ -278,6 +265,12 @@ struct DVRSettingsView: View {
             .listRowBackground(Color.cardBackground)
         }
         .scrollContentBackground(.hidden)
+        #if os(iOS)
+        // Phase 3 (Logan 2026-09-18): floating tab bar parity -
+        // content runs under the bar, the bar tucks away on scroll,
+        // and the last row clears it.
+        .settingsPhoneTabBarChrome()
+        #endif
     }
     #endif
 
@@ -304,7 +297,7 @@ struct DVRSettingsView: View {
                 // beneath it says the same thing twice.
                 SettingsSection("Default Recording Buffers", style: .plain) {
                     TVSettingsStepperRow(
-                        title: "Start early (pre-roll)",
+                        title: "Start Early (Pre-Roll)",
                         stops: preRollStops,
                         value: $defaultPreRoll,
                         label: bufferStepperLabel,
@@ -312,7 +305,7 @@ struct DVRSettingsView: View {
                         increaseLabel: "More pre-roll"
                     )
                     TVSettingsStepperRow(
-                        title: "End late (post-roll)",
+                        title: "End Late (Post-Roll)",
                         stops: postRollStops,
                         value: $defaultPostRoll,
                         label: bufferStepperLabel,
@@ -331,7 +324,7 @@ struct DVRSettingsView: View {
                     SettingsSection("Recording Destination", style: .plain) {
                         // Phase 3, item 3: same option list as iOS now.
                         SettingsChoicePicker(
-                            "Default destination",
+                            "Default Destination",
                             options: destinationOptions,
                             selection: Binding(
                                 get: { server.defaultRecordingDestination },
@@ -358,19 +351,11 @@ struct DVRSettingsView: View {
                 SettingsSection("Behavior", style: .plain) {
                     TVSettingsToggleRow(
                         icon: "bolt.fill",
-                        iconColor: .yellow,
+                        iconColor: theme.accent,
                         title: "Keep Device Awake",
                         subtitle: "Prevents sleep during local recording",
                         isOn: $keepAwake
                     ) { _ in }
-                }
-
-                SettingsSection("Recordings", style: .plain) {
-                    TVSettingsNavRow(destination: MyRecordingsView().trackedAsClassicSettingsChild()) {
-                        SettingsRow(icon: "film.stack", iconColor: .red,
-                                    title: "My Recordings",
-                                    subtitle: "\(recordingCount) recordings")
-                    }
                 }
 
                 SettingsSection("Danger Zone", style: .plain) {
@@ -393,23 +378,25 @@ struct DVRSettingsView: View {
                     .scaledFont(.system(size: 26, weight: .medium))
                     .foregroundColor(.textPrimary)
                 Spacer()
+                // Logan 2026-09-19: these two drew the default 14pt ring
+                // around a circular glyph, which read as the wrong focus
+                // entirely. They are now the same step keys every other
+                // Settings stepper uses (TVSettingsStepperRow).
                 HStack(spacing: 24) {
-                    Button { if maxStorageMB > 1024 { maxStorageMB -= 1024 } } label: {
-                        Image(systemName: "minus.circle.fill")
-                            .scaledFont(.system(size: 36))
-                            .foregroundColor(.accentPrimary)
+                    TVSettingsStepKey(systemImage: "minus",
+                                      isDisabled: maxStorageMB <= 1024) {
+                        if maxStorageMB > 1024 { maxStorageMB -= 1024 }
                     }
-                    .buttonStyle(TVNoHighlightButtonStyle())
+                    .accessibilityLabel("Less storage")
                     Text(formatGB(mb: maxStorageMB))
                         .scaledFont(.system(size: 28, weight: .semibold))
                         .foregroundColor(.textPrimary)
                         .frame(minWidth: 110)
-                    Button { if maxStorageMB < 204_800 { maxStorageMB += 1024 } } label: {
-                        Image(systemName: "plus.circle.fill")
-                            .scaledFont(.system(size: 36))
-                            .foregroundColor(.accentPrimary)
+                    TVSettingsStepKey(systemImage: "plus",
+                                      isDisabled: maxStorageMB >= 204_800) {
+                        if maxStorageMB < 204_800 { maxStorageMB += 1024 }
                     }
-                    .buttonStyle(TVNoHighlightButtonStyle())
+                    .accessibilityLabel("More storage")
                 }
             }
 
@@ -555,7 +542,13 @@ struct DVRSettingsView: View {
                 }
             }
         }
-        .presentationDetents([.medium])
+        #if os(iOS)
+        // Phase 3: one stepper does not need a full-height sheet on iPhone.
+        // Sized to its content, with .medium as the fallback stop. tvOS has
+        // no sheet detents, so this stays inside the iOS branch.
+        .presentationDetents([.height(180), .medium])
+        .presentationDragIndicator(.visible)
+        #endif
     }
 
     private var usageColor: Color {
@@ -570,11 +563,6 @@ struct DVRSettingsView: View {
             return custom.lastPathComponent
         }
         return "Documents/Recordings"
-    }
-
-    private var recordingCount: Int {
-        let descriptor = FetchDescriptor<Recording>()
-        return (try? modelContext.fetchCount(descriptor)) ?? 0
     }
 
     private func clearAllLocalRecordings() {
@@ -618,8 +606,12 @@ struct DVRSettingsView: View {
     }
 
     private func formatBytes(_ bytes: Int64) -> String {
+        // ByteCountFormatter spells nothing as "Zero KB", which reads like a
+        // bug next to "of 10 GB". An empty library is "0 KB" (Phase 3).
+        guard bytes > 0 else { return "0 KB" }
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
+        formatter.allowsNonnumericFormatting = false
         return formatter.string(fromByteCount: bytes)
     }
 }

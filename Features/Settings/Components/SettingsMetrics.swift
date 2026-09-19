@@ -81,4 +81,73 @@ enum SettingsMetrics {
     /// PROVISIONAL: inherited from OnDemandView's iPadOS 18-era constant;
     /// re-measure on the iOS 26 SDK before Phase 4 adopts it (plan A2).
     static let padTabCapsuleTopInset: CGFloat = 72
+
+    // MARK: iPhone bottom clearance (Phase 3, Logan 2026-09-18)
+    /// Bottom scroll clearance under the floating tab bar. Same 96 pt the
+    /// other tabs already reserve with their trailing spacer row
+    /// (ChannelListView / MoviesView / TVShowsView / PhoneMediaPage), so
+    /// the last Settings row clears the bar by the same margin.
+    static let phoneTabBarClearance: CGFloat = 96
 }
+
+#if os(iOS)
+import UIKit
+
+/// Makes a Settings scroll container behave like every other phone tab:
+/// content runs UNDER the floating tab bar (no opaque scroll-edge band),
+/// the bar tucks away after a deliberate downward scroll and returns on
+/// any upward scroll, and the last row clears the bar.
+///
+/// Why Settings differed (Logan 2026-09-18): every other tab pairs
+/// `scrollAwayTabBar` + `ignoresSafeArea(.container, edges: .bottom)` +
+/// `aerioContentUnderTabBar()` on its scroll view. Settings had none of
+/// the three, so the system's bottom scroll-edge effect resolved to the
+/// HARD style (the solid band behind the bar) and nothing ever fed
+/// `TabBarCollapseState`, leaving the bar pinned and expanded.
+///
+/// Phone only: iPad Settings is a split view with its own chrome.
+private struct SettingsPhoneTabBarChrome: ViewModifier {
+    @State private var tabBarHidden = false
+    @State private var tracker = TabBarScrollTracker()
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            content
+                .onScrollGeometryChange(for: [CGFloat].self) { geo in
+                    [geo.contentOffset.y,
+                     geo.contentSize.height - geo.containerSize.height
+                        + geo.contentInsets.bottom - geo.contentInsets.top]
+                } action: { old, new in
+                    let oldY = old[0], y = new[0], maxY = new[1]
+                    // No bar changes while rubber-banding past either end:
+                    // the spring-back reads as a scroll in the opposite
+                    // direction (MoviesView 2026-09-09).
+                    if y > maxY - 1 || oldY > maxY - 1 { return }
+                    if let hidden = tracker.update(oldY: oldY, newY: y,
+                                                   hidden: tabBarHidden) {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            tabBarHidden = hidden
+                        }
+                    }
+                }
+                .scrollAwayTabBar(collapsed: tabBarHidden)
+                .contentMargins(.bottom, SettingsMetrics.phoneTabBarClearance,
+                                for: .scrollContent)
+                .ignoresSafeArea(.container, edges: .bottom)
+                .aerioContentUnderTabBar()
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    /// See `SettingsPhoneTabBarChrome`. Applied to the scroll container of
+    /// every Settings page, root and pushed, including the picker and
+    /// sub-toggle pages.
+    func settingsPhoneTabBarChrome() -> some View {
+        modifier(SettingsPhoneTabBarChrome())
+    }
+}
+#endif

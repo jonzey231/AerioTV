@@ -56,6 +56,46 @@ struct GeneralSettingsView: View {
     @AppStorage("networkTimeout")          private var networkTimeout      = 15.0
     @AppStorage("maxRetries")              private var maxRetries          = 3
 
+    // MARK: Choice options
+    // Shared by both platforms so the strings cannot drift apart.
+
+    /// Background Refresh schedule kinds. Values are the stored
+    /// bgRefreshType strings and must not change.
+    private static let scheduleOptions: [SettingsChoice<String>] = [
+        SettingsChoice("interval", "Interval", subtitle: "Repeat on a timer"),
+        SettingsChoice("time", "Time of Day", subtitle: "Once a day at a set time")
+    ]
+
+    /// Background Refresh intervals, in minutes (bgRefreshIntervalMins).
+    private static let intervalOptions: [SettingsChoice<Int>] = [
+        SettingsChoice(15, "15 Minutes"),
+        SettingsChoice(30, "30 Minutes"),
+        SettingsChoice(60, "1 Hour"),
+        SettingsChoice(120, "2 Hours"),
+        SettingsChoice(240, "4 Hours"),
+        SettingsChoice(480, "8 Hours"),
+        SettingsChoice(720, "12 Hours"),
+        SettingsChoice(1440, "24 Hours")
+    ]
+
+    /// Request timeout choices, in seconds (networkTimeout).
+    private static let timeoutOptions: [SettingsChoice<Int>] = [
+        SettingsChoice(5, "5 Seconds"),
+        SettingsChoice(10, "10 Seconds"),
+        SettingsChoice(15, "15 Seconds"),
+        SettingsChoice(30, "30 Seconds"),
+        SettingsChoice(60, "60 Seconds")
+    ]
+
+    /// networkTimeout is stored as a Double; the picker works in whole
+    /// seconds. Same key, same stored value.
+    private var networkTimeoutSeconds: Binding<Int> {
+        Binding(
+            get: { Int(networkTimeout) },
+            set: { networkTimeout = Double($0) }
+        )
+    }
+
     // Converts stored hour/minute back to a Date for DatePicker binding
     private var refreshTimeDateBinding: Binding<Date> {
         Binding(
@@ -128,13 +168,14 @@ struct GeneralSettingsView: View {
                 }
 
                 SettingsSection("Network", style: .plain) {
-                    ForEach([5, 10, 15, 30, 60], id: \.self) { secs in
-                        TVSettingsSelectionRow(
-                            label: "\(secs) seconds",
-                            isSelected: Int(networkTimeout) == secs,
-                            action: { networkTimeout = Double(secs) }
-                        )
-                    }
+                    // Phase 3, item A: the hand-rolled timeout list is now
+                    // one SettingsChoicePicker. Key networkTimeout unchanged.
+                    SettingsChoicePicker(
+                        "Request Timeout",
+                        options: Self.timeoutOptions,
+                        selection: networkTimeoutSeconds,
+                        footer: "Raise the timeout if you have a slow connection."
+                    )
                 }
             }
             // v1.7.5: centered 1200pt reading column (matches EditServerPage).
@@ -167,7 +208,7 @@ struct GeneralSettingsView: View {
 
                 Toggle(isOn: $skipLoadingScreen) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Skip loading screen")
+                        Text("Skip Loading Screen")
                             .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
                         Text("Land on Live TV instantly; data hydrates in the background")
@@ -195,7 +236,7 @@ struct GeneralSettingsView: View {
 
                 Toggle(isOn: $autoRotate) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Auto-rotate")
+                        Text("Auto-Rotate")
                             .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
                         Text(UIDevice.current.userInterfaceIdiom == .pad
@@ -245,44 +286,35 @@ struct GeneralSettingsView: View {
                 .listRowBackground(Color.cardBackground)
 
                 if bgRefreshEnabled {
-                    Picker("Refresh by", selection: $bgRefreshType) {
-                        Text("Every…").tag("interval")
-                        Text("At time").tag("time")
-                    }
-                    .pickerStyle(.segmented)
+                    // Phase 3, item A: the segmented control and the
+                    // eight-row interval list became sub-page pickers,
+                    // the same shape the rest of Settings uses. Keys
+                    // (bgRefreshType, bgRefreshIntervalMins) unchanged.
+                    SettingsChoicePicker(
+                        "Schedule",
+                        options: Self.scheduleOptions,
+                        selection: $bgRefreshType,
+                        footer: "Interval refreshes on a repeating timer. Time of Day refreshes once a day at the time you pick.",
+                        iconColor: theme.accent
+                    )
                     .listRowBackground(Color.cardBackground)
 
                     if bgRefreshType == "interval" {
-                        let intervals: [(label: String, mins: Int)] = [
-                            ("15 minutes", 15), ("30 minutes", 30),
-                            ("1 hour", 60),     ("2 hours", 120),
-                            ("4 hours", 240),   ("8 hours", 480),
-                            ("12 hours", 720),  ("24 hours", 1440),
-                        ]
-                        ForEach(intervals, id: \.mins) { item in
-                            Button {
-                                bgRefreshInterval = item.mins
-                            } label: {
-                                HStack {
-                                    Text(item.label)
-                                        .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                                    Spacer()
-                                    if bgRefreshInterval == item.mins {
-                                        Image(systemName: "checkmark")
-                                            .foregroundColor(theme.accent)
-                                            .scaledFont(.system(size: 14, weight: .semibold))
-                                    }
-                                }
-                            }
-                            .listRowBackground(Color.cardBackground)
-                        }
+                        SettingsChoicePicker(
+                            "Interval",
+                            options: Self.intervalOptions,
+                            selection: $bgRefreshInterval,
+                            footer: "How often AerioTV asks for fresh channel lists and guide data.",
+                            iconColor: theme.accent
+                        )
+                        .listRowBackground(Color.cardBackground)
                     } else {
                         DatePicker(
-                            "Refresh at",
+                            "Refresh At",
                             selection: refreshTimeDateBinding,
                             displayedComponents: .hourAndMinute
                         )
-                        .datePickerStyle(.graphical)
+                        .datePickerStyle(.compact)
                         .environment(\.locale, Locale(identifier: "en_US"))
                         .tint(theme.accent)
                         .foregroundColor(.textPrimary)
@@ -322,8 +354,22 @@ struct GeneralSettingsView: View {
                 }
                 .listRowBackground(Color.cardBackground)
 
-                Stepper("Max Retries: \(maxRetries)", value: $maxRetries, in: 0...10)
-                    .listRowBackground(Color.cardBackground)
+                // Title left, value trailing in accent mono, exactly like
+                // Request Timeout above it. The old "Max Retries: 3" label
+                // was the only row in Settings that put its value inside
+                // the title (Logan screenshots 2026-09-18).
+                Stepper(value: $maxRetries, in: 0...10) {
+                    HStack {
+                        Text("Max Retries")
+                            .scaledFont(.bodyMedium)
+                            .foregroundColor(.textPrimary)
+                        Spacer()
+                        Text("\(maxRetries)")
+                            .scaledFont(.monoSmall)
+                            .foregroundColor(Color.contrastText(theme.accent))
+                    }
+                }
+                .listRowBackground(Color.cardBackground)
             } header: {
                 Text("Network").sectionHeaderStyle()
             } footer: {
@@ -334,6 +380,12 @@ struct GeneralSettingsView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+        #if os(iOS)
+        // Phase 3 (Logan 2026-09-18): floating tab bar parity -
+        // content runs under the bar, the bar tucks away on scroll,
+        // and the last row clears it.
+        .settingsPhoneTabBarChrome()
+        #endif
     }
     #endif
 

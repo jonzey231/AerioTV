@@ -125,13 +125,7 @@ struct MyRecordingsView: View {
         VStack(spacing: 0) {
             // Same pill selector on both platforms. On tvOS the pills
             // are focusable; on iOS they're plain tap buttons.
-            HStack(spacing: 12) {
-                segmentButton("Scheduled", count: scheduled.count, tag: 0)
-                segmentButton("Recording", count: recording.count, tag: 1)
-                segmentButton("Completed", count: completed.count, tag: 2)
-                Spacer()
-            }
-            .padding()
+            segmentBar
 
             // Quota warning toast
             if coordinator.isApproachingQuotaLimit && selectedSegment != 2 {
@@ -199,6 +193,12 @@ struct MyRecordingsView: View {
                 }
                 #if os(iOS)
                 .scrollContentBackground(.hidden)
+                #if os(iOS)
+                // Phase 3 (Logan 2026-09-18): floating tab bar parity -
+                // content runs under the bar, the bar tucks away on scroll,
+                // and the last row clears it.
+                .settingsPhoneTabBarChrome()
+                #endif
                 #endif
                 .background(Color.appBackground)
                 #endif
@@ -329,13 +329,45 @@ struct MyRecordingsView: View {
     /// the Live TV group filter bar / On Demand tab pills so every
     /// in-tab segment selector in the app has identical styling.
     private func segmentButton(_ label: String, count: Int, tag: Int) -> some View {
+        // Phase 3 (Logan 2026-09-18): "Scheduled (0)" wrapped to two
+        // lines at iPhone width. The parentheses are gone; the count
+        // rides as a dim trailing number and the label never wraps.
         DVRSegmentPill(
-            label: "\(label) (\(count))",
+            label: label,
+            count: count,
             isSelected: selectedSegment == tag,
             action: {
                 withAnimation(.easeInOut(duration: 0.15)) { selectedSegment = tag }
             }
         )
+    }
+
+    /// The three-pill segment selector. On iPhone the row scrolls
+    /// horizontally so the narrowest screen (and the largest text
+    /// sizes) can never squeeze a pill into two lines.
+    private var segmentPills: some View {
+        HStack(spacing: 12) {
+            segmentButton("Scheduled", count: scheduled.count, tag: 0)
+            segmentButton("Recording", count: recording.count, tag: 1)
+            segmentButton("Completed", count: completed.count, tag: 2)
+        }
+    }
+
+    @ViewBuilder
+    private var segmentBar: some View {
+        #if os(iOS)
+        ScrollView(.horizontal, showsIndicators: false) {
+            segmentPills
+                .padding()
+        }
+        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        #else
+        HStack(spacing: 12) {
+            segmentPills
+            Spacer()
+        }
+        .padding()
+        #endif
     }
 
     // MARK: - Context Menu
@@ -874,12 +906,25 @@ private struct TVRecordingRow<Menu: View>: View {
 /// reuse it.
 struct DVRSegmentPill: View {
     let label: String
+    /// Optional tally shown as a dim trailing number instead of the old
+    /// "(0)" suffix, which pushed the label onto a second line at
+    /// iPhone width. Callers that pass no count are unchanged.
+    var count: Int? = nil
     let isSelected: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Text(label)
+            HStack(spacing: 6) {
+                Text(label)
+                if let count {
+                    Text("\(count)")
+                        .monospacedDigit()
+                        .opacity(0.65)
+                }
+            }
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
         }
         .buttonStyle(DVRSegmentPillButtonStyle(isSelected: isSelected))
     }
@@ -899,6 +944,7 @@ private struct DVRSegmentPillButtonStyle: ButtonStyle {
             // Phase 3: focus no longer flips the label to bright white;
             // the accent ring is the focus visual.
             .foregroundColor(isSelected ? .appBackground : .textSecondary)
+            .lineLimit(1)
             .padding(.horizontal, 26)
             .padding(.vertical, 13)
             .background(
@@ -924,9 +970,12 @@ private struct DVRSegmentPillButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaledFont(.system(size: 15, weight: .medium))
+            // Phase 3: one step down from 15 pt so a counted pill
+            // ("Completed 12") stays on one line at iPhone width.
+            .scaledFont(.system(size: 14, weight: .medium))
             .foregroundColor(isSelected ? .appBackground : .textSecondary)
-            .padding(.horizontal, 18)
+            .lineLimit(1)
+            .padding(.horizontal, 16)
             .padding(.vertical, 8)
             .background(
                 Capsule()

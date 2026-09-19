@@ -99,7 +99,7 @@ struct PlayerSettingsView: View {
         return "Uses up to \(gb(4)) in HD, \(gb(8)) in FHD, or \(gb(20)) in UHD while you watch."
     }
 
-    /// Phase 3, item 3: one option list for "Rewind up to" on both
+    /// Phase 3, item 3: one option list for "Rewind Up To" on both
     /// platforms. tvOS used to print its own "15m" / "1h" segments while
     /// iOS said "15 minutes" / "1 hour"; both now go through
     /// `depthLabel`, so the wording finally agrees.
@@ -218,6 +218,12 @@ struct PlayerSettingsView: View {
                     }
                 }
                 .listRowBackground(Color.cardBackground)
+            } header: {
+                // Phase 3, item B: the card used to float with no header
+                // while every other section on this page had one. The
+                // header names the group without repeating the row's own
+                // "Info Card" title.
+                Text("On-Screen Display").sectionHeaderStyle()
             } footer: {
                 Text(Self.playerInfoCardFooter)
                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
@@ -228,7 +234,7 @@ struct PlayerSettingsView: View {
             Section {
                 Toggle(isOn: $liveRewindEnabled) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Pause & rewind live TV")
+                        Text("Pause & Rewind Live TV")
                             .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                         Text("Buffer fullscreen live playback on this device")
                             .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
@@ -248,7 +254,7 @@ struct PlayerSettingsView: View {
                                      iconColor: theme.accent,
                                      footer: "How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. Keeping recent channels live holds an extra stream connection per channel; opening a channel beyond the limit drops the oldest.") {
                         SettingsChoicePicker(
-                            "Rewind up to",
+                            "Rewind Up To",
                             options: rewindDepthOptions,
                             selection: $liveRewindDepthMinutes,
                             footer: "How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. \(depthEstimate(liveRewindDepthMinutes))",
@@ -269,7 +275,7 @@ struct PlayerSettingsView: View {
 
                         if liveRewindRetainChannels {
                             steppedSliderRow_iOS(
-                                title: "Channels to keep",
+                                title: "Channels to Keep",
                                 values: [1, 2, 3, 4, 5],
                                 selection: $liveRewindRetainCount,
                                 label: { "\($0)" }
@@ -289,13 +295,13 @@ struct PlayerSettingsView: View {
             // MARK: Playback
             Section {
                 steppedSliderRow_iOS(
-                    title: "Skip back",
+                    title: "Skip Back",
                     values: SkipIntervals.choices,
                     selection: $skipBackSeconds,
                     label: { "\($0) seconds" }
                 )
                 steppedSliderRow_iOS(
-                    title: "Skip forward",
+                    title: "Skip Forward",
                     values: SkipIntervals.choices,
                     selection: $skipForwardSeconds,
                     label: { "\($0) seconds" }
@@ -341,7 +347,7 @@ struct PlayerSettingsView: View {
             Section {
                 Toggle(isOn: $appleTVChannelFlip) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Up / Down channel change")
+                        Text("Up / Down Channel Change")
                             .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
                         Text("On iPhone & iPad, swipe up on the player for the next channel, swipe down for the previous. On Apple TV, press up or down on the Siri Remote. Live single-stream playback only.")
@@ -354,7 +360,7 @@ struct PlayerSettingsView: View {
 
                 Toggle(isOn: $edgeBrightnessGesture) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Edge slide for brightness")
+                        Text("Edge Slide for Brightness")
                             .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
                         Text("Slide a finger up or down along one edge of the fullscreen player to change screen brightness.")
@@ -367,7 +373,7 @@ struct PlayerSettingsView: View {
 
                 Toggle(isOn: $edgeVolumeGesture) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Edge slide for volume")
+                        Text("Edge Slide for Volume")
                             .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
                         Text("Slide a finger up or down along the other edge of the fullscreen player to change volume.")
@@ -454,6 +460,12 @@ struct PlayerSettingsView: View {
             .listSectionSeparator(.hidden)
         }
         .scrollContentBackground(.hidden)
+        #if os(iOS)
+        // Phase 3 (Logan 2026-09-18): floating tab bar parity -
+        // content runs under the bar, the bar tucks away on scroll,
+        // and the last row clears it.
+        .settingsPhoneTabBarChrome()
+        #endif
         .listStyle(.insetGrouped)
         .id("player-list-\(theme.selectedTheme.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
     }
@@ -510,27 +522,32 @@ struct PlayerSettingsView: View {
                 // already says "Info Card", so a section header above it
                 // labeled the same group twice. The subgroup draws the
                 // card itself.
-                SettingsSubgroup("Info Card",
-                                 summary: playerInfoCardSummary,
-                                 icon: "rectangle.on.rectangle",
-                                 iconColor: theme.accent,
-                                 footer: Self.playerInfoCardFooter,
-                                 drawsCard: true) {
-                        ForEach(playerInfoCardRows, id: \.key) { row in
-                            TVSettingsToggleRow(
-                                icon: "info.circle",
-                                iconColor: theme.accent,
-                                title: PlayerInfoCardSettings.title(row.key),
-                                subtitle: "",
-                                isOn: row.binding
-                            ) { _ in }
+                // Same "On-Screen Display" eyebrow the phone uses, so the page
+                // does not open on a headerless card.
+                SettingsSection("On-Screen Display", style: .plain) {
+                    SettingsSubgroup("Info Card",
+                                     summary: playerInfoCardSummary,
+                                     icon: "rectangle.on.rectangle",
+                                     iconColor: theme.accent,
+                                     footer: Self.playerInfoCardFooter,
+                                     drawsCard: false,
+                                     optionsOnly: true) {
+                            ForEach(playerInfoCardRows, id: \.key) { row in
+                                TVSettingsToggleRow(
+                                    icon: "info.circle",
+                                    iconColor: theme.accent,
+                                    title: PlayerInfoCardSettings.title(row.key),
+                                    subtitle: "",
+                                    isOn: row.binding
+                                ) { _ in }
+                        }
                     }
                 }
 
                 // Phase 3, item 4: "Keep Available" and "Channel
                 // Retention" were two more cards for settings that only
                 // exist because Live Rewind is on. One card now.
-                SettingsSection("Live Rewind", style: .card) {
+                SettingsSection("Live Rewind", style: .plain) {
                     TVSettingsToggleRow(
                         icon: "gobackward.30",
                         iconColor: theme.accent,
@@ -551,7 +568,7 @@ struct PlayerSettingsView: View {
                                          iconColor: theme.accent,
                                          showsMasterRow: false) {
                             SettingsChoicePicker(
-                                "Rewind up to",
+                                "Rewind Up To",
                                 options: rewindDepthOptions,
                                 selection: $liveRewindDepthMinutes,
                                 footer: "How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. \(depthEstimate(liveRewindDepthMinutes))"
@@ -566,7 +583,7 @@ struct PlayerSettingsView: View {
                             ) { _ in }
                             if liveRewindRetainChannels {
                                 tvSteppedSegmentsRow(
-                                    title: "Channels to keep",
+                                    title: "Channels to Keep",
                                     values: [1, 2, 3, 4, 5],
                                     selection: $liveRewindRetainCount,
                                     segmentLabel: { "\($0)" }
@@ -577,15 +594,15 @@ struct PlayerSettingsView: View {
                     }
                 }
 
-                SettingsSection("Playback", style: .card) {
+                SettingsSection("Playback", style: .plain) {
                     tvSteppedSegmentsRow(
-                        title: "Skip back",
+                        title: "Skip Back",
                         values: SkipIntervals.choices,
                         selection: $skipBackSeconds,
                         segmentLabel: { "\($0)s" }
                     )
                     tvSteppedSegmentsRow(
-                        title: "Skip forward",
+                        title: "Skip Forward",
                         values: SkipIntervals.choices,
                         selection: $skipForwardSeconds,
                         segmentLabel: { "\($0)s" }
@@ -612,7 +629,7 @@ struct PlayerSettingsView: View {
                     ) { _ in }
                 }
 
-                SettingsSection("Gestures", style: .card) {
+                SettingsSection("Gestures", style: .plain) {
                     TVSettingsToggleRow(
                         icon: "arrow.up.and.down",
                         iconColor: theme.accent,
@@ -624,7 +641,7 @@ struct PlayerSettingsView: View {
                     tvFooter("Turn off if accidental D-pad presses are flipping channels during playback. iPhone & iPad use the matching swipe-up / swipe-down gesture on the same toggle.")
                 }
 
-                SettingsSection("Multiview", style: .card) {
+                SettingsSection("Multiview", style: .plain) {
                     // Phase 3, item 3.
                     SettingsChoicePicker(
                         "Audio Focus Indicator",
@@ -682,13 +699,10 @@ struct PlayerSettingsView: View {
                 .foregroundColor(.textPrimary)
             Spacer()
             ForEach(values, id: \.self) { value in
-                Button {
+                TVSettingsPill(segmentLabel(value),
+                               isSelected: value == current) {
                     selection.wrappedValue = value
-                } label: {
-                    Text(segmentLabel(value))
-                        .scaledFont(.system(size: 22, weight: .medium))
                 }
-                .buttonStyle(TVSteppedSegmentStyle(isSelected: value == current))
             }
         }
         .padding(.horizontal, 20)

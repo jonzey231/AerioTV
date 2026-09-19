@@ -506,6 +506,22 @@ struct AerioApp: App {
             fatalError("Could not initialize ModelContainer: \(error)")
         }
 
+        #if os(tvOS)
+        // Group selector seed (Logan 2026-09-18). Runs here, in App.init,
+        // because it must land before anything reads
+        // `RemoteControlStore.shared`. Synchronous on purpose: two tiny
+        // count fetches on an already-open container, and getting it wrong
+        // by one launch would move an existing user off pills.
+        do {
+            let seedContext = ModelContext(self.sharedModelContainer)
+            let serverCount = (try? seedContext.fetchCount(FetchDescriptor<ServerConnection>())) ?? 0
+            let playlistCount = (try? seedContext.fetchCount(FetchDescriptor<M3UPlaylist>())) ?? 0
+            RemoteControlStore.seedGroupSelectorIfNeeded(
+                hasAnyPlaylist: serverCount > 0 || playlistCount > 0
+            )
+        }
+        #endif
+
         // Fire a throwaway fetch off main to force SQLite open +
         // schema validation off the critical path. Uses a fresh
         // background `ModelContext`, never touches MainActor.
@@ -1382,7 +1398,7 @@ struct RootView: View {
                     liveRewindPromptSeen = true
                 }
             } message: {
-                Text("Pause and rewind live TV. While you watch a channel fullscreen, AerioTV keeps a rolling buffer on this device so you can skip back, scrub the timeline, or pause and pick up where you left off.\n\nBuffered video is deleted automatically. You can change this anytime in Settings > App Behaviors > Live Rewind.")
+                Text("Pause and rewind live TV. While you watch a channel fullscreen, AerioTV keeps a rolling buffer on this device so you can skip back, scrub the timeline, or pause and pick up where you left off.\n\nBuffered video is deleted automatically. You can change this anytime in Settings > Player > Live Rewind.")
             }
             .onAppear {
                 debugLog("🟣 RootView.onAppear: hasCompletedOnboarding=\(hasCompletedOnboarding), hasAnySource=\(hasAnySource), servers=\(servers.count)")

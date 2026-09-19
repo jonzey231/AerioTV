@@ -116,20 +116,22 @@ struct AppearanceSettingsView: View {
             VStack(alignment: .leading, spacing: 32) {
                 // Color Theme
                 tvAppearanceSection("Color Theme") {
-                    ForEach(AppTheme.allCases, id: \.self) { t in
-                        TVSettingsSelectionRow(
-                            label: t.displayName,
-                            subtitle: themeSubtitle(t),
-                            isSelected: theme.selectedTheme == t,
-                            action: { theme.setTheme(t) },
-                            leading: {
-                                Circle()
-                                    .fill(t.accentPrimary)
-                                    .frame(width: 28, height: 28)
-                                    .overlay(Circle().stroke(Color.borderMedium, lineWidth: 1))
-                            }
-                        )
-                    }
+                    // Logan 2026-09-19: the seven inline theme rows are one
+                    // row now, opening the shared pop-up option sheet. Each
+                    // option carries the theme's accent swatch.
+                    SettingsChoicePicker(
+                        "Color Theme",
+                        options: AppTheme.allCases.map {
+                            SettingsChoice($0, $0.displayName,
+                                           subtitle: themeSubtitle($0),
+                                           swatch: $0.accentPrimary)
+                        },
+                        selection: Binding(
+                            get: { theme.selectedTheme },
+                            set: { theme.setTheme($0) }
+                        ),
+                        icon: "paintbrush.fill"
+                    )
 
                     // Custom accent toggle
                     TVSettingsToggleRow(
@@ -160,10 +162,11 @@ struct AppearanceSettingsView: View {
                 // began. It gets its own section. The two are
                 // orthogonal: the theme picks the hues, this picks
                 // light or dark surfaces.
-                tvAppearanceSection("Appearance") {
-                    SettingsChoicePicker("Appearance",
+                tvAppearanceSection("Light and Dark Mode") {
+                    SettingsChoicePicker("Mode",
                                          options: appearanceModeChoices,
                                          selection: appearanceModeSelection,
+                                         icon: "circle.lefthalf.filled",
                                          onChange: { _ in
                                              SyncManager.shared.pushPreferencesImmediate()
                                          })
@@ -174,7 +177,8 @@ struct AppearanceSettingsView: View {
                     // Phase 3: shared picker, inline on tvOS.
                     SettingsChoicePicker("Glass Effect",
                                          options: liquidGlassChoices,
-                                         selection: liquidGlassSelection)
+                                         selection: liquidGlassSelection,
+                                         icon: "square.on.square")
                 }
 
                 // Preview
@@ -283,6 +287,10 @@ struct AppearanceSettingsView: View {
         )
     }
 
+    /// Focus scope for the stepper rows, so Down from the row above lands
+    /// on the "-" key instead of on Reset (Phase 3 item 4).
+    @Namespace private var stepperFocusScope
+
     /// Shared tvOS minus / percent / plus / Reset row (TVSteppedSegmentStyle).
     private func tvPercentStepperRow(
         title: String,
@@ -300,13 +308,13 @@ struct AppearanceSettingsView: View {
                 .foregroundColor(.textPrimary)
                 .lineLimit(1)
             Spacer()
-            Button(action: decrease) {
-                Image(systemName: "minus")
-                    .font(.system(size: 22, weight: .semibold))
-                    .frame(minWidth: 28)
-            }
-            .buttonStyle(TVSteppedSegmentStyle(isSelected: false))
-            .accessibilityLabel(decreaseLabel)
+            // Phase 3 item 4: Down from the row above must land on the
+            // "-" key, not on Reset. `focusScope` + `prefersDefaultFocus`
+            // is what decides which chip in the row the focus engine
+            // enters on; without it tvOS picked the LAST chip.
+            TVSettingsStepKey(systemImage: "minus", action: decrease)
+                .prefersDefaultFocus(true, in: stepperFocusScope)
+                .accessibilityLabel(decreaseLabel)
 
             Text("\(percent)%")
                 .scaledFont(.system(size: 26, weight: .semibold).monospacedDigit())
@@ -314,21 +322,15 @@ struct AppearanceSettingsView: View {
                 .lineLimit(1)
                 .frame(minWidth: 96)
 
-            Button(action: increase) {
-                Image(systemName: "plus")
-                    .font(.system(size: 22, weight: .semibold))
-                    .frame(minWidth: 28)
-            }
-            .buttonStyle(TVSteppedSegmentStyle(isSelected: false))
-            .accessibilityLabel(increaseLabel)
+            TVSettingsStepKey(systemImage: "plus", action: increase)
+                .accessibilityLabel(increaseLabel)
 
-            Button(action: reset) {
-                Text("Reset")
-                    .scaledFont(.system(size: 22, weight: .medium))
-                    .lineLimit(1)
-            }
-            .buttonStyle(TVSteppedSegmentStyle(isSelected: isDefault))
+            // Reset is an ACTION, not a selection: a ghost pill at rest,
+            // dimmed and inert once the value is already the default.
+            TVSettingsPill("Reset", isDisabled: isDefault, isGhost: true,
+                           action: reset)
         }
+        .focusScope(stepperFocusScope)
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
         .background(
@@ -345,52 +347,15 @@ struct AppearanceSettingsView: View {
     private var textSizeRow_tvOS: some View {
         let current = TextScale.clamp(textScale)
         let index = TextScale.steps.firstIndex(where: { abs($0 - current) < 0.001 }) ?? 3
-        return HStack(spacing: 24) {
-            Text("Text Size")
-                .scaledFont(.system(size: 26, weight: .medium))
-                .foregroundColor(.textPrimary)
-                .lineLimit(1)
-            Spacer()
-            Button {
-                setTextScale(TextScale.steps[max(0, index - 1)])
-            } label: {
-                Image(systemName: "minus")
-                    .font(.system(size: 22, weight: .semibold))
-                    .frame(minWidth: 28)
-            }
-            .buttonStyle(TVSteppedSegmentStyle(isSelected: false))
-            .accessibilityLabel("Smaller Text")
-
-            Text("\(Int((current * 100).rounded()))%")
-                .scaledFont(.system(size: 26, weight: .semibold).monospacedDigit())
-                .foregroundColor(Color.contrastText(theme.accent))
-                .lineLimit(1)
-                .frame(minWidth: 96)
-
-            Button {
-                setTextScale(TextScale.steps[min(TextScale.steps.count - 1, index + 1)])
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 22, weight: .semibold))
-                    .frame(minWidth: 28)
-            }
-            .buttonStyle(TVSteppedSegmentStyle(isSelected: false))
-            .accessibilityLabel("Larger Text")
-
-            Button {
-                setTextScale(TextScale.defaultValue)
-            } label: {
-                Text("Reset")
-                    .scaledFont(.system(size: 22, weight: .medium))
-                    .lineLimit(1)
-            }
-            .buttonStyle(TVSteppedSegmentStyle(isSelected: index == 3))
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.cardBackground)
+        return tvPercentStepperRow(
+            title: "Text Size",
+            percent: Int((current * 100).rounded()),
+            isDefault: index == 3,
+            decreaseLabel: "Smaller Text",
+            increaseLabel: "Larger Text",
+            decrease: { setTextScale(TextScale.steps[max(0, index - 1)]) },
+            increase: { setTextScale(TextScale.steps[min(TextScale.steps.count - 1, index + 1)]) },
+            reset: { setTextScale(TextScale.defaultValue) }
         )
     }
 
@@ -405,7 +370,7 @@ struct AppearanceSettingsView: View {
         case .sunset:     return "Warm orange on near-black"
         case .forest:     return "Green on near-black"
         case .lavender:   return "Purple on near-black"
-        case .monochrome: return "Greyscale on near-black"
+        case .monochrome: return "Grayscale on near-black"
         case .light:      return "Neutral teal-grey that reads on white"
         }
     }
@@ -461,38 +426,49 @@ struct AppearanceSettingsView: View {
                                 themeRowLabel(t)
                             }
                             .listRowBackground(Color.cardBackground)
+                            // Dividers start at the row's title text, past
+                            // the swatch (22 pt swatch + 14 pt spacing).
+                            .alignmentGuide(.listRowSeparatorLeading) { _ in
+                                Self.themeRowSeparatorInset
+                            }
                         }
                     }
 
-                    // iPhone keeps the mode/accent rows in this section
-                    // (shipped canon). iPad moves them to their own section
-                    // below so the last theme tile ends its own pill
-                    // instead of visually fusing with the Appearance card
-                    // (Logan's report 2026-08-04).
-                    if !useThemeTileGrid {
-                        appearanceModeAndAccentRows
-                    }
                 } header: {
                     Text("Color Theme").sectionHeaderStyle()
                 } footer: {
-                    if !useThemeTileGrid {
-                        Text("Colors used throughout the app.")
-                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
-                    }
+                    Text("Colors used throughout the app.")
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .listSectionSeparator(.hidden)
 
-                if useThemeTileGrid {
-                    Section {
-                        appearanceModeAndAccentRows
-                    } footer: {
-                        Text("Colors used throughout the app.")
-                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
-                    }
-                    .listSectionSeparator(.hidden)
+                // MARK: Appearance (surface luminance)
+                // Phase 3 (Logan 2026-09-18): the mode picker and the
+                // accent rows used to ride inside the Color Theme card
+                // (iPhone) or share one unheaded card (iPad). Each card
+                // now states what it is, on both idioms.
+                Section {
+                    appearanceModeRow
+                } header: {
+                    Text("Light and Dark Mode").sectionHeaderStyle()
+                } footer: {
+                    Text("Light or dark surfaces, independent of the color theme.")
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
+                .listSectionSeparator(.hidden)
 
-                // MARK: Liquid Glass
+                // MARK: Accent
+                Section {
+                    accentRows
+                } header: {
+                    Text("Accent").sectionHeaderStyle()
+                } footer: {
+                    Text("Override the theme's accent color with one of your own.")
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                }
+                .listSectionSeparator(.hidden)
+
+                // MARK: Effects
                 Section {
                     // Phase 3: four inline check rows collapse to one row
                     // that pushes the choice page, carrying the footnote.
@@ -501,10 +477,10 @@ struct AppearanceSettingsView: View {
                                          selection: liquidGlassSelection,
                                          footer: liquidGlassFootnote)
                         .listRowBackground(Color.cardBackground)
+                        .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
+                } header: {
+                    Text("Effects").sectionHeaderStyle()
                 }
-                // Phase 3: no Section header. The picker row already says
-                // "Glass Effect"; a header repeating it read as two labels
-                // for one control.
                 .listSectionSeparator(.hidden)
 
                 // MARK: Preview Swatch
@@ -584,6 +560,12 @@ struct AppearanceSettingsView: View {
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
+            #if os(iOS)
+            // Phase 3 (Logan 2026-09-18): floating tab bar parity -
+            // content runs under the bar, the bar tucks away on scroll,
+            // and the last row clears it.
+            .settingsPhoneTabBarChrome()
+            #endif
             .background {
                 GeometryReader { geo in
                     Color.clear
@@ -600,28 +582,37 @@ struct AppearanceSettingsView: View {
             .id("appearance-list-\(theme.selectedTheme.rawValue)-\(theme.appearanceMode.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
     }
 
-    /// Appearance mode (Dark / Light / System) + custom accent rows.
-    /// One definition, hosted inline in the Color Theme section on
-    /// iPhone and in a standalone section on iPad.
-    @ViewBuilder
-    private var appearanceModeAndAccentRows: some View {
+    /// Leading inset for the dividers in the Color Theme and Accent
+    /// cards: the swatch width plus its trailing spacing, so every
+    /// divider starts under the row's title text.
+    private static let themeRowSeparatorInset: CGFloat = 36
+
+    /// Appearance mode (Dark / Light / System). Its own headed card
+    /// since Phase 3.
+    private var appearanceModeRow: some View {
         // Appearance mode — a surface luminance axis orthogonal to the
         // hue/identity themes. Defaults to Dark; selecting a theme never
         // changes the mode, and vice versa.
         // Phase 3: the segmented control becomes the shared picker row,
         // so Appearance asks its question the same way as every other
         // one-of-N setting (and the same way as tvOS and Android).
-        SettingsChoicePicker("Appearance",
+        SettingsChoicePicker("Mode",
                              options: appearanceModeChoices,
                              selection: appearanceModeSelection,
                              onChange: { _ in
                                  SyncManager.shared.pushPreferencesImmediate()
                              })
             .listRowBackground(Color.cardBackground)
+            .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
+    }
 
+    /// Custom accent toggle, system color picker and hex field. Its own
+    /// headed card since Phase 3.
+    @ViewBuilder
+    private var accentRows: some View {
         // Custom accent color toggle
         Toggle(isOn: $theme.useCustomAccent) {
-            HStack(spacing: 10) {
+            HStack(spacing: 14) {
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
                     .fill(Color(hex: theme.customAccentHex))
                     .frame(width: 22, height: 22)
@@ -635,6 +626,9 @@ struct AppearanceSettingsView: View {
         }
         .tint(theme.accent)
         .listRowBackground(Color.cardBackground)
+        .alignmentGuide(.listRowSeparatorLeading) { _ in
+            Self.themeRowSeparatorInset
+        }
 
         if theme.useCustomAccent {
             // Native system color picker — tap the swatch to open the full picker
@@ -650,6 +644,9 @@ struct AppearanceSettingsView: View {
                     .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
             }
             .listRowBackground(Color.cardBackground)
+            .alignmentGuide(.listRowSeparatorLeading) { _ in
+                Self.themeRowSeparatorInset
+            }
             #endif
 
             // Hex field for power users who want to paste a specific
@@ -668,6 +665,9 @@ struct AppearanceSettingsView: View {
                               helper: "Six hex digits, for example 2DD4BF.",
                               autocapitalization: .characters)
                 .listRowBackground(Color.cardBackground)
+                .alignmentGuide(.listRowSeparatorLeading) { _ in
+                    Self.themeRowSeparatorInset
+                }
         }
     }
 
@@ -814,12 +814,22 @@ struct AppearanceSettingsView: View {
 
             Spacer()
 
-            // Mini accent gradient pill
-            Capsule()
-                .fill(LinearGradient(
-                    colors: [theme.accent, theme.accentSecondary],
-                    startPoint: .leading, endPoint: .trailing))
-                .frame(width: 48, height: 6)
+            // Phase 3 item 9 (Logan 2026-09-19): the trailing accent
+            // gradient dash said nothing - on the TV it read as a stray
+            // mark at the edge of the row. Replaced by a real preview of
+            // what the page's other controls actually change: a line of
+            // primary text and a line of subtext, drawn through
+            // `.scaledFont` / `Color.contrastText` so it reflects the
+            // current Text Size, Subtext Size and Text Contrast live.
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("Sample")
+                    .scaledFont(.bodyMedium)
+                    .foregroundColor(.textPrimary)
+                Text("Secondary text")
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
+            }
+            .lineLimit(1)
         }
         .padding(.vertical, 6)
     }

@@ -12,33 +12,115 @@
 import SwiftUI
 
 #if os(tvOS)
-/// Segment chip for `tvSteppedSegmentsRow`. Mirrors `MoviesPillStyle`
-/// (Capsule, owned focus visual so the system white platter never shows)
-/// at the row's original compact padding.
+/// The ONE segmented chip for Settings: scale pills, stepper +/- keys,
+/// Reset, and any short ladder of choices that reads better in a row
+/// than as a list.
 ///
-/// Phase 3 (Logan 2026-09-17): the chip used to ring WHITE at 3pt when it
-/// was both focused and selected, and to scale up 5%. Both read as the
-/// bright, oversized focus treatment the standing rule forbids, so the
-/// chip now draws the one Settings ring: theme accent at
-/// `SettingsMetrics.tvFocusRingWidth`, no scale bump. Selection is still
-/// legible on its own, from the filled accent capsule.
-struct TVSteppedSegmentStyle: ButtonStyle {
-    let isSelected: Bool
-    @Environment(\.isFocused) private var isFocused
+/// Why it is a VIEW and not a `ButtonStyle` (Logan 2026-09-19, third
+/// round of device screenshots): the previous `TVSteppedSegmentStyle`
+/// read focus through `@Environment(\.isFocused)` inside the style. That
+/// value never arrived for a button hosted in a hand-built (non-List)
+/// Settings card, so the Appearance Text Size / Subtext Size / Text
+/// Contrast rows showed NO focus at all, and the Live TV scale pills
+/// (which used `.buttonStyle(.plain)`) got the system's white platter
+/// instead. Owning focus with `@FocusState` on the button itself is the
+/// app's proven pattern and is what every other Settings row does.
+///
+/// The visual, per the standing rule: selection is the filled accent
+/// capsule, focus is a 2 pt accent ring traced OUTSIDE that fill with a
+/// 3 pt gap, so a focused+selected chip shows both and neither is white.
+/// No scale bump.
+struct TVSettingsPill<Label: View>: View {
+    var isSelected: Bool = false
+    var isDisabled: Bool = false
+    /// Ghost variant: accent label on a faint accent fill with a hairline,
+    /// never the solid accent capsule. Phase 3 item 4 (Logan 2026-09-19):
+    /// Appearance's "Reset" pill was passing `isSelected: isDefault`, so a
+    /// value already at its default drew a fully accent-filled capsule.
+    /// That read as "selected and focused", and the pill's REAL focus ring
+    /// was invisible against it. An action pill is never "selected", so it
+    /// is a ghost at rest and takes the standard ring on focus.
+    var isGhost: Bool = false
+    let action: () -> Void
+    @ViewBuilder let label: () -> Label
+    @FocusState private var isFocused: Bool
 
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundColor(isSelected ? .appBackground : .textSecondary)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(Capsule().fill(isSelected ? Color.accentPrimary : Color.clear))
-            .overlay(
-                Capsule().strokeBorder(
-                    Color.accentPrimary,
-                    lineWidth: isFocused ? SettingsMetrics.tvFocusRingWidth : 0)
+    private var labelColor: Color {
+        if isSelected { return .appBackground }
+        if isGhost { return Color.contrastText(.accentPrimary) }
+        return isFocused ? Color.contrastText(.accentPrimary)
+                         : Color.contrastText(.textSecondary)
+    }
+
+    private var fillOpacity: Double {
+        if isGhost { return isFocused ? 0.18 : 0.10 }
+        return isFocused ? 0.18 : 0
+    }
+
+    var body: some View {
+        Button(action: action) {
+            label()
+                .foregroundColor(labelColor)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule().fill(isSelected
+                                   ? Color.accentPrimary
+                                   : Color.accentPrimary.opacity(fillOpacity))
+                )
+                .overlay(
+                    // Ghost hairline. Drawn inside the chip, so the focus
+                    // ring outside it stays the only thing that moves.
+                    Capsule().strokeBorder(
+                        Color.accentPrimary.opacity(isGhost && !isSelected ? 0.45 : 0),
+                        lineWidth: 1)
+                )
+                // Gap between the chip and its ring, always reserved so
+                // the row geometry never shifts on focus.
+                .padding(3)
+        }
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
+        .overlay(
+            Capsule().strokeBorder(Color.accentPrimary,
+                                   lineWidth: isFocused ? SettingsMetrics.tvFocusRingWidth : 0)
+        )
+        .focused($isFocused)
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.4 : 1)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+extension TVSettingsPill where Label == AnyView {
+    init(_ title: String, isSelected: Bool = false, isDisabled: Bool = false,
+         isGhost: Bool = false, action: @escaping () -> Void) {
+        self.isSelected = isSelected
+        self.isDisabled = isDisabled
+        self.isGhost = isGhost
+        self.action = action
+        self.label = {
+            AnyView(
+                Text(title)
+                    .scaledFont(.system(size: 22, weight: .medium))
+                    .lineLimit(1)
             )
-            .animation(.easeInOut(duration: 0.15), value: isFocused)
-            .opacity(configuration.isPressed ? 0.7 : 1.0)
+        }
+    }
+}
+
+/// The +/- key of a Settings stepper row. Same chip, a glyph instead of
+/// a word, so every stepper on the TV looks and focuses identically.
+struct TVSettingsStepKey: View {
+    let systemImage: String
+    var isDisabled: Bool = false
+    let action: () -> Void
+
+    var body: some View {
+        TVSettingsPill(isDisabled: isDisabled, action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 22, weight: .semibold))
+                .frame(minWidth: 28)
+        }
     }
 }
 #endif
@@ -81,16 +163,10 @@ struct TVSettingsStepperRow: View {
                 .lineLimit(1)
             Spacer(minLength: 12)
 
-            Button {
+            TVSettingsStepKey(systemImage: "minus",
+                              isDisabled: previousStop == nil) {
                 if let previousStop { value = previousStop }
-            } label: {
-                Image(systemName: "minus")
-                    .font(.system(size: 22, weight: .semibold))
-                    .frame(minWidth: 28)
             }
-            .buttonStyle(TVSteppedSegmentStyle(isSelected: false))
-            .disabled(previousStop == nil)
-            .opacity(previousStop == nil ? 0.4 : 1)
             .accessibilityLabel(decreaseLabel)
 
             Text(label(value))
@@ -99,16 +175,10 @@ struct TVSettingsStepperRow: View {
                 .lineLimit(1)
                 .frame(minWidth: 140)
 
-            Button {
+            TVSettingsStepKey(systemImage: "plus",
+                              isDisabled: nextStop == nil) {
                 if let nextStop { value = nextStop }
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 22, weight: .semibold))
-                    .frame(minWidth: 28)
             }
-            .buttonStyle(TVSteppedSegmentStyle(isSelected: false))
-            .disabled(nextStop == nil)
-            .opacity(nextStop == nil ? 0.4 : 1)
             .accessibilityLabel(increaseLabel)
         }
         .padding(.horizontal, 20)
@@ -256,28 +326,69 @@ struct StreamBufferSlider: View {
 /// suppress it with TVNoHighlightButtonStyle and draw our own focus
 /// border + fill (mirroring TVSettingsActionRow's approach).
 struct TVCompactButton: View {
+    /// Phase 3 item 7 (Logan 2026-09-19, Movies & TV Shows): Test and Save
+    /// both read as bare text at rest on the TV. They now match the phone:
+    /// the PRIMARY action is an accent-filled button, the secondary one is
+    /// a ghost with a hairline, and both keep the same height, radius and
+    /// focus ring so they read as a pair of buttons before anything is
+    /// focused. The standard Settings primary metrics are also what the
+    /// Developer > Share Log File "Close" button uses (item 8).
+    enum Role { case primary, ghost }
+
     let title: String
+    var role: Role = .ghost
     var disabled: Bool = false
     let action: () -> Void
     @FocusState private var isFocused: Bool
+
+    private var labelColor: Color {
+        if disabled { return Color.contrastText(.textTertiary) }
+        return role == .primary ? .appBackground : Color.contrastText(.accentPrimary)
+    }
+
+    private var fill: Color {
+        switch role {
+        case .primary: return .accentPrimary
+        case .ghost:   return Color.accentPrimary.opacity(isFocused ? 0.20 : 0.10)
+        }
+    }
 
     var body: some View {
         Button(action: action) {
             Text(title)
                 .scaledFont(.system(size: 24, weight: .semibold))
-                .foregroundColor(disabled ? Color.contrastText(.textTertiary) : Color.contrastText(.accentPrimary))
+                .foregroundColor(labelColor)
                 .padding(.horizontal, 32)
                 .padding(.vertical, 14)
                 .frame(minWidth: 160)
                 .background(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(isFocused ? Color.accentPrimary.opacity(0.20) : Color.elevatedBackground)
+                        .fill(fill)
+                )
+                .overlay(
+                    // Ghost hairline, drawn inside the button so the focus
+                    // ring outside it stays the only thing that changes.
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.accentPrimary
+                            .opacity(role == .ghost ? 0.55 : 0), lineWidth: 1)
+                )
+                .overlay(
+                    // Focus ring, driven by this button's OWN FocusState. The
+                    // shared button style reads focus from the environment,
+                    // which does not arrive for a button inside a hand-built
+                    // card, so on device these buttons showed no focus at all
+                    // (Logan 2026-09-19). Drawn outside the fill with a gap so
+                    // it stays visible against the accent-filled primary.
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(Color.accentPrimary,
+                                      lineWidth: SettingsMetrics.tvFocusRingWidth)
+                        .padding(-5)
+                        .opacity(isFocused ? 1 : 0)
                 )
         }
         // One ring, from the shared style, traced at the button's own
         // 12pt radius instead of the style's default 14pt.
-        .buttonStyle(TVNoHighlightButtonStyle())
-        .tvFocusRingShape(.rounded(12))
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false, settingsStyle: true))
         .focused($isFocused)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
         .disabled(disabled)

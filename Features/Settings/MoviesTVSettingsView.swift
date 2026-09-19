@@ -69,6 +69,11 @@ struct MoviesTVSettingsView: View {
         .toolbarBackground(Color.appBackground, for: .navigationBar)
         .onAppear {
             tmdbKeyDraft = TMDBPosters.loadAPIKey()
+            // Logan 2026-09-18: the range is 85-125% on every platform now.
+            // Anyone who saved 150% or 175% under the old range would get a
+            // slider value outside its bounds, so fold it back on entry.
+            let bounded = min(max(vodScale, 0.85), 1.5)
+            if bounded != vodScale { vodScale = bounded }
         }
     }
 
@@ -111,12 +116,12 @@ struct MoviesTVSettingsView: View {
     #if os(iOS)
     private var iOSBody: some View {
         List {
-            // MARK: Refresh library
+            // MARK: Refresh Library
             Section {
                 // Phase 3: the inline check list became one row that
                 // pushes the choice page; its footer moved onto the
                 // picker, so the Section footer would only repeat it.
-                SettingsChoicePicker("Refresh library",
+                SettingsChoicePicker("Refresh Library",
                                      options: Self.vodRefreshOptions,
                                      selection: $vodRefreshHours,
                                      footer: Self.vodRefreshFootnote,
@@ -124,14 +129,14 @@ struct MoviesTVSettingsView: View {
                     .listRowBackground(Color.cardBackground)
             }
             // Phase 3: no Section header. The picker row already says
-            // "Refresh library".
+            // "Refresh Library".
             .listSectionSeparator(.hidden)
 
             // MARK: Posters
             Section {
                 Toggle(isOn: $tmdbPostersEnabled) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Fetch posters from TMDB")
+                        Text("Fetch Posters from TMDB")
                             .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
                         Text("Fill in program artwork your provider doesn't supply, using The Movie Database.")
@@ -164,8 +169,7 @@ struct MoviesTVSettingsView: View {
                                 Text("Test")
                             }
                         }
-                        .buttonStyle(.bordered)
-                        .tint(theme.accent)
+                        .buttonStyle(SettingsGhostButtonStyle(accent: theme.accent))
                         .disabled(tmdbKeyDraft.trimmingCharacters(in: .whitespaces).isEmpty
                                   || tmdbTestState == .testing)
 
@@ -174,8 +178,7 @@ struct MoviesTVSettingsView: View {
                         Spacer()
 
                         Button("Save") { saveTMDBKey() }
-                            .buttonStyle(.borderedProminent)
-                            .tint(theme.accent)
+                            .buttonStyle(SettingsPrimaryButtonStyle(accent: theme.accent))
                             .disabled(tmdbTestState == .testing)
                     }
                     .listRowBackground(Color.cardBackground)
@@ -192,18 +195,30 @@ struct MoviesTVSettingsView: View {
             .listSectionSeparator(.hidden)
 
             // MARK: Display Scale
-            Section {
-                scaleSliderRow_iOS(title: "Movies & Series", binding: $vodScale)
-            } header: {
-                Text("Display Scale").sectionHeaderStyle()
-            } footer: {
-                Text("Independent scale for Movies & Series. 100% matches the default; 85-125% lets you trade density for readability. Changes apply live, no restart needed.")
-                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+            // iPad / Mac only (Logan 2026-09-18): the phone grids use fixed
+            // column counts and ignore `uiScale` entirely, so the slider did
+            // nothing there. The row is hidden, not deleted, until the phone
+            // layouts read the scale.
+            if UIDevice.current.userInterfaceIdiom != .phone {
+                Section {
+                    scaleSliderRow_iOS(title: "Movies & Series", binding: $vodScale)
+                } header: {
+                    Text("Display Scale").sectionHeaderStyle()
+                } footer: {
+                    Text("Independent scale for Movies & Series. 100% matches the default; 85-150% lets you trade density for readability. Changes apply live, no restart needed.")
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                }
+                .listSectionSeparator(.hidden)
             }
-            .listSectionSeparator(.hidden)
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+        #if os(iOS)
+        // Phase 3 (Logan 2026-09-18): floating tab bar parity -
+        // content runs under the bar, the bar tucks away on scroll,
+        // and the last row clears it.
+        .settingsPhoneTabBarChrome()
+        #endif
     }
 
     private func scaleSliderRow_iOS(title: String, binding: Binding<Double>) -> some View {
@@ -213,7 +228,7 @@ struct MoviesTVSettingsView: View {
                     .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                 Spacer()
-                Text("\(Int(binding.wrappedValue * 100))%")
+                Text("\(Int((binding.wrappedValue * 100).rounded()))%")
                     .scaledFont(.labelSmall.subtext())
                     .foregroundColor(Color.contrastText(.textTertiary))
             }
@@ -221,7 +236,7 @@ struct MoviesTVSettingsView: View {
                 Image(systemName: "textformat.size.smaller")
                     .foregroundColor(Color.contrastText(.textTertiary))
                     .scaledFont(.system(size: 12))
-                Slider(value: binding, in: 0.85...1.75, step: 0.05)
+                Slider(value: binding, in: 0.85...1.5, step: 0.05)
                     .tint(theme.accent)
                 Image(systemName: "textformat.size.larger")
                     .foregroundColor(Color.contrastText(.textTertiary))
@@ -239,16 +254,24 @@ struct MoviesTVSettingsView: View {
     private var tvOSBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
-                SettingsSection("Refresh library", style: .card) {
+                // Phase 3 item 6 (Logan 2026-09-19): this page was the only
+                // tvOS Settings page using `.card` sections, so its headers
+                // rendered as large white Title text and its rows sat
+                // inside an outer card while each row already draws its own
+                // card (card in card). `.plain` is what Live TV, Appearance,
+                // DVR and Developer use: small uppercase eyebrow header,
+                // bare content column.
+                SettingsSection("Refresh Library", style: .plain) {
                     // Phase 3: same options and copy as iOS, still inline
                     // here because a push costs an extra Back press.
-                    SettingsChoicePicker("Refresh library",
+                    SettingsChoicePicker("Refresh Library",
                                          options: Self.vodRefreshOptions,
                                          selection: $vodRefreshHours,
-                                         footer: Self.vodRefreshFootnote)
+                                         footer: Self.vodRefreshFootnote,
+                                         icon: "arrow.clockwise")
                 }
 
-                SettingsSection("Posters", style: .card) {
+                SettingsSection("Posters", style: .plain) {
                     TVSettingsToggleRow(
                         icon: "photo.on.rectangle.angled",
                         iconColor: theme.accent,
@@ -258,33 +281,38 @@ struct MoviesTVSettingsView: View {
                     ) { _ in }
 
                     if tmdbPostersEnabled {
-                        // Phase 3: the same shared field the iOS page uses.
-                        // It already asks for reveal-on-focus on secure
-                        // fields, which is the only reveal the Siri Remote
-                        // can reach.
+                        // Phase 3: the same shared field the iOS page
+                        // uses. It stays MASKED unless the user toggles the
+                        // eye, focused or not (security fix 2026-09-19).
                         SettingsTextField("TMDB API Key",
                                           placeholder: "API Key or Read Access Token",
                                           text: $tmdbKeyDraft,
                                           isSecure: true)
                             .onChange(of: tmdbKeyDraft) { _, _ in tmdbTestState = .idle }
+                            .padding(.horizontal, 20)
 
+                        // Phase 3 item 7: Save is the accent-filled primary
+                        // and Test the ghost, same pair the iPhone shows.
                         HStack(spacing: 24) {
                             // Not gated on an empty key: on tvOS the field only
                             // commits its text when focus LEAVES it, and the
                             // focus engine can't move onto a disabled button.
                             TVCompactButton(
                                 title: tmdbTestState == .testing ? "Testing…" : "Test",
+                                role: .ghost,
                                 disabled: tmdbTestState == .testing
                             ) { Task { await testTMDBKey() } }
 
                             TVCompactButton(
                                 title: "Save",
+                                role: .primary,
                                 disabled: tmdbTestState == .testing
                             ) { saveTMDBKey() }
 
                             tmdbStatusView
                             Spacer()
                         }
+                        .padding(.horizontal, 20)
 
                         Text("If iCloud Sync is enabled, your key is saved to your iCloud Keychain and syncs to your other devices. Get a free key at themoviedb.org; paste either the API Key or the Read Access Token. With a key, artwork and details for Movies and TV Shows come from TMDB first and your provider fills any gaps.")
                             .scaledFont(.system(size: 22).subtext())
@@ -298,9 +326,10 @@ struct MoviesTVSettingsView: View {
                         .padding(.top, 12)
                 }
 
-                SettingsSection("Display Scale", style: .card) {
-                    scaleSliderRow_tvOS(title: "Movies & Series", binding: $vodScale)
-                }
+                // Display Scale is hidden on tvOS (Logan 2026-09-18): the TV
+                // Movies / TV Shows layouts never read `uiScale`, so the
+                // control did nothing. `scaleSliderRow_tvOS` below is kept
+                // for when they do.
             }
             .padding(.horizontal, 80)
             .padding(.vertical, 60)
@@ -309,7 +338,7 @@ struct MoviesTVSettingsView: View {
     }
 
     private func scaleSliderRow_tvOS(title: String, binding: Binding<Double>) -> some View {
-        let steps: [Double] = [0.85, 0.92, 1.0, 1.15, 1.25, 1.5, 1.75]
+        let steps: [Double] = [0.85, 1.0, 1.15, 1.25, 1.35, 1.5]
         let current = steps.min(by: { abs($0 - binding.wrappedValue) < abs($1 - binding.wrappedValue) }) ?? 1.0
         return HStack(spacing: 24) {
             Text(title)
@@ -317,22 +346,12 @@ struct MoviesTVSettingsView: View {
                 .foregroundColor(.textPrimary)
             Spacer()
             ForEach(steps, id: \.self) { step in
-                Button {
+                // Shared Settings chip, not `.buttonStyle(.plain)` (which
+                // drew the system white platter on focus).
+                TVSettingsPill("\(Int((step * 100).rounded()))%",
+                               isSelected: step == current) {
                     binding.wrappedValue = step
-                } label: {
-                    Text("\(Int(step * 100))%")
-                        .scaledFont(.system(size: 22, weight: .medium))
-                        .foregroundColor(step == current ? Color.contrastText(theme.accent) : Color.contrastText(.textSecondary))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(step == current
-                                      ? theme.accent.opacity(0.18)
-                                      : Color.clear)
-                        )
                 }
-                .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 20)
@@ -344,3 +363,69 @@ struct MoviesTVSettingsView: View {
     }
     #endif
 }
+
+#if os(iOS)
+/// Shared geometry for the two Settings action-button styles below, so a
+/// primary and a ghost button sitting side by side are the same height
+/// and the same corner radius.
+private enum SettingsActionButtonMetrics {
+    static let horizontalPadding: CGFloat = 18
+    static let verticalPadding: CGFloat = 8
+    static let minHeight: CGFloat = 34
+    static let cornerRadius: CGFloat = 10
+}
+
+/// Filled primary action (Save). Phase 3 (Logan 2026-09-18): the system
+/// `.borderedProminent` capsule resolved to a pale near-white glass pill
+/// inside a Settings card, so the primary action draws its own accent
+/// fill instead.
+struct SettingsPrimaryButtonStyle: ButtonStyle {
+    let accent: Color
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaledFont(.bodyMedium.weight(.semibold))
+            .foregroundColor(.appBackground)
+            .padding(.horizontal, SettingsActionButtonMetrics.horizontalPadding)
+            .padding(.vertical, SettingsActionButtonMetrics.verticalPadding)
+            .frame(minHeight: SettingsActionButtonMetrics.minHeight)
+            .background(
+                RoundedRectangle(cornerRadius: SettingsActionButtonMetrics.cornerRadius,
+                                 style: .continuous)
+                    .fill(accent)
+            )
+            .opacity(isEnabled ? (configuration.isPressed ? 0.75 : 1) : 0.4)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+/// Secondary / ghost action (Test): accent label on a hairline accent
+/// outline, same height and radius as the primary button.
+struct SettingsGhostButtonStyle: ButtonStyle {
+    let accent: Color
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaledFont(.bodyMedium.weight(.medium))
+            .foregroundColor(Color.contrastText(accent))
+            .tint(accent)
+            .padding(.horizontal, SettingsActionButtonMetrics.horizontalPadding)
+            .padding(.vertical, SettingsActionButtonMetrics.verticalPadding)
+            .frame(minHeight: SettingsActionButtonMetrics.minHeight)
+            .background(
+                RoundedRectangle(cornerRadius: SettingsActionButtonMetrics.cornerRadius,
+                                 style: .continuous)
+                    .fill(accent.opacity(0.10))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: SettingsActionButtonMetrics.cornerRadius,
+                                 style: .continuous)
+                    .strokeBorder(accent.opacity(0.55), lineWidth: 1)
+            )
+            .opacity(isEnabled ? (configuration.isPressed ? 0.75 : 1) : 0.4)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+#endif

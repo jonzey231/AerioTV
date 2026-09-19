@@ -20,6 +20,51 @@ actor EPGCache {
     func invalidateAll() { cache.removeAll() }
 }
 
+// MARK: - Default Live TV group
+//
+// The group Live TV opens on. Set and cleared by LONG PRESS on the group
+// itself (Logan 2026-09-17), on every Apple platform: the tvOS group sidebar
+// rows and the iOS / iPadOS group pills. There is no menu and no Settings
+// picker; the thumbtack drawn beside the group is the only indicator.
+//
+// Empty = no default, so Live TV opens on the last used group. "All" stores
+// as empty, which is why the pin rule everywhere is
+// `token == stored || (token == "All" && stored.isEmpty)`.
+@MainActor
+enum DefaultChannelGroupStore {
+    static let key = "defaultChannelGroup"
+    /// Sentinel for the leading "All Channels" group, stored as "".
+    static let allToken = "All"
+    private static let hiddenGroupsKey = "hiddenChannelGroups"
+
+    static var current: String { UserDefaults.standard.string(forKey: key) ?? "" }
+
+    static func isDefault(_ token: String) -> Bool {
+        let stored = current
+        return token == stored || (token == allToken && stored.isEmpty)
+    }
+
+    /// The one place the long-press toggle lives: an unpinned group becomes
+    /// the default, the pinned one clears the default. Returns the new value.
+    @discardableResult
+    static func toggle(_ token: String) -> String {
+        let wanted = (token == allToken) ? "" : token
+        let next = isDefault(token) ? "" : wanted
+        UserDefaults.standard.set(next, forKey: key)
+        // Opening on a group the user cannot see makes no sense: making
+        // Recently Watched the default un-hides it (Logan 2026-09-14).
+        if next == ManageGroupsSheet.recentGroupToken {
+            var hidden = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
+            if hidden.remove(next) != nil {
+                HiddenGroupsStore.save(hidden, forKey: hiddenGroupsKey)
+            }
+        }
+        SyncManager.shared.pushPreferencesImmediate()
+        debugLog("[GROUPS] default group -> \(next.isEmpty ? "(none)" : next)")
+        return next
+    }
+}
+
 // MARK: - Channel List View
 // Reads pre-loaded channel data from the shared ChannelStore (owned by MainTabView).
 // The store begins fetching as soon as any server is configured, so this view is
@@ -462,8 +507,11 @@ struct ChannelListView: View {
     private var recentlyWatchedToken: String { Self.recentlyWatchedToken }
     /// Group the guide opens on (Manage Groups > long press / Default Group).
     /// Empty = All. Applied once per playlist load.
-    private let defaultChannelGroupKey = "defaultChannelGroup"
+    private let defaultChannelGroupKey = DefaultChannelGroupStore.key
     @State private var defaultGroupApplied = false
+    /// Mirrors the stored default so the pinned pill / drawer row re-renders
+    /// the moment a long press changes it.
+    @State private var defaultGroupToken: String = DefaultChannelGroupStore.current
     #if os(iOS)
     @AppStorage(phoneGroupSelectorKey) private var phoneGroupSelector = "sidebar"
     @State private var phoneSearchPresented = false
@@ -742,6 +790,7 @@ struct ChannelListView: View {
                     }
                     ManageGroupsSheet.seedRecentlyWatchedHidden(storageKey: hiddenGroupsKey)
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
+                    defaultGroupToken = DefaultChannelGroupStore.current
                     groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)
                     groupSortMode = GroupOrderStore.loadMode(forKey: channelGroupSortModeKey)
                     filterChannels()
@@ -824,6 +873,7 @@ struct ChannelListView: View {
                 .onReceive(NotificationCenter.default.publisher(for: .syncManagerDidApplyPreferences)) { _ in
                     ManageGroupsSheet.seedRecentlyWatchedHidden(storageKey: hiddenGroupsKey)
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
+                    defaultGroupToken = DefaultChannelGroupStore.current
                     groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)
                     groupSortMode = GroupOrderStore.loadMode(forKey: channelGroupSortModeKey)
                     if !selectedGroup.hasPrefix("collection:") && !groupTokens.contains(selectedGroup) {
@@ -861,6 +911,13 @@ struct ChannelListView: View {
                 }
             }
             .animation(.easeOut(duration: 0.22), value: phoneDrawerOpen)
+            // Catch-all: any transition with no matching [DRAWER] close line
+            // above it came from somewhere other than the three known writers
+            // (a view rebuild / @State reset), which is the next thing to look
+            // at if the drawer still closes on a hold release.
+            .onChange(of: phoneDrawerOpen) { _, open in
+                debugLog("[DRAWER] state -> \(open ? "open" : "closed")")
+            }
             #endif
             // GH #20 follow-up (user report 2026-07-12): this VStack consumed
             // the bottom safe area BEFORE the List inside could reach it, so
@@ -888,7 +945,10 @@ struct ChannelListView: View {
     private var phoneHeaderRow: some View {
         HStack(spacing: 8) {
             if guideSidebarSelectorActive {
-                Button { phoneDrawerOpen = true } label: { phoneCircle("sidebar.leading") }
+                Button {
+                    debugLog("[DRAWER] open: header button")
+                    phoneDrawerOpen = true
+                } label: { phoneCircle("sidebar.leading") }
                     .accessibilityLabel("Channel Groups")
                 Text(Self.groupTitle(selectedGroup))
                     .scaledFont(.labelMedium)
@@ -1022,13 +1082,17 @@ struct ChannelListView: View {
         ZStack(alignment: .leading) {
             Color.black.opacity(0.45)
                 .ignoresSafeArea()
-                .onTapGesture { phoneDrawerOpen = false }
+                .onTapGesture {
+                    debugLog("[DRAWER] close: scrim tap")
+                    phoneDrawerOpen = false
+                }
             PhoneGroupDrawer(
                 tokens: groupTokens,
                 selected: selectedGroup,
                 favoritesToken: favoritesToken,
-                defaultToken: UserDefaults.standard.string(forKey: defaultChannelGroupKey) ?? "",
+                defaultToken: defaultGroupToken,
                 onSelect: { token in
+                    debugLog("[DRAWER] close: row select \(token)")
                     withAnimation(.spring(response: 0.25)) { selectedGroup = token }
                     phoneDrawerOpen = false
                 },
@@ -1040,11 +1104,22 @@ struct ChannelListView: View {
                     filterChannels()
                 },
                 onManage: {
+                    debugLog("[DRAWER] close: manage groups")
                     phoneDrawerOpen = false
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showManageGroups = true }
+                },
+                // Thumbtack button on a drawer row: same default-group toggle
+                // the pills do (Logan 2026-09-18). Long press is NOT used
+                // here, it collided with the List's hold-and-drag reorder.
+                // The drawer stays open so the pin change is visible.
+                onSetDefault: { token in
+                    debugLog("[DRAWER] set default from row: \(token)")
+                    setDefaultGroup(token)
                 }
             )
-            .frame(width: 272)
+            // Width is owned by PhoneGroupDrawer (it fits itself to the
+            // longest visible group label), so the slide-in transition and
+            // the scrim both work off the same computed value.
             .background(Color.appBackground.ignoresSafeArea())
             .shadow(color: .black.opacity(0.45), radius: 24, x: 8, y: 0)
             .transition(.move(edge: .leading))
@@ -1189,7 +1264,11 @@ struct ChannelListView: View {
                             // the only Manage Groups entry with it. The pane's
                             // header button restores it without a view switch.
                             onManageGroups: { showManageGroups = true },
-                            hiddenGroupCount: hiddenGroups.count
+                            hiddenGroupCount: hiddenGroups.count,
+                            // Long press a row: that group becomes the default
+                            // Live TV group, or the pinned one clears back to
+                            // "last used" (Logan 2026-09-17).
+                            onSetDefault: { token in setDefaultGroup(token) }
                         )
                         .transition(.move(edge: .leading))
                         .focusSection()
@@ -1705,8 +1784,14 @@ struct ChannelListView: View {
             // screen. The rows draw their own card chrome, so the old row
             // insets become padding; pull-to-refresh, the header inset, the
             // group swipe and scroll-away all work on a ScrollView.
+            ScrollViewReader { listProxy in
             ScrollView(.vertical) {
                 LazyVStack(spacing: 0) {
+                    // Re-tap-the-tab anchor (zero height, so it changes
+                    // nothing about the layout): the list has no header row
+                    // that is guaranteed to exist, and the first channel row
+                    // sits below the group chrome.
+                    Color.clear.frame(height: 0).id("list.top")
                     // GH #72: an empty group is a legitimate state (a provider
                     // group the upstream has not populated yet), not an error,
                     // so it gets a notice with a way out rather than a blank list.
@@ -1871,6 +1956,21 @@ struct ChannelListView: View {
             // an opaque platter over the rows in the bar region (the actual
             // "dead band" - see aerioContentUnderTabBar).
             .aerioContentUnderTabBar()
+            // Tapping the Live TV tab while already on the list view: the
+            // channel list animates back to the top and the floating bar
+            // comes back (the trackers ignore a programmatic jump, so the
+            // chrome is expanded here).
+            .onReceive(
+                NotificationCenter.default.publisher(for: .aerioTabReselected)
+            ) { note in
+                guard (note.userInfo?["tab"] as? String) == AppTab.liveTV.rawValue else { return }
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    listProxy.scrollTo("list.top", anchor: .top)
+                }
+                chrome.applyTabBarAway(false, deferred: false)
+                chrome.applyCollapsed(false, deferred: false)
+            }
+            }
             #endif
         }
         // v1.6.13: same mini push-down as the Guide branch above.
@@ -2014,21 +2114,38 @@ struct ChannelListView: View {
                     // guide long-press Left can land focus on the "All" pill.
                     .focused($groupPillFocused, equals: group)
                     #else
-                    Button {
-                        withAnimation(.spring(response: 0.25)) { selectedGroup = group }
-                    } label: {
+                    // Not a Button: tap and long press stay separate gestures
+                    // so holding a pill sets/clears the default group without
+                    // the release also selecting it (Logan 2026-09-17).
+                    HStack(spacing: 5) {
                         Text(Self.groupTitle(group))
                             .scaledFont(.labelMedium)
-                            .foregroundColor(selectedGroup == group ? .appBackground : Color.contrastText(.textSecondary))
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 7)
-                            .background(
-                                selectedGroup == group
-                                    ? AnyView(Capsule().fill(Color.accentPrimary))
-                                    : AnyView(Capsule().fill(Color.elevatedBackground))
-                            )
+                        if group == defaultGroupToken
+                            || (group == DefaultChannelGroupStore.allToken && defaultGroupToken.isEmpty) {
+                            Image(systemName: "pin.fill")
+                                .scaledFont(.system(size: 11))
+                                .foregroundColor(selectedGroup == group
+                                                 ? .appBackground
+                                                 : Color.contrastText(.textTertiary))
+                        }
                     }
-                    .buttonStyle(.plain)
+                    .foregroundColor(selectedGroup == group ? .appBackground : Color.contrastText(.textSecondary))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(
+                        selectedGroup == group
+                            ? AnyView(Capsule().fill(Color.accentPrimary))
+                            : AnyView(Capsule().fill(Color.elevatedBackground))
+                    )
+                    .contentShape(Capsule())
+                    .accessibilityAddTraits(.isButton)
+                    .onTapGesture {
+                        withAnimation(.spring(response: 0.25)) { selectedGroup = group }
+                    }
+                    .onLongPressGesture(minimumDuration: 0.4) {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        setDefaultGroup(group)
+                    }
                     .id("pill_\(group)")
                     #endif
                 }
@@ -2302,6 +2419,17 @@ struct ChannelListView: View {
     /// no favorites yet) is skipped, not forced: the decision is made once
     /// per playlist load, so a later favorites edit or channel refresh never
     /// yanks the user off the group they picked.
+    /// Long-press handler shared by the tvOS sidebar rows and the iOS pills:
+    /// toggles the default group through the one store that owns the rule,
+    /// then picks up the un-hide side effect (Recently Watched) locally.
+    private func setDefaultGroup(_ token: String) {
+        defaultGroupToken = DefaultChannelGroupStore.toggle(token)
+        let stored = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
+        guard stored != hiddenGroups else { return }
+        hiddenGroups = stored
+        filterChannels()
+    }
+
     private func applyDefaultGroupIfNeeded() {
         guard !defaultGroupApplied else { return }
         defaultGroupApplied = true
@@ -2926,7 +3054,7 @@ struct ChannelRow: View {
     /// 0.85 as "slightly below 0.85" when the floating-point step
     /// lands on a binary-exact value.
     private var listScaleClamped: CGFloat {
-        CGFloat(max(0.85, min(1.25, listScale)))
+        CGFloat(max(0.85, min(1.5, listScale)))
     }
     #endif
 
@@ -5414,10 +5542,13 @@ struct ChannelBadge: View {
     }
 
     /// Height the name line costs, including its gap. Zero when hidden.
+    ///
+    /// Through the memoized `ChannelRowTextColumn.lineHeight`, not a fresh
+    /// `UIFont`: this runs on every badge body evaluation, so building a font
+    /// here cost a measurable slice of each guide remote press (1.8.40).
     private var nameBlock: CGFloat {
         guard showName, nameFontSize > 0 else { return 0 }
-        let line = UIFont.systemFont(ofSize: max(1, nameFontSize * measureScale), weight: .medium)
-            .lineHeight.rounded(.up)
+        let line = ChannelRowTextColumn.lineHeight(nameFontSize * measureScale, weight: .medium)
         return line + lineGap
     }
 
@@ -5623,6 +5754,129 @@ struct PhoneHeaderSyncSpinner: View {
     }
 }
 
+// MARK: - Phone group drawer width (fit to content, no layout feedback loop)
+//
+// The drawer used to be a fixed 272pt, so long provider group names always
+// truncated and short lists wasted space (Logan 2026-09-18: it should grow
+// AND shrink to fit). The width is measured straight from the group titles
+// with UIFont metrics at the row's own point size times the app Text Size
+// (the same multiplier `.scaledFont` applies), NEVER through a
+// GeometryReader / PreferenceKey feeding @State that drives sibling layout:
+// that shape has caused an infinite layout loop in this app before
+// (`feedback_swiftui_preference_layout_loop`). It is recomputed only when
+// the token list or the text scale changes, so nothing is written during
+// scroll.
+
+/// Every horizontal metric the drawer layout uses, in ONE place, so the
+/// fitted-width math and the views that draw the row can never drift apart
+/// (they did: the measurement reserved a lumped "56pt pin column" and no
+/// safety margin, so the widest title fitted its available width to within
+/// a fraction of a point and SwiftUI truncated it anyway).
+private enum PhoneDrawerMetrics {
+    /// Row label point size (`PhoneGroupDrawerRow`), at text scale 1.
+    static let rowFontSize: CGFloat = 15
+    /// Leading status glyph point size (Favorites / Recently Watched).
+    static let rowIconSize: CGFloat = 13
+    /// Spacing of both HStacks in the row (outer row, and label + glyph).
+    static let rowSpacing: CGFloat = 8
+    /// `Spacer(minLength:)` after the label, inside the select button.
+    static let labelSpacerMin: CGFloat = 4
+    /// Trailing pin button frame (square, also its hit target).
+    static let pinButtonSide: CGFloat = 44
+    /// `listRowInsets` on every drawer row.
+    static let rowInsetLeading: CGFloat = 18
+    static let rowInsetTrailing: CGFloat = 4
+    /// Header row: horizontal padding, gap before the circle, circle side.
+    static let headerHPadding: CGFloat = 18
+    static let headerGap: CGFloat = 12
+    static let headerCircleSide: CGFloat = 34
+    static let headerFontSize: CGFloat = 12
+    static let headerTracking: CGFloat = 1.2
+    /// Row minimum height / `defaultMinListRowHeight`.
+    static let rowMinHeight: CGFloat = 34
+    /// Slack added to the fitted width so sub-point differences between
+    /// UIKit measurement and SwiftUI's own line breaking never truncate.
+    static let safety: CGFloat = 4
+    /// Never narrower than this, however short the group names are.
+    static let minWidth: CGFloat = 200
+    /// Fraction of the screen the drawer may never exceed.
+    static let maxScreenFraction: CGFloat = 0.85
+
+    /// Everything a row reserves horizontally OUTSIDE the label text:
+    /// list row insets, the gap before the pin, the pin square and the
+    /// label's trailing `Spacer` minimum.
+    static var rowChrome: CGFloat {
+        rowInsetLeading + rowInsetTrailing
+            + labelSpacerMin + rowSpacing + pinButtonSide
+    }
+
+    /// Actual rendered width of a leading status glyph plus its gap.
+    @MainActor
+    static func leadingIconWidth(scale: CGFloat) -> CGFloat {
+        let cfg = UIImage.SymbolConfiguration(pointSize: rowIconSize * scale,
+                                              weight: .regular)
+        let widest = ["star.fill", "clock.arrow.circlepath"].reduce(CGFloat(0)) {
+            max($0, UIImage(systemName: $1, withConfiguration: cfg)?.size.width ?? 0)
+        }
+        // Fall back to a generous square if the symbol is unavailable.
+        return (widest > 0 ? widest : rowIconSize * scale * 1.4) + rowSpacing
+    }
+}
+
+/// Width the "CHANNEL GROUPS" header row needs with its Manage Groups
+/// circle, so the drawer can never squeeze that button.
+private func phoneDrawerHeaderWidth(scale: CGFloat) -> CGFloat {
+    let M = PhoneDrawerMetrics.self
+    let title = "CHANNEL GROUPS"
+    let font = UIFont.systemFont(ofSize: M.headerFontSize * scale, weight: .bold)
+    let width = (title as NSString).size(withAttributes: [.font: font]).width
+    // `.tracking` adds its value after every character, the last included.
+    let tracking = M.headerTracking * CGFloat(title.count)
+    return (M.headerHPadding * 2) + width.rounded(.up) + tracking
+        + M.headerGap + M.headerCircleSide + M.safety
+}
+
+/// Fitted drawer width: the wider of the longest group row and the header
+/// row, clamped between `PhoneDrawerMetrics.minWidth` (or the header row, if that is
+/// larger) and ~85 percent of the screen. Longer names truncate with a tail
+/// ellipsis (rows are `lineLimit(1)`).
+@MainActor
+func phoneGroupDrawerFittedWidth(tokens: [String],
+                                 favoritesToken: String,
+                                 scale: CGFloat) -> CGFloat {
+    let M = PhoneDrawerMetrics.self
+    // Rows go bold when selected, which is the widest they ever draw.
+    let font = UIFont.systemFont(ofSize: M.rowFontSize * scale, weight: .bold)
+    let iconWidth = M.leadingIconWidth(scale: scale)
+    var widestRow: CGFloat = 0
+    var widestTitle = ""
+    var widestText: CGFloat = 0
+    for token in tokens {
+        let title = ChannelListView.groupTitle(token)
+        // `.size(withAttributes:)` can land a fraction under what SwiftUI
+        // lays out, and a fractional shortfall truncates the whole word.
+        var w = (title as NSString).size(withAttributes: [.font: font]).width.rounded(.up)
+        let text = w
+        if token == favoritesToken || token == ChannelListView.recentlyWatchedToken {
+            w += iconWidth
+        }
+        let rowWidth = w + M.rowChrome + M.safety
+        if rowWidth > widestRow {
+            widestRow = rowWidth
+            widestTitle = title
+            widestText = text
+        }
+    }
+    let header = phoneDrawerHeaderWidth(scale: scale)
+    let screenW = UIScreen.main.bounds.width
+    let ceiling = (screenW > 0 ? screenW : 390) * M.maxScreenFraction
+    let floor = max(M.minWidth, header)
+    let final = min(max(widestRow, floor), max(floor, ceiling))
+    let clamped = widestRow > ceiling ? "ceiling" : (widestRow < floor ? "floor" : "none")
+    debugLog("[DRAWER] longest=\"\(widestTitle)\" text=\(Int(widestText)) chrome=\(Int(M.rowChrome + M.safety)) row=\(Int(widestRow)) header=\(Int(header)) final=\(Int(final)) clamp=\(clamped)")
+    return final
+}
+
 /// Phone group drawer (sidebar mode). A long press lifts a row to reorder.
 struct PhoneGroupDrawer: View {
     let tokens: [String]
@@ -5633,53 +5887,58 @@ struct PhoneGroupDrawer: View {
     /// New order of the REAL groups (favorites / All excluded).
     let onReorder: ([String]) -> Void
     let onManage: () -> Void
+    /// Thumbtack tapped on a row: toggle this group as the default Live TV
+    /// group, the same toggle a long press on a pill performs.
+    let onSetDefault: (String) -> Void
     @State private var order: [String] = []
+    @Environment(\.aerioTextScale) private var textScale
+    /// Fitted drawer width. Recomputed only when the token list or the text
+    /// scale changes; never from a measured-layout feedback loop.
+    @State private var fittedWidth: CGFloat = PhoneDrawerMetrics.minWidth
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("CHANNEL GROUPS")
-                    .scaledFont(.system(size: 12, weight: .bold))
-                    .tracking(1.2)
+                    .scaledFont(.system(size: PhoneDrawerMetrics.headerFontSize, weight: .bold))
+                    .tracking(PhoneDrawerMetrics.headerTracking)
                     .foregroundColor(Color.contrastText(.textTertiary))
                 Spacer()
                 Button(action: onManage) {
                     Image(systemName: "line.3.horizontal.decrease.circle")
                         .font(.system(size: 16, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                         .foregroundColor(.textPrimary)
-                        .frame(width: 34, height: 34)
+                        .frame(width: PhoneDrawerMetrics.headerCircleSide,
+                               height: PhoneDrawerMetrics.headerCircleSide)
                         .background(Circle().fill(Color.textPrimary.opacity(0.08)))
                 }
                 .accessibilityLabel("Manage Groups")
             }
-            .padding(.horizontal, 18)
+            .padding(.horizontal, PhoneDrawerMetrics.headerHPadding)
             .padding(.top, 12)
             .padding(.bottom, 4)
+
+            // No gesture hint here (Logan 2026-09-18): the tappable pin is
+            // self-explanatory. The tvOS sidebar keeps its own hint.
+
             List {
                 ForEach(order, id: \.self) { token in
-                    Button { onSelect(token) } label: {
-                        HStack(spacing: 8) {
-                            if token == favoritesToken {
-                                Image(systemName: "star.fill").scaledFont(.system(size: 13))
-                            } else if token == ChannelListView.recentlyWatchedToken {
-                                Image(systemName: "clock.arrow.circlepath").scaledFont(.system(size: 13))
-                            }
-                            Text(ChannelListView.groupTitle(token))
-                                .scaledFont(.system(size: 15, weight: token == selected ? .bold : .medium))
-                                .lineLimit(1)
-                            Spacer()
-                            if token == defaultToken || (token == "All" && defaultToken.isEmpty) {
-                                Image(systemName: "pin.fill").scaledFont(.system(size: 11)).foregroundColor(Color.contrastText(.textTertiary))
-                            }
-                        }
-                        .foregroundColor(token == selected ? .accentPrimary : .textPrimary)
-                        .frame(minHeight: 34)
-                        .contentShape(Rectangle())
-                    }
+                    PhoneGroupDrawerRow(
+                        token: token,
+                        isSelected: token == selected,
+                        isDefault: token == defaultToken
+                            || (token == "All" && defaultToken.isEmpty),
+                        favoritesToken: favoritesToken,
+                        onSelect: { onSelect(token) },
+                        onSetDefault: { onSetDefault(token) }
+                    )
                     // Tight rows (Logan 2026-09-05): provider playlists carry
                     // hundreds of groups, the default List spacing was a
                     // lot of scrolling.
-                    .listRowInsets(EdgeInsets(top: 0, leading: 18, bottom: 0, trailing: 14))
+                    .listRowInsets(EdgeInsets(top: 0,
+                                              leading: PhoneDrawerMetrics.rowInsetLeading,
+                                              bottom: 0,
+                                              trailing: PhoneDrawerMetrics.rowInsetTrailing))
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                     .moveDisabled(token.hasPrefix("collection:"))
@@ -5692,11 +5951,97 @@ struct PhoneGroupDrawer: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
-            .environment(\.defaultMinListRowHeight, 34)
+            .environment(\.defaultMinListRowHeight, PhoneDrawerMetrics.rowMinHeight)
         }
         .padding(.top, 2)
-        .onAppear { order = tokens }
-        .onChange(of: tokens) { _, t in if t != order { order = t } }
+        .frame(width: fittedWidth)
+        .onAppear {
+            order = tokens
+            recomputeWidth()
+        }
+        .onChange(of: tokens) { _, t in
+            if t != order { order = t }
+            recomputeWidth()
+        }
+        .onChange(of: textScale) { _, _ in recomputeWidth() }
+    }
+
+    /// Measured from the titles, not from the rendered layout. Applied with
+    /// animations disabled so an open drawer never animates its width.
+    private func recomputeWidth() {
+        let w = phoneGroupDrawerFittedWidth(tokens: order.isEmpty ? tokens : order,
+                                            favoritesToken: favoritesToken,
+                                            scale: textScale)
+        guard abs(w - fittedWidth) > 0.5 else { return }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) { fittedWidth = w }
+    }
+}
+
+/// One drawer row: the row itself selects the group, and a borderless
+/// thumbtack button at the trailing edge sets or clears the default Live TV
+/// group without selecting the row or closing the drawer.
+///
+/// No long press here (Logan 2026-09-18): it collided with the List's own
+/// hold-and-drag reorder, so a reorder also pinned the moved group. The row
+/// is back to the plain Button it shipped as, and `.onMove` is untouched.
+private struct PhoneGroupDrawerRow: View {
+    let token: String
+    let isSelected: Bool
+    let isDefault: Bool
+    let favoritesToken: String
+    let onSelect: () -> Void
+    let onSetDefault: () -> Void
+
+    var body: some View {
+        HStack(spacing: PhoneDrawerMetrics.rowSpacing) {
+            Button(action: onSelect) {
+                HStack(spacing: PhoneDrawerMetrics.rowSpacing) {
+                    if token == favoritesToken {
+                        Image(systemName: "star.fill")
+                            .scaledFont(.system(size: PhoneDrawerMetrics.rowIconSize))
+                    } else if token == ChannelListView.recentlyWatchedToken {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .scaledFont(.system(size: PhoneDrawerMetrics.rowIconSize))
+                    }
+                    Text(ChannelListView.groupTitle(token))
+                        .scaledFont(.system(size: PhoneDrawerMetrics.rowFontSize,
+                                            weight: isSelected ? .bold : .medium))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: PhoneDrawerMetrics.labelSpacerMin)
+                }
+                .foregroundColor(isSelected ? .accentPrimary : .textPrimary)
+                .frame(minHeight: PhoneDrawerMetrics.rowMinHeight)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            // Borderless so the List does not treat a tap here as a row tap:
+            // the drawer stays open and the selection does not change.
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                onSetDefault()
+            } label: {
+                Image(systemName: isDefault ? "pin.fill" : "pin")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(isDefault
+                                     ? Color.accentPrimary
+                                     : Color.contrastText(.textTertiary).opacity(0.45))
+                    .frame(width: PhoneDrawerMetrics.pinButtonSide,
+                           height: PhoneDrawerMetrics.pinButtonSide)
+                    .contentShape(Rectangle())
+                    .animation(.easeOut(duration: 0.18), value: isDefault)
+                    // 44x44 touch target on a 34pt row: the negative padding
+                    // keeps the tight row height (Logan 2026-09-05) while the
+                    // button still hit-tests its full square.
+                    .padding(.vertical, -5)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(isDefault ? "Clear default group" : "Set as default group")
+        }
+        .frame(minHeight: PhoneDrawerMetrics.rowMinHeight)
     }
 }
 #endif

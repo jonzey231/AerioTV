@@ -19,10 +19,9 @@
 //    * optional helper text BELOW it,
 //    * a subtle accent focus outline at the standard Settings width,
 //      never white and never oversized (Logan's standing rule),
-//    * secure fields get the reveal eye, and on tvOS they also reveal
-//      while the field is focused, because the Siri Remote's focus
-//      engine cannot move sideways off a focused UITextField onto the
-//      in-box eye button.
+//    * secure fields get the reveal eye, and NOTHING else reveals them:
+//      the value stays masked whether or not the field has focus, on
+//      every platform (security fix 2026-09-19).
 //
 //  The box itself is `AppTextField`, which already owns the UIKit
 //  dark-focus field that keeps tvOS from painting its white platter.
@@ -72,11 +71,10 @@ struct SettingsTextField: View {
                 keyboardType: keyboardType,
                 isSecure: isSecure,
                 autocapitalization: autocapitalization,
-                autocorrection: autocorrection,
-                // tvOS: reveal while focused. This is the only reveal the
-                // Siri Remote can actually reach; the eye button stays for
-                // touch and for pointer users.
-                revealWhenFocused: isSecure
+                autocorrection: autocorrection
+                // SECURITY 2026-09-19: no reveal-on-focus. A secure field
+                // stays masked on every platform until the user toggles
+                // the eye, which the Siri Remote can reach.
             )
 
             if let helper, !helper.isEmpty {

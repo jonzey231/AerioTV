@@ -272,7 +272,6 @@ struct TVSettingsSplitView<Detail: View>: View {
         case .category(let dest):    return "cat-\(dest.rawValue)"
         case .server(let id):        return "srv-\(id.uuidString)"
         case .editServer(let id):    return "edit-\(id.uuidString)"
-        case .myRecordings:          return "recordings"
         }
     }
 }
@@ -300,7 +299,10 @@ private struct TVRailRowStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .stroke(isFocused ? Color.accentPrimary : Color.clear, lineWidth: 2)
             )
-            .scaleEffect(isFocused ? 1.02 : 1.0)
+            // No focus scale: a focused row must share its siblings'
+        // exact frame (Logan 2026-09-19 - the 1.02 bump made the
+        // focused row read as wider than its neighbours). The
+        // accent ring and fill carry focus.
             .animation(.easeOut(duration: 0.15), value: isFocused)
     }
 }

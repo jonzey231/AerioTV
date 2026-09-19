@@ -9,6 +9,43 @@
 import SwiftUI
 import SwiftData
 
+/// The ONE leading icon for a Settings row: a tinted rounded tile with
+/// the glyph centered in it.
+///
+/// Phase 3 item 5 (Logan 2026-09-19, Apple TV walkthrough): a tvOS page
+/// mixed three leading treatments - a tile (Show Program Badges, Debug
+/// Logging), a bare glyph (Badge Types, Time Format, the log rows) and
+/// nothing at all (Color Theme, Mode, Playback Engine). The rule is now:
+/// within a page, every row that has an icon uses THIS tile, and a row
+/// either has this tile or no icon at all. Never a bare glyph.
+struct SettingsIconTile: View {
+    let icon: String
+    var color: Color = .accentPrimary
+    /// White-on-accent variant for the iPad sidebar's selection pill.
+    var selectionContrast: Bool = false
+
+    #if os(tvOS)
+    static let boxSize: CGFloat = 48
+    static let glyphSize: CGFloat = 22
+    static let corner: CGFloat = 10
+    #else
+    static let boxSize: CGFloat = 32
+    static let glyphSize: CGFloat = 14
+    static let corner: CGFloat = 7
+    #endif
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: Self.corner, style: .continuous)
+                .fill(selectionContrast ? Color.white.opacity(0.2) : color.opacity(0.2))
+                .frame(width: Self.boxSize, height: Self.boxSize)
+            Image(systemName: icon)
+                .scaledFont(.system(size: Self.glyphSize, weight: .semibold))
+                .foregroundColor(selectionContrast ? .white : color)
+        }
+    }
+}
+
 struct SettingsRow: View {
     let icon: String
     let iconColor: Color
@@ -19,6 +56,11 @@ struct SettingsRow: View {
     /// in an ellipsis instead of wrapping the row taller; everywhere else
     /// keeps the unlimited default.
     var subtitleLineLimit: Int? = nil
+    /// Overrides the title color. Used by destructive / warning rows
+    /// (Delete Playlist, Refresh EPG Data) so they keep their red or
+    /// amber title while still using the standard tiled icon and row
+    /// metrics (Logan 2026-09-19, playlist detail page).
+    var titleColor: Color? = nil
     /// iPad sidebar (Phase 4): true while the row sits on the accent
     /// selection pill, where the normal accent-tinted subtitle and icon
     /// would blend into the fill. Flips the row to white-on-accent, the
@@ -46,31 +88,19 @@ struct SettingsRow: View {
     /// new opacity-tinted accent.
     @ObservedObject private var theme = ThemeManager.shared
 
-    #if os(tvOS)
-    private let iconBoxSize: CGFloat = 48
-    private let iconFontSize: CGFloat = 22
-    private let cornerRadius: CGFloat = 10
-    #else
-    private let iconBoxSize: CGFloat = 32
-    private let iconFontSize: CGFloat = 14
-    private let cornerRadius: CGFloat = 7
-    #endif
+    /// Trailing spinner box, sized to match the leading icon tile so the
+    /// row's two ends balance.
+    private var iconBoxSize: CGFloat { SettingsIconTile.boxSize }
 
     var body: some View {
         HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(selectionContrast ? Color.white.opacity(0.2) : iconColor.opacity(0.2))
-                    .frame(width: iconBoxSize, height: iconBoxSize)
-                Image(systemName: icon)
-                    .scaledFont(.system(size: iconFontSize, weight: .semibold))
-                    .foregroundColor(selectionContrast ? .white : iconColor)
-            }
+            SettingsIconTile(icon: icon, color: iconColor,
+                             selectionContrast: selectionContrast)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .scaledFont(.bodyMedium)
-                    .foregroundColor(selectionContrast ? .white : .textPrimary)
+                    .foregroundColor(selectionContrast ? .white : (titleColor ?? .textPrimary))
                 if let subtitle {
                     Text(subtitle)
                         .scaledFont(.bodySmall)

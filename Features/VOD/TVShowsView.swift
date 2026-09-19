@@ -39,7 +39,7 @@ struct TVShowsView: View {
 
     private let hiddenGroupsKey = "hiddenSeriesGroups"
 
-    /// User-tunable UI scale (0.85–1.25). iPhone + tvOS ignore the value;
+    /// User-tunable UI scale (0.85-1.5). iPhone + tvOS ignore the value;
     /// iPad / Mac Catalyst stretch the poster minimum so the grid reads
     /// comfortably on wider displays (see AppearanceSettingsView).
     @AppStorage("uiScale") private var uiScale: Double = 1.0
@@ -51,7 +51,7 @@ struct TVShowsView: View {
     private let gridRowSpacing: CGFloat = 48
     #else
     private var columns: [GridItem] {
-        let clamped = max(0.85, min(1.25, uiScale))
+        let clamped = max(0.85, min(1.5, uiScale))
         let isRegular = UIDevice.current.userInterfaceIdiom != .phone
         let minimum: CGFloat = isRegular ? 120 * clamped : 120
         let maximum: CGFloat = isRegular ? 160 * clamped : 160
