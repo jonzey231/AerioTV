@@ -73,6 +73,18 @@ enum HLSDelivery {
     /// next remuxer in this process delivers in-process instead.
     nonisolated(unsafe) static var forceInProcessNextStart = false
 
+    /// An AirPlay output is on the audio route. In-process delivery
+    /// (custom-scheme URLs) cannot be handed to a receiver, so a tune with
+    /// the route up always takes loopback + LAN (device log 2026-09-25
+    /// 16:22:50: an in-process start left the TV with nothing to play).
+    static var airPlayRouteActive: Bool {
+        #if os(iOS)
+        return AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.portType == .airPlay }
+        #else
+        return false
+        #endif
+    }
+
     /// Developer override: UserDefaults "hlsInProcessDelivery" = true.
     static var developerForced: Bool { UserDefaults.standard.bool(forKey: "hlsInProcessDelivery") }
 }
@@ -655,7 +667,16 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         let proxy = HLSDelivery.systemProxyDescription()
         let forced = HLSDelivery.forceInProcessNextStart
         HLSDelivery.forceInProcessNextStart = false
-        if HLSDelivery.developerForced {
+        if HLSDelivery.airPlayRouteActive,
+           HLSDelivery.developerForced || proxy != nil || forced {
+            // Device log 2026-09-25 16:22:50 / 16:25:12 / 16:26:01: the
+            // in-process fallback on an AirPlay route made the tune
+            // un-AirPlayable ("LAN delivery unavailable").
+            let why = HLSDelivery.developerForced ? "developer override"
+                : proxy != nil ? "system proxy" : "previous loopback start never became ready"
+            inProcessDelivery = false
+            deliveryNote = "loopback (AirPlay route active: in-process fallback for \(why) skipped, the receiver needs the LAN URL)"
+        } else if HLSDelivery.developerForced {
             inProcessDelivery = true; deliveryNote = "in-process (developer override)"
         } else if let proxy {
             inProcessDelivery = true; deliveryNote = "in-process (system proxy: \(proxy))"
@@ -4509,7 +4530,21 @@ struct AVPlayerMultiviewTile: View {
         }
         if retryable, mismatchAutoRetries < 2, tileError == nil {
             mismatchAutoRetries += 1
-            if reason.contains("never became ready"), reason.contains(".unknown"),
+            // Device log 2026-09-25 16:22:49 / 16:25:10: the loopback item
+            // "never became ready" because the RECEIVER held it (external
+            // playback after a failed LAN item; 127.0.0.1 is unreachable
+            // from the TV), not because a proxy captured loopback. A
+            // session served to AirPlay is not a failed loopback start.
+            #if os(iOS)
+            let airPlayServed = HLSDelivery.airPlayRouteActive
+                || player?.isExternalPlaybackActive == true
+                || airPlayDelivery.isServing
+            #else
+            let airPlayServed = false
+            #endif
+            if reason.contains("never became ready"), reason.contains(".unknown"), airPlayServed {
+                debugLog("[AVP-MV] loopback start not counted as failed (AirPlay route / external playback active); retry stays on loopback title=\(channelName)")
+            } else if reason.contains("never became ready"), reason.contains(".unknown"),
                let mux = remuxer, !mux.inProcessDelivery {
                 // Loopback fetches never answered: a proxy or VPN is
                 // capturing 127.0.0.1 (see HLSDelivery). The retry hands
