@@ -180,6 +180,9 @@ final class AirPlayMonitor: ObservableObject {
               receiver?.isAudioOnly != true,
               !AerioCastController.shared.isCasting,
               !CompanionClient.shared.isControlling else { return false }
+        // The splash player must let go of the receiver before the
+        // tile's item goes external.
+        AirPlaySplash.shared.stop(reason: "channel tune")
         headlessTune = true
         if !hostsHeadless { hostsHeadless = true }
         debugLog("[AVP-AIRPLAY] AirPlay route selected (\(out.name ?? "?")): tuning \(channel) headless, no fullscreen player; card shows Connecting to AirPlay")
@@ -402,6 +405,21 @@ final class AirPlayMonitor: ObservableObject {
     }
 
     private func setPhase(_ p: AirPlayPhase) {
+        // Receiver splash: only while the idle-route card shows.
+        if case .idleRoute = p {
+            AirPlaySplash.shared.show()
+        } else if AirPlaySplash.shared.isShowing {
+            let reason: String
+            switch p {
+            case .probing: reason = "channel tune"
+            case .active: reason = "receiver took a channel"
+            case .none: reason = AirPlayReceiverResolver.currentAirPlayOutput() == nil ? "route gone" : "card cleared"
+            case .ended: reason = "session ended"
+            case .routeLost: reason = "route lost"
+            case .idleRoute: reason = ""
+            }
+            AirPlaySplash.shared.stop(reason: reason)
+        }
         if p == .ended, phase != .ended {
             debugLog("[Cast] card hide (AirPlay, session ended)")
         }
@@ -414,6 +432,63 @@ final class AirPlayMonitor: ObservableObject {
         let name = receiver?.displayName
             ?? (AirPlayReceiver.isGenericName(routeName) ? nil : routeName)
         if deviceName != name { deviceName = name }
+    }
+}
+
+// MARK: - Receiver "connected" splash (device test 2026-09-25 request)
+
+/// AirPlay has no custom receiver page (unlike Cast); the only way to put
+/// something on the TV is to play a video with external playback. While
+/// an AirPlay route is selected and nothing plays, this loops a bundled,
+/// silent 1080p clip (AirPlayConnectedSplash.mp4: "AerioTV / Connected to
+/// your iPhone / Pick a channel in the app.") through its own muted
+/// AVPlayer. It is never attached to AirPlayMonitor, so it cannot drive
+/// the card. Stopped the moment a channel tune begins and when the route
+/// goes away.
+@MainActor
+final class AirPlaySplash {
+    static let shared = AirPlaySplash()
+    private init() {}
+
+    private var player: AVQueuePlayer?
+    private var looper: AVPlayerLooper?
+    private var externalObservation: NSKeyValueObservation?
+
+    var isShowing: Bool { player != nil }
+
+    func show() {
+        guard player == nil else { return }
+        guard let url = Bundle.main.url(forResource: "AirPlayConnectedSplash", withExtension: "mp4") else {
+            debugLog("[AVP-AIRPLAY] splash: asset missing from the bundle; receiver shows nothing")
+            return
+        }
+        let q = AVQueuePlayer()
+        q.isMuted = true
+        q.allowsExternalPlayback = true
+        q.usesExternalPlaybackWhileExternalScreenIsActive = true
+        q.preventsDisplaySleepDuringVideoPlayback = false
+        looper = AVPlayerLooper(player: q, templateItem: AVPlayerItem(url: url))
+        player = q
+        externalObservation = q.observe(\.isExternalPlaybackActive, options: [.new]) { p, _ in
+            let active = p.isExternalPlaybackActive
+            Task { @MainActor in
+                guard AirPlaySplash.shared.player != nil else { return }
+                debugLog("[AVP-AIRPLAY] splash: external playback \(active ? "active (receiver shows the splash)" : "inactive")")
+            }
+        }
+        q.play()
+        debugLog("[AVP-AIRPLAY] splash: showing on receiver")
+    }
+
+    func stop(reason: String) {
+        guard let q = player else { return }
+        externalObservation = nil
+        looper?.disableLooping()
+        looper = nil
+        q.pause()
+        q.removeAllItems()
+        player = nil
+        debugLog("[AVP-AIRPLAY] splash: stopped (\(reason))")
     }
 }
 #endif

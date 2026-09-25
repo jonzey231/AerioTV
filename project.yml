@@ -52,6 +52,7 @@ targets:
           - "TopShelfExtension/**"
     resources:
       - path: App/AerioSplash.mp4
+      - path: App/AirPlayConnectedSplash.mp4
       - path: SupportingFiles/Assets.xcassets
     info:
       path: SupportingFiles/Info.plist
