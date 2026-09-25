@@ -84,8 +84,7 @@ final class AirPlayTileDelivery {
         self.loopbackURL = loopbackURL
         self.channelName = channelName
         observeRoute()
-        guard Self.routeHasAirPlay(),
-              !AirPlayMonitor.shared.externalPlaybackDisabledForSession else { return false }
+        guard Self.routeHasAirPlay() else { return false }
         debugLog("[AVP-AIRPLAY] item audio codec=\(remuxer.sourceAudioCodec) channel=\(channelName)")
         if remuxer.inProcessDelivery {
             debugLog("[AVP-AIRPLAY] LAN delivery unavailable; leaving the loopback item in place")
@@ -179,7 +178,6 @@ final class AirPlayTileDelivery {
 
     private func beginMidPlay() {
         guard state == .idle, let remuxer, let player, player.currentItem != nil,
-              !AirPlayMonitor.shared.externalPlaybackDisabledForSession,
               Self.routeHasAirPlay() else { return }
         debugLog("[AVP-AIRPLAY] item audio codec=\(remuxer.sourceAudioCodec) channel=\(channelName)")
         if remuxer.inProcessDelivery {

@@ -48,12 +48,6 @@ final class AirPlayMonitor: ObservableObject {
     /// Sticky across channel flips; cleared when the session ends.
     @Published private(set) var hostsHeadless = false
 
-    /// Set by the idle-route card's Disconnect: players built for the rest
-    /// of this route session get `allowsExternalPlayback = false`, so a
-    /// channel started afterwards stays on the phone. Cleared when the
-    /// AirPlay output leaves the route.
-    private(set) var externalPlaybackDisabledForSession = false
-
     private weak var player: AVPlayer?
     private var externalObservation: NSKeyValueObservation?
     private var rateObservation: NSKeyValueObservation?
@@ -106,8 +100,10 @@ final class AirPlayMonitor: ObservableObject {
         // 12:38:47: a player pinned local by an earlier X never entered
         // external playback when the Apple TV was picked mid-play, so only
         // the system audio route reached the TV).
-        if !externalPlaybackDisabledForSession { Self.enableExternalPlayback(on: player) }
-        else { player.allowsExternalPlayback = false }
+        // No per-session opt-out (device log 2026-09-25): while the system
+        // route is AirPlay a tune goes to the receiver, because that is
+        // what the route means; only the user's route picker changes it.
+        Self.enableExternalPlayback(on: player)
         startObservingRoutes()
         externalObservation = player.observe(\.isExternalPlaybackActive,
                                             options: [.initial, .new]) { p, _ in
@@ -135,11 +131,11 @@ final class AirPlayMonitor: ObservableObject {
     }
 
     /// The attached player, re-enabled for external playback when an
-    /// AirPlay output appears (the session flag was just cleared, or was
-    /// never set). Also called by AirPlayTileDelivery before a mid-play
+    /// AirPlay output appears (a player from an older build path that
+    /// was never pinned local). Also called by AirPlayTileDelivery before a mid-play
     /// handoff swaps the item.
     func reenableExternalPlaybackForRoute() {
-        guard !externalPlaybackDisabledForSession, let player, !player.allowsExternalPlayback else { return }
+        guard let player, !player.allowsExternalPlayback else { return }
         Self.enableExternalPlayback(on: player)
         debugLog("[AVP-AIRPLAY] external playback re-enabled on the attached player (AirPlay route present)")
     }
@@ -171,14 +167,26 @@ final class AirPlayMonitor: ObservableObject {
         player.timeControlStatus == .paused ? player.play() : player.pause()
     }
 
-    /// The card's X. AirPlay has nothing to "disconnect", so closing ends the
-    /// session outright, and it must NOT fall back to the phone's screen
-    /// (rule 4: "if I close it, it should just close").
+    /// The card's X / Stop AirPlay. Playback stops outright and must NOT
+    /// fall back to the phone's screen (rule 4: "if I close it, it should
+    /// just close"). An app cannot deselect an AirPlay route, so when the
+    /// system route is still AirPlay the card returns to the idle-route
+    /// state (Disconnect opens the route picker) and the next channel goes
+    /// to the receiver (device log 2026-09-25: pinning later players local
+    /// left the TV with the audio route only).
     func stop() {
-        debugLog("[Cast] stop: session ended, no local resume (AirPlay); system route stays on AirPlay")
-        player?.allowsExternalPlayback = false
+        let routeStays = AirPlayReceiverResolver.currentAirPlayOutput() != nil
+        if routeStays {
+            debugLog("[Cast] stop: playback stopped, no local resume (AirPlay); system route still on AirPlay, card back to idle route (Disconnect opens the route picker)")
+        } else {
+            debugLog("[Cast] stop: session ended, no local resume (AirPlay)")
+        }
         setPhase(.ended)
         stopPlayback()
+        if routeStays {
+            setPhase(.none)
+            evaluate()
+        }
     }
 
     /// The one teardown behind the card's X, Stop AirPlay and a
@@ -233,18 +241,17 @@ final class AirPlayMonitor: ObservableObject {
         } else {
             debugLog("[Cast] card hide (AirPlay)")
             debugLog("[Cast] stop: the receiver ended AirPlay; playback stopped, no local resume")
-            player?.allowsExternalPlayback = false
             setPhase(.ended)
             stopPlayback()
         }
     }
 
-    /// Idle-route card's Disconnect: nothing is playing, so there is no
-    /// player to pull off the receiver. The app stops offering the route
-    /// (card hidden, new players pinned local) until the route changes.
+    /// Idle-route card's Disconnect: an app cannot deselect an AirPlay
+    /// route, so this presents the system route picker for the user to
+    /// pick this iPhone. The card stays until the route actually changes.
     func disconnectIdleRoute() {
-        externalPlaybackDisabledForSession = true
-        setPhase(.ended)
+        debugLog("[AVP-AIRPLAY] disconnect: presenting the AirPlay route picker (an app cannot deselect the route; pick this iPhone to end AirPlay)")
+        AirPlayMenuTrigger.present()
     }
 
     private func apply(_ active: Bool, fromPlayer: Bool) {
@@ -288,8 +295,6 @@ final class AirPlayMonitor: ObservableObject {
         refreshName()
         if out != nil { reenableExternalPlaybackForRoute() }
         guard let out else {
-            externalPlaybackDisabledForSession = false
-            if let player { Self.enableExternalPlayback(on: player) }
             AirPlayReceiverResolver.shared.cancelRetryLadder()
             if receiver != nil { receiver = nil }
             if phase == .active || hostsHeadless || AirPlayTileDelivery.isServingReceiver {
@@ -323,7 +328,7 @@ final class AirPlayMonitor: ObservableObject {
         // Waiting to confirm a receiver-side release: hold the card.
         if releaseCheck != nil { return }
         // An ended session stays hidden until the route itself changes.
-        if phase == .ended, externalPlaybackDisabledForSession || player == nil && !tileLoading {
+        if phase == .ended, player == nil && !tileLoading {
             return
         }
         if tileLoading || player != nil {

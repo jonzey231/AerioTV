@@ -6182,13 +6182,16 @@ struct MainTabView: View {
                     onTogglePlayPause: {},
                     onChannelUp: { nowPlaying.changeChannel(direction: 1) },
                     onChannelDown: { nowPlaying.changeChannel(direction: -1) },
+                    // Disconnect opens the system route picker: an app
+                    // cannot deselect an AirPlay route (device log
+                    // 2026-09-25), the user picks this iPhone there.
                     onStop: {
-                        airPlay.disconnectIdleRoute()
                         showRemoteControls = false
+                        airPlay.disconnectIdleRoute()
                     },
                     onDisconnect: {
-                        airPlay.disconnectIdleRoute()
                         showRemoteControls = false
+                        airPlay.disconnectIdleRoute()
                     },
                     disconnectLabel: "Disconnect",
                     showsSkipButtons: false,
