@@ -1666,6 +1666,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             if gap > duration + 0.6 {
                 starvedClosures += 1
                 worstClosureGap = max(worstClosureGap, gap)
+                recentStarvations.append((wall: nowWall, gap: gap))
                 // Publish the moment of starvation, not just the 150-segment
                 // summary: an AVPlayer stall that lands within a few seconds
                 // of an upstream gap must NOT be answered by holding further
@@ -1683,10 +1684,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             debugLog("[TS-REMUX] feed-jitter: \(starvedClosures) starved closures so far, worst gap \(String(format: "%.1f", worstClosureGap))s")
         }
         segments.append((seq: nextSeq, data: data, duration: duration))
+        if lanListener != nil { refreshLANHoldBack(now: nowWall) }
         spillSegment(seq: nextSeq, data: data, duration: duration)
         if inProcessDelivery { deliveryBase64[nextSeq] = data.base64EncodedString() }
         nextSeq += 1
-        let ramCap = retainedRAMCap ?? maxBufferedSegments
+        let ramCap = retainedRAMCap ?? (lanListener != nil ? lanRingSegments : maxBufferedSegments)
         if segments.count > ramCap {
             let evicted = segments.prefix(segments.count - ramCap)
             // Rule 4: the reservoir can hold at most the ring itself. If the
@@ -1930,7 +1932,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                  + "(reservoir \(held.count) segs, \(String(format: "%.1f", heldSeconds)) s)")
     }
 
-    private func playlistText() -> String {
+    /// `lan`: the AirPlay LAN listener's copy (see `refreshLANHoldBack`):
+    /// never paced, a deeper RAM window, and an explicit hold-back.
+    private func playlistText(lan: Bool = false) -> String {
         advancePacedEdge()
         // Rewind mode: advertise the whole disk window; AVPlayer's
         // seekable range then IS the rewind window. Every spilled entry
@@ -1945,7 +1949,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // rendered (RAM window or Live Rewind spill window) to the paced
         // edge. Clamping the head only: the rewind depth behind the player
         // is untouched, so the seekable range keeps its full 1800 s.
-        let edgeCap: Int? = pacingApplies ? pacedAdvertisedSeq : nil
+        // LAN (AirPlay receiver): no pacing, every cut segment is served
+        // at once (device log 2026-09-25 17:04: the paced one-segment
+        // reservoir left the receiver no runway through a feed gap).
+        let edgeCap: Int? = (pacingApplies && !lan) ? pacedAdvertisedSeq : nil
         func capped<T>(_ items: [T], _ seq: (T) -> Int) -> [T] {
             guard let cap = edgeCap else { return items }
             return items.filter { seq($0) <= cap }
@@ -1954,7 +1961,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             ? segments.suffix(inlineWindowSegments).map { (seq: $0.seq, duration: $0.duration) }
             : (spillDir != nil && !spilled.isEmpty)
                 ? capped(spilled, { $0.seq }).map { (seq: $0.seq, duration: $0.duration) }
-                : capped(segments, { $0.seq }).suffix(liveWindowSegments)
+                : capped(segments, { $0.seq }).suffix(lan ? lanRingSegments : liveWindowSegments)
                     .map { (seq: $0.seq, duration: $0.duration) }
         guard let first = window.first else {
             return "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:\(Int(pinnedTargetDuration.rounded(.up)))\n#EXT-X-MEDIA-SEQUENCE:0\n"
@@ -1988,6 +1995,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
         if eventPlaylist {
             text += "#EXT-X-PLAYLIST-TYPE:EVENT\n"
+        }
+        if lan, !eventPlaylist, !playlistComplete, lanHoldBackSeconds > 0 {
+            // Never deeper than the window minus one target, so the join
+            // point stays inside what is advertised.
+            let room = window.reduce(0.0) { $0 + $1.duration } - pinnedTargetDuration
+            let hb = min(lanHoldBackSeconds, max(3 * pinnedTargetDuration.rounded(.up), room))
+            text += "#EXT-X-SERVER-CONTROL:HOLD-BACK=\(String(format: "%.3f", hb))\n"
+            text += "#EXT-X-START:TIME-OFFSET=-\(String(format: "%.3f", hb)),PRECISE=NO\n"
         }
         if fmp4 != nil {
             if inProcessDelivery, let initSeg = fmp4InitSegment {
@@ -2082,6 +2097,78 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var lanListener: NWListener?
     private var lanPort: UInt16 = 0
     private var lanPeersLogged = Set<String>()
+
+    // MARK: AirPlay LAN runway (device log 2026-09-25 17:04)
+    //
+    // The receiver played a bursty feed (11-13 stalls a minute, 4.5-6 s
+    // wall for a 2.5 s segment) from a paced playlist whose reservoir was
+    // one segment, and rebuffered until AVPlayer dropped external
+    // playback. The LAN copy of the playlist is never paced, the RAM ring
+    // is deeper while a receiver is served, and the playlist states a
+    // hold-back that keeps the receiver ~3 segments (>= 8 s) behind the
+    // live edge, grown for a bursty ingest and for high bitrates, up to
+    // `lanHoldBackCeiling`. Loopback playback is untouched.
+
+    /// RAM ring (and LAN RAM window) while a receiver is served: 16
+    /// segments of ~2.5 s = 40 s, >= the 20 s hold-back ceiling plus
+    /// room to re-fetch through a stall. Live tunes also have the disk
+    /// spill behind it.
+    private let lanRingSegments = 16
+    private let lanHoldBackFloor = 8.0
+    private let lanHoldBackCeiling = 20.0
+    /// Touched only on `queue`. Monotonic per LAN session (only grows), so
+    /// a receiver that re-joins after a stall joins at least as deep.
+    private var lanHoldBackSeconds = 0.0
+    private var lanHoldBackReason = ""
+    /// Starved closures (wall, gap) for the last 60 s, touched on `queue`.
+    private var recentStarvations: [(wall: Date, gap: Double)] = []
+    /// Highest segment the receiver fetched on the LAN (-1 = none).
+    private var lanHighestRequestedSeq = -1
+    /// The stated LAN hold-back, readable from any thread (0 = no LAN).
+    let lanHoldBack = DoubleBox(0)
+
+    /// Starved closures in the last 60 s and the worst gap among them.
+    private func recentStarvationStats(now: Date) -> (count: Int, worst: Double) {
+        recentStarvations.removeAll { now.timeIntervalSince($0.wall) > 60 }
+        return (recentStarvations.count, recentStarvations.reduce(0.0) { max($0, $1.gap) })
+    }
+
+    /// Bitrate of the RAM ring, kbps.
+    private func ringKbps() -> Int {
+        let bytes = segments.reduce(0) { $0 + $1.data.count }
+        let secs = segments.reduce(0.0) { $0 + $1.duration }
+        return secs > 0 ? Int(Double(bytes) * 8 / secs / 1000) : 0
+    }
+
+    /// Runs on `queue`. Chooses the LAN hold-back and logs when it grows.
+    private func refreshLANHoldBack(now: Date) {
+        let target = max(targetSegmentSeconds, pinnedTargetDuration.rounded(.up))
+        let stats = recentStarvationStats(now: now)
+        let kbps = ringKbps()
+        var hb = max(3 * target, lanHoldBackFloor)
+        var why = String(format: "3 x target %.0f s = %.0f s, floor %.0f s", target, 3 * target, lanHoldBackFloor)
+        if stats.count > 6 {
+            let add = stats.count > 12 ? 8.0 : 4.0
+            hb += add
+            why += String(format: "; bursty ingest %d stalls in 60 s +%.0f s", stats.count, add)
+        }
+        if stats.worst > 0, stats.worst + target > hb {
+            hb = stats.worst + target
+            why += String(format: "; worst gap %.1f s + target", stats.worst)
+        }
+        if kbps > 10_000 {
+            hb += 4
+            why += "; \(kbps) kbps > 10 Mbps +4 s"
+        }
+        hb = min(lanHoldBackCeiling, hb)
+        guard hb > lanHoldBackSeconds + 0.4 else { return }
+        lanHoldBackSeconds = hb
+        lanHoldBackReason = why
+        lanHoldBack.set(hb)
+        airPlayVariant?.setHoldBackFloor(hb)
+        debugLog(String(format: "[TS-REMUX] LAN hold-back %.1f s (%@; ceiling %.0f s); LAN playlist unpaced, RAM ring %d segs",
+                        hb, why, lanHoldBackCeiling, lanRingSegments))
+    }
     /// Touched only on `queue`; readable elsewhere through
     /// `currentAirPlayVariant`.
     private var airPlayVariant: AirPlayAACVariant? {
@@ -2129,6 +2216,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
             self.openLANListener(interfaces: [.wifi, .wiredEthernet]) { port in
                 // Runs on `queue`.
+                if port != nil { self.refreshLANHoldBack(now: Date()) }
                 if let port { finish(.ready(ip: ip, port: port)) } else { finish(.unavailable) }
             }
             self.queue.asyncAfter(deadline: .now() + 3) { finish(.unavailable) }
@@ -2197,6 +2285,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         lanListener = nil
         lanPort = 0
         lanPeersLogged.removeAll()
+        lanHoldBackSeconds = 0
+        lanHoldBack.set(0)
+        lanHoldBackReason = ""
+        lanHighestRequestedSeq = -1
         listener.cancel()
         debugLog("[TS-REMUX] LAN delivery stopped (loopback only)")
     }
@@ -2222,7 +2314,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 debugLog("[TS-REMUX] LAN delivery: first request from \(peer)")
             }
         }
-        handleConnection(connection)
+        handleConnection(connection, lan: true)
     }
 
     static func peerHost(_ endpoint: NWEndpoint) -> String? {
@@ -2292,6 +2384,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             for packet in self.heldAudio { tail.append(packet) }
             tail.append(self.pending)
             self.airPlayVariant = variant
+            variant.setHoldBackFloor(self.lanHoldBackSeconds)
             variant.start(primeSegments: Array(window), tail: tail)
             finish(variant)
         }
@@ -2307,12 +2400,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         variant.stop()
     }
 
-    private func handleConnection(_ connection: NWConnection) {
+    private func handleConnection(_ connection: NWConnection, lan: Bool = false) {
         connection.start(queue: .global(qos: .userInitiated))
-        receiveRequest(connection, buffer: Data())
+        receiveRequest(connection, buffer: Data(), lan: lan)
     }
 
-    private func receiveRequest(_ connection: NWConnection, buffer: Data) {
+    private func receiveRequest(_ connection: NWConnection, buffer: Data, lan: Bool) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, isComplete, error in
             guard let self, error == nil else { connection.cancel(); return }
             var buffer = buffer
@@ -2322,14 +2415,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 // last bytes arrive with FIN piggybacked must still be served.
                 let head = String(decoding: buffer[..<headerEnd.lowerBound], as: UTF8.self)
                 let path = head.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
-                self.respond(connection, path: path)
+                self.respond(connection, path: path, lan: lan)
             } else if isComplete || buffer.count >= 16_384 {
                 // EOF before a complete request, or an oversized head. Without
                 // the isComplete arm a cleanly half-closed peer returns
                 // (nil, true, nil) forever and this re-armed on every one.
                 connection.cancel()
             } else {
-                self.receiveRequest(connection, buffer: buffer)
+                self.receiveRequest(connection, buffer: buffer, lan: lan)
             }
         }
     }
@@ -2343,7 +2436,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     /// Resolves one playlist / init / segment request on the remux queue.
     /// Shared by the loopback HTTP server and the in-process loader.
-    func serve(path: String, completion: @escaping (ServedResource) -> Void) {
+    func serve(path: String, lan: Bool = false, completion: @escaping (ServedResource) -> Void) {
         // AirPlay airplay-aac variant (plan section 4). Resolved OFF the
         // remux queue: a live-edge segment GET is held up to the store's
         // wait, and the ingest must never stall behind it.
@@ -2371,20 +2464,23 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
             let r: ServedResource
             if path.hasSuffix("live.m3u8") {
-                r = ServedResource(status: 200, body: Data(self.playlistText().utf8),
+                r = ServedResource(status: 200, body: Data(self.playlistText(lan: lan).utf8),
                                    contentType: "application/vnd.apple.mpegurl", uti: "public.m3u-playlist")
             } else if path.hasSuffix("init.mp4"), let initSeg = self.fmp4InitSegment {
                 r = ServedResource(status: 200, body: initSeg, contentType: "video/mp4", uti: "public.mpeg-4")
             } else if path.hasPrefix("/seg"), path.hasSuffix(".ts"),
                       let seq = Int(path.dropFirst(4).dropLast(3)),
                       let data = self.segmentData(seq: seq) {
-                // The player's position, for the pacing starvation guard.
-                self.pacedHighestRequestedSeq = max(self.pacedHighestRequestedSeq, seq)
+                // The player's position, for the pacing starvation guard
+                // (loopback only: the LAN copy is unpaced).
+                if lan { self.lanHighestRequestedSeq = max(self.lanHighestRequestedSeq, seq) }
+                else { self.pacedHighestRequestedSeq = max(self.pacedHighestRequestedSeq, seq) }
                 r = ServedResource(status: 200, body: data, contentType: "video/mp2t", uti: "public.mpeg-2-transport-stream")
             } else if path.hasPrefix("/seg"), path.hasSuffix(".m4s"),
                       let seq = Int(path.dropFirst(4).dropLast(4)),
                       let data = self.segmentData(seq: seq) {
-                self.pacedHighestRequestedSeq = max(self.pacedHighestRequestedSeq, seq)
+                if lan { self.lanHighestRequestedSeq = max(self.lanHighestRequestedSeq, seq) }
+                else { self.pacedHighestRequestedSeq = max(self.pacedHighestRequestedSeq, seq) }
                 r = ServedResource(status: 200, body: data, contentType: "video/iso.segment", uti: "public.mpeg-4")
             } else {
                 r = ServedResource(status: 404, body: Data("not found".utf8), contentType: "text/plain", uti: "public.plain-text")
@@ -2407,8 +2503,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
     }
 
-    private func respond(_ connection: NWConnection, path: String) {
-        serve(path: path) { r in
+    private func respond(_ connection: NWConnection, path: String, lan: Bool = false) {
+        serve(path: path, lan: lan) { r in
             let status: String
             switch r.status {
             case 200: status = "200 OK"
@@ -5332,7 +5428,17 @@ struct AVPlayerMultiviewTile: View {
             debugLog("[AVP-AIRPLAY] join offset left to the variant playlist's HOLD-BACK (primary offset not applied) channel=\(channelName)")
         } else if isLiveTune {
             let floor = max(3 * joinTargetDuration, learned, LiveEdgeHoldback.base)
-            let offset = min(18.0, floor + streamBufferSeconds)
+            var offset = min(18.0, floor + streamBufferSeconds)
+            // AirPlay passthrough on the LAN URL: at least the remuxer's LAN
+            // hold-back (device log 2026-09-25 17:04), which the LAN
+            // playlist also states.
+            let lanHoldBack = (url.host != "127.0.0.1" && url.scheme == "http")
+                ? (remuxer?.lanHoldBack.get() ?? 0) : 0
+            if lanHoldBack > offset {
+                debugLog(String(format: "[AVP-AIRPLAY] join offset %.1fs -> LAN hold-back %.1fs channel=%@",
+                                offset, lanHoldBack, channelName))
+                offset = lanHoldBack
+            }
             playerItem.configuredTimeOffsetFromLive =
                 CMTime(seconds: offset, preferredTimescale: 600)
             debugLog(String(format:

@@ -265,7 +265,14 @@ final class AirPlayTileDelivery {
         if plan == .aacStereo {
             debugLog("[AVP-AIRPLAY] join offset left to the variant playlist's HOLD-BACK (primary offset not applied) channel=\(channelName)")
         } else {
-            item.configuredTimeOffsetFromLive = old.configuredTimeOffsetFromLive
+            var offset = old.configuredTimeOffsetFromLive
+            let lanHoldBack = remuxer?.lanHoldBack.get() ?? 0
+            if lanHoldBack > 0, !offset.isValid || offset.seconds < lanHoldBack {
+                debugLog(String(format: "[AVP-AIRPLAY] LAN item join offset %.1fs -> LAN hold-back %.1fs channel=%@",
+                                offset.isValid ? offset.seconds : 0, lanHoldBack, channelName))
+                offset = CMTime(seconds: lanHoldBack, preferredTimescale: 600)
+            }
+            item.configuredTimeOffsetFromLive = offset
         }
         return item
     }

@@ -69,6 +69,13 @@ final class AirPlayAACVariant: @unchecked Sendable {
     private var served: [String: Int] = [:]
     private var audioPath: String?
     private var servingTimer: DispatchSourceTimer?
+    /// Minimum hold-back the owner wants (the remuxer's LAN hold-back,
+    /// device log 2026-09-25 17:04); 0 = the 3 x target default.
+    private var holdBackFloor = 0.0
+
+    func setHoldBackFloor(_ seconds: Double) {
+        stateLock.lock(); holdBackFloor = max(0, seconds); stateLock.unlock()
+    }
 
     /// `transcoderFactory` is for the CLI tests only; production builds
     /// the real AudioToolbox transcoder.
@@ -265,7 +272,8 @@ final class AirPlayAACVariant: @unchecked Sendable {
         s.target = window.map { Int((Double(max($0.videoTicks, $0.audioTicks)) / ticks).rounded(.up)) }
             .max().map { max(1, $0) } ?? 0
         s.windowSeconds = window.reduce(0.0) { $0 + Double($1.videoTicks) / ticks }
-        (s.holdBack, s.holdBackWanted) = Self.holdBack(target: s.target, windowSeconds: s.windowSeconds)
+        (s.holdBack, s.holdBackWanted) = Self.holdBack(target: s.target, windowSeconds: s.windowSeconds,
+                                                       floor: holdBackFloor)
         s.videoEnd = Double(emittedVideoTicks) / ticks
         s.audioEnd = Double(emittedAudioTicks) / ticks
         s.audioBearing = window.filter { $0.audioSamples > 0 }.count
@@ -282,8 +290,11 @@ final class AirPlayAACVariant: @unchecked Sendable {
     /// (the RFC 8216bis minimum, what the Cast store states), but never so
     /// deep that the join point would fall off the front of the window,
     /// which keeps one full target duration in front of it.
-    static func holdBack(target: Int, windowSeconds: Double) -> (stated: Double, wanted: Double) {
-        let wanted = Double(3 * target)
+    /// `floor` raises the wanted hold-back past three targets (the
+    /// remuxer's LAN hold-back for a bursty or high-bitrate feed); the
+    /// window clamp still applies.
+    static func holdBack(target: Int, windowSeconds: Double, floor: Double = 0) -> (stated: Double, wanted: Double) {
+        let wanted = max(Double(3 * target), floor)
         guard target > 0 else { return (0, 0) }
         let room = windowSeconds - Double(target)
         let stated = min(wanted, max(Double(target), (room * 10).rounded(.down) / 10))

@@ -2091,6 +2091,13 @@ do {
     expectEq(tight.wanted, 15.0, "airplay-aac hold-back: still reports what it wanted")
     let tiny = AirPlayAACVariant.holdBack(target: 5, windowSeconds: 5.0)
     expectEq(tiny.stated, 5.0, "airplay-aac hold-back: never below one target")
+    // Device log 2026-09-25 17:04: the remuxer's LAN hold-back floor
+    // raises the wanted hold-back past 3x target, still window-clamped.
+    let floored = AirPlayAACVariant.holdBack(target: 5, windowSeconds: 30.0, floor: 20.0)
+    expectEq(floored.wanted, 20.0, "airplay-aac hold-back: floor raises wanted past 3x target")
+    expectEq(floored.stated, 20.0, "airplay-aac hold-back: floor stated when the window has room")
+    let flooredTight = AirPlayAACVariant.holdBack(target: 5, windowSeconds: 22.0, floor: 20.0)
+    expectEq(flooredTight.stated, 17.0, "airplay-aac hold-back: floor still clamped one target inside the window")
     expectEq(AirPlayAACVariant.servedSummary([:]), "none", "airplay-aac served: none before any GET")
     expectEq(AirPlayAACVariant.servedSummary(["video": 2, "master": 3, "aseg": 0]),
              "master=3 video=2", "airplay-aac served: sorted, zero kinds omitted")
