@@ -6057,13 +6057,10 @@ struct MainTabView: View {
                 isPlaying: castController.remoteIsPlaying,
                 // Android parity: no transport button until something plays.
                 showTransport: content != nil,
-                // 2026-09-21 production recording: no sheet behind the idle
-                // card; tapping it re-opens the "Cast to" picker so the user
-                // can switch devices. Playing -> the remote controls sheet.
-                onTap: {
-                    if content == nil { showCompanionPickerGlobal = true }
-                    else { showRemoteControls = true }
-                },
+                // 2026-09-25 production recording: idle expands into the
+                // minimal Connected sheet (Change Cast Device), playing into
+                // the remote controls sheet.
+                onTap: { showRemoteControls = true },
                 onTogglePlayPause: { castController.remoteTogglePlayPause() },
                 // X = stop playback on the TV AND close the card.
                 onStop: {
@@ -6098,9 +6095,9 @@ struct MainTabView: View {
                     status: "Select a Channel",
                     isPlaying: false,
                     showTransport: false,
-                    // No sheet behind the idle card (2026-09-21 production
-                    // recording): tap re-opens the system route picker.
-                    onTap: { AirPlayMenuTrigger.present() },
+                    // 2026-09-25 production recording: expands into the
+                    // minimal Connected sheet (Change AirPlay Device).
+                    onTap: { showRemoteControls = true },
                     onTogglePlayPause: {},
                     onStop: {
                         // An app cannot drop the route: X presents the
@@ -6140,19 +6137,19 @@ struct MainTabView: View {
         switch activeRemoteTransport {
         case .cast:
             // 2026-09-21 production recording: the shared Cast/AirPlay sheet.
-            // Only reachable while something is loaded (the idle card opens
-            // the picker); a web-receiver flip keeps the playing layout.
+            // Nothing loaded -> the minimal idle sheet; a web-receiver flip
+            // keeps the playing layout.
             let content = castController.castingContent
+            let device = castController.connectedDeviceName ?? "TV"
             let item = content.flatMap { c in
                 ChannelStore.shared.channels.first(where: { $0.id == c.mediaID })
             }
             RemoteSessionSheet(
                 transport: .cast,
-                mode: .playing,
-                channelName: content?.title
-                    ?? "Casting to \(castController.connectedDeviceName ?? "TV")",
-                statusText: castController.castStatusLine(
-                    deviceName: castController.connectedDeviceName ?? "TV"),
+                mode: content == nil ? .idle : .playing,
+                channelName: content?.title ?? device,
+                statusText: content == nil ? "Connected. Select a channel to start."
+                    : castController.castStatusLine(deviceName: device),
                 artURL: content?.artURL,
                 channelID: content?.mediaID,
                 fallbackSubtitle: content?.subtitle,
@@ -6165,6 +6162,13 @@ struct MainTabView: View {
                 onStop: {
                     castController.stopCasting()
                     showRemoteControls = false
+                },
+                onChangeDevice: {
+                    // Sheet-on-sheet: close this one, then open "Cast to".
+                    showRemoteControls = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        showCompanionPickerGlobal = true
+                    }
                 }
             )
         case .companion:
@@ -6191,15 +6195,16 @@ struct MainTabView: View {
                 companion: companionClient  // full options (scrubber + sheet)
             )
         case .airPlay:
-            // Idle route has no sheet (its card opens the route picker);
-            // probing = the playing layout with controls disabled until the
-            // receiver has the video.
+            // Idle route -> the minimal idle sheet; probing = the playing
+            // layout with controls disabled until the receiver has the video.
             let item = nowPlaying.playingItem
+            let idle = airPlayIsIdleRoute
             RemoteSessionSheet(
                 transport: .airPlay,
-                mode: airPlayIsProbing ? .connecting : .playing,
-                channelName: item?.name ?? "AirPlay",
-                statusText: airPlayIsProbing ? "Connecting to AirPlay" : airPlayPlayingStatus,
+                mode: idle ? .idle : (airPlayIsProbing ? .connecting : .playing),
+                channelName: idle ? (airPlay.deviceName ?? "AirPlay") : (item?.name ?? "AirPlay"),
+                statusText: idle ? "Connected. Select a channel to start."
+                    : (airPlayIsProbing ? "Connecting to AirPlay" : airPlayPlayingStatus),
                 artURL: item?.logoURL?.absoluteString,
                 channelID: item?.id,
                 fallbackSubtitle: nil,
@@ -6212,6 +6217,10 @@ struct MainTabView: View {
                 onStop: {
                     airPlay.stop()
                     showRemoteControls = false
+                },
+                onChangeDevice: {
+                    debugLog("[Remote] Change AirPlay Device: presenting the route picker")
+                    AirPlayMenuTrigger.present()
                 }
             )
         case nil:

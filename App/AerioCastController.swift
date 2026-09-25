@@ -2380,7 +2380,10 @@ struct RemoteControlScreen: View {
 ///    "AirPlay to <receiver>", program + LIVE badge, time range + progress,
 ///    Channel Down / Up, Back / Pause / Forward, Options, Stop AirPlay.
 struct RemoteSessionSheet: View {
-    enum Mode { case connecting, playing }
+    /// idle: connected / route selected, nothing playing (production
+    /// 2026-09-25): transport glyph, device name, "Connected. Select a
+    /// channel to start." and a single Change Device button.
+    enum Mode { case connecting, playing, idle }
     enum Transport { case cast, airPlay }
 
     var transport: Transport
@@ -2405,6 +2408,8 @@ struct RemoteSessionSheet: View {
     var onChannelDown: () -> Void
     var onSeek: (Double) -> Void
     var onStop: () -> Void
+    /// Idle only: "Change Cast Device" / "Change AirPlay Device".
+    var onChangeDevice: () -> Void = {}
 
     @State private var contentHeight: CGFloat = 320
     @State private var showOptions = false
@@ -2419,7 +2424,9 @@ struct RemoteSessionSheet: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            playingContent
+            Group {
+                if mode == .idle { idleContent } else { playingContent }
+            }
             .padding(.horizontal, 24)
             .padding(.top, 22)
             .padding(.bottom, 8)
@@ -2441,6 +2448,32 @@ struct RemoteSessionSheet: View {
                 CastOptionsSheet(cast: AerioCastController.shared, airPlayItem: item)
             }
         }
+    }
+
+    // MARK: Idle
+
+    private var idleContent: some View {
+        VStack(spacing: 14) {
+            VStack(spacing: 4) {
+                transportGlyph
+                Text(channelName)
+                    .scaledFont(.title3.weight(.bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text(statusText)
+                    .scaledFont(.subheadline)
+                    .foregroundStyle(Color.contrastText(accent))
+                    .lineLimit(2)
+            }
+            .multilineTextAlignment(.center)
+            wideButton {
+                Label(transport == .cast ? "Change Cast Device" : "Change AirPlay Device",
+                      systemImage: transport == .cast ? RemoteSessionCard.Transport.cast.glyph
+                                                      : RemoteSessionCard.Transport.airPlay.glyph)
+                    .foregroundStyle(.white)
+            } background: { Color.white.opacity(0.12) } action: { onChangeDevice() }
+        }
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: Playing / connecting
