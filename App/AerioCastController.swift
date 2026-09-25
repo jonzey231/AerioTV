@@ -2388,9 +2388,14 @@ struct RemoteSessionSheet: View {
     var channelName: String
     var statusText: String
     var artURL: String?
-    var programTitle: String?
-    var programStart: Date?
-    var programEnd: Date?
+    /// Channel whose now-airing programme the sheet shows. Resolved live
+    /// against the same sources as the Live TV list row (item fields when
+    /// they cover now, else GuideStore's bulk EPG), so it never drifts from
+    /// the list and rolls over on its own when the programme changes.
+    var channelID: String?
+    /// Shown as the title when no programme is known (e.g. the cast
+    /// payload's EPG subtitle).
+    var fallbackSubtitle: String?
     var isPlaying: Bool
     /// The locally resolved channel, for the AirPlay Options sheet (Cast
     /// anchors its options on the controller's own castingContent).
@@ -2403,6 +2408,8 @@ struct RemoteSessionSheet: View {
 
     @State private var contentHeight: CGFloat = 320
     @State private var showOptions = false
+    @ObservedObject private var guideStore = GuideStore.shared
+    @ObservedObject private var channelStore = ChannelStore.shared
     @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
     @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
     @Environment(\.dismiss) private var dismiss
@@ -2552,37 +2559,61 @@ struct RemoteSessionSheet: View {
             .frame(height: 56)
     }
 
+    /// Now-airing programme for `channelID` at `now`, same precedence as
+    /// ChannelRow.liveProgram: the channel item's current-program fields
+    /// (only while they still cover `now`), else GuideStore's EPG.
+    static func nowAiring(channelID: String?, at now: Date = Date())
+        -> (title: String, start: Date, end: Date)? {
+        guard let channelID else { return nil }
+        if let item = ChannelStore.shared.channels.first(where: { $0.id == channelID }),
+           let title = item.currentProgram, !title.isEmpty,
+           let start = item.currentProgramStart, let end = item.currentProgramEnd,
+           start <= now, end > now {
+            return (title, start, end)
+        }
+        if let p = GuideStore.shared.liveProgram(for: channelID, at: now) {
+            return (p.title, p.start, p.end)
+        }
+        return nil
+    }
+
     private var programBlock: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 8) {
-                Text(programTitle ?? "")
-                    .scaledFont(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                // Recording: red dot + red LIVE on a red-tinted capsule.
-                HStack(spacing: 4) {
-                    Circle().fill(Color.red).frame(width: 5, height: 5)
-                    Text("LIVE").scaledFont(.caption2.weight(.semibold))
+        // Ticks every 30 s: the bar advances and the programme rolls over.
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            let prog = Self.nowAiring(channelID: channelID, at: context.date)
+            let title = prog?.title ?? fallbackSubtitle
+            VStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    if let title, !title.isEmpty {
+                        Text(title)
+                            .scaledFont(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    // Recording: red dot + red LIVE on a red-tinted capsule.
+                    HStack(spacing: 4) {
+                        Circle().fill(Color.red).frame(width: 5, height: 5)
+                        Text("LIVE").scaledFont(.caption2.weight(.semibold))
+                    }
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.red.opacity(0.15), in: Capsule())
                 }
-                .foregroundStyle(.red)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(Color.red.opacity(0.15), in: Capsule())
-            }
-            if let programStart, let programEnd, programEnd > programStart {
-                Text("\(programStart.formatted(date: .omitted, time: .shortened)) - \(programEnd.formatted(date: .omitted, time: .shortened))")
-                    .scaledFont(.caption)
-                    .foregroundStyle(.white.opacity(0.7))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                TimelineView(.periodic(from: .now, by: 30)) { context in
-                    let total = programEnd.timeIntervalSince(programStart)
-                    let elapsed = context.date.timeIntervalSince(programStart)
+                if let prog, prog.end > prog.start {
+                    Text("\(prog.start.formatted(date: .omitted, time: .shortened)) - \(prog.end.formatted(date: .omitted, time: .shortened))")
+                        .scaledFont(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    let total = prog.end.timeIntervalSince(prog.start)
+                    let elapsed = context.date.timeIntervalSince(prog.start)
                     ProgressView(value: min(max(elapsed / total, 0), 1))
                         .tint(accent)
+                } else {
+                    // Unknown programme: an empty track, never a full bar.
+                    ProgressView(value: 0).tint(accent)
                 }
-            } else {
-                ProgressView(value: 1).tint(accent)
             }
         }
     }
