@@ -60,10 +60,27 @@ final class AirPlayMonitor: ObservableObject {
     private var headlessTune = false
     private var loadingForCard: Bool { tileLoading || headlessTune }
     private var servingSubscription: AnyCancellable?
-    /// Receiver let go of the player with the route still up: confirmed
-    /// after `receiverReleaseGrace` so an item swap blip is not a stop.
-    private var releaseCheck: Task<Void, Never>?
-    private static let receiverReleaseGrace: UInt64 = 3_000_000_000
+    /// The receiver dropped `isExternalPlaybackActive` with the AirPlay
+    /// output still on the route. Device log 2026-09-25 17:04:54.794: that
+    /// happens during a receiver REBUFFER (bursty ingest), and the old 3 s
+    /// `receiverReleaseGrace` turned the stall into a full stop at
+    /// 17:04:57.876 while Dispatcharr still had the channel healthy. It is
+    /// now held as a stall: `isExternal` stays true (LAN delivery, variant,
+    /// keepalive, watchdog suspension and the card are untouched, the card
+    /// reads "Buffering…"), and `stallWatch` ends the session only on a
+    /// real end (see `stallTick`).
+    @Published private(set) var receiverBuffering = false
+    /// Raw `isExternalPlaybackActive` from the attached player.
+    private(set) var playerExternal = false
+    private var stallWatch: Task<Void, Never>?
+    private var stallStartedAt: Date?
+    /// When the player was last seen NOT waiting / buffering during the
+    /// stall (nil while it buffers).
+    private var stallNotBufferingSince: Date?
+    private var stallLastLogAt = Date.distantPast
+    /// External playback off, player not buffering, no item error, route
+    /// still AirPlay: only after this long is it the receiver ending.
+    static let receiverIdleEndSeconds: TimeInterval = 60
     /// Re-entrancy guard for the stop paths (the teardown they run
     /// detaches the player, which re-evaluates the route).
     private var stoppingSession = false
@@ -150,8 +167,8 @@ final class AirPlayMonitor: ObservableObject {
         rateObservation = nil
         player = nil
         tileLoading = false
-        releaseCheck?.cancel()
-        releaseCheck = nil
+        endStall()
+        playerExternal = false
         if silently {
             isExternal = false
         } else {
@@ -291,8 +308,7 @@ final class AirPlayMonitor: ObservableObject {
     func receiverEnded(routeLost: Bool, servedByTile: Bool = false) {
         guard !stoppingSession, phase != .ended, phase != .routeLost else { return }
         guard servedByTile || phase == .active || hostsHeadless || isExternal else { return }
-        releaseCheck?.cancel()
-        releaseCheck = nil
+        endStall()
         if routeLost {
             debugLog("[Cast] card hide (AirPlay route lost); playback stopped")
             setPhase(.routeLost)
@@ -327,32 +343,142 @@ final class AirPlayMonitor: ObservableObject {
     }
 
     private func apply(_ active: Bool, fromPlayer: Bool) {
+        if fromPlayer { playerExternal = active }
+        if active, fromPlayer, let since = stallStartedAt {
+            debugLog("[AVP-AIRPLAY] external playback resumed after \(String(format: "%.1f", Date().timeIntervalSince(since))) s")
+            endStall()
+        }
         if isExternal != active {
-            isExternal = active
-            if active {
-                releaseCheck?.cancel()
-                releaseCheck = nil
-            } else if phase == .active, fromPlayer {
-                // The receiver gave the player back with the route still
-                // there (receiver stopped). Confirm after a grace period
-                // so an item swap blip is not taken for it, then stop.
-                releaseCheck?.cancel()
-                releaseCheck = Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: Self.receiverReleaseGrace)
-                    guard !Task.isCancelled else { return }
-                    let monitor = AirPlayMonitor.shared
-                    monitor.releaseCheck = nil
-                    guard !monitor.isExternal, monitor.player != nil else { return }
-                    monitor.receiverEnded(routeLost: false)
-                }
+            if !active, fromPlayer, phase == .active,
+               AirPlayReceiverResolver.currentAirPlayOutput() != nil {
+                // The receiver let go with the route still up: a stall
+                // until proven otherwise (device log 2026-09-25 17:04).
+                beginStall()
                 return
-            } else if !active, phase == .active {
+            }
+            isExternal = active
+            if !active, phase == .active {
                 // Player detached (tune teardown, channel flip): not a
                 // receiver-side end.
                 debugLog("[Cast] card hide (AirPlay)")
             }
         }
         evaluate()
+    }
+
+    // MARK: Receiver stall (device log 2026-09-25 17:04)
+
+    /// "playing", "paused" or "waiting:<reason>" for the stall and link lines.
+    static func playerStatusText(_ player: AVPlayer?) -> String {
+        guard let player else { return "none" }
+        switch player.timeControlStatus {
+        case .playing: return "playing"
+        case .paused: return "paused"
+        case .waitingToPlayAtSpecifiedRate:
+            return "waiting:" + waitingReasonText(player.reasonForWaitingToPlay)
+        @unknown default: return "unknown"
+        }
+    }
+
+    static func waitingReasonText(_ reason: AVPlayer.WaitingReason?) -> String {
+        guard let reason else { return "unknown" }
+        switch reason {
+        case .toMinimizeStalls: return "toMinimizeStalls"
+        case .evaluatingBufferingRate: return "evaluatingBufferingRate"
+        case .noItemToPlay: return "noItemToPlay"
+        default: return reason.rawValue
+        }
+    }
+
+    /// Buffering reason for the stall lines.
+    private func stallReasonText() -> String {
+        guard let player else { return "no player" }
+        var parts: [String] = []
+        if player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+            parts.append(Self.waitingReasonText(player.reasonForWaitingToPlay))
+        } else {
+            parts.append(Self.playerStatusText(player))
+        }
+        if let item = player.currentItem {
+            if item.isPlaybackBufferEmpty { parts.append("buffer empty") }
+            if item.status == .failed { parts.append("item failed: \(item.error?.localizedDescription ?? "unknown")") }
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private func beginStall() {
+        guard stallStartedAt == nil else { return }
+        let now = Date()
+        stallStartedAt = now
+        stallNotBufferingSince = nil
+        stallLastLogAt = now
+        if !receiverBuffering { receiverBuffering = true }
+        debugLog("[AVP-AIRPLAY] external playback paused by the receiver (buffering: \(stallReasonText())); holding the session")
+        stallWatch?.cancel()
+        stallWatch = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                AirPlayMonitor.shared.stallTick()
+            }
+        }
+    }
+
+    private func endStall() {
+        stallWatch?.cancel()
+        stallWatch = nil
+        stallStartedAt = nil
+        stallNotBufferingSince = nil
+        if receiverBuffering { receiverBuffering = false }
+    }
+
+    /// Once a second while the receiver is stalled. Ends the session only
+    /// when (a) the route lost its AirPlay output (the route evaluation's
+    /// own end), (b) the player has not been waiting / buffering for
+    /// `receiverIdleEndSeconds` with no item error, or (c) the item failed
+    /// and no serving tile is left to reload it (the tile reloads it once
+    /// on the same LAN URL and gives up itself on a second failure).
+    private func stallTick() {
+        guard let since = stallStartedAt else { return }
+        let now = Date()
+        let off = now.timeIntervalSince(since)
+        guard let player else {
+            endStall()
+            isExternal = false
+            evaluate()
+            return
+        }
+        if AirPlayReceiverResolver.currentAirPlayOutput() == nil {
+            debugLog("[AVP-AIRPLAY] AirPlay output left the route during the receiver stall (\(Int(off)) s)")
+            endStall()
+            evaluate()
+            return
+        }
+        if let item = player.currentItem, item.status == .failed {
+            if AirPlayTileDelivery.isServingReceiver { return }
+            debugLog("[AVP-AIRPLAY] receiver stall: item failed (\(item.error?.localizedDescription ?? "unknown")) and no LAN tile to reload it; the receiver ended AirPlay")
+            endStall()
+            receiverEnded(routeLost: false)
+            return
+        }
+        let buffering = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+            || player.currentItem?.isPlaybackBufferEmpty == true
+        if buffering {
+            stallNotBufferingSince = nil
+        } else if stallNotBufferingSince == nil {
+            stallNotBufferingSince = now
+        }
+        if let idle = stallNotBufferingSince,
+           now.timeIntervalSince(idle) >= Self.receiverIdleEndSeconds {
+            debugLog("[AVP-AIRPLAY] external playback off \(Int(off)) s, player \(Self.playerStatusText(player)) (not buffering) for \(Int(Self.receiverIdleEndSeconds)) s, no item error: the receiver ended AirPlay")
+            endStall()
+            receiverEnded(routeLost: false)
+            return
+        }
+        if now.timeIntervalSince(stallLastLogAt) >= 10 {
+            stallLastLogAt = now
+            debugLog("[AVP-AIRPLAY] external playback still paused by the receiver after \(Int(off)) s (buffering: \(stallReasonText())); holding the session")
+        }
     }
 
     private func setReceiver(_ r: AirPlayReceiver?) {
@@ -413,8 +539,6 @@ final class AirPlayMonitor: ObservableObject {
             if player != nil { handOffToReceiver() }
             return
         }
-        // Waiting to confirm a receiver-side release: hold the card.
-        if releaseCheck != nil { return }
         // An ended session stays hidden until the route itself changes.
         if phase == .ended, player == nil && !loadingForCard {
             return

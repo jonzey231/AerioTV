@@ -152,6 +152,12 @@ final class AirPlayTileDelivery {
             // The receiver took the loopback item (route picked mid-play):
             // hand it the LAN URL.
             if state == .idle { beginMidPlay() }
+        } else if state != .idle, Self.routeHasAirPlay() {
+            // Device log 2026-09-25 17:04:54.794: the receiver drops
+            // external playback while it rebuffers. With the route still
+            // up that is a stall, not an end: LAN delivery, the variant,
+            // the keepalive and the watchdog suspension all stay.
+            debugLog("[AVP-AIRPLAY] tile \(channelName): external playback paused by the receiver with the route present; LAN delivery, keepalive and watchdog suspension held")
         } else {
             debugLog("[AVP-AIRPLAY] tile \(channelName): external playback ended, watchdogs re-armed")
             if state != .serving { onWatchdogs?(false, player?.currentItem) }
@@ -275,11 +281,39 @@ final class AirPlayTileDelivery {
         lanItemStatusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             guard item.status == .failed else { return }
             let reason = item.error?.localizedDescription ?? "unknown"
-            Task { @MainActor in
-                debugLog("[AVP-AIRPLAY] LAN item failed (\(reason))")
-                self?.end(reason: "item failed")
-            }
+            Task { @MainActor in self?.lanItemFailed(item, reason: reason) }
         }
+    }
+
+    /// One reload of a failed LAN item per serving session (device log
+    /// 2026-09-25 17:04: a receiver-side hiccup must not end the session).
+    private var lanReloadUsed = false
+
+    private func lanItemFailed(_ item: AVPlayerItem, reason: String) {
+        guard let player, player.currentItem === item else { return }
+        if state == .serving, Self.routeHasAirPlay(), !lanReloadUsed,
+           let url = (item.asset as? AVURLAsset)?.url {
+            lanReloadUsed = true
+            debugLog("[AVP-AIRPLAY] LAN item failed (\(reason)): reloading once on the same LAN URL \(url.absoluteString)")
+            let fresh = makeLANItem(url: url, copying: item)
+            player.replaceCurrentItem(with: fresh)
+            observeLANItem(fresh)
+            player.play()
+            return
+        }
+        if state == .serving, Self.routeHasAirPlay(), lanReloadUsed {
+            debugLog("[AVP-AIRPLAY] LAN item failed again after the reload (\(reason)); giving up: LAN delivery torn down, playback stopped")
+            token = UUID()
+            state = .idle
+            lanItemStatusObservation = nil
+            teardownLAN()
+            leaveServing()
+            player.pause()
+            AirPlayMonitor.shared.receiverEnded(routeLost: false, servedByTile: true)
+            return
+        }
+        debugLog("[AVP-AIRPLAY] LAN item failed (\(reason))")
+        end(reason: "item failed")
     }
 
     // MARK: Shared steps
@@ -410,6 +444,7 @@ final class AirPlayTileDelivery {
     /// Watchdogs, keepalive, PiP (sections 6 and 7).
     private func enterServing() {
         state = .serving
+        lanReloadUsed = false
         Self.servingTile = self
         onWatchdogs?(true, nil)
         if !keepaliveHeld {

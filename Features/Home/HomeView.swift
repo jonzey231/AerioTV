@@ -6112,7 +6112,8 @@ struct MainTabView: View {
                 RemoteSessionCard(
                     transport: .airPlay,
                     title: item?.name ?? "AirPlay",
-                    status: probing ? "Connecting to AirPlay" : airPlayPlayingStatus,
+                    status: probing ? "Connecting to AirPlay"
+                        : (airPlay.receiverBuffering ? "Buffering…" : airPlayPlayingStatus),
                     artURL: item?.logoURL?.absoluteString,
                     isPlaying: airPlay.isPlaying,
                     // Nothing to pause until the receiver has the video.
@@ -6205,7 +6206,8 @@ struct MainTabView: View {
                 mode: idle ? .idle : (airPlayIsProbing ? .connecting : .playing),
                 channelName: idle ? (airPlay.deviceName ?? "AirPlay") : (item?.name ?? "AirPlay"),
                 statusText: idle ? "Connected. Select a channel to start."
-                    : (airPlayIsProbing ? "Connecting to AirPlay" : airPlayPlayingStatus),
+                    : (airPlayIsProbing ? "Connecting to AirPlay"
+                        : (airPlay.receiverBuffering ? "Buffering…" : airPlayPlayingStatus)),
                 artURL: item?.logoURL?.absoluteString,
                 channelID: item?.id,
                 fallbackSubtitle: nil,
