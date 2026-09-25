@@ -152,6 +152,10 @@ struct PlayerSettingsView: View {
     private var appleTVChannelFlip = true
 
     #if os(iOS)
+    /// AirPlay audio for the receiver (2026-09-21 rebuild): automatic,
+    /// passthrough, or stereo AAC. iOS only; tvOS has no AirPlay sender.
+    @AppStorage(AirPlayAudioMode.storageKey)
+    private var airPlayAudioMode: String = AirPlayAudioMode.defaultMode.rawValue
     @AppStorage(InPlayerEdgeGestures.brightnessKey)
     private var edgeBrightnessGesture = false
     @AppStorage(InPlayerEdgeGestures.volumeKey)
@@ -326,6 +330,19 @@ struct PlayerSettingsView: View {
                         .foregroundColor(.textPrimary)
                 }
                 .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+
+                // AirPlay audio (2026-09-21 rebuild). The Roku constraint
+                // lives on the picker's own page footer.
+                SettingsChoicePicker(
+                    "AirPlay Audio",
+                    options: AirPlayAudioMode.allCases.map {
+                        SettingsChoice($0.rawValue, $0.displayName, subtitle: $0.subtitle)
+                    },
+                    selection: $airPlayAudioMode,
+                    footer: AirPlayAudioMode.footer,
+                    iconColor: theme.accent
+                )
                 .listRowBackground(Color.cardBackground)
             } header: {
                 Text("Playback").sectionHeaderStyle()
