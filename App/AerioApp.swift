@@ -692,6 +692,11 @@ struct AerioApp: App {
                 // .failed only lands on resume); re-assert so the Control-TV
                 // button never shows a frozen device list.
                 CompanionClient.shared.ensureDiscovery()
+                // AirPlay (2026-09-21 rebuild): one launch-window route
+                // probe, and process-wide route observation so an AirPlay
+                // output picked before any channel shows the idle card.
+                AirPlayReceiverResolver.shared.probeRoutesAtLaunch()
+                AirPlayMonitor.shared.startObservingRoutes()
                 #endif
                 // Start iCloud sync if enabled (pull happens during EPG loading)
                 SyncManager.shared.startObserving()

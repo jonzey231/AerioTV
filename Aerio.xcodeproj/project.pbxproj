@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A1RF6A0E8715728C27F1F2FB /* AirPlayReceiverResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R3EEB47325934697D79C89 /* AirPlayReceiverResolver.swift */; };
+		A1R58F2EB6D2DBEFDAAB10ED /* AirPlayMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R11426AB13986BB21FB3FC /* AirPlayMonitor.swift */; };
 		A1RFD0C9647D68F7E2A9043C /* AirPlayAudioMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RC4579DB2B9BAAA41A1352 /* AirPlayAudioMode.swift */; };
 		A1R9EEF67E03A6539AE3DC4E /* AirPlayAudioMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RC4579DB2B9BAAA41A1352 /* AirPlayAudioMode.swift */; };
 		000A4A7BFF25A66945137BB3 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C0C151EAA6394D32003217 /* DeviceInfo.swift */; };
@@ -345,6 +347,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A1R3EEB47325934697D79C89 /* AirPlayReceiverResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayReceiverResolver.swift; sourceTree = "<group>"; };
+		A1R11426AB13986BB21FB3FC /* AirPlayMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayMonitor.swift; sourceTree = "<group>"; };
 		A1RC4579DB2B9BAAA41A1352 /* AirPlayAudioMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayAudioMode.swift; sourceTree = "<group>"; };
 		00F4EE98C1564A7E3A5DD86B /* SearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
 		03AB1BA15FC7FAB4754ECE75 /* Pods-Aerio_iOS-frameworks-Debug-output-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Debug-output-files.xcfilelist"; sourceTree = "<group>"; };
@@ -1013,6 +1017,8 @@
 				WHATSNEW00000000000ACE000 /* WhatsNew.swift */,
 				8179E2560269773B4D5A0D3A /* HeadlessPlaybackController.swift */,
 				75154966450E03A3443CF312 /* AerioCastController.swift */,
+				A1R3EEB47325934697D79C89 /* AirPlayReceiverResolver.swift */,
+				A1R11426AB13986BB21FB3FC /* AirPlayMonitor.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -1460,6 +1466,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1RF6A0E8715728C27F1F2FB /* AirPlayReceiverResolver.swift in Sources */,
+				A1R58F2EB6D2DBEFDAAB10ED /* AirPlayMonitor.swift in Sources */,
 				A1RFD0C9647D68F7E2A9043C /* AirPlayAudioMode.swift in Sources */,
 				A133DDDD4444DDDD4444DDDD /* MPMediaItemArtworkShim.m in Sources */,
 				10D8764EE31D09E18D0C2CFB /* AddServerView.swift in Sources */,
