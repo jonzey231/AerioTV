@@ -758,6 +758,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
             defer { if let completion { DispatchQueue.main.async(execute: completion) } }
             self.stopped = true
+            NetworkPathLog.shared.removeObserver(self.pathObserver)
+            self.pathObserver = nil
             self.ingestTask?.cancel()
             self.urlSession?.invalidateAndCancel()
             self.releaseConnection()
@@ -836,6 +838,48 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // poisons worstGap for the next 30 s.
         Self.feedRateWindow.reset()
         debugLog("[TS-REMUX] ingest started (headers: \(headers.keys.sorted().joined(separator: ",")))")
+        logIngestNetworkPolicy(config)
+    }
+
+    // MARK: Ingest network policy (device log 2026-09-25 17:04)
+
+    private var pathObserver: UUID?
+
+    /// The ingest URLSession is `.default`: cellular, expensive and
+    /// constrained access allowed, no waitsForConnectivity, no multipath.
+    /// Behavior unchanged; the policy and the current path are logged at
+    /// ingest start, and every path change while this ingest runs is
+    /// logged, loudly when it leaves Wi-Fi / wired while an AirPlay
+    /// receiver is on the route (Wi-Fi Assist moving the ingest to
+    /// cellular while the TV stays on Wi-Fi).
+    private func logIngestNetworkPolicy(_ config: URLSessionConfiguration) {
+        let airPlay = HLSDelivery.airPlayRouteActive
+        #if os(iOS)
+        let multipath = "\(config.multipathServiceType.rawValue)"
+        #else
+        let multipath = "n/a"
+        #endif
+        debugLog("[TS-REMUX] ingest network policy: allowsCellular=\(config.allowsCellularAccess) "
+            + "allowsExpensive=\(config.allowsExpensiveNetworkAccess) "
+            + "allowsConstrained=\(config.allowsConstrainedNetworkAccess) "
+            + "waitsForConnectivity=\(config.waitsForConnectivity) "
+            + "multipath=\(multipath) airPlayRoute=\(airPlay); "
+            + NetworkPathLog.shared.currentWithPower)
+        NetworkPathLog.shared.removeObserver(pathObserver)
+        pathObserver = NetworkPathLog.shared.addObserver { [weak self] text in
+            guard let self else { return }
+            self.queue.async {
+                guard !self.stopped else { return }
+                let receiver = self.lanListener != nil || HLSDelivery.airPlayRouteActive
+                let offLAN = !text.contains("via wifi") && !text.contains("via wired")
+                if receiver, offLAN {
+                    debugLog("[TS-REMUX] ingest path changed while an AirPlay receiver is served: \(text); "
+                        + "the ingest may now ride cellular (Wi-Fi Assist) while the receiver stays on Wi-Fi")
+                } else {
+                    debugLog("[TS-REMUX] ingest path changed: \(text)")
+                }
+            }
+        }
     }
 
     // MARK: Ingest silence poll (live "Reconnecting" signal)
@@ -2580,6 +2624,17 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 // MARK: - URLSessionDataDelegate (ingest)
 
 extension TSHLSRemuxer: URLSessionDataDelegate {
+    /// The interface the ingest actually rode (a live ingest reports this
+    /// only when the task ends: reconnect, stop, failure). Device log
+    /// 2026-09-25 17:04.
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didFinishCollecting metrics: URLSessionTaskMetrics) {
+        guard let t = metrics.transactionMetrics.last else { return }
+        debugLog("[TS-REMUX] ingest transport: cellular=\(t.isCellular) expensive=\(t.isExpensive) "
+            + "constrained=\(t.isConstrained) multipath=\(t.isMultipath) "
+            + "local=\(t.localAddress ?? "?") reused=\(t.isReusedConnection)")
+    }
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                     didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {

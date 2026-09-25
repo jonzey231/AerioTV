@@ -843,6 +843,15 @@ final class CastHLSProxySession: @unchecked Sendable {
             let task = session.dataTask(with: request)
             self.task = task
             task.resume()
+            #if os(iOS) || os(tvOS)
+            // Device log 2026-09-25 17:04: log the ingest policy and path
+            // (behavior unchanged: `.default` allows cellular).
+            debugLog("[CAST-HLS] ingest network policy: allowsCellular=\(config.allowsCellularAccess) "
+                + "allowsExpensive=\(config.allowsExpensiveNetworkAccess) "
+                + "allowsConstrained=\(config.allowsConstrainedNetworkAccess) "
+                + "waitsForConnectivity=\(config.waitsForConnectivity); "
+                + NetworkPathLog.shared.currentWithPower)
+            #endif
         }
 
         func cancel() {
