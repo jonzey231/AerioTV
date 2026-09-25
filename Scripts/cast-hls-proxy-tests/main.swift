@@ -2034,6 +2034,14 @@ func trunSampleCounts(_ segment: Data) -> [Int64] {
 
     let videoPlaylist = store.videoPlaylistText()
     let audioPlaylist = store.audioPlaylistText()
+    for (name, text) in [("video", videoPlaylist), ("audio", audioPlaylist)] {
+        let target = text.components(separatedBy: "\n")
+            .first { $0.hasPrefix("#EXT-X-TARGETDURATION:") }
+            .flatMap { Int($0.dropFirst("#EXT-X-TARGETDURATION:".count)) } ?? -1
+        expect(text.contains("#EXT-X-TARGETDURATION:\(target)\n#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,HOLD-BACK="
+                             + String(format: "%.3f", Double(target * 3)) + "\n#EXT-X-MEDIA-SEQUENCE:"),
+               "demuxed playlists: \(name) states HOLD-BACK at three target durations")
+    }
     func matches(_ text: String, _ pattern: String) -> [String] {
         guard let re = try? NSRegularExpression(pattern: pattern) else { return [] }
         let ns = text as NSString

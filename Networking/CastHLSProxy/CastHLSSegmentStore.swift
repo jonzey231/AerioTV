@@ -348,6 +348,13 @@ final class CastHLSSegmentStore: @unchecked Sendable {
             }
             .max().map { max(1, $0) } ?? 4
         text += "#EXT-X-TARGETDURATION:\(targetSeconds)\n"
+        // Explicit HOLD-BACK (2026-09-21) at the RFC 8216bis minimum of three
+        // target durations, identical on both renditions, so the receiver's
+        // live join point is stated by the playlist instead of left to each
+        // player's default; CAN-BLOCK-RELOAD=NO because the proxy does not
+        // implement blocking playlist reload (_HLS_msn).
+        text += "#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,HOLD-BACK="
+            + String(format: "%.3f", Double(targetSeconds * 3)) + "\n"
         text += "#EXT-X-MEDIA-SEQUENCE:\(window.first?.seq ?? nextSeq)\n"
         if discontinuitySequence > 0 {
             text += "#EXT-X-DISCONTINUITY-SEQUENCE:\(discontinuitySequence)\n"
