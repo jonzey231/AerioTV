@@ -102,7 +102,12 @@ final class AirPlayMonitor: ObservableObject {
     func attach(_ player: AVPlayer) {
         detach(silently: true)
         self.player = player
-        if externalPlaybackDisabledForSession { player.allowsExternalPlayback = false }
+        // Every attached player may go external (device log 2026-09-25
+        // 12:38:47: a player pinned local by an earlier X never entered
+        // external playback when the Apple TV was picked mid-play, so only
+        // the system audio route reached the TV).
+        if !externalPlaybackDisabledForSession { Self.enableExternalPlayback(on: player) }
+        else { player.allowsExternalPlayback = false }
         startObservingRoutes()
         externalObservation = player.observe(\.isExternalPlaybackActive,
                                             options: [.initial, .new]) { p, _ in
@@ -119,6 +124,25 @@ final class AirPlayMonitor: ObservableObject {
     }
 
     func detach() { detach(silently: false) }
+
+    /// Video external playback on: the receiver takes the item, not just
+    /// the audio route.
+    static func enableExternalPlayback(on player: AVPlayer) {
+        if !player.allowsExternalPlayback { player.allowsExternalPlayback = true }
+        if !player.usesExternalPlaybackWhileExternalScreenIsActive {
+            player.usesExternalPlaybackWhileExternalScreenIsActive = true
+        }
+    }
+
+    /// The attached player, re-enabled for external playback when an
+    /// AirPlay output appears (the session flag was just cleared, or was
+    /// never set). Also called by AirPlayTileDelivery before a mid-play
+    /// handoff swaps the item.
+    func reenableExternalPlaybackForRoute() {
+        guard !externalPlaybackDisabledForSession, let player, !player.allowsExternalPlayback else { return }
+        Self.enableExternalPlayback(on: player)
+        debugLog("[AVP-AIRPLAY] external playback re-enabled on the attached player (AirPlay route present)")
+    }
 
     private func detach(silently: Bool) {
         externalObservation = nil
@@ -262,8 +286,10 @@ final class AirPlayMonitor: ObservableObject {
     func evaluate() {
         let out = AirPlayReceiverResolver.currentAirPlayOutput()
         refreshName()
+        if out != nil { reenableExternalPlaybackForRoute() }
         guard let out else {
             externalPlaybackDisabledForSession = false
+            if let player { Self.enableExternalPlayback(on: player) }
             AirPlayReceiverResolver.shared.cancelRetryLadder()
             if receiver != nil { receiver = nil }
             if phase == .active || hostsHeadless || AirPlayTileDelivery.isServingReceiver {

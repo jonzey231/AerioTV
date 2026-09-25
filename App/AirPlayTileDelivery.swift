@@ -33,6 +33,9 @@ final class AirPlayTileDelivery {
     /// at a fresh tune the variant has no buffered window to prime from.
     static let midPlayReadyTimeout: TimeInterval = 6
     static let startReadyTimeout: TimeInterval = 30
+    /// Mid-play: how long the swapped LAN item has to go external before
+    /// the handoff is declared failed.
+    static let externalConfirmTimeout: TimeInterval = 5
 
     private enum State { case idle, preparing, serving }
     private var state: State = .idle
@@ -183,6 +186,10 @@ final class AirPlayTileDelivery {
             debugLog("[AVP-AIRPLAY] LAN delivery unavailable; leaving the loopback item in place")
             return
         }
+        // The player must be allowed to go external or the receiver only
+        // gets the system audio route (device log 2026-09-25 12:38:47).
+        AirPlayMonitor.shared.reenableExternalPlaybackForRoute()
+        AirPlayMonitor.enableExternalPlayback(on: player)
         state = .preparing
         let myToken = UUID()
         token = myToken
@@ -198,6 +205,30 @@ final class AirPlayTileDelivery {
                 let item = self.makeLANItem(url: url, copying: old)
                 player.replaceCurrentItem(with: item)
                 self.observeLANItem(item)
+                // Truthful handoff line (device log 2026-09-25 12:38:47:
+                // "serving on LAN" was logged but the receiver never
+                // fetched): claim serving only once AVPlayer is external.
+                self.onWatchdogs?(true, nil)
+                let deadline = Date().addingTimeInterval(Self.externalConfirmTimeout)
+                while !player.isExternalPlaybackActive, Date() < deadline {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    guard self.token == myToken else { return }
+                }
+                guard player.isExternalPlaybackActive else {
+                    debugLog("[AVP-AIRPLAY] receiver did not take the LAN item (external playback never became active within \(Int(Self.externalConfirmTimeout))s, allowsExternalPlayback=\(player.allowsExternalPlayback)); back to loopback, playing on this device")
+                    self.lanItemStatusObservation = nil
+                    if let loopbackURL = self.loopbackURL {
+                        let back = AVPlayerItem(url: loopbackURL)
+                        back.automaticallyPreservesTimeOffsetFromLive = true
+                        player.replaceCurrentItem(with: back)
+                        self.onWatchdogs?(false, back)
+                    } else {
+                        self.onWatchdogs?(false, player.currentItem)
+                    }
+                    self.teardownLAN()
+                    self.state = .idle
+                    return
+                }
                 debugLog("[AVP-AIRPLAY] external playback active: serving on LAN \(self.endpointText), watchdogs suspended")
                 self.enterServing()
             case .noAddress:
