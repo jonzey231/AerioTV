@@ -150,6 +150,7 @@ final class AirPlayAACVariant: @unchecked Sendable {
             try remuxer.feed(data)
         } catch {
             failed = true
+            stateLock.lock(); failedShared = true; stateLock.unlock()
             log("variant failed: \(error)")
         }
     }
@@ -168,7 +169,16 @@ final class AirPlayAACVariant: @unchecked Sendable {
     }
 
     /// True once the transcode could not run (decoder refused, codec error).
-    var hasFailed: Bool { queue.sync { failed } }
+    /// Lock-read, never a queue hop: the tile polls it from the main actor
+    /// while priming can keep the variant queue busy.
+    var hasFailed: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return failedShared
+    }
+    private var failedShared = false
+
+    /// Blocks until everything queued so far has run (CLI tests only).
+    func drain() { queue.sync {} }
 
     /// "AC-3 5.1": the source side of the audio path once the transcoder
     /// saw its first frame, else the PMT codec name.

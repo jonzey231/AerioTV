@@ -2115,6 +2115,7 @@ do {
         variant.feed(fixture.subdata(in: offset..<end))
         offset = end
     }
+    variant.drain()
     expect(!variant.hasFailed, "airplay-aac: remux/transcode ran without error")
     expect(variant.isReady, "airplay-aac: ready after 40 s of media")
     let lines = logLines.all
@@ -2161,7 +2162,7 @@ do {
     expect(status.range(of: template, options: .regularExpression) != nil,
            "airplay-aac status line matches the 09-24 template: \(status)")
     variant.stop()
-    _ = variant.hasFailed // barrier: stop ran
+    variant.drain() // barrier: stop ran
     expect(logLines.all.last == "variant stopped", "airplay-aac: variant stopped line")
     expectEq(variant.serve(path: "/aac/vseg\(firstSeq).m4s").status, 404, "airplay-aac: nothing served after stop")
 }
