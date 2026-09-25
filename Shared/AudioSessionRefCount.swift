@@ -127,3 +127,72 @@ enum AudioSessionRefCount {
     }
     #endif
 }
+
+#if os(iOS)
+/// One silent AVAudioEngine shared by every pipeline that must keep the
+/// process scheduled while the phone is pocketed and something else (a
+/// Chromecast, an AirPlay receiver) is being served from it.
+///
+/// A configured-but-silent audio session is NOT enough: iOS suspends a
+/// backgrounded process that renders no audio, which froze the receiver
+/// mid-cast within minutes (device-verified 2026-08-13, iPhone 17 Pro
+/// Max: proxy port unreachable after backgrounding while the TV starved).
+/// Only an ACTIVE render keeps the process scheduled, so the engine runs
+/// a player node with nothing scheduled into a muted main mixer.
+///
+/// Holders are named ("cast-hls-proxy", ...) so the log says which
+/// pipeline raised or dropped the engine. Each holder also holds one
+/// `AudioSessionRefCount` reference for its lifetime. The engine starts
+/// with the first holder and stops with the last one.
+enum BackgroundKeepalive {
+
+    private static let queue = DispatchQueue(label: "app.molinete.aerio.background.keepalive")
+    private nonisolated(unsafe) static var holders: Set<String> = []
+    private nonisolated(unsafe) static var engine: AVAudioEngine?
+
+    /// Add `holder`. No-op when it already holds the engine.
+    static func acquire(_ holder: String) {
+        queue.sync {
+            guard holders.insert(holder).inserted else { return }
+            AudioSessionRefCount.increment(caller: holder)
+            if engine == nil {
+                let newEngine = AVAudioEngine()
+                // The engine must have a source attached for some route
+                // configurations to start; a player node with nothing
+                // scheduled renders silence.
+                let player = AVAudioPlayerNode()
+                newEngine.attach(player)
+                newEngine.connect(player, to: newEngine.mainMixerNode, format: nil)
+                newEngine.mainMixerNode.outputVolume = 0
+                do {
+                    try newEngine.start()
+                    engine = newEngine
+                } catch {
+                    // Backgrounding will then suspend the holder's
+                    // pipeline; surfaced so the field log explains a
+                    // frozen receiver.
+                    debugLog("[KEEPALIVE] background keepalive engine FAILED (+\(holder)): \(error)")
+                    return
+                }
+            }
+            debugLog("[KEEPALIVE] background keepalive engine running (+\(holder))")
+        }
+    }
+
+    /// Drop `holder`; the engine stops when no holder is left.
+    static func release(_ holder: String) {
+        queue.sync {
+            guard holders.remove(holder) != nil else { return }
+            if holders.isEmpty {
+                engine?.stop()
+                engine = nil
+                debugLog("[KEEPALIVE] background keepalive engine stopped (-\(holder))")
+            } else {
+                debugLog("[KEEPALIVE] background keepalive holder released (-\(holder)), "
+                    + "still held by \(holders.sorted().joined(separator: ","))")
+            }
+            AudioSessionRefCount.decrement(caller: holder)
+        }
+    }
+}
+#endif
