@@ -2428,7 +2428,7 @@ struct RemoteSessionSheet: View {
         }
         .presentationDetents([.height(contentHeight + Self.bottomInset), .large])
         .presentationDragIndicator(.visible)
-        .presentationBackground(Color.black)
+        .presentationBackground(Color.sheetBackground)
         .sheet(isPresented: $showOptions) {
             if transport == .cast {
                 CastOptionsSheet(cast: AerioCastController.shared)
