@@ -190,8 +190,8 @@ final class AirPlayAACVariant: @unchecked Sendable {
 
     /// Emits `variant serving: ...` every `interval` seconds until stop.
     func startServingLog(interval: TimeInterval = 5, emit: @escaping @Sendable (String) -> Void) {
-        queue.async {
-            guard !self.stopped, self.servingTimer == nil else { return }
+        queue.async { [weak self] in
+            guard let self, !self.stopped, self.servingTimer == nil else { return }
             let t = DispatchSource.makeTimerSource(queue: self.queue)
             t.schedule(deadline: .now() + interval, repeating: interval)
             t.setEventHandler { [weak self] in

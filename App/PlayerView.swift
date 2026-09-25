@@ -5423,6 +5423,9 @@ final class AVPlayerProgressDriver {
                     debugLog("[AVP-STREAM] error log: status=\(key.status) domain=\(key.domain) \(key.comment)")
                 }
                 guard !self.firedUnrecoverable else { return }
+                // The receiver owns playback; its fetch errors are not this
+                // engine's to escalate.
+                if self.externalRenderSuspended { return }
                 let code = event.errorStatusCode
                 // Fatal, one entry is enough: playlist parse/validation failure
                 // (-12642), variant/media selection failure (-12646), and
@@ -5508,7 +5511,24 @@ final class AVPlayerProgressDriver {
         }
     }
 
+    /// AirPlay (2026-09-21 rebuild): while a receiver plays this player the
+    /// local clock is the receiver's, and the phone must not judge, rejoin
+    /// or bounce the engine off it.
+    private var externalRenderSuspended: Bool {
+        #if os(iOS)
+        return AirPlayTileDelivery.isServingReceiver || AirPlayMonitor.shared.isExternal
+        #else
+        return false
+        #endif
+    }
+
     private func freezeTick() {
+        if externalRenderSuspended {
+            freezeLastMediaTime = .invalid
+            freezeConsecutiveTicks = 0
+            endWaitStreak()
+            return
+        }
         guard let item = player.currentItem else {
             freezeLastMediaTime = .invalid
             freezeConsecutiveTicks = 0
@@ -5736,7 +5756,7 @@ final class AVPlayerProgressDriver {
         // The learned hold-back therefore stays a NEXT-TUNE setting, plus
         // the Return to Live floor; only the first-30 s targetDuration
         // correction below writes the offset.
-        guard isLive, let provider = liveTargetDuration,
+        guard isLive, !externalRenderSuspended, let provider = liveTargetDuration,
               let item = player.currentItem,
               CACurrentMediaTime() - launchStart < 30 else { return }
         let td = provider()

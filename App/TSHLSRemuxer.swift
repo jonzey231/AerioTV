@@ -2626,6 +2626,24 @@ final class AVPStallWatchdog {
     func start() { schedule() }
     func cancel() { cancelled = true }
 
+    /// AirPlay (2026-09-21 rebuild): while an external receiver plays, the
+    /// local clock and presentation size are not a render this phone can
+    /// judge, so polls pass without verdicts. Re-arming resets every
+    /// baseline and, after the tile swapped items, binds to `item`.
+    private(set) var suspended = false
+
+    func setSuspended(_ on: Bool, item newItem: AVPlayerItem?) {
+        if let newItem { item = newItem }
+        guard suspended != on else { return }
+        suspended = on
+        if !on {
+            lastTime = -1
+            stuckPolls = 0
+            unknownPolls = 0
+            lastMediaBytes = -1
+        }
+    }
+
     private func schedule() {
         DispatchQueue.main.asyncAfter(deadline: .now() + interval) { [weak self] in
             MainActor.assumeIsolated { self?.poll() }
@@ -2634,6 +2652,7 @@ final class AVPStallWatchdog {
 
     private func poll() {
         guard !cancelled, !fired else { return }
+        if suspended { schedule(); return }
         guard let player, let item, player.currentItem === item else { return }
         func die(_ reason: String) {
             fired = true
@@ -3403,6 +3422,10 @@ struct AVPlayerMultiviewTile: View {
     /// reported a video size, the stream is audio-only to AVFoundation
     /// (e.g. HEVC carried in MPEG-TS HLS) and we fall the tile back to mpv.
     @State private var stallWatchdog: AVPStallWatchdog?
+    #if os(iOS)
+    /// AirPlay LAN handoff for this tile (2026-09-21 rebuild).
+    @State private var airPlayDelivery = AirPlayTileDelivery()
+    #endif
     #if os(tvOS)
     /// The display manager our criteria landed on, for teardown. Mirrors
     /// the mpv path's clearDisplayCriteria bookkeeping.
@@ -3585,6 +3608,20 @@ struct AVPlayerMultiviewTile: View {
         .onChange(of: readyLocalURL) { _, url in
             guard let url else { return }
             statusText = nil
+            #if os(iOS)
+            // AirPlay route already selected: resolve the receiver, plan
+            // the audio and start on the LAN URL instead (plan 4c).
+            if MultiviewStore.shared.audioTileID == tileID, let mux = remuxer,
+               airPlayDelivery.prepareStart(remuxer: mux, loopbackURL: url, channelName: channelName,
+                                            start: { startURL, lanAAC in
+                                                // The tile moved on while the receiver resolved.
+                                                guard readyLocalURL == url, player == nil else { return }
+                                                startPlayer(url: startURL, requestHeaders: [:], lanAAC: lanAAC)
+                                            }) {
+                debugLog("[AVP-MV] tile playing REMUXED channel=\(channelName) muted=false")
+                return
+            }
+            #endif
             startPlayer(url: url, requestHeaders: [:])
             debugLog("[AVP-MV] tile playing REMUXED channel=\(channelName) muted=\(player?.isMuted == true)")
         }
@@ -4739,6 +4776,9 @@ struct AVPlayerMultiviewTile: View {
     /// -12888 stale-playlist error and the terminal card (field log
     /// 2026-08-29, Clippers game).
     private func quiesceForBackground() {
+        // A receiver is being served from this phone (plan section 6):
+        // the keepalive holds the process, and quiescing would starve it.
+        if airPlayDelivery.handleBackgroundEntry() { return }
         guard !progressStore.isPiPActive else { return }
         guard tileError == nil, player != nil || statusText != nil else { return }
         backgroundResumeMs = progressStore.currentMs
@@ -5194,7 +5234,9 @@ struct AVPlayerMultiviewTile: View {
         }
     }
 
-    private func startPlayer(url: URL, requestHeaders: [String: String]) {
+    /// `lanAAC`: the item is the AirPlay airplay-aac variant on the LAN,
+    /// whose playlists state their own HOLD-BACK (plan section 5).
+    private func startPlayer(url: URL, requestHeaders: [String: String], lanAAC: Bool = false) {
         var options: [String: Any] = [:]
         if !requestHeaders.isEmpty {
             options["AVURLAssetHTTPHeaderFieldsKey"] = requestHeaders
@@ -5251,7 +5293,9 @@ struct AVPlayerMultiviewTile: View {
         // taught us, and the 6 s floor, then add the user's Stream
         // Buffer. Same 18 s ceiling as before.
         let joinTargetDuration = isLiveTune ? (remuxer?.advertisedTargetDuration.get() ?? 0) : 0
-        if isLiveTune {
+        if isLiveTune, lanAAC {
+            debugLog("[AVP-AIRPLAY] join offset left to the variant playlist's HOLD-BACK (primary offset not applied) channel=\(channelName)")
+        } else if isLiveTune {
             let floor = max(3 * joinTargetDuration, learned, LiveEdgeHoldback.base)
             let offset = min(18.0, floor + streamBufferSeconds)
             playerItem.configuredTimeOffsetFromLive =
@@ -5331,6 +5375,14 @@ struct AVPlayerMultiviewTile: View {
         // is the one that can own an external route.
         if MultiviewStore.shared.audioTileID == tileID {
             AirPlayMonitor.shared.attach(avPlayer)
+            if let mux = remuxer {
+                airPlayDelivery.onWatchdogs = { suspend, item in
+                    stallWatchdog?.setSuspended(suspend, item: item)
+                }
+                airPlayDelivery.attach(player: avPlayer, remuxer: mux,
+                                       loopbackURL: readyLocalURL, channelName: channelName)
+                airPlayDelivery.noteStartItem(playerItem)
+            }
         }
         #endif
         // Live truth at this instant, never a captured snapshot.
@@ -5505,6 +5557,11 @@ struct AVPlayerMultiviewTile: View {
             player: avPlayer, item: playerItem, label: "tile \(channelName)",
             mediaBytes: progressServer.map { s in { s.mediaBytesStreamed } },
             onDead: { failOrFallback($0) })
+        #if os(iOS)
+        // Started on the LAN for an AirPlay receiver: the local clock is
+        // the receiver's, not a render the phone can judge.
+        if airPlayDelivery.isServing { watchdog.setSuspended(true, item: nil) }
+        #endif
         watchdog.start()
         stallWatchdog = watchdog
     }
@@ -5547,6 +5604,7 @@ struct AVPlayerMultiviewTile: View {
         player?.pause()
         player = nil
         #if os(iOS)
+        airPlayDelivery.reset()
         AirPlayMonitor.shared.detach()
         #endif
         if remuxer != nil, !isVOD, !isDVR, catchup == nil, let releasedKey = sessionRetainKey {
@@ -5703,6 +5761,9 @@ struct AVPlayerLayerView: UIViewRepresentable {
     final class PiPCoordinator: NSObject, AVPictureInPictureControllerDelegate {
         var controller: AVPictureInPictureController?
         weak var store: PlayerProgressStore?
+        /// AirPlay (plan section 7): auto-start from inline is disarmed
+        /// while a receiver is served from this tile, re-armed after.
+        var airPlaySubscription: AnyCancellable?
 
         func pictureInPictureControllerWillStartPictureInPicture(_ controller: AVPictureInPictureController) {
             // Synchronous, and iOS fires it BEFORE didEnterBackground -
@@ -5791,10 +5852,23 @@ struct AVPlayerLayerView: UIViewRepresentable {
                AVPictureInPictureController.isPictureInPictureSupported() {
                 if let pip = AVPictureInPictureController(playerLayer: view.playerLayer) {
                     pip.delegate = coordinator
-                    pip.canStartPictureInPictureAutomaticallyFromInline = true
+                    let external = MainActor.assumeIsolated { AirPlayTileDelivery.isServingReceiver }
+                    pip.canStartPictureInPictureAutomaticallyFromInline = !external
                     coordinator.controller = pip
                     MainActor.assumeIsolated { ForegroundPiPBridge.shared.register(pip) }
-                    debugLog("[AVP-PIP] controller armed (auto-start from inline)")
+                    debugLog("[AVP-PIP] controller armed (auto-start from inline: \(external ? "disarmed, AirPlay external" : "on"))")
+                    MainActor.assumeIsolated {
+                        coordinator.airPlaySubscription = AirPlayTileDelivery.serving
+                            .dropFirst()
+                            .removeDuplicates()
+                            .sink { [weak pip] serving in
+                                guard let pip,
+                                      pip.canStartPictureInPictureAutomaticallyFromInline == serving else { return }
+                                pip.canStartPictureInPictureAutomaticallyFromInline = !serving
+                                debugLog(serving ? "[AVP-PIP] auto-start from inline disarmed (AirPlay external)"
+                                                 : "[AVP-PIP] auto-start from inline re-armed")
+                            }
+                    }
                 }
             }
         } else if let existing = coordinator.controller {
@@ -5802,6 +5876,7 @@ struct AVPlayerLayerView: UIViewRepresentable {
             // affordance, mirror the mpv policy and drop it.
             existing.delegate = nil
             coordinator.controller = nil
+            coordinator.airPlaySubscription = nil
             coordinator.store?.isPiPActive = false
             MainActor.assumeIsolated { ForegroundPiPBridge.shared.unregister(existing) }
             debugLog("[AVP-PIP] controller disarmed (no longer solo)")

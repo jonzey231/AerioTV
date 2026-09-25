@@ -179,6 +179,11 @@ enum BackgroundKeepalive {
         }
     }
 
+    /// Current holders, sorted (the AirPlay background-entry line names them).
+    static var currentHolders: [String] {
+        queue.sync { holders.sorted() }
+    }
+
     /// Drop `holder`; the engine stops when no holder is left.
     static func release(_ holder: String) {
         queue.sync {
