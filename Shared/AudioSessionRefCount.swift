@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import Network
 
 /// Serialised reference counter for `AVAudioSession.setActive(...)`.
 ///
@@ -301,7 +302,7 @@ enum BackgroundKeepalive {
             let running = engine?.isRunning ?? false
             debugLog("[KEEPALIVE] background entry: holders=[\(holdersNow.joined(separator: ","))] "
                 + "engine=\(engine == nil ? "none" : (running ? "running" : "STOPPED")) "
-                + sessionStateText())
+                + sessionStateText() + " " + NetworkPathLog.shared.currentWithPower)
             if !holdersNow.isEmpty, !running {
                 if ensureEngineRunning(reason: "background entry") {
                     debugLog("[KEEPALIVE] engine restarted on background entry")
@@ -378,3 +379,97 @@ enum BackgroundKeepalive {
     }
 }
 #endif
+
+// MARK: - Network path readout (device log 2026-09-25 17:04)
+
+/// The process's current network path as one log fragment, for the
+/// keepalive background-entry line and the ingest start / path-change
+/// lines: which interface carries the default route (wifi / cellular /
+/// wired), what else is available, and the expensive / constrained flags.
+/// Lives here (not in its own file) so both targets compile it without a
+/// project change.
+final class NetworkPathLog: @unchecked Sendable {
+
+    static let shared = NetworkPathLog()
+
+    private let lock = NSLock()
+    private var monitor: NWPathMonitor?
+    private var latest = "path unknown"
+    private var observers: [UUID: @Sendable (String) -> Void] = [:]
+    private let monitorQueue = DispatchQueue(label: "app.molinete.aerio.pathlog")
+
+    /// Idempotent; the first reading lands asynchronously.
+    func start() {
+        lock.lock()
+        guard monitor == nil else { lock.unlock(); return }
+        let m = NWPathMonitor()
+        monitor = m
+        lock.unlock()
+        m.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            let text = Self.describe(path)
+            self.lock.lock()
+            let changed = text != self.latest
+            self.latest = text
+            let callbacks = Array(self.observers.values)
+            self.lock.unlock()
+            if changed { callbacks.forEach { $0(text) } }
+        }
+        m.start(queue: monitorQueue)
+    }
+
+    /// Latest path description (starts the monitor on first use).
+    var current: String {
+        start()
+        lock.lock(); defer { lock.unlock() }
+        return latest
+    }
+
+    /// `current` plus Low Power Mode.
+    var currentWithPower: String {
+        current + " lowPower=\(ProcessInfo.processInfo.isLowPowerModeEnabled)"
+    }
+
+    /// Called on a private queue with the new description on every change.
+    @discardableResult
+    func addObserver(_ callback: @escaping @Sendable (String) -> Void) -> UUID {
+        start()
+        let id = UUID()
+        lock.lock(); observers[id] = callback; lock.unlock()
+        return id
+    }
+
+    func removeObserver(_ id: UUID?) {
+        guard let id else { return }
+        lock.lock(); observers[id] = nil; lock.unlock()
+    }
+
+    static func describe(_ path: NWPath) -> String {
+        func name(_ t: NWInterface.InterfaceType) -> String {
+            switch t {
+            case .wifi: return "wifi"
+            case .cellular: return "cellular"
+            case .wiredEthernet: return "wired"
+            case .loopback: return "loopback"
+            case .other: return "other"
+            @unknown default: return "unknown"
+            }
+        }
+        let order: [NWInterface.InterfaceType] = [.wiredEthernet, .wifi, .cellular, .other]
+        let via = order.first { path.usesInterfaceType($0) }.map(name) ?? "none"
+        var available: [String] = []
+        for i in path.availableInterfaces where i.type != .loopback {
+            let n = name(i.type)
+            if !available.contains(n) { available.append(n) }
+        }
+        let status: String
+        switch path.status {
+        case .satisfied: status = "satisfied"
+        case .unsatisfied: status = "unsatisfied"
+        case .requiresConnection: status = "requiresConnection"
+        @unknown default: status = "unknown"
+        }
+        return "path \(status) via \(via) (available \(available.isEmpty ? "none" : available.joined(separator: ","))) "
+            + "expensive=\(path.isExpensive) constrained=\(path.isConstrained)"
+    }
+}

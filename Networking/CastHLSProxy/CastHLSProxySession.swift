@@ -288,6 +288,66 @@ final class CastHLSProxySession: @unchecked Sendable {
         debugLog("[CAST-HLS] \(message)")
     }
 
+    // MARK: Link line (device log 2026-09-25 17:04)
+
+    /// Ingest bytes since the link timer started, touched on `queue`.
+    private var linkIngestBytes: Int64 = 0
+    private var linkTimer: DispatchSourceTimer?
+    private var linkSamples: [Double] = []
+    private var linkLastIngest: Int64 = 0
+    private var linkLastServed: Int64 = 0
+    private var linkSilentSeconds = 0
+    private var linkStalls = 0
+    private var linkTicks = 0
+
+    /// Runs on `queue`. One `[CAST-HLS] link:` line every 10 s while the
+    /// proxy serves a receiver.
+    private func startLinkLogLocked() {
+        guard linkTimer == nil else { return }
+        linkSamples = []
+        linkLastIngest = linkIngestBytes
+        linkLastServed = server?.linkCounters.servedBytes ?? 0
+        linkSilentSeconds = 0
+        linkStalls = 0
+        linkTicks = 0
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + 1, repeating: 1)
+        t.setEventHandler { [weak self] in self?.linkTickLocked() }
+        linkTimer = t
+        t.resume()
+    }
+
+    private func stopLinkLogLocked() {
+        linkTimer?.cancel()
+        linkTimer = nil
+    }
+
+    private func linkTickLocked() {
+        guard let server, let store else { return }
+        let delta = linkIngestBytes - linkLastIngest
+        linkLastIngest = linkIngestBytes
+        linkSamples.append(Double(max(0, delta)) * 8 / 1000)
+        if delta == 0 {
+            linkSilentSeconds += 1
+            // Same 2 s threshold as the TS remuxer's ingest-silence stall.
+            if linkSilentSeconds == 2 { linkStalls += 1 }
+        } else {
+            linkSilentSeconds = 0
+        }
+        linkTicks += 1
+        guard linkTicks % 10 == 0 else { return }
+        let c = server.linkCounters
+        let runway = store.runwayAfter(seq: c.highestVideoSeq)
+        let avg = linkSamples.reduce(0, +) / Double(max(1, linkSamples.count))
+        let minimum = linkSamples.min() ?? 0
+        let servedKbps = Double(max(0, c.servedBytes - linkLastServed)) * 8 / 1000 / 10
+        linkLastServed = c.servedBytes
+        log(String(format: "link: ingest %.0f kbps avg/%.0f kbps min over 10 s, stalls %d, reservoir %d segs/%.1f s, served %.0f kbps to %@",
+                   avg, minimum, linkStalls, runway.count, runway.seconds, servedKbps, c.peer ?? "none"))
+        linkSamples = []
+        linkStalls = 0
+    }
+
     /// Point the proxy at `rawTSURL` (the SAME URL + headers the local
     /// player would use) and wait until the playlist has two segments.
     /// Returns the DEMUXED MASTER playlist URL to hand to the cast load:
@@ -349,6 +409,7 @@ final class CastHLSProxySession: @unchecked Sendable {
                 + "\(isChannelChange ? "channel change" : "session start") "
                 + "gen=\(self.currentGeneration) ingest=\(Self.sanitize(rawTSURL))")
             self.beginBackgroundKeepaliveIfNeeded()
+            self.startLinkLogLocked()
             self.startIngestLocked(url: rawTSURL, headers: headers)
             return (server.boundPort, isChannelChange)
         }
@@ -411,6 +472,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             stopIngestLocked()
             store?.close()
             store = nil
+            stopLinkLogLocked()
             server?.stop()
             server = nil
             endBackgroundKeepaliveIfNeeded()
@@ -570,6 +632,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             },
             onData: { [weak self] data in
                 guard let self, self.ingestEpoch == epoch, let remuxer = self.remuxer else { return }
+                self.linkIngestBytes += Int64(data.count)
                 do {
                     try remuxer.feed(data)
                 } catch let error as CastUnsupportedCodecError {

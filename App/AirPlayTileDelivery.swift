@@ -469,6 +469,70 @@ final class AirPlayTileDelivery {
         }
         Self.serving.send(true)
         RemoteSessionNowPlaying.publishAirPlay()
+        startLinkLog()
+    }
+
+    // MARK: Link line (device log 2026-09-25 17:04)
+
+    private var linkTask: Task<Void, Never>?
+    private var linkIngestKbps: [Double] = []
+    private var linkLastIngest: Int64?
+    private var linkLastServed: Int64 = 0
+    private var linkLastStarved = 0
+    private var linkTicks = 0
+
+    /// One `[AVP-AIRPLAY] link:` line every 10 s while serving, from 1 s
+    /// ingest samples (so the min shows a burst gap the average hides).
+    private func startLinkLog() {
+        guard linkTask == nil else { return }
+        NetworkPathLog.shared.start()
+        linkIngestKbps = []
+        linkLastIngest = nil
+        linkTicks = 0
+        let st = remuxer?.lanLinkStats
+        linkLastServed = st?.servedBytes ?? 0
+        linkLastStarved = st?.starvedClosures ?? 0
+        linkTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                self.linkTick()
+            }
+        }
+    }
+
+    private func stopLinkLog() {
+        linkTask?.cancel()
+        linkTask = nil
+    }
+
+    private func linkTick() {
+        guard state == .serving, let remuxer else { return }
+        let st = remuxer.lanLinkStats
+        if let last = linkLastIngest {
+            linkIngestKbps.append(Double(max(0, st.ingestBytes - last)) * 8 / 1000)
+        }
+        linkLastIngest = st.ingestBytes
+        linkTicks += 1
+        guard linkTicks % 10 == 0 else { return }
+        let samples = linkIngestKbps
+        linkIngestKbps = []
+        let avg = samples.isEmpty ? 0 : samples.reduce(0, +) / Double(samples.count)
+        let minimum = samples.min() ?? 0
+        let stalls = st.starvedClosures - linkLastStarved
+        linkLastStarved = st.starvedClosures
+        let servedKbps = Double(max(0, st.servedBytes - linkLastServed)) * 8 / 1000 / 10
+        linkLastServed = st.servedBytes
+        var behind = "?"
+        if let player, let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
+            let edge = range.end.seconds, now = player.currentTime().seconds
+            if edge.isFinite, now.isFinite { behind = String(format: "%.1f s", max(0, edge - now)) }
+        }
+        let status = AirPlayMonitor.playerStatusText(player)
+        let external = player?.isExternalPlaybackActive ?? false
+        debugLog(String(format: "[AVP-AIRPLAY] link: ingest %.0f kbps avg/%.0f kbps min over 10 s, stalls %d, reservoir %d segs/%.1f s, served %.0f kbps to %@, receiver playhead-behind-edge %@, player status %@, external %@ (hold-back %.1f s)",
+                        avg, minimum, stalls, st.reservoirSegments, st.reservoirSeconds, servedKbps,
+                        st.peer ?? "none", behind, status, external ? "true" : "false", st.holdBack))
     }
 
     /// End of LAN delivery. A LAN item failure goes back to loopback (plan
@@ -531,6 +595,7 @@ final class AirPlayTileDelivery {
     }
 
     private func leaveServing(holdForFlip: Bool = false) {
+        stopLinkLog()
         if keepaliveHeld, holdForFlip, Self.routeHasAirPlay(), Self.flipKeepaliveRelease == nil {
             keepaliveHeld = false
             debugLog("[AVP-AIRPLAY] background keepalive held \(Int(Self.flipKeepaliveGrace))s for the next tune (route still AirPlay)")

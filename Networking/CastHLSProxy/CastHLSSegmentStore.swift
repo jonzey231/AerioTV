@@ -206,6 +206,17 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         return publishedSeq
     }
 
+    /// Published segments after `seq` (the receiver's newest video fetch)
+    /// and their media seconds: the runway the receiver has not pulled
+    /// yet (link line, device log 2026-09-25 17:04).
+    func runwayAfter(seq: Int) -> (count: Int, seconds: Double) {
+        condition.lock()
+        defer { condition.unlock() }
+        let ahead = ring.filter { $0.seq > seq }
+        let ticks = ahead.reduce(Int64(0)) { $0 + $1.durationTicks }
+        return (ahead.count, Double(ticks) / Double(CastFMP4Remuxer.ticksPerSecond))
+    }
+
     /// Video init segment for `gen`, or nil when no longer retained.
     func videoInitSegment(generation gen: Int) -> Data? {
         condition.lock()

@@ -1667,6 +1667,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 starvedClosures += 1
                 worstClosureGap = max(worstClosureGap, gap)
                 recentStarvations.append((wall: nowWall, gap: gap))
+                linkLock.lock(); linkStats.starvedClosures += 1; linkLock.unlock()
                 // Publish the moment of starvation, not just the 150-segment
                 // summary: an AVPlayer stall that lands within a few seconds
                 // of an upstream gap must NOT be answered by holding further
@@ -1684,7 +1685,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             debugLog("[TS-REMUX] feed-jitter: \(starvedClosures) starved closures so far, worst gap \(String(format: "%.1f", worstClosureGap))s")
         }
         segments.append((seq: nextSeq, data: data, duration: duration))
-        if lanListener != nil { refreshLANHoldBack(now: nowWall) }
+        if lanListener != nil {
+            refreshLANHoldBack(now: nowWall)
+            updateLANReservoir()
+        }
         spillSegment(seq: nextSeq, data: data, duration: duration)
         if inProcessDelivery { deliveryBase64[nextSeq] = data.base64EncodedString() }
         nextSeq += 1
@@ -2123,7 +2127,52 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// Starved closures (wall, gap) for the last 60 s, touched on `queue`.
     private var recentStarvations: [(wall: Date, gap: Double)] = []
     /// Highest segment the receiver fetched on the LAN (-1 = none).
-    private var lanHighestRequestedSeq = -1
+    private var lanHighestRequestedSeq = -1 {
+        didSet { updateLANReservoir() }
+    }
+
+    // MARK: AirPlay link counters (read by the tile's 10 s link line)
+
+    struct LANLinkStats: Sendable {
+        /// Monotonic ingest bytes (same counter as `bytesIngested`).
+        var ingestBytes: Int64 = 0
+        /// Monotonic starved closures.
+        var starvedClosures = 0
+        /// Monotonic bytes sent on the LAN listener.
+        var servedBytes: Int64 = 0
+        var peer: String?
+        /// Cut segments the receiver has not fetched yet.
+        var reservoirSegments = 0
+        var reservoirSeconds = 0.0
+        var holdBack = 0.0
+    }
+    private let linkLock = NSLock()
+    private var linkStats = LANLinkStats()
+
+    var lanLinkStats: LANLinkStats {
+        var st: LANLinkStats
+        linkLock.lock(); st = linkStats; linkLock.unlock()
+        st.ingestBytes = bytesIngested
+        st.holdBack = lanHoldBack.get()
+        return st
+    }
+
+    /// Runs on `queue`.
+    private func updateLANReservoir() {
+        let ahead = segments.filter { $0.seq > lanHighestRequestedSeq }
+        let secs = ahead.reduce(0.0) { $0 + $1.duration }
+        linkLock.lock()
+        linkStats.reservoirSegments = ahead.count
+        linkStats.reservoirSeconds = secs
+        linkLock.unlock()
+    }
+
+    private func noteLANServed(bytes: Int, peer: String?) {
+        linkLock.lock()
+        linkStats.servedBytes += Int64(bytes)
+        if let peer { linkStats.peer = peer }
+        linkLock.unlock()
+    }
     /// The stated LAN hold-back, readable from any thread (0 = no LAN).
     let lanHoldBack = DoubleBox(0)
 
@@ -2289,6 +2338,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         lanHoldBack.set(0)
         lanHoldBackReason = ""
         lanHighestRequestedSeq = -1
+        linkLock.lock(); linkStats.peer = nil; linkLock.unlock()
         listener.cancel()
         debugLog("[TS-REMUX] LAN delivery stopped (loopback only)")
     }
@@ -2314,7 +2364,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 debugLog("[TS-REMUX] LAN delivery: first request from \(peer)")
             }
         }
-        handleConnection(connection, lan: true)
+        handleConnection(connection, lan: true, peer: peer)
     }
 
     static func peerHost(_ endpoint: NWEndpoint) -> String? {
@@ -2400,12 +2450,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         variant.stop()
     }
 
-    private func handleConnection(_ connection: NWConnection, lan: Bool = false) {
+    private func handleConnection(_ connection: NWConnection, lan: Bool = false, peer: String? = nil) {
         connection.start(queue: .global(qos: .userInitiated))
-        receiveRequest(connection, buffer: Data(), lan: lan)
+        receiveRequest(connection, buffer: Data(), lan: lan, peer: peer)
     }
 
-    private func receiveRequest(_ connection: NWConnection, buffer: Data, lan: Bool) {
+    private func receiveRequest(_ connection: NWConnection, buffer: Data, lan: Bool, peer: String?) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, isComplete, error in
             guard let self, error == nil else { connection.cancel(); return }
             var buffer = buffer
@@ -2415,14 +2465,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 // last bytes arrive with FIN piggybacked must still be served.
                 let head = String(decoding: buffer[..<headerEnd.lowerBound], as: UTF8.self)
                 let path = head.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
-                self.respond(connection, path: path, lan: lan)
+                self.respond(connection, path: path, lan: lan, peer: peer)
             } else if isComplete || buffer.count >= 16_384 {
                 // EOF before a complete request, or an oversized head. Without
                 // the isComplete arm a cleanly half-closed peer returns
                 // (nil, true, nil) forever and this re-armed on every one.
                 connection.cancel()
             } else {
-                self.receiveRequest(connection, buffer: buffer, lan: lan)
+                self.receiveRequest(connection, buffer: buffer, lan: lan, peer: peer)
             }
         }
     }
@@ -2503,8 +2553,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
     }
 
-    private func respond(_ connection: NWConnection, path: String, lan: Bool = false) {
-        serve(path: path, lan: lan) { r in
+    private func respond(_ connection: NWConnection, path: String, lan: Bool = false, peer: String? = nil) {
+        serve(path: path, lan: lan) { [weak self] r in
+            if lan { self?.noteLANServed(bytes: r.body.count, peer: peer) }
             let status: String
             switch r.status {
             case 200: status = "200 OK"
