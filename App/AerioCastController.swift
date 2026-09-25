@@ -2130,13 +2130,6 @@ struct RemoteControlScreen: View {
     /// hide the card while the TV KEEPS PLAYING. The X above is the other
     /// semantic (stop the TV as well), so both need to exist here.
     var onDisconnect: (() -> Void)? = nil
-    /// Label for `onDisconnect` (AirPlay's idle route says plain "Disconnect").
-    var disconnectLabel: String = "Disconnect (leave TV playing)"
-    /// AirPlay: skip back / forward have nothing to seek (the receiver
-    /// plays the live edge), so only Pause shows between the channel flips.
-    var showsSkipButtons: Bool = true
-    /// AirPlay: re-open the system route sheet on another receiver.
-    var onChangeAirPlayDevice: (() -> Void)? = nil
     /// Non-nil for the companion transport (full options: scrubber + Options
     /// sheet). nil for basic cast (web receiver has no control namespace).
     var companion: CompanionClient? = nil
@@ -2174,13 +2167,8 @@ struct RemoteControlScreen: View {
                 }
                 skipRow
                 bottomRow
-                if let onChangeAirPlayDevice {
-                    Button("Change AirPlay Device", action: onChangeAirPlayDevice)
-                        .scaledFont(.footnote.weight(.semibold))
-                        .foregroundStyle(ThemeManager.shared.accent)
-                }
                 if let onDisconnect {
-                    Button(disconnectLabel, action: onDisconnect)
+                    Button("Disconnect (leave TV playing)", action: onDisconnect)
                         .scaledFont(.footnote.weight(.semibold))
                         .foregroundStyle(ThemeManager.shared.accent)
                 }
@@ -2273,14 +2261,12 @@ struct RemoteControlScreen: View {
         HStack(spacing: 18) {
             transportButton("chevron.down", label: "Channel down",
                             size: 44, action: onChannelDown)
-            if showsSkipButtons {
-                transportButton(SkipIntervals.backSymbol(skipBackSeconds),
-                                label: "Skip back \(skipBackSeconds) seconds",
-                                size: 44) { seek(-Int64(skipBackSeconds) * 1000) }
-                transportButton(SkipIntervals.forwardSymbol(skipForwardSeconds),
-                                label: "Skip forward \(skipForwardSeconds) seconds",
-                                size: 44) { seek(Int64(skipForwardSeconds) * 1000) }
-            }
+            transportButton(SkipIntervals.backSymbol(skipBackSeconds),
+                            label: "Skip back \(skipBackSeconds) seconds",
+                            size: 44) { seek(-Int64(skipBackSeconds) * 1000) }
+            transportButton(SkipIntervals.forwardSymbol(skipForwardSeconds),
+                            label: "Skip forward \(skipForwardSeconds) seconds",
+                            size: 44) { seek(Int64(skipForwardSeconds) * 1000) }
             transportButton("chevron.up", label: "Channel up",
                             size: 44, action: onChannelUp)
         }
@@ -2372,6 +2358,236 @@ struct RemoteControlScreen: View {
             }
         }
         .accessibilityLabel(label)
+    }
+}
+
+// MARK: - AirPlay remote sheet (production Cast parity, 2026-09-25)
+
+/// AirPlay's expanded sheet, laid out exactly like the production Google Cast
+/// session sheet (device screenshots + screen recording 2026-09-25); only the
+/// transport wording differs.
+///  - idle route: "Close" on the left, "Connected" centered, nothing else.
+///  - playing (and connecting, controls disabled): logo, channel, accent
+///    "AirPlay to <receiver>", program + LIVE badge, time range + progress,
+///    Channel Down / Up, Back / Pause / Forward, Options, Stop AirPlay.
+struct AirPlayRemoteSheet: View {
+    enum Mode { case idleRoute, connecting, playing }
+
+    var mode: Mode
+    var channelName: String
+    var statusText: String
+    var artURL: String?
+    var programTitle: String?
+    var programStart: Date?
+    var programEnd: Date?
+    var isPlaying: Bool
+    /// The locally resolved channel, for the shared Options sheet.
+    var item: ChannelDisplayItem?
+    var onTogglePlayPause: () -> Void
+    var onChannelUp: () -> Void
+    var onChannelDown: () -> Void
+    var onSeek: (Double) -> Void
+    var onStop: () -> Void
+
+    @State private var contentHeight: CGFloat = 320
+    @State private var showOptions = false
+    @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
+    @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
+    @Environment(\.dismiss) private var dismiss
+
+    private var accent: Color { ThemeManager.shared.accent }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            Group {
+                if mode == .idleRoute { idleContent } else { playingContent }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 22)
+            .padding(.bottom, 8)
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { height in
+                let rounded = (height * 2).rounded() / 2
+                if abs(contentHeight - rounded) > 0.5 { contentHeight = rounded }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .presentationDetents([.height(contentHeight + Self.bottomInset), .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(Color.black)
+        .sheet(isPresented: $showOptions) {
+            CastOptionsSheet(cast: AerioCastController.shared, airPlayItem: item)
+        }
+    }
+
+    // MARK: Idle route: Close / Connected, nothing else (Cast parity)
+
+    private var idleContent: some View {
+        ZStack {
+            Text("Connected")
+                .scaledFont(.headline.weight(.semibold))
+                .foregroundStyle(.white)
+            HStack {
+                Button("Close") { dismiss() }
+                    .scaledFont(.body)
+                    .foregroundStyle(accent)
+                Spacer()
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    // MARK: Playing / connecting
+
+    private var playingContent: some View {
+        let enabled = mode == .playing
+        return VStack(spacing: 14) {
+            header
+            programBlock
+            Group {
+                HStack(spacing: 48) {
+                    labeledButton("chevron.down", label: "Channel Down", action: onChannelDown)
+                    labeledButton("chevron.up", label: "Channel Up", action: onChannelUp)
+                }
+                HStack(alignment: .top, spacing: 36) {
+                    labeledButton(SkipIntervals.backSymbol(skipBackSeconds),
+                                  label: "Back \(skipBackSeconds)s") {
+                        onSeek(-Double(skipBackSeconds))
+                    }
+                    Button(action: onTogglePlayPause) {
+                        VStack(spacing: 6) {
+                            ZStack {
+                                Circle().fill(accent).frame(width: 72, height: 72)
+                                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                                    .font(.system(size: 30, weight: .bold))  // glyph in a fixed box: not text, stays fixed
+                                    .foregroundStyle(.black)
+                            }
+                            Text(isPlaying ? "Pause" : "Play")
+                                .scaledFont(.caption)
+                                .foregroundStyle(.white.opacity(0.8))
+                        }
+                    }
+                    .accessibilityLabel(isPlaying ? "Pause" : "Play")
+                    labeledButton(SkipIntervals.forwardSymbol(skipForwardSeconds),
+                                  label: "Forward \(skipForwardSeconds)s") {
+                        onSeek(Double(skipForwardSeconds))
+                    }
+                }
+                wideButton {
+                    Label("Options", systemImage: "list.bullet")
+                        .foregroundStyle(.white)
+                } background: { Color.white.opacity(0.12) } action: { showOptions = true }
+            }
+            .disabled(!enabled)
+            .opacity(enabled ? 1 : 0.4)
+            wideButton {
+                Text("Stop AirPlay").foregroundStyle(.red)
+            } background: { Color.red.opacity(0.15) } action: { onStop() }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func wideButton<L: View>(@ViewBuilder _ label: () -> L,
+                                     background: () -> Color,
+                                              action: @escaping () -> Void) -> some View {
+        let bg = background()
+        return Button(action: action) {
+            label()
+                .scaledFont(.body.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(bg, in: RoundedRectangle(cornerRadius: 14))
+        }
+    }
+
+    private var header: some View {
+        VStack(spacing: 4) {
+            if let art = artURL, let url = URL(string: art) {
+                AsyncImage(url: url) { image in
+                    image.resizable().scaledToFit()
+                } placeholder: {
+                    airPlayGlyph
+                }
+                .frame(maxWidth: 140, maxHeight: 72)
+            } else {
+                airPlayGlyph
+            }
+            Text(channelName)
+                .scaledFont(.title3.weight(.bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            Text(statusText)
+                .scaledFont(.subheadline)
+                .foregroundStyle(Color.contrastText(accent))
+                .lineLimit(1)
+        }
+        .multilineTextAlignment(.center)
+    }
+
+    private var airPlayGlyph: some View {
+        Image(systemName: "airplayvideo")
+            .font(.system(size: 40))  // glyph in a fixed box: not text, stays fixed
+            .foregroundStyle(accent)
+            .frame(height: 56)
+    }
+
+    private var programBlock: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Text(programTitle ?? "")
+                    .scaledFont(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text("LIVE")
+                    .scaledFont(.caption2.weight(.bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.red, in: RoundedRectangle(cornerRadius: 4))
+            }
+            if let programStart, let programEnd, programEnd > programStart {
+                Text("\(programStart.formatted(date: .omitted, time: .shortened)) - \(programEnd.formatted(date: .omitted, time: .shortened))")
+                    .scaledFont(.caption)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    let total = programEnd.timeIntervalSince(programStart)
+                    let elapsed = context.date.timeIntervalSince(programStart)
+                    ProgressView(value: min(max(elapsed / total, 0), 1))
+                        .tint(accent)
+                }
+            } else {
+                ProgressView(value: 1).tint(accent)
+            }
+        }
+    }
+
+    private func labeledButton(_ symbol: String, label: String,
+                               action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                ZStack {
+                    Circle().fill(Color.white.opacity(0.12)).frame(width: 52, height: 52)
+                    Image(systemName: symbol)
+                        .font(.system(size: 20, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
+                        .foregroundStyle(.white)
+                }
+                Text(label)
+                    .scaledFont(.caption)
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+        }
+        .accessibilityLabel(label)
+    }
+
+    private static var bottomInset: CGFloat {
+        let inset = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow?.safeAreaInsets.bottom }
+            .first ?? 0
+        return max(12, inset)
     }
 }
 
@@ -2565,6 +2781,11 @@ struct RemoteOptionsSheet: View {
 /// need a control channel the web receiver lacks, so they are omitted.
 struct CastOptionsSheet: View {
     @ObservedObject var cast: AerioCastController
+    /// AirPlay reuses this sheet (production parity): the channel comes from
+    /// the local session, and the Cast-only rows (Sleep Timer, proxy Stream
+    /// Info) are hidden.
+    var airPlayItem: ChannelDisplayItem? = nil
+    private var isAirPlay: Bool { airPlayItem != nil }
     @Environment(\.dismiss) private var dismiss
     @State private var showSwitchStream = false
     @State private var showRecord = false
@@ -2576,6 +2797,7 @@ struct CastOptionsSheet: View {
     /// The channel the TV is playing, resolved locally (castingContent
     /// carries the id; ChannelStore has the Dispatcharr fields).
     private var castItem: ChannelDisplayItem? {
+        if let airPlayItem { return airPlayItem }
         guard let id = cast.castingContent?.mediaID else { return nil }
         return ChannelStore.shared.channels.first(where: { $0.id == id })
     }
@@ -2613,6 +2835,7 @@ struct CastOptionsSheet: View {
                             Label("Record Current Program", systemImage: "record.circle")
                         }
                     }
+                    if !isAirPlay {
                     Menu {
                         ForEach(sleepChoices, id: \.minutes) { c in
                             Button(c.label) { cast.armSleepTimer(minutes: c.minutes) }
@@ -2626,7 +2849,9 @@ struct CastOptionsSheet: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+                    }
                 }
+                if !isAirPlay {
                 Section("Stream Info") {
                     if let stats {
                         CastStreamInfoCard(stats: stats,
@@ -2638,6 +2863,7 @@ struct CastOptionsSheet: View {
                             .scaledFont(.footnote)
                             .foregroundStyle(.secondary)
                     }
+                }
                 }
             }
             .navigationTitle("Options")
@@ -2674,7 +2900,7 @@ struct CastOptionsSheet: View {
         // ~1 Hz stats poll while the sheet is up; statsSnapshot is one
         // short hop onto the proxy's session queue.
         .task {
-            while !Task.isCancelled {
+            while !Task.isCancelled && !isAirPlay {
                 stats = CastHLSProxySession.shared.statsSnapshot()
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
@@ -2853,6 +3079,7 @@ struct CastPickerSheet: View {
 
     @ObservedObject private var companion = CompanionClient.shared
     @ObservedObject private var castController = AerioCastController.shared
+    @ObservedObject private var airPlay = AirPlayMonitor.shared
     @StateObject private var castDevices = CastDeviceList()
     @ObservedObject private var nativeRegistry = CastNativeDeviceRegistry.shared
     @Environment(\.dismiss) private var dismiss
@@ -2983,11 +3210,22 @@ struct CastPickerSheet: View {
                             // AirPlayMenuTrigger for the hidden-picker detail.
                             AirPlayMenuTrigger.present()
                         } label: {
+                            if case .probing = airPlay.phase {
+                                // Cast parity: the connecting row shows the
+                                // receiver with a spinner.
+                                HStack {
+                                    Label(airPlay.deviceName ?? "AirPlay", systemImage: "airplay.video")
+                                    Spacer()
+                                    Text("Connecting…").foregroundStyle(.secondary)
+                                    ProgressView()
+                                }
+                            } else {
                             VStack(alignment: .leading, spacing: 2) {
                                 Label("AirPlay", systemImage: "airplay.video")
                                 Text("Choose a TV, then start a channel")
                                     .scaledFont(.caption)
                                     .foregroundStyle(.secondary)
+                            }
                             }
                         }
                     }

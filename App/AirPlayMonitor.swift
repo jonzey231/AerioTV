@@ -207,6 +207,23 @@ final class AirPlayMonitor: ObservableObject {
         player.timeControlStatus == .paused ? player.play() : player.pause()
     }
 
+    /// Back / Forward skip from the AirPlay sheet: seeks the tile's player
+    /// (which feeds the receiver) within its seekable range, clamped so a
+    /// forward skip lands on the live edge at most.
+    func seek(by seconds: Double) {
+        guard let player, let item = player.currentItem else { return }
+        let now = player.currentTime().seconds
+        guard now.isFinite else { return }
+        var target = now + seconds
+        if let range = item.seekableTimeRanges.last?.timeRangeValue {
+            let lo = range.start.seconds, hi = range.end.seconds
+            if lo.isFinite, hi.isFinite { target = min(max(target, lo), hi) }
+        }
+        debugLog("[AVP-AIRPLAY] skip \(seconds > 0 ? "+" : "")\(Int(seconds))s -> \(String(format: "%.1f", target))")
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
     /// The card's X / Stop AirPlay. Playback stops outright and must NOT
     /// fall back to the phone's screen (rule 4: "if I close it, it should
     /// just close"). An app cannot deselect an AirPlay route, so when the

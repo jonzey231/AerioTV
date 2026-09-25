@@ -6022,9 +6022,10 @@ struct MainTabView: View {
         }
     }
 
-    /// "Playing on AirPlay", or the receiver's own name once resolved.
+    /// "AirPlay to <receiver>" (Cast's "Casting to <device>" wording),
+    /// plain "AirPlay" until the receiver name resolves.
     private var airPlayPlayingStatus: String {
-        "Playing on \(airPlay.deviceName ?? "AirPlay")"
+        airPlay.deviceName.map { "AirPlay to \($0)" } ?? "AirPlay"
     }
 
     private var airPlayIsIdleRoute: Bool {
@@ -6090,13 +6091,15 @@ struct MainTabView: View {
                 // Route picked, nothing playing: the invitation state.
                 RemoteSessionCard(
                     transport: .airPlay,
-                    title: "Connected. Select a channel to start.",
+                    title: airPlayPlayingStatus,
                     status: "Select a Channel",
                     isPlaying: false,
                     showTransport: false,
                     onTap: { showRemoteControls = true },
                     onTogglePlayPause: {},
                     onStop: {
+                        // An app cannot drop the route: X presents the
+                        // system route picker (disconnectIdleRoute).
                         debugLog("[Remote] X: disconnect (AirPlay idle route)")
                         airPlay.disconnectIdleRoute()
                     }
@@ -6107,7 +6110,7 @@ struct MainTabView: View {
                     transport: .airPlay,
                     title: item?.name ?? "AirPlay",
                     programTitle: item?.currentProgram,
-                    status: probing ? "Connecting to AirPlay…" : airPlayPlayingStatus,
+                    status: probing ? "Connecting to AirPlay" : airPlayPlayingStatus,
                     artURL: item?.logoURL?.absoluteString,
                     isPlaying: airPlay.isPlaying,
                     // Nothing to pause until the receiver has the video.
@@ -6176,62 +6179,31 @@ struct MainTabView: View {
                 companion: companionClient  // full options (scrubber + sheet)
             )
         case .airPlay:
-            if airPlayIsIdleRoute {
-                // Idle route: nothing to control yet, only the route itself.
-                RemoteControlScreen(
-                    title: "Connected. Select a channel to start.",
-                    subtitle: nil,
-                    artURL: nil,
-                    statusText: airPlay.deviceName.map { "AirPlay · \($0)" } ?? "AirPlay",
-                    isPlaying: false,
-                    stopLabel: "Disconnect",
-                    onTogglePlayPause: {},
-                    onChannelUp: { nowPlaying.changeChannel(direction: 1) },
-                    onChannelDown: { nowPlaying.changeChannel(direction: -1) },
-                    // Disconnect opens the system route picker: an app
-                    // cannot deselect an AirPlay route (device log
-                    // 2026-09-25), the user picks this iPhone there.
-                    onStop: {
-                        showRemoteControls = false
-                        airPlay.disconnectIdleRoute()
-                    },
-                    onDisconnect: {
-                        showRemoteControls = false
-                        airPlay.disconnectIdleRoute()
-                    },
-                    disconnectLabel: "Disconnect",
-                    showsSkipButtons: false,
-                    onChangeAirPlayDevice: {
-                        showRemoteControls = false
-                        AirPlayMenuTrigger.present()
-                    }
-                )
-            } else {
-                // Channel up/down drive the LOCAL session that is feeding the
-                // AirPlay receiver; its own Options live in the player chrome, so
-                // no options button here (the screen hides it when both are nil).
-                // No skip buttons: the receiver plays the live edge (Pause only).
-                RemoteControlScreen(
-                    title: nowPlaying.playingItem?.name ?? "AirPlay",
-                    subtitle: nowPlaying.playingItem?.currentProgram,
-                    artURL: nowPlaying.playingItem?.logoURL?.absoluteString,
-                    statusText: airPlayIsProbing ? "Connecting to AirPlay…" : airPlayPlayingStatus,
-                    isPlaying: airPlay.isPlaying,
-                    stopLabel: "Stop AirPlay",
-                    onTogglePlayPause: { airPlay.togglePlayPause() },
-                    onChannelUp: { nowPlaying.changeChannel(direction: 1) },
-                    onChannelDown: { nowPlaying.changeChannel(direction: -1) },
-                    onStop: {
-                        airPlay.stop()
-                        showRemoteControls = false
-                    },
-                    showsSkipButtons: false,
-                    onChangeAirPlayDevice: {
-                        showRemoteControls = false
-                        AirPlayMenuTrigger.present()
-                    }
-                )
-            }
+            // Production Cast parity (device recording 2026-09-25): idle
+            // route = Close / Connected only (the card's X opens the route
+            // picker); probing = the playing layout with controls disabled
+            // until the receiver has the video.
+            let item = nowPlaying.playingItem
+            AirPlayRemoteSheet(
+                mode: airPlayIsIdleRoute ? .idleRoute
+                    : (airPlayIsProbing ? .connecting : .playing),
+                channelName: item?.name ?? "AirPlay",
+                statusText: airPlayIsProbing ? "Connecting to AirPlay" : airPlayPlayingStatus,
+                artURL: item?.logoURL?.absoluteString,
+                programTitle: item?.currentProgram,
+                programStart: item?.currentProgramStart,
+                programEnd: item?.currentProgramEnd,
+                isPlaying: airPlay.isPlaying,
+                item: item,
+                onTogglePlayPause: { airPlay.togglePlayPause() },
+                onChannelUp: { nowPlaying.changeChannel(direction: 1) },
+                onChannelDown: { nowPlaying.changeChannel(direction: -1) },
+                onSeek: { airPlay.seek(by: $0) },
+                onStop: {
+                    airPlay.stop()
+                    showRemoteControls = false
+                }
+            )
         case nil:
             EmptyView()
         }
