@@ -2130,6 +2130,13 @@ struct RemoteControlScreen: View {
     /// hide the card while the TV KEEPS PLAYING. The X above is the other
     /// semantic (stop the TV as well), so both need to exist here.
     var onDisconnect: (() -> Void)? = nil
+    /// Label for `onDisconnect` (AirPlay's idle route says plain "Disconnect").
+    var disconnectLabel: String = "Disconnect (leave TV playing)"
+    /// AirPlay: skip back / forward have nothing to seek (the receiver
+    /// plays the live edge), so only Pause shows between the channel flips.
+    var showsSkipButtons: Bool = true
+    /// AirPlay: re-open the system route sheet on another receiver.
+    var onChangeAirPlayDevice: (() -> Void)? = nil
     /// Non-nil for the companion transport (full options: scrubber + Options
     /// sheet). nil for basic cast (web receiver has no control namespace).
     var companion: CompanionClient? = nil
@@ -2167,8 +2174,13 @@ struct RemoteControlScreen: View {
                 }
                 skipRow
                 bottomRow
+                if let onChangeAirPlayDevice {
+                    Button("Change AirPlay Device", action: onChangeAirPlayDevice)
+                        .scaledFont(.footnote.weight(.semibold))
+                        .foregroundStyle(ThemeManager.shared.accent)
+                }
                 if let onDisconnect {
-                    Button("Disconnect (leave TV playing)", action: onDisconnect)
+                    Button(disconnectLabel, action: onDisconnect)
                         .scaledFont(.footnote.weight(.semibold))
                         .foregroundStyle(ThemeManager.shared.accent)
                 }
@@ -2261,12 +2273,14 @@ struct RemoteControlScreen: View {
         HStack(spacing: 18) {
             transportButton("chevron.down", label: "Channel down",
                             size: 44, action: onChannelDown)
-            transportButton(SkipIntervals.backSymbol(skipBackSeconds),
-                            label: "Skip back \(skipBackSeconds) seconds",
-                            size: 44) { seek(-Int64(skipBackSeconds) * 1000) }
-            transportButton(SkipIntervals.forwardSymbol(skipForwardSeconds),
-                            label: "Skip forward \(skipForwardSeconds) seconds",
-                            size: 44) { seek(Int64(skipForwardSeconds) * 1000) }
+            if showsSkipButtons {
+                transportButton(SkipIntervals.backSymbol(skipBackSeconds),
+                                label: "Skip back \(skipBackSeconds) seconds",
+                                size: 44) { seek(-Int64(skipBackSeconds) * 1000) }
+                transportButton(SkipIntervals.forwardSymbol(skipForwardSeconds),
+                                label: "Skip forward \(skipForwardSeconds) seconds",
+                                size: 44) { seek(Int64(skipForwardSeconds) * 1000) }
+            }
             transportButton("chevron.up", label: "Channel up",
                             size: 44, action: onChannelUp)
         }
@@ -2969,7 +2983,12 @@ struct CastPickerSheet: View {
                             // AirPlayMenuTrigger for the hidden-picker detail.
                             AirPlayMenuTrigger.present()
                         } label: {
-                            Label("Choose AirPlay output…", systemImage: "airplay.video")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Label("AirPlay", systemImage: "airplay.video")
+                                Text("Choose a TV, then start a channel")
+                                    .scaledFont(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }

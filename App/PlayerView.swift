@@ -385,7 +385,6 @@ final class SystemVolumeBridge {
 struct SystemVolumeHost: UIViewRepresentable {
     func makeUIView(context: Context) -> MPVolumeView {
         let v = MPVolumeView(frame: CGRect(x: -1000, y: -1000, width: 1, height: 1))
-        v.showsRouteButton = false
         v.isHidden = false
         v.alpha = 0.001
         v.isUserInteractionEnabled = false
@@ -4157,14 +4156,13 @@ struct PlayerOverflowMenu: View, Equatable {
                 // Swipe home to shrink the player into a floating window;
                 // controlled by Settings → Appearance → Picture-in-Picture.
 
-                // AirPlay. Routes audio only on iPhone (the mix of HLS +
-                // MPV-backed TS streams rules out reliable video routing),
-                // so the menu placement matches its actual scope — no
-                // point taking a top-bar chrome slot for audio routing.
+                // AirPlay. The AVPlayer engine hands video to the receiver
+                // (served over the LAN since the 2026-09-21 rebuild); the
+                // mpv engine still routes audio only.
                 Button {
                     AirPlayMenuTrigger.present()
                 } label: {
-                    Label("AirPlay (Audio Only)", systemImage: "airplay.audio")
+                    Label("AirPlay", systemImage: "airplay.video")
                 }
                 #endif
             }
@@ -4659,6 +4657,9 @@ struct AirPlayButton: UIViewRepresentable {
 enum AirPlayMenuTrigger {
     private static let pickerView: AVRoutePickerView = {
         let v = AVRoutePickerView(frame: CGRect(x: -100, y: -100, width: 1, height: 1))
+        // Video receivers (Apple TV, Roku, AirPlay TVs) first: the sheet is
+        // how a channel reaches a TV.
+        v.prioritizesVideoDevices = true
         v.alpha = 0.01       // kept non-zero so the subview button stays touch-enabled
         v.isUserInteractionEnabled = true
         return v
