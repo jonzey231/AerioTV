@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A1R198FCCDFCE30FD191BF69 /* RemoteSessionNowPlaying.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */; };
 		A1R865DEBFC0015BAB4F022B /* AirPlayTileDelivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */; };
 		A1R97E4D2C14EFFBDA110A4D /* AirPlayAACVariant.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8231 /* AirPlayAACVariant.swift */; };
 		A1R8CEDC79EEAEB1C433DB5F /* AirPlayAACVariant.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8231 /* AirPlayAACVariant.swift */; };
@@ -350,6 +351,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionNowPlaying.swift; sourceTree = "<group>"; };
 		A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayTileDelivery.swift; sourceTree = "<group>"; };
 		A1R8ABB50566B8495C3C8231 /* AirPlayAACVariant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayAACVariant.swift; sourceTree = "<group>"; };
 		A1R3EEB47325934697D79C89 /* AirPlayReceiverResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayReceiverResolver.swift; sourceTree = "<group>"; };
@@ -1022,6 +1024,7 @@
 				WHATSNEW00000000000ACE000 /* WhatsNew.swift */,
 				8179E2560269773B4D5A0D3A /* HeadlessPlaybackController.swift */,
 				75154966450E03A3443CF312 /* AerioCastController.swift */,
+				A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */,
 				A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */,
 				A1R8ABB50566B8495C3C8231 /* AirPlayAACVariant.swift */,
 				A1R3EEB47325934697D79C89 /* AirPlayReceiverResolver.swift */,
@@ -1474,6 +1477,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1R198FCCDFCE30FD191BF69 /* RemoteSessionNowPlaying.swift in Sources */,
 				A1R865DEBFC0015BAB4F022B /* AirPlayTileDelivery.swift in Sources */,
 				A1R97E4D2C14EFFBDA110A4D /* AirPlayAACVariant.swift in Sources */,
 				A1RF6A0E8715728C27F1F2FB /* AirPlayReceiverResolver.swift in Sources */,

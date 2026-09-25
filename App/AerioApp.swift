@@ -697,6 +697,7 @@ struct AerioApp: App {
                 // output picked before any channel shows the idle card.
                 AirPlayReceiverResolver.shared.probeRoutesAtLaunch()
                 AirPlayMonitor.shared.startObservingRoutes()
+                RemoteSessionNowPlaying.startObserving()
                 #endif
                 // Start iCloud sync if enabled (pull happens during EPG loading)
                 SyncManager.shared.startObserving()

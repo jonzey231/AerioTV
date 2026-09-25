@@ -325,6 +325,7 @@ final class AirPlayTileDelivery {
             BackgroundKeepalive.acquire(Self.keepaliveHolder)
         }
         Self.serving.send(true)
+        RemoteSessionNowPlaying.publishAirPlay()
     }
 
     /// Back to loopback (plan section 4c "End").
@@ -359,7 +360,10 @@ final class AirPlayTileDelivery {
             debugLog("[AVP-AIRPLAY] background keepalive off")
             BackgroundKeepalive.release(Self.keepaliveHolder)
         }
-        if Self.serving.value { Self.serving.send(false) }
+        if Self.serving.value {
+            Self.serving.send(false)
+            RemoteSessionNowPlaying.clear()
+        }
     }
 
     /// Tile teardown: the player and remuxer are going away with it, so no

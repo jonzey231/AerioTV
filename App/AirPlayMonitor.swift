@@ -131,6 +131,7 @@ final class AirPlayMonitor: ObservableObject {
         detach(silently: true)
         PlayerSession.shared.stop()
         NowPlayingManager.shared.stop()
+        RemoteSessionNowPlaying.clear()
     }
 
     /// Idle-route card's Disconnect: nothing is playing, so there is no
@@ -155,6 +156,7 @@ final class AirPlayMonitor: ObservableObject {
     private func setReceiver(_ r: AirPlayReceiver?) {
         if receiver != r { receiver = r }
         refreshName()
+        if phase == .active { RemoteSessionNowPlaying.republishAirPlayDevice() }
     }
 
     /// Re-derive the phase from the route, the player and the tile.
@@ -169,6 +171,7 @@ final class AirPlayMonitor: ObservableObject {
             case .active, .probing:
                 debugLog("[Cast] card hide (AirPlay route lost); playback continues on this device")
                 setPhase(.routeLost)
+                RemoteSessionNowPlaying.clear()
                 setPhase(.none)
             case .idleRoute:
                 debugLog("[Cast] card hide (AirPlay idle route)")
