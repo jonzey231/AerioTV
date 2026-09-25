@@ -27,9 +27,9 @@ enum AirPlayAudioMode: String, CaseIterable, Sendable {
 
     var displayName: String {
         switch self {
-        case .automatic: return "Automatic (Apple TV keeps surround, others get stereo)"
-        case .passthrough: return "Always passthrough"
-        case .stereo: return "Always stereo AAC"
+        case .automatic: return "Automatic"
+        case .passthrough: return "Passthrough"
+        case .stereo: return "Stereo AAC"
         }
     }
 
@@ -41,5 +41,5 @@ enum AirPlayAudioMode: String, CaseIterable, Sendable {
         }
     }
 
-    static let footer = "Roku and most non-Apple AirPlay receivers cannot play surround audio (AC-3 or E-AC-3). Automatic sends them AAC stereo instead. With Always passthrough a Roku plays no audio on surround channels."
+    static let footer = "Roku and most non-Apple AirPlay receivers cannot play surround audio (AC-3 or E-AC-3). Automatic sends them AAC stereo instead. With Passthrough a Roku plays no audio on surround channels."
 }

@@ -356,6 +356,10 @@ struct PlayerSettingsView: View {
                         .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     Text("If a live stream stops sending video, the player reloads it to recover. Turn Auto-Recover off if live channels restart or stutter during commercial breaks (a brief freeze may show instead). Applies to the next channel you tune.")
                         .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                    // Short picker labels fit the row; the explanation
+                    // lives here (2026-09-25).
+                    Text("AirPlay Audio: Automatic keeps surround on Apple TV and Mac receivers and sends AAC stereo to Roku and other TVs. Passthrough sends the original audio; Stereo AAC downmixes for every receiver.")
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
             }
             .listSectionSeparator(.hidden)
