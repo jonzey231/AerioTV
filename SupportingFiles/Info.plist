@@ -60,9 +60,10 @@
 		<string>_googlecast._tcp</string>
 		<string>_46B79062._googlecast._tcp</string>
 		<string>_aeriotv._tcp</string>
+		<string>_airplay._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>AerioTV needs local network access to connect to your media server on your home network.</string>
+	<string>AerioTV needs local network access to connect to your media server on your home network, and to find and stream to your AirPlay and Google Cast TVs.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
