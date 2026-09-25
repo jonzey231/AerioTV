@@ -2380,7 +2380,7 @@ struct RemoteControlScreen: View {
 ///    "AirPlay to <receiver>", program + LIVE badge, time range + progress,
 ///    Channel Down / Up, Back / Pause / Forward, Options, Stop AirPlay.
 struct RemoteSessionSheet: View {
-    enum Mode { case idleRoute, connecting, playing }
+    enum Mode { case connecting, playing }
     enum Transport { case cast, airPlay }
 
     var transport: Transport
@@ -2419,9 +2419,7 @@ struct RemoteSessionSheet: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            Group {
-                if mode == .idleRoute { idleContent } else { playingContent }
-            }
+            playingContent
             .padding(.horizontal, 24)
             .padding(.top, 22)
             .padding(.bottom, 8)
@@ -2443,23 +2441,6 @@ struct RemoteSessionSheet: View {
                 CastOptionsSheet(cast: AerioCastController.shared, airPlayItem: item)
             }
         }
-    }
-
-    // MARK: Idle route: Close / Connected, nothing else (Cast parity)
-
-    private var idleContent: some View {
-        ZStack {
-            Text("Connected")
-                .scaledFont(.headline.weight(.semibold))
-                .foregroundStyle(.white)
-            HStack {
-                Button("Close") { dismiss() }
-                    .scaledFont(.body)
-                    .foregroundStyle(accent)
-                Spacer()
-            }
-        }
-        .frame(maxWidth: .infinity)
     }
 
     // MARK: Playing / connecting
@@ -3315,8 +3296,16 @@ struct CastPickerSheet: View {
         .onChange(of: companion.isControlling) { _, controlling in
             if controlling { dismiss() }
         }
+        // 2026-09-21 production recording: the title flips "Cast to" ->
+        // "Connected" (navigationTitle reads isCasting), holds briefly so
+        // the user sees it, then the sheet dismisses onto the idle card.
         .onChange(of: castController.state) { _, state in
-            if case .connected = state { dismiss() }
+            if case .connected = state {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(600))
+                    if castController.isCasting { dismiss() }
+                }
+            }
         }
         .presentationDetents([.medium])
     }
