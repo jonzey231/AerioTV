@@ -163,7 +163,8 @@ final class AirPlayTileDelivery {
         // Mid-play start: the route gained an AirPlay output while this
         // tile plays on loopback (the 09-21 log serves on the LAN before
         // the receiver reports external playback). An audio-only speaker
-        // is skipped once the receiver resolves. Route LOSS ends it.
+        // is skipped once the receiver resolves. Route LOSS ends the
+        // whole session (device test 2026-09-25: no fall-back to the phone).
         if hasAirPlay, state == .idle, player != nil, remuxer != nil {
             beginMidPlay()
         } else if !hasAirPlay, state != .idle {
@@ -328,12 +329,27 @@ final class AirPlayTileDelivery {
         RemoteSessionNowPlaying.publishAirPlay()
     }
 
-    /// Back to loopback (plan section 4c "End").
+    /// End of LAN delivery. A LAN item failure goes back to loopback (plan
+    /// section 4c "End"). A route loss is the receiver ending AirPlay and
+    /// stops playback outright (device test 2026-09-25: the phone must not
+    /// pick the channel back up): LAN delivery, the variant and the
+    /// keepalive go now, then the monitor runs the same stop as the card's X.
     func end(reason: String) {
         guard state != .idle else { return }
         token = UUID()
         let wasServing = state == .serving
         state = .idle
+        if reason == "route" {
+            lanItemStatusObservation = nil
+            teardownLAN()
+            leaveServing()
+            if wasServing {
+                player?.pause()
+                debugLog("[AVP-AIRPLAY] external playback ended (route lost): LAN delivery torn down, playback stopped")
+                AirPlayMonitor.shared.receiverEnded(routeLost: true, servedByTile: true)
+            }
+            return
+        }
         if wasServing, let player, let loopbackURL {
             let item = AVPlayerItem(url: loopbackURL)
             item.automaticallyPreservesTimeOffsetFromLive = true
