@@ -80,6 +80,10 @@ final class CastHLSProxyServer: @unchecked Sendable {
     private var lastPeer: String?
     private var highestVideoSeq = -1
 
+    /// Playlist / segment request counts since the last accepted load
+    /// (stale-receiver check, incident 2026-09-25 15:26).
+    let requestCounters = CastHLSRequestCounters()
+
     var linkCounters: (servedBytes: Int64, peer: String?, highestVideoSeq: Int) {
         linkLock.lock(); defer { linkLock.unlock() }
         return (servedBytesTotal, lastPeer, highestVideoSeq)
@@ -162,6 +166,7 @@ final class CastHLSProxyServer: @unchecked Sendable {
             send(connection, status: "405 Method Not Allowed", contentType: nil, body: Data())
             return
         }
+        requestCounters.record(path: path)
         let body: Data?
         let mime: String
         // Wait time is only meaningful for a segment fetch that was held

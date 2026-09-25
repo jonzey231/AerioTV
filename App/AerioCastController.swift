@@ -625,6 +625,7 @@ final class AerioCastController: NSObject, ObservableObject {
     /// playlist is a hard receiver error, not a retry.
     private func load(_ content: Content, on session: GCKCastSession) {
         proxyLoadTask?.cancel()
+        staleCheckTask?.cancel()
         // Route by receiver type (2026-09-13). The native Android TV app gets the
         // channel IDENTITY and tunes itself; a web receiver gets the phone-local
         // proxy playlist. While the handshake is still in flight the load is HELD.
@@ -754,6 +755,8 @@ final class AerioCastController: NSObject, ObservableObject {
             debugLog("[Cast] load channel=\(content.title) "
                 + "audio=\(summary?.codec ?? "none") mode=\(summary?.mode ?? "unknown")")
             guard !Task.isCancelled else { return }
+            // Counters start at the load the receiver is about to get.
+            CastHLSProxySession.shared.markReceiverLoad()
             await MainActor.run { [weak self] in
                 // Re-fetch the session: the connect may have churned while
                 // the proxy warmed up.
@@ -762,6 +765,7 @@ final class AerioCastController: NSObject, ObservableObject {
                       self.flipToken == token,
                       self.castingContent?.mediaID == content.mediaID else { return }
                 self.loadProxyPlaylist(playlistURL, content: content, on: live)
+                self.armStaleReceiverCheck(playlistURL: playlistURL, content: content, afterReload: false)
             }
         }
     }
@@ -931,6 +935,7 @@ final class AerioCastController: NSObject, ObservableObject {
         debugLog("[CAST-HLS] switch-stream reprime for \(item.name)")
         let headers = content.streamHeaders
         proxyLoadTask?.cancel()
+        staleCheckTask?.cancel()
         // Same audio plan as the initial load: the plain stream URL, with
         // AC-3 / E-AC-3 passthrough gated on the receiver's own measurement,
         // otherwise the on-phone AAC transcode when a decoder exists.
@@ -938,14 +943,74 @@ final class AerioCastController: NSObject, ObservableObject {
         let transcodeAC3 = !allowAC3 && CastAudioTranscoder.canDecode(.ac3)
         proxyLoadTask = Task { [weak self] in
             do {
-                _ = try await CastHLSProxySession.shared.startChannel(
+                let playlistURL = try await CastHLSProxySession.shared.startChannel(
                     rawTSURL: rawTS, headers: headers, allowAC3Passthrough: allowAC3,
                     transcodeAC3: transcodeAC3)
+                CastHLSProxySession.shared.markReceiverLoad()
+                await MainActor.run { [weak self] in
+                    self?.armStaleReceiverCheck(playlistURL: playlistURL, content: content, afterReload: false)
+                }
             } catch is CancellationError {
             } catch {
                 self?.surfaceCastFailure("The stream switch interrupted casting: \(error)")
                 self?.stopCasting()
             }
+        }
+    }
+
+    // MARK: - Stale receiver check (incident 2026-09-25 15:26)
+
+    /// 10 s after each accepted proxy load (initial load and Switch Stream
+    /// reprime) the proxy's request counters say whether the receiver page
+    /// is actually playing. On 2026-09-25 15:26 a session attached to a
+    /// receiver page that fetched the master and both rendition playlists
+    /// once, two segments, then nothing for 2.5 minutes while the proxy kept
+    /// producing; only ending the session and casting again recovered it.
+    /// A playlist with no segment re-issues the same load ONCE per channel;
+    /// still nothing 10 s after that surfaces the cast-failure notice.
+    /// Android parity: AerioCastSender (963e5ed6).
+    private static let staleReceiverSeconds: UInt64 = 10
+    private var staleCheckTask: Task<Void, Never>?
+    /// Channel whose load was already re-issued once.
+    private var staleReloadedMediaID: String?
+
+    private func armStaleReceiverCheck(playlistURL: URL, content: Content, afterReload: Bool) {
+        staleCheckTask?.cancel()
+        staleCheckTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.staleReceiverSeconds * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            let counts = await Task.detached { CastHLSProxySession.shared.receiverRequestCounts() }.value
+            guard !Task.isCancelled, let self, self.isCasting,
+                  self.castingContent?.mediaID == content.mediaID,
+                  let counts else { return }
+            let secs = Self.staleReceiverSeconds
+            if counts.segments > 0 {
+                let first = counts.firstSegmentAt.map { $0.timeIntervalSince(counts.markedAt) } ?? 0
+                debugLog("[Cast] receiver healthy: first segment \(String(format: "%.1f", first)) s after load "
+                    + "(playlists=\(counts.playlists) vseg=\(counts.videoSegments) "
+                    + "aseg=\(counts.audioSegments) gen=\(counts.generation))")
+                return
+            }
+            if counts.playlists == 0 {
+                debugLog("[Cast] receiver fetched NOTHING \(secs)s after load "
+                    + "(no playlist, no segment); leaving it to the idle reload")
+                return
+            }
+            if afterReload || self.staleReloadedMediaID == content.mediaID {
+                debugLog("[Cast] stale receiver: still no segment after the reload; surfacing "
+                    + "(playlists=\(counts.playlists) segments=0 gen=\(counts.generation))")
+                self.surfaceCastFailure("The Cast device stopped requesting video. "
+                    + "Disconnect from it and cast again.")
+                return
+            }
+            debugLog("[Cast] stale receiver: playlist fetched, no segment in \(secs) s; "
+                + "re-issuing the load once (playlists=\(counts.playlists) gen=\(counts.generation))")
+            self.staleReloadedMediaID = content.mediaID
+            guard let live = GCKCastContext.sharedInstance().sessionManager.currentCastSession else { return }
+            await Task.detached { CastHLSProxySession.shared.markReceiverLoad() }.value
+            guard self.castingContent?.mediaID == content.mediaID else { return }
+            self.loadProxyPlaylist(playlistURL, content: content, on: live)
+            self.armStaleReceiverCheck(playlistURL: playlistURL, content: content, afterReload: true)
         }
     }
 
@@ -1189,6 +1254,7 @@ extension AerioCastController: GCKSessionManagerListener {
         NowPlayingBridge.shared.teardown()
         // The receiver is gone; the proxy has no client left to serve.
         proxyLoadTask?.cancel()
+        staleCheckTask?.cancel()
         proxyLoadTask = nil
         loadRequest = nil
         switchingToTitle = nil

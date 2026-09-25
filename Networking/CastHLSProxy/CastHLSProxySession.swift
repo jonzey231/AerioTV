@@ -190,6 +190,20 @@ final class CastHLSProxySession: @unchecked Sendable {
 
     /// Audio codec + mode for the sender's one-line cast log. nil when no
     /// proxy session is up.
+    /// Stale-receiver check (incident 2026-09-25 15:26): reset the request
+    /// counters at an accepted load, and read them back 10 s later.
+    func markReceiverLoad() {
+        _ = onQueueBounded(timeout: 1.0, what: "markReceiverLoad") {
+            self.server?.requestCounters.mark(generation: self.currentGeneration)
+        }
+    }
+
+    func receiverRequestCounts() -> CastHLSRequestCounters.Snapshot? {
+        onQueueBounded(timeout: 1.0, what: "receiverRequestCounts") {
+            self.server?.requestCounters.snapshot
+        } ?? nil
+    }
+
     func audioSummary() -> (codec: String?, mode: String)? {
         onQueueBounded(timeout: 1.0, what: "audioSummary") { () -> (codec: String?, mode: String)? in
             guard let remuxer = self.remuxer else { return nil }

@@ -416,3 +416,73 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         return text
     }
 }
+
+/// Receiver request counters for the stale-receiver check (iOS incident
+/// 2026-09-25 15:26: a Cast session attached to a receiver page that fetched
+/// the master and both rendition playlists once, two segments, and then
+/// nothing while the proxy kept producing). The sender marks each accepted
+/// load and reads the counts 10 s later; a playlist with no segment means
+/// the page is stale and the load is re-issued once. Thread-safe (the serve
+/// queue is concurrent). Android parity: CastHlsProxyServer's
+/// playlistFetches / segmentFetches (963e5ed6).
+final class CastHLSRequestCounters: @unchecked Sendable {
+    struct Snapshot: Equatable, Sendable {
+        var generation: Int
+        var playlists: Int
+        var videoSegments: Int
+        var audioSegments: Int
+        /// Time of the first segment request since the mark, nil if none.
+        var firstSegmentAt: Date?
+        /// Time of the most recent segment request since the mark.
+        var lastSegmentAt: Date?
+        var markedAt: Date
+        var segments: Int { videoSegments + audioSegments }
+    }
+
+    enum Kind { case playlist, videoSegment, audioSegment, other }
+
+    private let lock = NSLock()
+    private var current: Snapshot
+
+    init(now: Date = Date()) {
+        current = Snapshot(generation: 0, playlists: 0, videoSegments: 0, audioSegments: 0,
+                           firstSegmentAt: nil, lastSegmentAt: nil, markedAt: now)
+    }
+
+    /// Classify a request path the way the server routes it.
+    static func kind(of path: String) -> Kind {
+        if path.hasSuffix(".m3u8") { return .playlist }
+        if path.hasPrefix("/vseg") && path.hasSuffix(".m4s") { return .videoSegment }
+        if path.hasPrefix("/aseg") && path.hasSuffix(".m4s") { return .audioSegment }
+        return .other
+    }
+
+    /// Count one request (called when it arrives, before any live-edge hold).
+    func record(path: String, now: Date = Date()) {
+        let kind = Self.kind(of: path)
+        guard kind != .other else { return }
+        lock.lock(); defer { lock.unlock() }
+        switch kind {
+        case .playlist: current.playlists += 1
+        case .videoSegment: current.videoSegments += 1
+        case .audioSegment: current.audioSegments += 1
+        case .other: break
+        }
+        if kind != .playlist {
+            if current.firstSegmentAt == nil { current.firstSegmentAt = now }
+            current.lastSegmentAt = now
+        }
+    }
+
+    /// Reset the counts at an accepted load for `generation`.
+    func mark(generation: Int, now: Date = Date()) {
+        lock.lock(); defer { lock.unlock() }
+        current = Snapshot(generation: generation, playlists: 0, videoSegments: 0, audioSegments: 0,
+                           firstSegmentAt: nil, lastSegmentAt: nil, markedAt: now)
+    }
+
+    var snapshot: Snapshot {
+        lock.lock(); defer { lock.unlock() }
+        return current
+    }
+}

@@ -2268,5 +2268,33 @@ do {
 
 runAirPlayVariantChecks()
 
+// MARK: Stale-receiver request counters (incident 2026-09-25 15:26)
+
+do {
+    let t0 = Date(timeIntervalSince1970: 1000)
+    let c = CastHLSRequestCounters(now: t0)
+    c.mark(generation: 3, now: t0)
+    for p in ["/demuxed.m3u8", "/video.m3u8", "/audio.m3u8", "/vinit3.mp4", "/ainit3.mp4"] {
+        c.record(path: p, now: t0.addingTimeInterval(0.5))
+    }
+    var s = c.snapshot
+    expectEq(s.playlists, 3, "counters: three playlists")
+    expectEq(s.segments, 0, "counters: inits are not segments (stale shape)")
+    expect(s.firstSegmentAt == nil, "counters: no first segment yet")
+    c.record(path: "/vseg0.m4s", now: t0.addingTimeInterval(1.25))
+    c.record(path: "/aseg0.m4s", now: t0.addingTimeInterval(1.5))
+    c.record(path: "/vseg1.m4s", now: t0.addingTimeInterval(2.0))
+    s = c.snapshot
+    expectEq(s.videoSegments, 2, "counters: video segments")
+    expectEq(s.audioSegments, 1, "counters: audio segments")
+    expectEq(s.generation, 3, "counters: generation")
+    expectEq(s.firstSegmentAt.map { $0.timeIntervalSince(s.markedAt) }, 1.25, "counters: first segment offset")
+    expectEq(s.lastSegmentAt, t0.addingTimeInterval(2.0), "counters: last segment time")
+    c.mark(generation: 4, now: t0.addingTimeInterval(10))
+    s = c.snapshot
+    expect(s.playlists == 0 && s.segments == 0 && s.generation == 4 && s.lastSegmentAt == nil,
+           "counters: mark resets for the reload")
+}
+
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)
