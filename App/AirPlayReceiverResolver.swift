@@ -115,6 +115,12 @@ final class AirPlayReceiverResolver {
 
     func startBrowsing() {
         guard browser == nil else { return }
+        // Incident 2026-09-25 14:04: this browse was still running (from the
+        // launch probe) during a Google Cast session and failed with
+        // DefunctConnection 5 s before the cast ingest dropped and the app
+        // went silent. Browse only while an AirPlay output exists or a
+        // handoff is resolving; everything else stops it (`stopBrowsing`).
+        guard Self.currentAirPlayOutput() != nil || handoffInProgress else { return }
         let params = NWParameters()
         params.includePeerToPeer = false
         let b = NWBrowser(for: .bonjourWithTXTRecord(type: "_airplay._tcp", domain: nil), using: params)
@@ -140,10 +146,31 @@ final class AirPlayReceiverResolver {
         b.start(queue: .main)
     }
 
+    /// True while `resolveForHandoff` is waiting on a TXT record.
+    private var handoffInProgress = false
+
+    /// Stop the browse (no AirPlay route any more). Also re-arms the single
+    /// failure restart for the next route. Incident 2026-09-25.
+    func stopBrowsing() {
+        guard let b = browser else { return }
+        browser = nil
+        restartedAfterFailure = false
+        b.browseResultsChangedHandler = nil
+        b.stateUpdateHandler = nil
+        b.cancel()
+    }
+
     private func browseFailed(_ error: NWError) {
         debugLog("[AVP-AIRPLAY] receiver browse failed: \(Self.describe(error))")
-        browser?.cancel()
-        browser = nil
+        // Incident 2026-09-25: the failure path must never block. Handlers
+        // are detached before cancel so a late state update cannot re-enter,
+        // and the restart is async, once, and only while a route exists.
+        if let b = browser {
+            browser = nil
+            b.browseResultsChangedHandler = nil
+            b.stateUpdateHandler = nil
+            b.cancel()
+        }
         // One restart after 1 s; after that the resolver falls back to the
         // route name alone.
         guard !restartedAfterFailure else { return }
@@ -205,6 +232,8 @@ final class AirPlayReceiverResolver {
     /// start about 2 s after the loopback server came up), then returns
     /// what is known. Always non-nil while an AirPlay output exists.
     func resolveForHandoff(timeout: TimeInterval = 2) async -> AirPlayReceiver {
+        handoffInProgress = true
+        defer { handoffInProgress = false }
         startBrowsing()
         let deadline = Date().addingTimeInterval(timeout)
         var best = resolveNow() ?? .unknown
@@ -292,6 +321,9 @@ final class AirPlayReceiverResolver {
                 debugLog("[AVP-AIRPLAY] airplay routes detected=\(d.multipleRoutesDetected) (window: launch)")
                 d.isRouteDetectionEnabled = false
                 resolver.launchDetector = nil
+                // Incident 2026-09-25: the launch probe used to leave the
+                // browse running for the life of the process.
+                if AirPlayReceiverResolver.currentAirPlayOutput() == nil { resolver.stopBrowsing() }
             }
         }
     }

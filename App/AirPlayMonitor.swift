@@ -356,6 +356,8 @@ final class AirPlayMonitor: ObservableObject {
         guard let out else {
             headlessTune = false
             AirPlayReceiverResolver.shared.cancelRetryLadder()
+            // Incident 2026-09-25: no AirPlay route, no Bonjour browse.
+            AirPlayReceiverResolver.shared.stopBrowsing()
             if receiver != nil { receiver = nil }
             if phase == .active || hostsHeadless || AirPlayTileDelivery.isServingReceiver {
                 receiverEnded(routeLost: true)
