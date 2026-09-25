@@ -414,8 +414,16 @@ final class AirPlayTileDelivery {
         onWatchdogs?(true, nil)
         if !keepaliveHeld {
             keepaliveHeld = true
-            debugLog("[AVP-AIRPLAY] background keepalive on")
-            BackgroundKeepalive.acquire(Self.keepaliveHolder)
+            if let pending = Self.flipKeepaliveRelease {
+                // The previous tile's keepalive, held across the flip:
+                // take it over instead of releasing and re-acquiring.
+                pending.cancel()
+                Self.flipKeepaliveRelease = nil
+                debugLog("[AVP-AIRPLAY] background keepalive carried across the channel flip")
+            } else {
+                debugLog("[AVP-AIRPLAY] background keepalive on")
+                BackgroundKeepalive.acquire(Self.keepaliveHolder)
+            }
         }
         Self.serving.send(true)
         RemoteSessionNowPlaying.publishAirPlay()
@@ -462,7 +470,39 @@ final class AirPlayTileDelivery {
         lanEndpoint = nil
     }
 
-    private func leaveServing() {
+    /// Channel flip under AirPlay (device log 2026-09-25 16:28:17 / 16:28:27):
+    /// the old tile released the keepalive and the new one re-acquired it
+    /// ~2.5 s later, a window in which a backgrounded app could suspend.
+    /// While the route stays AirPlay the release is deferred this long and
+    /// handed to the next tile that starts serving.
+    static let flipKeepaliveGrace: TimeInterval = 15
+    private static var flipKeepaliveRelease: DispatchWorkItem?
+
+    /// The session ended for good (card X, receiver end): drop a
+    /// keepalive held for a flip now.
+    static func releaseFlipKeepalive() {
+        guard let pending = flipKeepaliveRelease else { return }
+        pending.cancel()
+        flipKeepaliveRelease = nil
+        debugLog("[AVP-AIRPLAY] background keepalive off")
+        BackgroundKeepalive.release(keepaliveHolder)
+    }
+
+    private func leaveServing(holdForFlip: Bool = false) {
+        if keepaliveHeld, holdForFlip, Self.routeHasAirPlay(), Self.flipKeepaliveRelease == nil {
+            keepaliveHeld = false
+            debugLog("[AVP-AIRPLAY] background keepalive held \(Int(Self.flipKeepaliveGrace))s for the next tune (route still AirPlay)")
+            let work = DispatchWorkItem {
+                MainActor.assumeIsolated {
+                    guard AirPlayTileDelivery.flipKeepaliveRelease != nil else { return }
+                    AirPlayTileDelivery.flipKeepaliveRelease = nil
+                    debugLog("[AVP-AIRPLAY] background keepalive off (no tune took it over)")
+                    BackgroundKeepalive.release(AirPlayTileDelivery.keepaliveHolder)
+                }
+            }
+            Self.flipKeepaliveRelease = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.flipKeepaliveGrace, execute: work)
+        }
         if keepaliveHeld {
             keepaliveHeld = false
             debugLog("[AVP-AIRPLAY] background keepalive off")
@@ -481,13 +521,14 @@ final class AirPlayTileDelivery {
         if state != .idle, logEnd {
             debugLog("[AVP-AIRPLAY] tile \(channelName): AirPlay delivery released with the pipeline")
         }
+        let wasServing = state == .serving
         if state != .idle { teardownLAN() }
         state = .idle
         externalObservation = nil
         lanItemStatusObservation = nil
         tileExternal = false
         player = nil
-        leaveServing()
+        leaveServing(holdForFlip: wasServing && logEnd)
         if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
         routeObserver = nil
     }

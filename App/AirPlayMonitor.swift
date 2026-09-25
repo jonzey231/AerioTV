@@ -260,6 +260,7 @@ final class AirPlayMonitor: ObservableObject {
         detach(silently: true)
         PlayerSession.shared.stop()
         NowPlayingManager.shared.stop()
+        AirPlayTileDelivery.releaseFlipKeepalive()
         RemoteSessionNowPlaying.clear()
     }
 
