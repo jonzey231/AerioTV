@@ -352,9 +352,65 @@ final class AirPlayTileDelivery {
         return "\(e.ip):\(e.port)"
     }
 
+    // MARK: Late receiver resolution (device log 2026-09-25)
+
+    /// The tile currently serving a receiver (one at a time).
+    private static weak var servingTile: AirPlayTileDelivery?
+    private var replanning = false
+
+    /// The resolver named the receiver after the plan was decided. An
+    /// unresolved receiver starts on passthrough (automatic mode); if it
+    /// turns out to be non-Apple, switch the receiver to the AAC variant
+    /// with one item swap.
+    static func receiverResolved(_ r: AirPlayReceiver) {
+        servingTile?.replanIfNeeded(for: r)
+    }
+
+    private func replanIfNeeded(for r: AirPlayReceiver) {
+        guard state == .serving, plan == .passthrough, !replanning,
+              AirPlayAudioMode.current == .automatic,
+              r.model != nil, !r.isApple, !r.isAudioOnly,
+              let remuxer, let player, let old = player.currentItem, let lanEndpoint else { return }
+        let codec = remuxer.sourceAudioCodec
+        guard codec == "AC-3" || codec == "E-AC-3" else { return }
+        debugLog("[AVP-AIRPLAY] receiver resolved to non-Apple '\(r.name)' model=\(r.model ?? "?") while serving passthrough: switching to the AAC variant (item swap)")
+        replanning = true
+        let myToken = token
+        Task { @MainActor in
+            defer { self.replanning = false }
+            let variant: AirPlayAACVariant? = await withCheckedContinuation { cont in
+                remuxer.startAACVariant { cont.resume(returning: $0) }
+            }
+            guard self.token == myToken, self.state == .serving, let variant else {
+                if variant == nil { debugLog("[AVP-AIRPLAY] re-plan: AAC variant unavailable; staying on passthrough") }
+                return
+            }
+            let deadline = Date().addingTimeInterval(Self.midPlayReadyTimeout)
+            while !variant.isReady, !variant.hasFailed, Date() < deadline {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard self.token == myToken, self.state == .serving else { return }
+            }
+            guard variant.isReady,
+                  let url = URL(string: "http://\(lanEndpoint.ip):\(lanEndpoint.port)/aac/master.m3u8"),
+                  let player = self.player else {
+                debugLog("[AVP-AIRPLAY] re-plan: AAC variant not ready; staying on passthrough")
+                remuxer.stopAACVariant()
+                return
+            }
+            self.plan = .aacStereo
+            debugLog("[AVP-AIRPLAY] \(variant.statusLine("variant ready"))")
+            let item = self.makeLANItem(url: url, copying: player.currentItem ?? old)
+            player.replaceCurrentItem(with: item)
+            self.observeLANItem(item)
+            variant.startServingLog { line in debugLog("[AVP-AIRPLAY] \(line)") }
+            debugLog("[AVP-AIRPLAY] re-plan: receiver now on the AAC variant \(self.endpointText)")
+        }
+    }
+
     /// Watchdogs, keepalive, PiP (sections 6 and 7).
     private func enterServing() {
         state = .serving
+        Self.servingTile = self
         onWatchdogs?(true, nil)
         if !keepaliveHeld {
             keepaliveHeld = true

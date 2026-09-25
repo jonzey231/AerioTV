@@ -356,6 +356,9 @@ final class AirPlayMonitor: ObservableObject {
 
     private func setReceiver(_ r: AirPlayReceiver?) {
         if receiver != r { receiver = r }
+        // A receiver resolved after the plan was decided: the serving tile
+        // re-plans passthrough -> AAC for a non-Apple one (2026-09-25).
+        if let r { AirPlayTileDelivery.receiverResolved(r) }
         refreshName()
         if phase == .active { RemoteSessionNowPlaying.republishAirPlayDevice() }
     }
@@ -364,7 +367,12 @@ final class AirPlayMonitor: ObservableObject {
     func evaluate() {
         let out = AirPlayReceiverResolver.currentAirPlayOutput()
         refreshName()
-        if out != nil { reenableExternalPlaybackForRoute() }
+        if out != nil {
+            reenableExternalPlaybackForRoute()
+            // Browse from the moment the route appears, not only at
+            // handoff (device log 2026-09-25 16:22-16:25: UNRESOLVED).
+            AirPlayReceiverResolver.shared.routePresent()
+        }
         guard let out else {
             dismissedRouteUID = nil
             headlessTune = false

@@ -48,7 +48,13 @@ struct AirPlayReceiver: Equatable, Sendable {
         switch mode {
         case .passthrough: return false
         case .stereo: return true
-        case .automatic: return !isApple
+        // Device log 2026-09-25 16:22:37 / 16:25:02: the Living Room
+        // Apple TV was still unresolved when the plan was decided and got
+        // AAC (-> the variant failure). An unresolved receiver (no TXT
+        // model) now defaults to passthrough: Apple receivers are the
+        // common case, and a Roku on passthrough at worst plays without
+        // audio until the late resolve re-plans it to AAC.
+        case .automatic: return model != nil && !isApple
         }
     }
 
@@ -74,11 +80,15 @@ struct AirPlayReceiver: Equatable, Sendable {
         return ["AppleTV", "AudioAccessory", "Mac", "iPad", "iPhone"].contains { model.hasPrefix($0) }
     }
 
-    /// Route names that carry no receiver identity.
+    /// Route names that carry no receiver identity: nil, empty, "AirPlay",
+    /// and any other name starting "AirPlay" (device log 2026-09-25: the
+    /// card once read "AirPlayHandoffDevice", an iOS placeholder route name
+    /// during handoff). A real receiver named "AirPlay..." is still
+    /// resolved when its Bonjour TXT record matches (`resolveNow`).
     static func isGenericName(_ name: String?) -> Bool {
         guard let name else { return true }
         let t = name.trimmingCharacters(in: .whitespaces)
-        return t.isEmpty || t == "AirPlay"
+        return t.isEmpty || t.hasPrefix("AirPlay")
     }
 }
 
@@ -96,8 +106,12 @@ final class AirPlayReceiverResolver {
     static let retryLadder: [TimeInterval] = [0.25, 0.5, 1, 2, 4, 8]
 
     private struct TXTEntry {
+        let name: String
         let model: String?
         let deviceID: String?
+        /// TXT `pi` / `psi` / `gid`: AirPlay 2 identifiers a route uid
+        /// can carry when it has no MAC.
+        let identifiers: [String]
     }
 
     private var browser: NWBrowser?
@@ -130,13 +144,20 @@ final class AirPlayReceiverResolver {
                 guard case let .service(name, _, _, _) = result.endpoint else { continue }
                 var model: String?
                 var deviceID: String?
+                var ids: [String] = []
                 if case let .bonjour(txt) = result.metadata {
                     model = txt["model"]
                     deviceID = txt["deviceid"]
+                    ids = ["pi", "psi", "gid"].compactMap { txt[$0] }.filter { $0.count >= 8 }
                 }
-                next[name.trimmingCharacters(in: .whitespaces)] = TXTEntry(model: model, deviceID: deviceID)
+                let key = name.trimmingCharacters(in: .whitespaces)
+                next[key] = TXTEntry(name: key, model: model, deviceID: deviceID, identifiers: ids)
             }
-            Task { @MainActor in AirPlayReceiverResolver.shared.cache = next }
+            Task { @MainActor in
+                let resolver = AirPlayReceiverResolver.shared
+                resolver.cache = next
+                resolver.checkLateResolution()
+            }
         }
         b.stateUpdateHandler = { state in
             guard case let .failed(error) = state else { return }
@@ -152,6 +173,8 @@ final class AirPlayReceiverResolver {
     /// Stop the browse (no AirPlay route any more). Also re-arms the single
     /// failure restart for the next route. Incident 2026-09-25.
     func stopBrowsing() {
+        lateWatch = false
+        lastPublished = nil
         guard let b = browser else { return }
         browser = nil
         restartedAfterFailure = false
@@ -206,16 +229,20 @@ final class AirPlayReceiverResolver {
     /// no AirPlay output at all.
     func resolveNow() -> AirPlayReceiver? {
         guard let out = Self.currentAirPlayOutput() else { return nil }
-        let rawName = out.name ?? "AirPlay"
-        let nameResolved = !AirPlayReceiver.isGenericName(out.name)
+        var rawName = out.name ?? "AirPlay"
+        let trimmed = rawName.trimmingCharacters(in: .whitespaces)
         let uid = out.uid
         let mac = Self.macAddress(in: uid)
-        var entry: TXTEntry?
-        if nameResolved {
-            entry = cache[rawName.trimmingCharacters(in: .whitespaces)]
-        }
-        if entry == nil, let mac {
-            entry = cache.values.first { $0.deviceID?.uppercased() == mac }
+        // Name first (a real receiver named "AirPlay..." resolves here),
+        // then uid / deviceid (device log 2026-09-25: the route said
+        // "AirPlay" while the TXT cache already knew the Apple TV).
+        var entry: TXTEntry? = trimmed.isEmpty ? nil : cache[trimmed]
+        if entry == nil { entry = Self.matchByUID(uid, mac: mac, in: Array(cache.values)) }
+        var nameResolved = !AirPlayReceiver.isGenericName(out.name)
+        if let entry, !nameResolved || entry.name == trimmed {
+            // A uid match names the receiver by its Bonjour service name.
+            if !nameResolved { rawName = entry.name }
+            nameResolved = true
         }
         let model = entry?.model
         return AirPlayReceiver(
@@ -241,7 +268,8 @@ final class AirPlayReceiverResolver {
             try? await Task.sleep(nanoseconds: 250_000_000)
             best = resolveNow() ?? best
         }
-        onReceiverChange?(best)
+        if best.model == nil { lateWatch = true }
+        publish(best)
         return best
     }
 
@@ -253,7 +281,8 @@ final class AirPlayReceiverResolver {
         let token = UUID()
         ladderToken = token
         if let now = resolveNow(), now.nameResolved {
-            onReceiverChange?(now)
+            if now.model == nil { lateWatch = true }
+            publish(now)
             return
         }
         for (i, offset) in Self.retryLadder.enumerated() {
@@ -267,10 +296,13 @@ final class AirPlayReceiverResolver {
                     }
                     if r.nameResolved {
                         resolver.ladderToken = UUID()
-                        resolver.onReceiverChange?(r)
+                        if r.model == nil { resolver.lateWatch = true }
+                        resolver.publish(r)
                     } else if i == Self.retryLadder.count - 1 {
                         resolver.ladderToken = UUID()
-                        debugLog("[AVP-AIRPLAY] route name still UNRESOLVED after the retry ladder; card and lock screen stay on the generic label, receiver stays unknown")
+                        // Keep resolving in the background (2026-09-25).
+                        resolver.lateWatch = true
+                        debugLog("[AVP-AIRPLAY] route name still UNRESOLVED after the retry ladder; still resolving in the background (Bonjour browse stays up while the route exists)")
                     }
                 }
             }
@@ -278,6 +310,56 @@ final class AirPlayReceiverResolver {
     }
 
     func cancelRetryLadder() { ladderToken = UUID() }
+
+    /// uid -> TXT entry: the uid's MAC against `deviceid`, else the uid
+    /// containing the `deviceid` (colons stripped) or a `pi`/`psi`/`gid`.
+    private static func matchByUID(_ uid: String, mac: String?, in entries: [TXTEntry]) -> TXTEntry? {
+        guard !uid.isEmpty else { return nil }
+        if let mac, let e = entries.first(where: { $0.deviceID?.uppercased() == mac }) { return e }
+        let u = uid.uppercased()
+        let bare = u.replacingOccurrences(of: ":", with: "")
+        return entries.first { e in
+            if let d = e.deviceID?.uppercased(), d.count >= 12,
+               u.contains(d) || bare.contains(d.replacingOccurrences(of: ":", with: "")) { return true }
+            return e.identifiers.contains { u.contains($0.uppercased()) }
+        }
+    }
+
+    // MARK: Late resolution (device log 2026-09-25)
+
+    /// Set when the retry ladder / handoff ended without a TXT model:
+    /// every browse update and route change re-resolves until the model
+    /// (and name) arrive or the route goes away.
+    private var lateWatch = false
+    private var lastPublished: AirPlayReceiver?
+
+    /// The route exists: browse for as long as it does (device log
+    /// 2026-09-25, regression from 1ca7083: a browse started only at
+    /// handoff had no results when the plan was decided). Called from the
+    /// monitor's route evaluation; `stopBrowsing` still runs when the
+    /// route goes (the Cast-session fix).
+    func routePresent() {
+        startBrowsing()
+        checkLateResolution()
+    }
+
+    func checkLateResolution() {
+        guard lateWatch else { return }
+        guard let r = resolveNow() else { lateWatch = false; return }
+        guard r != lastPublished, r.nameResolved || r.model != nil else { return }
+        if r.nameResolved, lastPublished?.nameResolved != true {
+            debugLog("[AVP-AIRPLAY] receiver name resolved late: \(r.name) model=\(r.model ?? "unknown") apple=\(r.isApple)")
+        } else if r.model != nil, lastPublished?.model == nil {
+            debugLog("[AVP-AIRPLAY] receiver model resolved late: \(r.model ?? "") apple=\(r.isApple) name=\(r.name)")
+        }
+        if r.model != nil { lateWatch = false }
+        publish(r)
+    }
+
+    private func publish(_ r: AirPlayReceiver?) {
+        lastPublished = r
+        onReceiverChange?(r)
+    }
 
     // MARK: Helpers
 
