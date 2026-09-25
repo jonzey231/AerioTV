@@ -4001,6 +4001,12 @@ final class NowPlayingManager: ObservableObject {
         self.isLive = isLive
         isMinimized = consumeStartMinimized()
         #if os(iOS)
+        // AirPlay route already selected (device log 2026-09-25 12:36:33):
+        // never present the fullscreen player; mount minimized and hidden,
+        // the remote-session card carries the tune.
+        if isLive, AirPlayMonitor.shared.beginHeadlessTune(channel: item.name) {
+            isMinimized = true
+        }
         // A new tune while foreground PiP is up stays in PiP (Logan
         // 2026-09-14): hand the window over to the new session instead of
         // expanding. The same item re-announcing itself is not a tune.
@@ -6101,7 +6107,7 @@ struct MainTabView: View {
                     transport: .airPlay,
                     title: item?.name ?? "AirPlay",
                     programTitle: item?.currentProgram,
-                    status: probing ? "Connecting to AirPlay" : airPlayPlayingStatus,
+                    status: probing ? "Connecting to AirPlay…" : airPlayPlayingStatus,
                     artURL: item?.logoURL?.absoluteString,
                     isPlaying: airPlay.isPlaying,
                     // Nothing to pause until the receiver has the video.
@@ -6209,7 +6215,7 @@ struct MainTabView: View {
                     title: nowPlaying.playingItem?.name ?? "AirPlay",
                     subtitle: nowPlaying.playingItem?.currentProgram,
                     artURL: nowPlaying.playingItem?.logoURL?.absoluteString,
-                    statusText: airPlayIsProbing ? "Connecting to AirPlay" : airPlayPlayingStatus,
+                    statusText: airPlayIsProbing ? "Connecting to AirPlay…" : airPlayPlayingStatus,
                     isPlaying: airPlay.isPlaying,
                     stopLabel: "Stop AirPlay",
                     onTogglePlayPause: { airPlay.togglePlayPause() },

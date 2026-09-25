@@ -54,6 +54,11 @@ final class AirPlayMonitor: ObservableObject {
     private var routeObserver: NSObjectProtocol?
     /// A tile is preparing a start with an AirPlay route selected.
     private var tileLoading = false
+    /// A channel was picked with the route already on AirPlay: the tune
+    /// runs headless from the press (no fullscreen player) until the tile
+    /// has a player or falls back. Survives the old tile's detach on a flip.
+    private var headlessTune = false
+    private var loadingForCard: Bool { tileLoading || headlessTune }
     private var servingSubscription: AnyCancellable?
     /// Receiver let go of the player with the route still up: confirmed
     /// after `receiverReleaseGrace` so an item swap blip is not a stop.
@@ -157,8 +162,43 @@ final class AirPlayMonitor: ObservableObject {
     /// The tile is starting a channel with the route already on AirPlay
     /// (card reads "Connecting to AirPlay" until the receiver takes it).
     func noteTileLoading(_ loading: Bool) {
-        guard tileLoading != loading else { return }
+        if !loading { headlessTune = false }
+        guard tileLoading != loading else { evaluate(); return }
         tileLoading = loading
+        evaluate()
+    }
+
+    /// Tune entry (NowPlayingManager.startPlaying): a live channel picked
+    /// while an AirPlay route is selected never shows the fullscreen
+    /// player (device log 2026-09-25 12:36:33: the player came up with
+    /// its loading state and was dismissed only after playback started).
+    /// The container mounts hidden and minimized, the card reads
+    /// "Connecting to AirPlay…" at once. Returns true when the caller must
+    /// start minimized.
+    func beginHeadlessTune(channel: String) -> Bool {
+        guard let out = AirPlayReceiverResolver.currentAirPlayOutput(),
+              receiver?.isAudioOnly != true,
+              !AerioCastController.shared.isCasting,
+              !CompanionClient.shared.isControlling else { return false }
+        headlessTune = true
+        if !hostsHeadless { hostsHeadless = true }
+        debugLog("[AVP-AIRPLAY] AirPlay route selected (\(out.name ?? "?")): tuning \(channel) headless, no fullscreen player; card shows Connecting to AirPlay")
+        AppOrientationLock.release()
+        // evaluate() moves an idle-route / ended card to probing; an
+        // active one follows once the old tile detaches.
+        evaluate()
+        return true
+    }
+
+    /// The headless tune cannot reach the receiver (audio-only speaker,
+    /// no LAN address, LAN delivery unavailable, route gone at READY):
+    /// show the player on this device instead of playing invisibly.
+    func headlessTuneFellBack(reason: String) {
+        guard headlessTune || (hostsHeadless && !isExternal && !AirPlayTileDelivery.isServingReceiver) else { return }
+        headlessTune = false
+        hostsHeadless = false
+        debugLog("[AVP-AIRPLAY] headless tune fell back (\(reason)): showing the player on this device")
+        NowPlayingManager.shared.expand()
         evaluate()
     }
 
@@ -199,6 +239,7 @@ final class AirPlayMonitor: ObservableObject {
         stoppingSession = true
         defer { stoppingSession = false }
         hostsHeadless = false
+        headlessTune = false
         detach(silently: true)
         PlayerSession.shared.stop()
         NowPlayingManager.shared.stop()
@@ -210,6 +251,7 @@ final class AirPlayMonitor: ObservableObject {
     /// container is minimized, not torn down: its tile is what feeds the
     /// receiver, so the session continues headless behind the card.
     func handOffToReceiver() {
+        if hostsHeadless { AppOrientationLock.release() }
         guard !hostsHeadless, !stoppingSession,
               AirPlayReceiverResolver.currentAirPlayOutput() != nil,
               PlayerSession.shared.mode != .idle || NowPlayingManager.shared.playingItem != nil
@@ -295,6 +337,7 @@ final class AirPlayMonitor: ObservableObject {
         refreshName()
         if out != nil { reenableExternalPlaybackForRoute() }
         guard let out else {
+            headlessTune = false
             AirPlayReceiverResolver.shared.cancelRetryLadder()
             if receiver != nil { receiver = nil }
             if phase == .active || hostsHeadless || AirPlayTileDelivery.isServingReceiver {
@@ -328,10 +371,10 @@ final class AirPlayMonitor: ObservableObject {
         // Waiting to confirm a receiver-side release: hold the card.
         if releaseCheck != nil { return }
         // An ended session stays hidden until the route itself changes.
-        if phase == .ended, player == nil && !tileLoading {
+        if phase == .ended, player == nil && !loadingForCard {
             return
         }
-        if tileLoading || player != nil {
+        if loadingForCard || player != nil {
             guard !isProbing else { return }
             debugLog("[Cast] card show (AirPlay, probing route \(out.name ?? "?"))")
             setPhase(.probing(routeName: out.name))

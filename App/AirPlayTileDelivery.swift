@@ -84,10 +84,14 @@ final class AirPlayTileDelivery {
         self.loopbackURL = loopbackURL
         self.channelName = channelName
         observeRoute()
-        guard Self.routeHasAirPlay() else { return false }
+        guard Self.routeHasAirPlay() else {
+            AirPlayMonitor.shared.headlessTuneFellBack(reason: "no AirPlay route at READY")
+            return false
+        }
         debugLog("[AVP-AIRPLAY] item audio codec=\(remuxer.sourceAudioCodec) channel=\(channelName)")
         if remuxer.inProcessDelivery {
             debugLog("[AVP-AIRPLAY] LAN delivery unavailable; leaving the loopback item in place")
+            AirPlayMonitor.shared.headlessTuneFellBack(reason: "in-process delivery")
             return false
         }
         state = .preparing
@@ -106,13 +110,16 @@ final class AirPlayTileDelivery {
             case .noAddress:
                 debugLog("[AVP-AIRPLAY] no LAN address for the remux server; starting on loopback")
                 self.state = .idle
+                AirPlayMonitor.shared.headlessTuneFellBack(reason: "no LAN address")
                 start(loopbackURL, false)
             case .unavailable:
                 debugLog("[AVP-AIRPLAY] LAN delivery unavailable; leaving the loopback item in place")
                 self.state = .idle
+                AirPlayMonitor.shared.headlessTuneFellBack(reason: "LAN delivery unavailable")
                 start(loopbackURL, false)
             case .audioOnlyReceiver:
                 self.state = .idle
+                AirPlayMonitor.shared.headlessTuneFellBack(reason: "audio-only receiver")
                 start(loopbackURL, false)
             }
             AirPlayMonitor.shared.noteTileLoading(false)
