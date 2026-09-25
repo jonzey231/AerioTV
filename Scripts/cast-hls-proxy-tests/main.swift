@@ -2167,11 +2167,71 @@ do {
     expectEq(variant.serve(path: "/aac/vseg\(firstSeq).m4s").status, 404, "airplay-aac: nothing served after stop")
 }
 
+final class StoreRef: @unchecked Sendable {
+    var store: CastHLSSegmentStore?
+}
+
 final class LockedLines: @unchecked Sendable {
     private let lock = NSLock()
     private var lines: [String] = []
     func append(_ s: String) { lock.lock(); lines.append(s); lock.unlock() }
     var all: [String] { lock.lock(); defer { lock.unlock() }; return lines }
+}
+
+// MARK: generation splice with a held live-edge fetch (incident 2026-09-25)
+
+do {
+    let logs = LockedLines()
+    let storeRef = StoreRef()
+    // The log closure reads the store back: with the old log-under-lock
+    // beginGeneration this self-deadlocked on the non-recursive NSCondition.
+    let store = CastHLSSegmentStore(log: { line in
+        _ = storeRef.store?.currentReadyState
+        logs.append(line)
+    })
+    storeRef.store = store
+    let ticks: Int64 = 5 * CastFMP4Remuxer.ticksPerSecond
+    let gen1 = store.beginGeneration()
+    for _ in 0..<3 {
+        store.addSegment(generation: gen1, durationTicks: ticks, videoData: Data([1]), audioData: Data([1]))
+    }
+    // A receiver fetch for seq 3 is held at the live edge while the
+    // ingest drops, reconnects as gen 2 and publishes seq 3 from it. The
+    // splice's log closure re-enters the store (it runs outside the lock
+    // now), and a stale gen-1 add in the gap is gated without waking the
+    // waiter with the wrong bytes.
+    let spliceDone = DispatchSemaphore(value: 0)
+    let splicer = Thread {
+        Thread.sleep(forTimeInterval: 0.1)
+        store.addSegment(generation: gen1, durationTicks: ticks, videoData: Data([7]), audioData: nil)
+        let gen2 = store.beginGeneration()
+        _ = store.videoPlaylistText() // from the log path's thread: must not deadlock
+        Thread.sleep(forTimeInterval: 0.1)
+        _ = store.addSegment(generation: gen1, durationTicks: ticks, videoData: Data([8]), audioData: nil)
+        store.setDemuxedInitSegments(generation: gen2, video: Data([0x76]), audio: Data([0x61]))
+        store.addSegment(generation: gen2, durationTicks: ticks, videoData: Data([2]), audioData: Data([3]))
+        spliceDone.signal()
+    }
+    splicer.start()
+    let began = Date()
+    // seq 3 was published by gen 1 at 0.1 s: the held fetch resolves then.
+    expectEq(store.awaitSegment(seq: 3, rendition: .video, timeout: 3), Data([7]),
+             "splice: held fetch resolves with the last old-generation segment")
+    // seq 4 is held across the roll and resolves with the NEW generation's bytes.
+    expectEq(store.awaitSegment(seq: 4, rendition: .audio, timeout: 3), Data([3]),
+             "splice: fetch held across the generation roll resolves from gen 2")
+    expect(Date().timeIntervalSince(began) < 2, "splice: held fetches did not sleep out their timeout")
+    expect(spliceDone.wait(timeout: .now() + 3) == .success, "splice: publisher finished (no deadlock)")
+    expect(logs.all.contains { $0.hasPrefix("splice oldGen=1 newGen=2 lastSeq=3 firstNewSeq=4") },
+           "splice: log line intact: \(logs.all)")
+    expect(store.videoPlaylistText().contains("#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"vinit2.mp4\""),
+           "splice: discontinuity into gen 2 advertised")
+    // Teardown wakes a fetch still held after the splice.
+    let closer = Thread { Thread.sleep(forTimeInterval: 0.1); store.close() }
+    closer.start()
+    let t = Date()
+    expectEq(store.awaitSegment(seq: 5, rendition: .video, timeout: 5), nil, "splice: close fails a held fetch")
+    expect(Date().timeIntervalSince(t) < 1, "splice: close wakes the waiter promptly")
 }
 
 runAirPlayVariantChecks()

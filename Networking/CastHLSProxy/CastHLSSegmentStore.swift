@@ -136,16 +136,27 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     @discardableResult
     func beginGeneration() -> Int {
         condition.lock()
-        defer { condition.unlock() }
         let oldGen = generation
         generation += 1
+        let newGen = generation
+        let lastSeq = nextSeq - 1
+        let firstNewSeq = nextSeq
         pendingDiscontinuity = !ring.isEmpty
         segmentsInGeneration = 0
         mediaTicksInGeneration = 0
+        // Incident 2026-09-25: wake held live-edge fetches on a roll so each
+        // re-checks against the new generation instead of sleeping out its
+        // whole timeout on a condition nobody may signal soon (the
+        // reconnect gap was 4.5 s against a 6 s hold).
+        condition.broadcast()
+        condition.unlock()
+        // Logged OUTSIDE the lock (incident 2026-09-25): the log closure
+        // is caller code, and the lock also gates every NWListener
+        // request, so it must never run under it.
         if oldGen > 0 {
-            log("splice oldGen=\(oldGen) newGen=\(generation) lastSeq=\(nextSeq - 1) firstNewSeq=\(nextSeq)")
+            log("splice oldGen=\(oldGen) newGen=\(newGen) lastSeq=\(lastSeq) firstNewSeq=\(firstNewSeq)")
         }
-        return generation
+        return newGen
     }
 
     /// Init segments for `gen`. `audio` is nil for a video-only

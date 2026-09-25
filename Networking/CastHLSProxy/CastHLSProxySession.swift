@@ -191,8 +191,8 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// Audio codec + mode for the sender's one-line cast log. nil when no
     /// proxy session is up.
     func audioSummary() -> (codec: String?, mode: String)? {
-        queue.sync {
-            guard let remuxer else { return nil }
+        onQueueBounded(timeout: 1.0, what: "audioSummary") { () -> (codec: String?, mode: String)? in
+            guard let remuxer = self.remuxer else { return nil }
             let codec = remuxer.audioCodecsAttribute
             let mode: String
             if codec == nil {
@@ -203,25 +203,85 @@ final class CastHLSProxySession: @unchecked Sendable {
                 mode = "passthrough"
             }
             return (codec, mode)
-        }
+        } ?? nil
     }
 
-    /// Snapshot for the cast Options sheet; nil when no proxy session is
-    /// up. Cheap: one hop onto the session queue.
+    /// Called ~1 Hz from the MAIN actor (the remote-session sheet's stats
+    /// poll). Incident 2026-09-25 14:04: a plain `queue.sync` here turns
+    /// any stall of the session queue (ingest callbacks, remuxer, splice)
+    /// into a frozen main thread, which is exactly the whole-app silence
+    /// seen after the gen=2 splice. Main now waits at most 50 ms and falls
+    /// back to the last snapshot.
     func statsSnapshot() -> Stats? {
-        queue.sync {
-            guard let server, let url = activeURL else { return nil }
-            if let path = remuxer?.audioPathDescription { audioPathCache = path }
+        let fresh = onQueueBounded(timeout: 0.05, what: "statsSnapshot") { () -> Stats? in
+            guard let server = self.server, let url = self.activeURL else { return nil }
+            if let path = self.remuxer?.audioPathDescription { self.audioPathCache = path }
             return Stats(
                 ingestHost: URLComponents(url: url, resolvingAgainstBaseURL: false)?.host ?? "?",
                 port: server.boundPort,
-                generation: currentGeneration,
-                segmentsProduced: totalSegmentsProduced,
-                videoCodec: videoCodecDescription,
-                audioPath: audioPathCache,
-                lastRollupKbps: lastRollupKbps,
-                lastRollupAvgSegmentSeconds: lastRollupAvgSegmentSeconds)
+                generation: self.currentGeneration,
+                segmentsProduced: self.totalSegmentsProduced,
+                videoCodec: self.videoCodecDescription,
+                audioPath: self.audioPathCache,
+                lastRollupKbps: self.lastRollupKbps,
+                lastRollupAvgSegmentSeconds: self.lastRollupAvgSegmentSeconds)
         }
+        boundedLock.lock()
+        defer { boundedLock.unlock() }
+        switch fresh {
+        case .some(let value): lastStats = value; return value
+        case .none: return lastStats
+        }
+    }
+
+    private let boundedLock = NSLock()
+    private var lastStats: Stats?
+    /// Bounded hops still waiting on `queue`, keyed by caller; a stalled
+    /// queue gets at most one queued probe per caller, not one per second.
+    private var boundedInFlight: Set<String> = []
+    private var stallLogged = false
+
+    /// Run `body` on `queue` and wait at most `timeout` for it (incident
+    /// 2026-09-25). Returns nil when the queue did not answer in time (the
+    /// block still runs later; its result is dropped) and logs the stall
+    /// once per stall, so a future freeze names the session queue instead
+    /// of going silent. Never call it from `queue` itself.
+    private func onQueueBounded<T>(timeout: TimeInterval, what: String,
+                                   _ body: @escaping () -> T) -> T? {
+        dispatchPrecondition(condition: .notOnQueue(queue))
+        boundedLock.lock()
+        if boundedInFlight.contains(what) {
+            boundedLock.unlock()
+            return nil
+        }
+        boundedInFlight.insert(what)
+        boundedLock.unlock()
+        let done = DispatchSemaphore(value: 0)
+        let box = BoundedResultBox<T>()
+        let began = Date()
+        queue.async { [self] in
+            box.value = body()
+            boundedLock.lock()
+            boundedInFlight.remove(what)
+            let wasStalled = stallLogged
+            stallLogged = false
+            boundedLock.unlock()
+            if wasStalled {
+                log(String(format: "session queue answered %@ after %.0f ms",
+                           what, Date().timeIntervalSince(began) * 1000))
+            }
+            done.signal()
+        }
+        if done.wait(timeout: .now() + timeout) == .success { return box.value }
+        boundedLock.lock()
+        let first = !stallLogged
+        stallLogged = true
+        boundedLock.unlock()
+        if first {
+            log("session queue STALLED: \(what) got no answer in \(Int(timeout * 1000)) ms "
+                + "(caller not blocked; spindump com.aerio.casthls.session)")
+        }
+        return nil
     }
 
     private func log(_ message: String) {
@@ -302,8 +362,16 @@ final class CastHLSProxySession: @unchecked Sendable {
             // A superseding channel flip cancels this task; the flip's own
             // startChannel already re-pointed the ingest, so just leave.
             if Task.isCancelled { throw CancellationError() }
-            let (err, ready, connectedAt): (Error?, (segments: Int, mediaTicks: Int64), Date?) = queue.sync {
-                (terminalError, store?.currentReadyState ?? (segments: 0, mediaTicks: 0), lastIngestConnectAt)
+            // Bounded hop (incident 2026-09-25): a stalled session queue must
+            // not pin a Swift cooperative thread; retry on the next tick.
+            guard let (err, ready, connectedAt) = onQueueBounded(timeout: 0.5, what: "readyWait", {
+                () -> (Error?, (segments: Int, mediaTicks: Int64), Date?) in
+                (self.terminalError, self.store?.currentReadyState ?? (segments: 0, mediaTicks: 0),
+                 self.lastIngestConnectAt)
+            }) else {
+                if Date() >= deadline { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                continue
             }
             // A (re)connect is progress: guarantee `postConnectGrace` of
             // runway from the moment bytes started flowing, else a slow
@@ -773,4 +841,10 @@ final class CastHLSProxySession: @unchecked Sendable {
             }
         }
     }
+}
+
+/// Result slot for `onQueueBounded`: written on the session queue before
+/// the semaphore signal, read after the wait succeeds.
+private final class BoundedResultBox<T>: @unchecked Sendable {
+    var value: T?
 }
