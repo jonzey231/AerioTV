@@ -741,6 +741,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             self.urlSession?.invalidateAndCancel()
             self.releaseConnection()
             self.listener?.cancel()
+            self.stopLANDeliveryLocked()
+            self.stopAACVariantLocked()
             HLSResourceLoaderRegistry.shared.unregister(id: self.deliveryID)
             self.deliveryBase64.removeAll()
             self.segments.removeAll()
@@ -859,6 +861,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             fmp4.feed(data)
             return
         }
+        // AirPlay airplay-aac variant: the same bytes, in ingest order, on
+        // the variant's own queue. No second upstream connection.
+        airPlayVariant?.feed(data)
         pending.append(data)
 
         // Resync to 0x47 if alignment was lost (provider hiccup).
@@ -1321,6 +1326,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         codecGatePassed = false
         audioPIDs.removeAll()
         audioStreamType = 0
+        setSourceAudioStreamType(0)
         lastVideoCC = -1
         lastSPS = nil
         adtsLogged = false
@@ -1405,6 +1411,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         codecGatePassed = true
         audioPIDs = foundAudioPIDs
         audioStreamType = audioTypes.first ?? 0
+        setSourceAudioStreamType(audioStreamType)
         let audioDesc = audioTypes.map { String(format: "0x%02X", $0) }.joined(separator: ",")
         debugLog("[TS-REMUX] PMT: H.264 video PID \(videoPID), audio types [\(audioDesc)] -> codec gate PASSED")
     }
@@ -2036,6 +2043,249 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
     }
 
+    // MARK: AirPlay LAN delivery (2026-09-21 rebuild)
+
+    /// Result of `startLANDelivery`.
+    enum LANDeliveryResult: Sendable {
+        case ready(ip: String, port: UInt16)
+        /// No Wi-Fi / Ethernet IPv4 address to serve on.
+        case noAddress
+        /// In-process delivery, or the listener would not come up.
+        case unavailable
+    }
+
+    /// Second listener, bound to Wi-Fi (Ethernet as fallback), up ONLY while
+    /// an AirPlay receiver is being served: in AirPlay video mode AVPlayer
+    /// hands the item URL to the receiver, which cannot reach 127.0.0.1.
+    /// Touched only on `queue`.
+    private var lanListener: NWListener?
+    private var lanPort: UInt16 = 0
+    private var lanPeersLogged = Set<String>()
+    /// Touched only on `queue`; readable elsewhere through
+    /// `currentAirPlayVariant`.
+    private var airPlayVariant: AirPlayAACVariant? {
+        didSet { airPlayLock.lock(); airPlayVariantShared = airPlayVariant; airPlayLock.unlock() }
+    }
+    private let airPlayLock = NSLock()
+    private var airPlayVariantShared: AirPlayAACVariant?
+    private var sourceAudioStreamTypeShared: UInt8 = 0
+
+    var currentAirPlayVariant: AirPlayAACVariant? {
+        airPlayLock.lock(); defer { airPlayLock.unlock() }
+        return airPlayVariantShared
+    }
+
+    private func setSourceAudioStreamType(_ type: UInt8) {
+        airPlayLock.lock(); sourceAudioStreamTypeShared = type; airPlayLock.unlock()
+    }
+
+    /// The PMT's first audio stream as the AirPlay log names it:
+    /// AC-3 / E-AC-3 / AAC, "unknown" before the PMT (or on the HEVC arm).
+    var sourceAudioCodec: String {
+        airPlayLock.lock(); let t = sourceAudioStreamTypeShared; airPlayLock.unlock()
+        switch t {
+        case 0x81: return "AC-3"
+        case 0x87: return "E-AC-3"
+        case 0x0F: return "AAC"
+        default: return "unknown"
+        }
+    }
+
+    /// Start (or reuse) the LAN listener. `completion` runs on the main
+    /// queue exactly once.
+    func startLANDelivery(completion: @escaping @MainActor (LANDeliveryResult) -> Void) {
+        let once = LANStartOnce()
+        queue.async { [weak self] in
+            @Sendable func finish(_ r: LANDeliveryResult) {
+                guard once.claim() else { return }
+                DispatchQueue.main.async { MainActor.assumeIsolated { completion(r) } }
+            }
+            guard let self, !self.stopped, !self.inProcessDelivery else { finish(.unavailable); return }
+            guard let ip = CastHLSProxySession.wifiLANAddress() else { finish(.noAddress); return }
+            if self.lanListener != nil, self.lanPort != 0 {
+                finish(.ready(ip: ip, port: self.lanPort))
+                return
+            }
+            self.openLANListener(interfaces: [.wifi, .wiredEthernet]) { port in
+                // Runs on `queue`.
+                if let port { finish(.ready(ip: ip, port: port)) } else { finish(.unavailable) }
+            }
+            self.queue.asyncAfter(deadline: .now() + 3) { finish(.unavailable) }
+        }
+    }
+
+    /// Runs on `queue`. Tries each interface type in order.
+    private func openLANListener(interfaces: [NWInterface.InterfaceType],
+                                 ready: @escaping @Sendable (UInt16?) -> Void) {
+        guard let type = interfaces.first else { ready(nil); return }
+        do {
+            let params = NWParameters.tcp
+            params.allowLocalEndpointReuse = true
+            params.requiredInterfaceType = type
+            let listener = try NWListener(using: params, on: .any)
+            lanListener = listener
+            listener.newConnectionHandler = { [weak self] connection in
+                self?.handleLANConnection(connection)
+            }
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    self.queue.async {
+                        guard self.lanListener === listener else { return }
+                        self.lanPort = listener.port?.rawValue ?? 0
+                        ready(self.lanPort == 0 ? nil : self.lanPort)
+                    }
+                case .failed, .cancelled:
+                    self.queue.async {
+                        guard self.lanListener === listener else { return }
+                        listener.cancel()
+                        self.lanListener = nil
+                        self.lanPort = 0
+                        self.openLANListener(interfaces: Array(interfaces.dropFirst()), ready: ready)
+                    }
+                default:
+                    break
+                }
+            }
+            listener.start(queue: .global(qos: .userInitiated))
+        } catch {
+            openLANListener(interfaces: Array(interfaces.dropFirst()), ready: ready)
+        }
+    }
+
+    /// One-shot latch for `startLANDelivery`'s completion (ready, failure
+    /// and the 3 s timeout race each other).
+    private final class LANStartOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var done = false
+        func claim() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if done { return false }
+            done = true
+            return true
+        }
+    }
+
+    func stopLANDelivery() {
+        queue.async { [weak self] in self?.stopLANDeliveryLocked() }
+    }
+
+    private func stopLANDeliveryLocked() {
+        guard let listener = lanListener else { return }
+        lanListener = nil
+        lanPort = 0
+        lanPeersLogged.removeAll()
+        listener.cancel()
+        debugLog("[TS-REMUX] LAN delivery stopped (loopback only)")
+    }
+
+    /// Peer filter: the stream leaves the device on this listener, so only
+    /// private (RFC 1918), link-local and unique-local peers are served;
+    /// anything else gets 403.
+    private func handleLANConnection(_ connection: NWConnection) {
+        let peer = Self.peerHost(connection.endpoint)
+        guard Self.isPrivatePeer(connection.endpoint) else {
+            debugLog("[TS-REMUX] LAN delivery refused \(peer ?? "?") (not a private address): 403")
+            connection.start(queue: .global(qos: .userInitiated))
+            let body = Data("forbidden".utf8)
+            var response = Data(("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n"
+                + "Content-Length: \(body.count)\r\nConnection: close\r\n\r\n").utf8)
+            response.append(body)
+            connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
+            return
+        }
+        if let peer {
+            queue.async { [weak self] in
+                guard let self, self.lanPeersLogged.insert(peer).inserted else { return }
+                debugLog("[TS-REMUX] LAN delivery: first request from \(peer)")
+            }
+        }
+        handleConnection(connection)
+    }
+
+    static func peerHost(_ endpoint: NWEndpoint) -> String? {
+        guard case let .hostPort(host, _) = endpoint else { return nil }
+        switch host {
+        case .ipv4(let a): return "\(a)"
+        case .ipv6(let a): return "\(a)"
+        case .name(let n, _): return n
+        @unknown default: return nil
+        }
+    }
+
+    static func isPrivatePeer(_ endpoint: NWEndpoint) -> Bool {
+        guard case let .hostPort(host, _) = endpoint else { return false }
+        switch host {
+        case .ipv4(let a):
+            return isPrivateIPv4([UInt8](a.rawValue))
+        case .ipv6(let a):
+            let b = [UInt8](a.rawValue)
+            guard b.count == 16 else { return false }
+            // IPv4-mapped ::ffff:a.b.c.d
+            if b[0..<10].allSatisfy({ $0 == 0 }), b[10] == 0xFF, b[11] == 0xFF {
+                return isPrivateIPv4(Array(b[12..<16]))
+            }
+            if b[0] == 0xFE, b[1] & 0xC0 == 0x80 { return true }   // fe80::/10 link-local
+            if b[0] & 0xFE == 0xFC { return true }                 // fc00::/7 unique-local
+            return b[0..<15].allSatisfy({ $0 == 0 }) && b[15] == 1 // ::1
+        default:
+            return false
+        }
+    }
+
+    static func isPrivateIPv4(_ b: [UInt8]) -> Bool {
+        guard b.count == 4 else { return false }
+        switch (b[0], b[1]) {
+        case (10, _), (127, _): return true
+        case (172, 16...31): return true
+        case (192, 168): return true
+        case (169, 254): return true
+        default: return false
+        }
+    }
+
+    /// Start the airplay-aac variant, primed from the buffered TS window.
+    /// nil (on main) when this session cannot feed one: the HEVC fMP4 arm,
+    /// a source that is not AC-3 / E-AC-3, or no platform decoder.
+    func startAACVariant(completion: @escaping @MainActor (AirPlayAACVariant?) -> Void) {
+        queue.async { [weak self] in
+            func finish(_ v: AirPlayAACVariant?) {
+                DispatchQueue.main.async { MainActor.assumeIsolated { completion(v) } }
+            }
+            guard let self, !self.stopped else { finish(nil); return }
+            if let existing = self.airPlayVariant { finish(existing); return }
+            let source: CastAudioSourceCodec
+            switch self.audioStreamType {
+            case 0x81: source = .ac3
+            case 0x87: source = .eac3
+            default: finish(nil); return
+            }
+            guard self.fmp4 == nil, self.codecGatePassed, CastAudioTranscoder.canDecode(source) else {
+                finish(nil); return
+            }
+            let variant = AirPlayAACVariant(sourceCodecName: source.displayName,
+                                            log: { debugLog("[TS-REMUX] airplay-aac \($0)") })
+            let window = self.segments.suffix(self.liveWindowSegments).map { (seq: $0.seq, data: $0.data) }
+            var tail = self.currentSegment
+            for packet in self.heldAudio { tail.append(packet) }
+            tail.append(self.pending)
+            self.airPlayVariant = variant
+            variant.start(primeSegments: Array(window), tail: tail)
+            finish(variant)
+        }
+    }
+
+    func stopAACVariant() {
+        queue.async { [weak self] in self?.stopAACVariantLocked() }
+    }
+
+    private func stopAACVariantLocked() {
+        guard let variant = airPlayVariant else { return }
+        airPlayVariant = nil
+        variant.stop()
+    }
+
     private func handleConnection(_ connection: NWConnection) {
         connection.start(queue: .global(qos: .userInitiated))
         receiveRequest(connection, buffer: Data())
@@ -2073,6 +2323,26 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// Resolves one playlist / init / segment request on the remux queue.
     /// Shared by the loopback HTTP server and the in-process loader.
     func serve(path: String, completion: @escaping (ServedResource) -> Void) {
+        // AirPlay airplay-aac variant (plan section 4). Resolved OFF the
+        // remux queue: a live-edge segment GET is held up to the store's
+        // wait, and the ingest must never stall behind it.
+        if path.hasPrefix("/aac/") {
+            let variant = currentAirPlayVariant
+            DispatchQueue.global(qos: .userInitiated).async {
+                let r: ServedResource
+                if let variant {
+                    let v = variant.serve(path: path)
+                    debugLog("[AVP-AIRPLAY] GET \(path) -> \(v.status) \(v.kind) seq \(v.seq) \(v.body.count) B")
+                    r = ServedResource(status: v.status, body: v.body, contentType: v.contentType,
+                                       uti: v.contentType.hasSuffix("mpegurl") ? "public.m3u-playlist" : "public.mpeg-4")
+                } else {
+                    debugLog("[AVP-AIRPLAY] GET \(path) -> 404 (no airplay-aac variant)")
+                    r = ServedResource(status: 404, body: Data("not found".utf8), contentType: "text/plain", uti: "public.plain-text")
+                }
+                completion(r)
+            }
+            return
+        }
         queue.async { [weak self] in
             guard let self else {
                 completion(ServedResource(status: 410, body: Data(), contentType: "text/plain", uti: "public.plain-text"))
@@ -2118,7 +2388,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     private func respond(_ connection: NWConnection, path: String) {
         serve(path: path) { r in
-            let status = r.status == 200 ? "200 OK" : (r.status == 404 ? "404 Not Found" : "410 Gone")
+            let status: String
+            switch r.status {
+            case 200: status = "200 OK"
+            case 403: status = "403 Forbidden"
+            case 404: status = "404 Not Found"
+            default: status = "410 Gone"
+            }
             let header = "HTTP/1.1 \(status)\r\n"
                 + "Content-Type: \(r.contentType)\r\n"
                 + "Content-Length: \(r.body.count)\r\n"
