@@ -497,6 +497,20 @@ final class AerioCastController: NSObject, ObservableObject {
         }
     }
 
+    /// Back / Forward from the remote session sheet: a RELATIVE seek on the
+    /// receiver's media session (GCKMediaSeekOptions.relative). The web
+    /// receiver's player clamps it to its live seek range; with no seekable
+    /// window the receiver ignores it.
+    func remoteSeek(by seconds: Double) {
+        guard let client = GCKCastContext.sharedInstance()
+            .sessionManager.currentCastSession?.remoteMediaClient else { return }
+        let options = GCKMediaSeekOptions()
+        options.interval = seconds
+        options.relative = true
+        debugLog("[Cast] remote seek \(seconds)s")
+        client.seek(with: options)
+    }
+
     /// Friendly name of the connected cast device, for the cover header.
     var connectedDeviceName: String? {
         if case .connected(let name) = state { return name }
@@ -2111,8 +2125,8 @@ struct CastButton: UIViewRepresentable {
 
 // MARK: - Cast remote cover (GH #33 basic cast)
 
-/// Fullscreen remote shown while a REMOTE screen plays (cast web receiver OR
-/// companion-controlled Android TV). Local playback is torn down underneath;
+/// Remote sheet for the companion transport (AerioTV on TV). Google Cast and
+/// AirPlay moved to RemoteSessionSheet (2026-09-21 production layout). Local playback is torn down underneath;
 /// this drives the TV. One layout, two transports -- the callbacks decide.
 /// Inlined here (not its own file) so no pbxproj target surgery is needed.
 struct RemoteControlScreen: View {
@@ -2133,11 +2147,6 @@ struct RemoteControlScreen: View {
     /// Non-nil for the companion transport (full options: scrubber + Options
     /// sheet). nil for basic cast (web receiver has no control namespace).
     var companion: CompanionClient? = nil
-    /// Non-nil for the basic-cast transport (task #267): shows the same
-    /// Options button as the companion remote, opening CastOptionsSheet
-    /// (Switch Stream / Record / Sleep Timer / proxy Stream Info) -- the
-    /// phone-driven subset, since the web receiver has no control channel.
-    var cast: AerioCastController? = nil
 
     @State private var showOptions = false
     // Skip Intervals (Settings > App Behaviors) for the skip row.
@@ -2193,8 +2202,6 @@ struct RemoteControlScreen: View {
         .sheet(isPresented: $showOptions) {
             if let companion {
                 RemoteOptionsSheet(companion: companion)
-            } else if let cast {
-                CastOptionsSheet(cast: cast)
             }
         }
     }
@@ -2284,7 +2291,7 @@ struct RemoteControlScreen: View {
                 }
             }
             .accessibilityLabel(isPlaying ? "Pause" : "Play")
-            if companion != nil || cast != nil {
+            if companion != nil {
                 transportButton("list.bullet", label: "Channel list and options",
                                 size: 50) { showOptions = true }
             }
@@ -2361,18 +2368,22 @@ struct RemoteControlScreen: View {
     }
 }
 
-// MARK: - AirPlay remote sheet (production Cast parity, 2026-09-25)
+// MARK: - Remote session sheet (Cast + AirPlay, 2026-09-21 production recording)
 
-/// AirPlay's expanded sheet, laid out exactly like the production Google Cast
-/// session sheet (device screenshots + screen recording 2026-09-25); only the
-/// transport wording differs.
+/// The ONE expanded sheet for Google Cast and AirPlay (Apple TV and Roku),
+/// laid out exactly like the production Google Cast session sheet in the
+/// 2026-09-21 screen recording; only the transport wording differs
+/// ("Casting to" / "Stop Casting" vs "AirPlay to" / "Stop AirPlay").
+/// The companion remote keeps RemoteControlScreen (scrubber, Disconnect).
 ///  - idle route: "Close" on the left, "Connected" centered, nothing else.
 ///  - playing (and connecting, controls disabled): logo, channel, accent
 ///    "AirPlay to <receiver>", program + LIVE badge, time range + progress,
 ///    Channel Down / Up, Back / Pause / Forward, Options, Stop AirPlay.
-struct AirPlayRemoteSheet: View {
+struct RemoteSessionSheet: View {
     enum Mode { case idleRoute, connecting, playing }
+    enum Transport { case cast, airPlay }
 
+    var transport: Transport
     var mode: Mode
     var channelName: String
     var statusText: String
@@ -2381,7 +2392,8 @@ struct AirPlayRemoteSheet: View {
     var programStart: Date?
     var programEnd: Date?
     var isPlaying: Bool
-    /// The locally resolved channel, for the shared Options sheet.
+    /// The locally resolved channel, for the AirPlay Options sheet (Cast
+    /// anchors its options on the controller's own castingContent).
     var item: ChannelDisplayItem?
     var onTogglePlayPause: () -> Void
     var onChannelUp: () -> Void
@@ -2418,7 +2430,11 @@ struct AirPlayRemoteSheet: View {
         .presentationDragIndicator(.visible)
         .presentationBackground(Color.black)
         .sheet(isPresented: $showOptions) {
-            CastOptionsSheet(cast: AerioCastController.shared, airPlayItem: item)
+            if transport == .cast {
+                CastOptionsSheet(cast: AerioCastController.shared)
+            } else {
+                CastOptionsSheet(cast: AerioCastController.shared, airPlayItem: item)
+            }
         }
     }
 
@@ -2483,7 +2499,9 @@ struct AirPlayRemoteSheet: View {
             .disabled(!enabled)
             .opacity(enabled ? 1 : 0.4)
             wideButton {
-                Text("Stop AirPlay").foregroundStyle(.red)
+                Label(transport == .cast ? "Stop Casting" : "Stop AirPlay",
+                      systemImage: "stop.fill")
+                    .foregroundStyle(.red)
             } background: { Color.red.opacity(0.15) } action: { onStop() }
         }
         .frame(maxWidth: .infinity)
@@ -2508,11 +2526,11 @@ struct AirPlayRemoteSheet: View {
                 AsyncImage(url: url) { image in
                     image.resizable().scaledToFit()
                 } placeholder: {
-                    airPlayGlyph
+                    transportGlyph
                 }
                 .frame(maxWidth: 140, maxHeight: 72)
             } else {
-                airPlayGlyph
+                transportGlyph
             }
             Text(channelName)
                 .scaledFont(.title3.weight(.bold))
@@ -2526,8 +2544,9 @@ struct AirPlayRemoteSheet: View {
         .multilineTextAlignment(.center)
     }
 
-    private var airPlayGlyph: some View {
-        Image(systemName: "airplayvideo")
+    private var transportGlyph: some View {
+        Image(systemName: transport == .cast ? RemoteSessionCard.Transport.cast.glyph
+                                             : RemoteSessionCard.Transport.airPlay.glyph)
             .font(.system(size: 40))  // glyph in a fixed box: not text, stays fixed
             .foregroundStyle(accent)
             .frame(height: 56)
@@ -2541,12 +2560,15 @@ struct AirPlayRemoteSheet: View {
                     .foregroundStyle(.white)
                     .lineLimit(1)
                 Spacer(minLength: 0)
-                Text("LIVE")
-                    .scaledFont(.caption2.weight(.bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.red, in: RoundedRectangle(cornerRadius: 4))
+                // Recording: red dot + red LIVE on a red-tinted capsule.
+                HStack(spacing: 4) {
+                    Circle().fill(Color.red).frame(width: 5, height: 5)
+                    Text("LIVE").scaledFont(.caption2.weight(.semibold))
+                }
+                .foregroundStyle(.red)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color.red.opacity(0.15), in: Capsule())
             }
             if let programStart, let programEnd, programEnd > programStart {
                 Text("\(programStart.formatted(date: .omitted, time: .shortened)) - \(programEnd.formatted(date: .omitted, time: .shortened))")
@@ -3364,9 +3386,6 @@ struct RemoteSessionCard: View {
 
     let transport: Transport
     let title: String
-    /// Middle line: the program on the other screen (Android
-    /// CastMiniController.programmeTitle). Blank hides the line.
-    var programTitle: String? = nil
     let status: String
     var artURL: String? = nil
     let isPlaying: Bool
@@ -3404,14 +3423,8 @@ struct RemoteSessionCard: View {
             // the accent status line ("Controlling <TV>" / "Casting to <TV>").
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
-                    .scaledFont(.subheadline.weight(.semibold))
+                    .scaledFont(.subheadline.weight(.bold))
                     .lineLimit(1)
-                if let programTitle, !programTitle.isEmpty {
-                    Text(programTitle)
-                        .scaledFont(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
                 Text(status)
                     .scaledFont(.caption)
                     .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))

@@ -6049,9 +6049,6 @@ struct MainTabView: View {
                 // Rule 1: a session connected with nothing playing reads as
                 // the invitation, not as a channel.
                 title: content?.title ?? "Casting to \(device)",
-                // Android card: program on its own middle line, the accent
-                // status line last.
-                programTitle: content?.subtitle,
                 // A web-receiver channel flip replaces this with
                 // "Switching to <channel>" until the receiver plays.
                 status: content == nil ? "Select a Channel"
@@ -6109,7 +6106,6 @@ struct MainTabView: View {
                 RemoteSessionCard(
                     transport: .airPlay,
                     title: item?.name ?? "AirPlay",
-                    programTitle: item?.currentProgram,
                     status: probing ? "Connecting to AirPlay" : airPlayPlayingStatus,
                     artURL: item?.logoURL?.absoluteString,
                     isPlaying: airPlay.isPlaying,
@@ -6135,25 +6131,34 @@ struct MainTabView: View {
     private var remoteControlsSheet: some View {
         switch activeRemoteTransport {
         case .cast:
-            RemoteControlScreen(
-                title: castController.castingContent?.title
+            // 2026-09-21 production recording: the shared Cast/AirPlay sheet.
+            // A session with nothing loaded is the idle Close / Connected
+            // state; a web-receiver flip keeps the playing layout.
+            let content = castController.castingContent
+            let item = content.flatMap { c in
+                ChannelStore.shared.channels.first(where: { $0.id == c.mediaID })
+            }
+            RemoteSessionSheet(
+                transport: .cast,
+                mode: content == nil ? .idleRoute : .playing,
+                channelName: content?.title
                     ?? "Casting to \(castController.connectedDeviceName ?? "TV")",
-                subtitle: castController.castingContent?.subtitle,
-                artURL: castController.castingContent?.artURL,
                 statusText: castController.castStatusLine(
                     deviceName: castController.connectedDeviceName ?? "TV"),
+                artURL: content?.artURL,
+                programTitle: item?.currentProgram ?? content?.subtitle,
+                programStart: item?.currentProgramStart,
+                programEnd: item?.currentProgramEnd,
                 isPlaying: castController.remoteIsPlaying,
-                stopLabel: "Stop casting",
+                item: item,
                 onTogglePlayPause: { castController.remoteTogglePlayPause() },
                 onChannelUp: { castController.castChannel(1) },
                 onChannelDown: { castController.castChannel(-1) },
+                onSeek: { castController.remoteSeek(by: $0) },
                 onStop: {
                     castController.stopCasting()
                     showRemoteControls = false
-                },
-                // Task #267: Switch Stream / Record / Sleep Timer / proxy
-                // Stream Info -- the phone-driven subset the web receiver allows.
-                cast: castController
+                }
             )
         case .companion:
             RemoteControlScreen(
@@ -6184,7 +6189,8 @@ struct MainTabView: View {
             // picker); probing = the playing layout with controls disabled
             // until the receiver has the video.
             let item = nowPlaying.playingItem
-            AirPlayRemoteSheet(
+            RemoteSessionSheet(
+                transport: .airPlay,
                 mode: airPlayIsIdleRoute ? .idleRoute
                     : (airPlayIsProbing ? .connecting : .playing),
                 channelName: item?.name ?? "AirPlay",
