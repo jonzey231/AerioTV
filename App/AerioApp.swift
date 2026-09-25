@@ -721,6 +721,12 @@ struct AerioApp: App {
             case .inactive:    DebugLogger.shared.logLifecycle("Scene → inactive")
             case .background:
                 DebugLogger.shared.logLifecycle("Scene → background")
+                #if os(iOS)
+                // Incident 2026-09-25: a cast was suspended ~2 min after
+                // backgrounding with the keepalive nominally "running";
+                // record what iOS will judge background audio by.
+                BackgroundKeepalive.logBackgroundEntry()
+                #endif
                 // Flush any pending debounced iCloud pushes before the OS
                 // suspends us. Without this, preference changes (favorites,
                 // theme, etc.) made in the last 60 seconds get dropped when

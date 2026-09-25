@@ -51,15 +51,7 @@ enum AudioSessionRefCount {
             NSLog("[MV-Audio] refcount inc \(before)→\(after) caller=\(caller)")
             guard after == 1 else { return }
             do {
-                #if os(iOS)
-                try AVAudioSession.sharedInstance().setCategory(
-                    .playback,
-                    mode: .moviePlayback,
-                    options: [.allowAirPlay, .allowBluetoothA2DP]
-                )
-                #else
-                try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
-                #endif
+                try configureCategory()
                 // Pin the hardware rate BEFORE activation: a fresh
                 // activation otherwise negotiates whatever the system
                 // offers, and an ATV+receiver chain that came up at
@@ -99,6 +91,22 @@ enum AudioSessionRefCount {
             let after = count
             NSLog("[MV-Audio] refcount dec \(before)→\(after) caller=\(caller)")
             guard after == 0 else { return }
+            #if os(iOS)
+            // Incident 2026-09-25 (cast suspended in the background): a
+            // background keepalive holder needs the session ACTIVE for the
+            // whole cast. Its own reference cannot reach this line, so a
+            // 1->0 here while holders exist is someone else's unbalanced
+            // decrement consuming it; deactivating would let iOS suspend
+            // the process under the receiver. Keep the session, restore
+            // the count, and say who did it.
+            if BackgroundKeepalive.hasHolders {
+                count = 1
+                debugLog("[KEEPALIVE] refcount hit 0 (caller=\(caller)) while keepalive holders "
+                    + "\(BackgroundKeepalive.currentHolders.joined(separator: ",")) need the session: "
+                    + "NOT deactivating (unbalanced decrement)")
+                return
+            }
+            #endif
             do {
                 try AVAudioSession.sharedInstance().setActive(
                     false,
@@ -110,6 +118,20 @@ enum AudioSessionRefCount {
                 NSLog("AudioSessionRefCount.decrement: setActive(false) failed: \(error)")
             }
         }
+    }
+
+    /// The app's playback category (also re-applied by BackgroundKeepalive
+    /// after a media-services reset, which drops it; 2026-09-25).
+    static func configureCategory() throws {
+        #if os(iOS)
+        try AVAudioSession.sharedInstance().setCategory(
+            .playback,
+            mode: .moviePlayback,
+            options: [.allowAirPlay, .allowBluetoothA2DP]
+        )
+        #else
+        try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        #endif
     }
 
     #if DEBUG
@@ -146,57 +168,212 @@ enum AudioSessionRefCount {
 /// with the first holder and stops with the last one.
 enum BackgroundKeepalive {
 
-    private static let queue = DispatchQueue(label: "app.molinete.aerio.background.keepalive")
+    // Incident 2026-09-25 (cast freeze after an ingest splice): the engine
+    // start/stop and the AVAudioSession activation used to run INSIDE
+    // `queue.sync`, so any caller (the cast proxy's session queue, main via
+    // `currentHolders`) waited on AVFoundation, and a route-change / config
+    // notification delivered on that same thread that read `currentHolders`
+    // would dispatch_sync onto the queue it already owned. Now the holder
+    // set sits behind a plain lock (held for set operations only) and every
+    // AVFoundation call runs asynchronously, in order, on `engineQueue`.
+    //
+    // Same incident, the actual failure: the phone was backgrounded at
+    // 14:01:56 with the engine "running (+cast-hls-proxy)" since 13:55:24,
+    // and iOS suspended the process at ~14:04:11 anyway (sockets defunct on
+    // the brief resume at 14:04:14, then silence). A silent engine keeps
+    // the process scheduled only while it is RUNNING, and AVAudioEngine
+    // stops itself on a configuration change (route change, sample-rate
+    // change), an interruption (another app's audio, a call, Siri) or a
+    // media-services reset, and nothing restarted it. The observers below
+    // restart it while holders exist and log every transition.
+    private static let lock = NSLock()
     private nonisolated(unsafe) static var holders: Set<String> = []
+    /// Everything below is touched only on `engineQueue`.
+    private static let engineQueue = DispatchQueue(label: "app.molinete.aerio.background.keepalive")
     private nonisolated(unsafe) static var engine: AVAudioEngine?
+    private nonisolated(unsafe) static var observersInstalled = false
 
-    /// Add `holder`. No-op when it already holds the engine.
+    /// True while any pipeline holds the keepalive (lock only, never waits
+    /// on AVFoundation, safe from any queue).
+    static var hasHolders: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !holders.isEmpty
+    }
+
+    /// Add `holder`. No-op when it already holds the engine. Never blocks
+    /// on AVFoundation: the engine starts asynchronously.
     static func acquire(_ holder: String) {
-        queue.sync {
-            guard holders.insert(holder).inserted else { return }
+        lock.lock()
+        let inserted = holders.insert(holder).inserted
+        lock.unlock()
+        guard inserted else { return }
+        engineQueue.async {
+            installObserversIfNeeded()
             AudioSessionRefCount.increment(caller: holder)
-            if engine == nil {
-                let newEngine = AVAudioEngine()
-                // The engine must have a source attached for some route
-                // configurations to start; a player node with nothing
-                // scheduled renders silence.
-                let player = AVAudioPlayerNode()
-                newEngine.attach(player)
-                newEngine.connect(player, to: newEngine.mainMixerNode, format: nil)
-                newEngine.mainMixerNode.outputVolume = 0
-                do {
-                    try newEngine.start()
-                    engine = newEngine
-                } catch {
-                    // Backgrounding will then suspend the holder's
-                    // pipeline; surfaced so the field log explains a
-                    // frozen receiver.
-                    debugLog("[KEEPALIVE] background keepalive engine FAILED (+\(holder)): \(error)")
-                    return
-                }
+            // Released again before this block ran: the release block
+            // queued behind us balances the refcount; no engine needed.
+            guard hasHolders else { return }
+            if ensureEngineRunning(reason: "+\(holder)") {
+                debugLog("[KEEPALIVE] background keepalive engine running (+\(holder))")
             }
-            debugLog("[KEEPALIVE] background keepalive engine running (+\(holder))")
         }
     }
 
     /// Current holders, sorted (the AirPlay background-entry line names them).
     static var currentHolders: [String] {
-        queue.sync { holders.sorted() }
+        lock.lock()
+        defer { lock.unlock() }
+        return holders.sorted()
     }
 
-    /// Drop `holder`; the engine stops when no holder is left.
+    /// Drop `holder`; the engine stops when no holder is left. Never
+    /// blocks on AVFoundation: the engine stops asynchronously.
     static func release(_ holder: String) {
-        queue.sync {
-            guard holders.remove(holder) != nil else { return }
-            if holders.isEmpty {
-                engine?.stop()
-                engine = nil
-                debugLog("[KEEPALIVE] background keepalive engine stopped (-\(holder))")
+        lock.lock()
+        let removed = holders.remove(holder) != nil
+        let remaining = holders.sorted()
+        lock.unlock()
+        guard removed else { return }
+        engineQueue.async {
+            if !hasHolders {
+                if let e = engine {
+                    e.stop()
+                    engine = nil
+                    debugLog("[KEEPALIVE] background keepalive engine stopped (-\(holder))")
+                }
             } else {
                 debugLog("[KEEPALIVE] background keepalive holder released (-\(holder)), "
-                    + "still held by \(holders.sorted().joined(separator: ","))")
+                    + "still held by \(remaining.joined(separator: ","))")
             }
             AudioSessionRefCount.decrement(caller: holder)
+        }
+    }
+
+    /// Build (if needed) and start the engine. engineQueue only. Returns
+    /// true when the engine is running afterwards.
+    @discardableResult
+    private static func ensureEngineRunning(reason: String) -> Bool {
+        if let e = engine, e.isRunning { return true }
+        let e: AVAudioEngine
+        if let existing = engine {
+            e = existing
+        } else {
+            e = AVAudioEngine()
+            // The engine must have a source attached for some route
+            // configurations to start; a player node with nothing
+            // scheduled renders silence.
+            let player = AVAudioPlayerNode()
+            e.attach(player)
+            e.connect(player, to: e.mainMixerNode, format: nil)
+            e.mainMixerNode.outputVolume = 0
+            engine = e
+        }
+        do {
+            try e.start()
+            return true
+        } catch {
+            // Backgrounding will then suspend the holder's pipeline;
+            // surfaced so the field log explains a frozen receiver.
+            debugLog("[KEEPALIVE] background keepalive engine FAILED (\(reason)): \(error) "
+                + sessionStateText())
+            return false
+        }
+    }
+
+    /// Engine and session state for the log (engineQueue, or any thread
+    /// for the read-only parts).
+    private static func sessionStateText() -> String {
+        let session = AVAudioSession.sharedInstance()
+        let outputs = session.currentRoute.outputs.map { "\($0.portType.rawValue)" }.joined(separator: ",")
+        return "category=\(session.category.rawValue) mode=\(session.mode.rawValue) "
+            + "options=\(session.categoryOptions.rawValue) otherAudio=\(session.isOtherAudioPlaying) "
+            + "silenceHint=\(session.secondaryAudioShouldBeSilencedHint) "
+            + "rate=\(Int(session.sampleRate)) route=[\(outputs)]"
+    }
+
+    /// One line for the app's background entry: who holds the keepalive,
+    /// whether the engine is actually rendering, and the session state
+    /// iOS judges background audio by. Non-blocking for the caller.
+    static func logBackgroundEntry() {
+        let holdersNow = currentHolders
+        engineQueue.async {
+            let running = engine?.isRunning ?? false
+            debugLog("[KEEPALIVE] background entry: holders=[\(holdersNow.joined(separator: ","))] "
+                + "engine=\(engine == nil ? "none" : (running ? "running" : "STOPPED")) "
+                + sessionStateText())
+            if !holdersNow.isEmpty, !running {
+                if ensureEngineRunning(reason: "background entry") {
+                    debugLog("[KEEPALIVE] engine restarted on background entry")
+                }
+            }
+        }
+    }
+
+    /// Restart the engine after something stopped it, while holders exist.
+    private static func restartIfHeld(_ why: String, reactivate: Bool) {
+        engineQueue.async {
+            guard hasHolders else { return }
+            let wasRunning = engine?.isRunning ?? false
+            if reactivate {
+                do {
+                    if why == "media services reset" { try AudioSessionRefCount.configureCategory() }
+                    try AVAudioSession.sharedInstance().setActive(true)
+                } catch {
+                    debugLog("[KEEPALIVE] \(why): session reactivation FAILED: \(error) " + sessionStateText())
+                }
+            }
+            guard !wasRunning else {
+                debugLog("[KEEPALIVE] \(why): engine still running")
+                return
+            }
+            if ensureEngineRunning(reason: why) {
+                debugLog("[KEEPALIVE] \(why): engine restarted (holders=\(currentHolders.joined(separator: ",")))")
+            }
+        }
+    }
+
+    /// engineQueue only; installed on the first acquire, never removed.
+    private static func installObserversIfNeeded() {
+        guard !observersInstalled else { return }
+        observersInstalled = true
+        let nc = NotificationCenter.default
+        // Every handler hops ASYNC to engineQueue: a notification can be
+        // delivered on the thread that is inside an AVFoundation call.
+        nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil) { note in
+            guard let e = note.object as? AVAudioEngine else { return }
+            engineQueue.async {
+                guard e === engine else { return }
+                debugLog("[KEEPALIVE] engine configuration change (engine stopped by AVFoundation)")
+                restartIfHeld("configuration change", reactivate: false)
+            }
+        }
+        nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { note in
+            let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            let type = raw.flatMap(AVAudioSession.InterruptionType.init(rawValue:))
+            switch type {
+            case .began:
+                debugLog("[KEEPALIVE] audio session interruption BEGAN (holders=\(currentHolders.joined(separator: ",")))")
+            case .ended:
+                debugLog("[KEEPALIVE] audio session interruption ended")
+                restartIfHeld("interruption ended", reactivate: true)
+            default:
+                break
+            }
+        }
+        nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { note in
+            guard hasHolders else { return }
+            let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
+            debugLog("[KEEPALIVE] route change reason=\(reason)")
+            restartIfHeld("route change", reactivate: false)
+        }
+        nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: nil) { _ in
+            engineQueue.async {
+                debugLog("[KEEPALIVE] media services were reset; rebuilding the engine")
+                engine?.stop()
+                engine = nil
+            }
+            restartIfHeld("media services reset", reactivate: true)
         }
     }
 }
