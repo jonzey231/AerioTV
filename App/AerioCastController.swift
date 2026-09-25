@@ -626,6 +626,7 @@ final class AerioCastController: NSObject, ObservableObject {
     private func load(_ content: Content, on session: GCKCastSession) {
         proxyLoadTask?.cancel()
         staleCheckTask?.cancel()
+        staleWatchTask?.cancel()
         // Route by receiver type (2026-09-13). The native Android TV app gets the
         // channel IDENTITY and tunes itself; a web receiver gets the phone-local
         // proxy playlist. While the handshake is still in flight the load is HELD.
@@ -936,6 +937,7 @@ final class AerioCastController: NSObject, ObservableObject {
         let headers = content.streamHeaders
         proxyLoadTask?.cancel()
         staleCheckTask?.cancel()
+        staleWatchTask?.cancel()
         // Same audio plan as the initial load: the plain stream URL, with
         // AC-3 / E-AC-3 passthrough gated on the receiver's own measurement,
         // otherwise the on-phone AAC transcode when a decoder exists.
@@ -976,6 +978,7 @@ final class AerioCastController: NSObject, ObservableObject {
 
     private func armStaleReceiverCheck(playlistURL: URL, content: Content, afterReload: Bool) {
         staleCheckTask?.cancel()
+        staleWatchTask?.cancel()
         staleCheckTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: Self.staleReceiverSeconds * 1_000_000_000)
             guard !Task.isCancelled else { return }
@@ -1005,12 +1008,80 @@ final class AerioCastController: NSObject, ObservableObject {
             }
             debugLog("[Cast] stale receiver: playlist fetched, no segment in \(secs) s; "
                 + "re-issuing the load once (playlists=\(counts.playlists) gen=\(counts.generation))")
-            self.staleReloadedMediaID = content.mediaID
-            guard let live = GCKCastContext.sharedInstance().sessionManager.currentCastSession else { return }
-            await Task.detached { CastHLSProxySession.shared.markReceiverLoad() }.value
-            guard self.castingContent?.mediaID == content.mediaID else { return }
-            self.loadProxyPlaylist(playlistURL, content: content, on: live)
-            self.armStaleReceiverCheck(playlistURL: playlistURL, content: content, afterReload: true)
+            await self.reissueStaleLoad(playlistURL: playlistURL, content: content)
+        }
+        startStaleWatch(playlistURL: playlistURL, content: content)
+    }
+
+    /// Re-issue the same proxy load (the once-per-channel latch is set here)
+    /// and arm the post-reload check, which surfaces on a second failure.
+    private func reissueStaleLoad(playlistURL: URL, content: Content) async {
+        staleReloadedMediaID = content.mediaID
+        staleHealthySince = nil
+        guard let live = GCKCastContext.sharedInstance().sessionManager.currentCastSession else { return }
+        await Task.detached { CastHLSProxySession.shared.markReceiverLoad() }.value
+        guard castingContent?.mediaID == content.mediaID else { return }
+        loadProxyPlaylist(playlistURL, content: content, on: live)
+        armStaleReceiverCheck(playlistURL: playlistURL, content: content, afterReload: true)
+    }
+
+    // Mid-stream stall watch (the actual 15:26 shape: a couple of segments,
+    // then nothing while the playhead sat). Every 10 s while the channel is
+    // loaded: a last segment request older than 30 s while the receiver is
+    // NOT PLAYING at rate 1 re-issues the load (same latch, same alert on a
+    // second failure). A PLAYING receiver on a 5 s target can go 10-15 s
+    // between fetches, so it is never touched. 10 min of healthy playback
+    // clears the latch so a later genuine stall still gets its one reload.
+    private static let staleWatchInterval: UInt64 = 10
+    private static let staleSegmentAge: TimeInterval = 30
+    private static let staleLatchResetSeconds: TimeInterval = 600
+    private var staleWatchTask: Task<Void, Never>?
+    private var staleHealthySince: Date?
+    /// Latest receiver player state / rate from the debug telemetry.
+    private var receiverPlayerState: String?
+    private var receiverPlaybackRate: Double?
+
+    private func startStaleWatch(playlistURL: URL, content: Content) {
+        staleWatchTask?.cancel()
+        staleHealthySince = nil
+        staleWatchTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.staleWatchInterval * 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                let counts = await Task.detached { CastHLSProxySession.shared.receiverRequestCounts() }.value
+                guard !Task.isCancelled, let self, self.isCasting,
+                      self.castingContent?.mediaID == content.mediaID else { return }
+                guard let counts, let last = counts.lastSegmentAt else { continue }
+                let now = Date()
+                let age = now.timeIntervalSince(last)
+                let state = self.receiverPlayerState ?? "?"
+                let playing = state == "PLAYING" && self.receiverPlaybackRate == 1
+                if playing && age < Self.staleSegmentAge {
+                    let since = self.staleHealthySince ?? now
+                    self.staleHealthySince = since
+                    if self.staleReloadedMediaID == content.mediaID,
+                       now.timeIntervalSince(since) >= Self.staleLatchResetSeconds {
+                        self.staleReloadedMediaID = nil
+                        debugLog("[Cast] stale receiver latch cleared after 10 min of healthy playback")
+                    }
+                    continue
+                }
+                self.staleHealthySince = nil
+                guard !playing, age > Self.staleSegmentAge else { continue }
+                let rate = self.receiverPlaybackRate.map { String(format: "%g", $0) } ?? "?"
+                if self.staleReloadedMediaID == content.mediaID {
+                    debugLog("[Cast] stale receiver: still no segment after the reload; surfacing "
+                        + "(last segment \(Int(age)) s ago, receiver \(state) rate=\(rate) gen=\(counts.generation))")
+                    self.surfaceCastFailure("The Cast device stopped requesting video. "
+                        + "Disconnect from it and cast again.")
+                    return
+                }
+                debugLog("[Cast] stale receiver: last segment \(Int(age)) s ago with receiver \(state); "
+                    + "re-issuing the load once (rate=\(rate) vseg=\(counts.videoSegments) "
+                    + "aseg=\(counts.audioSegments) gen=\(counts.generation))")
+                await self.reissueStaleLoad(playlistURL: playlistURL, content: content)
+                return // the reload's arm restarts the watch
+            }
         }
     }
 
@@ -1255,6 +1326,7 @@ extension AerioCastController: GCKSessionManagerListener {
         // The receiver is gone; the proxy has no client left to serve.
         proxyLoadTask?.cancel()
         staleCheckTask?.cancel()
+        staleWatchTask?.cancel()
         proxyLoadTask = nil
         loadRequest = nil
         switchingToTitle = nil
@@ -1480,6 +1552,8 @@ extension AerioCastController: GCKGenericChannelDelegate {
             }
             extras += " \(key)=\(text)"
         }
+        if let st = json["state"] as? String { receiverPlayerState = st }
+        if let r = json["rate"] as? NSNumber { receiverPlaybackRate = r.doubleValue }
         var line = "[Cast] receiver: ev=\(string("ev")) t=\(decimals("t", 3)) "
             + "buffered=\(buffered) ready=\(string("ready")) state=\(string("state")) "
             + "rate=\(string("rate")) seek=\(seek) bufTime=\(decimals("bufTime", 2)) "
