@@ -12,5 +12,6 @@ xcrun swiftc -swift-version 6 -O -o "$OUT/casthls_tests" \
     "$SRC/CastFMP4Remuxer.swift" \
     "$SRC/CastHLSSegmentStore.swift" \
     "$SRC/CastAudioFrameParser.swift" \
-    "$SRC/CastAudioTranscoder.swift"
+    "$SRC/CastAudioTranscoder.swift" \
+    ../../App/AirPlayAACVariant.swift
 "$OUT/casthls_tests"

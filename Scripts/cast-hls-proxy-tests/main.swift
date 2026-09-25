@@ -2073,5 +2073,107 @@ func trunSampleCounts(_ segment: Data) -> [Int64] {
 
 runDemuxedRenditionChecks()
 
+// MARK: 16. AirPlay airplay-aac variant (2026-09-21 rebuild)
+//
+// The variant reuses CastFMP4Remuxer + CastHLSSegmentStore for AirPlay
+// receivers that cannot decode AC-3. What it adds, and what is checked
+// here: the /aac routes, the restated HOLD-BACK, the readiness gate, the
+// served tally and the status-line template the device log greps for.
+
+do {
+    // HOLD-BACK: three targets when the window has room, never so deep
+    // the join falls off the window front, never below one target.
+    let roomy = AirPlayAACVariant.holdBack(target: 6, windowSeconds: 26.6)
+    expectEq(roomy.stated, 18.0, "airplay-aac hold-back: 3x target when the window has room")
+    expectEq(roomy.wanted, 18.0, "airplay-aac hold-back: wanted is 3x target")
+    let tight = AirPlayAACVariant.holdBack(target: 5, windowSeconds: 12.0)
+    expectEq(tight.stated, 7.0, "airplay-aac hold-back: capped one target inside the window")
+    expectEq(tight.wanted, 15.0, "airplay-aac hold-back: still reports what it wanted")
+    let tiny = AirPlayAACVariant.holdBack(target: 5, windowSeconds: 5.0)
+    expectEq(tiny.stated, 5.0, "airplay-aac hold-back: never below one target")
+    expectEq(AirPlayAACVariant.servedSummary([:]), "none", "airplay-aac served: none before any GET")
+    expectEq(AirPlayAACVariant.servedSummary(["video": 2, "master": 3, "aseg": 0]),
+             "master=3 video=2", "airplay-aac served: sorted, zero kinds omitted")
+}
+
+@MainActor func runAirPlayVariantChecks() {
+    guard let fixture = continuityFixtureTS() else {
+        print("SKIP airplay-aac variant end-to-end (no ffmpeg fixture)")
+        return
+    }
+    let logLines = LockedLines()
+    let variant = AirPlayAACVariant(sourceCodecName: "AAC", log: { logLines.append($0) })
+    expectEq(variant.serve(path: "/aac/nope.txt").status, 404, "airplay-aac: unknown path 404s")
+    expect(!variant.isReady, "airplay-aac: not ready before any media")
+    // Prime with the first 2 MB as "buffered segments", then tee the rest
+    // in ingest-sized chunks, the way TSHLSRemuxer drives it.
+    let split = min(fixture.count, (2_000_000 / 188) * 188)
+    variant.start(primeSegments: [(seq: 0, data: fixture.prefix(split))], tail: Data())
+    var offset = split
+    while offset < fixture.count {
+        let end = min(fixture.count, offset + 65_536)
+        variant.feed(fixture.subdata(in: offset..<end))
+        offset = end
+    }
+    expect(!variant.hasFailed, "airplay-aac: remux/transcode ran without error")
+    expect(variant.isReady, "airplay-aac: ready after 40 s of media")
+    let lines = logLines.all
+    expect(lines.first == "variant started (source AAC)", "airplay-aac: variant started line first")
+    expect(lines.contains { $0.hasPrefix("primed from 1 buffered segments (seq 0...0, ") },
+           "airplay-aac: primed line")
+    expect(lines.contains { $0.hasPrefix("init ready (") }, "airplay-aac: init ready line")
+
+    let master = String(decoding: variant.serve(path: "/aac/master.m3u8").body, as: UTF8.self)
+    expect(master.contains("URI=\"audio.m3u8\"") && master.contains("video.m3u8"),
+           "airplay-aac master: demuxed renditions")
+    expect(master.contains("mp4a.40.2"), "airplay-aac master: AAC codec string")
+    let video = variant.serve(path: "/aac/video.m3u8")
+    let videoText = String(decoding: video.body, as: UTF8.self)
+    expectEq(video.kind, "video", "airplay-aac: video playlist kind")
+    expectEq(video.seq, -1, "airplay-aac: playlists log seq -1")
+    let snap = variant.snapshot()
+    expect(snap.target >= 5, "airplay-aac: ~5 s target (got \(snap.target))")
+    let hb = String(format: "HOLD-BACK=%.3f", snap.holdBack)
+    expect(videoText.contains(hb), "airplay-aac video playlist restates \(hb)")
+    expect(snap.holdBack >= Double(snap.target) && snap.holdBack <= Double(3 * snap.target),
+           "airplay-aac: stated hold-back within [target, 3x target]")
+    let audioText = String(decoding: variant.serve(path: "/aac/audio.m3u8").body, as: UTF8.self)
+    expect(audioText.contains(hb), "airplay-aac audio playlist restates the same hold-back")
+    expect(videoText.contains("#EXT-X-MAP:URI=\"vinit1.mp4\""), "airplay-aac: generation 1 init")
+    let vinit = variant.serve(path: "/aac/vinit1.mp4")
+    expectEq(vinit.status, 200, "airplay-aac: vinit1 served")
+    expectEq(vinit.kind, "vinit", "airplay-aac: vinit kind")
+    expectEq(vinit.seq, 1, "airplay-aac: init seq is its generation")
+    expectEq(variant.serve(path: "/aac/ainit1.mp4").status, 200, "airplay-aac: ainit1 served")
+    let firstSeq = snap.windowFirst
+    let vseg = variant.serve(path: "/aac/vseg\(firstSeq).m4s")
+    let aseg = variant.serve(path: "/aac/aseg\(firstSeq).m4s")
+    expect(vseg.status == 200 && aseg.status == 200, "airplay-aac: window segments served")
+    expectEq(aseg.contentType, "audio/iso.segment", "airplay-aac: aseg content type")
+    expectEq(variant.serve(path: "/aac/vinit9.mp4").status, 404, "airplay-aac: unknown generation 404s")
+
+    let status = variant.statusLine("variant serving")
+    let template = "^variant serving: window seq [0-9]+\\.\\.\\.[0-9]+ \\([0-9]+ of [0-9]+ ring, target [0-9]+s, "
+        + "window [0-9.]+s, hold-back [0-9.]+s of [0-9.]+s wanted, live edge [0-9.]+s\\) "
+        + "video end [0-9.]+s audio end [0-9.]+s delta -?[0-9.]+s, audio-bearing [0-9]+, "
+        + "backlog v=[0-9]+ a=[0-9]+ units=[0-9]+ emitted [0-9.]+s, "
+        + "served ainit=1 aseg=1 audio=1 master=1 video=1 vinit=1 vseg=1$"
+    expect(status.range(of: template, options: .regularExpression) != nil,
+           "airplay-aac status line matches the 09-24 template: \(status)")
+    variant.stop()
+    _ = variant.hasFailed // barrier: stop ran
+    expect(logLines.all.last == "variant stopped", "airplay-aac: variant stopped line")
+    expectEq(variant.serve(path: "/aac/vseg\(firstSeq).m4s").status, 404, "airplay-aac: nothing served after stop")
+}
+
+final class LockedLines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    func append(_ s: String) { lock.lock(); lines.append(s); lock.unlock() }
+    var all: [String] { lock.lock(); defer { lock.unlock() }; return lines }
+}
+
+runAirPlayVariantChecks()
+
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)
