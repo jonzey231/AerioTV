@@ -2993,19 +2993,56 @@ final class GuideStore: ObservableObject {
             // first keeps ONE copy live and leaves the main thread free.
             let stagedIn = staged
             staged = [:]
+            //
+            // The replace is PER CHANNEL (2026-09-25, dev-build-log-2026-09-25j):
+            // only a channel this chunk actually returned programmes for has
+            // its day stripped. The strip used to cover every channel, so a
+            // chunk that came back partial (the server was mid-import after
+            // "sources changed (7 sources)") wiped today for every channel
+            // missing from it: 5048 -> 4906 programmes at 17:06:53 and
+            // ESPN2 / ESPNU / ESPNews / NFL Network lost their now-playing line.
+            // A channel absent from the response keeps its cached day.
+            let now = Date()
             let result = await Task.detached(priority: .background) {
-                var base: [String: [GuideProgram]] = [:]
-                base.reserveCapacity(stagedIn.count)
+                let fresh = GuideStore.mergeGridPrograms(fetched, into: [:],
+                                                         tvgIDToChannelIDs: maps.tvgIDToChannelIDs,
+                                                         intIDToChannelID: maps.intIDToChannelID,
+                                                         uuidToChannelID: maps.uuidToChannelID,
+                                                         windowStart: day, windowEnd: dayEnd)
+                var dict = stagedIn
+                var keptAbsent = 0
+                var keptAbsentAiring = 0
+                var lostAiring: [String] = []
                 for (channelID, list) in stagedIn {
-                    let kept = list.filter { $0.end <= day || $0.start >= dayEnd }
-                    if !kept.isEmpty { base[channelID] = kept }
+                    let airing = list.contains { $0.start <= now && $0.end > now }
+                    guard let replacement = fresh.dict[channelID], !replacement.isEmpty else {
+                        if list.contains(where: { $0.end > day && $0.start < dayEnd }) {
+                            keptAbsent += 1
+                            if airing { keptAbsentAiring += 1 }
+                        }
+                        continue
+                    }
+                    var out = list.filter { $0.end <= day || $0.start >= dayEnd }
+                    out.append(contentsOf: replacement)
+                    out.sort { $0.start < $1.start }
+                    if airing && !out.contains(where: { $0.start <= now && $0.end > now }) {
+                        lostAiring.append(channelID)
+                    }
+                    dict[channelID] = out
                 }
-                return GuideStore.mergeGridPrograms(fetched, into: base,
-                                                    tvgIDToChannelIDs: maps.tvgIDToChannelIDs,
-                                                    intIDToChannelID: maps.intIDToChannelID,
-                                                    uuidToChannelID: maps.uuidToChannelID,
-                                                    windowStart: day, windowEnd: dayEnd)
+                for (channelID, list) in fresh.dict where stagedIn[channelID] == nil {
+                    dict[channelID] = list
+                }
+                return (dict: dict, matched: fresh.matched, keptAbsent: keptAbsent,
+                        keptAbsentAiring: keptAbsentAiring, lostAiring: lostAiring,
+                        freshChannels: fresh.dict.count)
             }.value
+            if result.keptAbsent > 0 {
+                debugLog("[EPG grid window] background re-sweep chunk \(Self.chunkStamp(day)): \(result.freshChannels) channel(s) in response; kept cached day for \(result.keptAbsent) channel(s) the server returned nothing for (\(result.keptAbsentAiring) airing now)")
+            }
+            if !result.lostAiring.isEmpty {
+                debugLog("[EPG grid window] background re-sweep chunk \(Self.chunkStamp(day)): replacement drops the currently-airing programme for \(result.lostAiring.count) channel(s): \(result.lostAiring.prefix(8).joined(separator: ", "))")
+            }
             staged = result.dict
             merged += result.matched
             unpublished += 1
@@ -3071,8 +3108,12 @@ final class GuideStore: ObservableObject {
             guard merged.matched > 0 else { return 0 }
             var ctx = ModelContext(container)
             ctx.autosaveEnabled = false
+            // Per-channel replace (2026-09-25): only channels this chunk
+            // returned are cleared for the day; the rest keep their cached rows.
+            let replacedIDs = Array(merged.dict.keys)
             try? ctx.delete(model: EPGProgram.self, where: #Predicate<EPGProgram> {
                 $0.serverID == serverID && $0.endTime > day && $0.startTime < dayEnd
+                    && replacedIDs.contains($0.channelID)
             })
             try? ctx.save()
             var written = 0
