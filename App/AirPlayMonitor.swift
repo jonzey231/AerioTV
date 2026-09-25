@@ -308,6 +308,18 @@ final class AirPlayMonitor: ObservableObject {
     /// Idle-route card's Disconnect: an app cannot deselect an AirPlay
     /// route, so this presents the system route picker for the user to
     /// pick this iPhone. The card stays until the route actually changes.
+    /// Route uid whose idle card the user dismissed with X. The route
+    /// stays selected (an app cannot drop it); the idle card stays hidden
+    /// for this route until the route changes or a channel is tuned.
+    private(set) var dismissedRouteUID: String?
+
+    /// Idle card X (2026-09-25 production recording): hide the card only.
+    func dismissIdleCard() {
+        dismissedRouteUID = AirPlayReceiverResolver.currentAirPlayOutput()?.uid
+        debugLog("[Cast] card hide (AirPlay, dismissed by user)")
+        setPhase(.none)
+    }
+
     func disconnectIdleRoute() {
         debugLog("[AVP-AIRPLAY] disconnect: presenting the AirPlay route picker (an app cannot deselect the route; pick this iPhone to end AirPlay)")
         AirPlayMenuTrigger.present()
@@ -354,6 +366,7 @@ final class AirPlayMonitor: ObservableObject {
         refreshName()
         if out != nil { reenableExternalPlaybackForRoute() }
         guard let out else {
+            dismissedRouteUID = nil
             headlessTune = false
             AirPlayReceiverResolver.shared.cancelRetryLadder()
             // Incident 2026-09-25: no AirPlay route, no Bonjour browse.
@@ -378,7 +391,11 @@ final class AirPlayMonitor: ObservableObject {
             }
             return
         }
+        if let dismissed = dismissedRouteUID, dismissed != out.uid {
+            dismissedRouteUID = nil
+        }
         if isExternal {
+            dismissedRouteUID = nil
             if phase != .active {
                 debugLog("[Cast] card show (AirPlay)")
                 setPhase(.active)
@@ -394,6 +411,8 @@ final class AirPlayMonitor: ObservableObject {
             return
         }
         if loadingForCard || player != nil {
+            // A tune on the dismissed route still goes to the TV.
+            dismissedRouteUID = nil
             guard !isProbing else { return }
             debugLog("[Cast] card show (AirPlay, probing route \(out.name ?? "?"))")
             setPhase(.probing(routeName: out.name))
@@ -409,6 +428,7 @@ final class AirPlayMonitor: ObservableObject {
             return
         }
         if case .idleRoute = phase { return }
+        if dismissedRouteUID == out.uid { return }
         let label = AirPlayReceiver.isGenericName(out.name) ? "unresolved" : (out.name ?? "unresolved")
         debugLog("[Cast] card show (AirPlay idle route \(label))")
         setPhase(.idleRoute(out.name))

@@ -6100,10 +6100,11 @@ struct MainTabView: View {
                     onTap: { showRemoteControls = true },
                     onTogglePlayPause: {},
                     onStop: {
-                        // An app cannot drop the route: X presents the
-                        // system route picker (disconnectIdleRoute).
-                        debugLog("[Remote] X: disconnect (AirPlay idle route)")
-                        airPlay.disconnectIdleRoute()
+                        // 2026-09-25 production recording: X only hides the
+                        // card; the route stays selected and the card stays
+                        // hidden until the route changes or a channel tunes.
+                        debugLog("[Remote] X: hide (AirPlay idle route)")
+                        airPlay.dismissIdleCard()
                     }
                 )
             } else {
