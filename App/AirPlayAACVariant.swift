@@ -194,8 +194,25 @@ final class AirPlayAACVariant: @unchecked Sendable {
     /// already covers the hold-back the playlist wants.
     var isReady: Bool {
         let s = snapshot()
-        guard s.hasInit else { return false }
-        return s.segmentsInGeneration >= Self.readySegments || s.windowSeconds >= s.holdBackWanted + Double(s.target)
+        return Self.isReady(hasInit: s.hasInit, ringCount: s.ringCount,
+                            segmentsInGeneration: s.segmentsInGeneration, target: s.target,
+                            windowSeconds: s.windowSeconds, holdBackWanted: s.holdBackWanted)
+    }
+
+    /// Never ready below this many cut segments, whatever the hold-back.
+    static let minimumReadySegments = 2
+
+    /// The readiness gate as a pure function (tested by the CLI harness).
+    /// Device log 2026-09-25 16:22:37.462: `variant ready: window seq
+    /// -1...-1 (0 of 0 ring, target 0s ...)`. With nothing cut the target
+    /// and the wanted hold-back are both 0, so `0 >= 0 + 0` passed the
+    /// hold-back arm and the receiver got an empty playlist (LAN item
+    /// failed 140 ms later). At least `minimumReadySegments` segments and a
+    /// non-zero target are now required before either arm counts.
+    static func isReady(hasInit: Bool, ringCount: Int, segmentsInGeneration: Int, target: Int,
+                        windowSeconds: Double, holdBackWanted: Double) -> Bool {
+        guard hasInit, ringCount >= minimumReadySegments, target > 0 else { return false }
+        return segmentsInGeneration >= readySegments || windowSeconds >= holdBackWanted + Double(target)
     }
 
     /// Emits `variant serving: ...` every `interval` seconds until stop.

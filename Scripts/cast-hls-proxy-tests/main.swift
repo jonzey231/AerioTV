@@ -2094,6 +2094,20 @@ do {
     expectEq(AirPlayAACVariant.servedSummary([:]), "none", "airplay-aac served: none before any GET")
     expectEq(AirPlayAACVariant.servedSummary(["video": 2, "master": 3, "aseg": 0]),
              "master=3 video=2", "airplay-aac served: sorted, zero kinds omitted")
+    // Device log 2026-09-25 16:22:37: "variant ready ... (0 of 0 ring,
+    // target 0s ...)". An empty window must never read as ready.
+    expect(!AirPlayAACVariant.isReady(hasInit: true, ringCount: 0, segmentsInGeneration: 0, target: 0,
+                                      windowSeconds: 0, holdBackWanted: 0),
+           "airplay-aac: variant not ready with 0 segments (init only)")
+    expect(!AirPlayAACVariant.isReady(hasInit: true, ringCount: 1, segmentsInGeneration: 1, target: 6,
+                                      windowSeconds: 30, holdBackWanted: 18),
+           "airplay-aac: variant not ready with 1 segment")
+    expect(!AirPlayAACVariant.isReady(hasInit: true, ringCount: 3, segmentsInGeneration: 3, target: 0,
+                                      windowSeconds: 0, holdBackWanted: 0),
+           "airplay-aac: variant not ready with a zero target")
+    expect(AirPlayAACVariant.isReady(hasInit: true, ringCount: 3, segmentsInGeneration: 3, target: 6,
+                                     windowSeconds: 18, holdBackWanted: 18),
+           "airplay-aac: ready with 3 segments and a target")
 }
 
 @MainActor func runAirPlayVariantChecks() {
@@ -2105,6 +2119,17 @@ do {
     let variant = AirPlayAACVariant(sourceCodecName: "AAC", log: { logLines.append($0) })
     expectEq(variant.serve(path: "/aac/nope.txt").status, 404, "airplay-aac: unknown path 404s")
     expect(!variant.isReady, "airplay-aac: not ready before any media")
+    // Init but no closed segment (2026-09-25 log): feed ~1 s of media.
+    do {
+        let early = AirPlayAACVariant(sourceCodecName: "AAC", log: { _ in })
+        early.start(primeSegments: [], tail: fixture.prefix((200_000 / 188) * 188))
+        early.drain()
+        let s = early.snapshot()
+        expect(s.ringCount < 2, "airplay-aac early: fewer than 2 segments cut (got \(s.ringCount))")
+        expect(!early.isReady, "airplay-aac: variant not ready with 0 segments (hasInit=\(s.hasInit))")
+        early.stop()
+        early.drain()
+    }
     // Prime with the first 2 MB as "buffered segments", then tee the rest
     // in ingest-sized chunks, the way TSHLSRemuxer drives it.
     let split = min(fixture.count, (2_000_000 / 188) * 188)
