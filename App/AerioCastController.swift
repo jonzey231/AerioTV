@@ -667,7 +667,9 @@ final class AerioCastController: NSObject, ObservableObject {
         // So the ingest is ALWAYS the plain stream URL, and the only decision
         // left is whether this receiver may have the AC-3 bitstream:
         // `receiverCaps` ac-3 / ec-3, measured by the receiver itself. False
-        // plus an AC-3 source is refused by name rather than transcoded. AAC
+        // plus an AC-3 source is transcoded on the phone to AAC-LC stereo
+        // (2026-09-21, `audio=transcode-aac`), and refused by name only when
+        // this device has no AC-3 decoder (`audio=aac-only`). AAC
         // sources pass through as before (a channel_configuration 0 layout is
         // still refused), and MPEG audio transcodes instead of refusing.
         let receiverName = session.device.friendlyName ?? lastDeviceName
@@ -688,11 +690,15 @@ final class AerioCastController: NSObject, ObservableObject {
             }
             if caps == nil { debugLog("[Cast] caps not received, assuming no AC-3") }
             let allowAC3 = caps?["ac-3"] == true || caps?["ec-3"] == true
+            // No AC-3 on the receiver: decode it here instead of refusing the
+            // channel, as long as this device can build the decoder.
+            let transcodeAC3 = !allowAC3 && CastAudioTranscoder.canDecode(.ac3)
+            let audioMode = allowAC3 ? "passthrough" : (transcodeAC3 ? "transcode-aac" : "aac-only")
             func cap(_ key: String) -> String { caps?[key] == true ? "yes" : "no" }
             debugLog("[Cast] audio plan: receiver=\(receiverModel) "
                 + "caps=\(caps == nil ? "none" : "measured") "
                 + "ac-3=\(cap("ac-3")) ec-3=\(cap("ec-3")) aac=\(cap("mp4a.40.2")) "
-                + "-> ingest=plain audio=\(allowAC3 ? "passthrough" : "aac-only")")
+                + "-> ingest=plain audio=\(audioMode)")
             let playlistURL: URL
             // A connection-limit refusal or reconnect bounce after the
             // receiver loaded ends the cast with the notice text.
@@ -711,7 +717,8 @@ final class AerioCastController: NSObject, ObservableObject {
                 // audio/mp4 SourceBuffer. It is the only shape the proxy
                 // serves (the muxed endpoints were removed 2026-09-13).
                 playlistURL = try await CastHLSProxySession.shared.startChannel(
-                    rawTSURL: rawTS, headers: headers, allowAC3Passthrough: allowAC3)
+                    rawTSURL: rawTS, headers: headers, allowAC3Passthrough: allowAC3,
+                    transcodeAC3: transcodeAC3)
             } catch is CancellationError {
                 return
             } catch {
@@ -911,12 +918,15 @@ final class AerioCastController: NSObject, ObservableObject {
         let headers = content.streamHeaders
         proxyLoadTask?.cancel()
         // Same audio plan as the initial load: the plain stream URL, with
-        // AC-3 / E-AC-3 passthrough gated on the receiver's own measurement.
+        // AC-3 / E-AC-3 passthrough gated on the receiver's own measurement,
+        // otherwise the on-phone AAC transcode when a decoder exists.
         let allowAC3 = receiverDecodesAC3
+        let transcodeAC3 = !allowAC3 && CastAudioTranscoder.canDecode(.ac3)
         proxyLoadTask = Task { [weak self] in
             do {
                 _ = try await CastHLSProxySession.shared.startChannel(
-                    rawTSURL: rawTS, headers: headers, allowAC3Passthrough: allowAC3)
+                    rawTSURL: rawTS, headers: headers, allowAC3Passthrough: allowAC3,
+                    transcodeAC3: transcodeAC3)
             } catch is CancellationError {
             } catch {
                 self?.surfaceCastFailure("The stream switch interrupted casting: \(error)")

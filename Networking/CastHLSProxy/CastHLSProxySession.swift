@@ -147,6 +147,10 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// Receiver decodes AC-3: the remuxer then passes AC-3 / E-AC-3
     /// through instead of running the AudioToolbox transcode.
     private var allowAC3Passthrough = false
+    /// Receiver cannot decode AC-3 and the sender's audio plan is
+    /// `transcode-aac`: the remuxer decodes AC-3 / E-AC-3 on the phone and
+    /// serves AAC-LC stereo in the audio rendition instead of refusing.
+    private var transcodeAC3 = false
 
     // Per-generation log rollup state.
     private var segmentsLogged = 0
@@ -237,7 +241,8 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// Throws `CastUnsupportedCodecError` for a mux the proxy cannot
     /// serve and `CastHLSProxyError` for infrastructure failures.
     func startChannel(rawTSURL: URL, headers: [String: String],
-                      allowAC3Passthrough: Bool = false) async throws -> URL {
+                      allowAC3Passthrough: Bool = false,
+                      transcodeAC3: Bool = false) async throws -> URL {
         // The Chromecast fetches over the LAN; 127.0.0.1 would only ever
         // work for the phone itself.
         guard let lanIP = Self.wifiLANAddress() else {
@@ -264,6 +269,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             }
             let isChannelChange = self.activeURL != nil
             self.allowAC3Passthrough = allowAC3Passthrough
+            self.transcodeAC3 = transcodeAC3
             self.stopIngestLocked()
             self.activeURL = rawTSURL
             self.terminalError = nil
@@ -404,6 +410,7 @@ final class CastHLSProxySession: @unchecked Sendable {
         rollupTicks = 0
 
         let remuxer = CastFMP4Remuxer(allowAC3Passthrough: allowAC3Passthrough,
+                                      transcodeAC3: transcodeAC3,
                                       log: { [weak self] in self?.log($0) })
         remuxer.onDemuxedInitSegments = { [weak self] video, audio in
             guard let self, self.ingestEpoch == epoch else { return }
@@ -499,8 +506,9 @@ final class CastHLSProxySession: @unchecked Sendable {
                     try remuxer.feed(data)
                 } catch let error as CastUnsupportedCodecError {
                     // Terminal by design: video is never re-encoded and
-                    // the audio transcode covers AC-3/E-AC-3/MP2 only
-                    // (and needs a platform decoder). Surfaced to the
+                    // the audio transcode covers MP2 always and AC-3/E-AC-3
+                    // only under the sender's transcode-aac plan (and needs
+                    // a platform decoder). Surfaced to the
                     // sender's ready wait as the cast failure.
                     self.log("unsupported codec, refusing to cast: \(error.codecName)")
                     self.terminalError = error

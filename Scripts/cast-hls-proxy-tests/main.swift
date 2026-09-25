@@ -173,8 +173,9 @@ func mpegAudioFixtureTS(audioStreamType: UInt8, audioES: [UInt8],
         expectEq(t.released, 1, "\(label) release tears the codecs down")
     }
 
-    // AC-3 is NEVER transcoded: without receiver passthrough it refuses
-    // by name, and no transcoder is ever constructed.
+    // AC-3 without receiver passthrough and without the sender's
+    // transcode-aac plan refuses by name, and no transcoder is ever
+    // constructed.
     var built = false
     let ac3Remuxer = CastFMP4Remuxer(transcoderFactory: { _, onConfig, onFrame in
         built = true
@@ -186,8 +187,62 @@ func mpegAudioFixtureTS(audioStreamType: UInt8, audioES: [UInt8],
     var refusedName: String?
     do { try ac3Remuxer.feed(ac3TS) } catch let e as CastUnsupportedCodecError { refusedName = e.codecName }
     catch { refusedName = "other" }
-    expectEq(refusedName, "AC-3 audio", "AC-3 still refuses by name (never transcoded)")
-    expect(!built, "no transcoder is constructed for AC-3")
+    expectEq(refusedName, "AC-3 audio", "AC-3 refuses by name without a transcode plan")
+    expect(!built, "no transcoder is constructed for AC-3 without a transcode plan")
+
+    // transcode-aac plan (receiver answered ac-3=no): AC-3 syncframes go
+    // through the transcoder and the rendition declares AAC.
+    var ac3ES: [UInt8] = []
+    var ac3Frame: [UInt8] = [0x0B, 0x77, 0x00, 0x00, 0x1C, 0x40, 0xE1] // 48 kHz 384 kbps 5.1
+    ac3Frame.append(contentsOf: [UInt8](repeating: 0, count: 1536 - ac3Frame.count))
+    for _ in 0..<60 { ac3ES.append(contentsOf: ac3Frame) }
+    let ac3FrameTicks: Int64 = 1536 * CastFMP4Remuxer.ticksPerSecond / 48_000 // 2880
+    var ac3Fake: FakeCastAudioTranscoder?
+    var ac3Source: CastAudioSourceCodec?
+    var ac3Logs: [String] = []
+    let transcodeRemuxer = CastFMP4Remuxer(transcodeAC3: true, log: { ac3Logs.append($0) },
+                                           transcoderFactory: { source, onConfig, onFrame in
+        ac3Source = source
+        let t = FakeCastAudioTranscoder(onConfig: onConfig, onFrame: onFrame)
+        ac3Fake = t
+        return t
+    })
+    let ac3TranscodeTS = mpegAudioFixtureTS(audioStreamType: 0x81, audioES: ac3ES,
+                                            audioFrameLen: 1536, audioFrameTicks: ac3FrameTicks,
+                                            videoFrames: 90)
+    var ac3Threw = false
+    do { try transcodeRemuxer.feed(ac3TranscodeTS) } catch { ac3Threw = true }
+    expect(!ac3Threw, "AC-3 with transcode-aac is transcoded, not refused")
+    expect(ac3Source == .ac3, "AC-3 transcoder built for the AC-3 source")
+    expect((ac3Fake?.fedLengths.count ?? 0) >= 50, "framed whole AC-3 syncframes into the transcoder")
+    expect(ac3Fake?.fedLengths.allSatisfy { $0 == 1536 } ?? false, "every fed AC-3 frame is one syncframe")
+    expectEq(transcodeRemuxer.audioCodecsAttribute, "mp4a.40.2", "AC-3 transcode: CODECS names AAC")
+    expectEq(transcodeRemuxer.audioPathDescription, "AC-3 5.1 -> AAC stereo", "AC-3 transcode: audio path")
+    expect(ac3Logs.contains("transcoding AC-3 5.1 48000 Hz -> AAC-LC stereo (receiver cannot decode AC-3)"),
+           "AC-3 transcode: logs the transcoding line")
+    let transcodingIdx = ac3Logs.firstIndex { $0.hasPrefix("transcoding AC-3") }
+    let activeIdx = ac3Logs.firstIndex { $0.hasPrefix("audio transcode active: AC-3 6ch 48000Hz") }
+    expect(transcodingIdx != nil && activeIdx != nil && transcodingIdx! < activeIdx!,
+           "AC-3 transcode: transcoding line precedes audio transcode active")
+    let gated = ac3Logs.filter { $0.hasPrefix("transcoded audio gated: ") }
+    let resumed = ac3Logs.filter { $0.hasPrefix("transcoded audio resumed after ") }
+    expect(gated.count == resumed.count, "every gated run of transcoded audio logs its resume")
+    if let g = gated.first {
+        expect(g.hasPrefix("transcoded audio gated: 1 units dropped, pts ")
+               && g.hasSuffix("s below timeline base -0.000s"),
+               "gated line logs the first drop before the timeline base exists: \(g)")
+    }
+    transcodeRemuxer.release()
+
+    // Passthrough wins over the transcode plan when both are set.
+    var passthroughBuilt = false
+    let bothRemuxer = CastFMP4Remuxer(allowAC3Passthrough: true, transcodeAC3: true,
+                                      transcoderFactory: { _, onConfig, onFrame in
+        passthroughBuilt = true
+        return FakeCastAudioTranscoder(onConfig: onConfig, onFrame: onFrame)
+    })
+    do { try bothRemuxer.feed(ac3TranscodeTS) } catch {}
+    expect(!passthroughBuilt, "AC-3 passthrough takes precedence over the transcode plan")
 }
 
 runMPEGTranscodeChecks()

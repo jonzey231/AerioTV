@@ -53,8 +53,9 @@ protocol CastAudioTranscoding: AnyObject {
 ///
 /// H.264 video is pure passthrough (Annex B converted to 4-byte-length
 /// avc1 samples); audio is ADTS AAC passthrough, AC-3 / E-AC-3
-/// passthrough, or an on-phone MPEG audio to AAC-LC stereo transcode.
-/// The AC-3 family is never re-encoded.
+/// passthrough, or an on-phone MPEG audio / AC-3 / E-AC-3 to AAC-LC
+/// stereo transcode. The AC-3 family is re-encoded only when the sender
+/// asked for it (`transcodeAC3`, a receiver that cannot decode AC-3).
 ///
 /// Threading: single-caller. `feed` runs on the ingest queue only; no
 /// internal locking.
@@ -88,7 +89,8 @@ final class CastFMP4Remuxer {
     private static let audioStreamTypes: Set<Int> = [0x03, 0x04, 0x0F, 0x11, 0x81, 0x87, 0x82, 0x8A]
 
     /// stream_types the audio passthrough can take instead of a refusal,
-    /// and only when the receiver reported AC-3 support.
+    /// and only when the receiver reported AC-3 support. The same types
+    /// go through the on-phone transcode when `transcodeAC3` is set.
     private static let passthroughSources: [Int: CastAudioSourceCodec] = [
         0x81: .ac3, 0x87: .eac3,
     ]
@@ -96,7 +98,7 @@ final class CastFMP4Remuxer {
     /// stream_types the on-phone audio transcode takes instead of a
     /// refusal: MPEG-1 Layer I/II/III only (0x03 and 0x04 ride the same
     /// decoder family). No MSE decodes them and their patents have
-    /// expired; the AC-3 family is never transcoded.
+    /// expired. The AC-3 family transcodes only under `transcodeAC3`.
     private static let transcodeSources: [Int: CastAudioSourceCodec] = [
         0x03: .mp2, 0x04: .mp2,
     ]
@@ -105,10 +107,18 @@ final class CastFMP4Remuxer {
     /// `allowAC3Passthrough` flips AC-3 / E-AC-3 to a pure passthrough
     /// (no decode, no encode, original channel layout) and is set by the
     /// sender only for receivers that measured support for it; an AC-3
-    /// source without it is REFUSED by name rather than transcoded
-    /// (Logan 2026-09-13). MPEG audio still uses the AudioToolbox
+    /// source without it is transcoded when `transcodeAC3` is set and
+    /// otherwise REFUSED by name. MPEG audio always uses the AudioToolbox
     /// transcode; nothing else is ever re-encoded.
     private let allowAC3Passthrough: Bool
+
+    /// AC-3 / E-AC-3 the receiver cannot decode is decoded on the phone
+    /// and re-encoded as AAC-LC stereo (2026-09-21, sender audio plan
+    /// `audio=transcode-aac`). Before this a Chromecast that answered
+    /// ac-3=no could not play any AC-3 channel at all: every load ended
+    /// in "unsupported codec, refusing to cast: AC-3 audio". Ignored when
+    /// `allowAC3Passthrough` is set (passthrough keeps the surround mix).
+    private let transcodeAC3: Bool
 
     /// Speaker-layout label for the Stream Info audio path. Total decoded
     /// channels (LFE included) to the familiar x.1 names.
@@ -192,12 +202,14 @@ final class CastFMP4Remuxer {
 
     init(targetSegmentTicks: Int64 = 3 * CastFMP4Remuxer.ticksPerSecond,
          allowAC3Passthrough: Bool = false,
+         transcodeAC3: Bool = false,
          log: @escaping (String) -> Void = { _ in },
          transcoderFactory: ((CastAudioSourceCodec,
                               @escaping (_ asc: [UInt8], _ sampleRate: Int) -> Void,
                               @escaping (_ data: [UInt8], _ ptsTicks: Int64) -> Void) -> CastAudioTranscoding)? = nil) {
         self.targetSegmentTicks = targetSegmentTicks
         self.allowAC3Passthrough = allowAC3Passthrough
+        self.transcodeAC3 = transcodeAC3
         self.log = log
         self.transcoderFactory = transcoderFactory ?? { source, onConfig, onFrame in
             CastAudioTranscoder(source: source, onEncoderConfig: onConfig, onAACFrame: onFrame, log: log)
@@ -593,14 +605,19 @@ final class CastFMP4Remuxer {
             // patents have expired. Everything else refuses.
             let name = Self.streamTypeNames[audioType]
                 ?? String(format: "audio stream_type 0x%02X", audioType)
+            // 2026-09-21: an AC-3 source for a receiver that cannot
+            // decode it transcodes to AAC-LC stereo on the phone when the
+            // sender planned it; the refusal remains for the case where
+            // the sender found no platform decoder.
             if let source = Self.transcodeSources[audioType] {
                 audioSource = source
-            } else {
-                guard let source = Self.passthroughSources[audioType], allowAC3Passthrough else {
-                    log("unsupported cast audio: \(name)")
-                    throw CastUnsupportedCodecError(codecName: name, stream: .audio)
-                }
+            } else if let source = Self.passthroughSources[audioType], allowAC3Passthrough {
                 audioPassthrough = source
+            } else if let source = Self.passthroughSources[audioType], transcodeAC3 {
+                audioSource = source
+            } else {
+                log("unsupported cast audio: \(name)")
+                throw CastUnsupportedCodecError(codecName: name, stream: .audio)
             }
         }
         if video < 0 { throw CastUnsupportedCodecError(codecName: "no video stream in PMT", stream: .video) }
@@ -898,17 +915,15 @@ final class CastFMP4Remuxer {
                     self.audioFrameTicks = 1024 * Self.ticksPerSecond / Int64(rate)
                     self.maybeEmitInit()
                 }, { [weak self] frame, pts in
-                    guard let self else { return }
-                    // Same gate as the passthrough path: audio only queues
-                    // once the init exists and video anchored the timeline,
-                    // and never before the first video PRESENTATION time.
-                    if self.initSent, self.timelineBasePTS >= 0, pts >= self.timelineBasePTS {
-                        self.audioQueue.append(AudioSample(data: frame, pts: pts))
-                    }
+                    self?.queueTranscodedAudio(frame, pts: pts)
                 })
                 transcoder = t
             }
             if !transcodeLogged {
+                if source != .mp2 {
+                    log("transcoding \(source.displayName) \(Self.channelLabel(info.channels)) "
+                        + "\(info.sampleRate) Hz -> AAC-LC stereo (receiver cannot decode \(source.displayName))")
+                }
                 log("audio transcode active: \(source.displayName) \(info.channels)ch \(info.sampleRate)Hz -> AAC-LC stereo")
                 audioPathDescription = "\(source.displayName) \(Self.channelLabel(info.channels)) -> AAC stereo"
                 transcodeLogged = true
@@ -931,6 +946,36 @@ final class CastFMP4Remuxer {
             p = next
         }
         if p < data.count { audioCarry = Array(data[p...]) }
+    }
+
+    /// Units the transcoded-audio gate has dropped in the current run of
+    /// drops; 0 while audio is flowing.
+    private var transcodeGatedUnits = 0
+
+    /// Encoder output lands here. Same gate as the passthrough path:
+    /// audio only queues once the init exists and video anchored the
+    /// timeline, and never before the first video PRESENTATION time.
+    /// The encoder starts on the first decodable audio frame, which on a
+    /// mid-GOP join is well before the first video keyframe, so the first
+    /// units of every session are dropped here; the drop and the resume
+    /// are logged once per run so the field log shows how much audio the
+    /// join cost.
+    private func queueTranscodedAudio(_ frame: [UInt8], pts: Int64) {
+        guard initSent, timelineBasePTS >= 0, pts >= timelineBasePTS else {
+            transcodeGatedUnits += 1
+            if transcodeGatedUnits == 1 {
+                let seconds = Double(pts) / Double(Self.ticksPerSecond)
+                let base = Double(timelineBasePTS) / Double(Self.ticksPerSecond)
+                log(String(format: "transcoded audio gated: %d units dropped, pts %.3fs below timeline base %.3fs",
+                           transcodeGatedUnits, seconds, base))
+            }
+            return
+        }
+        if transcodeGatedUnits > 0 {
+            log("transcoded audio resumed after \(transcodeGatedUnits) gated units")
+            transcodeGatedUnits = 0
+        }
+        audioQueue.append(AudioSample(data: frame, pts: pts))
     }
 
     private func onADTSAudioPES(_ payload: [UInt8], pts33: Int64) throws {
