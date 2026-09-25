@@ -5865,6 +5865,7 @@ struct MainTabView: View {
             if !companionClient.devices.isEmpty || castController.state != .unavailable,
                !companionClient.isControlling,
                !castController.isCasting,
+               !airPlay.hostsHeadless,
                nowPlaying.playingItem == nil || nowPlaying.isMinimized,
                // Container sessions (VOD/DVR/live via PlayerSession) never
                // set nowPlaying.playingItem, so the FAB floated over the
@@ -5876,6 +5877,13 @@ struct MainTabView: View {
         }
         .overlay(alignment: .bottomLeading) {
             MinimizedTabButton(tab: selectedTab)
+        }
+        // AirPlay handoff (device test 2026-09-25): the receiver took the
+        // channel, the fullscreen player was minimized, so land on Live TV
+        // with the remote-session card driving the session (Cast parity).
+        .onChange(of: airPlay.hostsHeadless) { _, headless in
+            guard headless, selectedTab != .liveTV else { return }
+            selectedTab = .liveTV
         }
         #endif
         // safeAreaInset on the outer ZStack pushes the entire TabView (including its tab bar)
@@ -7617,6 +7625,11 @@ struct MainTabView: View {
                 .modifier(MiniPlayerSettingsStash(stashed: stashed, travel: miniW + 24 - MiniPlayerSettingsStash.sliver))
             }
             .ignoresSafeArea()
+            // AirPlay handoff: the receiver shows the picture, the mini
+            // would only be a black box; hidden in place, still mounted
+            // because its tile feeds the receiver.
+            .opacity(airPlay.hostsHeadless ? 0 : 1)
+            .allowsHitTesting(!airPlay.hostsHeadless)
             .zIndex(2)
         } else {
             // v1.6.17 — iPhone branch. NO outer `.ignoresSafeArea()`.
@@ -7637,7 +7650,9 @@ struct MainTabView: View {
             // so the AVPlayerLayer stays in the window for PiP and restore
             // animates back into the right rect. `hidesHost` covers the gap
             // before isMinimized and the close teardown after it.
-            let hidden = nowPlaying.isMinimized || foregroundPiP.hidesHost
+            // AirPlay handoff (device test 2026-09-25): same hide-in-place
+            // while the receiver plays, the tile keeps serving it.
+            let hidden = nowPlaying.isMinimized || foregroundPiP.hidesHost || airPlay.hostsHeadless
             MultiviewContainerView()
                 .opacity(hidden ? 0 : 1)
                 .allowsHitTesting(!hidden)

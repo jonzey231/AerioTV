@@ -16,7 +16,8 @@ enum AirPlayPhase: Equatable {
     case idleRoute(String?)
     /// The receiver took the player (`isExternalPlaybackActive`).
     case active
-    /// The output disappeared while playing; local playback continues.
+    /// The output disappeared while the receiver played; playback stopped
+    /// (device test 2026-09-25: no fall-back to the phone).
     case routeLost
     /// The user ended the session from the card or the sheet.
     case ended
@@ -41,6 +42,11 @@ final class AirPlayMonitor: ObservableObject {
     @Published private(set) var phase: AirPlayPhase = .none
     /// Set by `AirPlayReceiverResolver`; nil while unknown.
     @Published private(set) var receiver: AirPlayReceiver?
+    /// The receiver owns the picture: the fullscreen player is dismissed
+    /// (minimized, still mounted so the tile keeps feeding the receiver)
+    /// and the remote-session card drives the session, as for Cast.
+    /// Sticky across channel flips; cleared when the session ends.
+    @Published private(set) var hostsHeadless = false
 
     /// Set by the idle-route card's Disconnect: players built for the rest
     /// of this route session get `allowsExternalPlayback = false`, so a
@@ -54,11 +60,29 @@ final class AirPlayMonitor: ObservableObject {
     private var routeObserver: NSObjectProtocol?
     /// A tile is preparing a start with an AirPlay route selected.
     private var tileLoading = false
+    private var servingSubscription: AnyCancellable?
+    /// Receiver let go of the player with the route still up: confirmed
+    /// after `receiverReleaseGrace` so an item swap blip is not a stop.
+    private var releaseCheck: Task<Void, Never>?
+    private static let receiverReleaseGrace: UInt64 = 3_000_000_000
+    /// Re-entrancy guard for the stop paths (the teardown they run
+    /// detaches the player, which re-evaluates the route).
+    private var stoppingSession = false
 
     private init() {
         AirPlayReceiverResolver.shared.onReceiverChange = { [weak self] r in
             self?.setReceiver(r)
         }
+        // A tile serving a receiver on the LAN (route picked mid-play, or a
+        // tune started with the route selected) is a handoff even before
+        // the receiver reports external playback.
+        servingSubscription = AirPlayTileDelivery.serving
+            .removeDuplicates()
+            .sink { serving in
+                Task { @MainActor in
+                    if serving { AirPlayMonitor.shared.handOffToReceiver() }
+                }
+            }
     }
 
     /// Route observation for the whole process (idle-route card at launch,
@@ -83,7 +107,7 @@ final class AirPlayMonitor: ObservableObject {
         externalObservation = player.observe(\.isExternalPlaybackActive,
                                             options: [.initial, .new]) { p, _ in
             let active = p.isExternalPlaybackActive
-            Task { @MainActor in AirPlayMonitor.shared.apply(active) }
+            Task { @MainActor in AirPlayMonitor.shared.apply(active, fromPlayer: true) }
         }
         rateObservation = player.observe(\.timeControlStatus, options: [.initial, .new]) { p, _ in
             let playing = p.timeControlStatus != .paused
@@ -101,10 +125,12 @@ final class AirPlayMonitor: ObservableObject {
         rateObservation = nil
         player = nil
         tileLoading = false
+        releaseCheck?.cancel()
+        releaseCheck = nil
         if silently {
             isExternal = false
         } else {
-            apply(false)
+            apply(false, fromPlayer: false)
         }
     }
 
@@ -128,10 +154,65 @@ final class AirPlayMonitor: ObservableObject {
         debugLog("[Cast] stop: session ended, no local resume (AirPlay); system route stays on AirPlay")
         player?.allowsExternalPlayback = false
         setPhase(.ended)
+        stopPlayback()
+    }
+
+    /// The one teardown behind the card's X, Stop AirPlay and a
+    /// receiver-side end (device test 2026-09-25): playback stops outright,
+    /// never falls back to the phone. PlayerSession.stop() unmounts the
+    /// tile, whose AirPlayTileDelivery.reset() tears down LAN delivery and
+    /// the airplay-aac variant and releases the keepalive.
+    private func stopPlayback() {
+        guard !stoppingSession else { return }
+        stoppingSession = true
+        defer { stoppingSession = false }
+        hostsHeadless = false
         detach(silently: true)
         PlayerSession.shared.stop()
         NowPlayingManager.shared.stop()
         RemoteSessionNowPlaying.clear()
+    }
+
+    /// The fullscreen player gives way to the card (Cast parity, device
+    /// test 2026-09-25: the player stayed up as a black screen). The
+    /// container is minimized, not torn down: its tile is what feeds the
+    /// receiver, so the session continues headless behind the card.
+    func handOffToReceiver() {
+        guard !hostsHeadless, !stoppingSession,
+              AirPlayReceiverResolver.currentAirPlayOutput() != nil,
+              PlayerSession.shared.mode != .idle || NowPlayingManager.shared.playingItem != nil
+        else { return }
+        hostsHeadless = true
+        debugLog("[AVP-AIRPLAY] fullscreen player dismissed: the receiver plays, the tile keeps serving it headless behind the card")
+        AppOrientationLock.release()
+        if !NowPlayingManager.shared.isMinimized {
+            NowPlayingManager.shared.applyMinimized()
+        }
+    }
+
+    /// The receiver side ended AirPlay (route gone, or the receiver let go
+    /// of the player): stop, same as the card's X. Called by the monitor's
+    /// own route evaluation and by the tile's route observer, whichever
+    /// runs first; the second call is a no-op.
+    /// `servedByTile`: the tile was serving the receiver on the LAN, so
+    /// the session belonged to it even if the card never reached `.active`.
+    func receiverEnded(routeLost: Bool, servedByTile: Bool = false) {
+        guard !stoppingSession, phase != .ended, phase != .routeLost else { return }
+        guard servedByTile || phase == .active || hostsHeadless || isExternal else { return }
+        releaseCheck?.cancel()
+        releaseCheck = nil
+        if routeLost {
+            debugLog("[Cast] card hide (AirPlay route lost); playback stopped")
+            setPhase(.routeLost)
+            stopPlayback()
+            setPhase(.none)
+        } else {
+            debugLog("[Cast] card hide (AirPlay)")
+            debugLog("[Cast] stop: the receiver ended AirPlay; playback stopped, no local resume")
+            player?.allowsExternalPlayback = false
+            setPhase(.ended)
+            stopPlayback()
+        }
     }
 
     /// Idle-route card's Disconnect: nothing is playing, so there is no
@@ -142,11 +223,29 @@ final class AirPlayMonitor: ObservableObject {
         setPhase(.ended)
     }
 
-    private func apply(_ active: Bool) {
+    private func apply(_ active: Bool, fromPlayer: Bool) {
         if isExternal != active {
             isExternal = active
-            if !active, phase == .active {
-                // Receiver gave the player back with the route still there.
+            if active {
+                releaseCheck?.cancel()
+                releaseCheck = nil
+            } else if phase == .active, fromPlayer {
+                // The receiver gave the player back with the route still
+                // there (receiver stopped). Confirm after a grace period
+                // so an item swap blip is not taken for it, then stop.
+                releaseCheck?.cancel()
+                releaseCheck = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: Self.receiverReleaseGrace)
+                    guard !Task.isCancelled else { return }
+                    let monitor = AirPlayMonitor.shared
+                    monitor.releaseCheck = nil
+                    guard !monitor.isExternal, monitor.player != nil else { return }
+                    monitor.receiverEnded(routeLost: false)
+                }
+                return
+            } else if !active, phase == .active {
+                // Player detached (tune teardown, channel flip): not a
+                // receiver-side end.
                 debugLog("[Cast] card hide (AirPlay)")
             }
         }
@@ -167,11 +266,16 @@ final class AirPlayMonitor: ObservableObject {
             externalPlaybackDisabledForSession = false
             AirPlayReceiverResolver.shared.cancelRetryLadder()
             if receiver != nil { receiver = nil }
+            if phase == .active || hostsHeadless || AirPlayTileDelivery.isServingReceiver {
+                receiverEnded(routeLost: true)
+                setPhase(.none)
+                return
+            }
             switch phase {
-            case .active, .probing:
-                debugLog("[Cast] card hide (AirPlay route lost); playback continues on this device")
-                setPhase(.routeLost)
-                RemoteSessionNowPlaying.clear()
+            case .probing:
+                // The receiver never took playback (audio-only speaker, or
+                // it dropped mid-handoff): the phone was still playing.
+                debugLog("[Cast] card hide (AirPlay route lost before handoff); playback continues on this device")
                 setPhase(.none)
             case .idleRoute:
                 debugLog("[Cast] card hide (AirPlay idle route)")
@@ -187,8 +291,11 @@ final class AirPlayMonitor: ObservableObject {
                 setPhase(.active)
                 AirPlayReceiverResolver.shared.runRetryLadder()
             }
+            if player != nil { handOffToReceiver() }
             return
         }
+        // Waiting to confirm a receiver-side release: hold the card.
+        if releaseCheck != nil { return }
         // An ended session stays hidden until the route itself changes.
         if phase == .ended, externalPlaybackDisabledForSession || player == nil && !tileLoading {
             return
@@ -224,6 +331,7 @@ final class AirPlayMonitor: ObservableObject {
         if p == .ended, phase != .ended {
             debugLog("[Cast] card hide (AirPlay, session ended)")
         }
+        if p == .none || p == .ended || p == .routeLost { hostsHeadless = false }
         if phase != p { phase = p }
     }
 
