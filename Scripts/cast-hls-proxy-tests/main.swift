@@ -290,7 +290,7 @@ do {
     let text = store.videoPlaylistText()
     let lines = text.split(separator: "\n").map(String.init)
     expect(lines.contains("#EXT-X-VERSION:7"), "version 7")
-    expect(lines.contains("#EXT-X-MEDIA-SEQUENCE:0"), "media sequence starts at 0 (5-window covers all 5)")
+    expect(lines.contains("#EXT-X-MEDIA-SEQUENCE:0"), "media sequence starts at 0 (15-window covers all 5)")
     expect(lines.contains("#EXT-X-DISCONTINUITY"), "discontinuity tag present at splice")
     expect(lines.contains("#EXT-X-MAP:URI=\"vinit\(gen1).mp4\""), "old generation MAP present")
     expect(lines.contains("#EXT-X-MAP:URI=\"vinit\(gen2).mp4\""), "new generation MAP present")
@@ -334,20 +334,20 @@ do {
     }
     let gen2 = store.beginGeneration()
     store.setDemuxedInitSegments(generation: gen2, video: Data("i2".utf8), audio: nil)
-    // Ring size 8: after 6 gen2 segments (total 9) one gen1 segment evicts.
-    for _ in 0..<6 {
+    // Ring size 18: after 16 gen2 segments (total 19) one gen1 segment evicts.
+    for _ in 0..<16 {
         store.addSegment(generation: gen2, durationTicks: ticks, videoData: Data([2]), audioData: nil)
     }
     expect(store.videoInitSegment(generation: gen1) != nil,
            "gen1 init retained while a gen1 segment is ringed")
-    // Push the remaining gen1 segments out (11 total > 8 + 3).
+    // Push the remaining gen1 segments out (21 total > 18 + 3).
     for _ in 0..<2 {
         store.addSegment(generation: gen2, durationTicks: ticks, videoData: Data([2]), audioData: nil)
     }
     expectEq(store.videoInitSegment(generation: gen1), nil,
              "gen1 init dropped once no ring entry references it")
     expect(store.videoInitSegment(generation: gen2) != nil, "current generation init always retained")
-    // The flagged (discontinuity) segment was seg3; it evicts at 12 total.
+    // The flagged (discontinuity) segment was seg3; it evicts at 22 total.
     var text = store.videoPlaylistText()
     expect(!text.contains("#EXT-X-DISCONTINUITY-SEQUENCE"), "discontinuity-sequence absent while tag in ring")
     for _ in 0..<4 {
@@ -361,11 +361,11 @@ do {
     // Live-edge hold semantics: newest+1 blocks briefly then nils on
     // timeout; far future and evicted return nil immediately.
     let t0 = Date()
-    expectEq(store.awaitSegment(seq: 15, rendition: .video, timeout: 0.3), nil,
+    expectEq(store.awaitSegment(seq: 25, rendition: .video, timeout: 0.3), nil,
              "newest+1 held until timeout")
     expect(Date().timeIntervalSince(t0) >= 0.25, "newest+1 actually waited")
     let t1 = Date()
-    expectEq(store.awaitSegment(seq: 40, rendition: .video, timeout: 5), nil, "far future 404s fast")
+    expectEq(store.awaitSegment(seq: 50, rendition: .video, timeout: 5), nil, "far future 404s fast")
     expectEq(store.awaitSegment(seq: 0, rendition: .video, timeout: 5), nil, "evicted 404s fast")
     expect(Date().timeIntervalSince(t1) < 0.2, "no hold for far-future/evicted")
     // Publication wakes a held fetch.
@@ -374,7 +374,7 @@ do {
         store.addSegment(generation: gen2, durationTicks: ticks, videoData: Data([9]), audioData: nil)
     }
     publisher.start()
-    expectEq(store.awaitSegment(seq: 15, rendition: .video, timeout: 3), Data([9]),
+    expectEq(store.awaitSegment(seq: 25, rendition: .video, timeout: 3), Data([9]),
              "held fetch resolves on publish")
 }
 
@@ -1009,15 +1009,15 @@ do {
     expect(windowSpanSeconds(first) - receiverPresentationDelay >= 3.0,
            "first window leaves a seek range at least one target duration wide")
 
-    // Slide the window: windowSize is 5, so six more segments roll the
-    // first four out, and the span stays the full five segments.
-    for _ in 0..<6 {
+    // Slide the window: windowSize is 15, so sixteen more segments roll
+    // the first five out, and the span stays the full fifteen segments.
+    for _ in 0..<16 {
         store.addSegment(generation: gen, durationTicks: ticks3s, videoData: Data([1]), audioData: nil)
     }
     let slid = store.videoPlaylistText()
     expect(slid.contains("#EXT-X-MEDIA-SEQUENCE:5"), "window head advanced with the ring")
     expectEq(programDateTimes(slid).count, 0, "still no PROGRAM-DATE-TIME after the window slid")
-    expectEq(windowSpanSeconds(slid), 15.0, "a full window spans five segments")
+    expectEq(windowSpanSeconds(slid), 45.0, "a full window spans fifteen segments")
 }
 
 // A playlist built across a discontinuity carries no absolute clock
@@ -2086,7 +2086,11 @@ func trunSampleCounts(_ segment: Data) -> [Int64] {
     let aExtinf = matches(audioPlaylist, "#EXTINF:([0-9.]+)").compactMap(Double.init)
     var extinfOK = vExtinf.count == aExtinf.count && !vExtinf.isEmpty
     let frameSeconds = frameTicks / Double(CastFMP4Remuxer.ticksPerSecond)
-    for i in vExtinf.indices where i < aExtinf.count {
+    // The generation's first segment is exempt: audio starts a little
+    // after video there (the first-segment offset). The window used to
+    // be short enough to have slid past it; at 15 segments it still lists it.
+    let firstListed = matches(videoPlaylist, "#EXT-X-MEDIA-SEQUENCE:([0-9]+)").first.flatMap { Int($0) } ?? 0
+    for i in vExtinf.indices where i < aExtinf.count && !(firstListed == 0 && i == 0) {
         if abs(vExtinf[i] - aExtinf[i]) > frameSeconds + 0.001 { extinfOK = false }
     }
     expect(extinfOK, "demuxed playlists: EXTINF differs by less than one audio frame")

@@ -25,13 +25,16 @@ import Foundation
 /// Shaka fatals).
 final class CastHLSSegmentStore: @unchecked Sendable {
 
-    /// Segments advertised in the playlist.
-    static let windowSize = 5
+    /// Segments advertised in the playlist: 15 at the usual 4 s is 60 s.
+    /// Shaka on the receiver re-seeks forward whenever the playhead falls
+    /// behind the seekable window start (the oldest listed segment), so
+    /// a short window turns any stall over ~10 s into a seek loop.
+    static let windowSize = 15
 
     /// Segments retained in memory; the extra tail past the window lets
     /// a receiver that is a poll behind still fetch what the previous
     /// playlist advertised.
-    static let ringSize = 8
+    static let ringSize = 18
 
     /// Bound on holding a segment GET that names a sequence the ingest
     /// has not published yet (the receiver racing the live edge);

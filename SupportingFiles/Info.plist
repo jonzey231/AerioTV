@@ -59,6 +59,7 @@
 	<array>
 		<string>_googlecast._tcp</string>
 		<string>_46B79062._googlecast._tcp</string>
+		<string>_116851A3._googlecast._tcp</string>
 		<string>_aeriotv._tcp</string>
 		<string>_airplay._tcp</string>
 	</array>
