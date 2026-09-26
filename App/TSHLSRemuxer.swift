@@ -2607,7 +2607,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             var response = Data(("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n"
                 + "Content-Length: \(body.count)\r\nConnection: close\r\n\r\n").utf8)
             response.append(body)
-            connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
+            // FIN follows the data; cancel only after a short grace so the
+            // peer can read the body before the socket is torn down.
+            connection.send(content: response, contentContext: .finalMessage, isComplete: true,
+                            completion: .contentProcessed { _ in
+                DispatchQueue.global().asyncAfter(deadline: .now() + 5) { connection.cancel() }
+            })
             return
         }
         if let peer {
@@ -2702,39 +2707,257 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         variant.stop()
     }
 
+    // MARK: HTTP/1.1 keep-alive server (shared by loopback and LAN)
+    //
+    // Device log 2026-09-26 11:08 / 11:15: a Roku fetched one playlist and
+    // failed within a second on every variant. Every response used to carry
+    // `Connection: close` and cancel the socket as soon as the bytes reached
+    // the stack (an abortive close that can RST before the peer reads). Each
+    // connection now serves requests in a loop, keeps alive by default, and
+    // closes gracefully (FIN after the data) on request, peer EOF or idle.
+
+    static let httpIdleTimeout: TimeInterval = 30
+    static let httpCloseGrace: TimeInterval = 5
+    static let httpMaxConnections = 32
+    private let httpConnLock = NSLock()
+    private var httpConnCount = 0
+    private var httpConnSeq = 0
+
     private func handleConnection(_ connection: NWConnection, lan: Bool = false, peer: String? = nil) {
-        connection.start(queue: .global(qos: .userInitiated))
-        receiveRequest(connection, buffer: Data(), lan: lan, peer: peer)
+        httpConnLock.lock()
+        let atCap = httpConnCount >= Self.httpMaxConnections
+        if !atCap { httpConnCount += 1 }
+        httpConnSeq += 1
+        let id = httpConnSeq
+        httpConnLock.unlock()
+        if atCap {
+            debugLog("[TS-REMUX] HTTP connection cap (\(Self.httpMaxConnections)) reached; refusing "
+                + "\(lan ? "LAN" : "loopback") conn#\(id) from \(peer ?? "?")")
+            connection.cancel()
+            return
+        }
+        linkLock.lock(); let localIP = linkStats.localIP; linkLock.unlock()
+        let isLocal = peer == nil || peer!.hasPrefix("127.") || peer == "::1"
+            || peer == "::ffff:127.0.0.1" || (localIP != nil && peer == localIP)
+        let conn = HTTPConn(id: id, connection: connection, lan: lan, peer: peer,
+                            logLAN: lan && !isLocal, owner: self)
+        conn.start()
     }
 
-    private func receiveRequest(_ connection: NWConnection, buffer: Data, lan: Bool, peer: String?) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, isComplete, error in
-            guard let self, error == nil else { connection.cancel(); return }
-            var buffer = buffer
-            if let data { buffer.append(data) }
-            if let headerEnd = buffer.range(of: Data("\r\n\r\n".utf8)) {
-                // Parse BEFORE honouring isComplete: a legal request whose
-                // last bytes arrive with FIN piggybacked must still be served.
-                let head = String(decoding: buffer[..<headerEnd.lowerBound], as: UTF8.self)
-                let path = head.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
-                if lan, let peer {
-                    let ua = head.split(separator: "\r\n").first {
-                        $0.lowercased().hasPrefix("user-agent:")
-                    }.map { $0.dropFirst("user-agent:".count).trimmingCharacters(in: .whitespaces) } ?? "(none)"
-                    self.queue.async {
-                        guard self.lanUALogged.insert(peer).inserted else { return }
-                        debugLog("[TS-REMUX] LAN delivery: User-Agent from \(peer): \(ua)")
-                    }
+    fileprivate func httpConnectionEnded() {
+        httpConnLock.lock(); httpConnCount -= 1; httpConnLock.unlock()
+    }
+
+    /// One HTTP/1.1 connection. All state is touched only on `q`, which is
+    /// also the NWConnection's queue, so every callback lands serialized.
+    /// Requests are served strictly one at a time in arrival order; bytes of
+    /// pipelined requests wait in `buffer` until the previous response is sent.
+    fileprivate final class HTTPConn: @unchecked Sendable {
+        let id: Int
+        let connection: NWConnection
+        let lan: Bool
+        let peer: String?
+        let logLAN: Bool
+        weak var owner: TSHLSRemuxer?
+        let q: DispatchQueue
+        private var buffer = Data()
+        private var busy = false
+        private var peerEOF = false
+        private var closing = false
+        private var ended = false
+        private var served = 0
+        private var idle: DispatchWorkItem?
+
+        init(id: Int, connection: NWConnection, lan: Bool, peer: String?, logLAN: Bool, owner: TSHLSRemuxer) {
+            self.id = id; self.connection = connection; self.lan = lan
+            self.peer = peer; self.logLAN = logLAN; self.owner = owner
+            q = DispatchQueue(label: "aerio.tsremux.http.\(id)", qos: .userInitiated)
+        }
+
+        private var tag: String { "\(peer ?? "?")#\(id)" }
+
+        func start() {
+            connection.stateUpdateHandler = { [self] state in
+                switch state {
+                case .failed, .cancelled: end()
+                default: break
                 }
-                self.respond(connection, path: path, lan: lan, peer: peer)
-            } else if isComplete || buffer.count >= 16_384 {
-                // EOF before a complete request, or an oversized head. Without
-                // the isComplete arm a cleanly half-closed peer returns
-                // (nil, true, nil) forever and this re-armed on every one.
-                connection.cancel()
-            } else {
-                self.receiveRequest(connection, buffer: buffer, lan: lan, peer: peer)
             }
+            connection.start(queue: q)
+            if logLAN { debugLog("[TS-REMUX] LAN conn#\(id) from \(peer ?? "?") opened") }
+            armIdle(Self.idle)
+            receive()
+        }
+
+        private static var idle: TimeInterval { TSHLSRemuxer.httpIdleTimeout }
+
+        private func end() {
+            guard !ended else { return }
+            ended = true
+            idle?.cancel(); idle = nil
+            connection.stateUpdateHandler = nil
+            owner?.httpConnectionEnded()
+        }
+
+        private func receive() {
+            guard !peerEOF, !ended else { return }
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [self] data, _, isComplete, error in
+                if let data { buffer.append(data) }
+                if error != nil || isComplete { peerEOF = true } else { receive() }
+                if error != nil && !busy {
+                    if logLAN && !closing { debugLog("[TS-REMUX] LAN conn#\(id) from \(peer ?? "?") closed by peer") }
+                    connection.cancel()
+                    return
+                }
+                processBuffer()
+            }
+        }
+
+        /// Serves the next buffered request, if any and if idle. Parse BEFORE
+        /// honoring EOF: a request whose last bytes arrive with FIN
+        /// piggybacked must still be served.
+        private func processBuffer() {
+            guard !busy, !closing, !ended else { return }
+            guard let headerEnd = buffer.range(of: Data("\r\n\r\n".utf8)) else {
+                if peerEOF {
+                    if logLAN { debugLog("[TS-REMUX] LAN conn#\(id) from \(peer ?? "?") closed by peer") }
+                    closeGracefully()
+                } else if buffer.count >= 16_384 {
+                    debugLog("[TS-REMUX] HTTP conn \(tag): oversized request head, closing")
+                    closeGracefully()
+                }
+                return
+            }
+            let head = String(decoding: buffer[..<headerEnd.lowerBound], as: UTF8.self)
+            buffer.removeSubrange(..<headerEnd.upperBound)
+            // Tolerate stray CRLFs between pipelined requests (RFC 9112 2.2).
+            while buffer.starts(with: Data("\r\n".utf8)) { buffer.removeFirst(2) }
+            busy = true
+            idle?.cancel(); idle = nil
+            handle(head: head)
+        }
+
+        private func handle(head: String) {
+            let lines = head.components(separatedBy: "\r\n")
+            let requestLine = lines.first?.split(separator: " ").map(String.init) ?? []
+            let method = requestLine.first?.uppercased() ?? ""
+            let path = requestLine.count > 1 ? requestLine[1] : "/"
+            let version = requestLine.count > 2 ? requestLine[2].uppercased() : "HTTP/1.0"
+            var headers: [String: String] = [:]
+            for line in lines.dropFirst() {
+                guard let colon = line.firstIndex(of: ":") else { continue }
+                let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+                headers[name] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            }
+            let connTokens = (headers["connection"] ?? "").lowercased()
+                .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            let keepAlive = version == "HTTP/1.1"
+                ? !connTokens.contains("close")
+                : connTokens.contains("keep-alive")
+
+            if served == 0 && logLAN {
+                var text = lines.joined(separator: " | ")
+                if text.count > 600 { text = String(text.prefix(600)) }
+                debugLog("[TS-REMUX] LAN request head from \(tag): \(text)")
+            }
+            if lan, let peer, let owner {
+                let ua = headers["user-agent"] ?? "(none)"
+                owner.queue.async {
+                    guard owner.lanUALogged.insert(peer).inserted else { return }
+                    debugLog("[TS-REMUX] LAN delivery: User-Agent from \(peer): \(ua)")
+                }
+            }
+
+            guard method == "GET" || method == "HEAD" else {
+                let body = Data("method not allowed".utf8)
+                send(status: "405 Method Not Allowed", contentType: "text/plain", body: body,
+                     headOnly: false, keepAlive: false, extra: "Allow: GET, HEAD\r\n")
+                return
+            }
+            guard let owner else {
+                send(status: "410 Gone", contentType: "text/plain", body: Data(),
+                     headOnly: method == "HEAD", keepAlive: false, extra: "")
+                return
+            }
+            owner.resolve(path: path, lan: lan, peer: peer) { [self] r in
+                q.async { [self] in
+                    let status: String
+                    switch r.status {
+                    case 200: status = "200 OK"
+                    case 403: status = "403 Forbidden"
+                    case 404: status = "404 Not Found"
+                    default: status = "410 Gone"
+                    }
+                    send(status: status, contentType: r.contentType, body: r.body,
+                         headOnly: method == "HEAD", keepAlive: keepAlive, extra: "")
+                }
+            }
+        }
+
+        /// Runs on `q`. A closing response goes out as the final message, so
+        /// the FIN trails the body; the socket is cancelled only after the
+        /// peer closes or a short grace.
+        private func send(status: String, contentType: String, body: Data,
+                          headOnly: Bool, keepAlive: Bool, extra: String) {
+            guard !ended else { return }
+            let header = "HTTP/1.1 \(status)\r\n"
+                + "Content-Type: \(contentType)\r\n"
+                + "Content-Length: \(body.count)\r\n"
+                + "Accept-Ranges: none\r\n"
+                + "Cache-Control: no-cache\r\n"
+                + extra
+                + (keepAlive
+                    ? "Connection: keep-alive\r\nKeep-Alive: timeout=\(Int(Self.idle))\r\n\r\n"
+                    : "Connection: close\r\n\r\n")
+            var response = Data(header.utf8)
+            if !headOnly { response.append(body) }
+            if keepAlive {
+                connection.send(content: response, completion: .contentProcessed { [self] error in
+                    busy = false
+                    served += 1
+                    if error != nil { connection.cancel(); return }
+                    armIdle(Self.idle)
+                    processBuffer()
+                })
+            } else {
+                closing = true
+                connection.send(content: response, contentContext: .finalMessage, isComplete: true,
+                                completion: .contentProcessed { [self] _ in
+                    busy = false
+                    served += 1
+                    if logLAN { debugLog("[TS-REMUX] LAN conn#\(id) from \(peer ?? "?") closed after response") }
+                    armCancel()
+                })
+            }
+        }
+
+        /// Half-close our side (FIN after any queued data), then cancel once
+        /// the grace runs out.
+        private func closeGracefully() {
+            guard !closing, !ended else { return }
+            closing = true
+            connection.send(content: nil, contentContext: .finalMessage, isComplete: true,
+                            completion: .contentProcessed { [self] _ in armCancel() })
+        }
+
+        private func armCancel() {
+            idle?.cancel()
+            // Peer already closed: nothing left to read, cancel now.
+            if peerEOF { connection.cancel(); return }
+            let item = DispatchWorkItem { [self] in connection.cancel() }
+            idle = item
+            q.asyncAfter(deadline: .now() + TSHLSRemuxer.httpCloseGrace, execute: item)
+        }
+
+        private func armIdle(_ seconds: TimeInterval) {
+            idle?.cancel()
+            let item = DispatchWorkItem { [self] in
+                guard !busy, !closing, !ended else { return }
+                if logLAN { debugLog("[TS-REMUX] LAN conn#\(id) from \(peer ?? "?") closed idle") }
+                closeGracefully()
+            }
+            idle = item
+            q.asyncAfter(deadline: .now() + seconds, execute: item)
         }
     }
 
@@ -2836,8 +3059,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
     }
 
-    private func respond(_ connection: NWConnection, path: String, lan: Bool = false, peer: String? = nil) {
+    /// Serves `path` and records the LAN diagnostics; the HTTP connection
+    /// writes the response.
+    fileprivate func resolve(path: String, lan: Bool, peer: String?,
+                             completion: @escaping @Sendable (ServedResource) -> Void) {
         serve(path: path, lan: lan) { [weak self] r in
+            defer { completion(r) }
             if lan { self?.noteLANServed(bytes: r.body.count, peer: peer, path: path, status: r.status) }
             if lan, let self, let peer, r.status == 200, path.hasSuffix("live.m3u8") {
                 let text = String(decoding: r.body, as: UTF8.self)
@@ -2862,23 +3089,6 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                     debugLog("[AVP-AIRPLAY] aac \(name) for \(peer): \(text)")
                 }
             }
-            let status: String
-            switch r.status {
-            case 200: status = "200 OK"
-            case 403: status = "403 Forbidden"
-            case 404: status = "404 Not Found"
-            default: status = "410 Gone"
-            }
-            let header = "HTTP/1.1 \(status)\r\n"
-                + "Content-Type: \(r.contentType)\r\n"
-                + "Content-Length: \(r.body.count)\r\n"
-                + "Cache-Control: no-cache\r\n"
-                + "Connection: close\r\n\r\n"
-            var response = Data(header.utf8)
-            response.append(r.body)
-            connection.send(content: response, completion: .contentProcessed { _ in
-                connection.cancel()
-            })
         }
     }
 }
