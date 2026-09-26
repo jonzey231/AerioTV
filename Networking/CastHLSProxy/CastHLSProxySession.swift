@@ -376,7 +376,8 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// serve and `CastHLSProxyError` for infrastructure failures.
     func startChannel(rawTSURL: URL, headers: [String: String],
                       allowAC3Passthrough: Bool = false,
-                      transcodeAC3: Bool = false) async throws -> URL {
+                      transcodeAC3: Bool = false,
+                      receiverDecodesAVCLevel42: Bool? = nil) async throws -> URL {
         // The Chromecast fetches over the LAN; 127.0.0.1 would only ever
         // work for the phone itself.
         guard let lanIP = Self.wifiLANAddress() else {
@@ -404,6 +405,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             let isChannelChange = self.activeURL != nil
             self.allowAC3Passthrough = allowAC3Passthrough
             self.transcodeAC3 = transcodeAC3
+            store.setReceiverDecodesAVCLevel42(receiverDecodesAVCLevel42)
             self.stopIngestLocked()
             self.activeURL = rawTSURL
             self.terminalError = nil

@@ -430,6 +430,27 @@ do {
     let videoOnly = store.demuxedMasterPlaylistText()
     expect(!videoOnly.contains("mp4a") && !videoOnly.contains("ac-3"),
            "video-only master names no audio codec")
+
+    // Level clamp (Chromecast Ultra, 2026-09-26): 4.2 is declared as 4.0
+    // unless the receiver answered yes to avc1.64002A.
+    expectEq(CastHLSSegmentStore.declaredAVCCodec("avc1.64002A", receiverDecodesLevel42: nil),
+             "avc1.640028", "unknown caps clamp level 4.2")
+    expectEq(CastHLSSegmentStore.declaredAVCCodec("avc1.4D002A", receiverDecodesLevel42: false),
+             "avc1.4D0028", "no to 4.2 clamps, keeping profile and constraint")
+    expectEq(CastHLSSegmentStore.declaredAVCCodec("avc1.64002A", receiverDecodesLevel42: true),
+             "avc1.64002A", "yes to 4.2 keeps the stream level")
+    expectEq(CastHLSSegmentStore.declaredAVCCodec("avc1.64001F", receiverDecodesLevel42: false),
+             "avc1.64001F", "levels at or below 4.0 are untouched")
+    var avcInit = Data("xxxxavcC".utf8)
+    avcInit.append(contentsOf: [0x01, 0x64, 0x00, 0x2A, 0xFF])
+    let clampStore = CastHLSSegmentStore()
+    let clampGen = clampStore.beginGeneration()
+    clampStore.setDemuxedInitSegments(generation: clampGen, video: avcInit, audio: nil)
+    expect(clampStore.demuxedMasterPlaylistText().contains("CODECS=\"avc1.640028,"),
+           "master declares the clamped level when caps are unknown")
+    clampStore.setReceiverDecodesAVCLevel42(true)
+    expect(clampStore.demuxedMasterPlaylistText().contains("CODECS=\"avc1.64002A,"),
+           "master keeps level 4.2 when the receiver decodes it")
 }
 
 // MARK: 9. segment-run continuity against a real transport stream
