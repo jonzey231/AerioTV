@@ -4,10 +4,10 @@ import Foundation
 /// (rebuilt 2026-09-24 from the lost 2026-09-21 work; the phone log reads
 /// `(mode: automatic)` on every receiver line).
 ///
-/// Roku's AirPlay receiver accepts neither AC-3 nor E-AC-3, so surround over
-/// AirPlay to a Roku is impossible: `automatic` hands non-Apple receivers an
-/// AAC-LC stereo downmix (the `airplay-aac` variant) and keeps Apple TV and
-/// Mac receivers on AC-3 passthrough.
+/// Some Roku models cannot decode AC-3 / E-AC-3 over AirPlay, so
+/// `automatic` hands non-Apple receivers an AAC-LC stereo downmix (muxed
+/// into the same LAN TS segments in place of the source audio) and keeps
+/// Apple TV and Mac receivers on AC-3 passthrough.
 enum AirPlayAudioMode: String, CaseIterable, Sendable {
     case automatic
     case passthrough

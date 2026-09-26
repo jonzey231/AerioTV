@@ -7,17 +7,11 @@ set -e
 cd "$(dirname "$0")"
 SRC=../../Networking/CastHLSProxy
 OUT=$(mktemp -d)
-# The AirPlay AAC master reads the SPS frame rate with the shipping
-# H264SPSTiming; lift it (and VideoRateStandards) out of TSHLSRemuxer.swift
-# rather than compiling the whole remuxer.
-awk '/^enum VideoRateStandards/,/^}/; /^enum H264SPSTiming/,/^}/' \
-    ../../App/TSHLSRemuxer.swift > "$OUT/H264SPSTiming.swift"
 xcrun swiftc -swift-version 6 -O -o "$OUT/casthls_tests" \
     main.swift \
     "$SRC/CastFMP4Remuxer.swift" \
     "$SRC/CastHLSSegmentStore.swift" \
     "$SRC/CastAudioFrameParser.swift" \
     "$SRC/CastAudioTranscoder.swift" \
-    ../../App/AirPlayAACVariant.swift \
-    "$OUT/H264SPSTiming.swift"
+    ../../App/TSLANAudioRewriter.swift
 "$OUT/casthls_tests"

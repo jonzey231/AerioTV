@@ -11,9 +11,11 @@ import Foundation
 /// In AirPlay video mode AVPlayer hands the item's URL to the receiver, so
 /// the loopback URL the tile normally plays is unreachable from the TV.
 /// While a receiver is served this swaps the item for the remuxer's LAN
-/// URL: `/live.m3u8` untouched (passthrough, Apple receivers) or the
-/// `airplay-aac` variant's `/aac/master.m3u8` (AAC-LC stereo, Roku), then
-/// suspends the local-render watchdogs, holds the background keepalive and
+/// URL, `/live.m3u8`, whatever the receiver (2026-09-26: a Roku plays the
+/// muxed TS playlist but rejects any demuxed fMP4 master). Only the audio
+/// inside the LAN TS segments depends on the receiver: the source audio
+/// (passthrough, Apple receivers) or AAC-LC stereo muxed into the same
+/// segments by the remuxer (Roku). Then it suspends the local-render watchdogs, holds the background keepalive and
 /// disarms PiP auto-start.
 ///
 /// The one owner of the session: the player's `isExternalPlaybackActive`
@@ -37,9 +39,9 @@ final class AirPlayTileDelivery {
     static let serving = CurrentValueSubject<Bool, Never>(false)
     static var isServingReceiver: Bool { serving.value }
 
-    /// Readiness waits for the airplay-aac variant: mid-play the phone is
-    /// still playing, so the swap gives up quickly (plan open question 2);
-    /// at a fresh tune the variant has no buffered window to prime from.
+    /// Handover waits for published LAN segments: mid-play the phone is
+    /// still playing, so the swap gives up quickly; a fresh tune has no
+    /// buffered window yet.
     static let midPlayReadyTimeout: TimeInterval = 6
     static let startReadyTimeout: TimeInterval = 30
     /// Mid-play: how long the swapped LAN item has to go external before
@@ -109,7 +111,7 @@ final class AirPlayTileDelivery {
     /// delivery cannot run). Returns false when AirPlay is not involved;
     /// the caller then starts on loopback as always.
     func prepareStart(remuxer: TSHLSRemuxer, loopbackURL: URL, channelName: String,
-                      start: @escaping (_ url: URL, _ lanAAC: Bool) -> Void) -> Bool {
+                      start: @escaping (_ url: URL) -> Void) -> Bool {
         reset(logEnd: false)
         self.remuxer = remuxer
         self.loopbackURL = loopbackURL
@@ -137,23 +139,23 @@ final class AirPlayTileDelivery {
             case .ready(let url):
                 debugLog("[AVP-AIRPLAY] AirPlay route already selected: starting on LAN \(self.endpointText), watchdogs suspended")
                 self.enterServing()
-                start(url, self.plan == .aacStereo)
+                start(url)
                 self.holdLocalOutputForTake(url: url)
                 self.watchReceiverTake(token: myToken)
             case .noAddress:
                 debugLog("[AVP-AIRPLAY] no LAN address for the remux server; starting on loopback")
                 self.state = .idle
                 AirPlayMonitor.shared.headlessTuneFellBack(reason: "no LAN address")
-                start(loopbackURL, false)
+                start(loopbackURL)
             case .unavailable:
                 debugLog("[AVP-AIRPLAY] LAN delivery unavailable; leaving the loopback item in place")
                 self.state = .idle
                 AirPlayMonitor.shared.headlessTuneFellBack(reason: "LAN delivery unavailable")
-                start(loopbackURL, false)
+                start(loopbackURL)
             case .audioOnlyReceiver:
                 self.state = .idle
                 AirPlayMonitor.shared.headlessTuneFellBack(reason: "audio-only receiver")
-                start(loopbackURL, false)
+                start(loopbackURL)
             }
             AirPlayMonitor.shared.noteTileLoading(false)
         }
@@ -407,8 +409,8 @@ final class AirPlayTileDelivery {
 
     /// Mid-play LAN item: the same forward-buffer policy as the loopback
     /// item (automatic). No configured join offset: the receiver starts at
-    /// the playlist's default point and the LAN publication delay (or the
-    /// AAC variant's window gate) keeps that point inside the window.
+    /// the playlist's default point and the LAN publication delay keeps
+    /// that point inside the window.
     private func makeLANItem(url: URL, copying old: AVPlayerItem) -> AVPlayerItem {
         let item = AVPlayerItem(url: url)
         item.automaticallyPreservesTimeOffsetFromLive = true
@@ -484,8 +486,10 @@ final class AirPlayTileDelivery {
 
     private enum LANResult { case ready(URL), noAddress, unavailable, audioOnlyReceiver }
 
-    /// Plan section 3 then section 4: receiver, audio plan, variant
-    /// readiness (AAC), LAN listener.
+    /// Plan section 3 then section 4: receiver, audio plan, LAN listener,
+    /// then the published-segment handover wait. One path for every plan:
+    /// the receiver always gets `/live.m3u8`; `aacStereo` only turns on the
+    /// remuxer's LAN audio rewrite.
     private func prepareLAN(remuxer: TSHLSRemuxer, readyTimeout: TimeInterval, token myToken: UUID) async -> LANResult {
         let mode = AirPlayAudioMode.current
         let receiver = await AirPlayReceiverResolver.shared.resolveForHandoff()
@@ -497,31 +501,11 @@ final class AirPlayTileDelivery {
         let codec = remuxer.sourceAudioCodec
         let transcodable = codec == "AC-3" || codec == "E-AC-3"
         plan = (receiver.wantsAAC(mode: mode) && transcodable) ? .aacStereo : .passthrough
-        var path = "/live.m3u8"
-        if plan == .aacStereo {
-            let variant: AirPlayAACVariant? = await withCheckedContinuation { cont in
-                remuxer.startAACVariant { cont.resume(returning: $0) }
-            }
-            guard token == myToken else { return .unavailable }
-            if let variant {
-                let deadline = Date().addingTimeInterval(readyTimeout)
-                while !variant.isReady, !variant.hasFailed, Date() < deadline {
-                    try? await Task.sleep(nanoseconds: 250_000_000)
-                    guard token == myToken else { return .unavailable }
-                }
-                guard variant.isReady else {
-                    // Plan open question 2: no swap without a ready variant.
-                    remuxer.stopAACVariant()
-                    plan = .passthrough
-                    return .unavailable
-                }
-                debugLog("[AVP-AIRPLAY] audio: source \(variant.sourceAudioLabel) -> AAC stereo for AirPlay")
-                debugLog("[AVP-AIRPLAY] \(variant.statusLine("variant ready"))")
-                path = "/aac/master.m3u8"
-            } else {
-                debugLog("[AVP-AIRPLAY] audio: passthrough (decoder unavailable)")
-                plan = .passthroughDecoderUnavailable
-            }
+        let aac = await setLANAudio(remuxer: remuxer, aac: plan == .aacStereo)
+        guard token == myToken else { return .unavailable }
+        if plan == .aacStereo, !aac {
+            debugLog("[AVP-AIRPLAY] audio: passthrough (decoder unavailable)")
+            plan = .passthroughDecoderUnavailable
         }
         let lan: TSHLSRemuxer.LANDeliveryResult = await withCheckedContinuation { cont in
             remuxer.startLANDelivery { cont.resume(returning: $0) }
@@ -530,22 +514,21 @@ final class AirPlayTileDelivery {
         switch lan {
         case .ready(let ip, let port):
             lanEndpoint = (ip, port)
-            if plan != .aacStereo {
-                await waitForPublishedSegments(remuxer: remuxer, timeout: readyTimeout, token: myToken)
-                guard token == myToken else { return .unavailable }
-            }
-            guard let url = URL(string: "http://\(ip):\(port)\(path)") else { return .unavailable }
-            if let variant = remuxer.currentAirPlayVariant, plan == .aacStereo {
-                variant.startServingLog { line in debugLog("[AVP-AIRPLAY] \(line)") }
-            }
+            await waitForPublishedSegments(remuxer: remuxer, timeout: readyTimeout, token: myToken)
+            guard token == myToken else { return .unavailable }
+            guard let url = URL(string: "http://\(ip):\(port)/live.m3u8") else { return .unavailable }
             return .ready(url)
         case .noAddress:
-            remuxer.stopAACVariant()
             return .noAddress
         case .unavailable:
-            remuxer.stopAACVariant()
             remuxer.stopLANDelivery()
             return .unavailable
+        }
+    }
+
+    private func setLANAudio(remuxer: TSHLSRemuxer, aac: Bool) async -> Bool {
+        await withCheckedContinuation { cont in
+            remuxer.setLANAudioAAC(aac) { cont.resume(returning: $0) }
         }
     }
 
@@ -588,8 +571,8 @@ final class AirPlayTileDelivery {
 
     /// The resolver named the receiver after the plan was decided. An
     /// unresolved receiver starts on passthrough (automatic mode); if it
-    /// turns out to be non-Apple, switch the receiver to the AAC variant
-    /// with one item swap.
+    /// turns out to be non-Apple, turn on the LAN audio rewrite and hand
+    /// the receiver a fresh item on the same `/live.m3u8`.
     static func receiverResolved(_ r: AirPlayReceiver) {
         servingTile?.replanIfNeeded(for: r)
     }
@@ -598,40 +581,26 @@ final class AirPlayTileDelivery {
         guard state == .serving, plan == .passthrough, !replanning,
               AirPlayAudioMode.current == .automatic,
               r.model != nil, !r.isApple, !r.isAudioOnly,
-              let remuxer, let player, let old = player.currentItem, let lanEndpoint else { return }
+              let remuxer, let player, let old = player.currentItem, lanEndpoint != nil else { return }
         let codec = remuxer.sourceAudioCodec
         guard codec == "AC-3" || codec == "E-AC-3" else { return }
-        debugLog("[AVP-AIRPLAY] receiver resolved to non-Apple '\(r.name)' model=\(r.model ?? "?") while serving passthrough: switching to the AAC variant (item swap)")
+        debugLog("[AVP-AIRPLAY] receiver resolved to non-Apple '\(r.name)' model=\(r.model ?? "?") while serving passthrough: switching LAN audio to AAC-LC stereo (item swap)")
         replanning = true
         let myToken = token
         Task { @MainActor in
             defer { self.replanning = false }
-            let variant: AirPlayAACVariant? = await withCheckedContinuation { cont in
-                remuxer.startAACVariant { cont.resume(returning: $0) }
-            }
-            guard self.token == myToken, self.state == .serving, let variant else {
-                if variant == nil { debugLog("[AVP-AIRPLAY] re-plan: AAC variant unavailable; staying on passthrough") }
-                return
-            }
-            let deadline = Date().addingTimeInterval(Self.midPlayReadyTimeout)
-            while !variant.isReady, !variant.hasFailed, Date() < deadline {
-                try? await Task.sleep(nanoseconds: 250_000_000)
-                guard self.token == myToken, self.state == .serving else { return }
-            }
-            guard variant.isReady,
-                  let url = URL(string: "http://\(lanEndpoint.ip):\(lanEndpoint.port)/aac/master.m3u8"),
-                  let player = self.player else {
-                debugLog("[AVP-AIRPLAY] re-plan: AAC variant not ready; staying on passthrough")
-                remuxer.stopAACVariant()
+            let aac = await self.setLANAudio(remuxer: remuxer, aac: true)
+            guard self.token == myToken, self.state == .serving, let player = self.player else { return }
+            guard aac, let url = (old.asset as? AVURLAsset)?.url else {
+                debugLog("[AVP-AIRPLAY] re-plan: LAN audio rewrite unavailable; staying on passthrough")
                 return
             }
             self.plan = .aacStereo
-            debugLog("[AVP-AIRPLAY] \(variant.statusLine("variant ready"))")
+            remuxer.resetLANReceiverTimeBase()
             let item = self.makeLANItem(url: url, copying: player.currentItem ?? old)
             player.replaceCurrentItem(with: item)
             self.observeLANItem(item)
-            variant.startServingLog { line in debugLog("[AVP-AIRPLAY] \(line)") }
-            debugLog("[AVP-AIRPLAY] re-plan: receiver now on the AAC variant \(self.endpointText)")
+            debugLog("[AVP-AIRPLAY] re-plan: receiver now gets AAC-LC stereo in the LAN TS \(self.endpointText)")
         }
     }
 
@@ -670,7 +639,7 @@ final class AirPlayTileDelivery {
     private var linkTicks = 0
 
     /// Parked-receiver watchdog: the receiver fetched a playlist but no
-    /// media segment for `parkTimeout`. Off for the AAC plan.
+    /// media segment for `parkTimeout`.
     static let parkTimeout: TimeInterval = 20
     private var parkLastSegments = 0
     private var parkBaselinePlaylists = 0
@@ -701,7 +670,6 @@ final class AirPlayTileDelivery {
 
     /// True when the session was stopped.
     private func checkParked(_ st: TSHLSRemuxer.LANLinkStats) -> Bool {
-        guard plan != .aacStereo else { return false }
         // Upstream stall: nothing cut and unfetched, so the receiver has
         // nothing to ask for. The clock only runs while segments wait.
         if st.servedSegmentRequests != parkLastSegments || st.reservoirSegments == 0 {
@@ -756,19 +724,18 @@ final class AirPlayTileDelivery {
         let playerT = secs(player?.currentTime())
         let seekable = rangeText(player?.currentItem?.seekableTimeRanges.last)
         // Direct margins in the receiver's item time (t = 0 at the start of
-        // the first segment of the first LAN playlist it read). The AAC
-        // variant has its own playlist, so these apply to passthrough only.
+        // the first segment of the first LAN playlist it read).
         func f1(_ v: Double?) -> String {
             guard let v, v.isFinite else { return "-" }
             return String(format: "%.1f", v)
         }
         let t = player?.currentTime().seconds
-        let tOK = (t?.isFinite ?? false) && plan != .aacStereo
-        let e = plan != .aacStereo ? published.realEdgeTime : nil
-        let p = plan != .aacStereo ? published.publishedEdgeTime : nil
+        let tOK = t?.isFinite ?? false
+        let e = published.realEdgeTime
+        let p = published.publishedEdgeTime
         let recvBuffer = tOK ? p.map { $0 - t! } : nil
         let margin = tOK ? e.map { $0 - t! } : nil
-        let base = published.timeBaseSeq >= 0 && plan != .aacStereo ? "seg \(published.timeBaseSeq)" : "-"
+        let base = published.timeBaseSeq >= 0 ? "seg \(published.timeBaseSeq)" : "-"
         debugLog(String(format: "[AVP-AIRPLAY] link: ingest %.0f kbps avg/%.0f kbps min over 10 s, stalls %d, reservoir %d segs/%.1f s, served %.0f kbps to %@, player status %@, external %@ (hold-back %.1f s, published %d segs, delay %.1f s), receiver last seg %@ / published edge %@ (lag %@ segs), real edge %@ s, published edge %@ s, receiver buffer %@ s, total margin %@ s (t0=%@), player t=%@ s seekable=[%@]",
                         avg, minimum, stalls, st.reservoirSegments, st.reservoirSeconds, servedKbps,
                         st.peer ?? "none", status, external ? "true" : "false", st.holdBack,
@@ -779,8 +746,8 @@ final class AirPlayTileDelivery {
 
     /// The receiver-side end of a serving session (external playback off
     /// past the grace, the parked watchdog, a LAN item that failed twice):
-    /// playback stops outright, no local resume. LAN delivery, the variant
-    /// and the keepalive go now, then the monitor runs the same stop as
+    /// playback stops outright, no local resume. LAN delivery (with its
+    /// audio rewrite) and the keepalive go now, then the monitor runs the same stop as
     /// the card's X.
     private func endReceiverSession(_ why: String) {
         guard state == .serving else { return }
@@ -810,7 +777,6 @@ final class AirPlayTileDelivery {
     }
 
     private func teardownLAN() {
-        remuxer?.stopAACVariant()
         remuxer?.stopLANDelivery()
         lanEndpoint = nil
     }

@@ -2073,135 +2073,6 @@ func trunSampleCounts(_ segment: Data) -> [Int64] {
 
 runDemuxedRenditionChecks()
 
-// MARK: 16. AirPlay airplay-aac variant (2026-09-21 rebuild)
-//
-// The variant reuses CastFMP4Remuxer + CastHLSSegmentStore for AirPlay
-// receivers that cannot decode AC-3. What it adds, and what is checked
-// here: the /aac routes, the stripped steering tags, the readiness gate, the
-// served tally and the status-line template the device log greps for.
-
-do {
-    // No steering tags on the variant: the SERVER-CONTROL and START
-    // lines go, everything else stays in order.
-    let tagged = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,HOLD-BACK=18.000\n"
-        + "#EXT-X-START:TIME-OFFSET=-9\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:5.000,\nvseg0.m4s\n"
-    expectEq(AirPlayAACVariant.stripSteeringTags(tagged),
-             "#EXTM3U\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:5.000,\nvseg0.m4s\n",
-             "airplay-aac: steering tags stripped, target pinned to 4")
-    expectEq(AirPlayAACVariant.servedSummary([:]), "none", "airplay-aac served: none before any GET")
-    expectEq(AirPlayAACVariant.servedSummary(["video": 2, "master": 3, "aseg": 0]),
-             "master=3 video=2", "airplay-aac served: sorted, zero kinds omitted")
-    // Device log 2026-09-25 16:22:37: "variant ready ... (0 of 0 ring,
-    // target 0s ...)". An empty window must never read as ready.
-    expect(!AirPlayAACVariant.isReady(hasInit: true, windowCount: 0, target: 0, windowSeconds: 0),
-           "airplay-aac: variant not ready with 0 segments (init only)")
-    expect(!AirPlayAACVariant.isReady(hasInit: true, windowCount: 3, target: 0, windowSeconds: 0),
-           "airplay-aac: variant not ready with a zero target")
-    // Device log 2026-09-26 10:58: 3 segments, target 6, 15 s window.
-    expect(!AirPlayAACVariant.isReady(hasInit: true, windowCount: 3, target: 6, windowSeconds: 15),
-           "airplay-aac: not ready with 3 segments (device log 10:58)")
-    expect(!AirPlayAACVariant.isReady(hasInit: true, windowCount: 3, target: 6, windowSeconds: 30),
-           "airplay-aac: not ready below 4 segments")
-    expect(!AirPlayAACVariant.isReady(hasInit: true, windowCount: 4, target: 4, windowSeconds: 9.9),
-           "airplay-aac: not ready below 10 s")
-    expect(!AirPlayAACVariant.isReady(hasInit: true, windowCount: 3, target: 4, windowSeconds: 12),
-           "airplay-aac: not ready below 4 segments even with 10 s")
-    expect(AirPlayAACVariant.isReady(hasInit: true, windowCount: 5, target: 4, windowSeconds: 10),
-           "airplay-aac: ready at 10 s with 4+ segments (TS LAN handover parity)")
-}
-
-@MainActor func runAirPlayVariantChecks() {
-    guard let fixture = continuityFixtureTS() else {
-        print("SKIP airplay-aac variant end-to-end (no ffmpeg fixture)")
-        return
-    }
-    let logLines = LockedLines()
-    let variant = AirPlayAACVariant(sourceCodecName: "AAC", log: { logLines.append($0) })
-    expectEq(variant.serve(path: "/aac/nope.txt").status, 404, "airplay-aac: unknown path 404s")
-    expect(!variant.isReady, "airplay-aac: not ready before any media")
-    // Init but no closed segment (2026-09-25 log): feed ~1 s of media.
-    do {
-        let early = AirPlayAACVariant(sourceCodecName: "AAC", log: { _ in })
-        early.start(primeSegments: [], tail: fixture.prefix((200_000 / 188) * 188))
-        early.drain()
-        let s = early.snapshot()
-        expect(s.ringCount < 2, "airplay-aac early: fewer than 2 segments cut (got \(s.ringCount))")
-        expect(!early.isReady, "airplay-aac: variant not ready with 0 segments (hasInit=\(s.hasInit))")
-        early.stop()
-        early.drain()
-    }
-    // Prime with the first 2 MB as "buffered segments", then tee the rest
-    // in ingest-sized chunks, the way TSHLSRemuxer drives it.
-    let split = min(fixture.count, (2_000_000 / 188) * 188)
-    variant.start(primeSegments: [(seq: 0, data: fixture.prefix(split))], tail: Data())
-    var offset = split
-    while offset < fixture.count {
-        let end = min(fixture.count, offset + 65_536)
-        variant.feed(fixture.subdata(in: offset..<end))
-        offset = end
-    }
-    variant.drain()
-    expect(!variant.hasFailed, "airplay-aac: remux/transcode ran without error")
-    expect(variant.isReady, "airplay-aac: ready after 40 s of media")
-    let lines = logLines.all
-    expect(lines.first == "variant started (source AAC)", "airplay-aac: variant started line first")
-    expect(lines.contains { $0.hasPrefix("primed from 1 buffered segments (seq 0...0, ") },
-           "airplay-aac: primed line")
-    expect(lines.contains { $0.hasPrefix("init ready (") }, "airplay-aac: init ready line")
-
-    let master = String(decoding: variant.serve(path: "/aac/master.m3u8").body, as: UTF8.self)
-    expect(master.contains("URI=\"audio.m3u8\"") && master.contains("video.m3u8"),
-           "airplay-aac master: demuxed renditions")
-    expect(master.contains("mp4a.40.2"), "airplay-aac master: AAC codec string")
-    print("---- airplay-aac master ----\n" + master + "----")
-    expect(master.hasPrefix("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n"),
-           "airplay-aac master: VERSION + INDEPENDENT-SEGMENTS header")
-    expect(!master.contains("CLOSED-CAPTIONS"), "airplay-aac master: no CLOSED-CAPTIONS")
-    expect(master.contains("CHANNELS=\"2\"") && master.contains("LANGUAGE=\"en\""),
-           "airplay-aac master: audio rendition attributes")
-    expect(master.contains("AVERAGE-BANDWIDTH=8000000"), "airplay-aac master: AVERAGE-BANDWIDTH")
-    let video = variant.serve(path: "/aac/video.m3u8")
-    let videoText = String(decoding: video.body, as: UTF8.self)
-    expect(videoText.contains("#EXTM3U\n#EXT-X-INDEPENDENT-SEGMENTS\n"),
-           "airplay-aac: video playlist states INDEPENDENT-SEGMENTS")
-    expectEq(video.kind, "video", "airplay-aac: video playlist kind")
-    expectEq(video.seq, -1, "airplay-aac: playlists log seq -1")
-    let snap = variant.snapshot()
-    expectEq(snap.target, 4, "airplay-aac: served target is a constant 4")
-    expect(videoText.contains("#EXT-X-TARGETDURATION:4\n"), "airplay-aac video playlist serves TARGETDURATION 4")
-    expect(!videoText.contains("#EXT-X-SERVER-CONTROL") && !videoText.contains("#EXT-X-START"),
-           "airplay-aac video playlist carries no steering tags")
-    expect(snap.windowSeconds >= AirPlayAACVariant.readyWindowSeconds,
-           "airplay-aac: window holds the 10 s handover minimum (\(snap.windowSeconds) s)")
-    let audioText = String(decoding: variant.serve(path: "/aac/audio.m3u8").body, as: UTF8.self)
-    expect(!audioText.contains("HOLD-BACK"), "airplay-aac audio playlist carries no hold-back")
-    expect(videoText.contains("#EXT-X-MAP:URI=\"vinit1.mp4\""), "airplay-aac: generation 1 init")
-    let vinit = variant.serve(path: "/aac/vinit1.mp4")
-    expectEq(vinit.status, 200, "airplay-aac: vinit1 served")
-    expectEq(vinit.kind, "vinit", "airplay-aac: vinit kind")
-    expectEq(vinit.seq, 1, "airplay-aac: init seq is its generation")
-    expectEq(variant.serve(path: "/aac/ainit1.mp4").status, 200, "airplay-aac: ainit1 served")
-    let firstSeq = snap.windowFirst
-    let vseg = variant.serve(path: "/aac/vseg\(firstSeq).m4s")
-    let aseg = variant.serve(path: "/aac/aseg\(firstSeq).m4s")
-    expect(vseg.status == 200 && aseg.status == 200, "airplay-aac: window segments served")
-    expectEq(aseg.contentType, "audio/iso.segment", "airplay-aac: aseg content type")
-    expectEq(variant.serve(path: "/aac/vinit9.mp4").status, 404, "airplay-aac: unknown generation 404s")
-
-    let status = variant.statusLine("variant serving")
-    let template = "^variant serving: window seq [0-9]+\\.\\.\\.[0-9]+ \\([0-9]+ of [0-9]+ ring, target [0-9]+s, "
-        + "window [0-9.]+s of 10\\.0s needed, default start [0-9.]+s back, live edge [0-9.]+s\\) "
-        + "video end [0-9.]+s audio end [0-9.]+s delta -?[0-9.]+s, audio-bearing [0-9]+, "
-        + "backlog v=[0-9]+ a=[0-9]+ units=[0-9]+ emitted [0-9.]+s, "
-        + "served ainit=1 aseg=1 audio=1 master=1 video=1 vinit=1 vseg=1$"
-    expect(status.range(of: template, options: .regularExpression) != nil,
-           "airplay-aac status line matches the 09-24 template: \(status)")
-    variant.stop()
-    variant.drain() // barrier: stop ran
-    expect(logLines.all.last == "variant stopped", "airplay-aac: variant stopped line")
-    expectEq(variant.serve(path: "/aac/vseg\(firstSeq).m4s").status, 404, "airplay-aac: nothing served after stop")
-}
-
 final class StoreRef: @unchecked Sendable {
     var store: CastHLSSegmentStore?
 }
@@ -2269,7 +2140,198 @@ do {
     expect(Date().timeIntervalSince(t) < 1, "splice: close wakes the waiter promptly")
 }
 
-runAirPlayVariantChecks()
+// MARK: 16. AirPlay LAN audio rewrite (2026-09-26)
+//
+// AirPlay always serves the TS LAN playlist; for an AAC receiver the LAN
+// copy of each segment carries AAC-LC stereo as ADTS PES on the source
+// audio PID. Checked here: CRC-32/MPEG-2, the PMT rewrite, ADTS headers,
+// PES packetization (CC, stuffing, PTS) and one synthetic segment end to
+// end with the fake transcoder.
+
+func tsPacket(pid: Int, pusi: Bool, cc: UInt8, payload: [UInt8]) -> [UInt8] {
+    precondition(payload.count <= 184)
+    var p: [UInt8] = [0x47, UInt8((pusi ? 0x40 : 0) | (pid >> 8)), UInt8(pid & 0xFF), 0x10 | cc]
+    p.append(contentsOf: payload)
+    p.append(contentsOf: [UInt8](repeating: 0xFF, count: 188 - p.count))
+    return p
+}
+
+func psiPacket(pid: Int, section body: [UInt8]) -> [UInt8] {
+    var section = body
+    let len = section.count - 3 + 4
+    section[1] = 0xB0 | UInt8(len >> 8)
+    section[2] = UInt8(len & 0xFF)
+    let crc = TSLANAudioRewriter.crc32MPEG(section)
+    section += [UInt8(crc >> 24), UInt8((crc >> 16) & 0xFF), UInt8((crc >> 8) & 0xFF), UInt8(crc & 0xFF)]
+    return tsPacket(pid: pid, pusi: true, cc: 0, payload: [0x00] + section)
+}
+
+/// Video 0x100 (PCR), AC-3 0x101 (language + AC-3 registration), AC-3 0x102.
+func syntheticPMT() -> [UInt8] {
+    var s: [UInt8] = [0x02, 0, 0, 0x00, 0x01, 0xC1, 0x00, 0x00, 0xE1, 0x00, 0xF0, 0x00]
+    s += [0x1B, 0xE1, 0x00, 0xF0, 0x00]
+    let desc: [UInt8] = [0x0A, 4, 0x65, 0x6E, 0x67, 0x00, 0x05, 4, 0x41, 0x43, 0x2D, 0x33]
+    s += [0x81, 0xE1, 0x01, 0xF0, UInt8(desc.count)] + desc
+    s += [0x81, 0xE1, 0x02, 0xF0, 0x00]
+    return psiPacket(pid: 0x1000, section: s)
+}
+
+func syntheticPAT() -> [UInt8] {
+    psiPacket(pid: 0, section: [0x00, 0, 0, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x01, 0xF0, 0x00])
+}
+
+/// One AC-3 syncframe: 48 kHz, 64 kbps (256 bytes), 2/0 stereo.
+func ac3Frame() -> [UInt8] {
+    var f = [UInt8](repeating: 0x21, count: 256)
+    f[0] = 0x0B; f[1] = 0x77; f[2] = 0; f[3] = 0
+    f[4] = 0x08       // fscod 0 (48 kHz), frmsizecod 8 (64 kbps)
+    f[5] = 0x40       // bsid 8, bsmod 0
+    f[6] = 0x40       // acmod 2, dsurmod 0, lfeon 0
+    return f
+}
+
+func pesBytes(streamID: UInt8, pts: Int64, payload: [UInt8]) -> [UInt8] {
+    [0, 0, 1, streamID, 0, 0, 0x80, 0x80, 5] + TSLANAudioRewriter.encodePTS(pts) + payload
+}
+
+/// Split a PES into full-payload packets; the last is 0xFF-filled (the
+/// rewriter parses by syncword and length, so filler after it is harmless).
+func packetsFor(pid: Int, pes: [UInt8]) -> [[UInt8]] {
+    var out: [[UInt8]] = []
+    var o = 0
+    var cc: UInt8 = 0
+    while o < pes.count {
+        let n = min(184, pes.count - o)
+        out.append(tsPacket(pid: pid, pusi: o == 0, cc: cc, payload: Array(pes[o..<(o + n)])))
+        cc = (cc + 1) & 0x0F
+        o += n
+    }
+    return out
+}
+
+@MainActor func runLANAudioRewriteChecks() {
+    // CRC-32/MPEG-2 check value.
+    expectEq(TSLANAudioRewriter.crc32MPEG(Array("123456789".utf8)), 0x0376_E6E7, "lan-audio: CRC-32/MPEG-2 check value")
+
+    // PMT rewrite.
+    let pmt = syntheticPMT()
+    let before = TSLANAudioRewriter.parsePMT(pmt)
+    expectEq(before?.audio.count, 2, "lan-audio: synthetic PMT has two audio PIDs")
+    guard let rewritten = TSLANAudioRewriter.rewritePMT(pmt, targetPID: 0x101) else {
+        expect(false, "lan-audio: PMT rewrite produced a packet"); return
+    }
+    expectEq(rewritten.count, 188, "lan-audio: rewritten PMT is one packet")
+    let after = TSLANAudioRewriter.parsePMT(rewritten)
+    expectEq(after?.audio, [TSLANAudioRewriter.PMTInfo.AudioES(pid: 0x101, type: 0x0F)],
+             "lan-audio: PMT names only PID 0x101, as stream_type 0x0F")
+    expectEq(after?.videoPID, 0x100, "lan-audio: video entry kept")
+    expectEq(after?.pcrPID, 0x100, "lan-audio: PCR PID untouched")
+    let sectionLength = (Int(rewritten[6] & 0x0F) << 8) | Int(rewritten[7])
+    let section = Array(rewritten[5..<(5 + 3 + sectionLength)])
+    expectEq(TSLANAudioRewriter.crc32MPEG(section), 0, "lan-audio: rewritten PMT CRC verifies (residue 0)")
+    let text = section.map { String(format: "%02X", $0) }.joined()
+    expect(text.contains("0FE101F0060A04656E6700"), "lan-audio: AAC entry keeps only the language descriptor: \(text)")
+    expect(!text.contains("0541432D33"), "lan-audio: AC-3 registration descriptor dropped")
+    expect(TSLANAudioRewriter.rewritePMT(pmt, targetPID: 0x1FF) == nil, "lan-audio: unknown target PID refused")
+
+    // ADTS header.
+    let adts = TSLANAudioRewriter.adtsHeader(payloadLength: 300, frequencyIndex: 3)
+    expectEq(adts.count, 7, "lan-audio: ADTS header is 7 bytes")
+    let adtsLen = (Int(adts[3] & 0x03) << 11) | (Int(adts[4]) << 3) | (Int(adts[5]) >> 5)
+    expectEq(adtsLen, 307, "lan-audio: ADTS frame length includes the header")
+    expectEq((Int(adts[2]) >> 6) + 1, 2, "lan-audio: ADTS profile AAC-LC")
+    expectEq((Int(adts[2]) >> 2) & 0x0F, 3, "lan-audio: ADTS 48 kHz")
+    expectEq(((Int(adts[2]) & 1) << 2) | (Int(adts[3]) >> 6), 2, "lan-audio: ADTS stereo")
+
+    // PES packetization.
+    var cc: UInt8 = 14
+    let pts: Int64 = (1 << 33) - 1234
+    let ts = TSLANAudioRewriter.packetizePES(payload: [UInt8](repeating: 0x5A, count: 400), pts: pts, pid: 0x101, cc: &cc)
+    expectEq(ts.count, 3 * 188, "lan-audio: 414-byte PES fills three packets")
+    expectEq(cc, 1, "lan-audio: CC advanced by three with wrap")
+    let ccs = stride(from: 0, to: ts.count, by: 188).map { ts[$0 + 3] & 0x0F }
+    expectEq(ccs, [14, 15, 0], "lan-audio: CC continuous across the wrap")
+    expect(ts[1] & 0x40 != 0 && ts[189] & 0x40 == 0, "lan-audio: PUSI on the first packet only")
+    expectEq(ts[376 + 3] >> 4, 3, "lan-audio: last packet carries adaptation stuffing")
+    expectEq(Int(ts[376 + 4]), 183 - 46, "lan-audio: stuffing length fills the packet")
+    expectEq(TSLANAudioRewriter.pesPTS(Array(ts[0..<188])), pts, "lan-audio: PTS round trip")
+    let pesLen = (Int(ts[8]) << 8) | Int(ts[9])
+    expectEq(pesLen, 3 + 5 + 400, "lan-audio: PES_packet_length")
+
+    // One synthetic segment end to end.
+    let logs = LockedLines()
+    var fakes: [FakeCastAudioTranscoder] = []
+    let rewriter = TSLANAudioRewriter(log: { logs.append($0) }, canDecode: { _ in true },
+                                      transcoderFactory: { _, onConfig, onFrame in
+        let f = FakeCastAudioTranscoder(onConfig: onConfig, onFrame: onFrame)
+        fakes.append(f)
+        return f
+    })
+    var seg: [UInt8] = syntheticPAT() + pmt
+    let videoPTS: Int64 = 900_000
+    for p in packetsFor(pid: 0x100, pes: pesBytes(streamID: 0xE0, pts: videoPTS, payload: [0, 0, 0, 1, 0x65, 0x88])) { seg += p }
+    // Audio starts one frame before the first picture: gated.
+    var acc: UInt8 = 0
+    seg += TSLANAudioRewriter.packetizePES(payload: ac3Frame() + ac3Frame() + ac3Frame(), pts: videoPTS - 2880,
+                                           pid: 0x101, cc: &acc)
+    acc = 0
+    seg += TSLANAudioRewriter.packetizePES(payload: ac3Frame(), pts: videoPTS - 2880, pid: 0x102, cc: &acc)
+    let out = [UInt8](rewriter.rewrite(Data(seg)))
+    expectEq(out.count % 188, 0, "lan-audio: output is whole packets")
+    var pids: [Int: Int] = [:]
+    var audioPackets: [[UInt8]] = []
+    for o in stride(from: 0, to: out.count, by: 188) {
+        let p = Array(out[o..<(o + 188)])
+        let pid = (Int(p[1] & 0x1F) << 8) | Int(p[2])
+        pids[pid, default: 0] += 1
+        if pid == 0x101 { audioPackets.append(p) }
+    }
+    expectEq(pids[0x102], nil, "lan-audio: second audio PID dropped")
+    expectEq(pids[0x100], 1, "lan-audio: video copied")
+    expectEq(TSLANAudioRewriter.parsePMT(Array(out[188..<376]))?.audio.first?.type, 0x0F, "lan-audio: segment PMT rewritten")
+    expectEq(fakes.count, 1, "lan-audio: one transcoder")
+    expectEq(fakes.first?.fedPTS, [videoPTS - 2880, videoPTS, videoPTS + 2880], "lan-audio: AC-3 frames stamped from the PES PTS")
+    expectEq(audioPackets.count, 1, "lan-audio: two gated-in AAC frames fit one packet")
+    if let first = audioPackets.first {
+        expectEq(TSLANAudioRewriter.pesPTS(first), videoPTS, "lan-audio: first AAC PTS = first video PTS (earlier frame gated)")
+        var es = Array(first[(TSLANAudioRewriter.payloadOffset(first)! + 14)...])
+        var frames = 0
+        while es.count >= 7, es[0] == 0xFF, es[1] & 0xF0 == 0xF0 {
+            let len = (Int(es[3] & 0x03) << 11) | (Int(es[4]) << 3) | (Int(es[5]) >> 5)
+            frames += 1
+            es.removeFirst(min(len, es.count))
+        }
+        expectEq(frames, 2, "lan-audio: two ADTS frames in the PES")
+    }
+    expect(logs.all.contains("LAN audio: AC-3 2ch -> AAC-LC stereo muxed into TS (PID 257, PMT rewritten)"),
+           "lan-audio: session line: \(logs.all)")
+    // Second segment: CC continues on the audio PID.
+    let out2 = [UInt8](rewriter.rewrite(Data(seg)))
+    let cc2 = stride(from: 0, to: out2.count, by: 188).first { (Int(out2[$0 + 1] & 0x1F) << 8 | Int(out2[$0 + 2])) == 0x101 }
+        .map { out2[$0 + 3] & 0x0F }
+    expectEq(cc2, 1, "lan-audio: audio CC continues into the next segment")
+
+    // Stage: lazy, in order, cached, evicted.
+    let stage = TSLANAudioStage(rewriter: TSLANAudioRewriter(log: { _ in }, canDecode: { _ in true },
+                                                             transcoderFactory: { _, c, f in FakeCastAudioTranscoder(onConfig: c, onFrame: f) }))
+    expectEq(stage.sourcesNeeded(for: 5), [5], "lan-audio stage: first request needs only itself")
+    _ = stage.produce(seq: 5, sources: [(5, Data(seg))], oldestSeq: 0)
+    expectEq(stage.sourcesNeeded(for: 5), [], "lan-audio stage: cached")
+    expectEq(stage.sourcesNeeded(for: 7), [6, 7], "lan-audio stage: a skipped segment is produced first")
+    _ = stage.produce(seq: 7, sources: [(6, Data(seg)), (7, Data(seg))], oldestSeq: 6)
+    expectEq(stage.cachedCount, 2, "lan-audio stage: evicted below the ring")
+
+    // Non-AC-3 source: passthrough, logged once.
+    let aacLogs = LockedLines()
+    let passthrough = TSLANAudioRewriter(log: { aacLogs.append($0) }, canDecode: { _ in true })
+    var aacPMT = pmt
+    aacPMT[5 + 12 + 5] = 0x0F; aacPMT[5 + 12 + 5 + 5 + 12] = 0x0F
+    let plain = syntheticPAT() + psiPacket(pid: 0x1000, section: Array(aacPMT[5..<(5 + 12 + 5 + 17 + 5)]))
+    expectEq([UInt8](passthrough.rewrite(Data(plain))), plain, "lan-audio: AAC source passes through unchanged")
+    expect(aacLogs.all.count == 1 && aacLogs.all[0].contains("stays passthrough"), "lan-audio: unsupported line: \(aacLogs.all)")
+}
+
+runLANAudioRewriteChecks()
 
 // MARK: Stale-receiver request counters (incident 2026-09-25 15:26)
 

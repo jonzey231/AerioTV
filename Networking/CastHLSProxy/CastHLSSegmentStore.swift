@@ -86,19 +86,8 @@ final class CastHLSSegmentStore: @unchecked Sendable {
 
     private let log: (String) -> Void
 
-    /// This store's playlist window and retained ring, in segments. The
-    /// Cast receiver uses the static defaults; the AirPlay AAC variant
-    /// asks for a deeper window so AVPlayer's default start point (three
-    /// target durations from the end) always lands inside it.
-    let windowSegments: Int
-    let ringSegments: Int
-
-    init(log: @escaping (String) -> Void = { _ in },
-         windowSegments: Int = CastHLSSegmentStore.windowSize,
-         ringSegments: Int = CastHLSSegmentStore.ringSize) {
+    init(log: @escaping (String) -> Void = { _ in }) {
         self.log = log
-        self.windowSegments = max(1, windowSegments)
-        self.ringSegments = max(self.windowSegments, ringSegments)
     }
 
     /// Segments committed since the last `beginGeneration`.
@@ -200,7 +189,7 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         nextSeq += 1
         pendingDiscontinuity = false
         ring.append(entry)
-        while ring.count > ringSegments {
+        while ring.count > Self.ringSize {
             let evicted = ring.removeFirst()
             if evicted.discontinuity { discontinuitySequence += 1 }
             // Drop init segments no ring entry references any more.
@@ -280,7 +269,13 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     /// BUFFER_READ_OUT_OF_BOUNDS (Shaka Error 3000) tens of seconds in
     /// (device-verified on a Google TV Streamer).
     func demuxedMasterPlaylistText() -> String {
-        let (videoCodec, audioCodec, _) = demuxedMasterInputs()
+        condition.lock()
+        let videoInit = videoInits[generation]
+        let audioInit = audioInits[generation]
+        let attribute = audioCodecsAttribute
+        condition.unlock()
+        let videoCodec = videoInit.flatMap { Self.avcCodecString(from: $0) } ?? "avc1.640028"
+        let audioCodec = audioInit.flatMap { Self.audioCodecString(from: $0) } ?? attribute
         var text = "#EXTM3U\n"
         if audioCodec != nil {
             text += "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"Main\","
@@ -293,21 +288,6 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         text += ",CLOSED-CAPTIONS=NONE\n"
         text += "video.m3u8\n"
         return text
-    }
-
-    /// The codec strings every demuxed master states, derived exactly as
-    /// the Cast master derives them, plus the current video init so a
-    /// caller (the AirPlay AAC variant) can read the SPS for resolution
-    /// and frame rate.
-    func demuxedMasterInputs() -> (videoCodec: String, audioCodec: String?, videoInit: Data?) {
-        condition.lock()
-        let videoInit = videoInits[generation]
-        let audioInit = audioInits[generation]
-        let attribute = audioCodecsAttribute
-        condition.unlock()
-        let videoCodec = videoInit.flatMap { Self.avcCodecString(from: $0) } ?? "avc1.640028"
-        let audioCodec = audioInit.flatMap { Self.audioCodecString(from: $0) } ?? attribute
-        return (videoCodec, audioCodec, videoInit)
     }
 
     /// RFC 6381 audio codec string from an init segment's audio sample
@@ -378,7 +358,7 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         case .video: initPrefix = "vinit"; segPrefix = "vseg"
         case .audio: initPrefix = "ainit"; segPrefix = "aseg"
         }
-        let window = Array(ring.suffix(windowSegments))
+        let window = Array(ring.suffix(Self.windowSize))
         var text = "#EXTM3U\n#EXT-X-VERSION:7\n"
         // Deliberately the max over BOTH renditions' spans, so the two
         // demuxed playlists advertise the SAME target duration even though
