@@ -280,13 +280,7 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     /// BUFFER_READ_OUT_OF_BOUNDS (Shaka Error 3000) tens of seconds in
     /// (device-verified on a Google TV Streamer).
     func demuxedMasterPlaylistText() -> String {
-        condition.lock()
-        let videoInit = videoInits[generation]
-        let audioInit = audioInits[generation]
-        let attribute = audioCodecsAttribute
-        condition.unlock()
-        let videoCodec = videoInit.flatMap { Self.avcCodecString(from: $0) } ?? "avc1.640028"
-        let audioCodec = audioInit.flatMap { Self.audioCodecString(from: $0) } ?? attribute
+        let (videoCodec, audioCodec, _) = demuxedMasterInputs()
         var text = "#EXTM3U\n"
         if audioCodec != nil {
             text += "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"Main\","
@@ -299,6 +293,21 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         text += ",CLOSED-CAPTIONS=NONE\n"
         text += "video.m3u8\n"
         return text
+    }
+
+    /// The codec strings every demuxed master states, derived exactly as
+    /// the Cast master derives them, plus the current video init so a
+    /// caller (the AirPlay AAC variant) can read the SPS for resolution
+    /// and frame rate.
+    func demuxedMasterInputs() -> (videoCodec: String, audioCodec: String?, videoInit: Data?) {
+        condition.lock()
+        let videoInit = videoInits[generation]
+        let audioInit = audioInits[generation]
+        let attribute = audioCodecsAttribute
+        condition.unlock()
+        let videoCodec = videoInit.flatMap { Self.avcCodecString(from: $0) } ?? "avc1.640028"
+        let audioCodec = audioInit.flatMap { Self.audioCodecString(from: $0) } ?? attribute
+        return (videoCodec, audioCodec, videoInit)
     }
 
     /// RFC 6381 audio codec string from an init segment's audio sample

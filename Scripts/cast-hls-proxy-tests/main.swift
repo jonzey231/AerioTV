@@ -2086,7 +2086,7 @@ do {
     let tagged = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,HOLD-BACK=18.000\n"
         + "#EXT-X-START:TIME-OFFSET=-9\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:5.000,\nvseg0.m4s\n"
     expectEq(AirPlayAACVariant.stripSteeringTags(tagged),
-             "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:5.000,\nvseg0.m4s\n",
+             "#EXTM3U\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:5.000,\nvseg0.m4s\n",
              "airplay-aac: steering tags stripped, target pinned to 4")
     expectEq(AirPlayAACVariant.servedSummary([:]), "none", "airplay-aac served: none before any GET")
     expectEq(AirPlayAACVariant.servedSummary(["video": 2, "master": 3, "aseg": 0]),
@@ -2153,8 +2153,17 @@ do {
     expect(master.contains("URI=\"audio.m3u8\"") && master.contains("video.m3u8"),
            "airplay-aac master: demuxed renditions")
     expect(master.contains("mp4a.40.2"), "airplay-aac master: AAC codec string")
+    print("---- airplay-aac master ----\n" + master + "----")
+    expect(master.hasPrefix("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n"),
+           "airplay-aac master: VERSION + INDEPENDENT-SEGMENTS header")
+    expect(!master.contains("CLOSED-CAPTIONS"), "airplay-aac master: no CLOSED-CAPTIONS")
+    expect(master.contains("CHANNELS=\"2\"") && master.contains("LANGUAGE=\"en\""),
+           "airplay-aac master: audio rendition attributes")
+    expect(master.contains("AVERAGE-BANDWIDTH=8000000"), "airplay-aac master: AVERAGE-BANDWIDTH")
     let video = variant.serve(path: "/aac/video.m3u8")
     let videoText = String(decoding: video.body, as: UTF8.self)
+    expect(videoText.contains("#EXTM3U\n#EXT-X-INDEPENDENT-SEGMENTS\n"),
+           "airplay-aac: video playlist states INDEPENDENT-SEGMENTS")
     expectEq(video.kind, "video", "airplay-aac: video playlist kind")
     expectEq(video.seq, -1, "airplay-aac: playlists log seq -1")
     let snap = variant.snapshot()

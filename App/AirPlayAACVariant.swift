@@ -357,7 +357,7 @@ final class AirPlayAACVariant: @unchecked Sendable {
         }
         let r: Response
         if name == "master.m3u8" {
-            r = Response(status: 200, body: Data(store.demuxedMasterPlaylistText().utf8),
+            r = Response(status: 200, body: Data(airPlayMasterPlaylistText().utf8),
                          contentType: playlist, kind: "master", seq: -1)
         } else if name == "video.m3u8" {
             r = Response(status: 200, body: Data(Self.stripSteeringTags(store.videoPlaylistText()).utf8),
@@ -400,12 +400,71 @@ final class AirPlayAACVariant: @unchecked Sendable {
     /// guarantees the window is deep enough to hold that start point.
     /// Device log 2026-09-26 10:58: a restated HOLD-BACK of 9.0 s against
     /// TARGETDURATION 6 broke the RFC 8216bis minimum and the item failed.
+    /// Segments are keyframe-cut, so `#EXT-X-INDEPENDENT-SEGMENTS` is true
+    /// and is stated right after `#EXTM3U` when the store did not already.
     static func stripSteeringTags(_ text: String) -> String {
         var lines = text.components(separatedBy: "\n")
         lines.removeAll { $0.hasPrefix("#EXT-X-SERVER-CONTROL:") || $0.hasPrefix("#EXT-X-START:") }
         for i in lines.indices where lines[i].hasPrefix("#EXT-X-TARGETDURATION:") {
             lines[i] = "#EXT-X-TARGETDURATION:\(servedTargetDuration)"
         }
+        if !lines.contains("#EXT-X-INDEPENDENT-SEGMENTS"),
+           let head = lines.firstIndex(of: "#EXTM3U") {
+            lines.insert("#EXT-X-INDEPENDENT-SEGMENTS", at: head + 1)
+        }
         return lines.joined(separator: "\n")
+    }
+
+    /// The AirPlay master. Not the Cast one: device log 2026-09-26 11:31, a
+    /// Roku Streaming Stick (OS 15.3.4) rejected the bare Cast master
+    /// (receiver -60034) within 200 ms without fetching either media
+    /// playlist. This one states VERSION, INDEPENDENT-SEGMENTS, the audio
+    /// LANGUAGE / CHANNELS, AVERAGE-BANDWIDTH and, when the video init's
+    /// SPS yields them, RESOLUTION and FRAME-RATE (omitted rather than
+    /// guessed). No CLOSED-CAPTIONS=NONE: that exists only for Shaka.
+    func airPlayMasterPlaylistText() -> String {
+        let inputs = store.demuxedMasterInputs()
+        var width: Int?, height: Int?, fps: Double?
+        if let initSegment = inputs.videoInit, let sps = Self.firstSPS(inAVCInit: initSegment) {
+            if let dims = try? CastFMP4Remuxer.parseSPSDimensions(sps) {
+                width = dims.width; height = dims.height
+            }
+            fps = H264SPSTiming.parse(sps)?.fps
+        }
+        return Self.airPlayMasterText(videoCodec: inputs.videoCodec, audioCodec: inputs.audioCodec,
+                                      width: width, height: height, fps: fps)
+    }
+
+    static func airPlayMasterText(videoCodec: String, audioCodec: String?,
+                                  width: Int?, height: Int?, fps: Double?) -> String {
+        var text = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n"
+        if audioCodec != nil {
+            text += "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"Main\",LANGUAGE=\"en\","
+                + "DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"2\",URI=\"audio.m3u8\"\n"
+        }
+        text += "#EXT-X-STREAM-INF:BANDWIDTH=12000000,AVERAGE-BANDWIDTH=8000000,CODECS=\"\(videoCodec)"
+        if let audioCodec { text += ",\(audioCodec)" }
+        text += "\""
+        if let width, let height, width > 0, height > 0 { text += ",RESOLUTION=\(width)x\(height)" }
+        if let fps, fps > 0 { text += ",FRAME-RATE=" + String(format: "%.3f", fps) }
+        if audioCodec != nil { text += ",AUDIO=\"aud\"" }
+        text += "\nvideo.m3u8\n"
+        return text
+    }
+
+    /// First SPS NAL (no start code) from the avcC box in a video init.
+    static func firstSPS(inAVCInit initSegment: Data) -> [UInt8]? {
+        let b = [UInt8](initSegment)
+        guard b.count >= 16 else { return nil }
+        for i in 0...(b.count - 16) where b[i] == 0x61 && b[i + 1] == 0x76 && b[i + 2] == 0x63 && b[i + 3] == 0x43 {
+            // avcC: version, profile, compat, level, lengthSize, numSPS, then u16 len + SPS.
+            let c = i + 4
+            guard b[c + 5] & 0x1F >= 1 else { return nil }
+            let len = Int(b[c + 6]) << 8 | Int(b[c + 7])
+            let start = c + 8
+            guard len > 0, start + len <= b.count else { return nil }
+            return Array(b[start..<(start + len)])
+        }
+        return nil
     }
 }
