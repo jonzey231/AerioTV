@@ -77,6 +77,8 @@ final class AirPlayTileDelivery {
     private var channelName = ""
     private var loopbackURL: URL?
     private var plan: AudioPlan = .passthrough
+    /// The resolved receiver for this session (nil until resolved).
+    private var receiver: AirPlayReceiver?
     private var lanEndpoint: (ip: String, port: UInt16)?
     private var keepaliveHeld = false
     private var externalObservation: NSKeyValueObservation?
@@ -454,6 +456,39 @@ final class AirPlayTileDelivery {
         return "none"
     }
 
+    /// Last underrun reissue; at most one per `underrunReissueWindow`.
+    private var lastUnderrunReissue: Date?
+    static let underrunReissueWindow: TimeInterval = 60
+
+    /// The tile saw AVPlayerItemFailedToPlayToEndTime while a receiver owns
+    /// playback. A non-Apple receiver (Roku, device log 2026-09-26 11:44)
+    /// quits on underrun and stops fetching with segments available; reissue
+    /// the LAN item once per window. Apple receivers pause and resume on
+    /// their own and are left alone; a second quit inside the window falls
+    /// through to the parked watchdog as before.
+    func receiverFailedToPlayToEnd(_ item: AVPlayerItem) {
+        guard state == .serving, let player, player.currentItem === item,
+              let receiver, receiver.model != nil, !receiver.isApple,
+              let url = (item.asset as? AVURLAsset)?.url else { return }
+        let now = Date()
+        if let last = lastUnderrunReissue, now.timeIntervalSince(last) < Self.underrunReissueWindow {
+            debugLog("[AVP-AIRPLAY] receiver quit on underrun again within \(Int(Self.underrunReissueWindow)) s; no reissue")
+            return
+        }
+        lastUnderrunReissue = now
+        let segs = remuxer?.lanLinkStats.reservoirSegments ?? 0
+        debugLog("[AVP-AIRPLAY] receiver quit on underrun; reissuing the LAN item (\(segs) segs available)")
+        let fresh = makeLANItem(url: url, copying: item)
+        player.replaceCurrentItem(with: fresh)
+        observeLANItem(fresh)
+        player.play()
+        parkLastSegmentAt = now
+        if let st = remuxer?.lanLinkStats {
+            parkLastSegments = st.servedSegmentRequests
+            parkBaselinePlaylists = st.servedPlaylistRequests
+        }
+    }
+
     private func lanItemFailed(_ item: AVPlayerItem, reason: String, receiverRejection: String? = nil) {
         guard let player, player.currentItem === item else { return }
         // The receiver rejected the asset: a reload on the same URL gets the
@@ -494,6 +529,7 @@ final class AirPlayTileDelivery {
         let mode = AirPlayAudioMode.current
         let receiver = await AirPlayReceiverResolver.shared.resolveForHandoff()
         guard token == myToken else { return .unavailable }
+        self.receiver = receiver
         debugLog(receiver.logLine(mode: mode))
         // A HomePod / AirPort route plays the phone's audio; there is no
         // screen to hand the video to.
@@ -574,6 +610,7 @@ final class AirPlayTileDelivery {
     /// turns out to be non-Apple, turn on the LAN audio rewrite and hand
     /// the receiver a fresh item on the same `/live.m3u8`.
     static func receiverResolved(_ r: AirPlayReceiver) {
+        servingTile?.receiver = r
         servingTile?.replanIfNeeded(for: r)
     }
 
@@ -608,6 +645,7 @@ final class AirPlayTileDelivery {
     private func enterServing() {
         state = .serving
         lanReloadUsed = false
+        lastUnderrunReissue = nil
         cancelReleaseGrace()
         Self.servingTile = self
         onWatchdogs?(true, nil)

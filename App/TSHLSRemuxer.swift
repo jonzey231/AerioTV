@@ -2207,12 +2207,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     // Loopback playback is untouched.
 
     /// RAM ring (and LAN RAM window) while a receiver is served. It must
-    /// hold the largest publication delay (20 s ceiling - 3 x 4 s = 8 s,
-    /// ~4 segments) plus a normal 3 x TARGETDURATION live window; never
+    /// hold the largest publication delay (40 s ceiling - 3 x 4 s = 28 s,
+    /// 14 segments at 2 s) plus a normal 3-segment live window; never
     /// shrink it below that. Live tunes also have the disk spill behind it.
-    private let lanRingSegments = 16
+    /// Device log 2026-09-26 11:44: proxy ingest gaps of 4.0, 4.7, 7.8 and
+    /// 15.6 s within 30 s overran the old 20 s ceiling.
+    private let lanRingSegments = 24
     private let lanHoldBackFloor = 8.0
-    private let lanHoldBackCeiling = 20.0
+    private let lanHoldBackCeiling = 40.0
     /// Touched only on `queue`. Monotonic per LAN session (only grows), so
     /// a receiver that re-joins after a stall joins at least as deep.
     private var lanHoldBackSeconds = 0.0
@@ -2312,9 +2314,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     let lanHoldBack = DoubleBox(0)
 
     /// Starved closures in the last 60 s and the worst gap among them.
-    private func recentStarvationStats(now: Date) -> (count: Int, worst: Double) {
+    private func recentStarvationStats(now: Date) -> (count: Int, worst: Double, totalSeconds: Double) {
         recentStarvations.removeAll { now.timeIntervalSince($0.wall) > 60 }
-        return (recentStarvations.count, recentStarvations.reduce(0.0) { max($0, $1.gap) })
+        return (recentStarvations.count,
+                recentStarvations.reduce(0.0) { max($0, $1.gap) },
+                recentStarvations.reduce(0.0) { $0 + $1.gap })
     }
 
     /// Bitrate of the RAM ring, kbps.
@@ -2444,6 +2448,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if stats.worst > 0, stats.worst + target > hb {
             hb = stats.worst + target
             why += String(format: "; worst gap %.1f s + target", stats.worst)
+        }
+        // Gaps that stack inside a minute drain the receiver's buffer
+        // together, not one at a time.
+        if stats.totalSeconds > 0, stats.totalSeconds + target > hb {
+            hb = stats.totalSeconds + target
+            why += String(format: "; starved %.1f s in 60 s + target", stats.totalSeconds)
         }
         if kbps > 10_000 {
             hb += 4
@@ -4436,6 +4446,10 @@ struct AVPlayerMultiviewTile: View {
             // rebuilds the pipeline under it.
             if airPlayDelivery.isServing || player?.isExternalPlaybackActive == true {
                 debugLog("[AVP-MV] tile playback-failed ignored: receiver owns playback (item status \(failed.status.rawValue)) channel=\(channelName)")
+                // A non-Apple receiver (Roku, device log 2026-09-26 11:44)
+                // quits on underrun instead of waiting: the delivery
+                // reissues the LAN item.
+                airPlayDelivery.receiverFailedToPlayToEnd(failed)
                 return
             }
             #endif
