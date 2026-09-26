@@ -1755,6 +1755,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if inProcessDelivery, let first = segments.first?.seq {
             for k in deliveryBase64.keys where k >= 0 && k < first { deliveryBase64[k] = nil }
         }
+        // Raise the advertised target at close time, not only in the
+        // playlist builder (device log 2026-09-25 23:12): the AirPlay start
+        // wait read TD 2 before the first fetch while the builder then
+        // advertised 3 and withheld the hold-back. Runs on `queue`.
+        let priorCloseTarget = pinnedTargetDuration.rounded(.up)
+        pinnedTargetDuration = max(pinnedTargetDuration, duration)
+        if pinnedTargetDuration.rounded(.up) > priorCloseTarget, lanListener != nil {
+            refreshLANHoldBack(now: Date())
+        }
         let lanTail = segments.suffix(lanRingSegments)
         lanWindowSeconds.set(lanTail.reduce(0.0) { $0 + $1.duration })
         lanWindowSegments.set(Double(lanTail.count))
@@ -2075,7 +2084,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             let tdInt = Int(pinnedTargetDuration.rounded(.up))
             let minHB = 3 * Double(tdInt)
             let hb = max(lanHoldBackSeconds, minHB)
-            let room = window.reduce(0.0) { $0 + $1.duration } - pinnedTargetDuration
+            let room = window.reduce(0.0) { $0 + $1.duration } - Double(tdInt)
             if room >= hb {
                 let hbText = String(format: "%.3f", hb)
                 text += "#EXT-X-SERVER-CONTROL:HOLD-BACK=\(hbText)\n"

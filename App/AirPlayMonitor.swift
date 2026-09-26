@@ -507,6 +507,14 @@ final class AirPlayMonitor: ObservableObject {
             // Incident 2026-09-25: no AirPlay route, no Bonjour browse.
             AirPlayReceiverResolver.shared.stopBrowsing()
             if receiver != nil { receiver = nil }
+            if player?.isExternalPlaybackActive == true,
+               phase == .active || hostsHeadless || AirPlayTileDelivery.isServingReceiver {
+                // Device log 2026-09-25 23:12:49: the route briefly showed
+                // no AirPlay output while the receiver kept playing. Hold;
+                // apply(false) re-evaluates once the player lets go.
+                debugLog("[AVP-AIRPLAY] route shows no AirPlay output but external playback is active; holding the session")
+                return
+            }
             if phase == .active || hostsHeadless || AirPlayTileDelivery.isServingReceiver {
                 receiverEnded(routeLost: true)
                 setPhase(.none)

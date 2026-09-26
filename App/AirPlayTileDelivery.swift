@@ -158,9 +158,14 @@ final class AirPlayTileDelivery {
             // up that is a stall, not an end: LAN delivery, the variant,
             // the keepalive and the watchdog suspension all stay.
             debugLog("[AVP-AIRPLAY] tile \(channelName): external playback paused by the receiver with the route present; LAN delivery, keepalive and watchdog suspension held")
+        } else if state != .idle {
+            // Both signals gone (no AirPlay output, no external playback):
+            // the real receiver-side stop or route loss.
+            debugLog("[AVP-AIRPLAY] tile \(channelName): external playback ended with no AirPlay route; ending the session")
+            end(reason: "route")
         } else {
             debugLog("[AVP-AIRPLAY] tile \(channelName): external playback ended, watchdogs re-armed")
-            if state != .serving { onWatchdogs?(false, player?.currentItem) }
+            onWatchdogs?(false, player?.currentItem)
         }
     }
 
@@ -168,13 +173,18 @@ final class AirPlayTileDelivery {
         guard routeObserver == nil else { return }
         routeObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.routeChanged() }
+        ) { [weak self] note in
+            let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
+            MainActor.assumeIsolated { self?.routeChanged(reasonRaw: reason) }
         }
     }
 
-    private func routeChanged() {
+    private func routeChanged(reasonRaw: UInt) {
         let hasAirPlay = Self.routeHasAirPlay()
+        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+            .map { "\($0.portType.rawValue)(\($0.portName))" }.joined(separator: ",")
+        let external = player?.isExternalPlaybackActive
+        debugLog("[AVP-AIRPLAY] route change: reason=\(Self.routeChangeReasonText(reasonRaw)) outputs=[\(outputs)] airplay=\(hasAirPlay) externalActive=\(external.map { String($0) } ?? "nil") state=\(state)")
         // Mid-play start: the route gained an AirPlay output while this
         // tile plays on loopback (the 09-21 log serves on the LAN before
         // the receiver reports external playback). An audio-only speaker
@@ -183,7 +193,30 @@ final class AirPlayTileDelivery {
         if hasAirPlay, state == .idle, player != nil, remuxer != nil {
             beginMidPlay()
         } else if !hasAirPlay, state != .idle {
-            end(reason: "route")
+            // Device log 2026-09-25 23:12:49: a route change without an
+            // AirPlay output while the player still played externally and
+            // the receiver kept going. Route loss needs both signals gone;
+            // externalChanged ends the session when the player lets go.
+            if external == true {
+                debugLog("[AVP-AIRPLAY] route shows no AirPlay output but external playback is active; holding the session")
+            } else {
+                end(reason: "route")
+            }
+        }
+    }
+
+    static func routeChangeReasonText(_ raw: UInt) -> String {
+        guard let r = AVAudioSession.RouteChangeReason(rawValue: raw) else { return "raw\(raw)" }
+        switch r {
+        case .unknown: return "unknown"
+        case .newDeviceAvailable: return "newDeviceAvailable"
+        case .oldDeviceUnavailable: return "oldDeviceUnavailable"
+        case .categoryChange: return "categoryChange"
+        case .override: return "override"
+        case .wakeFromSleep: return "wakeFromSleep"
+        case .noSuitableRouteForCategory: return "noSuitableRouteForCategory"
+        case .routeConfigurationChange: return "routeConfigurationChange"
+        @unknown default: return "raw\(raw)"
         }
     }
 
