@@ -285,7 +285,7 @@ struct DeveloperSettingsView: View {
                     Text("What's Captured")
                         .sectionHeaderStyle()
                 } footer: {
-                    Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as aerio_debug_logs_archive.txt.")
+                    Text("Logs rotate automatically when the file exceeds 4 MB. The previous log is preserved as aerio_debug_logs.1.txt.")
                         .scaledFont(.labelSmall.subtext())
                         .foregroundColor(Color.contrastText(.textTertiary))
                 }
@@ -746,7 +746,7 @@ struct DeveloperSettingsView: View {
                           title: "Performance",
                           detail: "Timed operations: parse time, load time, memory at session start")
 
-            Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as aerio_debug_logs_archive.txt.")
+            Text("Logs rotate automatically when the file exceeds 4 MB. The previous log is preserved as aerio_debug_logs.1.txt.")
                 .scaledFont(.system(size: 20).subtext())
                 .foregroundColor(Color.contrastText(.textTertiary))
                 .padding(.top, 8)

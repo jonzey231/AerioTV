@@ -92,8 +92,20 @@ final class DebugLogger: @unchecked Sendable {
     // Serial queue for all file I/O — prevents data races.
     private let queue = DispatchQueue(label: "com.aerio.debuglogger", qos: .utility)
 
-    // Maximum log file size before rotation (10 MB).
-    private let maxFileSize: Int = 10 * 1_024 * 1_024
+    // Maximum log file size before rotation (4 MB). A 9 MB file stalled
+    // `devicectl device copy from` while the app was busy, so keep the
+    // active file small and exactly one previous generation beside it.
+    private let maxFileSize: Int = 4 * 1_024 * 1_024
+    /// Name of the single previous generation kept on rotation.
+    static let previousLogFileName = "aerio_debug_logs.1.txt"
+    /// Pre-4 MB rotation archive name; removed on rotation so it cannot linger.
+    private static let legacyArchiveFileName = "aerio_debug_logs_archive.txt"
+    /// How often the write path may stat the real file size. Between
+    /// checks the size is estimated from bytes written in memory.
+    private static let sizeCheckInterval: TimeInterval = 60
+    /// Queue-confined: estimated current file size (last stat + bytes since).
+    private var estimatedFileSize = 0
+    private var lastSizeCheckAt: Date = .distantPast
 
     private let timestampFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -282,6 +294,8 @@ final class DebugLogger: @unchecked Sendable {
             self.ringStart = 0
             self.lastValidationAt = .distantPast
             self.needsRevalidation = false
+            self.estimatedFileSize = 0
+            self.lastSizeCheckAt = .distantPast
             for url in Self.allLogFileURLs() {
                 try? FileManager.default.removeItem(at: url)
             }
@@ -535,7 +549,7 @@ final class DebugLogger: @unchecked Sendable {
                let size = attrs[.size] as? Int { bytes = size }
             let archivePresent = self.logFileURL.map {
                 FileManager.default.fileExists(atPath: $0.deletingLastPathComponent()
-                    .appendingPathComponent("aerio_debug_logs_archive.txt").path)
+                    .appendingPathComponent(Self.previousLogFileName).path)
             } ?? false
             self.appendToFile(header)
             self.appendToFile("[\(self.timestampFormatter.string(from: Date()))] [LOG] file present=\(present) size=\(bytes) archive=\(archivePresent)\n")
@@ -615,11 +629,25 @@ final class DebugLogger: @unchecked Sendable {
             let exists = FileManager.default.fileExists(atPath: url.path)
             if !exists {
                 recreateFile(at: url)
-            } else if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-                      let size = attrs[.size] as? Int, size > maxFileSize {
-                // Rotation is part of the same once-per-second check so
-                // the steady-state line cost is one write, no stat.
-                rotateLog(at: url)
+                estimatedFileSize = 0
+                lastSizeCheckAt = .distantPast
+            }
+        }
+
+        // Size check: the in-memory byte count decides when to look, and
+        // the real size is read at most once per minute (or as soon as the
+        // estimate crosses the limit), so the steady-state line cost is
+        // one write, no stat. Runs on `queue`, the same serial queue as
+        // every append, so no write can interleave with the rename.
+        if estimatedFileSize > maxFileSize
+            || now.timeIntervalSince(lastSizeCheckAt) >= Self.sizeCheckInterval {
+            lastSizeCheckAt = now
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+               let size = attrs[.size] as? Int {
+                estimatedFileSize = size
+                if size > maxFileSize {
+                    rotateLog(at: url, previousSize: size)
+                }
             }
         }
 
@@ -632,6 +660,7 @@ final class DebugLogger: @unchecked Sendable {
             defer { try? handle.close() }
             handle.seekToEndOfFile()
             handle.write(data)
+            estimatedFileSize += data.count
             if !appendDiagFirstWriteLogged {
                 appendDiagFirstWriteLogged = true
                 print("[DebugLogger][diag] first append OK: \(data.count) B at \(url.path)")
@@ -711,14 +740,19 @@ final class DebugLogger: @unchecked Sendable {
     private var appendDiagFirstWriteLogged = false
     private var appendDiagFailureLogged = false
 
-    /// Rename the current log to debug_logs_archive.txt and start fresh.
-    private func rotateLog(at url: URL) {
-        let archiveURL = url.deletingLastPathComponent()
-            .appendingPathComponent("aerio_debug_logs_archive.txt")
-        try? FileManager.default.removeItem(at: archiveURL)
-        try? FileManager.default.moveItem(at: url, to: archiveURL)
-        let note = "[\(timestampFormatter.string(from: Date()))] ℹ️ [INFO    ] [Logger] Log rotated, previous log saved as aerio_debug_logs_archive.txt\n"
-        try? note.data(using: .utf8)?.write(to: url, options: .atomic)
+    /// Rename the current log to aerio_debug_logs.1.txt (replacing any
+    /// previous generation) and start a fresh file. Queue-confined.
+    private func rotateLog(at url: URL, previousSize: Int) {
+        let dir = url.deletingLastPathComponent()
+        let previousURL = dir.appendingPathComponent(Self.previousLogFileName)
+        try? FileManager.default.removeItem(at: previousURL)
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent(Self.legacyArchiveFileName))
+        try? FileManager.default.moveItem(at: url, to: previousURL)
+        let mb = String(format: "%.1f", Double(previousSize) / Double(1_024 * 1_024))
+        let note = "[LOG] rotated after \(mb) MB\n"
+        let noteData = note.data(using: .utf8) ?? Data()
+        try? noteData.write(to: url, options: .atomic)
+        estimatedFileSize = noteData.count
     }
 
     // MARK: - Helpers
