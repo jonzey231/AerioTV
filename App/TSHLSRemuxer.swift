@@ -770,6 +770,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             self.deliveryBase64.removeAll()
             self.segments.removeAll()
             self.currentSegment.removeAll()
+            self.lanWindowSeconds.set(0)
+            self.lanWindowSegments.set(0)
             // Assign a fresh Data rather than removeAll(): the latter keeps
             // the backing allocation, so a stopped-but-still-retained remuxer
             // would hold its whole dead buffer (Apple #74).
@@ -1753,6 +1755,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if inProcessDelivery, let first = segments.first?.seq {
             for k in deliveryBase64.keys where k >= 0 && k < first { deliveryBase64[k] = nil }
         }
+        let lanTail = segments.suffix(lanRingSegments)
+        lanWindowSeconds.set(lanTail.reduce(0.0) { $0 + $1.duration })
+        lanWindowSegments.set(Double(lanTail.count))
         // nextSeq, not segments.count: the count pins at maxBufferedSegments
         // once the window fills, and 12 % 5 != 0 silenced every close after
         // the first ten seconds of the 2026-08-25 UHD soak.
@@ -1838,6 +1843,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// 18:07: the value grew from 3 to 4 when a 3.92 s segment closed and
     /// the poll cadence went with it).
     let advertisedTargetDuration = DoubleBox(2.0)
+    /// Media seconds (and segment count) the LAN playlist's RAM window
+    /// holds right now: the last `lanRingSegments` cut segments. The
+    /// AirPlay start gate reads it (device log 2026-09-25: a 4 s window
+    /// under an 8 s hold-back never started on the Apple TV).
+    let lanWindowSeconds = DoubleBox(0)
+    let lanWindowSegments = DoubleBox(0)
 
     // MARK: Live-edge pacing (proxy burst join, 2026-09-13)
     //
@@ -2047,10 +2058,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if lan, !eventPlaylist, !playlistComplete, lanHoldBackSeconds > 0 {
             // Never deeper than the window minus one target, so the join
             // point stays inside what is advertised.
+            // HOLD-BACK must be at least 3x target per spec, and TIME-OFFSET
+            // must never exceed the playlist duration: when the window is
+            // too shallow for either, omit both tags for this reload.
             let room = window.reduce(0.0) { $0 + $1.duration } - pinnedTargetDuration
-            let hb = min(lanHoldBackSeconds, max(3 * pinnedTargetDuration.rounded(.up), room))
-            text += "#EXT-X-SERVER-CONTROL:HOLD-BACK=\(String(format: "%.3f", hb))\n"
-            text += "#EXT-X-START:TIME-OFFSET=-\(String(format: "%.3f", hb)),PRECISE=NO\n"
+            if room >= 3 * pinnedTargetDuration.rounded(.up) {
+                let hb = min(lanHoldBackSeconds, room)
+                text += "#EXT-X-SERVER-CONTROL:HOLD-BACK=\(String(format: "%.3f", hb))\n"
+                text += "#EXT-X-START:TIME-OFFSET=-\(String(format: "%.3f", hb)),PRECISE=NO\n"
+            }
         }
         if fmp4 != nil {
             if inProcessDelivery, let initSeg = fmp4InitSegment {
@@ -5544,6 +5560,18 @@ struct AVPlayerMultiviewTile: View {
                 debugLog(String(format: "[AVP-AIRPLAY] join offset %.1fs -> LAN hold-back %.1fs channel=%@",
                                 offset, lanHoldBack, channelName))
                 offset = lanHoldBack
+            }
+            // Never join deeper than the LAN window actually holds (window
+            // minus one target): an offset past the playlist start leaves
+            // the receiver parked on the first fetch (device log
+            // 2026-09-25, 8 s offset into a 4 s window).
+            if lanHoldBack > 0 {
+                let available = (remuxer?.lanWindowSeconds.get() ?? 0) - joinTargetDuration
+                if available > 0, offset > available {
+                    debugLog(String(format: "[AVP-AIRPLAY] join offset %.1fs clamped to %.1fs (LAN window minus one target) channel=%@",
+                                    offset, available, channelName))
+                    offset = available
+                }
             }
             playerItem.configuredTimeOffsetFromLive =
                 CMTime(seconds: offset, preferredTimescale: 600)

@@ -272,6 +272,14 @@ final class AirPlayTileDelivery {
                                 offset.isValid ? offset.seconds : 0, lanHoldBack, channelName))
                 offset = CMTime(seconds: lanHoldBack, preferredTimescale: 600)
             }
+            if lanHoldBack > 0, let remuxer {
+                let available = remuxer.lanWindowSeconds.get() - remuxer.advertisedTargetDuration.get()
+                if available > 0, offset.isValid, offset.seconds > available {
+                    debugLog(String(format: "[AVP-AIRPLAY] LAN item join offset %.1fs clamped to %.1fs (LAN window minus one target) channel=%@",
+                                    offset.seconds, available, channelName))
+                    offset = CMTime(seconds: available, preferredTimescale: 600)
+                }
+            }
             item.configuredTimeOffsetFromLive = offset
         }
         return item
@@ -373,6 +381,10 @@ final class AirPlayTileDelivery {
         switch lan {
         case .ready(let ip, let port):
             lanEndpoint = (ip, port)
+            if plan != .aacStereo {
+                await waitForHoldBackWindow(remuxer: remuxer, timeout: readyTimeout, token: myToken)
+                guard token == myToken else { return .unavailable }
+            }
             guard let url = URL(string: "http://\(ip):\(port)\(path)") else { return .unavailable }
             if let variant = remuxer.currentAirPlayVariant, plan == .aacStereo {
                 variant.startServingLog { line in debugLog("[AVP-AIRPLAY] \(line)") }
@@ -385,6 +397,37 @@ final class AirPlayTileDelivery {
             remuxer.stopAACVariant()
             remuxer.stopLANDelivery()
             return .unavailable
+        }
+    }
+
+    /// Start gate (device log 2026-09-25): the remuxer declares READY on
+    /// two segments (~4 s), but the receiver joins `lanHoldBack` (8 s+)
+    /// behind the edge, so it parked on its first playlist fetch. Hold the
+    /// LAN start until the window covers hold-back plus one target (5 x
+    /// 2 s segments at the 8 s floor). On timeout the start proceeds; the
+    /// playlist omits the hold-back tags and the join offset is clamped.
+    private func waitForHoldBackWindow(remuxer: TSHLSRemuxer, timeout: TimeInterval, token myToken: UUID) async {
+        let target = max(1, remuxer.advertisedTargetDuration.get())
+        func need() -> Double { remuxer.lanHoldBack.get() + target }
+        guard remuxer.lanWindowSeconds.get() < need() else { return }
+        let began = Date()
+        let short = need() - remuxer.lanWindowSeconds.get()
+        let segs = Int((short / target).rounded(.up))
+        debugLog(String(format: "[AVP-AIRPLAY] start gate: waiting for %d segs (%.1f s) to cover hold-back %.1f s (window %.1f s, %d segs)",
+                        segs, short, remuxer.lanHoldBack.get(), remuxer.lanWindowSeconds.get(),
+                        Int(remuxer.lanWindowSegments.get())))
+        let deadline = began.addingTimeInterval(timeout)
+        while remuxer.lanWindowSeconds.get() < need(), Date() < deadline {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard token == myToken else { return }
+        }
+        let waited = Date().timeIntervalSince(began)
+        if remuxer.lanWindowSeconds.get() >= need() {
+            debugLog(String(format: "[AVP-AIRPLAY] start gate released after %.1f s (window %.1f s)",
+                            waited, remuxer.lanWindowSeconds.get()))
+        } else {
+            debugLog(String(format: "[AVP-AIRPLAY] start gate timed out after %.1f s (window %.1f s < %.1f s); starting anyway with a clamped join offset",
+                            waited, remuxer.lanWindowSeconds.get(), need()))
         }
     }
 
