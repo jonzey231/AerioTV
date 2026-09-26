@@ -55,8 +55,8 @@ final class AirPlayTileDelivery {
     /// receiver keeps fetching.
     static let receiverReleaseHardCap: TimeInterval = 60
     /// Published LAN segments the receiver's first playlist must carry:
-    /// 5 x ~2 s = 10 s, so the default start point (3 x the LAN target of
-    /// 3 s = 9 s behind the published end) exists.
+    /// 5 segments (2.5 to 3.8 s each), so the default start point (3 x the
+    /// LAN target of 4 s = 12 s behind the published end) exists.
     static let handoverPublishedSegments = 5
     /// The handover gave the player the LAN URL; the receiver must take it
     /// (external playback active) within this long or the session stops.
@@ -223,9 +223,13 @@ final class AirPlayTileDelivery {
         releasedAt = Date()
         let myToken = token
         let offSince = Date()
+        // Only peers other than the phone count: after the receiver drops
+        // external playback the phone's own player fetches from the LAN
+        // listener (device log 2026-09-26 09:49), which kept the silence
+        // rule from ever firing.
         func requests(_ r: TSHLSRemuxer?) -> Int {
             guard let st = r?.lanLinkStats else { return 0 }
-            return st.servedPlaylistRequests + st.servedSegmentRequests
+            return TSHLSRemuxer.remotePeerRequests(st)
         }
         var lastRequests = requests(remuxer)
         var silentSince = offSince
@@ -689,10 +693,26 @@ final class AirPlayTileDelivery {
         let status = AirPlayMonitor.playerStatusText(player)
         let external = player?.isExternalPlaybackActive ?? false
         let published = remuxer.lanPublishedState()
-        debugLog(String(format: "[AVP-AIRPLAY] link: ingest %.0f kbps avg/%.0f kbps min over 10 s, stalls %d, reservoir %d segs/%.1f s, served %.0f kbps to %@, receiver playhead-behind-edge %@, player status %@, external %@ (hold-back %.1f s, published %d segs, delay %.1f s)",
+        let recvSeg = st.receiverHighestSeq >= 0 ? "\(st.receiverHighestSeq)" : "-"
+        let edgeSeg = published.edge >= 0 ? "\(published.edge)" : "-"
+        let lagSegs = (st.receiverHighestSeq >= 0 && published.edge >= 0)
+            ? "\(published.edge - st.receiverHighestSeq)" : "-"
+        func secs(_ t: CMTime?) -> String {
+            guard let t, t.isValid, t.seconds.isFinite else { return "-" }
+            return String(format: "%.1f", t.seconds)
+        }
+        func rangeText(_ v: NSValue?) -> String {
+            guard let r = v?.timeRangeValue else { return "-" }
+            return "\(secs(r.start))..\(secs(r.end))"
+        }
+        let playerT = secs(player?.currentTime())
+        let seekable = rangeText(player?.currentItem?.seekableTimeRanges.last)
+        let loaded = rangeText(player?.currentItem?.loadedTimeRanges.last)
+        debugLog(String(format: "[AVP-AIRPLAY] link: ingest %.0f kbps avg/%.0f kbps min over 10 s, stalls %d, reservoir %d segs/%.1f s, served %.0f kbps to %@, receiver playhead-behind-edge %@, player status %@, external %@ (hold-back %.1f s, published %d segs, delay %.1f s), receiver last seg %@ / published edge %@ (lag %@ segs), player t=%@ s seekable=[%@] loaded=[%@]",
                         avg, minimum, stalls, st.reservoirSegments, st.reservoirSeconds, servedKbps,
                         st.peer ?? "none", behind, status, external ? "true" : "false", st.holdBack,
-                        published.segments, published.delay))
+                        published.segments, published.delay, recvSeg, edgeSeg, lagSegs,
+                        playerT, seekable, loaded))
     }
 
     /// The receiver-side end of a serving session (external playback off

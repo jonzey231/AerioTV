@@ -1848,10 +1848,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// the poll cadence went with it).
     let advertisedTargetDuration = DoubleBox(2.0)
     /// LAN (AirPlay receiver) TARGETDURATION: a constant for the session.
-    /// 3 covers the 2.5 s keyframe cuts (EXTINF rounded to the nearest
-    /// integer must be <= TARGETDURATION); a longer segment is logged once,
-    /// never re-advertised.
-    private let lanTargetDuration = 3
+    /// 4 covers the fMP4/HEVC arm's keyframe cuts (cut at or after 2.0 s,
+    /// 3.8 s segments all session on Sky Sports UHD, device log
+    /// 2026-09-26 09:49, which made a target of 3 illegal) as well as the
+    /// TS arm's 2.5 s cuts (EXTINF rounded to the nearest integer must be
+    /// <= TARGETDURATION); a longer segment is logged once, never
+    /// re-advertised.
+    private let lanTargetDuration = 4
     /// Segment seq -> wall clock of its close, for the LAN publication
     /// delay. Touched only on `queue`; pruned with the RAM ring.
     private var segmentCloseWall: [Int: Date] = [:]
@@ -2172,7 +2175,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     // one segment, and rebuffered until AVPlayer dropped external
     // playback. The LAN copy of the playlist is never paced, the RAM ring
     // is deeper while a receiver is served, and the receiver is kept
-    // `lanHoldBackSeconds` (>= 9 s, grown for a bursty ingest and for high
+    // `lanHoldBackSeconds` (>= 12 s, grown for a bursty ingest and for high
     // bitrates, up to `lanHoldBackCeiling`) behind the real edge by a
     // publication delay: the LAN playlist lists a segment only once it
     // closed `lanHoldBackSeconds - 3 x TARGETDURATION` ago, and the
@@ -2181,8 +2184,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     // Loopback playback is untouched.
 
     /// RAM ring (and LAN RAM window) while a receiver is served. It must
-    /// hold the largest publication delay (20 s ceiling - 3 x 3 s = 11 s,
-    /// ~6 segments) plus a normal 3 x TARGETDURATION live window; never
+    /// hold the largest publication delay (20 s ceiling - 3 x 4 s = 8 s,
+    /// ~4 segments) plus a normal 3 x TARGETDURATION live window; never
     /// shrink it below that. Live tunes also have the disk spill behind it.
     private let lanRingSegments = 16
     private let lanHoldBackFloor = 8.0
@@ -2211,6 +2214,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         var servedPlaylistRequests = 0
         var servedSegmentRequests = 0
         var peer: String?
+        /// Per-peer LAN requests answered 200 (peer IP -> counts), so the
+        /// release grace can ignore the phone's own fetches.
+        var peerRequests: [String: (playlist: Int, segment: Int)] = [:]
+        /// The IP the LAN listener advertised (the phone's own Wi-Fi IP).
+        var localIP: String?
+        /// Highest media segment seq fetched by a peer other than the
+        /// phone itself (-1 = none).
+        var receiverHighestSeq = -1
         /// Cut segments the receiver has not fetched yet.
         var reservoirSegments = 0
         var reservoirSeconds = 0.0
@@ -2237,14 +2248,38 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         linkLock.unlock()
     }
 
+    /// Requests answered 200 by peers other than `localIP`.
+    static func remotePeerRequests(_ st: LANLinkStats) -> Int {
+        st.peerRequests.reduce(0) { sum, e in
+            e.key == st.localIP ? sum : sum + e.value.playlist + e.value.segment
+        }
+    }
+
+    /// The seq in a `seg<N>.<ext>` path, or nil.
+    private static func segmentSeq(inPath path: String) -> Int? {
+        guard let r = path.range(of: #"seg(\d+)"#, options: .regularExpression) else { return nil }
+        return Int(path[r].dropFirst(3))
+    }
+
     private func noteLANServed(bytes: Int, peer: String?, path: String, status: Int) {
         linkLock.lock()
         linkStats.servedBytes += Int64(bytes)
         if status == 200 {
+            var isPlaylist = false, isSegment = false
             if path.hasSuffix(".m3u8") {
                 linkStats.servedPlaylistRequests += 1
+                isPlaylist = true
             } else if path.hasSuffix(".ts") || path.hasSuffix(".m4s") || path.hasSuffix(".aac") {
                 linkStats.servedSegmentRequests += 1
+                isSegment = true
+            }
+            if let peer, isPlaylist || isSegment {
+                var c = linkStats.peerRequests[peer] ?? (0, 0)
+                if isPlaylist { c.playlist += 1 } else { c.segment += 1 }
+                linkStats.peerRequests[peer] = c
+                if isSegment, peer != linkStats.localIP, let seq = Self.segmentSeq(inPath: path) {
+                    linkStats.receiverHighestSeq = max(linkStats.receiverHighestSeq, seq)
+                }
             }
         }
         if let peer { linkStats.peer = peer }
@@ -2287,18 +2322,18 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         return lanPublishedEdge
     }
 
-    /// Segments the LAN playlist would list right now, and the delay in
-    /// force. Blocks on `queue` briefly; the handover wait and the 10 s
-    /// link line call it.
-    func lanPublishedState() -> (segments: Int, delay: Double) {
+    /// Segments the LAN playlist would list right now, the delay in
+    /// force and the published edge seq (-1 = none). Blocks on `queue`
+    /// briefly; the handover wait and the 10 s link line call it.
+    func lanPublishedState() -> (segments: Int, delay: Double, edge: Int) {
         queue.sync {
             guard lanListener != nil, let edge = lanPublishedEdgeSeq(now: Date()) else {
-                return (0, lanPublicationDelay)
+                return (0, lanPublicationDelay, -1)
             }
             let count = (spillDir != nil && !spilled.isEmpty)
                 ? spilled.filter { $0.seq <= edge }.count
                 : min(lanRingSegments, segments.filter { $0.seq <= edge }.count)
-            return (count, lanPublicationDelay)
+            return (count, lanPublicationDelay, edge)
         }
     }
 
@@ -2372,6 +2407,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
             guard let self, !self.stopped, !self.inProcessDelivery else { finish(.unavailable); return }
             guard let ip = CastHLSProxySession.wifiLANAddress() else { finish(.noAddress); return }
+            self.linkLock.lock(); self.linkStats.localIP = ip; self.linkLock.unlock()
             if self.lanListener != nil, self.lanPort != 0 {
                 finish(.ready(ip: ip, port: self.lanPort))
                 return
@@ -2454,7 +2490,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         lanHoldBackReason = ""
         lanPublishedEdge = -1
         lanHighestRequestedSeq = -1
-        linkLock.lock(); linkStats.peer = nil; linkLock.unlock()
+        linkLock.lock()
+        linkStats.peer = nil
+        linkStats.peerRequests = [:]
+        linkStats.localIP = nil
+        linkStats.receiverHighestSeq = -1
+        linkLock.unlock()
         listener.cancel()
         debugLog("[TS-REMUX] LAN delivery stopped (loopback only)")
     }
