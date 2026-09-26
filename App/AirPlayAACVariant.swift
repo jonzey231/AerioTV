@@ -33,12 +33,25 @@ import Foundation
 /// must be called off every serial queue that matters.
 final class AirPlayAACVariant: @unchecked Sendable {
 
-    /// ~5 s segments (plan open question 7); cuts land on keyframes, so
-    /// the playlist target reads 5-7 s in practice.
-    static let targetSegmentSeconds: Int64 = 5
-    /// Segments that must exist before the player is pointed at the
-    /// variant, unless the hold-back is already covered.
-    static let readySegments = 3
+    /// Cut at the first keyframe at or after 2 s, like the LAN TS path, so
+    /// real segments run 2 to 4 s on these feeds and the window fills fast
+    /// (connect time: the 2026-09-21 reference connected in ~8 s).
+    static let targetSegmentSeconds: Int64 = 2
+    /// TARGETDURATION served on the /aac/ playlists: a constant for the
+    /// session, like TSHLSRemuxer's `lanTargetDuration`. The store derives
+    /// its own for the Cast receiver; the tag pass pins this one instead.
+    /// A longer segment is logged once, never re-advertised.
+    static let servedTargetDuration = 4
+    /// Playlist window and retained ring for the variant's store (device
+    /// log 2026-09-26 10:58). Once live, 9 cuts of at least 2 s list 18 s
+    /// or more, deeper than AVPlayer's default start point (3 x 4 s from
+    /// the end), and the ring keeps 2 more for a receiver that is a poll
+    /// behind. At 2 to 4 s cuts
+    /// a segment is ~0.4 to 1.6 MB of video plus a few tens of KB of AAC,
+    /// so the 11-segment ring holds roughly 5 to 18 MB.
+    static let windowSegments = 9
+    static let ringSegments = windowSegments + 2
+    private var overTargetLogged = false
 
     /// "AC-3", "E-AC-3": what the TS arm's PMT declared.
     let sourceCodecName: String
@@ -69,14 +82,6 @@ final class AirPlayAACVariant: @unchecked Sendable {
     private var served: [String: Int] = [:]
     private var audioPath: String?
     private var servingTimer: DispatchSourceTimer?
-    /// Minimum hold-back the owner wants (the remuxer's LAN hold-back,
-    /// device log 2026-09-25 17:04); 0 = the 3 x target default.
-    private var holdBackFloor = 0.0
-
-    func setHoldBackFloor(_ seconds: Double) {
-        stateLock.lock(); holdBackFloor = max(0, seconds); stateLock.unlock()
-    }
-
     /// `transcoderFactory` is for the CLI tests only; production builds
     /// the real AudioToolbox transcoder.
     init(sourceCodecName: String,
@@ -86,7 +91,8 @@ final class AirPlayAACVariant: @unchecked Sendable {
                               @escaping (_ data: [UInt8], _ ptsTicks: Int64) -> Void) -> CastAudioTranscoding)? = nil) {
         self.sourceCodecName = sourceCodecName
         self.log = log
-        self.store = CastHLSSegmentStore(log: log)
+        self.store = CastHLSSegmentStore(log: log, windowSegments: Self.windowSegments,
+                                         ringSegments: Self.ringSegments)
         let remuxer = CastFMP4Remuxer(
             targetSegmentTicks: Self.targetSegmentSeconds * CastFMP4Remuxer.ticksPerSecond,
             allowAC3Passthrough: false,
@@ -114,10 +120,16 @@ final class AirPlayAACVariant: @unchecked Sendable {
             guard let seq = self.store.addSegment(generation: gen, durationTicks: videoTicks,
                                                   videoData: video, audioData: audio,
                                                   audioDurationTicks: audioTicks) else { return }
+            let seconds = Double(max(videoTicks, audioTicks)) / Double(CastFMP4Remuxer.ticksPerSecond)
+            if seconds > Double(Self.servedTargetDuration) + 0.5, !self.overTargetLogged {
+                self.overTargetLogged = true
+                self.log(String(format: "segment %d is %.2f s, over the advertised target %d s",
+                                seq, seconds, Self.servedTargetDuration))
+            }
             self.stateLock.lock()
             self.ring.append(Entry(seq: seq, videoTicks: videoTicks, audioTicks: audioTicks,
                                    audioSamples: composition.audio))
-            while self.ring.count > CastHLSSegmentStore.ringSize { self.ring.removeFirst() }
+            while self.ring.count > Self.ringSegments { self.ring.removeFirst() }
             self.lastComposition = composition
             self.emittedVideoTicks += videoTicks
             self.emittedAudioTicks += audioTicks
@@ -197,29 +209,38 @@ final class AirPlayAACVariant: @unchecked Sendable {
 
     // MARK: Readiness and status
 
-    /// Plan section 4b: at least `readySegments` cuts, or the window
-    /// already covers the hold-back the playlist wants.
+    /// The window must list `minimumReadySegments` segments and
+    /// `readyWindowSeconds` of media before the player is pointed at the
+    /// variant.
     var isReady: Bool {
         let s = snapshot()
-        return Self.isReady(hasInit: s.hasInit, ringCount: s.ringCount,
-                            segmentsInGeneration: s.segmentsInGeneration, target: s.target,
-                            windowSeconds: s.windowSeconds, holdBackWanted: s.holdBackWanted)
+        return Self.isReady(hasInit: s.hasInit, windowCount: s.windowCount, target: s.target,
+                            windowSeconds: s.windowSeconds)
     }
 
-    /// Never ready below this many cut segments, whatever the hold-back.
-    static let minimumReadySegments = 2
+    /// Never ready below this many listed segments.
+    static let minimumReadySegments = 4
+
+    /// Media the listed window must hold at handover, matching the TS LAN
+    /// path's handover (5 published 2 s segments, about 10 s). A playlist
+    /// shorter than 3 x TARGETDURATION makes the client start at the
+    /// playlist's first segment, so the whole window is its buffer; that
+    /// is what the Apple TV path does today and it measured fine.
+    static let readyWindowSeconds = 10.0
+    static func windowNeeded(target: Int) -> Double { target > 0 ? readyWindowSeconds : 0 }
 
     /// The readiness gate as a pure function (tested by the CLI harness).
-    /// Device log 2026-09-25 16:22:37.462: `variant ready: window seq
-    /// -1...-1 (0 of 0 ring, target 0s ...)`. With nothing cut the target
-    /// and the wanted hold-back are both 0, so `0 >= 0 + 0` passed the
-    /// hold-back arm and the receiver got an empty playlist (LAN item
-    /// failed 140 ms later). At least `minimumReadySegments` segments and a
-    /// non-zero target are now required before either arm counts.
-    static func isReady(hasInit: Bool, ringCount: Int, segmentsInGeneration: Int, target: Int,
-                        windowSeconds: Double, holdBackWanted: Double) -> Bool {
-        guard hasInit, ringCount >= minimumReadySegments, target > 0 else { return false }
-        return segmentsInGeneration >= readySegments || windowSeconds >= holdBackWanted + Double(target)
+    /// Device log 2026-09-26 10:58: `variant ready: window seq 0...2 (3 of
+    /// 3 ring, target 6s, window 15.0s, ...)` handed AVPlayer a 15 s window
+    /// with a restated HOLD-BACK of 9 s against TARGETDURATION 6 (below
+    /// the RFC 8216bis minimum), and the phone's item failed 2.4 s later.
+    /// The hold-back tag is gone now (see `stripSteeringTags`), and the
+    /// window must list at least `minimumReadySegments` segments AND hold
+    /// `readyWindowSeconds` (10 s). The 2026-09-25 16:22 case (nothing cut,
+    /// target 0) stays not ready through the target guard.
+    static func isReady(hasInit: Bool, windowCount: Int, target: Int, windowSeconds: Double) -> Bool {
+        guard hasInit, target > 0, windowCount >= minimumReadySegments else { return false }
+        return windowSeconds >= windowNeeded(target: target)
     }
 
     /// Emits `variant serving: ...` every `interval` seconds until stop.
@@ -244,8 +265,10 @@ final class AirPlayAACVariant: @unchecked Sendable {
         var ringCount = 0
         var target = 0
         var windowSeconds = 0.0
-        var holdBack = 0.0
-        var holdBackWanted = 0.0
+        /// AVPlayer's default start distance from the end (3 x target).
+        var startBack = 0.0
+        /// `windowNeeded(target:)` for the current target.
+        var windowNeeded = 0.0
         var videoEnd = 0.0
         var audioEnd = 0.0
         var audioBearing = 0
@@ -262,18 +285,17 @@ final class AirPlayAACVariant: @unchecked Sendable {
         let hasInit = store.videoInitSegment(generation: generation) != nil
         stateLock.lock(); defer { stateLock.unlock() }
         var s = Snapshot()
-        let window = Array(ring.suffix(CastHLSSegmentStore.windowSize))
+        let window = Array(ring.suffix(Self.windowSegments))
         let ticks = Double(CastFMP4Remuxer.ticksPerSecond)
         s.windowFirst = window.first?.seq ?? -1
         s.windowLast = window.last?.seq ?? -1
         s.windowCount = window.count
         s.ringCount = ring.count
-        // Same rounding as CastHLSSegmentStore.mediaPlaylistText.
-        s.target = window.map { Int((Double(max($0.videoTicks, $0.audioTicks)) / ticks).rounded(.up)) }
-            .max().map { max(1, $0) } ?? 0
+        // The TARGETDURATION the /aac/ playlists serve (0 = nothing cut).
+        s.target = window.isEmpty ? 0 : Self.servedTargetDuration
         s.windowSeconds = window.reduce(0.0) { $0 + Double($1.videoTicks) / ticks }
-        (s.holdBack, s.holdBackWanted) = Self.holdBack(target: s.target, windowSeconds: s.windowSeconds,
-                                                       floor: holdBackFloor)
+        s.startBack = Double(3 * s.target)
+        s.windowNeeded = Self.windowNeeded(target: s.target)
         s.videoEnd = Double(emittedVideoTicks) / ticks
         s.audioEnd = Double(emittedAudioTicks) / ticks
         s.audioBearing = window.filter { $0.audioSamples > 0 }.count
@@ -286,23 +308,8 @@ final class AirPlayAACVariant: @unchecked Sendable {
         return s
     }
 
-    /// The HOLD-BACK the variant playlists state: three target durations
-    /// (the RFC 8216bis minimum, what the Cast store states), but never so
-    /// deep that the join point would fall off the front of the window,
-    /// which keeps one full target duration in front of it.
-    /// `floor` raises the wanted hold-back past three targets (the
-    /// remuxer's LAN hold-back for a bursty or high-bitrate feed); the
-    /// window clamp still applies.
-    static func holdBack(target: Int, windowSeconds: Double, floor: Double = 0) -> (stated: Double, wanted: Double) {
-        let wanted = max(Double(3 * target), floor)
-        guard target > 0 else { return (0, 0) }
-        let room = windowSeconds - Double(target)
-        let stated = min(wanted, max(Double(target), (room * 10).rounded(.down) / 10))
-        return (stated, wanted)
-    }
-
-    /// `window seq A...B (n of N ring, target Ts, window Ws, hold-back Hs of
-    /// Ws wanted, live edge Es) video end Vs audio end As delta Ds,
+    /// `window seq A...B (n of N ring, target Ts, window Ws of Ns needed,
+    /// default start Ss back, live edge Es) video end Vs audio end As delta Ds,
     /// audio-bearing N, backlog v= a= units= emitted Es, served ...`
     /// (the 2026-09-24 template). backlog v/a are the newest cut's video
     /// and audio sample counts; units counts AAC frames emitted so far.
@@ -311,8 +318,8 @@ final class AirPlayAACVariant: @unchecked Sendable {
         let liveEdge = min(s.videoEnd, s.audioEnd > 0 ? s.audioEnd : s.videoEnd)
         var line = "\(label): window seq \(s.windowFirst)...\(s.windowLast) "
         line += "(\(s.windowCount) of \(s.ringCount) ring, target \(s.target)s, "
-        line += String(format: "window %.1fs, hold-back %.1fs of %.1fs wanted, live edge %.3fs) ",
-                       s.windowSeconds, s.holdBack, s.holdBackWanted, liveEdge)
+        line += String(format: "window %.1fs of %.1fs needed, default start %.1fs back, live edge %.3fs) ",
+                       s.windowSeconds, s.windowNeeded, s.startBack, liveEdge)
         line += String(format: "video end %.3fs audio end %.3fs delta %.3fs, ",
                        s.videoEnd, s.audioEnd, s.audioEnd - s.videoEnd)
         line += "audio-bearing \(s.audioBearing), backlog v=\(s.backlogVideo) a=\(s.backlogAudio) "
@@ -353,10 +360,10 @@ final class AirPlayAACVariant: @unchecked Sendable {
             r = Response(status: 200, body: Data(store.demuxedMasterPlaylistText().utf8),
                          contentType: playlist, kind: "master", seq: -1)
         } else if name == "video.m3u8" {
-            r = Response(status: 200, body: Data(restateHoldBack(store.videoPlaylistText()).utf8),
+            r = Response(status: 200, body: Data(Self.stripSteeringTags(store.videoPlaylistText()).utf8),
                          contentType: playlist, kind: "video", seq: -1)
         } else if name == "audio.m3u8" {
-            r = Response(status: 200, body: Data(restateHoldBack(store.audioPlaylistText()).utf8),
+            r = Response(status: 200, body: Data(Self.stripSteeringTags(store.audioPlaylistText()).utf8),
                          contentType: playlist, kind: "audio", seq: -1)
         } else if let gen = number("vinit", ".mp4") {
             r = Self.found(store.videoInitSegment(generation: gen), "video/mp4", "vinit", gen)
@@ -383,16 +390,22 @@ final class AirPlayAACVariant: @unchecked Sendable {
         return Response(status: 200, body: data, contentType: type, kind: kind, seq: seq)
     }
 
-    /// The store states HOLD-BACK = 3 x target for the Cast receiver; the
-    /// variant states `holdBack(target:windowSeconds:)` instead so
-    /// AVPlayer's join point (plan section 5: no configured offset for the
-    /// LAN item) always lands inside the window.
-    func restateHoldBack(_ text: String) -> String {
-        let s = snapshot()
-        guard s.target > 0,
-              let range = text.range(of: "HOLD-BACK=[0-9.]+", options: .regularExpression) else { return text }
-        var out = text
-        out.replaceSubrange(range, with: "HOLD-BACK=" + String(format: "%.3f", s.holdBack))
-        return out
+    /// The store states `#EXT-X-SERVER-CONTROL:...HOLD-BACK=3 x target`
+    /// and a derived TARGETDURATION for the Cast receiver. The AirPlay
+    /// variant carries no steering tags at all (the same model as the LAN
+    /// TS path): the whole EXT-X-SERVER-CONTROL line and any EXT-X-START
+    /// line are removed, so AVPlayer uses its default start point (3 x
+    /// target from the end), and TARGETDURATION is pinned to
+    /// `servedTargetDuration` in the same pass. The readiness gate
+    /// guarantees the window is deep enough to hold that start point.
+    /// Device log 2026-09-26 10:58: a restated HOLD-BACK of 9.0 s against
+    /// TARGETDURATION 6 broke the RFC 8216bis minimum and the item failed.
+    static func stripSteeringTags(_ text: String) -> String {
+        var lines = text.components(separatedBy: "\n")
+        lines.removeAll { $0.hasPrefix("#EXT-X-SERVER-CONTROL:") || $0.hasPrefix("#EXT-X-START:") }
+        for i in lines.indices where lines[i].hasPrefix("#EXT-X-TARGETDURATION:") {
+            lines[i] = "#EXT-X-TARGETDURATION:\(servedTargetDuration)"
+        }
+        return lines.joined(separator: "\n")
     }
 }

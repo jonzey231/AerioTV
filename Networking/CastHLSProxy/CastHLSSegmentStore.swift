@@ -86,8 +86,19 @@ final class CastHLSSegmentStore: @unchecked Sendable {
 
     private let log: (String) -> Void
 
-    init(log: @escaping (String) -> Void = { _ in }) {
+    /// This store's playlist window and retained ring, in segments. The
+    /// Cast receiver uses the static defaults; the AirPlay AAC variant
+    /// asks for a deeper window so AVPlayer's default start point (three
+    /// target durations from the end) always lands inside it.
+    let windowSegments: Int
+    let ringSegments: Int
+
+    init(log: @escaping (String) -> Void = { _ in },
+         windowSegments: Int = CastHLSSegmentStore.windowSize,
+         ringSegments: Int = CastHLSSegmentStore.ringSize) {
         self.log = log
+        self.windowSegments = max(1, windowSegments)
+        self.ringSegments = max(self.windowSegments, ringSegments)
     }
 
     /// Segments committed since the last `beginGeneration`.
@@ -189,7 +200,7 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         nextSeq += 1
         pendingDiscontinuity = false
         ring.append(entry)
-        while ring.count > Self.ringSize {
+        while ring.count > ringSegments {
             let evicted = ring.removeFirst()
             if evicted.discontinuity { discontinuitySequence += 1 }
             // Drop init segments no ring entry references any more.
@@ -358,7 +369,7 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         case .video: initPrefix = "vinit"; segPrefix = "vseg"
         case .audio: initPrefix = "ainit"; segPrefix = "aseg"
         }
-        let window = Array(ring.suffix(Self.windowSize))
+        let window = Array(ring.suffix(windowSegments))
         var text = "#EXTM3U\n#EXT-X-VERSION:7\n"
         // Deliberately the max over BOTH renditions' spans, so the two
         // demuxed playlists advertise the SAME target duration even though

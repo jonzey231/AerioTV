@@ -2077,44 +2077,37 @@ runDemuxedRenditionChecks()
 //
 // The variant reuses CastFMP4Remuxer + CastHLSSegmentStore for AirPlay
 // receivers that cannot decode AC-3. What it adds, and what is checked
-// here: the /aac routes, the restated HOLD-BACK, the readiness gate, the
+// here: the /aac routes, the stripped steering tags, the readiness gate, the
 // served tally and the status-line template the device log greps for.
 
 do {
-    // HOLD-BACK: three targets when the window has room, never so deep
-    // the join falls off the window front, never below one target.
-    let roomy = AirPlayAACVariant.holdBack(target: 6, windowSeconds: 26.6)
-    expectEq(roomy.stated, 18.0, "airplay-aac hold-back: 3x target when the window has room")
-    expectEq(roomy.wanted, 18.0, "airplay-aac hold-back: wanted is 3x target")
-    let tight = AirPlayAACVariant.holdBack(target: 5, windowSeconds: 12.0)
-    expectEq(tight.stated, 7.0, "airplay-aac hold-back: capped one target inside the window")
-    expectEq(tight.wanted, 15.0, "airplay-aac hold-back: still reports what it wanted")
-    let tiny = AirPlayAACVariant.holdBack(target: 5, windowSeconds: 5.0)
-    expectEq(tiny.stated, 5.0, "airplay-aac hold-back: never below one target")
-    // Device log 2026-09-25 17:04: the remuxer's LAN hold-back floor
-    // raises the wanted hold-back past 3x target, still window-clamped.
-    let floored = AirPlayAACVariant.holdBack(target: 5, windowSeconds: 30.0, floor: 20.0)
-    expectEq(floored.wanted, 20.0, "airplay-aac hold-back: floor raises wanted past 3x target")
-    expectEq(floored.stated, 20.0, "airplay-aac hold-back: floor stated when the window has room")
-    let flooredTight = AirPlayAACVariant.holdBack(target: 5, windowSeconds: 22.0, floor: 20.0)
-    expectEq(flooredTight.stated, 17.0, "airplay-aac hold-back: floor still clamped one target inside the window")
+    // No steering tags on the variant: the SERVER-CONTROL and START
+    // lines go, everything else stays in order.
+    let tagged = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,HOLD-BACK=18.000\n"
+        + "#EXT-X-START:TIME-OFFSET=-9\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:5.000,\nvseg0.m4s\n"
+    expectEq(AirPlayAACVariant.stripSteeringTags(tagged),
+             "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:5.000,\nvseg0.m4s\n",
+             "airplay-aac: steering tags stripped, target pinned to 4")
     expectEq(AirPlayAACVariant.servedSummary([:]), "none", "airplay-aac served: none before any GET")
     expectEq(AirPlayAACVariant.servedSummary(["video": 2, "master": 3, "aseg": 0]),
              "master=3 video=2", "airplay-aac served: sorted, zero kinds omitted")
     // Device log 2026-09-25 16:22:37: "variant ready ... (0 of 0 ring,
     // target 0s ...)". An empty window must never read as ready.
-    expect(!AirPlayAACVariant.isReady(hasInit: true, ringCount: 0, segmentsInGeneration: 0, target: 0,
-                                      windowSeconds: 0, holdBackWanted: 0),
+    expect(!AirPlayAACVariant.isReady(hasInit: true, windowCount: 0, target: 0, windowSeconds: 0),
            "airplay-aac: variant not ready with 0 segments (init only)")
-    expect(!AirPlayAACVariant.isReady(hasInit: true, ringCount: 1, segmentsInGeneration: 1, target: 6,
-                                      windowSeconds: 30, holdBackWanted: 18),
-           "airplay-aac: variant not ready with 1 segment")
-    expect(!AirPlayAACVariant.isReady(hasInit: true, ringCount: 3, segmentsInGeneration: 3, target: 0,
-                                      windowSeconds: 0, holdBackWanted: 0),
+    expect(!AirPlayAACVariant.isReady(hasInit: true, windowCount: 3, target: 0, windowSeconds: 0),
            "airplay-aac: variant not ready with a zero target")
-    expect(AirPlayAACVariant.isReady(hasInit: true, ringCount: 3, segmentsInGeneration: 3, target: 6,
-                                     windowSeconds: 18, holdBackWanted: 18),
-           "airplay-aac: ready with 3 segments and a target")
+    // Device log 2026-09-26 10:58: 3 segments, target 6, 15 s window.
+    expect(!AirPlayAACVariant.isReady(hasInit: true, windowCount: 3, target: 6, windowSeconds: 15),
+           "airplay-aac: not ready with 3 segments (device log 10:58)")
+    expect(!AirPlayAACVariant.isReady(hasInit: true, windowCount: 3, target: 6, windowSeconds: 30),
+           "airplay-aac: not ready below 4 segments")
+    expect(!AirPlayAACVariant.isReady(hasInit: true, windowCount: 4, target: 4, windowSeconds: 9.9),
+           "airplay-aac: not ready below 10 s")
+    expect(!AirPlayAACVariant.isReady(hasInit: true, windowCount: 3, target: 4, windowSeconds: 12),
+           "airplay-aac: not ready below 4 segments even with 10 s")
+    expect(AirPlayAACVariant.isReady(hasInit: true, windowCount: 5, target: 4, windowSeconds: 10),
+           "airplay-aac: ready at 10 s with 4+ segments (TS LAN handover parity)")
 }
 
 @MainActor func runAirPlayVariantChecks() {
@@ -2165,13 +2158,14 @@ do {
     expectEq(video.kind, "video", "airplay-aac: video playlist kind")
     expectEq(video.seq, -1, "airplay-aac: playlists log seq -1")
     let snap = variant.snapshot()
-    expect(snap.target >= 5, "airplay-aac: ~5 s target (got \(snap.target))")
-    let hb = String(format: "HOLD-BACK=%.3f", snap.holdBack)
-    expect(videoText.contains(hb), "airplay-aac video playlist restates \(hb)")
-    expect(snap.holdBack >= Double(snap.target) && snap.holdBack <= Double(3 * snap.target),
-           "airplay-aac: stated hold-back within [target, 3x target]")
+    expectEq(snap.target, 4, "airplay-aac: served target is a constant 4")
+    expect(videoText.contains("#EXT-X-TARGETDURATION:4\n"), "airplay-aac video playlist serves TARGETDURATION 4")
+    expect(!videoText.contains("#EXT-X-SERVER-CONTROL") && !videoText.contains("#EXT-X-START"),
+           "airplay-aac video playlist carries no steering tags")
+    expect(snap.windowSeconds >= AirPlayAACVariant.readyWindowSeconds,
+           "airplay-aac: window holds the 10 s handover minimum (\(snap.windowSeconds) s)")
     let audioText = String(decoding: variant.serve(path: "/aac/audio.m3u8").body, as: UTF8.self)
-    expect(audioText.contains(hb), "airplay-aac audio playlist restates the same hold-back")
+    expect(!audioText.contains("HOLD-BACK"), "airplay-aac audio playlist carries no hold-back")
     expect(videoText.contains("#EXT-X-MAP:URI=\"vinit1.mp4\""), "airplay-aac: generation 1 init")
     let vinit = variant.serve(path: "/aac/vinit1.mp4")
     expectEq(vinit.status, 200, "airplay-aac: vinit1 served")
@@ -2187,7 +2181,7 @@ do {
 
     let status = variant.statusLine("variant serving")
     let template = "^variant serving: window seq [0-9]+\\.\\.\\.[0-9]+ \\([0-9]+ of [0-9]+ ring, target [0-9]+s, "
-        + "window [0-9.]+s, hold-back [0-9.]+s of [0-9.]+s wanted, live edge [0-9.]+s\\) "
+        + "window [0-9.]+s of 10\\.0s needed, default start [0-9.]+s back, live edge [0-9.]+s\\) "
         + "video end [0-9.]+s audio end [0-9.]+s delta -?[0-9.]+s, audio-bearing [0-9]+, "
         + "backlog v=[0-9]+ a=[0-9]+ units=[0-9]+ emitted [0-9.]+s, "
         + "served ainit=1 aseg=1 audio=1 master=1 video=1 vinit=1 vseg=1$"

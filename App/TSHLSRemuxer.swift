@@ -2189,6 +2189,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var lanPeersLogged = Set<String>()
     private var lanUALogged = Set<String>()
     private var lanPlaylistLogged = Set<String>()
+    /// "peer name" pairs whose first /aac/ playlist was logged in full.
+    private var aacPlaylistLogged = Set<String>()
 
     // MARK: AirPlay LAN runway (device log 2026-09-25 17:04)
     //
@@ -2453,7 +2455,6 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         lanHoldBackSeconds = hb
         lanHoldBackReason = why
         lanHoldBack.set(hb)
-        airPlayVariant?.setHoldBackFloor(hb)
         debugLog(String(format: "[TS-REMUX] LAN hold-back %.1f s (%@; ceiling %.0f s); LAN playlist unpaced, RAM ring %d segs, publication delay %.1f s",
                         hb, why, lanHoldBackCeiling, lanRingSegments, lanPublicationDelay))
     }
@@ -2576,6 +2577,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         lanPeersLogged.removeAll()
         lanUALogged.removeAll()
         lanPlaylistLogged.removeAll()
+        aacPlaylistLogged.removeAll()
         lanHoldBackSeconds = 0
         lanHoldBack.set(0)
         lanHoldBackReason = ""
@@ -2684,7 +2686,6 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             for packet in self.heldAudio { tail.append(packet) }
             tail.append(self.pending)
             self.airPlayVariant = variant
-            variant.setHoldBackFloor(self.lanHoldBackSeconds)
             variant.start(primeSegments: Array(window), tail: tail)
             finish(variant)
         }
@@ -2697,6 +2698,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private func stopAACVariantLocked() {
         guard let variant = airPlayVariant else { return }
         airPlayVariant = nil
+        aacPlaylistLogged.removeAll()
         variant.stop()
     }
 
@@ -2734,6 +2736,28 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 self.receiveRequest(connection, buffer: buffer, lan: lan, peer: peer)
             }
         }
+    }
+
+    /// NSError domain/code, the underlying error, and the newest errorLog
+    /// event of a failed AVPlayerItem, on one line. Shared with
+    /// AirPlayTileDelivery's LAN item failure log.
+    nonisolated static func itemFailureDetail(_ item: AVPlayerItem) -> String {
+        var out = "error=-"
+        if let e = item.error as NSError? {
+            out = "error=\(e.domain) \(e.code)"
+            if let u = e.userInfo[NSUnderlyingErrorKey] as? NSError {
+                out += " underlying=\(u.domain) \(u.code) '\(u.localizedDescription)'"
+            } else {
+                out += " underlying=-"
+            }
+        }
+        if let ev = item.errorLog()?.events.last {
+            out += " errorLog last: status=\(ev.errorStatusCode) domain=\(ev.errorDomain)"
+            out += " comment=\(ev.errorComment ?? "-") uri=\(ev.uri ?? "-")"
+        } else {
+            out += " errorLog: none"
+        }
+        return out
     }
 
     struct ServedResource {
@@ -2824,6 +2848,18 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                     self.noteLANReceiverPlaylist(raw, peer: peer)
                     guard self.lanPlaylistLogged.insert(peer).inserted else { return }
                     debugLog("[TS-REMUX] LAN playlist for \(peer): \(text)")
+                }
+            }
+            // AirPlay AAC variant: each peer's first fetch of each playlist,
+            // in full, so the receiver's view of the variant is on record.
+            if lan, let self, let peer, r.status == 200, path.hasPrefix("/aac/"), path.hasSuffix(".m3u8") {
+                let name = String(path.dropFirst("/aac/".count).dropLast(".m3u8".count))
+                let text = String(decoding: r.body, as: UTF8.self)
+                    .trimmingCharacters(in: .newlines)
+                    .replacingOccurrences(of: "\n", with: " | ")
+                self.queue.async {
+                    guard self.aacPlaylistLogged.insert("\(peer) \(name)").inserted else { return }
+                    debugLog("[AVP-AIRPLAY] aac \(name) for \(peer): \(text)")
                 }
             }
             let status: String
@@ -5829,7 +5865,7 @@ struct AVPlayerMultiviewTile: View {
                 TuneTimeline.shared.mark("ready")
                 debugLog("[AVP-ITEM] AVPlayerItem readyToPlay")
             } else {
-                debugLog("[AVP-ITEM] AVPlayerItem status=failed (\(item.error?.localizedDescription ?? "unknown"))")
+                debugLog("[AVP-ITEM] AVPlayerItem status=failed (\(item.error?.localizedDescription ?? "unknown")) \(TSHLSRemuxer.itemFailureDetail(item))")
             }
             itemReadyObs?.invalidate()
             itemReadyObs = nil

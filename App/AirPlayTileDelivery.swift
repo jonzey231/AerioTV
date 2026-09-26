@@ -380,7 +380,7 @@ final class AirPlayTileDelivery {
     /// Mid-play LAN item: the same forward-buffer policy as the loopback
     /// item (automatic). No configured join offset: the receiver starts at
     /// the playlist's default point and the LAN publication delay (or the
-    /// AAC variant's own playlist) sets its distance from the edge.
+    /// AAC variant's window gate) keeps that point inside the window.
     private func makeLANItem(url: URL, copying old: AVPlayerItem) -> AVPlayerItem {
         let item = AVPlayerItem(url: url)
         item.automaticallyPreservesTimeOffsetFromLive = true
@@ -399,7 +399,11 @@ final class AirPlayTileDelivery {
         lanItemStatusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             guard item.status == .failed else { return }
             let reason = item.error?.localizedDescription ?? "unknown"
-            Task { @MainActor in self?.lanItemFailed(item, reason: reason) }
+            let detail = TSHLSRemuxer.itemFailureDetail(item)
+            Task { @MainActor in
+                debugLog("[AVP-AIRPLAY] LAN item failure detail: \(detail)")
+                self?.lanItemFailed(item, reason: reason)
+            }
         }
     }
 
