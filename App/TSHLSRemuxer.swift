@@ -1845,8 +1845,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     let advertisedTargetDuration = DoubleBox(2.0)
     /// Media seconds (and segment count) the LAN playlist's RAM window
     /// holds right now: the last `lanRingSegments` cut segments. The
-    /// AirPlay start gate reads it (device log 2026-09-25: a 4 s window
-    /// under an 8 s hold-back never started on the Apple TV).
+    /// AirPlay join offset clamp reads it, so the receiver never joins
+    /// deeper than the window holds.
     let lanWindowSeconds = DoubleBox(0)
     let lanWindowSegments = DoubleBox(0)
 
@@ -2031,8 +2031,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // later, which is exactly the heuristic CoreMedia's -12888 staleness
         // check keys off. Pin it monotonically, seeded at the steady-state
         // target.
+        let priorTarget = pinnedTargetDuration.rounded(.up)
         pinnedTargetDuration = max(pinnedTargetDuration,
                                    window.map(\.duration).max() ?? targetSegmentSeconds)
+        // A grown target raises the spec minimum hold-back (3 x target), so
+        // re-derive the LAN hold-back now rather than on its lazy cadence.
+        // This builder runs on `queue`, as `refreshLANHoldBack` requires.
+        if pinnedTargetDuration.rounded(.up) > priorTarget, lanListener != nil {
+            refreshLANHoldBack(now: Date())
+        }
         // fMP4 arm: EXT-X-MAP requires protocol version 6+; 7 matches
         // Apple's own fMP4 playlists. The TS arm stays at 3.
         let version = fmp4 != nil ? 7 : 3
@@ -2056,16 +2063,23 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             text += "#EXT-X-PLAYLIST-TYPE:EVENT\n"
         }
         if lan, !eventPlaylist, !playlistComplete, lanHoldBackSeconds > 0 {
-            // Never deeper than the window minus one target, so the join
-            // point stays inside what is advertised.
-            // HOLD-BACK must be at least 3x target per spec, and TIME-OFFSET
-            // must never exceed the playlist duration: when the window is
-            // too shallow for either, omit both tags for this reload.
+            // RFC 8216bis 4.4.3.8: HOLD-BACK MUST be at least 3 x
+            // TARGETDURATION. Device log 2026-09-25: a 2.002 s segment rounded
+            // TARGETDURATION up to 3 while HOLD-BACK stayed 8 (the lazy
+            // refresh had not caught up) and the Apple TV fetched the
+            // playlist once and parked. So the hold-back is floored at the
+            // spec minimum for the target actually advertised, and both tags
+            // are emitted only when the window (minus one target, so the
+            // join point stays inside what is advertised) is deep enough to
+            // honor it; otherwise neither is emitted for this reload.
+            let tdInt = Int(pinnedTargetDuration.rounded(.up))
+            let minHB = 3 * Double(tdInt)
+            let hb = max(lanHoldBackSeconds, minHB)
             let room = window.reduce(0.0) { $0 + $1.duration } - pinnedTargetDuration
-            if room >= 3 * pinnedTargetDuration.rounded(.up) {
-                let hb = min(lanHoldBackSeconds, room)
-                text += "#EXT-X-SERVER-CONTROL:HOLD-BACK=\(String(format: "%.3f", hb))\n"
-                text += "#EXT-X-START:TIME-OFFSET=-\(String(format: "%.3f", hb)),PRECISE=NO\n"
+            if room >= hb {
+                let hbText = String(format: "%.3f", hb)
+                text += "#EXT-X-SERVER-CONTROL:HOLD-BACK=\(hbText)\n"
+                text += "#EXT-X-START:TIME-OFFSET=-\(hbText),PRECISE=NO\n"
             }
         }
         if fmp4 != nil {
@@ -2161,6 +2175,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var lanListener: NWListener?
     private var lanPort: UInt16 = 0
     private var lanPeersLogged = Set<String>()
+    private var lanUALogged = Set<String>()
+    private var lanPlaylistLogged = Set<String>()
 
     // MARK: AirPlay LAN runway (device log 2026-09-25 17:04)
     //
@@ -2394,6 +2410,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         lanListener = nil
         lanPort = 0
         lanPeersLogged.removeAll()
+        lanUALogged.removeAll()
+        lanPlaylistLogged.removeAll()
         lanHoldBackSeconds = 0
         lanHoldBack.set(0)
         lanHoldBackReason = ""
@@ -2525,6 +2543,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 // last bytes arrive with FIN piggybacked must still be served.
                 let head = String(decoding: buffer[..<headerEnd.lowerBound], as: UTF8.self)
                 let path = head.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
+                if lan, let peer {
+                    let ua = head.split(separator: "\r\n").first {
+                        $0.lowercased().hasPrefix("user-agent:")
+                    }.map { $0.dropFirst("user-agent:".count).trimmingCharacters(in: .whitespaces) } ?? "(none)"
+                    self.queue.async {
+                        guard self.lanUALogged.insert(peer).inserted else { return }
+                        debugLog("[TS-REMUX] LAN delivery: User-Agent from \(peer): \(ua)")
+                    }
+                }
                 self.respond(connection, path: path, lan: lan, peer: peer)
             } else if isComplete || buffer.count >= 16_384 {
                 // EOF before a complete request, or an oversized head. Without
@@ -2616,6 +2643,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private func respond(_ connection: NWConnection, path: String, lan: Bool = false, peer: String? = nil) {
         serve(path: path, lan: lan) { [weak self] r in
             if lan { self?.noteLANServed(bytes: r.body.count, peer: peer) }
+            if lan, let self, let peer, r.status == 200, path.hasSuffix("live.m3u8") {
+                let text = String(decoding: r.body, as: UTF8.self)
+                    .trimmingCharacters(in: .newlines)
+                    .replacingOccurrences(of: "\n", with: " | ")
+                self.queue.async {
+                    guard self.lanPlaylistLogged.insert(peer).inserted else { return }
+                    debugLog("[TS-REMUX] LAN playlist for \(peer): \(text)")
+                }
+            }
             let status: String
             switch r.status {
             case 200: status = "200 OK"
