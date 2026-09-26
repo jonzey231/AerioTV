@@ -1897,8 +1897,24 @@ struct ChannelListView: View {
                 }
             }
             .refreshable {
-                await EPGCache.shared.invalidateAll()
-                await channelStore.forceRefresh(servers: servers, modelContext: modelContext)
+                // The refresh work runs in an unstructured main-actor Task so
+                // a cancelled refreshable task (view re-render / teardown)
+                // cannot cancel the network fetch; the spinner still waits
+                // on task.value. [PULL] logs time the outer cancellation.
+                let pullStart = Date()
+                debugLog("[PULL] pull to refresh started")
+                let work = Task { @MainActor in
+                    await EPGCache.shared.invalidateAll()
+                    await channelStore.forceRefresh(servers: servers, modelContext: modelContext)
+                }
+                await withTaskCancellationHandler {
+                    await work.value
+                } onCancel: {
+                    let ms = Int(Date().timeIntervalSince(pullStart) * 1000)
+                    debugLog("[PULL] refreshable task cancelled after \(ms)ms")
+                }
+                let ms = Int(Date().timeIntervalSince(pullStart) * 1000)
+                debugLog("[PULL] pull to refresh finished in \(ms)ms (cancelled=\(Task.isCancelled))")
             }
             // iPhone-only: collapse the chrome (filter pills) when the
             // list scrolls past 80pt; expand again near the top (< 20pt).

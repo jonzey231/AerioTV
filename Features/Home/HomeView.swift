@@ -1610,6 +1610,9 @@ final class ChannelStore: ObservableObject {
     private var currentChannelServerID: UUID?
 
     private var loadTask: Task<Void, Never>?
+    /// In-flight `forceRefresh`, so a second pull (or a Refresh button while a
+    /// pull runs) awaits the same pass instead of cancelling and restarting it.
+    private var forceRefreshTask: Task<Void, Never>?
     private var epgEnrichTask: Task<Void, Never>?
 
     // MARK: - Public API
@@ -1680,6 +1683,23 @@ final class ChannelStore: ObservableObject {
     /// This is async so the pull-to-refresh spinner stays visible until done.
     /// Pass `modelContext` to persist the rebuilt guide back to SwiftData.
     func forceRefresh(servers: [ServerConnection], modelContext: ModelContext? = nil) async {
+        if let inFlight = forceRefreshTask, !inFlight.isCancelled {
+            debugLog("[PULL] forceRefresh already in flight, awaiting it")
+            await inFlight.value
+            return
+        }
+        // Unstructured on purpose: the caller's task (SwiftUI's refreshable
+        // task in particular) can be cancelled by a re-render, and that must
+        // not cancel the network fetch the user asked for.
+        let task = Task { @MainActor in
+            await self.performForceRefresh(servers: servers, modelContext: modelContext)
+        }
+        forceRefreshTask = task
+        await task.value
+        if forceRefreshTask == task { forceRefreshTask = nil }
+    }
+
+    private func performForceRefresh(servers: [ServerConnection], modelContext: ModelContext?) async {
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first else { return }
         // The user asked for fresh data, so the bulk guide must actually be
         // re-downloaded even if a pass completed moments ago — and a server
