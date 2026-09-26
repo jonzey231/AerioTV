@@ -5486,9 +5486,21 @@ final class AVPlayerProgressDriver {
         itemNotificationTokens.append(nc.addObserver(
             forName: AVPlayerItem.playbackStalledNotification,
             object: item, queue: .main) { [weak self] _ in
-            let ms = Int((CACurrentMediaTime() - (self?.launchStart ?? 0)) * 1000)
+            guard let self else { return }
+            // A receiver (Roku and other non-Apple AirPlay targets) never
+            // reports its buffer back through this item, so "ran empty"
+            // here is the phone's view, not the TV's. No verdict.
+            if self.externalRenderSuspended {
+                if !self.loggedReceiverStallSkip {
+                    self.loggedReceiverStallSkip = true
+                    debugLog("[AVP-STREAM] stall check skipped: receiver owns playback")
+                }
+                self.stallGateSince = nil
+                return
+            }
+            let ms = Int((CACurrentMediaTime() - self.launchStart) * 1000)
             debugLog("[AVP-STREAM] STALL at +\(ms)ms (buffer ran empty)")
-            self?.armStallResumeGate()
+            self.armStallResumeGate()
         })
 
         // Periodic summary (15s), mpv [STREAM-SUMMARY] cadence: report
@@ -5515,9 +5527,12 @@ final class AVPlayerProgressDriver {
     /// AirPlay (2026-09-21 rebuild): while a receiver plays this player the
     /// local clock is the receiver's, and the phone must not judge, rejoin
     /// or bounce the engine off it.
+    /// One "stall check skipped" line per driver, not one per stall.
+    private var loggedReceiverStallSkip = false
     private var externalRenderSuspended: Bool {
         #if os(iOS)
         return AirPlayTileDelivery.isServingReceiver || AirPlayMonitor.shared.isExternal
+            || player.isExternalPlaybackActive
         #else
         return false
         #endif
@@ -5605,6 +5620,7 @@ final class AVPlayerProgressDriver {
     /// The watchdog fuse is untouched: if this does not help, it still
     /// fires exactly as before.
     private func maybeNudgeOutOfWait(item: AVPlayerItem, reason: String) {
+        if externalRenderSuspended { stallGateSince = nil; return }
         guard isLive else { return }
         guard reason == AVPlayer.WaitingReason.toMinimizeStalls.rawValue else {
             endWaitStreak()
@@ -5676,7 +5692,7 @@ final class AVPlayerProgressDriver {
     /// `attemptRepeatStallRejoin`, which moves the playhead back into the
     /// local window instead of waiting at the edge.
     private func armStallResumeGate() {
-        guard isLive else { return }
+        guard isLive, !externalRenderSuspended else { return }
         let now = Date()
         let repeated = lastStallAt.map { now.timeIntervalSince($0) < 60 } ?? false
         lastStallAt = now

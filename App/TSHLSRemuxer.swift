@@ -4466,6 +4466,18 @@ struct AVPlayerMultiviewTile: View {
             for: .AVPlayerItemFailedToPlayToEndTime)) { note in
             guard let failed = note.object as? AVPlayerItem,
                   failed === player?.currentItem else { return }
+            #if os(iOS)
+            // Device log 2026-09-26 11:26:58: a Roku receiver never reports
+            // its buffer back, so the phone's item "failed to play to end"
+            // on a stall and the retry tore the receiver session down.
+            // While a receiver owns playback the delivery's own
+            // lanItemFailed handles a real LAN item failure; the tile never
+            // rebuilds the pipeline under it.
+            if airPlayDelivery.isServing || player?.isExternalPlaybackActive == true {
+                debugLog("[AVP-MV] tile playback-failed ignored: receiver owns playback (item status \(failed.status.rawValue)) channel=\(channelName)")
+                return
+            }
+            #endif
             debugLog("[AVP-MV] tile playback failed channel=\(channelName); falling back to mpv tile")
             failOrFallback("playback failed")
         }
