@@ -273,8 +273,20 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         let videoInit = videoInits[generation]
         let audioInit = audioInits[generation]
         let attribute = audioCodecsAttribute
+        let decodesLevel42 = receiverDecodesAVCLevel42
         condition.unlock()
-        let videoCodec = videoInit.flatMap { Self.avcCodecString(from: $0) } ?? "avc1.640028"
+        let streamCodec = videoInit.flatMap { Self.avcCodecString(from: $0) } ?? "avc1.640028"
+        let videoCodec = Self.declaredAVCCodec(streamCodec, receiverDecodesLevel42: decodesLevel42)
+        if videoCodec != streamCodec {
+            condition.lock()
+            let first = !loggedLevelClamp
+            loggedLevelClamp = true
+            condition.unlock()
+            if first {
+                log("[CAST-HLS] master declares \(videoCodec) (stream is \(streamCodec); "
+                    + "receiver answered no to level 4.2)")
+            }
+        }
         let audioCodec = audioInit.flatMap { Self.audioCodecString(from: $0) } ?? attribute
         var text = "#EXTM3U\n"
         if audioCodec != nil {
@@ -324,6 +336,30 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         condition.lock()
         audioCodecsAttribute = value
         condition.unlock()
+    }
+
+    /// The receiver's own answer to isTypeSupported for
+    /// `video/mp4; codecs="avc1.64002A"` (level 4.2), set by the session
+    /// from the cast controller's caps; nil when caps were never measured.
+    private var receiverDecodesAVCLevel42: Bool?
+    /// The level clamp is logged once per store (one store per session).
+    private var loggedLevelClamp = false
+
+    func setReceiverDecodesAVCLevel42(_ value: Bool?) {
+        condition.lock()
+        receiverDecodesAVCLevel42 = value
+        condition.unlock()
+    }
+
+    /// The avc1 string the master declares. A Chromecast Ultra decodes
+    /// 1080p60 but its MSE answers no to level 4.2 (avc1.64002A) and Shaka
+    /// refuses the variant (Error 4032, device log 2026-09-26), while
+    /// avc1.640028 plays. So a level above 4.0 is declared as 4.0, keeping
+    /// profile and constraint bytes, unless the receiver said yes to 4.2.
+    static func declaredAVCCodec(_ codec: String, receiverDecodesLevel42: Bool?) -> String {
+        guard receiverDecodesLevel42 != true, codec.hasPrefix("avc1."), codec.count == 11,
+              let level = UInt8(codec.suffix(2), radix: 16), level > 0x28 else { return codec }
+        return String(codec.prefix(9)) + "28"
     }
 
     /// avc1.PPCCLL from the avcC box inside an init segment (profile,
