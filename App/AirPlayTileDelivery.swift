@@ -138,6 +138,7 @@ final class AirPlayTileDelivery {
                 debugLog("[AVP-AIRPLAY] AirPlay route already selected: starting on LAN \(self.endpointText), watchdogs suspended")
                 self.enterServing()
                 start(url, self.plan == .aacStereo)
+                self.holdLocalOutputForTake(url: url)
                 self.watchReceiverTake(token: myToken)
             case .noAddress:
                 debugLog("[AVP-AIRPLAY] no LAN address for the remux server; starting on loopback")
@@ -157,6 +158,32 @@ final class AirPlayTileDelivery {
             AirPlayMonitor.shared.noteTileLoading(false)
         }
         return true
+    }
+
+    /// The fresh-tune player was muted until the receiver takes the LAN
+    /// item (`holdLocalOutputForTake`).
+    private var mutedForTake = false
+
+    /// Fresh tune: `play()` on the LAN item renders on this device until
+    /// AVPlayer goes external (the fullscreen player is hidden by the
+    /// headless tune, but the audio still plays through the current route).
+    /// Mute it until `isExternalPlaybackActive` turns true so the phone
+    /// never plays on its own while the receiver has not taken the item
+    /// (device log 2026-09-26 11:08). Not paused: the receiver takes a
+    /// playing item, and the card reads the player's rate.
+    private func holdLocalOutputForTake(url: URL) {
+        guard let player, state == .serving, !player.isExternalPlaybackActive,
+              (player.currentItem?.asset as? AVURLAsset)?.url == url else { return }
+        mutedForTake = true
+        player.isMuted = true
+        debugLog("[AVP-AIRPLAY] tile \(channelName): local output muted until the receiver takes the LAN item")
+    }
+
+    private func releaseTakeMute() {
+        guard mutedForTake else { return }
+        mutedForTake = false
+        player?.isMuted = false
+        debugLog("[AVP-AIRPLAY] tile \(channelName): receiver took the LAN item, player unmuted")
     }
 
     /// Fresh-tune handover: the player has the LAN URL; stop the session
@@ -202,6 +229,7 @@ final class AirPlayTileDelivery {
                                 channelName, Date().timeIntervalSince(since)))
             }
             cancelReleaseGrace()
+            releaseTakeMute()
             debugLog("[AVP-AIRPLAY] tile \(channelName): external playback active, local-render watchdogs suspended")
             onWatchdogs?(true, nil)
             // The receiver took the loopback item (route picked mid-play):
@@ -400,9 +428,10 @@ final class AirPlayTileDelivery {
             guard item.status == .failed else { return }
             let reason = item.error?.localizedDescription ?? "unknown"
             let detail = TSHLSRemuxer.itemFailureDetail(item)
+            let rejection = Self.receiverRejection(item.error)
             Task { @MainActor in
                 debugLog("[AVP-AIRPLAY] LAN item failure detail: \(detail)")
-                self?.lanItemFailed(item, reason: reason)
+                self?.lanItemFailed(item, reason: reason, receiverRejection: rejection)
             }
         }
     }
@@ -411,8 +440,27 @@ final class AirPlayTileDelivery {
     /// 2026-09-25 17:04: a receiver-side hiccup must not end the session).
     private var lanReloadUsed = false
 
-    private func lanItemFailed(_ item: AVPlayerItem, reason: String) {
+    /// AVError -11870 (externalPlaybackNotSupportedForAsset): the receiver
+    /// refused the asset. Returns the underlying receiver code text ("-60034"
+    /// in device log 2026-09-26 11:08), or nil for any other failure.
+    nonisolated static func receiverRejection(_ error: Error?) -> String? {
+        guard let e = error as NSError?, e.domain == AVFoundationErrorDomain,
+              e.code == AVError.Code.externalPlaybackNotSupportedForAsset.rawValue else { return nil }
+        if let u = e.userInfo[NSUnderlyingErrorKey] as? NSError {
+            return "\(u.domain) \(u.code)"
+        }
+        return "none"
+    }
+
+    private func lanItemFailed(_ item: AVPlayerItem, reason: String, receiverRejection: String? = nil) {
         guard let player, player.currentItem === item else { return }
+        // The receiver rejected the asset: a reload on the same URL gets the
+        // same answer while the phone plays headless (device log 2026-09-26
+        // 11:08). Stop now; the phone never carries on alone.
+        if state == .serving, let code = receiverRejection {
+            endReceiverSession("receiver rejected the asset (AVError -11870, receiver code \(code)): \(reason)")
+            return
+        }
         if state == .serving, !lanReloadUsed,
            let url = (item.asset as? AVURLAsset)?.url {
             lanReloadUsed = true
@@ -743,6 +791,8 @@ final class AirPlayTileDelivery {
         lanItemStatusObservation = nil
         teardownLAN()
         leaveServing()
+        // Stays muted if the receiver never took the item: playback stops.
+        mutedForTake = false
         player?.pause()
         AirPlayMonitor.shared.receiverEnded(routeLost: !Self.routeHasAirPlay(), servedByTile: true)
     }
@@ -824,6 +874,7 @@ final class AirPlayTileDelivery {
         lanItemStatusObservation = nil
         cancelReleaseGrace()
         tileExternal = false
+        mutedForTake = false
         if let player { Self.tilePlayers.remove(player) }
         player = nil
         leaveServing(holdForFlip: wasServing && logEnd)
