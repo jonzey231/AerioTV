@@ -2216,6 +2216,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         var starvedClosures = 0
         /// Monotonic bytes sent on the LAN listener.
         var servedBytes: Int64 = 0
+        /// Monotonic LAN playlist / media segment requests answered 200.
+        var servedPlaylistRequests = 0
+        var servedSegmentRequests = 0
         var peer: String?
         /// Cut segments the receiver has not fetched yet.
         var reservoirSegments = 0
@@ -2243,9 +2246,16 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         linkLock.unlock()
     }
 
-    private func noteLANServed(bytes: Int, peer: String?) {
+    private func noteLANServed(bytes: Int, peer: String?, path: String, status: Int) {
         linkLock.lock()
         linkStats.servedBytes += Int64(bytes)
+        if status == 200 {
+            if path.hasSuffix(".m3u8") {
+                linkStats.servedPlaylistRequests += 1
+            } else if path.hasSuffix(".ts") || path.hasSuffix(".m4s") || path.hasSuffix(".aac") {
+                linkStats.servedSegmentRequests += 1
+            }
+        }
         if let peer { linkStats.peer = peer }
         linkLock.unlock()
     }
@@ -2642,7 +2652,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     private func respond(_ connection: NWConnection, path: String, lan: Bool = false, peer: String? = nil) {
         serve(path: path, lan: lan) { [weak self] r in
-            if lan { self?.noteLANServed(bytes: r.body.count, peer: peer) }
+            if lan { self?.noteLANServed(bytes: r.body.count, peer: peer, path: path, status: r.status) }
             if lan, let self, let peer, r.status == 200, path.hasSuffix("live.m3u8") {
                 let text = String(decoding: r.body, as: UTF8.self)
                     .trimmingCharacters(in: .newlines)

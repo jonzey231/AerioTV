@@ -381,6 +381,10 @@ final class AirPlayTileDelivery {
         switch lan {
         case .ready(let ip, let port):
             lanEndpoint = (ip, port)
+            if plan != .aacStereo {
+                await waitForHoldBackWindow(remuxer: remuxer, timeout: readyTimeout, token: myToken)
+                guard token == myToken else { return .unavailable }
+            }
             guard let url = URL(string: "http://\(ip):\(port)\(path)") else { return .unavailable }
             if let variant = remuxer.currentAirPlayVariant, plan == .aacStereo {
                 variant.startServingLog { line in debugLog("[AVP-AIRPLAY] \(line)") }
@@ -393,6 +397,41 @@ final class AirPlayTileDelivery {
             remuxer.stopAACVariant()
             remuxer.stopLANDelivery()
             return .unavailable
+        }
+    }
+
+    /// Start wait (device log 2026-09-25 23:06): AVFoundation honors
+    /// EXT-X-START only from the first playlist it reads, and the playlist
+    /// omits the hold-back tags while the window is too shallow to carry
+    /// them. Starting early left the receiver 0.0 s behind the edge with
+    /// no reserve for the whole session. Hold the LAN start until the
+    /// window minus one target covers the hold-back the playlist builder
+    /// will advertise (same rule as `minHB` in TSHLSRemuxer), so the tags
+    /// are on the first fetch. On timeout the start proceeds anyway.
+    private func waitForHoldBackWindow(remuxer: TSHLSRemuxer, timeout: TimeInterval, token myToken: UUID) async {
+        func requirement() -> (need: Double, hb: Double) {
+            let tdInt = ceil(remuxer.advertisedTargetDuration.get())
+            let hb = max(remuxer.lanHoldBack.get(), 3 * tdInt)
+            return (hb + tdInt, hb)
+        }
+        guard remuxer.lanWindowSeconds.get() < requirement().need else { return }
+        let began = Date()
+        let r = requirement()
+        debugLog(String(format: "[AVP-AIRPLAY] start wait: window %.1f s of %.1f s needed so the receiver joins %.1f s behind the edge",
+                        remuxer.lanWindowSeconds.get(), r.need, r.hb))
+        let deadline = began.addingTimeInterval(timeout)
+        while remuxer.lanWindowSeconds.get() < requirement().need, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard token == myToken else { return }
+        }
+        let waited = Date().timeIntervalSince(began)
+        let window = remuxer.lanWindowSeconds.get()
+        let need = requirement().need
+        if window >= need {
+            debugLog(String(format: "[AVP-AIRPLAY] start wait released after %.1f s (window %.1f s)", waited, window))
+        } else {
+            debugLog(String(format: "[AVP-AIRPLAY] start wait timed out after %.1f s (window %.1f s < %.1f s); starting anyway",
+                            waited, window, need))
         }
     }
 
@@ -489,6 +528,13 @@ final class AirPlayTileDelivery {
     private var linkLastStarved = 0
     private var linkTicks = 0
 
+    /// Parked-receiver watchdog: the receiver fetched a playlist but no
+    /// media segment for `parkTimeout`. Off for the AAC plan.
+    static let parkTimeout: TimeInterval = 20
+    private var parkLastSegments = 0
+    private var parkBaselinePlaylists = 0
+    private var parkLastSegmentAt = Date()
+
     /// One `[AVP-AIRPLAY] link:` line every 10 s while serving, from 1 s
     /// ingest samples (so the min shows a burst gap the average hides).
     private func startLinkLog() {
@@ -500,6 +546,9 @@ final class AirPlayTileDelivery {
         let st = remuxer?.lanLinkStats
         linkLastServed = st?.servedBytes ?? 0
         linkLastStarved = st?.starvedClosures ?? 0
+        parkLastSegments = st?.servedSegmentRequests ?? 0
+        parkBaselinePlaylists = st?.servedPlaylistRequests ?? 0
+        parkLastSegmentAt = Date()
         linkTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -507,6 +556,29 @@ final class AirPlayTileDelivery {
                 self.linkTick()
             }
         }
+    }
+
+    /// True when the session was stopped.
+    private func checkParked(_ st: TSHLSRemuxer.LANLinkStats) -> Bool {
+        guard plan != .aacStereo else { return false }
+        // Upstream stall: nothing cut and unfetched, so the receiver has
+        // nothing to ask for. The clock only runs while segments wait.
+        if st.servedSegmentRequests != parkLastSegments || st.reservoirSegments == 0 {
+            parkLastSegments = st.servedSegmentRequests
+            parkLastSegmentAt = Date()
+            return false
+        }
+        guard st.servedPlaylistRequests > parkBaselinePlaylists,
+              Date().timeIntervalSince(parkLastSegmentAt) >= Self.parkTimeout else { return false }
+        debugLog("[AVP-AIRPLAY] receiver parked: playlist fetched, no segment in \(Int(Self.parkTimeout)) s with \(st.reservoirSegments) segs available; stopping the session")
+        token = UUID()
+        state = .idle
+        lanItemStatusObservation = nil
+        teardownLAN()
+        leaveServing()
+        player?.pause()
+        AirPlayMonitor.shared.receiverEnded(routeLost: false, servedByTile: true)
+        return true
     }
 
     private func stopLinkLog() {
@@ -522,6 +594,7 @@ final class AirPlayTileDelivery {
         }
         linkLastIngest = st.ingestBytes
         linkTicks += 1
+        if checkParked(st) { return }
         guard linkTicks % 10 == 0 else { return }
         let samples = linkIngestKbps
         linkIngestKbps = []
