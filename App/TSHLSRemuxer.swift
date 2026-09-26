@@ -770,8 +770,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             self.deliveryBase64.removeAll()
             self.segments.removeAll()
             self.currentSegment.removeAll()
-            self.lanWindowSeconds.set(0)
-            self.lanWindowSegments.set(0)
+            self.segmentCloseWall.removeAll()
             // Assign a fresh Data rather than removeAll(): the latter keeps
             // the backing allocation, so a stopped-but-still-retained remuxer
             // would hold its whole dead buffer (Apple #74).
@@ -1731,6 +1730,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             debugLog("[TS-REMUX] feed-jitter: \(starvedClosures) starved closures so far, worst gap \(String(format: "%.1f", worstClosureGap))s")
         }
         segments.append((seq: nextSeq, data: data, duration: duration))
+        segmentCloseWall[nextSeq] = nowWall
+        if duration > Double(lanTargetDuration) + 0.5, !overTargetLogged {
+            overTargetLogged = true
+            debugLog(String(format: "[TS-REMUX] segment %d is %.2f s, over the advertised LAN target %d s",
+                            nextSeq, duration, lanTargetDuration))
+        }
         if lanListener != nil {
             refreshLANHoldBack(now: nowWall)
             updateLANReservoir()
@@ -1750,23 +1755,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 pacedAdvertisedSeq = lastEvicted
                 pacedNextReleaseAt = Date() + (evicted.last?.duration ?? targetSegmentSeconds)
             }
+            for e in evicted { segmentCloseWall[e.seq] = nil }
             segments.removeFirst(segments.count - ramCap)
         }
         if inProcessDelivery, let first = segments.first?.seq {
             for k in deliveryBase64.keys where k >= 0 && k < first { deliveryBase64[k] = nil }
         }
-        // Raise the advertised target at close time, not only in the
-        // playlist builder (device log 2026-09-25 23:12): the AirPlay start
-        // wait read TD 2 before the first fetch while the builder then
-        // advertised 3 and withheld the hold-back. Runs on `queue`.
-        let priorCloseTarget = pinnedTargetDuration.rounded(.up)
-        pinnedTargetDuration = max(pinnedTargetDuration, duration)
-        if pinnedTargetDuration.rounded(.up) > priorCloseTarget, lanListener != nil {
-            refreshLANHoldBack(now: Date())
-        }
-        let lanTail = segments.suffix(lanRingSegments)
-        lanWindowSeconds.set(lanTail.reduce(0.0) { $0 + $1.duration })
-        lanWindowSegments.set(Double(lanTail.count))
         // nextSeq, not segments.count: the count pins at maxBufferedSegments
         // once the window fills, and 12 % 5 != 0 silenced every close after
         // the first ten seconds of the 2026-08-25 UHD soak.
@@ -1841,23 +1835,28 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var starvedClosures = 0
     private var worstClosureGap = 0.0
 
-    /// See playlistText: monotonic, never shrinks, seeded at the target.
+    /// Loopback TARGETDURATION. See playlistText: monotonic, never
+    /// shrinks, seeded at the target.
     private var pinnedTargetDuration = 2.0 {
         didSet { advertisedTargetDuration.set(pinnedTargetDuration) }
     }
-    /// The TARGETDURATION this remuxer is currently advertising, readable
-    /// from the main thread. AVPlayer polls a live playlist once per
-    /// TARGETDURATION and parks roughly 3 x TARGETDURATION behind the
+    /// The loopback TARGETDURATION this remuxer is currently advertising,
+    /// readable from the main thread. AVPlayer polls a live playlist once
+    /// per TARGETDURATION and parks roughly 3 x TARGETDURATION behind the
     /// edge, so the tile sizes its join offset from this (session7,
     /// 18:07: the value grew from 3 to 4 when a 3.92 s segment closed and
     /// the poll cadence went with it).
     let advertisedTargetDuration = DoubleBox(2.0)
-    /// Media seconds (and segment count) the LAN playlist's RAM window
-    /// holds right now: the last `lanRingSegments` cut segments. The
-    /// AirPlay join offset clamp reads it, so the receiver never joins
-    /// deeper than the window holds.
-    let lanWindowSeconds = DoubleBox(0)
-    let lanWindowSegments = DoubleBox(0)
+    /// LAN (AirPlay receiver) TARGETDURATION: a constant for the session.
+    /// 3 covers the 2.5 s keyframe cuts (EXTINF rounded to the nearest
+    /// integer must be <= TARGETDURATION); a longer segment is logged once,
+    /// never re-advertised.
+    private let lanTargetDuration = 3
+    /// Segment seq -> wall clock of its close, for the LAN publication
+    /// delay. Touched only on `queue`; pruned with the RAM ring.
+    private var segmentCloseWall: [Int: Date] = [:]
+    /// The over-target segment line is logged once per session.
+    private var overTargetLogged = false
 
     // MARK: Live-edge pacing (proxy burst join, 2026-09-13)
     //
@@ -2001,7 +2000,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     }
 
     /// `lan`: the AirPlay LAN listener's copy (see `refreshLANHoldBack`):
-    /// never paced, a deeper RAM window, and an explicit hold-back.
+    /// never paced, a deeper RAM window, and its head held back by the
+    /// publication delay.
     private func playlistText(lan: Bool = false) -> String {
         advancePacedEdge()
         // Rewind mode: advertise the whole disk window; AVPlayer's
@@ -2017,10 +2017,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // rendered (RAM window or Live Rewind spill window) to the paced
         // edge. Clamping the head only: the rewind depth behind the player
         // is untouched, so the seekable range keeps its full 1800 s.
-        // LAN (AirPlay receiver): no pacing, every cut segment is served
-        // at once (device log 2026-09-25 17:04: the paced one-segment
-        // reservoir left the receiver no runway through a feed gap).
-        let edgeCap: Int? = (pacingApplies && !lan) ? pacedAdvertisedSeq : nil
+        // LAN (AirPlay receiver): no pacing (device log 2026-09-25 17:04:
+        // the paced one-segment reservoir left the receiver no runway
+        // through a feed gap); the head is the publication-delay edge.
+        let edgeCap: Int? = lan ? lanPublishedEdgeSeq(now: Date())
+            : (pacingApplies ? pacedAdvertisedSeq : nil)
         func capped<T>(_ items: [T], _ seq: (T) -> Int) -> [T] {
             guard let cap = edgeCap else { return items }
             return items.filter { seq($0) <= cap }
@@ -2032,30 +2033,27 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 : capped(segments, { $0.seq }).suffix(lan ? lanRingSegments : liveWindowSegments)
                     .map { (seq: $0.seq, duration: $0.duration) }
         guard let first = window.first else {
-            return "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:\(Int(pinnedTargetDuration.rounded(.up)))\n#EXT-X-MEDIA-SEQUENCE:0\n"
+            let td = lan ? lanTargetDuration : Int(pinnedTargetDuration.rounded(.up))
+            return "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:\(td)\n#EXT-X-MEDIA-SEQUENCE:0\n"
         }
         // RFC 8216 4.3.3.1: TARGETDURATION MUST NOT change between playlist
         // reloads. The old `window.max()` recomputation could report 1 during
         // the startup ramp and grow to 2 (or beyond, after a long-GOP cut)
         // later, which is exactly the heuristic CoreMedia's -12888 staleness
         // check keys off. Pin it monotonically, seeded at the steady-state
-        // target.
-        let priorTarget = pinnedTargetDuration.rounded(.up)
-        pinnedTargetDuration = max(pinnedTargetDuration,
-                                   window.map(\.duration).max() ?? targetSegmentSeconds)
-        // A grown target raises the spec minimum hold-back (3 x target), so
-        // re-derive the LAN hold-back now rather than on its lazy cadence.
-        // This builder runs on `queue`, as `refreshLANHoldBack` requires.
-        if pinnedTargetDuration.rounded(.up) > priorTarget, lanListener != nil {
-            refreshLANHoldBack(now: Date())
+        // target. The LAN copy advertises its own constant instead.
+        if !lan {
+            pinnedTargetDuration = max(pinnedTargetDuration,
+                                       window.map(\.duration).max() ?? targetSegmentSeconds)
         }
+        let targetDuration = lan ? lanTargetDuration : Int(pinnedTargetDuration.rounded(.up))
         // fMP4 arm: EXT-X-MAP requires protocol version 6+; 7 matches
         // Apple's own fMP4 playlists. The TS arm stays at 3.
         let version = fmp4 != nil ? 7 : 3
         var text = """
         #EXTM3U
         #EXT-X-VERSION:\(version)
-        #EXT-X-TARGETDURATION:\(Int(pinnedTargetDuration.rounded(.up)))
+        #EXT-X-TARGETDURATION:\(targetDuration)
         #EXT-X-MEDIA-SEQUENCE:\(first.seq)
 
         """
@@ -2070,26 +2068,6 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
         if eventPlaylist {
             text += "#EXT-X-PLAYLIST-TYPE:EVENT\n"
-        }
-        if lan, !eventPlaylist, !playlistComplete, lanHoldBackSeconds > 0 {
-            // RFC 8216bis 4.4.3.8: HOLD-BACK MUST be at least 3 x
-            // TARGETDURATION. Device log 2026-09-25: a 2.002 s segment rounded
-            // TARGETDURATION up to 3 while HOLD-BACK stayed 8 (the lazy
-            // refresh had not caught up) and the Apple TV fetched the
-            // playlist once and parked. So the hold-back is floored at the
-            // spec minimum for the target actually advertised, and both tags
-            // are emitted only when the window (minus one target, so the
-            // join point stays inside what is advertised) is deep enough to
-            // honor it; otherwise neither is emitted for this reload.
-            let tdInt = Int(pinnedTargetDuration.rounded(.up))
-            let minHB = 3 * Double(tdInt)
-            let hb = max(lanHoldBackSeconds, minHB)
-            let room = window.reduce(0.0) { $0 + $1.duration } - Double(tdInt)
-            if room >= hb {
-                let hbText = String(format: "%.3f", hb)
-                text += "#EXT-X-SERVER-CONTROL:HOLD-BACK=\(hbText)\n"
-                text += "#EXT-X-START:TIME-OFFSET=-\(hbText),PRECISE=NO\n"
-            }
         }
         if fmp4 != nil {
             if inProcessDelivery, let initSeg = fmp4InitSegment {
@@ -2193,15 +2171,19 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     // wall for a 2.5 s segment) from a paced playlist whose reservoir was
     // one segment, and rebuffered until AVPlayer dropped external
     // playback. The LAN copy of the playlist is never paced, the RAM ring
-    // is deeper while a receiver is served, and the playlist states a
-    // hold-back that keeps the receiver ~3 segments (>= 8 s) behind the
-    // live edge, grown for a bursty ingest and for high bitrates, up to
-    // `lanHoldBackCeiling`. Loopback playback is untouched.
+    // is deeper while a receiver is served, and the receiver is kept
+    // `lanHoldBackSeconds` (>= 9 s, grown for a bursty ingest and for high
+    // bitrates, up to `lanHoldBackCeiling`) behind the real edge by a
+    // publication delay: the LAN playlist lists a segment only once it
+    // closed `lanHoldBackSeconds - 3 x TARGETDURATION` ago, and the
+    // receiver's default start point (3 x TARGETDURATION from the end of
+    // the playlist) covers the rest. No steering tags, no player offset.
+    // Loopback playback is untouched.
 
-    /// RAM ring (and LAN RAM window) while a receiver is served: 16
-    /// segments of ~2.5 s = 40 s, >= the 20 s hold-back ceiling plus
-    /// room to re-fetch through a stall. Live tunes also have the disk
-    /// spill behind it.
+    /// RAM ring (and LAN RAM window) while a receiver is served. It must
+    /// hold the largest publication delay (20 s ceiling - 3 x 3 s = 11 s,
+    /// ~6 segments) plus a normal 3 x TARGETDURATION live window; never
+    /// shrink it below that. Live tunes also have the disk spill behind it.
     private let lanRingSegments = 16
     private let lanHoldBackFloor = 8.0
     private let lanHoldBackCeiling = 20.0
@@ -2284,9 +2266,45 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         return secs > 0 ? Int(Double(bytes) * 8 / secs / 1000) : 0
     }
 
+    /// Seconds a closed segment waits before the LAN playlist lists it.
+    /// Touched only on `queue`.
+    private var lanPublicationDelay: Double {
+        max(0, lanHoldBackSeconds - 3 * Double(lanTargetDuration))
+    }
+    /// Highest seq the LAN playlist has listed (-1 = none). Monotonic per
+    /// LAN session: a grown delay slows the edge, never pulls it back.
+    private var lanPublishedEdge = -1
+
+    /// Runs on `queue`. The newest seq past the publication delay (or the
+    /// last published one, whichever is higher); nil when the ring is empty.
+    private func lanPublishedEdgeSeq(now: Date) -> Int? {
+        guard let first = segments.first else { return nil }
+        let delay = lanPublicationDelay
+        let ready = segments.last(where: { seg in
+            segmentCloseWall[seg.seq].map { now.timeIntervalSince($0) >= delay } ?? true
+        })?.seq ?? (first.seq - 1)
+        lanPublishedEdge = max(lanPublishedEdge, ready)
+        return lanPublishedEdge
+    }
+
+    /// Segments the LAN playlist would list right now, and the delay in
+    /// force. Blocks on `queue` briefly; the handover wait and the 10 s
+    /// link line call it.
+    func lanPublishedState() -> (segments: Int, delay: Double) {
+        queue.sync {
+            guard lanListener != nil, let edge = lanPublishedEdgeSeq(now: Date()) else {
+                return (0, lanPublicationDelay)
+            }
+            let count = (spillDir != nil && !spilled.isEmpty)
+                ? spilled.filter { $0.seq <= edge }.count
+                : min(lanRingSegments, segments.filter { $0.seq <= edge }.count)
+            return (count, lanPublicationDelay)
+        }
+    }
+
     /// Runs on `queue`. Chooses the LAN hold-back and logs when it grows.
     private func refreshLANHoldBack(now: Date) {
-        let target = max(targetSegmentSeconds, pinnedTargetDuration.rounded(.up))
+        let target = Double(lanTargetDuration)
         let stats = recentStarvationStats(now: now)
         let kbps = ringKbps()
         var hb = max(3 * target, lanHoldBackFloor)
@@ -2310,8 +2328,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         lanHoldBackReason = why
         lanHoldBack.set(hb)
         airPlayVariant?.setHoldBackFloor(hb)
-        debugLog(String(format: "[TS-REMUX] LAN hold-back %.1f s (%@; ceiling %.0f s); LAN playlist unpaced, RAM ring %d segs",
-                        hb, why, lanHoldBackCeiling, lanRingSegments))
+        debugLog(String(format: "[TS-REMUX] LAN hold-back %.1f s (%@; ceiling %.0f s); LAN playlist unpaced, RAM ring %d segs, publication delay %.1f s",
+                        hb, why, lanHoldBackCeiling, lanRingSegments, lanPublicationDelay))
     }
     /// Touched only on `queue`; readable elsewhere through
     /// `currentAirPlayVariant`.
@@ -2434,6 +2452,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         lanHoldBackSeconds = 0
         lanHoldBack.set(0)
         lanHoldBackReason = ""
+        lanPublishedEdge = -1
         lanHighestRequestedSeq = -1
         linkLock.lock(); linkStats.peer = nil; linkLock.unlock()
         listener.cancel()
@@ -5542,8 +5561,8 @@ struct AVPlayerMultiviewTile: View {
         }
     }
 
-    /// `lanAAC`: the item is the AirPlay airplay-aac variant on the LAN,
-    /// whose playlists state their own HOLD-BACK (plan section 5).
+    /// `lanAAC`: the item is the AirPlay airplay-aac variant on the LAN.
+    /// No LAN item (variant or passthrough) gets a configured join offset.
     private func startPlayer(url: URL, requestHeaders: [String: String], lanAAC: Bool = false) {
         var options: [String: Any] = [:]
         if !requestHeaders.isEmpty {
@@ -5591,43 +5610,23 @@ struct AVPlayerMultiviewTile: View {
         let learned = holdbackKey.map { LiveEdgeHoldback.offset(for: $0) } ?? LiveEdgeHoldback.base
         // Join offset geometry (session7, ESPN 18:06:52-18:07:18). The
         // playlist's TARGETDURATION sets AVPlayer's poll cadence, so a
-        // player parked only 6 s back has barely one poll of slack: the
-        // remuxer pinned TARGETDURATION at 4 after a 3.92 s segment,
-        // AVPlayer then polled every 4 s (:15.36, :19.37, :23.37),
-        // segments 10 and 11 closed after its last fetch, the feed also
-        // ran 3.1 s late once, and the buffer ran empty. Three target
-        // durations is AVPlayer's own default hold-back for a reason;
-        // take the largest of that, what this channel's stalls have
-        // taught us, and the 6 s floor, then add the user's Stream
+        // player parked only 6 s back has barely one poll of slack. Three
+        // target durations is AVPlayer's own default hold-back for a
+        // reason; take the largest of that, what this channel's stalls
+        // have taught us, and the 6 s floor, then add the user's Stream
         // Buffer. Same 18 s ceiling as before.
         let joinTargetDuration = isLiveTune ? (remuxer?.advertisedTargetDuration.get() ?? 0) : 0
-        if isLiveTune, lanAAC {
-            debugLog("[AVP-AIRPLAY] join offset left to the variant playlist's HOLD-BACK (primary offset not applied) channel=\(channelName)")
+        // An AirPlay LAN item (variant or passthrough) gets no configured
+        // offset: the receiver starts at the playlist's default point and
+        // the LAN playlist's publication delay sets its distance from the
+        // real edge.
+        let isLANItem = lanAAC || (url.scheme == "http" && url.host != "127.0.0.1"
+                                   && (remuxer?.lanHoldBack.get() ?? 0) > 0)
+        if isLiveTune, isLANItem {
+            debugLog("[AVP-AIRPLAY] LAN item: no configured join offset (default start point; the LAN publication delay holds it back) channel=\(channelName)")
         } else if isLiveTune {
             let floor = max(3 * joinTargetDuration, learned, LiveEdgeHoldback.base)
-            var offset = min(18.0, floor + streamBufferSeconds)
-            // AirPlay passthrough on the LAN URL: at least the remuxer's LAN
-            // hold-back (device log 2026-09-25 17:04), which the LAN
-            // playlist also states.
-            let lanHoldBack = (url.host != "127.0.0.1" && url.scheme == "http")
-                ? (remuxer?.lanHoldBack.get() ?? 0) : 0
-            if lanHoldBack > offset {
-                debugLog(String(format: "[AVP-AIRPLAY] join offset %.1fs -> LAN hold-back %.1fs channel=%@",
-                                offset, lanHoldBack, channelName))
-                offset = lanHoldBack
-            }
-            // Never join deeper than the LAN window actually holds (window
-            // minus one target): an offset past the playlist start leaves
-            // the receiver parked on the first fetch (device log
-            // 2026-09-25, 8 s offset into a 4 s window).
-            if lanHoldBack > 0 {
-                let available = (remuxer?.lanWindowSeconds.get() ?? 0) - joinTargetDuration
-                if available > 0, offset > available {
-                    debugLog(String(format: "[AVP-AIRPLAY] join offset %.1fs clamped to %.1fs (LAN window minus one target) channel=%@",
-                                    offset, available, channelName))
-                    offset = available
-                }
-            }
+            let offset = min(18.0, floor + streamBufferSeconds)
             playerItem.configuredTimeOffsetFromLive =
                 CMTime(seconds: offset, preferredTimescale: 600)
             debugLog(String(format:
@@ -5778,12 +5777,11 @@ struct AVPlayerMultiviewTile: View {
             isLive: !(isVOD || isDVR || catchup != nil), applyGravity: { _ in })
         // Where a stall-learned hold-back is recorded for the NEXT tune.
         driver?.liveHoldbackKey = holdbackKey
-        // A TARGETDURATION that grows during the first 30 s (a long GOP
-        // lands and the pin rises) leaves the join offset too small; the
-        // driver re-applies it, but ONLY inside that window and ONLY with
-        // an empty buffer, because writing this on a healthy playing item
-        // is what seeks backward.
-        if isLiveTune, let mux = remuxer {
+        // The driver re-applies the join offset only inside the first 30 s
+        // and only with an empty buffer (writing it on a healthy playing
+        // item is what seeks backward). Never wired for a LAN item, which
+        // must carry no configured offset.
+        if isLiveTune, !isLANItem, let mux = remuxer {
             driver?.appliedLiveOffset = driverJoinOffset
             driver?.liveOffsetFloor = driverOffsetFloor
             driver?.liveTargetDuration = { mux.advertisedTargetDuration.get() }

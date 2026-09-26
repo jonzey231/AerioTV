@@ -14,7 +14,16 @@ import Foundation
 /// URL: `/live.m3u8` untouched (passthrough, Apple receivers) or the
 /// `airplay-aac` variant's `/aac/master.m3u8` (AAC-LC stereo, Roku), then
 /// suspends the local-render watchdogs, holds the background keepalive and
-/// disarms PiP auto-start. The reverse runs when the route goes away.
+/// disarms PiP auto-start.
+///
+/// The one owner of the session: the player's `isExternalPlaybackActive`
+/// is the only signal that the receiver has the stream. The audio route
+/// only starts things (an AirPlay output selected at tune time, or one
+/// appearing during loopback playback); route loss on its own never ends
+/// a session. The session ends when external playback stays off for
+/// `receiverReleaseGrace` with the receiver silent on the LAN listener (or
+/// for `receiverReleaseHardCap` regardless), when the user stops it, or when the parked
+/// watchdog fires.
 ///
 /// Owned by the tile (`@State`), one per tile; main actor only.
 @MainActor
@@ -36,6 +45,26 @@ final class AirPlayTileDelivery {
     /// Mid-play: how long the swapped LAN item has to go external before
     /// the handoff is declared failed.
     static let externalConfirmTimeout: TimeInterval = 5
+    /// External playback off while serving ends the session once the
+    /// receiver has also been silent on the LAN listener (no playlist or
+    /// segment request) for this long. Device log 2026-09-25 17:04: a
+    /// rebuffering receiver drops external playback for an unknown time
+    /// while it keeps fetching, so its requests are the evidence.
+    static let receiverReleaseGrace: TimeInterval = 10
+    /// External playback off this long ends the session even while the
+    /// receiver keeps fetching.
+    static let receiverReleaseHardCap: TimeInterval = 60
+    /// Published LAN segments the receiver's first playlist must carry:
+    /// 5 x ~2 s = 10 s, so the default start point (3 x the LAN target of
+    /// 3 s = 9 s behind the published end) exists.
+    static let handoverPublishedSegments = 5
+    /// The handover gave the player the LAN URL; the receiver must take it
+    /// (external playback active) within this long or the session stops.
+    static let receiverTakeTimeout: TimeInterval = 15
+    /// Players attached to a tile delivery; AirPlayMonitor leaves their
+    /// session end to the delivery.
+    private static let tilePlayers = NSHashTable<AVPlayer>.weakObjects()
+    static func isTilePlayer(_ player: AVPlayer) -> Bool { tilePlayers.contains(player) }
 
     private enum State { case idle, preparing, serving }
     private var state: State = .idle
@@ -53,6 +82,8 @@ final class AirPlayTileDelivery {
     private var routeObserver: NSObjectProtocol?
     /// The tile's own view of `isExternalPlaybackActive` (for its lines).
     private var tileExternal = false
+    private var releaseGraceTask: Task<Void, Never>?
+    private var releasedAt: Date?
 
     static let keepaliveHolder = "airplay-video"
 
@@ -107,6 +138,7 @@ final class AirPlayTileDelivery {
                 debugLog("[AVP-AIRPLAY] AirPlay route already selected: starting on LAN \(self.endpointText), watchdogs suspended")
                 self.enterServing()
                 start(url, self.plan == .aacStereo)
+                self.watchReceiverTake(token: myToken)
             case .noAddress:
                 debugLog("[AVP-AIRPLAY] no LAN address for the remux server; starting on loopback")
                 self.state = .idle
@@ -127,12 +159,30 @@ final class AirPlayTileDelivery {
         return true
     }
 
+    /// Fresh-tune handover: the player has the LAN URL; stop the session
+    /// if the receiver never takes it (external playback never active).
+    private func watchReceiverTake(token myToken: UUID) {
+        Task { @MainActor [weak self] in
+            let deadline = Date().addingTimeInterval(Self.receiverTakeTimeout)
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard let self, self.token == myToken, self.state == .serving else { return }
+                if self.player?.isExternalPlaybackActive == true { return }
+            }
+            guard let self, self.token == myToken, self.state == .serving,
+                  self.player?.isExternalPlaybackActive != true else { return }
+            debugLog("[AVP-AIRPLAY] receiver never took the LAN item within \(Int(Self.receiverTakeTimeout)) s; stopping")
+            self.endReceiverSession("receiver never took the LAN item")
+        }
+    }
+
     // MARK: Player attachment (every start)
 
     /// The tile's AVPlayer for this tune. Observes `isExternalPlaybackActive`
     /// for the tile's own lines and for the mid-play handoff.
     func attach(player: AVPlayer, remuxer: TSHLSRemuxer?, loopbackURL: URL?, channelName: String) {
         self.player = player
+        Self.tilePlayers.add(player)
         if let remuxer { self.remuxer = remuxer }
         if let loopbackURL { self.loopbackURL = loopbackURL }
         self.channelName = channelName
@@ -147,26 +197,73 @@ final class AirPlayTileDelivery {
         guard active != tileExternal else { return }
         tileExternal = active
         if active {
+            if let since = releasedAt {
+                debugLog(String(format: "[AVP-AIRPLAY] tile %@: external playback back after %.1f s; session kept",
+                                channelName, Date().timeIntervalSince(since)))
+            }
+            cancelReleaseGrace()
             debugLog("[AVP-AIRPLAY] tile \(channelName): external playback active, local-render watchdogs suspended")
             onWatchdogs?(true, nil)
             // The receiver took the loopback item (route picked mid-play):
             // hand it the LAN URL.
             if state == .idle { beginMidPlay() }
-        } else if state != .idle, Self.routeHasAirPlay() {
-            // Device log 2026-09-25 17:04:54.794: the receiver drops
-            // external playback while it rebuffers. With the route still
-            // up that is a stall, not an end: LAN delivery, the variant,
-            // the keepalive and the watchdog suspension all stay.
-            debugLog("[AVP-AIRPLAY] tile \(channelName): external playback paused by the receiver with the route present; LAN delivery, keepalive and watchdog suspension held")
-        } else if state != .idle {
-            // Both signals gone (no AirPlay output, no external playback):
-            // the real receiver-side stop or route loss.
-            debugLog("[AVP-AIRPLAY] tile \(channelName): external playback ended with no AirPlay route; ending the session")
-            end(reason: "route")
+        } else if state == .serving {
+            debugLog("[AVP-AIRPLAY] tile \(channelName): external playback off (player \(AirPlayMonitor.playerStatusText(player))); ending the session after \(Int(Self.receiverReleaseGrace)) s of receiver silence or \(Int(Self.receiverReleaseHardCap)) s off")
+            startReleaseGrace()
+        } else if state == .preparing {
+            debugLog("[AVP-AIRPLAY] tile \(channelName): external playback off while the LAN handover is prepared")
         } else {
             debugLog("[AVP-AIRPLAY] tile \(channelName): external playback ended, watchdogs re-armed")
             onWatchdogs?(false, player?.currentItem)
         }
+    }
+
+    private func startReleaseGrace() {
+        releaseGraceTask?.cancel()
+        releasedAt = Date()
+        let myToken = token
+        let offSince = Date()
+        func requests(_ r: TSHLSRemuxer?) -> Int {
+            guard let st = r?.lanLinkStats else { return 0 }
+            return st.servedPlaylistRequests + st.servedSegmentRequests
+        }
+        var lastRequests = requests(remuxer)
+        var silentSince = offSince
+        var fetchLogged = false
+        releaseGraceTask = Task { @MainActor [weak self] in
+            while true {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled, let self, self.token == myToken, self.state == .serving,
+                      self.player?.isExternalPlaybackActive != true else { return }
+                let now = Date()
+                let total = requests(self.remuxer)
+                if total != lastRequests {
+                    lastRequests = total
+                    silentSince = now
+                    if !fetchLogged {
+                        fetchLogged = true
+                        debugLog("[AVP-AIRPLAY] tile \(self.channelName): external playback off but the receiver is still fetching; holding")
+                    }
+                }
+                let off = now.timeIntervalSince(offSince)
+                let silent = now.timeIntervalSince(silentSince)
+                if silent >= Self.receiverReleaseGrace {
+                    self.endReceiverSession(String(format: "external playback off %.1f s and the receiver silent on the LAN for %.0f s (silence grace): the receiver ended AirPlay",
+                                                   off, silent))
+                    return
+                }
+                if off >= Self.receiverReleaseHardCap {
+                    self.endReceiverSession(String(format: "external playback off %.0f s (hard cap) while the receiver still fetched: ending the session", off))
+                    return
+                }
+            }
+        }
+    }
+
+    private func cancelReleaseGrace() {
+        releaseGraceTask?.cancel()
+        releaseGraceTask = nil
+        releasedAt = nil
     }
 
     private func observeRoute() {
@@ -179,29 +276,18 @@ final class AirPlayTileDelivery {
         }
     }
 
+    /// One diagnostic line per route change. The route only starts a
+    /// mid-play handover (an AirPlay output appeared while this tile plays
+    /// on loopback; an audio-only speaker is skipped once the receiver
+    /// resolves); it never ends a session.
     private func routeChanged(reasonRaw: UInt) {
         let hasAirPlay = Self.routeHasAirPlay()
         let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
             .map { "\($0.portType.rawValue)(\($0.portName))" }.joined(separator: ",")
         let external = player?.isExternalPlaybackActive
         debugLog("[AVP-AIRPLAY] route change: reason=\(Self.routeChangeReasonText(reasonRaw)) outputs=[\(outputs)] airplay=\(hasAirPlay) externalActive=\(external.map { String($0) } ?? "nil") state=\(state)")
-        // Mid-play start: the route gained an AirPlay output while this
-        // tile plays on loopback (the 09-21 log serves on the LAN before
-        // the receiver reports external playback). An audio-only speaker
-        // is skipped once the receiver resolves. Route LOSS ends the
-        // whole session (device test 2026-09-25: no fall-back to the phone).
         if hasAirPlay, state == .idle, player != nil, remuxer != nil {
             beginMidPlay()
-        } else if !hasAirPlay, state != .idle {
-            // Device log 2026-09-25 23:12:49: a route change without an
-            // AirPlay output while the player still played externally and
-            // the receiver kept going. Route loss needs both signals gone;
-            // externalChanged ends the session when the player lets go.
-            if external == true {
-                debugLog("[AVP-AIRPLAY] route shows no AirPlay output but external playback is active; holding the session")
-            } else {
-                end(reason: "route")
-            }
         }
     }
 
@@ -288,33 +374,13 @@ final class AirPlayTileDelivery {
     }
 
     /// Mid-play LAN item: the same forward-buffer policy as the loopback
-    /// item (automatic). An AAC item takes its join point from the variant
-    /// playlist's HOLD-BACK (plan section 5); a passthrough item keeps the
-    /// loopback item's configured offset.
+    /// item (automatic). No configured join offset: the receiver starts at
+    /// the playlist's default point and the LAN publication delay (or the
+    /// AAC variant's own playlist) sets its distance from the edge.
     private func makeLANItem(url: URL, copying old: AVPlayerItem) -> AVPlayerItem {
         let item = AVPlayerItem(url: url)
         item.automaticallyPreservesTimeOffsetFromLive = true
         item.preferredForwardBufferDuration = old.preferredForwardBufferDuration
-        if plan == .aacStereo {
-            debugLog("[AVP-AIRPLAY] join offset left to the variant playlist's HOLD-BACK (primary offset not applied) channel=\(channelName)")
-        } else {
-            var offset = old.configuredTimeOffsetFromLive
-            let lanHoldBack = remuxer?.lanHoldBack.get() ?? 0
-            if lanHoldBack > 0, !offset.isValid || offset.seconds < lanHoldBack {
-                debugLog(String(format: "[AVP-AIRPLAY] LAN item join offset %.1fs -> LAN hold-back %.1fs channel=%@",
-                                offset.isValid ? offset.seconds : 0, lanHoldBack, channelName))
-                offset = CMTime(seconds: lanHoldBack, preferredTimescale: 600)
-            }
-            if lanHoldBack > 0, let remuxer {
-                let available = remuxer.lanWindowSeconds.get() - remuxer.advertisedTargetDuration.get()
-                if available > 0, offset.isValid, offset.seconds > available {
-                    debugLog(String(format: "[AVP-AIRPLAY] LAN item join offset %.1fs clamped to %.1fs (LAN window minus one target) channel=%@",
-                                    offset.seconds, available, channelName))
-                    offset = CMTime(seconds: available, preferredTimescale: 600)
-                }
-            }
-            item.configuredTimeOffsetFromLive = offset
-        }
         return item
     }
 
@@ -339,7 +405,7 @@ final class AirPlayTileDelivery {
 
     private func lanItemFailed(_ item: AVPlayerItem, reason: String) {
         guard let player, player.currentItem === item else { return }
-        if state == .serving, Self.routeHasAirPlay(), !lanReloadUsed,
+        if state == .serving, !lanReloadUsed,
            let url = (item.asset as? AVURLAsset)?.url {
             lanReloadUsed = true
             debugLog("[AVP-AIRPLAY] LAN item failed (\(reason)): reloading once on the same LAN URL \(url.absoluteString)")
@@ -349,15 +415,8 @@ final class AirPlayTileDelivery {
             player.play()
             return
         }
-        if state == .serving, Self.routeHasAirPlay(), lanReloadUsed {
-            debugLog("[AVP-AIRPLAY] LAN item failed again after the reload (\(reason)); giving up: LAN delivery torn down, playback stopped")
-            token = UUID()
-            state = .idle
-            lanItemStatusObservation = nil
-            teardownLAN()
-            leaveServing()
-            player.pause()
-            AirPlayMonitor.shared.receiverEnded(routeLost: false, servedByTile: true)
+        if state == .serving {
+            endReceiverSession("LAN item failed again after the reload (\(reason)); giving up")
             return
         }
         debugLog("[AVP-AIRPLAY] LAN item failed (\(reason))")
@@ -415,7 +474,7 @@ final class AirPlayTileDelivery {
         case .ready(let ip, let port):
             lanEndpoint = (ip, port)
             if plan != .aacStereo {
-                await waitForHoldBackWindow(remuxer: remuxer, timeout: readyTimeout, token: myToken)
+                await waitForPublishedSegments(remuxer: remuxer, timeout: readyTimeout, token: myToken)
                 guard token == myToken else { return .unavailable }
             }
             guard let url = URL(string: "http://\(ip):\(port)\(path)") else { return .unavailable }
@@ -433,38 +492,29 @@ final class AirPlayTileDelivery {
         }
     }
 
-    /// Start wait (device log 2026-09-25 23:06): AVFoundation honors
-    /// EXT-X-START only from the first playlist it reads, and the playlist
-    /// omits the hold-back tags while the window is too shallow to carry
-    /// them. Starting early left the receiver 0.0 s behind the edge with
-    /// no reserve for the whole session. Hold the LAN start until the
-    /// window minus one target covers the hold-back the playlist builder
-    /// will advertise (same rule as `minHB` in TSHLSRemuxer), so the tags
-    /// are on the first fetch. On timeout the start proceeds anyway.
-    private func waitForHoldBackWindow(remuxer: TSHLSRemuxer, timeout: TimeInterval, token myToken: UUID) async {
-        func requirement() -> (need: Double, hb: Double) {
-            let tdInt = ceil(remuxer.advertisedTargetDuration.get())
-            let hb = max(remuxer.lanHoldBack.get(), 3 * tdInt)
-            return (hb + tdInt, hb)
-        }
-        guard remuxer.lanWindowSeconds.get() < requirement().need else { return }
+    /// Handover wait: the receiver's first LAN playlist must list at least
+    /// `handoverPublishedSegments` segments that passed the publication
+    /// delay, so its default start point (3 x TARGETDURATION from the end)
+    /// lands inside the list. On timeout the handover proceeds anyway.
+    private func waitForPublishedSegments(remuxer: TSHLSRemuxer, timeout: TimeInterval, token myToken: UUID) async {
+        let need = Self.handoverPublishedSegments
+        var st = remuxer.lanPublishedState()
+        guard st.segments < need else { return }
         let began = Date()
-        let r = requirement()
-        debugLog(String(format: "[AVP-AIRPLAY] start wait: window %.1f s of %.1f s needed so the receiver joins %.1f s behind the edge",
-                        remuxer.lanWindowSeconds.get(), r.need, r.hb))
+        debugLog(String(format: "[AVP-AIRPLAY] handover: waiting for %d published segments (have %d, delay %.1f s)",
+                        need, st.segments, st.delay))
         let deadline = began.addingTimeInterval(timeout)
-        while remuxer.lanWindowSeconds.get() < requirement().need, Date() < deadline {
-            try? await Task.sleep(nanoseconds: 200_000_000)
+        while st.segments < need, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 250_000_000)
             guard token == myToken else { return }
+            st = remuxer.lanPublishedState()
         }
         let waited = Date().timeIntervalSince(began)
-        let window = remuxer.lanWindowSeconds.get()
-        let need = requirement().need
-        if window >= need {
-            debugLog(String(format: "[AVP-AIRPLAY] start wait released after %.1f s (window %.1f s)", waited, window))
+        if st.segments >= need {
+            debugLog(String(format: "[AVP-AIRPLAY] handover after %.1f s", waited))
         } else {
-            debugLog(String(format: "[AVP-AIRPLAY] start wait timed out after %.1f s (window %.1f s < %.1f s); starting anyway",
-                            waited, window, need))
+            debugLog(String(format: "[AVP-AIRPLAY] handover wait timed out after %.1f s (%d of %d published segments); starting anyway",
+                            waited, st.segments, need))
         }
     }
 
@@ -532,6 +582,7 @@ final class AirPlayTileDelivery {
     private func enterServing() {
         state = .serving
         lanReloadUsed = false
+        cancelReleaseGrace()
         Self.servingTile = self
         onWatchdogs?(true, nil)
         if !keepaliveHeld {
@@ -603,14 +654,7 @@ final class AirPlayTileDelivery {
         }
         guard st.servedPlaylistRequests > parkBaselinePlaylists,
               Date().timeIntervalSince(parkLastSegmentAt) >= Self.parkTimeout else { return false }
-        debugLog("[AVP-AIRPLAY] receiver parked: playlist fetched, no segment in \(Int(Self.parkTimeout)) s with \(st.reservoirSegments) segs available; stopping the session")
-        token = UUID()
-        state = .idle
-        lanItemStatusObservation = nil
-        teardownLAN()
-        leaveServing()
-        player?.pause()
-        AirPlayMonitor.shared.receiverEnded(routeLost: false, servedByTile: true)
+        endReceiverSession("receiver parked: playlist fetched, no segment in \(Int(Self.parkTimeout)) s with \(st.reservoirSegments) segs available")
         return true
     }
 
@@ -644,43 +688,40 @@ final class AirPlayTileDelivery {
         }
         let status = AirPlayMonitor.playerStatusText(player)
         let external = player?.isExternalPlaybackActive ?? false
-        debugLog(String(format: "[AVP-AIRPLAY] link: ingest %.0f kbps avg/%.0f kbps min over 10 s, stalls %d, reservoir %d segs/%.1f s, served %.0f kbps to %@, receiver playhead-behind-edge %@, player status %@, external %@ (hold-back %.1f s)",
+        let published = remuxer.lanPublishedState()
+        debugLog(String(format: "[AVP-AIRPLAY] link: ingest %.0f kbps avg/%.0f kbps min over 10 s, stalls %d, reservoir %d segs/%.1f s, served %.0f kbps to %@, receiver playhead-behind-edge %@, player status %@, external %@ (hold-back %.1f s, published %d segs, delay %.1f s)",
                         avg, minimum, stalls, st.reservoirSegments, st.reservoirSeconds, servedKbps,
-                        st.peer ?? "none", behind, status, external ? "true" : "false", st.holdBack))
+                        st.peer ?? "none", behind, status, external ? "true" : "false", st.holdBack,
+                        published.segments, published.delay))
     }
 
-    /// End of LAN delivery. A LAN item failure goes back to loopback (plan
-    /// section 4c "End"). A route loss is the receiver ending AirPlay and
-    /// stops playback outright (device test 2026-09-25: the phone must not
-    /// pick the channel back up): LAN delivery, the variant and the
-    /// keepalive go now, then the monitor runs the same stop as the card's X.
-    func end(reason: String) {
+    /// The receiver-side end of a serving session (external playback off
+    /// past the grace, the parked watchdog, a LAN item that failed twice):
+    /// playback stops outright, no local resume. LAN delivery, the variant
+    /// and the keepalive go now, then the monitor runs the same stop as
+    /// the card's X.
+    private func endReceiverSession(_ why: String) {
+        guard state == .serving else { return }
+        debugLog("[AVP-AIRPLAY] \(why): LAN delivery torn down, playback stopped")
+        token = UUID()
+        state = .idle
+        cancelReleaseGrace()
+        lanItemStatusObservation = nil
+        teardownLAN()
+        leaveServing()
+        player?.pause()
+        AirPlayMonitor.shared.receiverEnded(routeLost: !Self.routeHasAirPlay(), servedByTile: true)
+    }
+
+    /// A LAN item failed outside a serving session: drop LAN delivery.
+    private func end(reason: String) {
         guard state != .idle else { return }
         token = UUID()
-        let wasServing = state == .serving
         state = .idle
-        if reason == "route" {
-            lanItemStatusObservation = nil
-            teardownLAN()
-            leaveServing()
-            if wasServing {
-                player?.pause()
-                debugLog("[AVP-AIRPLAY] external playback ended (route lost): LAN delivery torn down, playback stopped")
-                AirPlayMonitor.shared.receiverEnded(routeLost: true, servedByTile: true)
-            }
-            return
-        }
-        if wasServing, let player, let loopbackURL {
-            let item = AVPlayerItem(url: loopbackURL)
-            item.automaticallyPreservesTimeOffsetFromLive = true
-            player.replaceCurrentItem(with: item)
-            lanItemStatusObservation = nil
-            teardownLAN()
-            debugLog("[AVP-AIRPLAY] external playback ended: back to loopback delivery, watchdogs re-armed")
-            onWatchdogs?(false, item)
-        } else {
-            teardownLAN()
-        }
+        cancelReleaseGrace()
+        lanItemStatusObservation = nil
+        teardownLAN()
+        debugLog("[AVP-AIRPLAY] LAN delivery dropped (\(reason))")
         leaveServing()
     }
 
@@ -747,7 +788,9 @@ final class AirPlayTileDelivery {
         state = .idle
         externalObservation = nil
         lanItemStatusObservation = nil
+        cancelReleaseGrace()
         tileExternal = false
+        if let player { Self.tilePlayers.remove(player) }
         player = nil
         leaveServing(holdForFlip: wasServing && logEnd)
         if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
