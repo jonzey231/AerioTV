@@ -2219,6 +2219,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// a receiver that re-joins after a stall joins at least as deep.
     private var lanHoldBackSeconds = 0.0
     private var lanHoldBackReason = ""
+    /// Wall time of the last applied hold-back raise (ramp clock), on `queue`.
+    private var lastHoldBackRaiseAt: Date?
     /// Starved closures (wall, gap) for the last 60 s, touched on `queue`.
     private var recentStarvations: [(wall: Date, gap: Double)] = []
     /// Highest segment the receiver fetched on the LAN (-1 = none).
@@ -2314,11 +2316,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     let lanHoldBack = DoubleBox(0)
 
     /// Starved closures in the last 60 s and the worst gap among them.
-    private func recentStarvationStats(now: Date) -> (count: Int, worst: Double, totalSeconds: Double) {
+    private func recentStarvationStats(now: Date) -> (count: Int, worst: Double) {
         recentStarvations.removeAll { now.timeIntervalSince($0.wall) > 60 }
         return (recentStarvations.count,
-                recentStarvations.reduce(0.0) { max($0, $1.gap) },
-                recentStarvations.reduce(0.0) { $0 + $1.gap })
+                recentStarvations.reduce(0.0) { max($0, $1.gap) })
     }
 
     /// Bitrate of the RAM ring, kbps.
@@ -2449,19 +2450,32 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             hb = stats.worst + target
             why += String(format: "; worst gap %.1f s + target", stats.worst)
         }
-        // Gaps that stack inside a minute drain the receiver's buffer
-        // together, not one at a time.
-        if stats.totalSeconds > 0, stats.totalSeconds + target > hb {
-            hb = stats.totalSeconds + target
-            why += String(format: "; starved %.1f s in 60 s + target", stats.totalSeconds)
-        }
         if kbps > 10_000 {
             hb += 4
             why += "; \(kbps) kbps > 10 Mbps +4 s"
         }
         hb = min(lanHoldBackCeiling, hb)
-        guard hb > lanHoldBackSeconds + 0.4 else { return }
+        let targetHoldBack = hb
+        // Growth is rate-limited to 1 s per 10 s of wall time: every raise
+        // lengthens the publication delay, and the edge holds still until
+        // segments age past it. A fast climb froze the edge ~30 s and the
+        // receiver drained (device log 2026-09-26 11:49 to 11:51). At 0.1 s
+        // per s the edge still advances at ~0.9x real time.
+        var ramping = false
+        if lanHoldBackSeconds > 0, hb > lanHoldBackSeconds {
+            let elapsed = max(0, now.timeIntervalSince(lastHoldBackRaiseAt ?? now))
+            let allowed = lanHoldBackSeconds + 0.1 * elapsed
+            if allowed < hb { hb = allowed; ramping = true }
+        }
+        guard hb > lanHoldBackSeconds + 0.4 else {
+            // No growth pending: restart the ramp clock so a later raise
+            // cannot bank idle time into one big step.
+            if targetHoldBack <= lanHoldBackSeconds || lastHoldBackRaiseAt == nil { lastHoldBackRaiseAt = now }
+            return
+        }
         lanHoldBackSeconds = hb
+        lastHoldBackRaiseAt = now
+        if ramping { why += String(format: " (ramping toward %.1f s)", targetHoldBack) }
         lanHoldBackReason = why
         lanHoldBack.set(hb)
         debugLog(String(format: "[TS-REMUX] LAN hold-back %.1f s (%@; ceiling %.0f s); LAN playlist unpaced, RAM ring %d segs, publication delay %.1f s",
@@ -2577,6 +2591,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         lanPlaylistLogged.removeAll()
         lanAudioStage = nil
         lanHoldBackSeconds = 0
+        lastHoldBackRaiseAt = nil
         lanHoldBack.set(0)
         lanHoldBackReason = ""
         lanPublishedEdge = -1
