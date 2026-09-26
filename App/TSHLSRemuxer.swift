@@ -771,6 +771,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             self.segments.removeAll()
             self.currentSegment.removeAll()
             self.segmentCloseWall.removeAll()
+            self.segmentTimelineStart.removeAll()
             // Assign a fresh Data rather than removeAll(): the latter keeps
             // the backing allocation, so a stopped-but-still-retained remuxer
             // would hold its whole dead buffer (Apple #74).
@@ -1731,6 +1732,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
         segments.append((seq: nextSeq, data: data, duration: duration))
         segmentCloseWall[nextSeq] = nowWall
+        // Playlist timeline: the EXTINF value as written (3 decimals), summed.
+        segmentTimelineStart[nextSeq] = timelineEnd
+        timelineEnd += (duration * 1000).rounded() / 1000
+        pruneTimeline()
         if duration > Double(lanTargetDuration) + 0.5, !overTargetLogged {
             overTargetLogged = true
             debugLog(String(format: "[TS-REMUX] segment %d is %.2f s, over the advertised LAN target %d s",
@@ -1860,6 +1865,23 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var segmentCloseWall: [Int: Date] = [:]
     /// The over-target segment line is logged once per session.
     private var overTargetLogged = false
+    /// Seq -> start of the segment on the playlist timeline: the running
+    /// sum of the EXTINF values written for every segment before it, from
+    /// seg 0 (= 0). Covers the RAM ring and the spill window. Touched only
+    /// on `queue`.
+    private var segmentTimelineStart: [Int: Double] = [:]
+    /// End of the newest closed segment on the same timeline.
+    private var timelineEnd = 0.0
+    /// Entries below this seq are already pruned.
+    private var timelinePrunedBelow = 0
+
+    /// Runs on `queue`. Drops timeline entries no playlist can list any more.
+    private func pruneTimeline() {
+        let floor = min(spilled.first?.seq ?? Int.max, segments.first?.seq ?? Int.max)
+        guard floor != Int.max, floor > timelinePrunedBelow else { return }
+        for seq in timelinePrunedBelow..<floor { segmentTimelineStart[seq] = nil }
+        timelinePrunedBelow = floor
+    }
 
     // MARK: Live-edge pacing (proxy burst join, 2026-09-13)
     //
@@ -2310,11 +2332,34 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// LAN session: a grown delay slows the edge, never pulls it back.
     private var lanPublishedEdge = -1
 
+    /// True while an ingest gap has released the publication delay's
+    /// reserve (touched only on `queue`, reset per LAN session).
+    private var lanReserveReleased = false
+
     /// Runs on `queue`. The newest seq past the publication delay (or the
     /// last published one, whichever is higher); nil when the ring is empty.
+    /// The delay applies only while ingest flows: once no segment has
+    /// closed for `lanTargetDuration` s, everything closed is published so
+    /// the receiver spends the reserve instead of draining against a
+    /// frozen edge (device log 2026-09-26 10:10:05, 11.2 s ingest gap).
     private func lanPublishedEdgeSeq(now: Date) -> Int? {
-        guard let first = segments.first else { return nil }
+        guard let first = segments.first, let newest = segments.last else { return nil }
         let delay = lanPublicationDelay
+        let sinceClose = segmentCloseWall[newest.seq].map { now.timeIntervalSince($0) } ?? 0
+        if sinceClose >= Double(lanTargetDuration) {
+            let held = segments.filter { $0.seq > lanPublishedEdge }
+            if !held.isEmpty, !lanReserveReleased {
+                lanReserveReleased = true
+                debugLog(String(format: "[TS-REMUX] LAN reserve released: no segment for %.1f s, publishing %d held segs (%.1f s)",
+                                sinceClose, held.count, held.reduce(0.0) { $0 + $1.duration }))
+            }
+            lanPublishedEdge = max(lanPublishedEdge, newest.seq)
+            return lanPublishedEdge
+        }
+        if lanReserveReleased {
+            lanReserveReleased = false
+            debugLog("[TS-REMUX] LAN reserve rebuilding")
+        }
         let ready = segments.last(where: { seg in
             segmentCloseWall[seg.seq].map { now.timeIntervalSince($0) >= delay } ?? true
         })?.seq ?? (first.seq - 1)
@@ -2322,19 +2367,65 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         return lanPublishedEdge
     }
 
+    struct LANPublishedState: Sendable {
+        var segments = 0
+        var delay = 0.0
+        /// Published edge seq (-1 = none).
+        var edge = -1
+        /// End of the newest closed segment and of the published edge
+        /// segment, in the receiver's item time (nil until the receiver
+        /// fetched its first LAN playlist).
+        var realEdgeTime: Double?
+        var publishedEdgeTime: Double?
+        /// Seq whose start is the receiver's item time 0 (-1 = unknown).
+        var timeBaseSeq = -1
+    }
+
     /// Segments the LAN playlist would list right now, the delay in
-    /// force and the published edge seq (-1 = none). Blocks on `queue`
-    /// briefly; the handover wait and the 10 s link line call it.
-    func lanPublishedState() -> (segments: Int, delay: Double, edge: Int) {
+    /// force, the published edge seq and both edges in the receiver's
+    /// time base. Blocks on `queue` briefly; the handover wait and the
+    /// 10 s link line call it.
+    func lanPublishedState() -> LANPublishedState {
         queue.sync {
-            guard lanListener != nil, let edge = lanPublishedEdgeSeq(now: Date()) else {
-                return (0, lanPublicationDelay, -1)
-            }
-            let count = (spillDir != nil && !spilled.isEmpty)
+            var st = LANPublishedState(delay: lanPublicationDelay)
+            guard lanListener != nil, let edge = lanPublishedEdgeSeq(now: Date()) else { return st }
+            st.edge = edge
+            st.segments = (spillDir != nil && !spilled.isEmpty)
                 ? spilled.filter { $0.seq <= edge }.count
                 : min(lanRingSegments, segments.filter { $0.seq <= edge }.count)
-            return (count, lanPublicationDelay, edge)
+            if let base = lanReceiverTimeBase {
+                st.timeBaseSeq = base.seq
+                st.realEdgeTime = timelineEnd - base.start
+                let pEnd = segmentTimelineStart[edge + 1] ?? (edge == segments.last?.seq ? timelineEnd : nil)
+                st.publishedEdgeTime = pEnd.map { $0 - base.start }
+            }
+            return st
         }
+    }
+
+    /// The receiver's item time base: AVPlayer puts item time 0 at the
+    /// start of the first segment in the first playlist it reads, and
+    /// later evictions do not shift it. Recorded from the first LAN
+    /// playlist served to a peer other than the phone. Touched only on
+    /// `queue`, reset per LAN session and per receiver item.
+    private var lanReceiverTimeBase: (seq: Int, start: Double)?
+
+    /// Runs on `queue`. Records the time base from a served LAN playlist.
+    private func noteLANReceiverPlaylist(_ text: String, peer: String) {
+        guard lanReceiverTimeBase == nil else { return }
+        linkLock.lock(); let local = linkStats.localIP; linkLock.unlock()
+        guard peer != local,
+              let r = text.range(of: #"#EXT-X-MEDIA-SEQUENCE:(\d+)"#, options: .regularExpression),
+              let seq = Int(text[r].dropFirst("#EXT-X-MEDIA-SEQUENCE:".count)),
+              let start = segmentTimelineStart[seq] else { return }
+        lanReceiverTimeBase = (seq, start)
+        debugLog(String(format: "[TS-REMUX] LAN receiver time base: item t=0 is seg %d start (playlist timeline %.3f s)",
+                        seq, start))
+    }
+
+    /// A new receiver item reads a new first playlist: forget the time base.
+    func resetLANReceiverTimeBase() {
+        queue.async { self.lanReceiverTimeBase = nil }
     }
 
     /// Runs on `queue`. Chooses the LAN hold-back and logs when it grows.
@@ -2489,6 +2580,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         lanHoldBack.set(0)
         lanHoldBackReason = ""
         lanPublishedEdge = -1
+        lanReserveReleased = false
+        lanReceiverTimeBase = nil
         lanHighestRequestedSeq = -1
         linkLock.lock()
         linkStats.peer = nil
@@ -2726,7 +2819,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 let text = String(decoding: r.body, as: UTF8.self)
                     .trimmingCharacters(in: .newlines)
                     .replacingOccurrences(of: "\n", with: " | ")
+                let raw = String(decoding: r.body, as: UTF8.self)
                 self.queue.async {
+                    self.noteLANReceiverPlaylist(raw, peer: peer)
                     guard self.lanPlaylistLogged.insert(peer).inserted else { return }
                     debugLog("[TS-REMUX] LAN playlist for \(peer): \(text)")
                 }

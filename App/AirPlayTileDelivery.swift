@@ -412,6 +412,7 @@ final class AirPlayTileDelivery {
         if state == .serving, !lanReloadUsed,
            let url = (item.asset as? AVURLAsset)?.url {
             lanReloadUsed = true
+            remuxer?.resetLANReceiverTimeBase()
             debugLog("[AVP-AIRPLAY] LAN item failed (\(reason)): reloading once on the same LAN URL \(url.absoluteString)")
             let fresh = makeLANItem(url: url, copying: item)
             player.replaceCurrentItem(with: fresh)
@@ -685,11 +686,6 @@ final class AirPlayTileDelivery {
         linkLastStarved = st.starvedClosures
         let servedKbps = Double(max(0, st.servedBytes - linkLastServed)) * 8 / 1000 / 10
         linkLastServed = st.servedBytes
-        var behind = "?"
-        if let player, let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
-            let edge = range.end.seconds, now = player.currentTime().seconds
-            if edge.isFinite, now.isFinite { behind = String(format: "%.1f s", max(0, edge - now)) }
-        }
         let status = AirPlayMonitor.playerStatusText(player)
         let external = player?.isExternalPlaybackActive ?? false
         let published = remuxer.lanPublishedState()
@@ -707,12 +703,26 @@ final class AirPlayTileDelivery {
         }
         let playerT = secs(player?.currentTime())
         let seekable = rangeText(player?.currentItem?.seekableTimeRanges.last)
-        let loaded = rangeText(player?.currentItem?.loadedTimeRanges.last)
-        debugLog(String(format: "[AVP-AIRPLAY] link: ingest %.0f kbps avg/%.0f kbps min over 10 s, stalls %d, reservoir %d segs/%.1f s, served %.0f kbps to %@, receiver playhead-behind-edge %@, player status %@, external %@ (hold-back %.1f s, published %d segs, delay %.1f s), receiver last seg %@ / published edge %@ (lag %@ segs), player t=%@ s seekable=[%@] loaded=[%@]",
+        // Direct margins in the receiver's item time (t = 0 at the start of
+        // the first segment of the first LAN playlist it read). The AAC
+        // variant has its own playlist, so these apply to passthrough only.
+        func f1(_ v: Double?) -> String {
+            guard let v, v.isFinite else { return "-" }
+            return String(format: "%.1f", v)
+        }
+        let t = player?.currentTime().seconds
+        let tOK = (t?.isFinite ?? false) && plan != .aacStereo
+        let e = plan != .aacStereo ? published.realEdgeTime : nil
+        let p = plan != .aacStereo ? published.publishedEdgeTime : nil
+        let recvBuffer = tOK ? p.map { $0 - t! } : nil
+        let margin = tOK ? e.map { $0 - t! } : nil
+        let base = published.timeBaseSeq >= 0 && plan != .aacStereo ? "seg \(published.timeBaseSeq)" : "-"
+        debugLog(String(format: "[AVP-AIRPLAY] link: ingest %.0f kbps avg/%.0f kbps min over 10 s, stalls %d, reservoir %d segs/%.1f s, served %.0f kbps to %@, player status %@, external %@ (hold-back %.1f s, published %d segs, delay %.1f s), receiver last seg %@ / published edge %@ (lag %@ segs), real edge %@ s, published edge %@ s, receiver buffer %@ s, total margin %@ s (t0=%@), player t=%@ s seekable=[%@]",
                         avg, minimum, stalls, st.reservoirSegments, st.reservoirSeconds, servedKbps,
-                        st.peer ?? "none", behind, status, external ? "true" : "false", st.holdBack,
+                        st.peer ?? "none", status, external ? "true" : "false", st.holdBack,
                         published.segments, published.delay, recvSeg, edgeSeg, lagSegs,
-                        playerT, seekable, loaded))
+                        f1(e), f1(p), f1(recvBuffer), f1(margin), base,
+                        playerT, seekable))
     }
 
     /// The receiver-side end of a serving session (external playback off
