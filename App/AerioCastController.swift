@@ -734,8 +734,7 @@ final class AerioCastController: NSObject, ObservableObject {
                 // serves (the muxed endpoints were removed 2026-09-13).
                 playlistURL = try await CastHLSProxySession.shared.startChannel(
                     rawTSURL: rawTS, headers: headers, allowAC3Passthrough: allowAC3,
-                    transcodeAC3: transcodeAC3,
-                    receiverDecodesAVCLevel42: caps?["avc1.64002A"])
+                    transcodeAC3: transcodeAC3)
             } catch is CancellationError {
                 return
             } catch {
@@ -944,12 +943,11 @@ final class AerioCastController: NSObject, ObservableObject {
         // otherwise the on-phone AAC transcode when a decoder exists.
         let allowAC3 = receiverDecodesAC3
         let transcodeAC3 = !allowAC3 && CastAudioTranscoder.canDecode(.ac3)
-        let decodesLevel42 = receiverCaps?["avc1.64002A"]
         proxyLoadTask = Task { [weak self] in
             do {
                 let playlistURL = try await CastHLSProxySession.shared.startChannel(
                     rawTSURL: rawTS, headers: headers, allowAC3Passthrough: allowAC3,
-                    transcodeAC3: transcodeAC3, receiverDecodesAVCLevel42: decodesLevel42)
+                    transcodeAC3: transcodeAC3)
                 CastHLSProxySession.shared.markReceiverLoad()
                 await MainActor.run { [weak self] in
                     self?.armStaleReceiverCheck(playlistURL: playlistURL, content: content, afterReload: false)
