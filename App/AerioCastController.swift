@@ -705,7 +705,12 @@ final class AerioCastController: NSObject, ObservableObject {
                 if Task.isCancelled { return }
             }
             if caps == nil { debugLog("[Cast] caps not received, assuming no AC-3") }
-            let allowAC3 = caps?["ac-3"] == true || caps?["ec-3"] == true
+            // Developer test switch (2026-09-26): force the AAC transcode on a
+            // receiver that reports AC-3, to measure whether AC-3 passthrough
+            // paces 1080p60 playback on the Chromecast Ultra.
+            let forceAAC = UserDefaults.standard.bool(forKey: "castForceAACAudio")
+            let allowAC3 = !forceAAC && (caps?["ac-3"] == true || caps?["ec-3"] == true)
+            if forceAAC { debugLog("[Cast] audio plan: Developer switch forces AAC (receiver AC-3 ignored)") }
             // No AC-3 on the receiver: decode it here instead of refusing the
             // channel, as long as this device can build the decoder.
             let transcodeAC3 = !allowAC3 && CastAudioTranscoder.canDecode(.ac3)

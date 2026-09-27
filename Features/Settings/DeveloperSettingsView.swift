@@ -106,6 +106,7 @@ struct DeveloperSettingsView: View {
     /// - `ChannelListView` for the chrome layout branch
     /// - `ManageGroupsSheet` for the hide-filter / hide-search toggles
     @AppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
+    @AppStorage("castForceAACAudio") private var castForceAACAudio = false
 
     /// Companion toggles — previously only exposed inside the Manage
     /// Groups sheet, which made the parent "Compact Chrome" toggle
@@ -360,6 +361,25 @@ struct DeveloperSettingsView: View {
                             Spacer()
 
                             Toggle("", isOn: $compactChromeiPhone)
+                                .labelsHidden()
+                                .tint(.accentPrimary)
+                        }
+                        .padding(.vertical, 4)
+                        .listRowBackground(Color.cardBackground)
+
+                        // Cast audio test switch (2026-09-26): force the AAC
+                        // transcode even when the receiver reports AC-3.
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Cast: force AAC audio")
+                                    .scaledFont(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                                Text("Transcode AC-3 to AAC for every Chromecast receiver (test)")
+                                    .scaledFont(.labelSmall)
+                                    .foregroundColor(Color.contrastText(.textTertiary))
+                            }
+                            Spacer()
+                            Toggle("", isOn: $castForceAACAudio)
                                 .labelsHidden()
                                 .tint(.accentPrimary)
                         }
