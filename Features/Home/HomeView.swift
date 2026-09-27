@@ -8779,7 +8779,11 @@ final class TabBarCollapseState: ObservableObject {
     func set(_ value: Bool) {
         guard collapsed != value else { return }
         collapsed = value
-        applyToSystemBar()
+        // Off the caller's turn: the show arrives from the scroll geometry
+        // callback inside a SwiftUI update, where UIView.animate completed
+        // in 5 to 19 ms (a flash), while the hide arrives "at scroll idle"
+        // and animated. Measured 2026-09-27 01:39 to 01:53.
+        DispatchQueue.main.async { [self] in applyToSystemBar() }
     }
 
     /// Slides the UIKit tab bar off screen instead of hiding it through the
@@ -8803,6 +8807,16 @@ final class TabBarCollapseState: ObservableObject {
             // edge (MinimizedTabButton). The bar collapses right-to-left
             // INTO it (Logan 2026-09-09): anchor the bar on the button's
             // centre, then scale toward that anchor while the far end fades.
+            // A bar still scaled from the last hide (a show and a hide within
+            // the same animation, or a rotation while hidden: UIKit sets a
+            // transformed view's frame, which is undefined) must be put back
+            // to its laid-out place before its geometry is read. Measured
+            // 2026-09-27 01:36:57: the hide read a landscape frame, the show
+            // 44 ms later found alpha 0 and a stale anchor, and the reset
+            // shifted the bar to x -452, off screen for good.
+            if bar.transform != .identity || bar.layer.anchorPoint != CGPoint(x: 0.5, y: 0.5) {
+                Self.normalize(bar)
+            }
             let frame = superview.convert(bar.frame, to: window)
             let target = CGPoint(x: 28 + 24,
                                  y: window.bounds.height - window.safeAreaInsets.bottom + 6 - 24)
@@ -8818,21 +8832,44 @@ final class TabBarCollapseState: ObservableObject {
                     bar.alpha = 0
                 }
             } else {
+                // The collapse in reverse: scale back up from the mini
+                // button's anchor, fading in first.
                 UIView.animate(withDuration: 0.32, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState], animations: {
                     bar.transform = .identity
-                }, completion: { _ in
+                }, completion: { finished in
                     guard !self.collapsed else { return }
-                    Self.setAnchor(bar, CGPoint(x: 0.5, y: 0.5))
-                    // Belt and braces: a show must leave the bar visible
-                    // whatever a toggle mid-animation did to it.
-                    bar.transform = .identity
-                    bar.alpha = 1
+                    if !finished { debugLog("[TABBAR] show animation interrupted") }
+                    Self.normalize(bar)
                     debugLog("[TABBAR] shown: frame=\(Int(bar.frame.minX)),\(Int(bar.frame.minY)) \(Int(bar.frame.width))x\(Int(bar.frame.height)) hidden=\(bar.isHidden) window=\(bar.window != nil)")
                 })
                 UIView.animate(withDuration: 0.14, delay: 0.02, options: [.curveEaseOut, .beginFromCurrentState]) {
                     bar.alpha = 1
                 }
             }
+        }
+    }
+
+    /// Identity transform, centred anchor, and the frame the tab bar
+    /// controller lays out (its layoutSubviews owns the bar's frame).
+    private static func normalize(_ bar: UIView) {
+        bar.transform = .identity
+        // The compensating anchor move keeps the frame where it was; a
+        // direct anchor write plus an explicit frame made the next show
+        // animation complete in 6 ms (measured 2026-09-27 01:46:29), a
+        // flash instead of the expand.
+        setAnchor(bar, CGPoint(x: 0.5, y: 0.5))
+        // After a rotation while hidden the compensation is wrong (it used
+        // the old size) and the bar lands off screen (x -452 at 01:36:57,
+        // -168 at 01:39:37). Only then set the frame UITabBarController
+        // would: full width on the bottom edge, at the bar's own height.
+        guard let superview = bar.superview else { return }
+        let height = bar.bounds.height
+        let expected = CGRect(x: 0, y: superview.bounds.height - height,
+                              width: superview.bounds.width, height: height)
+        if abs(bar.frame.minX - expected.minX) > 1 || abs(bar.frame.minY - expected.minY) > 1
+            || abs(bar.frame.width - expected.width) > 1 {
+            debugLog("[TABBAR] frame corrected from \(Int(bar.frame.minX)),\(Int(bar.frame.minY)) \(Int(bar.frame.width))x\(Int(bar.frame.height))")
+            bar.frame = expected
         }
     }
 
