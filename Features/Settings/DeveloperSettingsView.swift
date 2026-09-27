@@ -108,6 +108,8 @@ struct DeveloperSettingsView: View {
     @AppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
     @AppStorage("castForceAACAudio") private var castForceAACAudio = false
     @AppStorage("castMuxedTSViaMPL") private var castMuxedTSViaMPL = false
+    @AppStorage("castForceHEVCTranscode") private var castForceHEVCTranscode = false
+    @AppStorage("castTranscodeDownProfile") private var castTranscodeDownProfile = "720p60"
 
     /// Companion toggles — previously only exposed inside the Manage
     /// Groups sheet, which made the parent "Compact Chrome" toggle
@@ -403,6 +405,51 @@ struct DeveloperSettingsView: View {
                             Toggle("", isOn: $castMuxedTSViaMPL)
                                 .labelsHidden()
                                 .tint(.accentPrimary)
+                        }
+                        .padding(.vertical, 4)
+                        .listRowBackground(Color.cardBackground)
+
+                        // Cast video transcode test switch (2026-09-26):
+                        // re-encode any H.264 source on the phone, HEVC when
+                        // the receiver presents it, else the H.264 profile
+                        // picked below.
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Cast: transcode video to HEVC (test)")
+                                    .scaledFont(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                                Text("Re-encode every H.264 channel; H.264 profile below when the receiver has no HEVC")
+                                    .scaledFont(.labelSmall)
+                                    .foregroundColor(Color.contrastText(.textTertiary))
+                            }
+                            Spacer()
+                            Toggle("", isOn: $castForceHEVCTranscode)
+                                .labelsHidden()
+                                .tint(.accentPrimary)
+                        }
+                        .padding(.vertical, 4)
+                        .listRowBackground(Color.cardBackground)
+
+                        // H.264 output when the receiver cannot present the
+                        // source or HEVC: 720p at the source rate, or the
+                        // source size at half rate.
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Cast: H.264 transcode profile")
+                                    .scaledFont(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                                Text("720p60 keeps motion; 1080p30 keeps resolution")
+                                    .scaledFont(.labelSmall)
+                                    .foregroundColor(Color.contrastText(.textTertiary))
+                            }
+                            Spacer()
+                            Picker("", selection: $castTranscodeDownProfile) {
+                                Text("720p60").tag("720p60")
+                                Text("1080p30").tag("1080p30")
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                            .tint(.accentPrimary)
                         }
                         .padding(.vertical, 4)
                         .listRowBackground(Color.cardBackground)

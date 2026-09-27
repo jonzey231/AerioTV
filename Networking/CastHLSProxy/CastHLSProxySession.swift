@@ -151,6 +151,12 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// `transcode-aac`: the remuxer decodes AC-3 / E-AC-3 on the phone and
     /// serves AAC-LC stereo in the audio rendition instead of refusing.
     private var transcodeAC3 = false
+    /// The sender's video plan for the current channel (receiver caps plus
+    /// the Developer switches); the remuxer applies it at the source SPS.
+    private var videoPlan = CastVideoPlan.passthrough
+    /// Set when the on-phone video transcode fails: every later remuxer of
+    /// this proxy session passes H.264 through. Cleared by `stop()`.
+    private var videoTranscodeDisabledReason: String?
 
     // Per-generation log rollup state.
     private var segmentsLogged = 0
@@ -377,7 +383,8 @@ final class CastHLSProxySession: @unchecked Sendable {
     func startChannel(rawTSURL: URL, headers: [String: String],
                       allowAC3Passthrough: Bool = false,
                       transcodeAC3: Bool = false,
-                      receiverDecodesAVCLevel42: Bool? = nil) async throws -> URL {
+                      receiverDecodesAVCLevel42: Bool? = nil,
+                      videoPlan: CastVideoPlan = .passthrough) async throws -> URL {
         // The Chromecast fetches over the LAN; 127.0.0.1 would only ever
         // work for the phone itself.
         guard let lanIP = Self.wifiLANAddress() else {
@@ -405,6 +412,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             let isChannelChange = self.activeURL != nil
             self.allowAC3Passthrough = allowAC3Passthrough
             self.transcodeAC3 = transcodeAC3
+            self.videoPlan = videoPlan
             store.setReceiverDecodesAVCLevel42(receiverDecodesAVCLevel42)
             self.stopIngestLocked()
             self.activeURL = rawTSURL
@@ -486,6 +494,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             let hadSession = activeURL != nil || server != nil
             activeURL = nil
             stopIngestLocked()
+            videoTranscodeDisabledReason = nil
             store?.close()
             store = nil
             stopLinkLogLocked()
@@ -555,17 +564,41 @@ final class CastHLSProxySession: @unchecked Sendable {
         rollupBytes = 0
         rollupTicks = 0
 
+        var plan = videoPlan
+        if let reason = videoTranscodeDisabledReason {
+            plan.disabledReason = "transcode failed earlier this session: \(reason)"
+        }
+        // Transcoder output hops back onto this queue; a delivery for a
+        // superseded ingest is dropped (the remuxer is gone or released).
+        let delivery: CastIngestDelivery = { [weak self] block in
+            guard let self else { return }
+            self.queue.async {
+                guard self.ingestEpoch == epoch else { return }
+                block()
+            }
+        }
         let remuxer = CastFMP4Remuxer(allowAC3Passthrough: allowAC3Passthrough,
                                       transcodeAC3: transcodeAC3,
+                                      videoPlan: plan,
+                                      videoDelivery: delivery,
                                       log: { [weak self] in self?.log($0) })
+        remuxer.onVideoTranscodeFailed = { [weak self] reason in
+            // Runs on `queue`; the next `feed` throws and the ingest
+            // reconnects with a passthrough remuxer.
+            self?.videoTranscodeDisabledReason = reason
+        }
         remuxer.onDemuxedInitSegments = { [weak self] video, audio in
             guard let self, self.ingestEpoch == epoch else { return }
+            self.store?.setVideoTranscoded(generation: gen, remuxer.videoIsTranscoded)
             self.store?.setDemuxedInitSegments(generation: gen, video: video, audio: audio)
             // The playlist's CODECS attribute must name the audio the
             // segments actually carry (AAC, ac-3 or ec-3).
             self.store?.setAudioCodecsAttribute(remuxer.audioCodecsAttribute)
-            if let avc = CastHLSSegmentStore.avcCodecString(from: video) {
-                self.videoCodecDescription = "H.264 (\(avc))"
+            if let hevc = CastHLSSegmentStore.hevcCodecString(from: video) {
+                self.videoCodecDescription = "HEVC (\(hevc)), transcoded from H.264"
+            } else if let avc = CastHLSSegmentStore.avcCodecString(from: video) {
+                self.videoCodecDescription = remuxer.videoIsTranscoded
+                    ? "H.264 (\(avc)), transcoded" : "H.264 (\(avc))"
             }
             self.log("demuxed init ready gen=\(gen) "
                 + "vinit=\(video.count) B ainit=\(audio?.count ?? 0) B")
@@ -651,6 +684,11 @@ final class CastHLSProxySession: @unchecked Sendable {
                 self.linkIngestBytes += Int64(data.count)
                 do {
                     try remuxer.feed(data)
+                } catch let error as CastVideoTranscodeError {
+                    // Fallback: a fresh remuxer, built with the plan
+                    // disabled, passes H.264 through from the next IDR.
+                    self.log("\(error); reconnecting with H.264 passthrough")
+                    self.scheduleReconnectLocked(url: url, headers: headers, closingEpoch: epoch)
                 } catch let error as CastUnsupportedCodecError {
                     // Terminal by design: video is never re-encoded and
                     // the audio transcode covers MP2 always and AC-3/E-AC-3

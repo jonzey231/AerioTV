@@ -277,9 +277,15 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         let audioInit = audioInits[generation]
         let attribute = audioCodecsAttribute
         let decodesLevel42 = receiverDecodesAVCLevel42
+        let transcoded = videoTranscodedGenerations.contains(generation)
         condition.unlock()
-        let streamCodec = videoInit.flatMap { Self.avcCodecString(from: $0) } ?? "avc1.640028"
-        let videoCodec = Self.declaredAVCCodec(streamCodec, receiverDecodesLevel42: decodesLevel42)
+        let streamCodec = videoInit.flatMap { Self.videoCodecString(from: $0) } ?? "avc1.640028"
+        // A re-encoded track declares exactly what the encoder wrote
+        // (hvc1.x, or avc1.640029 for the H.264 High 4.1 profile); the
+        // level relabel exists only for passthrough H.264.
+        let videoCodec = transcoded
+            ? streamCodec
+            : Self.declaredAVCCodec(streamCodec, receiverDecodesLevel42: decodesLevel42)
         if videoCodec != streamCodec {
             condition.lock()
             let first = !loggedLevelClamp
@@ -363,6 +369,37 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         guard receiverDecodesLevel42 != true, codec.hasPrefix("avc1."), codec.count == 11,
               let level = UInt8(codec.suffix(2), radix: 16), level > 0x28 else { return codec }
         return String(codec.prefix(9)) + "28"
+    }
+
+    /// The video codec string of an init segment: hvc1.x from an hvcC box,
+    /// otherwise avc1.PPCCLL from the avcC box.
+    static func videoCodecString(from initSegment: Data) -> String? {
+        hevcCodecString(from: initSegment) ?? avcCodecString(from: initSegment)
+    }
+
+    /// RFC 6381 hvc1 string from the hvcC box inside an init segment.
+    static func hevcCodecString(from initSegment: Data) -> String? {
+        let bytes = [UInt8](initSegment)
+        guard bytes.count >= 8 else { return nil }
+        for i in 4...(bytes.count - 4) where bytes[i] == 0x68 && bytes[i + 1] == 0x76
+            && bytes[i + 2] == 0x63 && bytes[i + 3] == 0x43 {
+            let size = (Int(bytes[i - 4]) << 24) | (Int(bytes[i - 3]) << 16)
+                | (Int(bytes[i - 2]) << 8) | Int(bytes[i - 1])
+            let end = min(bytes.count, i - 4 + max(8, size))
+            guard i + 4 < end else { return nil }
+            return CastVideoCodecConfig.hevcCodecString(hvcC: Array(bytes[(i + 4)..<end]))
+        }
+        return nil
+    }
+
+    /// Generations whose video track is re-encoded on the phone, set by the
+    /// session at init time.
+    private var videoTranscodedGenerations: Set<Int> = []
+
+    func setVideoTranscoded(generation gen: Int, _ value: Bool) {
+        condition.lock()
+        if value { videoTranscodedGenerations.insert(gen) } else { videoTranscodedGenerations.remove(gen) }
+        condition.unlock()
     }
 
     /// avc1.PPCCLL from the avcC box inside an init segment (profile,

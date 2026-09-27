@@ -169,6 +169,26 @@ final class AerioCastController: NSObject, ObservableObject {
     /// Last measurement logged, so the copy that rides every telemetry
     /// snapshot does not repeat the line.
     private var loggedCaps: [String: Bool]?
+    /// The receiver's `display` map (cast.framework canDisplayType):
+    /// h264_1080p60, h264_1080p30, hevc_1080p60, hevc_4k60, h264_4k60.
+    /// nil when the page sent none (an older receiver page). Measured
+    /// 2026-09-26 on a Chromecast Ultra: h264_1080p60 false, h264_1080p30
+    /// true, every HEVC key false; that is what drives the video plan.
+    private var receiverDisplayCaps: [String: Bool]?
+    private var loggedDisplayCaps: [String: Bool]?
+
+    /// The video plan for a proxy load: receiver caps plus the Developer
+    /// switches. The remuxer applies it once it has read the source SPS
+    /// (the level, size and frame rate are not known before the ingest).
+    private func videoPlan(caps: [String: Bool]?) -> CastVideoPlan {
+        let defaults = UserDefaults.standard
+        let profile = CastTranscodeDownProfile(
+            rawValue: defaults.string(forKey: "castTranscodeDownProfile") ?? "") ?? .p720p60
+        return CastVideoPlan(
+            caps: caps.map { CastReceiverVideoCaps(mse: $0, display: receiverDisplayCaps) },
+            force: defaults.bool(forKey: "castForceHEVCTranscode"),
+            downProfile: profile)
+    }
 
     /// True only when the receiver MEASURED AC-3 or E-AC-3 support, which it
     /// now probes as `audio/mp4; codecs="ac-3"` (the DEMUXED shape the sender
@@ -220,18 +240,34 @@ final class AerioCastController: NSObject, ObservableObject {
     /// `type: "caps"` message sent on READY, and the copy that rides every
     /// telemetry snapshot).
     fileprivate func noteReceiverCaps(_ json: [String: Any]) {
-        guard let mse = json["mse"] as? [String: Any], !mse.isEmpty else { return }
-        var parsed: [String: Bool] = [:]
-        for (key, value) in mse {
-            if let b = value as? Bool { parsed[key] = b } else if let n = value as? NSNumber { parsed[key] = n.boolValue }
+        func bools(_ any: Any?) -> [String: Bool]? {
+            guard let dict = any as? [String: Any], !dict.isEmpty else { return nil }
+            var parsed: [String: Bool] = [:]
+            for (key, value) in dict {
+                if let b = value as? Bool { parsed[key] = b } else if let n = value as? NSNumber { parsed[key] = n.boolValue }
+            }
+            return parsed.isEmpty ? nil : parsed
         }
-        guard !parsed.isEmpty else { return }
+        // The display map arrives in the same message as `mse`; parsed
+        // first so a caps wait that wakes on `receiverCaps` already sees it.
+        if let display = bools(json["display"]) {
+            receiverDisplayCaps = display
+            if loggedDisplayCaps != display {
+                loggedDisplayCaps = display
+                func cap(_ key: String) -> String { display[key] == true ? "yes" : "no" }
+                debugLog("[Cast] receiver display: h264_1080p60=\(cap("h264_1080p60")) "
+                    + "h264_1080p30=\(cap("h264_1080p30")) hevc_1080p60=\(cap("hevc_1080p60")) "
+                    + "hevc_4k60=\(cap("hevc_4k60")) h264_4k60=\(cap("h264_4k60"))")
+            }
+        }
+        guard let parsed = bools(json["mse"]) else { return }
         receiverCaps = parsed
         guard loggedCaps != parsed else { return }
         loggedCaps = parsed
         func cap(_ key: String) -> String { parsed[key] == true ? "yes" : "no" }
         debugLog("[Cast] receiver caps: ac-3=\(cap("ac-3")) ec-3=\(cap("ec-3")) "
-            + "aac=\(cap("mp4a.40.2")) h264=\(cap("avc1.64002A"))")
+            + "aac=\(cap("mp4a.40.2")) h264=\(cap("avc1.64002A")) "
+            + "hvc1=\(cap("hvc1")) hvc1.4k=\(cap("hvc1.4k")) hev1=\(cap("hev1"))")
     }
 
     /// Attached on session start, dropped on session end.
@@ -720,6 +756,13 @@ final class AerioCastController: NSObject, ObservableObject {
                 + "caps=\(caps == nil ? "none" : "measured") "
                 + "ac-3=\(cap("ac-3")) ec-3=\(cap("ec-3")) aac=\(cap("mp4a.40.2")) "
                 + "-> ingest=plain audio=\(audioMode)")
+            // Video plan: decided per source once the proxy reads the SPS
+            // (the full `[Cast] video plan: source=...` line comes from
+            // there); this line records what the decision will work from.
+            let videoPlan = await MainActor.run { self?.videoPlan(caps: caps) } ?? .passthrough
+            debugLog("[Cast] video plan inputs: receiver=\(receiverModel) hvc1=\(cap("hvc1")) "
+                + "display=\(videoPlan.caps?.display == nil ? "none" : "measured") "
+                + "force=\(videoPlan.force ? "yes" : "no") down=\(videoPlan.downProfile.rawValue)")
             // Developer experiment (2026-09-26): muxed TS HLS from the
             // TSHLSRemuxer LAN listener, played by the receiver's legacy
             // Media Player Library instead of Shaka/MSE.
@@ -748,7 +791,8 @@ final class AerioCastController: NSObject, ObservableObject {
                 playlistURL = try await CastHLSProxySession.shared.startChannel(
                     rawTSURL: rawTS, headers: headers, allowAC3Passthrough: allowAC3,
                     transcodeAC3: transcodeAC3,
-                    receiverDecodesAVCLevel42: caps?["avc1.64002A"])
+                    receiverDecodesAVCLevel42: caps?["avc1.64002A"],
+                    videoPlan: videoPlan)
             } catch is CancellationError {
                 return
             } catch {
@@ -1082,11 +1126,13 @@ final class AerioCastController: NSObject, ObservableObject {
         let allowAC3 = receiverDecodesAC3
         let transcodeAC3 = !allowAC3 && CastAudioTranscoder.canDecode(.ac3)
         let decodesLevel42 = receiverCaps?["avc1.64002A"]
+        let plan = videoPlan(caps: receiverCaps)
         proxyLoadTask = Task { [weak self] in
             do {
                 let playlistURL = try await CastHLSProxySession.shared.startChannel(
                     rawTSURL: rawTS, headers: headers, allowAC3Passthrough: allowAC3,
-                    transcodeAC3: transcodeAC3, receiverDecodesAVCLevel42: decodesLevel42)
+                    transcodeAC3: transcodeAC3, receiverDecodesAVCLevel42: decodesLevel42,
+                    videoPlan: plan)
                 CastHLSProxySession.shared.markReceiverLoad()
                 await MainActor.run { [weak self] in
                     self?.armStaleReceiverCheck(playlistURL: playlistURL, content: content, afterReload: false)
@@ -1459,6 +1505,8 @@ extension AerioCastController: GCKSessionManagerListener {
         deferredLoad = nil
         receiverCaps = nil
         loggedCaps = nil
+        receiverDisplayCaps = nil
+        loggedDisplayCaps = nil
         // The cast card must not outlive the session; a local resume below
         // publishes its own via PlayerSession.
         NowPlayingBridge.shared.teardown()
