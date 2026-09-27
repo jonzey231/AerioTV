@@ -68,6 +68,25 @@ final class AirPlayMonitor: ObservableObject {
     /// stays active and reads "Buffering…"; whether the session ends is
     /// AirPlayTileDelivery's call (its release grace), never this one's.
     @Published private(set) var receiverBuffering = false
+    /// Channel name of an in-place channel flip in progress: set when the
+    /// tile splices the new channel into the receiver's playlist and
+    /// cleared when the receiver fetches the new channel's first segment
+    /// (or the flip is abandoned / the session ends). The card and sheet
+    /// read "Switching to <channel>" for that window, as for Cast.
+    @Published private(set) var switchingToTitle: String?
+
+    func noteSwitching(to name: String?) {
+        if switchingToTitle != name { switchingToTitle = name }
+    }
+
+    /// Accent status line for the AirPlay card and sheet while playing: a
+    /// flip in progress wins, then a receiver rebuffer, then the steady
+    /// "AirPlay to <receiver>" (`playing`). Same precedence as Cast's
+    /// castStatusLine.
+    func statusLine(playing: String) -> String {
+        if let switchingToTitle { return "Switching to \(switchingToTitle)" }
+        return receiverBuffering ? "Buffering\u{2026}" : playing
+    }
     /// Raw `isExternalPlaybackActive` from the attached player.
     private(set) var playerExternal = false
     /// A player no tile delivery owns (PlayerView's direct / HLS / VOD
@@ -508,7 +527,10 @@ final class AirPlayMonitor: ObservableObject {
         if p == .ended, phase != .ended {
             debugLog("[Cast] card hide (AirPlay, session ended)")
         }
-        if p == .none || p == .ended || p == .routeLost { hostsHeadless = false }
+        if p == .none || p == .ended || p == .routeLost {
+            hostsHeadless = false
+            noteSwitching(to: nil)
+        }
         if phase != p { phase = p }
     }
 

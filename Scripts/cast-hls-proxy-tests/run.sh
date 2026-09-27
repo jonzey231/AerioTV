@@ -14,5 +14,6 @@ xcrun swiftc -swift-version 6 -O -o "$OUT/casthls_tests" \
     "$SRC/CastAudioFrameParser.swift" \
     "$SRC/CastAudioTranscoder.swift" \
     "$SRC/CastVideoTranscoder.swift" \
-    ../../App/TSLANAudioRewriter.swift
+    ../../App/TSLANAudioRewriter.swift \
+    ../../App/TSHLSPlaylist.swift
 "$OUT/casthls_tests"

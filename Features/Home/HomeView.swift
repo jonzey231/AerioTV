@@ -4205,6 +4205,9 @@ final class NowPlayingManager: ObservableObject {
             let didSwap: Bool = {
                 guard store.tiles.count == 1,
                       let tileID = store.audioTileID else { return false }
+                #if os(iOS)
+                AirPlayTileDelivery.noteFlipEntry("tuneDirect (player overlay / last-channel zap)")
+                #endif
                 return store.swapTileContent(tileID: tileID, to: target, server: server)
             }()
             if !didSwap {
@@ -4285,6 +4288,9 @@ final class NowPlayingManager: ObservableObject {
             let didSwap: Bool = {
                 guard store.tiles.count == 1,
                       let tileID = store.audioTileID else { return false }
+                #if os(iOS)
+                AirPlayTileDelivery.noteFlipEntry("channel up/down (step \(step))")
+                #endif
                 return store.swapTileContent(tileID: tileID, to: next, server: server)
             }()
             if didSwap {
@@ -6149,7 +6155,7 @@ struct MainTabView: View {
                     transport: .airPlay,
                     title: item?.name ?? "AirPlay",
                     status: probing ? "Connecting to AirPlay"
-                        : (airPlay.receiverBuffering ? "Buffering…" : airPlayPlayingStatus),
+                        : airPlay.statusLine(playing: airPlayPlayingStatus),
                     artURL: item?.logoURL?.absoluteString,
                     isPlaying: airPlay.isPlaying,
                     // Nothing to pause until the receiver has the video.
@@ -6244,7 +6250,7 @@ struct MainTabView: View {
                 channelName: idle ? (airPlay.deviceName ?? "AirPlay") : (item?.name ?? "AirPlay"),
                 statusText: idle ? "Connected. Select a channel to start."
                     : (airPlayIsProbing ? "Connecting to AirPlay"
-                        : (airPlay.receiverBuffering ? "Buffering…" : airPlayPlayingStatus)),
+                        : airPlay.statusLine(playing: airPlayPlayingStatus)),
                 artURL: item?.logoURL?.absoluteString,
                 channelID: item?.id,
                 fallbackSubtitle: nil,

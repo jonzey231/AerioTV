@@ -471,6 +471,13 @@ final class AirPlayTileDelivery {
               let receiver, receiver.model != nil, !receiver.isApple,
               let url = (item.asset as? AVURLAsset)?.url else { return }
         let now = Date()
+        // A flip's splice seek can leave the receiver briefly short of
+        // buffer; a reissue now would throw it back to the playlist's
+        // default point, undoing the seek.
+        if let seekAt = lastFlipSeekAt, now.timeIntervalSince(seekAt) < Self.flipSeekReissueHold {
+            debugLog(String(format: "[AVP-AIRPLAY] reissue suppressed: flip seek %.1f s ago", now.timeIntervalSince(seekAt)))
+            return
+        }
         if let last = lastUnderrunReissue, now.timeIntervalSince(last) < Self.underrunReissueWindow {
             debugLog("[AVP-AIRPLAY] receiver quit on underrun again within \(Int(Self.underrunReissueWindow)) s; no reissue")
             return
@@ -641,6 +648,230 @@ final class AirPlayTileDelivery {
         }
     }
 
+    // MARK: In-place channel flip (2026-09-27)
+    //
+    // Device measurement 2026-09-25: a flip that tore the tile down sent
+    // the Apple TV to its home screen for 3 to 7 s, then re-handshook and
+    // waited ~10 s for the handover segments. While serving, the tile now
+    // keeps this delivery, its AVPlayer and the remuxer's LAN listener, and
+    // only retargets the remuxer's ingest: the new channel lands in the
+    // same /live.m3u8 behind an EXT-X-DISCONTINUITY and the receiver
+    // crosses into it on its own. The player item is never replaced.
+
+    private struct InPlaceFlip {
+        let from: String
+        let to: String
+        let generation: Int
+        let firstSeq: Int
+        let at: Date
+    }
+    private var inPlaceFlip: InPlaceFlip?
+    /// The flip whose splice the receiver may still be seeked to (kept
+    /// past the first-fetch crossing: the receiver fetches ahead of its
+    /// playhead, so a fetch does not mean the picture changed).
+    private var pendingSplice: InPlaceFlip?
+    /// Seek only once this much of the new channel is published, so the
+    /// receiver lands with about 8 s of buffer and grows back toward the
+    /// hold-back from there.
+    static let spliceSeekMinSegments = 2
+    static let spliceSeekMinSeconds = 8.0
+
+    /// Which UI path asked for the channel change (logged with the flip).
+    private static var pendingFlipEntry: String?
+    static func noteFlipEntry(_ entry: String?) { pendingFlipEntry = entry }
+    /// "Switching to" gives up (and says so) if the receiver has not
+    /// fetched the new channel's first segment by then.
+    static let flipCrossTimeout: TimeInterval = 60
+
+    /// The tile may flip in place: a receiver is being served from this
+    /// tile's remuxer.
+    var canFlipInPlace: Bool { state == .serving && remuxer != nil && player != nil }
+
+    /// The tile is about to retarget the remuxer: the card reads
+    /// "Switching to <channel>" from now on.
+    func beginInPlaceFlip(to name: String) {
+        guard state == .serving else { return }
+        AirPlayMonitor.shared.noteSwitching(to: name)
+    }
+
+    /// The remuxer refused the retarget; the tile re-tunes the classic way.
+    func cancelInPlaceFlip(_ why: String) {
+        debugLog("[AVP-AIRPLAY] flip in place not possible (\(why)); full re-tune")
+        inPlaceFlip = nil
+        pendingSplice = nil
+        Self.pendingFlipEntry = nil
+        AirPlayMonitor.shared.noteSwitching(to: nil)
+    }
+
+    /// The remuxer's new ingest is opening; `firstSeq` will carry the
+    /// discontinuity.
+    func flipStarted(from old: String, to new: String, generation: Int, firstSeq: Int) {
+        guard state == .serving else { return }
+        channelName = new
+        let flip = InPlaceFlip(from: old, to: new, generation: generation, firstSeq: firstSeq, at: Date())
+        inPlaceFlip = flip
+        pendingSplice = flip
+        flipFetchLogged = false
+        // The press went through the tune entry, which armed a headless
+        // tune; no handover follows an in-place flip, so settle it here.
+        AirPlayMonitor.shared.noteTileLoading(false)
+        // The flip gap is not a parked receiver: restart the clock.
+        parkLastSegmentAt = Date()
+        debugLog("[AVP-AIRPLAY] flip: \(old) -> \(new) in place (gen \(generation), discontinuity at seq \(firstSeq))")
+        debugLog("[AVP-AIRPLAY] flip: entry point \(Self.pendingFlipEntry ?? "tile stream change (other)")")
+        Self.pendingFlipEntry = nil
+    }
+
+    /// The remuxer stored the first segment of a new source. Re-plan the
+    /// receiver's audio against the new codec: a non-Apple receiver on
+    /// passthrough (the old channel was AAC) needs the LAN rewrite once
+    /// the new channel carries AC-3 / E-AC-3. The reverse needs nothing:
+    /// the rewriter passes an AAC source through on its own.
+    func newSourceStarted(seq: Int, audioCodec: String) {
+        guard state == .serving, let remuxer else { return }
+        if let f = inPlaceFlip, f.firstSeq == seq {
+            debugLog(String(format: "[AVP-AIRPLAY] flip: %@ first segment %d stored %.1f s after the flip (audio %@)",
+                            f.to, seq, Date().timeIntervalSince(f.at), audioCodec))
+            // With no publication delay the segment is already listed:
+            // do not wait up to a second for the link tick.
+            checkSpliceSeek()
+        }
+        let transcodable = audioCodec == "AC-3" || audioCodec == "E-AC-3"
+        guard transcodable, plan == .passthrough, !replanning, let r = receiver,
+              r.wantsAAC(mode: AirPlayAudioMode.current) else { return }
+        debugLog("[AVP-AIRPLAY] new source audio \(audioCodec) for '\(r.name)': switching LAN audio to AAC-LC stereo (no item swap)")
+        replanning = true
+        let myToken = token
+        Task { @MainActor in
+            defer { self.replanning = false }
+            let aac = await self.setLANAudio(remuxer: remuxer, aac: true)
+            guard self.token == myToken, self.state == .serving else { return }
+            if aac {
+                self.plan = .aacStereo
+                debugLog("[AVP-AIRPLAY] re-plan: receiver now gets AAC-LC stereo in the LAN TS \(self.endpointText)")
+            } else {
+                debugLog("[AVP-AIRPLAY] re-plan: LAN audio rewrite unavailable; staying on passthrough")
+            }
+        }
+    }
+
+    /// Runs in the 1 s link tick: the receiver's first fetch of a segment
+    /// of the new generation ends the "Switching to" window.
+    private func checkFlipCrossed(_ st: TSHLSRemuxer.LANLinkStats) {
+        guard let f = inPlaceFlip else { return }
+        let elapsed = Date().timeIntervalSince(f.at)
+        if !flipFetchLogged,
+           TSHLSPlaylist.receiverCrossed(receiverHighestSeq: st.receiverHighestSeq, generationFirstSeq: f.firstSeq) {
+            flipFetchLogged = true
+            debugLog(String(format: "[AVP-AIRPLAY] flip: receiver crossed into gen %d (%@): first fetch of seg %d at %.1f s after the flip",
+                            f.generation, f.to, st.receiverHighestSeq, elapsed))
+        }
+        // "Switching to" follows the picture, not the fetch (dev_log19
+        // 11:24: first fetch at 4.5 s, new picture at 14 s): it ends when
+        // the player's playhead, which the receiver shows, reaches the
+        // splice.
+        if let remuxer, let player,
+           let t = remuxer.lanSpliceState(firstSeq: f.firstSeq).itemTime {
+            let now = player.currentTime().seconds
+            if now.isFinite, now >= t - 0.1 {
+                debugLog(String(format: "[AVP-AIRPLAY] flip: receiver playhead at the splice of gen %d (%@): item t=%.1f, player t=%.1f, %.1f s after the flip",
+                                f.generation, f.to, t, now, elapsed))
+                inPlaceFlip = nil
+                pendingSplice = nil
+                AirPlayMonitor.shared.noteSwitching(to: nil)
+                return
+            }
+        }
+        if elapsed >= Self.flipCrossTimeout {
+            debugLog(String(format: "[AVP-AIRPLAY] flip: receiver playhead not at gen %d (seg %d) %.0f s after the flip (receiver last seg %d); clearing Switching to",
+                            f.generation, f.firstSeq, elapsed, st.receiverHighestSeq))
+            inPlaceFlip = nil
+            AirPlayMonitor.shared.noteSwitching(to: nil)
+        }
+    }
+
+    /// First-fetch line logged for the current flip.
+    private var flipFetchLogged = false
+    /// When the last splice seek was issued; the Roku underrun reissue
+    /// holds off `flipSeekReissueHold` after it.
+    private var spliceSeekableLogged = false
+    private var lastFlipSeekAt: Date?
+    static let flipSeekReissueHold: TimeInterval = 10
+    /// Seek on the first published new segment only when the playhead is
+    /// further than this before the splice (else the receiver gets there
+    /// on its own about as fast).
+    static let spliceSeekEarlyLead: Double = 4
+
+    /// Runs in the 1 s link tick and when the new source's first segment
+    /// is stored. The receiver would otherwise play out its hold-back of
+    /// the old channel (14 s on the Apple TV, dev_log19 11:24; 21 s on the
+    /// Roku). The phone's AVPlayer owns the AirPlay item, so a seek on it
+    /// moves the receiver. Fires on the second published new segment, or
+    /// on the first when the playhead is still more than
+    /// `spliceSeekEarlyLead` before the splice; the receiver keeps
+    /// fetching as further segments land.
+    ///
+    /// All receivers, Roku included (2026-09-27 trial): the Roku underrun
+    /// reissue is held off for `flipSeekReissueHold` after the seek, since
+    /// a reissue would restart it at the playlist's default point. If the
+    /// Roku stalls after the seek, the log shows the suppressed reissue.
+    private func checkSpliceSeek() {
+        guard let f = pendingSplice, let remuxer, let player,
+              let item = player.currentItem else { return }
+        if Date().timeIntervalSince(f.at) >= Self.flipCrossTimeout {
+            pendingSplice = nil
+            return
+        }
+        guard player.isExternalPlaybackActive else { return }
+        let sp = remuxer.lanSpliceState(firstSeq: f.firstSeq)
+        guard let t = sp.itemTime, sp.publishedSegments >= 1 else { return }
+        let now = player.currentTime().seconds
+        guard now.isFinite else { return }
+        // Already at or past the splice: the receiver crossed on its own.
+        guard now < t - 0.5 else {
+            pendingSplice = nil
+            debugLog(String(format: "[AVP-AIRPLAY] flip: receiver already at the splice (item t=%.1f, player t=%.1f); no seek", t, now))
+            return
+        }
+        let trigger: String
+        if sp.publishedSegments >= 2 {
+            trigger = "second new segment published"
+        } else if t - now > Self.spliceSeekEarlyLead {
+            trigger = String(format: "first new segment published, playhead %.1f s before the splice", t - now)
+        } else {
+            return
+        }
+        // The splice must be inside what the item can seek to. The item's
+        // seekable range trails the LAN playlist by a refresh (Roku
+        // 2026-09-27 11:30:24: splice 38.4 s, seekable to 36.8 s at the
+        // first segment), so keep the pending splice and try again on the
+        // next tick instead of giving up.
+        if let range = item.seekableTimeRanges.last?.timeRangeValue,
+           !(range.start.seconds...range.end.seconds).contains(t) {
+            if !spliceSeekableLogged {
+                spliceSeekableLogged = true
+                debugLog(String(format: "[AVP-AIRPLAY] flip: splice item t=%.1f outside seekable %.1f..%.1f; retrying each tick",
+                                t, range.start.seconds, range.end.seconds))
+            }
+            return
+        }
+        pendingSplice = nil
+        spliceSeekableLogged = false
+        debugLog(String(format: "[AVP-AIRPLAY] flip: seeking the receiver to the splice (item t=%.1f, %d new segments published)",
+                        t, sp.publishedSegments))
+        debugLog("[AVP-AIRPLAY] flip: seek trigger: \(trigger) (receiver \(receiver?.isApple == true ? "Apple" : "non-Apple"))")
+        lastFlipSeekAt = Date()
+        let target = CMTime(seconds: t, preferredTimescale: 90_000)
+        let label = f.to
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { done in
+            let landed = player.currentTime().seconds
+            Task { @MainActor in
+                debugLog(String(format: "[AVP-AIRPLAY] flip: splice seek to %@ %@ (player t=%.1f)",
+                                label, done ? "finished" : "interrupted", landed))
+            }
+        }
+    }
+
     /// Watchdogs, keepalive, PiP (sections 6 and 7).
     private func enterServing() {
         state = .serving
@@ -734,6 +965,8 @@ final class AirPlayTileDelivery {
         }
         linkLastIngest = st.ingestBytes
         linkTicks += 1
+        checkFlipCrossed(st)
+        checkSpliceSeek()
         if checkParked(st) { return }
         guard linkTicks % 10 == 0 else { return }
         let samples = linkIngestKbps
@@ -839,6 +1072,11 @@ final class AirPlayTileDelivery {
 
     private func leaveServing(holdForFlip: Bool = false) {
         stopLinkLog()
+        pendingSplice = nil
+        if inPlaceFlip != nil || AirPlayMonitor.shared.switchingToTitle != nil {
+            inPlaceFlip = nil
+            AirPlayMonitor.shared.noteSwitching(to: nil)
+        }
         if keepaliveHeld, holdForFlip, Self.routeHasAirPlay(), Self.flipKeepaliveRelease == nil {
             keepaliveHeld = false
             debugLog("[AVP-AIRPLAY] background keepalive held \(Int(Self.flipKeepaliveGrace))s for the next tune (route still AirPlay)")

@@ -3078,5 +3078,90 @@ runVideoTranscodeChecks()
 
 runHDRPlanChecks()
 
+// MARK: 18. In-place AirPlay flip: LAN / loopback playlist splice (2026-09-27)
+//
+// The flip keeps one remuxer and one playlist URL; the new channel's
+// first segment carries EXT-X-DISCONTINUITY and the media sequence just
+// continues. TSHLSPlaylist is the renderer every TSHLSRemuxer playlist
+// (loopback, LAN, in-process) goes through.
+
+@MainActor func runInPlaceFlipPlaylistChecks() {
+    func window(_ seqs: ClosedRange<Int>, _ d: Double = 2.5) -> [TSHLSPlaylist.Entry] {
+        seqs.map { TSHLSPlaylist.Entry(seq: $0, duration: d, uri: "seg\($0).ts") }
+    }
+    func count(_ text: String, _ needle: String) -> Int { text.components(separatedBy: needle).count - 1 }
+
+    // No flip yet: byte-identical to the pre-flip format (no DSEQ line).
+    let plain = TSHLSPlaylist.render(window: window(3...3, 2.0), targetDuration: 4, version: 3,
+                                     discontinuitySeqs: [], eventPlaylist: false, mapURI: nil, complete: false)
+    expectEq(plain, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:3\n#EXTINF:2.000,\nseg3.ts\n",
+             "flip playlist: no discontinuity renders the classic text")
+    expectEq(TSHLSPlaylist.emptyText(targetDuration: 4),
+             "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n",
+             "flip playlist: empty playlist text")
+
+    // Flip at seq 14: the receiver's window straddles both channels.
+    let straddle = TSHLSPlaylist.render(window: window(10...17), targetDuration: 4, version: 3,
+                                        discontinuitySeqs: [14], eventPlaylist: false, mapURI: nil, complete: false)
+    expect(straddle.contains("#EXT-X-MEDIA-SEQUENCE:10\n"), "flip playlist: media sequence continues across the flip")
+    expect(straddle.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0\n"), "flip playlist: DSEQ 0 while the tag is in the window")
+    expectEq(count(straddle, "#EXT-X-DISCONTINUITY\n"), 1, "flip playlist: exactly one discontinuity tag")
+    expect(straddle.contains("seg13.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:2.500,\nseg14.ts\n"),
+           "flip playlist: the tag sits right before the new channel's first segment")
+    expect(straddle.contains("#EXT-X-TARGETDURATION:4\n"), "flip playlist: fixed LAN target duration kept")
+
+    // The tagged segment slid out: DSEQ bumps, tag gone.
+    let after = TSHLSPlaylist.render(window: window(15...22), targetDuration: 4, version: 3,
+                                     discontinuitySeqs: [14], eventPlaylist: false, mapURI: nil, complete: false)
+    expect(after.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1\n"), "flip playlist: DSEQ 1 once the tag slid out")
+    expectEq(count(after, "#EXT-X-DISCONTINUITY\n"), 0, "flip playlist: no tag after it slid out")
+
+    // Two flips: only the one still in the window is tagged.
+    let two = TSHLSPlaylist.render(window: window(15...22), targetDuration: 4, version: 3,
+                                   discontinuitySeqs: [14, 20], eventPlaylist: false, mapURI: nil, complete: false)
+    expect(two.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1\n"), "flip playlist: two flips, DSEQ counts the slid one")
+    expectEq(count(two, "#EXT-X-DISCONTINUITY\n"), 1, "flip playlist: two flips, one tag in the window")
+    expect(two.contains("#EXT-X-DISCONTINUITY\n#EXTINF:2.500,\nseg20.ts"), "flip playlist: second flip tagged")
+    expectEq(TSHLSPlaylist.discontinuitySequence(firstSeq: 21, discontinuitySeqs: [14, 20]), 2,
+             "flip playlist: DSEQ 2 once both slid out")
+
+    // Header order for the other variants (event, fMP4 map, finished).
+    let event = TSHLSPlaylist.render(window: window(0...1), targetDuration: 2, version: 7,
+                                     discontinuitySeqs: [1], eventPlaylist: true, mapURI: "init.mp4", complete: true)
+    expect(event.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MAP:URI=\"init.mp4\"\n"),
+           "flip playlist: DSEQ, event and map order")
+    expect(event.hasSuffix("seg1.ts\n#EXT-X-ENDLIST\n"), "flip playlist: ENDLIST last")
+
+    // Receiver crossing: first fetch of a new-generation segment.
+    expect(!TSHLSPlaylist.receiverCrossed(receiverHighestSeq: -1, generationFirstSeq: 0),
+           "flip cross: nothing fetched is not a crossing")
+    expect(!TSHLSPlaylist.receiverCrossed(receiverHighestSeq: 13, generationFirstSeq: 14),
+           "flip cross: still on the old channel")
+    expect(TSHLSPlaylist.receiverCrossed(receiverHighestSeq: 14, generationFirstSeq: 14),
+           "flip cross: first new-generation segment fetched")
+
+    // LAN audio stage (Roku AAC rewrite): the old channel's codec / PES
+    // state never runs into the new one across the flip.
+    var fakes: [FakeCastAudioTranscoder] = []
+    let stage = TSLANAudioStage(rewriter: TSLANAudioRewriter(log: { _ in }, canDecode: { _ in true },
+                                                             transcoderFactory: { _, c, f in
+        let fake = FakeCastAudioTranscoder(onConfig: c, onFrame: f)
+        fakes.append(fake)
+        return fake
+    }))
+    var seg: [UInt8] = syntheticPAT() + syntheticPMT()
+    for p in packetsFor(pid: 0x100, pes: pesBytes(streamID: 0xE0, pts: 900_000, payload: [0, 0, 0, 1, 0x65, 0x88])) { seg += p }
+    var acc: UInt8 = 0
+    seg += TSLANAudioRewriter.packetizePES(payload: ac3Frame(), pts: 900_000, pid: 0x101, cc: &acc)
+    _ = stage.produce(seq: 5, sources: [(5, Data(seg))], oldestSeq: 0, discontinuities: [7])
+    _ = stage.produce(seq: 6, sources: [(6, Data(seg))], oldestSeq: 0, discontinuities: [7])
+    let flushesBefore = fakes.reduce(0) { $0 + $1.flushes }
+    expectEq(flushesBefore, 0, "flip stage: contiguous same-source segments keep codec state")
+    _ = stage.produce(seq: 7, sources: [(7, Data(seg))], oldestSeq: 0, discontinuities: [7])
+    expectEq(fakes.reduce(0) { $0 + $1.flushes }, 1, "flip stage: the new channel's first segment resets the rewriter")
+}
+
+runInPlaceFlipPlaylistChecks()
+
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

@@ -582,10 +582,15 @@ final class TSLANAudioStage: @unchecked Sendable {
     /// The LAN copy of `seq`, rewriting `sources` (any order) first. Nil
     /// when `seq` is neither cached nor among the sources. `oldestSeq` is
     /// the oldest segment the remuxer still holds; older cache entries go.
-    func produce(seq: Int, sources: [(seq: Int, data: Data)], oldestSeq: Int) -> Data? {
+    /// `discontinuities` are the seqs that open a new source (a channel
+    /// flip in place or a Switch Stream change): the old source's codec
+    /// and PES state must not run into the new one, whose PTS clock is
+    /// unrelated.
+    func produce(seq: Int, sources: [(seq: Int, data: Data)], oldestSeq: Int,
+                 discontinuities: Set<Int> = []) -> Data? {
         lock.lock(); defer { lock.unlock() }
         for s in sources.sorted(by: { $0.seq < $1.seq }) where cache[s.seq] == nil {
-            if s.seq != nextSeq { rewriter.reset() }
+            if s.seq != nextSeq || discontinuities.contains(s.seq) { rewriter.reset() }
             cache[s.seq] = rewriter.rewrite(s.data)
             nextSeq = s.seq + 1
         }

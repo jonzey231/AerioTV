@@ -10,7 +10,9 @@
 		A1R198FCCDFCE30FD191BF69 /* RemoteSessionNowPlaying.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */; };
 		A1R865DEBFC0015BAB4F022B /* AirPlayTileDelivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */; };
 		A1R97E4D2C14EFFBDA110A4D /* TSLANAudioRewriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8231 /* TSLANAudioRewriter.swift */; };
+		A1R97E4D2C14EFFBDA110B5E /* TSHLSPlaylist.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8342 /* TSHLSPlaylist.swift */; };
 		A1R8CEDC79EEAEB1C433DB5F /* TSLANAudioRewriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8231 /* TSLANAudioRewriter.swift */; };
+		A1R8CEDC79EEAEB1C433DC6A /* TSHLSPlaylist.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8342 /* TSHLSPlaylist.swift */; };
 		A1RF6A0E8715728C27F1F2FB /* AirPlayReceiverResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R3EEB47325934697D79C89 /* AirPlayReceiverResolver.swift */; };
 		A1R58F2EB6D2DBEFDAAB10ED /* AirPlayMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R11426AB13986BB21FB3FC /* AirPlayMonitor.swift */; };
 		A1RFD0C9647D68F7E2A9043C /* AirPlayAudioMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RC4579DB2B9BAAA41A1352 /* AirPlayAudioMode.swift */; };
@@ -356,6 +358,7 @@
 		A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionNowPlaying.swift; sourceTree = "<group>"; };
 		A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayTileDelivery.swift; sourceTree = "<group>"; };
 		A1R8ABB50566B8495C3C8231 /* TSLANAudioRewriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSLANAudioRewriter.swift; sourceTree = "<group>"; };
+		A1R8ABB50566B8495C3C8342 /* TSHLSPlaylist.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSHLSPlaylist.swift; sourceTree = "<group>"; };
 		A1R3EEB47325934697D79C89 /* AirPlayReceiverResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayReceiverResolver.swift; sourceTree = "<group>"; };
 		A1R11426AB13986BB21FB3FC /* AirPlayMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayMonitor.swift; sourceTree = "<group>"; };
 		A1RC4579DB2B9BAAA41A1352 /* AirPlayAudioMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayAudioMode.swift; sourceTree = "<group>"; };
@@ -1031,6 +1034,7 @@
 				A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */,
 				A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */,
 				A1R8ABB50566B8495C3C8231 /* TSLANAudioRewriter.swift */,
+				A1R8ABB50566B8495C3C8342 /* TSHLSPlaylist.swift */,
 				A1R3EEB47325934697D79C89 /* AirPlayReceiverResolver.swift */,
 				A1R11426AB13986BB21FB3FC /* AirPlayMonitor.swift */,
 			);
@@ -1338,6 +1342,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1R8CEDC79EEAEB1C433DB5F /* TSLANAudioRewriter.swift in Sources */,
+				A1R8CEDC79EEAEB1C433DC6A /* TSHLSPlaylist.swift in Sources */,
 				A1R9EEF67E03A6539AE3DC4E /* AirPlayAudioMode.swift in Sources */,
 				81A5CE2643A02F7A26B2B5CF /* AddServerView.swift in Sources */,
 				81A5CE2643A02F7A26B2B5D0 /* ServerSyncView.swift in Sources */,
@@ -1485,6 +1490,7 @@
 				A1R198FCCDFCE30FD191BF69 /* RemoteSessionNowPlaying.swift in Sources */,
 				A1R865DEBFC0015BAB4F022B /* AirPlayTileDelivery.swift in Sources */,
 				A1R97E4D2C14EFFBDA110A4D /* TSLANAudioRewriter.swift in Sources */,
+				A1R97E4D2C14EFFBDA110B5E /* TSHLSPlaylist.swift in Sources */,
 				A1RF6A0E8715728C27F1F2FB /* AirPlayReceiverResolver.swift in Sources */,
 				A1R58F2EB6D2DBEFDAAB10ED /* AirPlayMonitor.swift in Sources */,
 				A1RFD0C9647D68F7E2A9043C /* AirPlayAudioMode.swift in Sources */,
