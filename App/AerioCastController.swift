@@ -90,6 +90,10 @@ final class AerioCastController: NSObject, ObservableObject {
     /// What the TV is (or is about to be) playing. Survives the local player's
     /// teardown so the cast-remote cover + channel flips have their anchor.
     @Published private(set) var castingContent: Content?
+    /// What was casting when Change Cast Device was tapped; consumed by the
+    /// next beginSession so the new receiver opens on the same channel.
+    private var handoffContent: Content?
+    func rememberHandoff() { handoffContent = castingContent }
     /// Set by stopCasting() so a deliberate teardown is never reported as a
     /// drop, even if the SDK attaches an error to it (Android parity, dce3074).
     private var userRequestedStop = false
@@ -667,9 +671,12 @@ final class AerioCastController: NSObject, ObservableObject {
         // would otherwise leave two remote covers live.
         if CompanionClient.shared.isControlling { CompanionClient.shared.disconnect() }
         let seed = Self.currentCastableItem()
-        pending = seed.flatMap { Self.castContent(for: $0) }
+        // A Change Cast Device handoff wins over nothing; a channel playing
+        // locally still wins over the handoff.
+        pending = seed.flatMap { Self.castContent(for: $0) } ?? handoffContent
         castingContent = pending
-        debugLog("[Cast] picker selected \(name) -> startSession seed=\(seed?.name ?? "none")")
+        debugLog("[Cast] picker selected \(name) -> startSession seed=\(seed?.name ?? handoffContent?.title ?? "none")")
+        handoffContent = nil
         let started = GCKCastContext.sharedInstance().sessionManager.startSession(with: device)
         if !started {
             pending = nil
@@ -2982,6 +2989,10 @@ struct RemoteSessionSheet: View {
                     .foregroundStyle(.white)
             } background: { Color.white.opacity(0.12) } action: {
                 debugLog("[Remote] Change \(transport == .cast ? "Cast" : "AirPlay") Device while playing: stopping, then opening the picker")
+                // The channel follows the user to the next receiver (Logan
+                // 2026-09-27: the switch to the Streamer connected and then
+                // sat idle "awaiting channel pick").
+                if transport == .cast { AerioCastController.shared.rememberHandoff() }
                 onStop()
                 onChangeDevice()
             }
