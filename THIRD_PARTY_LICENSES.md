@@ -52,6 +52,15 @@ live. Dolby, DTS and other codec and format names are trademarks of their
 respective owners; AerioTV is not affiliated with, endorsed by, or certified by
 any of them.
 
+AerioTV also encodes video on the device for casting, in H.264/AVC (High
+profile) and HEVC/H.265 (Main profile). This encoding, like hardware and
+platform decoding of these formats, uses only the codecs provided by the
+operating system: VideoToolbox on Apple devices and MediaCodec on Android
+devices. AerioTV does not bundle any third-party video encoder. These operating
+system codecs are licensed by Apple, and by Google or the device manufacturer, respectively for use on those
+devices; AerioTV grants no additional patent license for H.264/AVC or HEVC/H.265
+encoding or decoding.
+
 ### Relinking
 
 MPVKit is linked as a dynamic XCFramework, so it can be replaced with a modified
