@@ -55,11 +55,14 @@ private struct UniversalSplashView: View {
         }
         .opacity(opacity)
         .onAppear {
-            withAnimation(.easeIn(duration: 0.4)) { opacity = 1.0 }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.3) {
-                withAnimation(.easeOut(duration: 0.4)) { opacity = 0 }
+            // 1.2 s end to end (was 2.8 s). The splash sat in front of every
+            // launch, including warm ones whose channel list is restored from
+            // disk ~0.1 s in; the brand beat still reads at this length.
+            withAnimation(.easeIn(duration: 0.3)) { opacity = 1.0 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                withAnimation(.easeOut(duration: 0.25)) { opacity = 0 }
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                 isFinished = true
             }
         }

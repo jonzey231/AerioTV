@@ -3,16 +3,38 @@ import SwiftData
 
 // MARK: - Search Scope
 enum SearchScope: String, CaseIterable {
-    case all     = "All"
-    case movies  = "Movies"
-    case tv      = "TV Shows"
-    case epg     = "EPG"
+    case all      = "All"
+    case channels = "Channels"
+    case movies   = "Movies"
+    case tv       = "TV Shows"
+    case epg      = "EPG"
 }
 
 // MARK: - Search Result
+
+/// One guide programme hit: from Dispatcharr's server-side search (the whole
+/// guide, not just what this device has loaded) or from the on-device EPG
+/// cache for other sources. `channelID` is the guide's channel key
+/// (`ChannelDisplayItem.id`).
+struct ProgramSearchResult: Identifiable, Sendable {
+    let id: String
+    let channelID: String
+    let title: String
+    let description: String
+    let start: Date
+    let end: Date
+    let posterURL: String
+
+    var isLive: Bool {
+        let now = Date()
+        return now >= start && now <= end
+    }
+}
+
 enum SearchResult: Identifiable {
     case vod(VODDisplayItem)
-    case epg(EPGProgram)
+    case epg(ProgramSearchResult)
+    case channel(ChannelDisplayItem)
 
     private static var shortTimeFmt: DateFormatter { ClockFormat.short() }
 
@@ -20,6 +42,7 @@ enum SearchResult: Identifiable {
         switch self {
         case .vod(let item): return "vod-\(item.id)"
         case .epg(let prog): return "epg-\(prog.id)"
+        case .channel(let ch): return "ch-\(ch.id)"
         }
     }
 
@@ -27,6 +50,7 @@ enum SearchResult: Identifiable {
         switch self {
         case .vod(let item): return item.name
         case .epg(let prog): return prog.title
+        case .channel(let ch): return ch.name
         }
     }
 
@@ -39,8 +63,10 @@ enum SearchResult: Identifiable {
             case .episode: return "Episode"
             }
         case .epg(let prog):
-            let time = Self.shortTimeFmt.string(from: prog.startTime)
+            let time = Self.shortTimeFmt.string(from: prog.start)
             return prog.isLive ? "LIVE · \(time)" : time
+        case .channel(let ch):
+            return ch.number.isEmpty ? ch.group : "\(ch.number) · \(ch.group)"
         }
     }
 
@@ -53,6 +79,7 @@ enum SearchResult: Identifiable {
             case .episode: return "play.tv"
             }
         case .epg: return "calendar"
+        case .channel: return "antenna.radiowaves.left.and.right"
         }
     }
 
@@ -60,6 +87,7 @@ enum SearchResult: Identifiable {
         switch self {
         case .vod(let item): return item.posterURL
         case .epg(let prog): return URL(string: prog.posterURL)
+        case .channel(let ch): return ch.logoURL
         }
     }
 }
@@ -148,9 +176,9 @@ struct SearchView: View {
                 }
             }
             #if os(iOS)
-            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search movies, shows, programs...")
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search channels, programs, movies...")
             #else
-            .searchable(text: $query, prompt: "Search movies, shows, programs...")
+            .searchable(text: $query, prompt: "Search channels, programs, movies...")
             #endif
             .onDismissSearch {
                 if !query.isEmpty { query = "" }
@@ -182,7 +210,7 @@ struct SearchView: View {
                     Image(systemName: "magnifyingglass")
                         .scaledFont(.system(size: 26, weight: .medium))
                         .foregroundColor(theme.accent)
-                    TextField("Search movies, shows, programs…", text: $query)
+                    TextField("Search channels, programs, movies…", text: $query)
                         .textFieldStyle(.plain)
                         .scaledFont(.system(size: 28))
                         .foregroundColor(.textPrimary)
@@ -291,7 +319,7 @@ struct SearchView: View {
     /// SSRF targets via VODService.validateAbsoluteURL.
     private func validatedPosterURL(_ result: SearchResult) -> URL? {
         switch result {
-        case .vod:
+        case .vod, .channel:
             return result.posterURL
         case .epg(let prog):
             guard let url = URL(string: prog.posterURL),
@@ -315,11 +343,13 @@ struct SearchView: View {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return (result.subtitle, (detail?.isEmpty ?? true) ? nil : detail)
         case .epg(let prog):
-            let range = Self.rangeTimeFmt.string(from: prog.startTime)
-                + " \u{2013} " + Self.rangeTimeFmt.string(from: prog.endTime)
+            let range = Self.rangeTimeFmt.string(from: prog.start)
+                + " \u{2013} " + Self.rangeTimeFmt.string(from: prog.end)
             let parts = [channelsByID[prog.channelID]?.name, range].compactMap { $0 }
-            let detail = prog.programDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+            let detail = prog.description.trimmingCharacters(in: .whitespacesAndNewlines)
             return (parts.joined(separator: " \u{00B7} "), detail.isEmpty ? nil : detail)
+        case .channel(let ch):
+            return (result.subtitle, ch.currentProgram.flatMap { $0.isEmpty ? nil : "Now: \($0)" })
         }
     }
 
@@ -337,7 +367,8 @@ struct SearchView: View {
         Button {
             switch result {
             case .vod(let item): selectedVODItem = item
-            case .epg(let prog): jumpToGuide(prog)
+            case .epg(let prog): jumpToGuide(channelID: prog.channelID, start: prog.start)
+            case .channel(let ch): jumpToGuide(channelID: ch.id, start: Date())
             }
         } label: {
             HStack(spacing: 12) {
@@ -399,7 +430,7 @@ struct SearchView: View {
             Spacer()
             Image(systemName: "magnifyingglass")
                 .scaledFont(.system(size: 48)).foregroundColor(Color.contrastText(.textTertiary))
-            Text("Search for movies, shows,\nor EPG programs")
+            Text("Search for channels, programs,\nmovies or shows")
                 .scaledFont(.bodyMedium.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                 .multilineTextAlignment(.center)
             Spacer()
@@ -445,36 +476,37 @@ struct SearchView: View {
         let activeServerID = (servers.first(where: { $0.isActive }) ?? servers.first)?.id.uuidString
         var found: [SearchResult] = []
 
-        // EPG search. This used to be an in-memory filter over a @Query of
-        // the ENTIRE EPG cache -- materializing ~258k SwiftData models and
-        // string-scanning them on the MainActor, which froze the app on the
-        // first keystroke of any large playlist (ATV repro 2026-08-12). The
-        // predicate + fetchLimit push the match into SQLite: only the
-        // handful of hits ever become model objects.
+        // Channels by name or number, from the loaded list (the Apple TV had
+        // no channel search at all; iOS only filters inside the Live TV tab).
+        let playlistChannels = ChannelStore.shared.channels
+        channelsByID = Dictionary(playlistChannels.map { ($0.id, $0) },
+                                  uniquingKeysWith: { a, _ in a })
+        if scope == .all || scope == .channels {
+            let limit = scope == .channels ? 60 : 12
+            let matches = await Task.detached(priority: .userInitiated) {
+                Self.matchChannels(playlistChannels, query: q, limit: limit)
+            }.value
+            guard !Task.isCancelled else { return }
+            found += matches.map { .channel($0) }
+        }
+
+        // EPG search: programmes still airing or upcoming, soonest first.
+        // Dispatcharr answers from its own database, so the whole guide is
+        // searched, not only the hours and days this device has loaded (the
+        // guide now loads further days on browse). Other sources, and
+        // servers without the search action, use the on-device cache.
         if scope == .all || scope == .epg {
-            channelsByID = Dictionary(
-                ChannelStore.shared.channels.map { ($0.id, $0) },
-                uniquingKeysWith: { a, _ in a }
-            )
-            let sid = activeServerID ?? ""
-            var descriptor = FetchDescriptor<EPGProgram>(
-                predicate: #Predicate<EPGProgram> { p in
-                    p.serverID == sid
-                    && (p.title.localizedStandardContains(lowered)
-                        || p.programDescription.localizedStandardContains(lowered))
-                },
-                sortBy: [SortDescriptor(\.startTime)]
-            )
-            descriptor.fetchLimit = 60
-            let epgMatches = (try? modelContext.fetch(descriptor)) ?? []
-            let epgResults = epgMatches
-                .sorted { a, b in
-                    // Live programs first, then upcoming, then past
-                    if a.isLive != b.isLive { return a.isLive }
-                    return a.startTime < b.startTime
-                }
-                .prefix(30)
-            found += epgResults.map { .epg($0) }
+            var epgResults: [ProgramSearchResult]? = nil
+            if let server = searchActiveServer, server.type == .dispatcharrAPI {
+                epgResults = await Self.serverProgramSearch(q, server: server, channelsByID: channelsByID)
+                guard !Task.isCancelled else { return }
+            }
+            if epgResults == nil {
+                epgResults = await Self.localProgramSearch(lowered, serverID: activeServerID ?? "",
+                                                           container: modelContext.container)
+                guard !Task.isCancelled else { return }
+            }
+            found += (epgResults ?? []).map { .epg($0) }
         }
 
         // VOD search. The old path re-downloaded the complete movie+series
@@ -482,7 +514,7 @@ struct SearchView: View {
         // servers here; the log showed the whole fan-out being cancelled and
         // re-fired per keypress). The active playlist's library is already
         // resident in VODStore -- filter that, off the MainActor.
-        if scope != .epg {
+        if scope == .all || scope == .movies || scope == .tv {
             // Dispatcharr 0.30 per-user permissions: a denied half never
             // contributes results, including under the "All" scope. The
             // store is normally already empty for a denied account (the
@@ -508,21 +540,119 @@ struct SearchView: View {
             found += vodResults.prefix(50).map { .vod($0) }
         }
 
+        guard !Task.isCancelled else { return }
         results = found
         isSearching = false
     }
 
-    /// Tapping an EPG search result jumps to that program in the Live
-    /// TV guide. We stash the target (channel id + start time) in
-    /// UserDefaults so the guide can consume it even if it isn't
-    /// mounted yet (cold path), dismiss this sheet, then post the
-    /// warm-path trigger that switches to the Live TV tab + guide mode.
-    /// `prog.channelID` already equals the guide's channel key
-    /// (ChannelDisplayItem.id), so no tvg-id/name matching is needed.
-    private func jumpToGuide(_ prog: EPGProgram) {
+    /// Name contains the query (diacritic and case insensitive), or the
+    /// channel number starts with it. Exact-number and name-prefix hits first.
+    nonisolated private static func matchChannels(_ channels: [ChannelDisplayItem],
+                                                  query: String, limit: Int) -> [ChannelDisplayItem] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return [] }
+        var ranked: [(rank: Int, item: ChannelDisplayItem)] = []
+        for ch in channels {
+            if ch.number == q {
+                ranked.append((0, ch))
+            } else if ch.name.range(of: q, options: [.caseInsensitive, .diacriticInsensitive, .anchored]) != nil {
+                ranked.append((1, ch))
+            } else if ch.name.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil {
+                ranked.append((2, ch))
+            } else if ch.number.hasPrefix(q) {
+                ranked.append((3, ch))
+            }
+        }
+        // Stable within a rank: the list is already in channel-number order.
+        return ranked.enumerated()
+            .sorted { $0.element.rank != $1.element.rank ? $0.element.rank < $1.element.rank : $0.offset < $1.offset }
+            .prefix(limit)
+            .map(\.element.item)
+    }
+
+    /// Dispatcharr's `/api/epg/programs/search/`, mapped onto the channels in
+    /// this playlist (a programme on several channels yields one row per
+    /// channel the user has). nil when the server has no search action or
+    /// the request failed, so the caller falls back to the local cache.
+    private static func serverProgramSearch(_ query: String, server: ServerConnection,
+                                            channelsByID: [String: ChannelDisplayItem]) async -> [ProgramSearchResult]? {
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode,
+                                 serverID: server.id,
+                                 savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                                     ? server.username : nil)
+        let hits: [DispatcharrAPI.ProgramSearchHit]
+        do {
+            guard let found = try await api.searchPrograms(title: query, limit: 60) else { return nil }
+            hits = found
+        } catch {
+            debugLog("🔎 EPG search: server search failed (\(error.localizedDescription)); using the local guide cache")
+            return nil
+        }
+        var out: [ProgramSearchResult] = []
+        for hit in hits {
+            for chInt in hit.channelIDs {
+                let cid = String(chInt)
+                guard channelsByID[cid] != nil else { continue }
+                out.append(ProgramSearchResult(
+                    id: "\(hit.programID.map(String.init) ?? hit.title)-\(cid)-\(Int(hit.start.timeIntervalSince1970))",
+                    channelID: cid, title: hit.title,
+                    description: hit.description.isEmpty ? hit.subTitle : hit.description,
+                    start: hit.start, end: hit.end, posterURL: ""))
+            }
+        }
+        return Array(sortedForDisplay(out).prefix(40))
+    }
+
+    /// On-device fallback over the persisted guide (`EPGProgram`), in a
+    /// background context so a large cache never blocks the main actor, and
+    /// limited to programmes that have not ended: the old oldest-first fetch
+    /// filled its 60-row limit with already-aired programmes.
+    private static func localProgramSearch(_ lowered: String, serverID: String,
+                                           container: ModelContainer) async -> [ProgramSearchResult] {
+        await Task.detached(priority: .userInitiated) {
+            let now = Date()
+            var descriptor = FetchDescriptor<EPGProgram>(
+                predicate: #Predicate<EPGProgram> { p in
+                    p.serverID == serverID && p.endTime > now
+                    && (p.title.localizedStandardContains(lowered)
+                        || p.programDescription.localizedStandardContains(lowered))
+                },
+                sortBy: [SortDescriptor(\.startTime)]
+            )
+            descriptor.fetchLimit = 60
+            let ctx = ModelContext(container)
+            let rows = (try? ctx.fetch(descriptor)) ?? []
+            let mapped = rows.map {
+                ProgramSearchResult(id: $0.id.uuidString, channelID: $0.channelID, title: $0.title,
+                                    description: $0.programDescription, start: $0.startTime,
+                                    end: $0.endTime, posterURL: $0.posterURL)
+            }
+            return Array(sortedForDisplay(mapped).prefix(30))
+        }.value
+    }
+
+    /// Airing now first, then by start time.
+    nonisolated private static func sortedForDisplay(_ list: [ProgramSearchResult]) -> [ProgramSearchResult] {
+        list.sorted { a, b in
+            if a.isLive != b.isLive { return a.isLive }
+            return a.start < b.start
+        }
+    }
+
+    /// Tapping an EPG or channel search result jumps to that programme (or
+    /// to now on that channel) in the Live TV guide. We stash the target
+    /// (channel id + start time) in UserDefaults so the guide can consume it
+    /// even if it isn't mounted yet (cold path), dismiss this sheet, then
+    /// post the warm-path trigger that switches to the Live TV tab + guide
+    /// mode. `channelID` is the guide's channel key (ChannelDisplayItem.id),
+    /// so no tvg-id/name matching is needed.
+    private func jumpToGuide(channelID: String, start: Date) {
         let defaults = UserDefaults.standard
-        defaults.set(prog.channelID, forKey: "guideJumpChannelID")
-        defaults.set(prog.startTime.timeIntervalSince1970, forKey: "guideJumpStart")
+        defaults.set(channelID, forKey: "guideJumpChannelID")
+        defaults.set(start.timeIntervalSince1970, forKey: "guideJumpStart")
         if let onClose { onClose() } else { dismiss() }
         NotificationCenter.default.post(name: .aerioJumpToGuideProgram, object: nil)
     }

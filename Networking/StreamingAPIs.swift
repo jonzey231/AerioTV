@@ -2794,6 +2794,18 @@ struct DispatcharrAPI {
         let tvgID = tvgIDs?.first ?? ""
         let channelID = channelIDs?.first
 
+        // The plain `/api/epg/programs/` list honours neither `tvg_id`,
+        // `channel` nor `page_size`: it answers with EVERY programme on the
+        // server (64 MB on a 12k-channel install, measured 2026-09-26), and
+        // the channel-id filter below then keeps all of them because list
+        // rows carry no `channel`. The search action does filter, server
+        // side, and pages. Only a server without it (404) falls back.
+        if !DispatcharrProgramSearchSupport.isUnsupported(baseURL) {
+            if let found = try await searchUpcomingPrograms(tvgID: tvgID, channelID: channelID, limit: limit) {
+                return found
+            }
+        }
+
         let queryPath: String
         if !tvgID.isEmpty {
             let encoded = tvgID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? tvgID
@@ -2860,6 +2872,107 @@ struct DispatcharrAPI {
             return end > now
         }
         return limit == .max ? upcoming : Array(upcoming.prefix(limit))
+    }
+
+    /// `/api/epg/programs/search/` for one channel: programmes still airing or
+    /// upcoming, oldest first, one page. Prefers `channel_id` (the channel's
+    /// own EPG link, so a channel whose tvg_id differs from its guide row
+    /// still matches) over `tvg_id`. Returns nil when the server has no
+    /// search action (404), which is remembered per base URL.
+    private func searchUpcomingPrograms(tvgID: String, channelID: Int?,
+                                        limit: Int) async throws -> [DispatcharrCurrentProgram]? {
+        var items = ["end_after=\(Self.encodeQueryValue(Self.isoNow()))",
+                     "page_size=\(min(max(limit == .max ? 20 : limit, 1), 100))",
+                     "fields=id,title,sub_title,description,start_time,end_time,tvg_id"]
+        if let channelID {
+            items.append("channel_id=\(channelID)")
+        } else if !tvgID.isEmpty {
+            items.append("tvg_id=\(Self.encodeQueryValue(tvgID))")
+        } else {
+            return []
+        }
+        let url = try buildURL(path: "/api/epg/programs/search/?" + items.joined(separator: "&"))
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        // dataWithJWTRetry: a session-login server refreshes its token on 401.
+        let (data, response) = try await dataWithJWTRetry(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 404 || status == 405 {
+            DispatcharrProgramSearchSupport.markUnsupported(baseURL)
+            return nil
+        }
+        guard (200..<300).contains(status) else { return [] }
+        let page = try decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: data)
+        return limit == .max ? page.results : Array(page.results.prefix(limit))
+    }
+
+    /// Current time as the ISO 8601 string Dispatcharr's search filters parse.
+    private static func isoNow() -> String {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f.string(from: Date())
+    }
+
+    // MARK: - EPG programme search (Dispatcharr 0.2x+ `/api/epg/programs/search/`)
+
+    /// One programme hit from the server-side EPG search, with the channels
+    /// that carry it. `channels` holds Dispatcharr channel ids, which are the
+    /// `ChannelDisplayItem.id` values on this server type.
+    struct ProgramSearchHit: Sendable {
+        let programID: Int?
+        let title: String
+        let subTitle: String
+        let description: String
+        let start: Date
+        let end: Date
+        let channelIDs: [Int]
+    }
+
+    /// Title search across the server's whole guide (not just what the app
+    /// has loaded), programmes still airing or upcoming, soonest first.
+    /// Returns nil when the server has no search action.
+    func searchPrograms(title: String, limit: Int = 50) async throws -> [ProgramSearchHit]? {
+        guard !DispatcharrProgramSearchSupport.isUnsupported(baseURL) else { return nil }
+        struct Hit: Decodable {
+            struct Chan: Decodable { let id: Int }
+            let id: Int?
+            let title: String?
+            let subTitle: String?
+            let description: String?
+            let startTime: DispatcharrDateValue?
+            let endTime: DispatcharrDateValue?
+            let channels: [Chan]?
+            enum CodingKeys: String, CodingKey {
+                case id, title, description, channels
+                case subTitle = "sub_title"
+                case startTime = "start_time"
+                case endTime = "end_time"
+            }
+        }
+        let items = ["title=\(Self.encodeQueryValue(title))",
+                     "end_after=\(Self.encodeQueryValue(Self.isoNow()))",
+                     "page_size=\(min(max(limit, 1), 100))",
+                     "fields=id,title,sub_title,description,start_time,end_time,channels"]
+        let url = try buildURL(path: "/api/epg/programs/search/?" + items.joined(separator: "&"))
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        // Not through `loggedData`: its two-slot gate is shared with the
+        // background VOD pass, and a keystroke must not queue behind it.
+        let (data, response) = try await dataWithJWTRetry(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 404 || status == 405 {
+            DispatcharrProgramSearchSupport.markUnsupported(baseURL)
+            return nil
+        }
+        guard (200..<300).contains(status) else { throw APIError.serverError(status) }
+        let page = try decode(DispatcharrResultsWrapper<Hit>.self, from: data)
+        return page.results.compactMap { hit in
+            guard let start = hit.startTime?.toDate(), let end = hit.endTime?.toDate() else { return nil }
+            return ProgramSearchHit(programID: hit.id, title: hit.title ?? "",
+                                    subTitle: hit.subTitle ?? "", description: hit.description ?? "",
+                                    start: start, end: end,
+                                    channelIDs: (hit.channels ?? []).map(\.id))
+        }
     }
 
     // MARK: - Bulk upcoming programs (all channels at once)
@@ -3184,8 +3297,7 @@ struct DispatcharrAPI {
         // can exist for both a movie and a series category, unique only
         // on name+type), so pin the movie type. The `|`
         // percent-encodes to %7C inside the query value.
-        let typed = category.contains("|") ? category : "\(category)|movie"
-        let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
+        let encoded = Self.categoryQueryValue(category, type: "movie")
         return "/api/vod/movies/?page_size=100&category=\(encoded)"
     }
 
@@ -3194,9 +3306,22 @@ struct DispatcharrAPI {
             return "/api/vod/series/?page_size=100"
         }
         // Same name|type filter as movies; pin the series type.
-        let typed = category.contains("|") ? category : "\(category)|series"
-        let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
+        let encoded = Self.categoryQueryValue(category, type: "series")
         return "/api/vod/series/?page_size=100&category=\(encoded)"
+    }
+
+    /// The `category` filter value: `name|type`, percent-encoded as a query
+    /// value. The type is appended unless the value already ends in one, so a
+    /// category whose NAME contains a pipe ("|EN| COMEDY") is still pinned to
+    /// its type (Dispatcharr splits on the last pipe). `.urlQueryAllowed`
+    /// leaves "+" and "&" bare, which truncated names like "APPLE+ KIDS" or
+    /// "|EN| ACTORS & DIRECTORS" server-side: those categories came back
+    /// empty and their titles never reached the library (1,303 movies and
+    /// 492 series on the 2026-09-26 test server).
+    static func categoryQueryValue(_ category: String, type: String) -> String {
+        let typed = category.hasSuffix("|movie") || category.hasSuffix("|series")
+            ? category : "\(category)|\(type)"
+        return encodeQueryValue(typed)
     }
 
     /// Query-VALUE-safe percent encoding. `.urlQueryAllowed` describes the
@@ -4645,6 +4770,53 @@ struct DispatcharrServerInfo: Decodable {
     }
 }
 
+/// Servers that answered `/api/epg/programs/search/` with 404, so older
+/// Dispatcharr builds are asked once per process, not on every call.
+enum DispatcharrProgramSearchSupport {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var unsupported = Set<String>()
+
+    static func isUnsupported(_ baseURL: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return unsupported.contains(baseURL)
+    }
+
+    static func markUnsupported(_ baseURL: String) {
+        lock.lock(); unsupported.insert(baseURL); lock.unlock()
+        debugLog("📺 EPG search: /api/epg/programs/search/ not available on this server; using the legacy per-channel path")
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// The object, or the same object serialized into a JSON string: the
+    /// raw-SQL `/api/vod/all/` listing returns some `custom_properties` that
+    /// way (192 of 1,000 movie rows and every sampled series row on the
+    /// 2026-09-27 test server), which a plain `decode` dropped as nil.
+    func decodeObjectOrJSONString<T: Decodable>(_ type: T.Type, forKey key: Key) -> T? {
+        if let value = try? decode(T.self, forKey: key) { return value }
+        guard let text = try? decode(String.self, forKey: key),
+              let data = text.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+}
+
+/// Servers without the `/api/vod/all/` listing, so the catalog sweep asks
+/// once per launch and then uses the typed listings directly.
+enum DispatcharrBulkCatalogSupport {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var unsupported = Set<String>()
+
+    static func isUnsupported(_ baseURL: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return unsupported.contains(baseURL)
+    }
+
+    static func markUnsupported(_ baseURL: String) {
+        lock.lock(); unsupported.insert(baseURL); lock.unlock()
+        debugLog("🎬 [VOD-CAT] /api/vod/all/ not available on this server; sweeping the typed listings")
+    }
+}
+
 // Generic DRF wrapper
 struct DispatcharrResultsWrapper<T: Decodable>: Decodable {
     let results: [T]
@@ -4727,6 +4899,14 @@ struct DispatcharrCurrentProgram: Decodable, Identifiable {
     let isPremiere: Bool
     let isFinale: Bool
     let isRepeat: Bool
+    /// Dispatcharr's generic stand-in for a channel with no guide data
+    /// (`dummy-standard-<channel>-<start>`: the channel name in 4 h blocks).
+    /// The guide draws the same label itself for an empty row, so these are
+    /// dropped instead of stored: on a large playlist they are most of the
+    /// grid (8,234 of 11,625 channels on the 2026-09-26 test server). Custom
+    /// dummy sources (`dummy-custom-...`, titles parsed from the stream
+    /// name) carry real information and are kept.
+    let isStandardDummy: Bool
 
     enum CodingKeys: String, CodingKey {
         case programID = "id"
@@ -4754,6 +4934,8 @@ struct DispatcharrCurrentProgram: Decodable, Identifiable {
         // nil for non-numeric ids (the detail endpoint won't accept
         // them anyway, so we just skip enrichment for those).
         programID = try? c.decode(Int.self, forKey: .programID)
+        isStandardDummy = programID == nil
+            && ((try? c.decode(String.self, forKey: .programID))?.hasPrefix("dummy-standard") ?? false)
         tvgID = try? c.decode(String.self, forKey: .tvgID)
         channel = try? c.decode(Int.self, forKey: .channel)
         channelName = try? c.decode(String.self, forKey: .channelName)
@@ -5692,7 +5874,14 @@ struct DispatcharrVODMovie: Decodable, Identifiable {
         let p3 = try? c.decode(String.self, forKey: .description)
         plot   = p1 ?? p2 ?? p3
         genre  = try? c.decode(String.self, forKey: .genre)
-        rating = try? c.decode(String.self, forKey: .rating)
+        // String on the typed listings, a number on /api/vod/all/.
+        if let r = try? c.decode(String.self, forKey: .rating) {
+            rating = r
+        } else if let d = try? c.decode(Double.self, forKey: .rating), d > 0 {
+            rating = String(format: "%.1f", d)
+        } else {
+            rating = nil
+        }
         streams = try? c.decode([DispatcharrVODStreamOption].self, forKey: .streams)
 
         // v1.6.12 additions — defensive decode so a stale Dispatcharr
@@ -5701,8 +5890,8 @@ struct DispatcharrVODMovie: Decodable, Identifiable {
         durationSecs     = try? c.decode(Int.self, forKey: .durationSecs)
         tmdbID           = try? c.decode(String.self, forKey: .tmdbID)
         imdbID           = try? c.decode(String.self, forKey: .imdbID)
-        customProperties = try? c.decode(DispatcharrVODCustomProperties.self,
-                                         forKey: .customProperties)
+        customProperties = c.decodeObjectOrJSONString(DispatcharrVODCustomProperties.self,
+                                                               forKey: .customProperties)
     }
 }
 
@@ -5757,13 +5946,20 @@ struct DispatcharrVODSeries: Decodable, Identifiable {
         let p3 = try? c.decode(String.self, forKey: .description)
         plot   = p1 ?? p2 ?? p3
         genre  = try? c.decode(String.self, forKey: .genre)
-        rating = try? c.decode(String.self, forKey: .rating)
+        // String on the typed listings, a number on /api/vod/all/.
+        if let r = try? c.decode(String.self, forKey: .rating) {
+            rating = r
+        } else if let d = try? c.decode(Double.self, forKey: .rating), d > 0 {
+            rating = String(format: "%.1f", d)
+        } else {
+            rating = nil
+        }
 
         year             = try? c.decode(Int.self, forKey: .year)
         tmdbID           = try? c.decode(String.self, forKey: .tmdbID)
         imdbID           = try? c.decode(String.self, forKey: .imdbID)
-        customProperties = try? c.decode(DispatcharrVODCustomProperties.self,
-                                         forKey: .customProperties)
+        customProperties = c.decodeObjectOrJSONString(DispatcharrVODCustomProperties.self,
+                                                               forKey: .customProperties)
         createdAt = try? c.decode(String.self, forKey: .createdAt)
     }
 }
@@ -5885,6 +6081,14 @@ struct DispatcharrVODSeriesProviderInfo: Decodable {
     let imdbID: String?
     let cover: DispatcharrVODLogo?
     let customProperties: DispatcharrVODCustomProperties?
+    /// Every episode this provider carries, flattened from the response's
+    /// `{"<season>": [...]}` map in season/episode order. Dispatcharr includes
+    /// it by default (`include_episodes`), so opening a series needs no
+    /// `/api/vod/episodes/` paging: that listing nests the full series object
+    /// in every row and cost the server ~0.5 s per 100 episodes (802 queries),
+    /// 25 sequential pages for a long-running series. nil when absent
+    /// (older servers), so the caller falls back to paging.
+    let episodes: [DispatcharrVODEpisode]?
 
     enum CodingKeys: String, CodingKey {
         case name, description, year, genre, cover
@@ -5892,6 +6096,7 @@ struct DispatcharrVODSeriesProviderInfo: Decodable {
         case tmdbID = "tmdb_id"
         case imdbID = "imdb_id"
         case customProperties = "custom_properties"
+        case episodes
     }
 
     init(from decoder: Decoder) throws {
@@ -5911,8 +6116,15 @@ struct DispatcharrVODSeriesProviderInfo: Decodable {
         tmdbID           = try? c.decode(String.self, forKey: .tmdbID)
         imdbID           = try? c.decode(String.self, forKey: .imdbID)
         cover            = try? c.decode(DispatcharrVODLogo.self, forKey: .cover)
-        customProperties = try? c.decode(DispatcharrVODCustomProperties.self,
-                                         forKey: .customProperties)
+        customProperties = c.decodeObjectOrJSONString(DispatcharrVODCustomProperties.self,
+                                                               forKey: .customProperties)
+        if let bySeason = try? c.decode([String: [DispatcharrVODEpisode]].self, forKey: .episodes) {
+            episodes = bySeason.values.flatMap { $0 }.sorted {
+                ($0.seasonNumber ?? 0, $0.episodeNumber ?? 0) < ($1.seasonNumber ?? 0, $1.episodeNumber ?? 0)
+            }
+        } else {
+            episodes = nil
+        }
     }
 }
 
@@ -5937,12 +6149,16 @@ struct DispatcharrVODEpisode: Decodable, Identifiable {
     let tmdbID: String?
     let imdbID: String?
     let customProperties: DispatcharrVODCustomProperties?
+    /// Episode still as provider-info sends it (top level, already a proxied
+    /// URL); the episodes listing carries it in `custom_properties` instead.
+    let movieImage: String?
 
     enum CodingKeys: String, CodingKey {
         case id
         case uuid
         case title
         case name
+        case movieImage = "movie_image"
         case seasonNumber = "season_number"
         case episodeNumber = "episode_number"
         case plot
@@ -6001,8 +6217,9 @@ struct DispatcharrVODEpisode: Decodable, Identifiable {
         durationSecs     = try? c.decode(Int.self, forKey: .durationSecs)
         tmdbID           = try? c.decode(String.self, forKey: .tmdbID)
         imdbID           = try? c.decode(String.self, forKey: .imdbID)
-        customProperties = try? c.decode(DispatcharrVODCustomProperties.self,
-                                         forKey: .customProperties)
+        customProperties = c.decodeObjectOrJSONString(DispatcharrVODCustomProperties.self,
+                                                               forKey: .customProperties)
+        movieImage       = try? c.decode(String.self, forKey: .movieImage)
     }
 }
 
@@ -6651,14 +6868,63 @@ extension DispatcharrAPI {
                                background: background)
     }
 
+    /// Rows per bulk catalog request. `/api/vod/all/` is a raw-SQL listing:
+    /// no per-row serializer queries and no page cap, so 1,000 rows of one
+    /// category cost 0.06-0.45 s on a 57k-title server. The typed listings
+    /// (`/api/vod/movies/`, `/api/vod/series/`) cap pages at 100 rows and
+    /// spend 0.3-1.2 s per page in N+1 serializer queries (logo counts,
+    /// episode counts), which stretched a full sweep past 15 minutes.
+    static let bulkCatalogPageSize = 1000
+    /// Rows per page of the typed listings (`page_size=100` in their paths).
+    static let typedCatalogPageSize = 100
+
+    /// One page of one category from `/api/vod/all/`, filtered to `type`
+    /// (`movie` / `series`). nil when the server has no such listing (older
+    /// Dispatcharr), so the caller falls back to the typed endpoints. Not
+    /// through `loggedData`: the sweep bounds its own concurrency, and the
+    /// shared two-slot gate would halve it.
+    func fetchVODBulkPage<T: Decodable & Sendable>(type: String, category: String, page: Int,
+                                                   background: Bool) async throws -> VODPageResult<T>? {
+        guard !DispatcharrBulkCatalogSupport.isUnsupported(baseURL) else { return nil }
+        let path = "/api/vod/all/?page_size=\(Self.bulkCatalogPageSize)&page=\(max(1, page))&category="
+            + Self.categoryQueryValue(category, type: type)
+        var request = URLRequest(url: try buildURL(path: path), timeoutInterval: 60)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        // Only while something plays: the class lowers the priority of
+        // every packet, which is right beside a stream and slow otherwise.
+        if background { request.networkServiceType = .background }
+        let urlString = request.url?.absoluteString ?? path
+        let start = Date()
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await dataWithJWTRetry(for: request)
+        } catch {
+            DebugLogger.shared.logNetwork(method: "GET", url: urlString,
+                                          duration: Date().timeIntervalSince(start), error: error)
+            throw error
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        DebugLogger.shared.logNetwork(method: "GET", url: urlString, statusCode: status,
+                                      duration: Date().timeIntervalSince(start), bytesReceived: data.count)
+        if status == 404 || status == 405 {
+            DispatcharrBulkCatalogSupport.markUnsupported(baseURL)
+            return nil
+        }
+        try validate(response: response, data: data)
+        let wrapped = try Self.jsonDecoder.decode(DispatcharrResultsWrapper<T>.self, from: data)
+        return VODPageResult(items: wrapped.results,
+                             serverCount: wrapped.count,
+                             hasMore: wrapped.next != nil && !wrapped.results.isEmpty)
+    }
+
     /// Same `name|type` category filter the stream paths use, plus DRF's
     /// explicit `page` so a saved position can be resumed directly.
     private static func pagedVODPath(collection: String, type: String,
                                      category: String?, page: Int) -> String {
         var path = "/api/vod/\(collection)/?page_size=100&page=\(max(1, page))"
         if let category, !category.isEmpty {
-            let typed = category.contains("|") ? category : "\(category)|\(type)"
-            let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
+            let encoded = Self.categoryQueryValue(category, type: type)
             path += "&category=\(encoded)"
         }
         return path
@@ -6685,15 +6951,13 @@ extension DispatcharrAPI {
     /// Dispatcharr's MovieFilter matches on.
     private static func backgroundMoviesPath(category: String?) -> String {
         guard let category, !category.isEmpty else { return "/api/vod/movies/?page_size=100" }
-        let typed = category.contains("|") ? category : "\(category)|movie"
-        let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
+        let encoded = Self.categoryQueryValue(category, type: "movie")
         return "/api/vod/movies/?page_size=100&category=\(encoded)"
     }
 
     private static func backgroundSeriesPath(category: String?) -> String {
         guard let category, !category.isEmpty else { return "/api/vod/series/?page_size=100" }
-        let typed = category.contains("|") ? category : "\(category)|series"
-        let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
+        let encoded = Self.categoryQueryValue(category, type: "series")
         return "/api/vod/series/?page_size=100&category=\(encoded)"
     }
 
