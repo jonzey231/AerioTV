@@ -437,6 +437,9 @@ final class AerioCastController: NSObject, ObservableObject {
         guard let channel = controlChannel,
               let data = try? JSONSerialization.data(withJSONObject: dict),
               let text = String(data: data, encoding: .utf8) else { return }
+        // Logged so a Speed / Video Scale / Audio Only change can be matched
+        // against the receiver's next state reply when verifying on device.
+        debugLog("[Cast] control -> \(text)")
         channel.sendTextMessage(text, error: nil)
     }
 
@@ -1731,6 +1734,9 @@ extension AerioCastController: GCKGenericChannelDelegate {
         if kind == "caps" { noteReceiverCaps(json); return }
         if kind == "state" {
             let decoded = CompanionClient.decodeState(json)
+            // One line per reply: without it there was no way to confirm the
+            // receiver applied an aspect / speed / audio-only command.
+            debugLog("[Cast] state <- aspect=\(decoded.aspect) speed=\(decoded.speed) audioOnly=\(decoded.audioOnly) audio=\(decoded.audio.count) tracks text=\(decoded.text.count) tracks textOff=\(decoded.textOff)")
             if decoded != remoteState { remoteState = decoded }
             return
         }
@@ -2965,6 +2971,20 @@ struct RemoteSessionSheet: View {
             }
             .disabled(!enabled)
             .opacity(enabled ? 1 : 0.4)
+            // Outside the disabled group on purpose: a session stuck connecting
+            // is exactly when the user wants a different device. Ends the current
+            // session first (the same path as Stop) so the new device never
+            // races a still-live one, then opens the same picker as the idle sheet.
+            wideButton {
+                Label(transport == .cast ? "Change Cast Device" : "Change AirPlay Device",
+                      systemImage: transport == .cast ? RemoteSessionCard.Transport.cast.glyph
+                                                      : RemoteSessionCard.Transport.airPlay.glyph)
+                    .foregroundStyle(.white)
+            } background: { Color.white.opacity(0.12) } action: {
+                debugLog("[Remote] Change \(transport == .cast ? "Cast" : "AirPlay") Device while playing: stopping, then opening the picker")
+                onStop()
+                onChangeDevice()
+            }
             wideButton {
                 Label(transport == .cast ? "Stop Casting" : "Stop AirPlay",
                       systemImage: "stop.fill")

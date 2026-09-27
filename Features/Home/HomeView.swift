@@ -6260,7 +6260,15 @@ struct MainTabView: View {
                 },
                 onChangeDevice: {
                     debugLog("[Remote] Change AirPlay Device: presenting the route picker")
-                    AirPlayMenuTrigger.present()
+                    // From the playing sheet, onStop has just dismissed the sheet;
+                    // presenting mid-dismiss can be dropped, so wait for it to finish.
+                    if showRemoteControls {
+                        AirPlayMenuTrigger.present()
+                    } else {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            AirPlayMenuTrigger.present()
+                        }
+                    }
                 }
             )
         case nil:
