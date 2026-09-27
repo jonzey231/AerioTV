@@ -324,7 +324,13 @@ final class AerioCastController: NSObject, ObservableObject {
     /// phone-local HLS proxy and a directly playable contentURL.
     enum ReceiverTarget { case unknown, androidTVApp, webReceiver }
 
-    private(set) var receiverTarget: ReceiverTarget = .unknown
+    /// Published so the Options sheet can grey out the receiver-control rows
+    /// the web receiver page does not implement.
+    @Published private(set) var receiverTarget: ReceiverTarget = .unknown
+    /// The Android TV receiver's option snapshot (tracks, speed, scale, audio
+    /// only), the same CMD_STATE frame the Android sender and the companion
+    /// remote decode, so all three pickers read one wire shape.
+    @Published private(set) var remoteState = CompanionClient.RemoteState()
     private var controlChannel: GCKGenericChannel?
     private var targetProbeTask: Task<Void, Never>?
     /// A live load held until the receiver type is known. Guessing is not an
@@ -414,6 +420,17 @@ final class AerioCastController: NSObject, ObservableObject {
             }
         }
     }
+
+    // Receiver controls, same frames as the Android sender's setRemote* calls
+    // (CastControl.kt): only the AerioTV Android TV receiver acts on them;
+    // the web receiver page drops any cmd it does not know.
+    func requestRemoteState() { sendControl(["cmd": "getState"]) }
+    func setRemoteAudioTrack(_ id: String) { sendControl(["cmd": "setAudio", "id": id]) }
+    /// nil selects Off; the receiver reads an empty id as "no subtitles".
+    func setRemoteTextTrack(_ id: String?) { sendControl(["cmd": "setText", "id": id ?? ""]) }
+    func setRemoteSpeed(_ speed: Double) { sendControl(["cmd": "setSpeed", "speed": speed]) }
+    func setRemoteAspect(_ key: String) { sendControl(["cmd": "setAspect", "aspect": key]) }
+    func setRemoteAudioOnly(_ on: Bool) { sendControl(["cmd": "setAudioOnly", "audioOnly": on]) }
 
     /// Fire-and-forget JSON on the control namespace. No-op with no channel.
     private func sendControl(_ dict: [String: Any]) {
@@ -1552,6 +1569,7 @@ extension AerioCastController: GCKSessionManagerListener {
         targetProbeTask?.cancel()
         targetProbeTask = nil
         receiverTarget = .unknown
+        remoteState = CompanionClient.RemoteState()
         deferredLoad = nil
         receiverCaps = nil
         loggedCaps = nil
@@ -1696,9 +1714,10 @@ extension AerioCastController: GCKGenericChannelDelegate {
         }
     }
 
-    /// Receiver -> sender on the control namespace. Only the handshake answer is
-    /// read here: transport and now-playing ride the Cast media status, and the
-    /// receiver's own track/speed pickers are the Android remote's surface.
+    /// Receiver -> sender on the control namespace: the handshake answer and
+    /// the Android TV receiver's option snapshot (the Options sheet's track,
+    /// speed, scale and audio-only rows). Transport and now-playing ride the
+    /// Cast media status.
     private func handleControlMessage(_ message: String) {
         guard let data = message.data(using: .utf8),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
@@ -1710,6 +1729,11 @@ extension AerioCastController: GCKGenericChannelDelegate {
         // The receiver answers an explicit caps request on whichever namespace
         // it was asked on, so the control channel can carry one too.
         if kind == "caps" { noteReceiverCaps(json); return }
+        if kind == "state" {
+            let decoded = CompanionClient.decodeState(json)
+            if decoded != remoteState { remoteState = decoded }
+            return
+        }
         guard kind == "receiverInfo" else { return }
         noteReceiverInfo(json)
     }
@@ -2275,7 +2299,7 @@ final class CompanionClient: NSObject, ObservableObject {
         }
     }
 
-    private static func decodeState(_ json: [String: Any]) -> RemoteState {
+    static func decodeState(_ json: [String: Any]) -> RemoteState {
         func tracks(_ key: String) -> [Track] {
             (json[key] as? [[String: Any]] ?? []).map {
                 Track(id: $0["id"] as? String ?? "",
@@ -3108,11 +3132,6 @@ struct RemoteOptionsSheet: View {
     @State private var showSwitchStream = false
     @State private var showRecord = false
 
-    private let speeds: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
-    private let aspects: [(key: String, label: String)] =
-        [("fit", "Fit"), ("fill", "Fill"), ("zoom", "Zoom")]
-    private let sleepChoices: [(minutes: Int, label: String)] =
-        [(0, "Off"), (30, "30 minutes"), (60, "1 hour"), (90, "1.5 hours"), (120, "2 hours")]
 
     /// The controlled channel resolved locally, for actions the phone drives
     /// against Dispatcharr itself (Record) -- same anchor as Switch Stream
@@ -3144,30 +3163,8 @@ struct RemoteOptionsSheet: View {
         NavigationStack {
             List {
                 let s = companion.remoteState
-                if !s.audio.isEmpty {
-                    Section("Audio") {
-                        ForEach(s.audio) { t in
-                            row(t.label, checked: t.selected) { companion.setAudioTrack(t.id) }
-                        }
-                    }
-                }
-                Section("Subtitles") {
-                    row("Off", checked: s.textOff) { companion.setTextTrack(nil) }
-                    ForEach(s.text) { t in
-                        row(t.label, checked: t.selected) { companion.setTextTrack(t.id) }
-                    }
-                }
-                Section("Speed") {
-                    ForEach(speeds, id: \.self) { sp in
-                        row(sp == 1 ? "Normal" : "\(speedLabel(sp))×",
-                            checked: abs(s.speed - sp) < 0.01) { companion.setSpeed(sp) }
-                    }
-                }
-                Section("Aspect Ratio") {
-                    ForEach(aspects, id: \.key) { a in
-                        row(a.label, checked: s.aspect == a.key) { companion.setAspect(a.key) }
-                    }
-                }
+                // Row order and titles are the cross-platform Options list
+                // (Logan 2026-09-27); Android's CastRemoteSheet reads the same.
                 if switchStreamTarget != nil {
                     Section {
                         Button {
@@ -3175,10 +3172,10 @@ struct RemoteOptionsSheet: View {
                         } label: {
                             Label("Switch Stream", systemImage: "arrow.triangle.2.circlepath")
                         }
+                    } footer: {
+                        Text("Swaps this channel's upstream. The TV keeps playing; the picture follows in a few seconds.")
                     }
                 }
-                // Android companion-overlay parity: Record / Sleep Timer /
-                // Audio Only ride the same options surface.
                 Section {
                     if controlledItem?.dispatcharrChannelID != nil {
                         Button {
@@ -3188,29 +3185,29 @@ struct RemoteOptionsSheet: View {
                             Label("Record Current Program", systemImage: "record.circle")
                         }
                     }
+                    RemoteTrackRows(state: s,
+                                    onAudio: { companion.setAudioTrack($0) },
+                                    onText: { companion.setTextTrack($0) },
+                                    onSpeed: { companion.setSpeed($0) })
+                    Button {
+                        companion.setAspect(RemoteOptionLabels.nextScale(s.aspect))
+                    } label: {
+                        OptionValueLabel(title: "Video Scale", icon: "aspectratio",
+                                         value: RemoteOptionLabels.scale(s.aspect))
+                    }
                     Menu {
-                        ForEach(sleepChoices, id: \.minutes) { c in
+                        ForEach(RemoteOptionLabels.sleepChoices, id: \.minutes) { c in
                             Button(c.label) { companion.armSleepTimer(minutes: c.minutes) }
                         }
                     } label: {
-                        HStack {
-                            Label("Sleep Timer", systemImage: "timer")
-                                .foregroundStyle(.primary)
-                            Spacer()
-                            Text(sleepValueLabel)
-                                .foregroundStyle(.secondary)
-                        }
+                        OptionValueLabel(title: "Sleep Timer", icon: "timer",
+                                         value: RemoteOptionLabels.sleep(companion.sleepEndsAt))
                     }
                     Button {
                         companion.setAudioOnly(!s.audioOnly)
                     } label: {
-                        HStack {
-                            Label("Audio Only", systemImage: "music.note")
-                                .foregroundStyle(.primary)
-                            Spacer()
-                            Text(s.audioOnly ? "On" : "Off")
-                                .foregroundStyle(.secondary)
-                        }
+                        OptionValueLabel(title: "Audio Only", icon: "video.slash",
+                                         value: s.audioOnly ? "On" : "Off")
                     }
                 }
                 if !s.streamInfo.isEmpty {
@@ -3253,24 +3250,199 @@ struct RemoteOptionsSheet: View {
         .presentationDetents([.medium, .large])
     }
 
-    private var sleepValueLabel: String {
-        guard let end = companion.sleepEndsAt else { return "Off" }
+}
+
+// MARK: - Shared Options rows (cross-platform list, Logan 2026-09-27)
+
+/// Wording for the Options rows' value lines. One place so Cast, AirPlay and
+/// the companion remote cannot drift from each other or from Android's
+/// CastRemoteSheet / CastControl.AspectMode labels.
+enum RemoteOptionLabels {
+    static let speeds: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+    /// Wire keys predate the "Video Scale" naming (CastControl.AspectMode):
+    /// "zoom" is Fill (aspect kept, cropped), "fill" is Stretch.
+    static let scales: [(key: String, label: String)] =
+        [("fit", "Fit"), ("zoom", "Fill"), ("fill", "Stretch")]
+    static let sleepChoices: [(minutes: Int, label: String)] =
+        [(0, "Off"), (30, "30 minutes"), (60, "1 hour"), (90, "1.5 hours"), (120, "2 hours")]
+
+    /// "Normal" or "1.25x"; whole numbers keep one decimal ("2.0x") because
+    /// that is how Android prints the same Float.
+    static func speed(_ s: Double) -> String {
+        abs(s - 1) < 0.01 ? "Normal" : "\(number(s))x"
+    }
+    /// Picker choice label, Android's PLAYBACK_SPEEDS wording.
+    static func speedChoice(_ s: Double) -> String {
+        abs(s - 1) < 0.01 ? "Normal (1.0x)" : "\(number(s))x"
+    }
+    private static func number(_ s: Double) -> String {
+        s == s.rounded() ? String(format: "%.1f", s) : String(format: "%g", s)
+    }
+    static func scale(_ key: String) -> String {
+        scales.first(where: { $0.key == key })?.label ?? "Fit"
+    }
+    /// Tap cycles Fit, Fill, Stretch, as Android's AspectMode.next().
+    static func nextScale(_ key: String) -> String {
+        let i = scales.firstIndex(where: { $0.key == key }) ?? 0
+        return scales[(i + 1) % scales.count].key
+    }
+    static func subtitles(_ s: CompanionClient.RemoteState) -> String {
+        s.textOff ? "Off" : (s.text.first(where: { $0.selected })?.label ?? "On")
+    }
+    static func sleep(_ end: Date?) -> String {
+        guard let end else { return "Off" }
         let mins = max(1, Int(end.timeIntervalSinceNow / 60) + 1)
         return "\(mins)m left"
     }
+}
 
-    private func row(_ label: String, checked: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack {
-                Text(label).foregroundStyle(.primary)
-                Spacer()
-                if checked { Image(systemName: "checkmark").foregroundStyle(Color.accentColor) }
-            }
+/// Icon + title with the current value on the trailing side.
+struct OptionValueLabel: View {
+    let title: String
+    let icon: String
+    let value: String?
+    var body: some View {
+        HStack {
+            Label(title, systemImage: icon).foregroundStyle(.primary)
+            Spacer()
+            if let value { Text(value).foregroundStyle(.secondary) }
         }
     }
+}
 
-    private func speedLabel(_ s: Double) -> String {
-        s == s.rounded() ? String(Int(s)) : String(format: "%g", s)
+/// Audio Track, Subtitles and Playback Speed: the three rows every transport
+/// can honor, each pushing a checkmark picker.
+struct RemoteTrackRows: View {
+    let state: CompanionClient.RemoteState
+    let onAudio: (String) -> Void
+    /// nil selects Off.
+    let onText: (String?) -> Void
+    let onSpeed: (Double) -> Void
+
+    var body: some View {
+        NavigationLink {
+            OptionPickerList(title: "Audio Track",
+                             choices: state.audio.map { ($0.id, $0.label, $0.selected) },
+                             emptyText: "No audio tracks reported.") { if let id = $0 { onAudio(id) } }
+        } label: {
+            OptionValueLabel(title: "Audio Track", icon: "music.note",
+                             value: state.audio.first(where: { $0.selected })?.label)
+        }
+        NavigationLink {
+            OptionPickerList(title: "Subtitles",
+                             choices: [(nil, "Off", state.textOff)]
+                                + state.text.map { ($0.id, $0.label, $0.selected) },
+                             emptyText: nil) { onText($0) }
+        } label: {
+            OptionValueLabel(title: "Subtitles", icon: "captions.bubble",
+                             value: RemoteOptionLabels.subtitles(state))
+        }
+        NavigationLink {
+            OptionPickerList(title: "Playback Speed",
+                             choices: RemoteOptionLabels.speeds.map {
+                                 (String($0), RemoteOptionLabels.speedChoice($0), abs(state.speed - $0) < 0.01)
+                             },
+                             emptyText: nil) { if let v = $0.flatMap(Double.init) { onSpeed(v) } }
+        } label: {
+            OptionValueLabel(title: "Playback Speed", icon: "gauge.with.dots.needle.33percent",
+                             value: RemoteOptionLabels.speed(state.speed))
+        }
+    }
+}
+
+/// Checkmark list; picking a row applies it and pops back to Options.
+private struct OptionPickerList: View {
+    let title: String
+    let choices: [(id: String?, label: String, selected: Bool)]
+    let emptyText: String?
+    let onSelect: (String?) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        List {
+            if choices.isEmpty, let emptyText {
+                Text(emptyText).foregroundStyle(.secondary)
+            }
+            ForEach(Array(choices.enumerated()), id: \.offset) { _, c in
+                Button {
+                    onSelect(c.id)
+                    dismiss()
+                } label: {
+                    HStack {
+                        Text(c.label).foregroundStyle(.primary)
+                        Spacer()
+                        if c.selected {
+                            Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// The AirPlay session's AVPlayer media selection and rate, shaped like the
+/// receiver snapshot so the same rows render it. Track ids are the option's
+/// index in its selection group.
+@MainActor
+final class AirPlayMediaOptions: ObservableObject {
+    @Published private(set) var state = CompanionClient.RemoteState()
+    private var audible: AVMediaSelectionGroup?
+    private var legible: AVMediaSelectionGroup?
+
+    func load() async {
+        guard let player = AirPlayMonitor.shared.attachedPlayer,
+              let item = player.currentItem else { return }
+        audible = try? await item.asset.loadMediaSelectionGroup(for: .audible)
+        legible = try? await item.asset.loadMediaSelectionGroup(for: .legible)
+        refresh()
+    }
+
+    private func refresh() {
+        guard let player = AirPlayMonitor.shared.attachedPlayer,
+              let item = player.currentItem else { return }
+        var s = CompanionClient.RemoteState()
+        if let g = audible {
+            let current = item.currentMediaSelection.selectedMediaOption(in: g)
+            s.audio = g.options.enumerated().map {
+                .init(id: String($0.offset), label: $0.element.displayName, selected: $0.element == current)
+            }
+        }
+        if let g = legible {
+            let current = item.currentMediaSelection.selectedMediaOption(in: g)
+            s.text = g.options.enumerated().map {
+                .init(id: String($0.offset), label: $0.element.displayName, selected: $0.element == current)
+            }
+            s.textOff = current == nil
+        }
+        // A paused player reads rate 0; the chosen speed is defaultRate.
+        s.speed = Double(player.defaultRate)
+        state = s
+    }
+
+    func selectAudio(_ id: String) {
+        guard let g = audible, let i = Int(id), g.options.indices.contains(i) else { return }
+        AirPlayMonitor.shared.attachedPlayer?.currentItem?.select(g.options[i], in: g)
+        refresh()
+    }
+
+    func selectText(_ id: String?) {
+        guard let g = legible, let item = AirPlayMonitor.shared.attachedPlayer?.currentItem else { return }
+        if let id, let i = Int(id), g.options.indices.contains(i) {
+            item.select(g.options[i], in: g)
+        } else {
+            item.select(nil, in: g)
+        }
+        refresh()
+    }
+
+    func setSpeed(_ speed: Double) {
+        guard let player = AirPlayMonitor.shared.attachedPlayer else { return }
+        player.defaultRate = Float(speed)
+        if player.rate != 0 { player.rate = Float(speed) }
+        refresh()
     }
 }
 
@@ -3283,9 +3455,10 @@ struct RemoteOptionsSheet: View {
 /// AerioCastController re-splices the proxy), Record talks to the
 /// Dispatcharr DVR API directly, the sleep timer is a phone-side countdown
 /// that stops the cast, and Stream Info renders the local HLS proxy's own
-/// stats (there is no player on the phone to ask). The Android cast
-/// overlay's receiver-state rows (audio/subtitles/speed/aspect/audio-only)
-/// need a control channel the web receiver lacks, so they are omitted.
+/// stats (there is no player on the phone to ask). The receiver-state rows
+/// (audio/subtitles/speed/scale/audio only) speak the control namespace the
+/// AerioTV Android TV receiver implements; on AirPlay the ones AVPlayer can
+/// carry (audio/subtitles/speed) drive the local player instead.
 struct CastOptionsSheet: View {
     @ObservedObject var cast: AerioCastController
     /// AirPlay reuses this sheet (production parity): the channel comes from
@@ -3298,8 +3471,12 @@ struct CastOptionsSheet: View {
     @State private var showRecord = false
     @State private var stats: CastHLSProxySession.Stats?
 
-    private let sleepChoices: [(minutes: Int, label: String)] =
-        [(0, "Off"), (30, "30 minutes"), (60, "1 hour"), (90, "1.5 hours"), (120, "2 hours")]
+    @StateObject private var airPlayOptions = AirPlayMediaOptions()
+
+    /// The web receiver page has no handlers for the track, speed, scale or
+    /// audio-only commands, so those rows stay listed (same list on every
+    /// platform) but only act on the AerioTV Android TV receiver.
+    private var receiverControls: Bool { cast.receiverTarget == .androidTVApp }
 
     /// The channel the TV is playing, resolved locally (castingContent
     /// carries the id; ChannelStore has the Dispatcharr fields).
@@ -3323,6 +3500,8 @@ struct CastOptionsSheet: View {
     var body: some View {
         NavigationStack {
             List {
+                // Row order and titles are the cross-platform Options list
+                // (Logan 2026-09-27); Android's CastRemoteSheet reads the same.
                 if switchStreamTarget != nil {
                     Section {
                         Button {
@@ -3342,20 +3521,44 @@ struct CastOptionsSheet: View {
                             Label("Record Current Program", systemImage: "record.circle")
                         }
                     }
-                    if !isAirPlay {
-                    Menu {
-                        ForEach(sleepChoices, id: \.minutes) { c in
-                            Button(c.label) { cast.armSleepTimer(minutes: c.minutes) }
+                    if isAirPlay {
+                        // AVPlayer carries its media selection and rate to the
+                        // receiver. It has no scale the receiver honors and no
+                        // way to drop the video track, so those rows are Cast only.
+                        RemoteTrackRows(state: airPlayOptions.state,
+                                        onAudio: { airPlayOptions.selectAudio($0) },
+                                        onText: { airPlayOptions.selectText($0) },
+                                        onSpeed: { airPlayOptions.setSpeed($0) })
+                    } else {
+                        let s = cast.remoteState
+                        Group {
+                            RemoteTrackRows(state: s,
+                                            onAudio: { cast.setRemoteAudioTrack($0) },
+                                            onText: { cast.setRemoteTextTrack($0) },
+                                            onSpeed: { cast.setRemoteSpeed($0) })
+                            Button {
+                                cast.setRemoteAspect(RemoteOptionLabels.nextScale(s.aspect))
+                            } label: {
+                                OptionValueLabel(title: "Video Scale", icon: "aspectratio",
+                                                 value: RemoteOptionLabels.scale(s.aspect))
+                            }
                         }
-                    } label: {
-                        HStack {
-                            Label("Sleep Timer", systemImage: "timer")
-                                .foregroundStyle(.primary)
-                            Spacer()
-                            Text(sleepValueLabel)
-                                .foregroundStyle(.secondary)
+                        .disabled(!receiverControls)
+                        Menu {
+                            ForEach(RemoteOptionLabels.sleepChoices, id: \.minutes) { c in
+                                Button(c.label) { cast.armSleepTimer(minutes: c.minutes) }
+                            }
+                        } label: {
+                            OptionValueLabel(title: "Sleep Timer", icon: "timer",
+                                             value: RemoteOptionLabels.sleep(cast.sleepEndsAt))
                         }
-                    }
+                        Button {
+                            cast.setRemoteAudioOnly(!s.audioOnly)
+                        } label: {
+                            OptionValueLabel(title: "Audio Only", icon: "video.slash",
+                                             value: s.audioOnly ? "On" : "Off")
+                        }
+                        .disabled(!receiverControls)
                     }
                 }
                 if !isAirPlay {
@@ -3418,18 +3621,20 @@ struct CastOptionsSheet: View {
         // ~1 Hz stats poll while the sheet is up; statsSnapshot is one
         // short hop onto the proxy's session queue.
         .task {
-            while !Task.isCancelled && !isAirPlay {
+            if isAirPlay {
+                await airPlayOptions.load()
+                return
+            }
+            // The receiver pushes a snapshot after every change; this asks
+            // for the current one so the rows are filled on open.
+            cast.requestRemoteState()
+            while !Task.isCancelled {
                 stats = CastHLSProxySession.shared.statsSnapshot()
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
     }
 
-    private var sleepValueLabel: String {
-        guard let end = cast.sleepEndsAt else { return "Off" }
-        let mins = max(1, Int(end.timeIntervalSinceNow / 60) + 1)
-        return "\(mins)m left"
-    }
 }
 
 /// The proxy's own numbers in the app's Stream Info card treatment

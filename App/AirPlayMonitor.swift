@@ -49,6 +49,9 @@ final class AirPlayMonitor: ObservableObject {
     @Published private(set) var hostsHeadless = false
 
     private weak var player: AVPlayer?
+    /// The player the receiver is showing, for the AirPlay Options sheet's
+    /// audio, subtitle and speed rows (AVPlayer carries those to the receiver).
+    var attachedPlayer: AVPlayer? { player }
     private var externalObservation: NSKeyValueObservation?
     private var rateObservation: NSKeyValueObservation?
     private var routeObserver: NSObjectProtocol?
