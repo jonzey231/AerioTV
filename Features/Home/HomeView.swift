@@ -8792,6 +8792,11 @@ final class TabBarCollapseState: ObservableObject {
             .flatMap { $0.windows }
             .flatMap { Self.tabBars(in: $0) }
         let hide = collapsed
+        // First report 2026-09-27 (Logan): after stopping a cast from the
+        // sheet the bar was gone for good; the log showed collapse toggles
+        // with nothing about the bar itself. Log what each toggle found.
+        debugLog("[TABBAR] collapse=\(hide) bars=\(bars.count)"
+            + bars.map { " frame=\(Int($0.frame.minX)),\(Int($0.frame.minY)) \(Int($0.frame.width))x\(Int($0.frame.height)) alpha=\($0.alpha) t=\($0.transform.a),\($0.transform.d) anchor=\($0.layer.anchorPoint.x),\($0.layer.anchorPoint.y) window=\($0.window != nil)" }.joined())
         for bar in bars {
             guard let window = bar.window, let superview = bar.superview else { continue }
             // Mini button: 48 pt at x 28, bottom 6 pt below the safe-area
@@ -8816,7 +8821,13 @@ final class TabBarCollapseState: ObservableObject {
                 UIView.animate(withDuration: 0.32, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState], animations: {
                     bar.transform = .identity
                 }, completion: { _ in
-                    if !self.collapsed { Self.setAnchor(bar, CGPoint(x: 0.5, y: 0.5)) }
+                    guard !self.collapsed else { return }
+                    Self.setAnchor(bar, CGPoint(x: 0.5, y: 0.5))
+                    // Belt and braces: a show must leave the bar visible
+                    // whatever a toggle mid-animation did to it.
+                    bar.transform = .identity
+                    bar.alpha = 1
+                    debugLog("[TABBAR] shown: frame=\(Int(bar.frame.minX)),\(Int(bar.frame.minY)) \(Int(bar.frame.width))x\(Int(bar.frame.height)) hidden=\(bar.isHidden) window=\(bar.window != nil)")
                 })
                 UIView.animate(withDuration: 0.14, delay: 0.02, options: [.curveEaseOut, .beginFromCurrentState]) {
                     bar.alpha = 1
