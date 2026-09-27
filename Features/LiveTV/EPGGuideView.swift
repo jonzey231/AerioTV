@@ -1,6 +1,7 @@
 import Combine
 import SwiftUI
 import SwiftData
+import SQLite3
 import Combine  // Xcode 26.5 requires explicit Combine import for the
                // Timer.publish().autoconnect() (Publishers.Autoconnect)
                // stored-property type; transitive SwiftUI import no longer suffices.
@@ -228,7 +229,302 @@ final class GuideStore: ObservableObject {
         didSet {
             programChannelMemo.removeAll()
             loadedEdges = nil
+            programsVersion &+= 1
         }
+    }
+
+    /// Bumped on every write to `programs`, so work computed off the main
+    /// actor from a snapshot can tell whether the map moved underneath it.
+    private(set) var programsVersion = 0
+
+    /// The launch cache read's window and its first-published "near" hours.
+    struct CacheLaunchSpan: Sendable {
+        let windowStart: Date
+        let windowEnd: Date
+        let nearStart: Date
+        let nearEnd: Date
+    }
+
+    /// What a cache read covers.
+    enum CacheReadSpan: Sendable {
+        /// Programmes overlapping [from, to).
+        case overlapping(Date, Date)
+        /// Programmes starting in [from, to).
+        case starting(Date, Date)
+        /// Programmes ending in (after, atOrBefore].
+        case ending(Date, Date)
+    }
+
+    /// Reads cached programmes as `slices` parallel start-time slices of
+    /// 5k-row pages, each page in its own context so the managed objects are
+    /// released as it goes (fetching 208k rows in one call took the process
+    /// from 380 MB to 1.8 GB on an Apple TV, 2026-09-03). Each slice is
+    /// start-sorted, so joining them in slice order keeps every channel's
+    /// list sorted.
+    nonisolated static func readCachedPrograms(
+        container: ModelContainer, serverID: String, span: CacheReadSpan, slices requested: Int
+    ) async -> (dict: [String: [GuideProgram]], total: Int, newest: Date) {
+        if let storeURL = container.configurations.first?.url,
+           let raw = rawCachedPrograms(storeURL: storeURL, serverID: serverID, span: span) {
+            return raw
+        }
+        let sliceCount: Int
+        let from: Date
+        let to: Date
+        switch span {
+        case .overlapping(let a, let b), .starting(let a, let b):
+            sliceCount = max(1, requested); from = a; to = b
+        case .ending(let a, let b):
+            sliceCount = 1; from = a; to = b
+        }
+        guard to > from else { return ([:], 0, .distantPast) }
+        let sliceLength = to.timeIntervalSince(from) / Double(sliceCount)
+        let bounds: [Date] = (0...sliceCount).map {
+            $0 == sliceCount ? to : from.addingTimeInterval(Double($0) * sliceLength)
+        }
+        let slices = await withTaskGroup(
+            of: (index: Int, dict: [String: [GuideProgram]], total: Int, newest: Date).self
+        ) { group in
+            for index in 0..<sliceCount {
+                let lo = bounds[index]
+                let hi = bounds[index + 1]
+                let descriptor: FetchDescriptor<EPGProgram>
+                switch span {
+                case .overlapping:
+                    // The first slice also holds programmes that began before
+                    // the span and are still on.
+                    descriptor = index == 0
+                        ? FetchDescriptor<EPGProgram>(
+                            predicate: #Predicate<EPGProgram> {
+                                $0.serverID == serverID && $0.endTime > lo && $0.startTime < hi
+                            },
+                            sortBy: [SortDescriptor(\.startTime)])
+                        : FetchDescriptor<EPGProgram>(
+                            predicate: #Predicate<EPGProgram> {
+                                $0.serverID == serverID && $0.startTime >= lo && $0.startTime < hi
+                            },
+                            sortBy: [SortDescriptor(\.startTime)])
+                case .starting:
+                    descriptor = FetchDescriptor<EPGProgram>(
+                        predicate: #Predicate<EPGProgram> {
+                            $0.serverID == serverID && $0.startTime >= lo && $0.startTime < hi
+                        },
+                        sortBy: [SortDescriptor(\.startTime)])
+                case .ending:
+                    descriptor = FetchDescriptor<EPGProgram>(
+                        predicate: #Predicate<EPGProgram> {
+                            $0.serverID == serverID && $0.endTime > lo && $0.endTime <= hi
+                        },
+                        sortBy: [SortDescriptor(\.startTime)])
+                }
+                group.addTask {
+                    var dict: [String: [GuideProgram]] = [:]
+                    var total = 0
+                    var newestFetch = Date.distantPast
+                    var offset = 0
+                    let pageSize = 5_000
+                    while true {
+                        var page = descriptor
+                        page.fetchOffset = offset
+                        page.fetchLimit = pageSize
+                        let rows: [EPGProgram] = autoreleasepool {
+                            let pageContext = ModelContext(container)
+                            return (try? pageContext.fetch(page)) ?? []
+                        }
+                        if rows.isEmpty { break }
+                        for ep in rows {
+                            let gp = GuideProgram(channelID: ep.channelID, title: ep.title,
+                                                  description: ep.programDescription,
+                                                  start: ep.startTime, end: ep.endTime,
+                                                  category: ep.category,
+                                                  programID: ep.programID,
+                                                  subTitle: ep.subTitle, season: ep.season,
+                                                  episode: ep.episode, isNew: ep.isNew,
+                                                  isLiveBroadcast: ep.isLiveBroadcast,
+                                                  isPremiere: ep.isPremiere, isFinale: ep.isFinale,
+                                                  isRepeat: ep.isRepeat,
+                                                  posterURL: ep.posterURL.isEmpty ? nil : ep.posterURL)
+                            dict[ep.channelID, default: []].append(gp)
+                            if ep.fetchedAt > newestFetch { newestFetch = ep.fetchedAt }
+                        }
+                        total += rows.count
+                        offset += rows.count
+                        if rows.count < pageSize { break }
+                    }
+                    return (index, dict, total, newestFetch)
+                }
+            }
+            var collected: [(index: Int, dict: [String: [GuideProgram]], total: Int, newest: Date)] = []
+            for await slice in group { collected.append(slice) }
+            return collected.sorted { $0.index < $1.index }
+        }
+        var dict: [String: [GuideProgram]] = [:]
+        var total = 0
+        var newest = Date.distantPast
+        for slice in slices {
+            for (channelID, list) in slice.dict {
+                dict[channelID, default: []].append(contentsOf: list)
+            }
+            total += slice.total
+            if slice.newest > newest { newest = slice.newest }
+        }
+        return (dict, total, newest)
+    }
+
+    /// Columns of SwiftData's `EPGProgram` table that `rawCachedPrograms` reads.
+    nonisolated private static let rawProgramColumns = [
+        "ZCHANNELID", "ZTITLE", "ZPROGRAMDESCRIPTION", "ZSTARTTIME", "ZENDTIME", "ZCATEGORY",
+        "ZPROGRAMID", "ZSUBTITLE", "ZSEASON", "ZEPISODE", "ZISNEW", "ZISLIVEBROADCAST",
+        "ZISPREMIERE", "ZISFINALE", "ZISREPEAT", "ZPOSTERURL", "ZFETCHEDAT", "ZSERVERID",
+    ]
+
+    /// The cached programmes of `span`, read straight from SwiftData's SQLite
+    /// store over a read-only connection (WAL readers never block the
+    /// container's own writes). Turning rows into managed objects cost ~80 µs
+    /// per programme on an Apple TV 4K (A10X), ~12 s for the launch window of
+    /// an 11.6k-channel playlist; this reads the same rows as plain values in
+    /// a fraction of that. nil whenever the store does not look exactly as
+    /// expected (a changed model, a missing column, an open failure), so the
+    /// caller falls back to the SwiftData read.
+    nonisolated static func rawCachedPrograms(
+        storeURL: URL, serverID: String, span: CacheReadSpan
+    ) -> (dict: [String: [GuideProgram]], total: Int, newest: Date)? {
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(storeURL.path, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK,
+              let db = handle else {
+            sqlite3_close(handle)
+            return nil
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 2_000)
+
+        var columns = Set<String>()
+        var info: OpaquePointer?
+        if sqlite3_prepare_v2(db, "PRAGMA table_info(ZEPGPROGRAM)", -1, &info, nil) == SQLITE_OK {
+            while sqlite3_step(info) == SQLITE_ROW {
+                if let name = sqlite3_column_text(info, 1) { columns.insert(String(cString: name)) }
+            }
+        }
+        sqlite3_finalize(info)
+        guard rawProgramColumns.allSatisfy(columns.contains) else {
+            debugLog("📺 GuideStore: raw cache read unavailable (unexpected store layout); using SwiftData")
+            return nil
+        }
+
+        let select = "SELECT ZCHANNELID, ZTITLE, ZPROGRAMDESCRIPTION, ZSTARTTIME, ZENDTIME, ZCATEGORY, "
+            + "ZPROGRAMID, ZSUBTITLE, ZSEASON, ZEPISODE, ZISNEW, ZISLIVEBROADCAST, ZISPREMIERE, "
+            + "ZISFINALE, ZISREPEAT, ZPOSTERURL, ZFETCHEDAT FROM ZEPGPROGRAM WHERE ZSERVERID = ? AND "
+        let (condition, a, b): (String, Date, Date) = {
+            switch span {
+            case .overlapping(let a, let b): return ("ZENDTIME > ? AND ZSTARTTIME < ?", a, b)
+            case .starting(let a, let b): return ("ZSTARTTIME >= ? AND ZSTARTTIME < ?", a, b)
+            case .ending(let a, let b): return ("ZENDTIME > ? AND ZENDTIME <= ?", a, b)
+            }
+        }()
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, select + condition + " ORDER BY ZSTARTTIME", -1, &stmt, nil) == SQLITE_OK else {
+            sqlite3_finalize(stmt)
+            return nil
+        }
+        defer { sqlite3_finalize(stmt) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(stmt, 1, serverID, -1, transient)
+        // Core Data stores dates as seconds since the reference date.
+        sqlite3_bind_double(stmt, 2, a.timeIntervalSinceReferenceDate)
+        sqlite3_bind_double(stmt, 3, b.timeIntervalSinceReferenceDate)
+
+        func text(_ col: Int32) -> String? {
+            guard let c = sqlite3_column_text(stmt, col) else { return nil }
+            return String(cString: c)
+        }
+        func int(_ col: Int32) -> Int? {
+            sqlite3_column_type(stmt, col) == SQLITE_NULL ? nil : Int(sqlite3_column_int64(stmt, col))
+        }
+        func flag(_ col: Int32) -> Bool { sqlite3_column_int(stmt, col) != 0 }
+
+        var dict: [String: [GuideProgram]] = [:]
+        var total = 0
+        var newest = Date.distantPast
+        while true {
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { break }
+            guard rc == SQLITE_ROW else {
+                debugLog("📺 GuideStore: raw cache read failed (\(rc)); using SwiftData")
+                return nil
+            }
+            guard let channelID = text(0) else { continue }
+            let poster = text(15) ?? ""
+            let gp = GuideProgram(channelID: channelID, title: text(1) ?? "",
+                                  description: text(2) ?? "",
+                                  start: Date(timeIntervalSinceReferenceDate: sqlite3_column_double(stmt, 3)),
+                                  end: Date(timeIntervalSinceReferenceDate: sqlite3_column_double(stmt, 4)),
+                                  category: text(5) ?? "",
+                                  programID: int(6),
+                                  subTitle: text(7), season: int(8), episode: int(9),
+                                  isNew: flag(10), isLiveBroadcast: flag(11),
+                                  isPremiere: flag(12), isFinale: flag(13), isRepeat: flag(14),
+                                  posterURL: poster.isEmpty ? nil : poster)
+            dict[channelID, default: []].append(gp)
+            let fetched = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(stmt, 16))
+            if fetched > newest { newest = fetched }
+            total += 1
+        }
+        return (dict, total, newest)
+    }
+
+    /// Second phase of the launch cache read: every programme of the window
+    /// outside the near hours, merged around what `programs` holds by then.
+    /// Per channel, the resident list is authoritative for its own time span
+    /// (it may already carry a network refresh), so only cached programmes
+    /// ending before it or starting after it are added. The merge runs off
+    /// the main actor and is committed only if `programs` did not move
+    /// meanwhile; otherwise it is redone once against the newer map.
+    private func loadCacheRemainder(container: ModelContainer, serverID: String,
+                                    span: CacheLaunchSpan) async {
+        let started = Date()
+        let rest: (dict: [String: [GuideProgram]], total: Int) = await Task.detached(priority: .utility) {
+            async let before = GuideStore.readCachedPrograms(
+                container: container, serverID: serverID,
+                span: .ending(span.windowStart, span.nearStart), slices: 1)
+            async let after = GuideStore.readCachedPrograms(
+                container: container, serverID: serverID,
+                span: .starting(span.nearEnd, span.windowEnd), slices: 2)
+            let (b, a) = await (before, after)
+            var dict = b.dict
+            for (channelID, list) in a.dict { dict[channelID, default: []].append(contentsOf: list) }
+            return (dict, b.total + a.total)
+        }.value
+        guard rest.total > 0, !Task.isCancelled else { return }
+        for _ in 0..<2 {
+            guard displayedServerID == nil || displayedServerID == serverID else { return }
+            let base = programs
+            let version = programsVersion
+            let merged: (dict: [String: [GuideProgram]], added: Int) = await Task.detached(priority: .utility) {
+                var merged = base
+                var added = 0
+                for (channelID, cached) in rest.dict {
+                    guard let current = merged[channelID], let first = current.first,
+                          let last = current.last else {
+                        merged[channelID] = cached
+                        added += cached.count
+                        continue
+                    }
+                    let earlier = cached.filter { $0.end <= first.start }
+                    let later = cached.filter { $0.start >= last.end }
+                    guard !earlier.isEmpty || !later.isEmpty else { continue }
+                    merged[channelID] = earlier + current + later
+                    added += earlier.count + later.count
+                }
+                return (Self.drawableOnly(merged), added)
+            }.value
+            guard version == programsVersion else { continue }
+            if merged.added > 0 {
+                commitPrograms(merged.dict, for: serverID, source: "cache-load-rest")
+            }
+            debugLog("📺 GuideStore.loadFromCache: remainder merged, \(merged.added) programme(s) outside the first hours in \(Int(Date().timeIntervalSince(started) * 1000))ms")
+            return
+        }
+        debugLog("📺 GuideStore.loadFromCache: remainder not merged, the guide kept changing underneath it")
     }
 
     /// Furthest-back and furthest-forward programme edges of the resident map,
@@ -640,21 +936,63 @@ final class GuideStore: ObservableObject {
         return true
     }
 
-    private func beginBatch(basePrograms: [String: [GuideProgram]]? = nil) {
+    /// `programsVersion` when the running batch copied the map, and the time
+    /// window it rewrites (nil: the caller did not say).
+    private var _batchVersion = 0
+    private var _batchWindow: (start: Date, end: Date, replace: Bool)?
+
+    private func beginBatch(basePrograms: [String: [GuideProgram]]? = nil,
+                            window: (start: Date, end: Date, replace: Bool)? = nil) {
         _isBatching = true
         _pendingPrograms = basePrograms ?? programs
+        _batchVersion = programsVersion
+        _batchWindow = window
     }
 
     private func endBatch(for serverID: String, source: String) {
         _isBatching = false
-        commitPrograms(_pendingPrograms, for: serverID, source: source)
+        var result = _pendingPrograms
+        if programsVersion != _batchVersion, let window = _batchWindow {
+            // Something else wrote `programs` while this batch ran on its
+            // copy. Committing the copy would throw that write away, so only
+            // the batch's own window is carried onto the current map.
+            result = Self.rebaseBatch(_pendingPrograms, onto: programs, window: window)
+            debugLog("📺 GuideStore: \(source) batch rebased onto a newer guide map")
+        }
+        commitPrograms(result, for: serverID, source: source)
         _pendingPrograms = [:]
+        _batchWindow = nil
         debugLog("[MEM] endBatch done rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
     }
 
     private func cancelBatch() {
         _isBatching = false
         _pendingPrograms = [:]
+        _batchWindow = nil
+    }
+
+    /// The batch's programmes inside `window`, applied to `current`: replacing
+    /// that window per channel when the batch replaces, merged otherwise.
+    /// Programmes outside the window come from `current`.
+    nonisolated static func rebaseBatch(_ batch: [String: [GuideProgram]],
+                                        onto current: [String: [GuideProgram]],
+                                        window: (start: Date, end: Date, replace: Bool)) -> [String: [GuideProgram]] {
+        var result = current
+        for (channelID, list) in batch {
+            let inWindow = list.filter { $0.end > window.start && $0.start < window.end }
+            guard !inWindow.isEmpty else { continue }
+            var merged: [String: [GuideProgram]] = [:]
+            var existing = result[channelID] ?? []
+            if window.replace {
+                existing.removeAll { $0.end > window.start && $0.start < window.end }
+                merged[channelID] = existing + inWindow
+            } else {
+                merged[channelID] = existing
+                for p in inWindow { mergeProgramInto(&merged, program: p, for: channelID, deferSort: true) }
+            }
+            result[channelID] = (merged[channelID] ?? []).sorted { $0.start < $1.start }
+        }
+        return result
     }
 
     private func replacingWindowBase(
@@ -758,7 +1096,7 @@ final class GuideStore: ObservableObject {
         // lastLoadFromCacheResult writes all happen on main. The
         // expensive work is still in the nested Task.detached.
         let fetchTask = Task<Bool, Never> { [self] in
-            let fetchResult: (loaded: (dict: [String: [GuideProgram]], programCount: Int, isFresh: Bool, newestFetchAgoSec: Int)?, purgedForEpoch: Bool) = await Task.detached(priority: .userInitiated) {
+            let fetchResult: (loaded: (dict: [String: [GuideProgram]], programCount: Int, isFresh: Bool, newestFetchAgoSec: Int)?, purgedForEpoch: Bool, span: CacheLaunchSpan?) = await Task.detached(priority: .userInitiated) {
                 let bgContext = ModelContext(container)
 
                 // EPG cache epoch. Single integer generation stamp for the
@@ -797,7 +1135,7 @@ final class GuideStore: ObservableObject {
                         debugLog("🗑️ EPG cache epoch purge: dropped \(allRows.count) rows written before epoch \(Self.epgCacheEpoch)")
                     }
                     defaults.set(Self.epgCacheEpoch, forKey: Self.epgCacheEpochKey)
-                    return (nil, true)
+                    return (nil, true, nil)
                 }
 
                 let now = Date()
@@ -828,96 +1166,22 @@ final class GuideStore: ObservableObject {
                 let windowEnd = GuideStore.gridDayCeil(
                     now.addingTimeInterval(min(Double(effectiveWindowHours) * 3600,
                                                GuideStore.residentForwardSeconds)))
-                // Paged read (Apple TV, 2026-09-03): fetching 208k rows in
-                // one call materialised every managed object at once and took
-                // the process from 380 MB to 1.8 GB. Pages, each in its own
-                // context so the objects are released as we go.
-                //
-                // Read as parallel slices of start time (2026-09-27): the
-                // sequential walk took ~4.4 s for 155k rows on the simulator,
-                // the wait before a warm launch shows any programme. Each
-                // slice is start-sorted, so joining them in slice order keeps
-                // every channel's list sorted. Four slices of 5k-row pages hold
-                // the same ~20k objects at once as the single 20k-row walk did.
-                let sliceCount = 4
-                let sliceSpan = windowEnd.timeIntervalSince(windowStart) / Double(sliceCount)
-                let bounds: [Date] = (0...sliceCount).map {
-                    $0 == sliceCount ? windowEnd : windowStart.addingTimeInterval(Double($0) * sliceSpan)
-                }
-                let slices = await withTaskGroup(
-                    of: (index: Int, dict: [String: [GuideProgram]], total: Int, newest: Date).self
-                ) { group in
-                    for index in 0..<sliceCount {
-                        let lo = bounds[index]
-                        let hi = bounds[index + 1]
-                        let first = index == 0
-                        group.addTask {
-                            // The first slice also holds programmes that began
-                            // before the window and are still on.
-                            let descriptor = first
-                                ? FetchDescriptor<EPGProgram>(
-                                    predicate: #Predicate<EPGProgram> {
-                                        $0.serverID == serverID && $0.endTime > windowStart && $0.startTime < hi
-                                    },
-                                    sortBy: [SortDescriptor(\.startTime)])
-                                : FetchDescriptor<EPGProgram>(
-                                    predicate: #Predicate<EPGProgram> {
-                                        $0.serverID == serverID && $0.startTime >= lo && $0.startTime < hi
-                                    },
-                                    sortBy: [SortDescriptor(\.startTime)])
-                            var dict: [String: [GuideProgram]] = [:]
-                            var total = 0
-                            var newestFetch = Date.distantPast
-                            var offset = 0
-                            let pageSize = 5_000
-                            while true {
-                                var page = descriptor
-                                page.fetchOffset = offset
-                                page.fetchLimit = pageSize
-                                let rows: [EPGProgram] = autoreleasepool {
-                                    let pageContext = ModelContext(container)
-                                    return (try? pageContext.fetch(page)) ?? []
-                                }
-                                if rows.isEmpty { break }
-                                for ep in rows {
-                                    let gp = GuideProgram(channelID: ep.channelID, title: ep.title,
-                                                          description: ep.programDescription,
-                                                          start: ep.startTime, end: ep.endTime,
-                                                          category: ep.category,
-                                                          programID: ep.programID,
-                                                          subTitle: ep.subTitle, season: ep.season,
-                                                          episode: ep.episode, isNew: ep.isNew,
-                                                          isLiveBroadcast: ep.isLiveBroadcast,
-                                                          isPremiere: ep.isPremiere, isFinale: ep.isFinale,
-                                                          isRepeat: ep.isRepeat,
-                                                          posterURL: ep.posterURL.isEmpty ? nil : ep.posterURL)
-                                    dict[ep.channelID, default: []].append(gp)
-                                    if ep.fetchedAt > newestFetch { newestFetch = ep.fetchedAt }
-                                }
-                                total += rows.count
-                                offset += rows.count
-                                if rows.count < pageSize { break }
-                            }
-                            return (index, dict, total, newestFetch)
-                        }
-                    }
-                    var collected: [(index: Int, dict: [String: [GuideProgram]], total: Int, newest: Date)] = []
-                    for await slice in group { collected.append(slice) }
-                    return collected.sorted { $0.index < $1.index }
-                }
-                var dict: [String: [GuideProgram]] = [:]
-                var total = 0
-                var newestFetch = Date.distantPast
-                for slice in slices {
-                    for (channelID, list) in slice.dict {
-                        dict[channelID, default: []].append(contentsOf: list)
-                    }
-                    total += slice.total
-                    if slice.newest > newestFetch { newestFetch = slice.newest }
-                }
-                guard total > 0 else { return (nil, false) }
-                let isFresh = now.timeIntervalSince(newestFetch) < stalenessThreshold
-                return ((dict, total, isFresh, Int(now.timeIntervalSince(newestFetch))), false)
+                // Two phases (2026-09-27): the hours the guide opens on are
+                // read and published first, and the rest of the window is
+                // merged in afterwards (`loadCacheRemainder`). The whole
+                // window is ~150k programmes on an 11.6k-channel playlist;
+                // reading it before showing anything took ~14 s on an Apple TV
+                // 4K (A10X), behind the launch loading screen.
+                let span = CacheLaunchSpan(
+                    windowStart: windowStart, windowEnd: windowEnd,
+                    nearStart: max(windowStart, now.addingTimeInterval(-3600)),
+                    nearEnd: min(windowEnd, now.addingTimeInterval(3 * 3600)))
+                let near = await GuideStore.readCachedPrograms(
+                    container: container, serverID: serverID,
+                    span: .overlapping(span.nearStart, span.nearEnd), slices: 2)
+                guard near.total > 0 else { return (nil, false, span) }
+                let isFresh = now.timeIntervalSince(near.newest) < stalenessThreshold
+                return ((near.dict, near.total, isFresh, Int(now.timeIntervalSince(near.newest))), false, span)
             }.value
 
             if fetchResult.purgedForEpoch {
@@ -959,9 +1223,21 @@ final class GuideStore: ObservableObject {
             self.newestFetchedAt = Date().addingTimeInterval(-Double(loaded.newestFetchAgoSec))
             debugLog("📺 GuideStore.loadFromCache: loaded \(loaded.programCount) programs across \(loaded.dict.count) channels (server \(serverID)) rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
             debugLog("📺 GuideStore.loadFromCache: newest fetch \(loaded.newestFetchAgoSec)s ago, threshold \(Int(stalenessThreshold))s, fresh=\(loaded.isFresh)")
+            // The rest of the launch window before this load counts as done
+            // (and before the replay shortcut above can answer other callers:
+            // they join `inFlightLoadTask` until then). The guide already
+            // paints from the near hours published above; everything that
+            // awaits the cache load (the network refresh, the window walk,
+            // the prunes) then starts from the complete map. When they ran
+            // alongside the remainder, a refresh that had copied the map
+            // before the remainder landed committed its copy afterwards and
+            // dropped ~118k programmes (Apple TV run, 2026-09-27).
+            if let span = fetchResult.span {
+                await self.loadCacheRemainder(container: container, serverID: serverID, span: span)
+            }
             self.lastLoadFromCacheResult = (serverID: serverID, isFresh: loaded.isFresh)
-            // Catch-up reach prune after the restore (Logan 2026-09-12). Fired
-            // detached so the guide paints first; the delete runs off the main
+            // Catch-up reach prune after the restore (Logan 2026-09-12).
+            // Detached so the load returns; the delete runs off the main
             // actor inside.
             Task { [weak self] in
                 await self?.pruneBeyondCatchupReach(channels: ChannelStore.shared.channels,
@@ -2107,7 +2383,8 @@ final class GuideStore: ObservableObject {
             guard !didLoadXMLTVOverride else { return programs }
             return replacingWindowBase(for: channels, windowStart: windowStart, windowEnd: windowEnd)
         }()
-        beginBatch(basePrograms: batchBasePrograms)
+        beginBatch(basePrograms: batchBasePrograms,
+                   window: (windowStart, windowEnd, replaceExisting && !didLoadXMLTVOverride))
         var shouldCommitBatch = false
         let batchServerID = server.id.uuidString
         defer {

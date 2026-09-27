@@ -1842,6 +1842,11 @@ final class ChannelStore: ObservableObject {
 
     // MARK: - Channel list snapshot (instant start)
 
+    /// True once this launch's channel list came from the saved snapshot (a
+    /// warm launch). Not published: it is set together with `channels`, which
+    /// is what observers react to.
+    private(set) var channelsRestoredFromSnapshot = false
+
     /// The last Dispatcharr channel list, kept on disk so a cold launch shows
     /// the Live TV rows at once instead of waiting on /api/channels/channels/
     /// (8.4 MB and several seconds on a 12.7k-channel server) plus the
@@ -1849,7 +1854,7 @@ final class ChannelStore: ObservableObject {
     /// only when something changed. Dispatcharr only: its stream URLs carry
     /// no credentials (auth rides in headers), Xtream's do.
     private struct ChannelListSnapshot: Codable {
-        static let currentVersion = 1
+        static let currentVersion = 2
         let version: Int
         let identity: String
         let baseURL: String
@@ -1864,7 +1869,14 @@ final class ChannelStore: ObservableObject {
             + (server.dispatcharrSelectedProfileID.map(String.init) ?? "-")
     }
 
+    /// JSON, not a binary property list: decoding the 11.6k-channel list is
+    /// about twice as fast (the decode was 3.1 s of an Apple TV 4K launch).
     nonisolated private static func snapshotURL(serverID: UUID) -> URL {
+        AppCacheDirectory.url.appendingPathComponent("channel-list-\(serverID.uuidString).json")
+    }
+
+    /// Version-1 snapshots were property lists under this name.
+    nonisolated private static func legacySnapshotURL(serverID: UUID) -> URL {
         AppCacheDirectory.url.appendingPathComponent("channel-list-\(serverID.uuidString).plist")
     }
 
@@ -1873,9 +1885,8 @@ final class ChannelStore: ObservableObject {
         let snapshot = ChannelListSnapshot(version: ChannelListSnapshot.currentVersion, identity: identity,
                                            baseURL: baseURL, channels: channels, groups: groups)
         do {
-            let encoder = PropertyListEncoder()
-            encoder.outputFormat = .binary
-            try encoder.encode(snapshot).write(to: snapshotURL(serverID: serverID), options: .atomic)
+            try JSONEncoder().encode(snapshot).write(to: snapshotURL(serverID: serverID), options: .atomic)
+            try? FileManager.default.removeItem(at: legacySnapshotURL(serverID: serverID))
         } catch {
             debugLog("🔷 ChannelStore: channel snapshot write failed: \(error.localizedDescription)")
         }
@@ -1887,7 +1898,7 @@ final class ChannelStore: ObservableObject {
     nonisolated private static func readSnapshot(serverID: UUID, identity: String,
                                                  baseURL: String) -> (channels: [ChannelDisplayItem], groups: [String])? {
         guard let data = try? Data(contentsOf: snapshotURL(serverID: serverID)),
-              let snap = try? PropertyListDecoder().decode(ChannelListSnapshot.self, from: data),
+              let snap = try? JSONDecoder().decode(ChannelListSnapshot.self, from: data),
               snap.version == ChannelListSnapshot.currentVersion,
               snap.identity == identity,
               !snap.channels.isEmpty else { return nil }
@@ -1969,6 +1980,7 @@ final class ChannelStore: ObservableObject {
                 Self.readSnapshot(serverID: serverID, identity: snapshotIdentity, baseURL: baseURL)
             }.value
             if let restored, !Task.isCancelled, channels.isEmpty, currentChannelServerID == serverID {
+                channelsRestoredFromSnapshot = true
                 channels = restored.channels
                 orderedGroups = restored.groups
                 GuideStore.rememberChannelCount(restored.channels.count, serverID: serverID.uuidString)
@@ -4973,15 +4985,23 @@ struct MainTabView: View {
         }
 
         guard !channelStore.isLoading, !channelStore.channels.isEmpty else { return }
-        guard !channelStore.isEPGLoading else { return }
-        // XMLTV parse must also complete — see `initialSyncKey` doc comment.
-        guard !guideStore.isLoading else { return }
+        // Warm launch: the saved channel list is already on screen and the
+        // guide fills in from its cache as the read lands. Holding the cover
+        // for the EPG read kept it up 14.6 s on an Apple TV 4K (A10X) with
+        // 11.6k channels; the first-run wait below is for a guide that has
+        // nothing to show yet.
+        let warmStart = channelStore.channelsRestoredFromSnapshot
+        if !warmStart {
+            guard !channelStore.isEPGLoading else { return }
+            // XMLTV parse must also complete — see `initialSyncKey` doc comment.
+            guard !guideStore.isLoading else { return }
+        }
         // VOD loading intentionally NOT gated here. VOD can take
         // minutes on large libraries and the user shouldn't wait on
         // On Demand before they can watch Live TV. The On Demand tab
         // shows its own spinner while `vodStore.isLoadingMovies` /
         // `.isLoadingSeries` are true.
-        if needsInitialDVRSync && !didInitialDVRReconcile { return }
+        if !warmStart, needsInitialDVRSync && !didInitialDVRReconcile { return }
 
         withAnimation(.easeOut(duration: 0.4)) {
             showInitialEPGLoading = false
