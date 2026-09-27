@@ -2908,6 +2908,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 + "Content-Type: \(contentType)\r\n"
                 + "Content-Length: \(body.count)\r\n"
                 + "Accept-Ranges: none\r\n"
+                + "Access-Control-Allow-Origin: *\r\n"
                 + "Cache-Control: no-cache\r\n"
                 + extra
                 + (keepAlive
