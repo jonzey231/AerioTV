@@ -42,11 +42,7 @@ enum AerioCast {
     // ever changes again, also update Info.plist NSBonjourServices
     // (_<id>._googlecast._tcp) and Android local.properties
     // CAST_RECEIVER_APP_ID.
-    static let receiverAppID: String = {
-        // Dev bundle: the unpublished preview receiver (116851A3, registered
-        // to receiver-preview.html?pipeline=mpl) for the legacy-player test.
-        Bundle.main.bundleIdentifier == "app.molinete.aerio.dev" ? "116851A3" : "46B79062"
-    }()
+    static let receiverAppID = "46B79062"
 
     /// customData contract shared with the Android receiver.
     static let keyMediaID = "aerioMediaId"
