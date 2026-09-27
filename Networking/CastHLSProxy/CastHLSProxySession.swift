@@ -133,6 +133,11 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// Called (off main) with the user-facing text when the ingest stops
     /// for good after the receiver was loaded. Set by the cast sender.
     var onTerminalAfterReady: (@Sendable (String) -> Void)?
+    /// Called (off main, on the session queue) each time a remuxer of the
+    /// current channel decides its video path, the passthrough fallback
+    /// after a transcode failure included, so the sender's cast card can
+    /// show or clear its transcode note. Set by the cast sender.
+    var onVideoDecision: (@Sendable (CastVideoPlanOutcome) -> Void)?
     private var activeURL: URL?
     private var currentGeneration = 0
     private var consecutiveFailures = 0
@@ -155,7 +160,7 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// the Developer switches); the remuxer applies it at the source SPS.
     private var videoPlan = CastVideoPlan.passthrough
     /// Set when the on-phone video transcode fails: every later remuxer of
-    /// this proxy session passes H.264 through. Cleared by `stop()`.
+    /// this proxy session passes the source through. Cleared by `stop()`.
     private var videoTranscodeDisabledReason: String?
 
     // Per-generation log rollup state.
@@ -587,6 +592,10 @@ final class CastHLSProxySession: @unchecked Sendable {
             // reconnects with a passthrough remuxer.
             self?.videoTranscodeDisabledReason = reason
         }
+        remuxer.onVideoDecision = { [weak self] outcome in
+            guard let self, self.ingestEpoch == epoch else { return }
+            self.onVideoDecision?(outcome)
+        }
         remuxer.onDemuxedInitSegments = { [weak self] video, audio in
             guard let self, self.ingestEpoch == epoch else { return }
             self.store?.setVideoTranscoded(generation: gen, remuxer.videoIsTranscoded)
@@ -594,11 +603,12 @@ final class CastHLSProxySession: @unchecked Sendable {
             // The playlist's CODECS attribute must name the audio the
             // segments actually carry (AAC, ac-3 or ec-3).
             self.store?.setAudioCodecsAttribute(remuxer.audioCodecsAttribute)
+            let from = remuxer.sourceVideoInfo.map { " from \($0.codec.displayName)" } ?? ""
+            let transcoded = remuxer.videoIsTranscoded ? ", transcoded\(from)" : ""
             if let hevc = CastHLSSegmentStore.hevcCodecString(from: video) {
-                self.videoCodecDescription = "HEVC (\(hevc)), transcoded from H.264"
+                self.videoCodecDescription = "HEVC (\(hevc))\(transcoded)"
             } else if let avc = CastHLSSegmentStore.avcCodecString(from: video) {
-                self.videoCodecDescription = remuxer.videoIsTranscoded
-                    ? "H.264 (\(avc)), transcoded" : "H.264 (\(avc))"
+                self.videoCodecDescription = "H.264 (\(avc))\(transcoded)"
             }
             self.log("demuxed init ready gen=\(gen) "
                 + "vinit=\(video.count) B ainit=\(audio?.count ?? 0) B")
@@ -686,12 +696,12 @@ final class CastHLSProxySession: @unchecked Sendable {
                     try remuxer.feed(data)
                 } catch let error as CastVideoTranscodeError {
                     // Fallback: a fresh remuxer, built with the plan
-                    // disabled, passes H.264 through from the next IDR.
-                    self.log("\(error); reconnecting with H.264 passthrough")
+                    // disabled, passes the source through from the next IDR.
+                    self.log("\(error); reconnecting with passthrough")
                     self.scheduleReconnectLocked(url: url, headers: headers, closingEpoch: epoch)
                 } catch let error as CastUnsupportedCodecError {
-                    // Terminal by design: video is never re-encoded and
-                    // the audio transcode covers MP2 always and AC-3/E-AC-3
+                    // Terminal by design: video other than H.264 / HEVC
+                    // has no path, and the audio transcode covers MP2 always and AC-3/E-AC-3
                     // only under the sender's transcode-aac plan (and needs
                     // a platform decoder). Surfaced to the
                     // sender's ready wait as the cast failure.

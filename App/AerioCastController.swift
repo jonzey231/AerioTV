@@ -115,6 +115,36 @@ final class AerioCastController: NSObject, ObservableObject {
     /// session's first load.
     private var webReceiverHasLoadedMedia = false
 
+    /// The cast proxy's video plan for what is casting now (the remuxer's
+    /// decision against the source SPS). Drives the transcode note on the
+    /// cast card and in Stream Info; nil until the source is read, and for
+    /// pipelines that bypass the proxy.
+    @Published private(set) var videoPlanOutcome: CastVideoPlanOutcome?
+    /// What the receiver is actually presenting, from its telemetry tick:
+    /// "1920x1080 at 60fps". nil until a PLAYING tick reports a size.
+    @Published private(set) var receiverVideoLine: String?
+    /// Last five playing-tick rates for the current size (median shown).
+    private var receiverFPSSamples: (resolution: String, values: [Double]) = ("", [])
+
+    /// Three-line note shown whenever the phone transcodes the video
+    /// (Logan 2026-09-27), in this order: the source, what this device
+    /// turns it into, and what the receiver ruled out (the list comes from
+    /// the plan's own decision). nil when no transcode runs.
+    var transcodeNote: (source: String, phone: String, receiver: String)? {
+        guard let outcome = videoPlanOutcome, let output = outcome.outputDescription,
+              let receiver = outcome.receiverLine(deviceName: connectedDeviceName) else { return nil }
+        let device = UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
+        return ("Source: \(outcome.sourceDescription)",
+                "Transcoding on this \(device) to \(output)",
+                receiver)
+    }
+
+    /// Equal writes still re-render every observer, and the proxy reports
+    /// once per ingest connection.
+    private func setVideoPlanOutcome(_ outcome: CastVideoPlanOutcome?) {
+        if videoPlanOutcome != outcome { videoPlanOutcome = outcome }
+    }
+
     /// Accent status line for the cast card and the controls sheet: the flip
     /// in progress wins over the steady "Casting to <device>".
     func castStatusLine(deviceName: String) -> String {
@@ -257,7 +287,9 @@ final class AerioCastController: NSObject, ObservableObject {
                 func cap(_ key: String) -> String { display[key] == true ? "yes" : "no" }
                 debugLog("[Cast] receiver display: h264_1080p60=\(cap("h264_1080p60")) "
                     + "h264_1080p30=\(cap("h264_1080p30")) hevc_1080p60=\(cap("hevc_1080p60")) "
-                    + "hevc_4k60=\(cap("hevc_4k60")) h264_4k60=\(cap("h264_4k60"))")
+                    + "hevc_4k60=\(cap("hevc_4k60")) h264_4k60=\(cap("h264_4k60")) "
+                    + "hevc_1080p60_hlg=\(cap("hevc_1080p60_hlg")) hevc_1080p60_pq=\(cap("hevc_1080p60_pq")) "
+                    + "hevc_4k60_hlg=\(cap("hevc_4k60_hlg")) hevc_4k60_pq=\(cap("hevc_4k60_pq"))")
             }
         }
         guard let parsed = bools(json["mse"]) else { return }
@@ -267,7 +299,8 @@ final class AerioCastController: NSObject, ObservableObject {
         func cap(_ key: String) -> String { parsed[key] == true ? "yes" : "no" }
         debugLog("[Cast] receiver caps: ac-3=\(cap("ac-3")) ec-3=\(cap("ec-3")) "
             + "aac=\(cap("mp4a.40.2")) h264=\(cap("avc1.64002A")) "
-            + "hvc1=\(cap("hvc1")) hvc1.4k=\(cap("hvc1.4k")) hev1=\(cap("hev1"))")
+            + "hvc1=\(cap("hvc1")) hvc1.4k=\(cap("hvc1.4k")) hev1=\(cap("hev1")) "
+            + "hvc1.hlg=\(cap("hvc1.hlg")) hvc1.pq=\(cap("hvc1.pq"))")
     }
 
     /// Attached on session start, dropped on session end.
@@ -350,6 +383,15 @@ final class AerioCastController: NSObject, ObservableObject {
     /// Latch the receiver type, log WHICH of the three outcomes happened, and
     /// release any held load.
     private func resolveReceiverTarget(_ target: ReceiverTarget, answered: Bool = true) {
+        // The web receiver answering hello means the AerioTV TV app is no
+        // longer what Cast Connect launches here (uninstalled, measured
+        // 2026-09-27), so the picker must stop listing it as AerioTV on TV.
+        // Ahead of the latch: the answer can land after a handshake timeout
+        // already chose the web receiver.
+        if target == .webReceiver, answered,
+           let id = GCKCastContext.sharedInstance().sessionManager.currentCastSession?.device.deviceID {
+            CastNativeDeviceRegistry.shared.forget(id)
+        }
         guard receiverTarget != target else { return }
         receiverTarget = target
         if target == .androidTVApp {
@@ -772,6 +814,14 @@ final class AerioCastController: NSObject, ObservableObject {
                 return
             }
             let playlistURL: URL
+            // The previous channel's note must not describe this one while
+            // the new source is still being read.
+            await MainActor.run { self?.setVideoPlanOutcome(nil) }
+            CastHLSProxySession.shared.onVideoDecision = { outcome in
+                Task { @MainActor in
+                    AerioCastController.shared.setVideoPlanOutcome(outcome)
+                }
+            }
             // A connection-limit refusal or reconnect bounce after the
             // receiver loaded ends the cast with the notice text.
             CastHLSProxySession.shared.onTerminalAfterReady = { text in
@@ -964,7 +1014,7 @@ final class AerioCastController: NSObject, ObservableObject {
                 .replacingOccurrences(of: " audio", with: "")
             switch codec.stream {
             case .video:
-                return "This channel's video is \(name), which Google Cast receivers cannot play."
+                return "This channel's video is \(name), which cannot be cast to this receiver."
             case .audio:
                 if name.hasPrefix("AC-3") || name.hasPrefix("E-AC-3") {
                     return "This receiver cannot decode this channel's surround audio (AC-3)."
@@ -1507,6 +1557,9 @@ extension AerioCastController: GCKSessionManagerListener {
         loggedCaps = nil
         receiverDisplayCaps = nil
         loggedDisplayCaps = nil
+        setVideoPlanOutcome(nil)
+        if receiverVideoLine != nil { receiverVideoLine = nil }
+        receiverFPSSamples = ("", [])
         // The cast card must not outlive the session; a local resume below
         // publishes its own via PlayerSession.
         NowPlayingBridge.shared.teardown()
@@ -1661,6 +1714,31 @@ extension AerioCastController: GCKGenericChannelDelegate {
         noteReceiverInfo(json)
     }
 
+    /// The tick's `res` ("1920x1080", from videoWidth / videoHeight) and
+    /// `fps` (decoded frames per second over the last tick, one decimal).
+    /// The rate is shown whole: the measurement wanders a tenth either side
+    /// of the true rate every tick, and a card that flickers between 59.9
+    /// and 60.1 says nothing more than "60".
+    private func noteReceiverVideo(_ json: [String: Any]) {
+        // A paused or buffering tick reports no frames; the last playing
+        // reading stays up rather than the line blinking out.
+        guard let res = json["res"] as? String, !res.isEmpty, !res.hasPrefix("0x"),
+              !res.hasSuffix("x0"),
+              let fps = (json["fps"] as? NSNumber)?.doubleValue, fps > 0 else { return }
+        // The tick's rate is a one-second sample: the first few after a load
+        // straddle the start and read 8 or 15 fps on a stream the receiver
+        // then presents at 60 (Logan's card, 2026-09-27 01:11). Show the
+        // median of the last five playing ticks, and nothing before five.
+        if receiverFPSSamples.resolution != res { receiverFPSSamples = (res, []) }
+        receiverFPSSamples.values.append(fps)
+        if receiverFPSSamples.values.count > 5 { receiverFPSSamples.values.removeFirst() }
+        guard receiverFPSSamples.values.count == 5 else { return }
+        let median = receiverFPSSamples.values.sorted()[2]
+        let line = "\(res) at \(Int(median.rounded()))fps"
+        if receiverVideoLine != line { receiverVideoLine = line }
+    }
+
+
     /// Never throws and never logs anything but the single line: a
     /// malformed snapshot must not cost us the rest of the session.
     private func logReceiverDebug(_ message: String) {
@@ -1743,6 +1821,7 @@ extension AerioCastController: GCKGenericChannelDelegate {
         }
         if let st = json["state"] as? String { receiverPlayerState = st }
         if let r = json["rate"] as? NSNumber { receiverPlaybackRate = r.doubleValue }
+        noteReceiverVideo(json)
         var line = "[Cast] receiver: ev=\(string("ev")) t=\(decimals("t", 3)) "
             + "buffered=\(buffered) ready=\(string("ready")) state=\(string("state")) "
             + "rate=\(string("rate")) seek=\(seek) bufTime=\(decimals("bufTime", 2)) "
@@ -2433,6 +2512,15 @@ final class CastNativeDeviceRegistry: ObservableObject {
         UserDefaults.standard.set(Array(ids), forKey: Self.key)
         debugLog("[Cast] device \(deviceID) recorded as AerioTV on TV")
     }
+
+    /// Only a web receiver's own answer calls this; a handshake timeout is
+    /// not evidence the TV app is gone.
+    func forget(_ deviceID: String) {
+        guard ids.contains(deviceID) else { return }
+        ids.remove(deviceID)
+        UserDefaults.standard.set(Array(ids), forKey: Self.key)
+        debugLog("[Cast] device \(deviceID) no longer AerioTV on TV")
+    }
 }
 
 // MARK: - SwiftUI Cast button
@@ -2739,6 +2827,10 @@ struct RemoteSessionSheet: View {
     var onStop: () -> Void
     /// Idle only: "Change Cast Device" / "Change AirPlay Device".
     var onChangeDevice: () -> Void = {}
+    /// Under the Stop button (Logan 2026-09-27: the resolution lines belong
+    /// in the expanded sheet, not the collapsed card): the "Receiver:" stat
+    /// and, while the phone transcodes, the two-line note.
+    var footnoteLines: [String] = []
 
     @State private var contentHeight: CGFloat = 320
     @State private var showOptions = false
@@ -2813,11 +2905,11 @@ struct RemoteSessionSheet: View {
             header
             programBlock
             Group {
-                HStack(spacing: 48) {
+                HStack(spacing: 24) {
                     labeledButton("chevron.down", label: "Channel Down", action: onChannelDown)
                     labeledButton("chevron.up", label: "Channel Up", action: onChannelUp)
                 }
-                HStack(alignment: .top, spacing: 36) {
+                HStack(alignment: .top, spacing: 0) {
                     labeledButton(SkipIntervals.backSymbol(skipBackSeconds),
                                   label: "Back \(skipBackSeconds)s") {
                         onSeek(-Double(skipBackSeconds))
@@ -2834,6 +2926,7 @@ struct RemoteSessionSheet: View {
                                 .scaledFont(.caption)
                                 .foregroundStyle(.white.opacity(0.8))
                         }
+                        .frame(width: Self.buttonColumnWidth)
                     }
                     .accessibilityLabel(isPlaying ? "Pause" : "Play")
                     labeledButton(SkipIntervals.forwardSymbol(skipForwardSeconds),
@@ -2853,6 +2946,18 @@ struct RemoteSessionSheet: View {
                       systemImage: "stop.fill")
                     .foregroundStyle(.red)
             } background: { Color.red.opacity(0.15) } action: { onStop() }
+            if !footnoteLines.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(footnoteLines, id: \.self) { line in
+                        Text(line)
+                            .scaledFont(.footnote)
+                            .foregroundStyle(.white.opacity(0.7))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 4)
+            }
         }
         .frame(maxWidth: .infinity)
     }
@@ -2961,6 +3066,8 @@ struct RemoteSessionSheet: View {
         }
     }
 
+    private static let buttonColumnWidth: CGFloat = 104
+
     private func labeledButton(_ symbol: String, label: String,
                                action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -2975,6 +3082,10 @@ struct RemoteSessionSheet: View {
                     .scaledFont(.caption)
                     .foregroundStyle(.white.opacity(0.8))
             }
+            // Same column width for every button: "Forward 60s" is wider
+            // than "Back 5s", and unequal labels pulled the row's centre
+            // 20 pt left of the sheet's (Logan 2026-09-27).
+            .frame(width: Self.buttonColumnWidth)
         }
         .accessibilityLabel(label)
     }
@@ -3251,13 +3362,24 @@ struct CastOptionsSheet: View {
                 Section("Stream Info") {
                     if let stats {
                         CastStreamInfoCard(stats: stats,
-                                           receiverName: cast.connectedDeviceName)
+                                           receiverName: cast.connectedDeviceName,
+                                           receiverVideo: cast.receiverVideoLine)
                             .listRowInsets(EdgeInsets())
                             .listRowBackground(Color.clear)
                     } else {
                         Text("Waiting for the cast proxy to report.")
                             .scaledFont(.footnote)
                             .foregroundStyle(.secondary)
+                    }
+                    // Same three lines as the cast card.
+                    if let note = cast.transcodeNote {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(note.source)
+                            Text(note.phone)
+                            Text(note.receiver)
+                        }
+                        .scaledFont(.footnote)
+                        .foregroundStyle(.secondary)
                     }
                 }
                 }
@@ -3317,6 +3439,8 @@ private struct CastStreamInfoCard: View {
     @Environment(\.aerioTextScale) private var textScale
     let stats: CastHLSProxySession.Stats
     let receiverName: String?
+    /// "1920x1080 at 60fps" from the receiver's own telemetry.
+    let receiverVideo: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -3327,6 +3451,7 @@ private struct CastStreamInfoCard: View {
             row(label: "RATE", value: rateLine)
             row(label: "PROXY", value: "HLS on port \(stats.port)")
             row(label: "TV", value: receiverName ?? "-")
+            row(label: "RECEIVER", value: receiverVideo ?? "waiting")
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -3774,6 +3899,9 @@ struct RemoteSessionCard: View {
     /// Android parity (CastMiniController.showTransport): hidden while nothing
     /// is playing on the other screen yet, since there is nothing to pause.
     var showTransport: Bool = true
+    /// Extra lines under the status line (Cast: the transcode note and what
+    /// the receiver presents). Empty keeps the card at its three lines.
+    var detailLines: [String] = []
     let onTap: () -> Void
     let onTogglePlayPause: () -> Void
     let onStop: () -> Void
@@ -3811,6 +3939,14 @@ struct RemoteSessionCard: View {
                     .scaledFont(.caption)
                     .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))
                     .lineLimit(1)
+                ForEach(detailLines, id: \.self) { line in
+                    // Wraps rather than truncates: the note names the codec,
+                    // size and rate, and a cut-off line loses exactly those.
+                    Text(line)
+                        .scaledFont(.caption2)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             if showTransport {

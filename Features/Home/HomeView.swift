@@ -6042,6 +6042,22 @@ struct MainTabView: View {
         }
     }
 
+    /// Cast sheet lines under Stop Casting: what the receiver reports it is
+    /// presenting, then the transcode note (Logan
+    /// 2026-09-27: whenever the phone transcodes, say what the receiver
+    /// could not take and what it gets instead), then what the receiver
+    /// reports it is presenting.
+    private var castCardDetailLines: [String] {
+        var lines: [String] = []
+        if let receiver = castController.receiverVideoLine {
+            lines.append("Receiver: \(receiver)")
+        }
+        if let note = castController.transcodeNote {
+            lines += [note.source, note.phone, note.receiver]
+        }
+        return lines
+    }
+
     /// "AirPlay to <receiver>" (Cast's "Casting to <device>" wording),
     /// plain "AirPlay" until the receiver name resolves.
     private var airPlayPlayingStatus: String {
@@ -6191,7 +6207,8 @@ struct MainTabView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                         showCompanionPickerGlobal = true
                     }
-                }
+                },
+                footnoteLines: content == nil ? [] : castCardDetailLines
             )
         case .companion:
             RemoteControlScreen(
@@ -8905,9 +8922,16 @@ private struct RemoteSessionCardDock<Content: View>: View {
             let barTop = metrics.tabBarTopInWindow
             // Not measured yet: fall back to the stock 49 pt bar plus the home
             // indicator so the first frame is never ON the bar.
-            let lift = barTop > 0
-                ? max(RemoteSessionCardMetrics.gap, dockBottom - barTop + RemoteSessionCardMetrics.gap)
-                : 49 + geo.safeAreaInsets.bottom + RemoteSessionCardMetrics.gap
+            let fallback = 49 + geo.safeAreaInsets.bottom + RemoteSessionCardMetrics.gap
+            let measured = dockBottom - barTop + RemoteSessionCardMetrics.gap
+            // A bar top measured in the other orientation puts the card
+            // hundreds of points up the screen until the re-measure lands
+            // (Logan 2026-09-27: "sits at the top and then snaps down").
+            // No tab bar is ever taller than about twice the stock one, so a
+            // larger lift is a stale reading: use the fallback instead.
+            let lift = barTop > 0 && measured <= fallback * 2
+                ? max(RemoteSessionCardMetrics.gap, measured)
+                : fallback
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
                 content
@@ -8918,7 +8942,16 @@ private struct RemoteSessionCardDock<Content: View>: View {
             }
             .frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
             .onAppear { metrics.measureTabBar() }
-            .onChange(of: geo.size) { _, _ in metrics.measureTabBar() }
+            .onChange(of: geo.size) { _, _ in
+                // A rotation lands here before the bar has its new frame:
+                // measured once, the landscape top (about 380 pt) lifted the
+                // card to the top of the portrait screen (Logan 2026-09-27).
+                metrics.measureTabBar()
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    metrics.measureTabBar()
+                }
+            }
             .task {
                 // The bar may not be in the hierarchy yet on the first frame.
                 metrics.measureTabBar()

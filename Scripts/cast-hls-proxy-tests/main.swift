@@ -1724,12 +1724,20 @@ func censusADTSFrame(_ frameLen: Int) -> [UInt8] {
     return f
 }
 
-func censusVideoAU(keyframe: Bool) -> [UInt8] {
+func censusVideoAU(keyframe: Bool, hevc: Bool = false) -> [UInt8] {
+    let start: [UInt8] = [0, 0, 0, 1]
+    if hevc {
+        // VPS + SPS + PPS, then an IDR_W_RADL (19) or TRAIL_R (1) slice.
+        let ps = hevcParameterSets()
+        var slice = [UInt8](repeating: 0x10, count: 400)
+        slice[0] = keyframe ? 19 << 1 : 1 << 1
+        slice[1] = 0x01
+        return start + ps.vps + start + ps.sps + start + ps.pps + start + slice
+    }
     let sps: [UInt8] = [0x67, 0x42, 0xC0, 0x1E, 0xD9, 0x00, 0xF0, 0x11, 0x7E, 0xF0, 0x3C, 0x80]
     let pps: [UInt8] = [0x68, 0xCE, 0x3C, 0x80]
     var slice = [UInt8](repeating: 0x10, count: 400)
     slice[0] = keyframe ? 0x65 : 0x41
-    let start: [UInt8] = [0, 0, 0, 1]
     return start + sps + start + pps + start + slice
 }
 
@@ -1738,7 +1746,7 @@ func censusVideoAU(keyframe: Bool) -> [UInt8] {
 /// PES. `audioLagTicks` delays the audio in MUX ORDER, which is what puts
 /// a segment's last frames behind the keyframe that cuts it.
 func straddlingCensusTS(videoFrames: Int, videoFrameTicks: Int64, gop: Int,
-                        frameLen: Int, audioLagTicks: Int64) -> (Data, Int) {
+                        frameLen: Int, audioLagTicks: Int64, hevc: Bool = false) -> (Data, Int) {
     let frameTicks = 1024 * CastFMP4Remuxer.ticksPerSecond / 48_000
     let base: Int64 = 10_000
     var writer = CensusTSWriter()
@@ -1765,11 +1773,11 @@ func straddlingCensusTS(videoFrames: Int, videoFrameTicks: Int64, gop: Int,
         audioPES.append((off, end, base + Int64(firstFrame) * frameTicks))
         off = end
     }
-    // PAT pointing at a PMT on pid 0x1000: H.264 on 0x100, ADTS on 0x101.
+    // PAT pointing at a PMT on pid 0x1000: H.264 (or HEVC) on 0x100, ADTS on 0x101.
     let pat: [UInt8] = [0x00, 0xB0, 13, 0x00, 0x01, 0xC1, 0, 0, 0, 0x01, 0xF0, 0x00, 0, 0, 0, 0]
     let pmtBody: [UInt8] = [0x00, 0x01, 0xC1, 0, 0,
                             0xE1, 0x00, 0xF0, 0x00,
-                            0x1B, 0xE1, 0x00, 0xF0, 0x00,
+                            hevc ? 0x24 : 0x1B, 0xE1, 0x00, 0xF0, 0x00,
                             0x0F, 0xE1, 0x01, 0xF0, 0x00]
     let pmt: [UInt8] = [0x02, 0xB0, UInt8(pmtBody.count + 4)] + pmtBody + [0, 0, 0, 0]
     writer.psi(pid: 0, table: pat)
@@ -1777,7 +1785,8 @@ func straddlingCensusTS(videoFrames: Int, videoFrameTicks: Int64, gop: Int,
     var next = 0
     for i in 0..<videoFrames {
         let dts = base + Int64(i) * videoFrameTicks
-        writer.pes(pid: 0x100, payload: censusPES(streamID: 0xE0, payload: censusVideoAU(keyframe: i % gop == 0),
+        writer.pes(pid: 0x100, payload: censusPES(streamID: 0xE0,
+                                                  payload: censusVideoAU(keyframe: i % gop == 0, hevc: hevc),
                                                   pts: dts, dts: dts))
         while next < audioPES.count, audioPES[next].pts <= dts - audioLagTicks {
             let a = audioPES[next]
@@ -2603,6 +2612,7 @@ let ultraCaps = CastReceiverVideoCaps(
     expectEq(CastHLSSegmentStore.videoCodecString(from: avc42), "avc1.64002A", "codec string: avcC")
 
     runTranscodeRemuxChecks(hvcC: hvcC ?? [])
+    runHEVCIngestChecks(hvcC: hvcC ?? [])
 }
 
 /// Stands in for VideoToolbox: keeps PTS, DTS = PTS, forced IDR every
@@ -2618,14 +2628,16 @@ final class FakeVideoTranscoder: CastVideoTranscoding {
     var fed = 0
     var released = false
     var failAfter: Int?
+    var lastParameterSets: [[UInt8]] = []
 
     init(sink: CastVideoTranscodeSink, keyTicks: Int64, latency: Int, config: [UInt8], failAfter: Int? = nil) {
         self.sink = sink; self.keyTicks = keyTicks; self.latency = latency
         self.config = config; self.failAfter = failAfter
     }
 
-    func feed(_ sample: [UInt8], pts: Int64, dts: Int64, keyframe: Bool, sps: [UInt8], pps: [UInt8]) {
+    func feed(_ sample: [UInt8], pts: Int64, dts: Int64, keyframe: Bool, parameterSets: [[UInt8]]) {
         fed += 1
+        lastParameterSets = parameterSets
         if let failAfter, fed == failAfter { sink.onFailure("fake VT error"); return }
         if held.isEmpty && lastKey < 0 && !keyframe { return }
         held.append(pts)
@@ -2735,7 +2747,336 @@ final class FakeVideoTranscoder: CastVideoTranscoding {
            "transcode remux: no delivery queue keeps passthrough")
 }
 
+// MARK: 18. HEVC ingest: SPS / VPS facts, codec-aware plan, passthrough (2026-09-27)
+//
+// Measured: a Google TV Streamer answered hevc_1080p60=yes hevc_4k60=no
+// h264_4k60=yes hvc1=yes; a 4K HEVC channel was refused by name before
+// this, because the remuxer only took stream_type 0x1B.
+
+/// Google TV Streamer, measured 2026-09-27.
+let streamerCaps = CastReceiverVideoCaps(
+    mse: ["h264": true, "hvc1": true, "hvc1.4k": false, "hev1": true],
+    display: ["h264_1080p60": true, "h264_1080p30": true, "hevc_1080p60": true,
+              "hevc_4k60": false, "h264_4k60": true])
+
+extension BitWriter {
+    mutating func se(_ v: Int) { ue(v > 0 ? 2 * v - 1 : -2 * v) }
+}
+
+/// HEVC Main10 level 5.1 3840x2160 SPS carrying the whole tail the plan
+/// reads past: 10-bit, reorder 2 at the highest sub-layer, scaling list
+/// data (one explicit 4x4 list, one explicit 16x16 with its DC), two
+/// short-term RPS (the second inter-predicted from the first), then a VUI
+/// with BT.2020 / HLG / BT.2020nc and 50 fps timing.
+func hevcSPS4K50HLG() -> [UInt8] {
+    var w = BitWriter()
+    w.put(0, 4); w.put(0, 3); w.put(1, 1) // vps id, max_sub_layers_minus1 0, nesting
+    w.put(0, 2); w.put(0, 1); w.put(2, 5) // space, tier, profile_idc 2 (Main10)
+    w.put(0x2000_0000, 32) // compat flag 2
+    w.put(0xB0, 8); w.put(0, 40)
+    w.put(153, 8) // level 5.1
+    w.ue(0) // sps id
+    w.ue(1) // 4:2:0
+    w.ue(3840); w.ue(2160)
+    w.put(0, 1) // no conformance window
+    w.ue(2); w.ue(2) // 10-bit luma and chroma
+    w.ue(4) // log2_max_pic_order_cnt_lsb_minus4
+    w.put(0, 1) // ordering info for the highest sub-layer only
+    w.ue(4); w.ue(2); w.ue(0) // dec pic buffering, num_reorder_pics 2, latency
+    w.ue(0); w.ue(3); w.ue(0); w.ue(3); w.ue(1); w.ue(1) // block sizes, hierarchy depths
+    w.put(1, 1); w.put(1, 1) // scaling_list_enabled, data present
+    for sizeId in 0..<4 {
+        for matrixId in stride(from: 0, to: 6, by: sizeId == 3 ? 3 : 1) {
+            if matrixId == 0 && (sizeId == 0 || sizeId == 2) {
+                w.put(1, 1)
+                if sizeId == 2 { w.se(8) } // DC
+                for _ in 0..<(sizeId == 0 ? 16 : 64) { w.se(1) }
+            } else {
+                w.put(0, 1); w.ue(0)
+            }
+        }
+    }
+    w.put(0, 1); w.put(1, 1) // amp off, SAO on
+    w.put(0, 1) // pcm off
+    w.ue(2) // two short-term RPS
+    w.ue(1); w.ue(0); w.ue(0); w.put(1, 1) // set 0: one negative picture, used
+    w.put(1, 1); w.put(0, 1); w.ue(0) // set 1: predicted, sign, abs_delta_rps_minus1
+    w.put(1, 1) // j 0: used
+    w.put(0, 1); w.put(1, 1) // j 1: not used, use_delta
+    w.put(0, 1) // no long-term pictures
+    w.put(1, 1); w.put(1, 1) // temporal mvp, strong intra smoothing
+    w.put(1, 1) // vui
+    w.put(1, 1); w.put(1, 8) // aspect_ratio_idc 1
+    w.put(0, 1) // overscan
+    w.put(1, 1); w.put(5, 3); w.put(0, 1); w.put(1, 1); w.put(9, 8); w.put(18, 8); w.put(9, 8)
+    w.put(0, 1) // chroma loc
+    w.put(0, 1); w.put(0, 1); w.put(0, 1) // neutral chroma, field_seq, frame_field_info
+    w.put(0, 1) // default display window
+    w.put(1, 1); w.put(1, 32); w.put(50, 32) // 50 fps
+    w.put(0, 1); w.put(0, 1); w.put(0, 1) // poc proportional, hrd, bitstream restriction
+    w.put(0, 1) // sps_extension_present
+    w.trailing()
+    return [0x42, 0x01] + escapeRBSP(w.bytes)
+}
+
+/// HEVC VPS with 59.94 fps timing (60000 / 1001).
+func hevcVPSWithTiming() -> [UInt8] {
+    var w = BitWriter()
+    w.put(0, 4); w.put(1, 1); w.put(1, 1); w.put(0, 6) // id, base layer flags, max_layers_minus1
+    w.put(0, 3); w.put(1, 1); w.put(0xFFFF, 16) // max_sub_layers_minus1, nesting, reserved
+    w.put(0, 2); w.put(0, 1); w.put(1, 5); w.put(0x6000_0000, 32); w.put(0xB0, 8); w.put(0, 40); w.put(123, 8)
+    w.put(1, 1); w.ue(4); w.ue(2); w.ue(0) // ordering info
+    w.put(0, 6); w.ue(0) // max_layer_id, num_layer_sets_minus1
+    w.put(1, 1); w.put(1001, 32); w.put(60000, 32)
+    w.put(0, 1); w.ue(0); w.put(0, 1) // poc proportional, num_hrd, extension
+    w.trailing()
+    return [0x40, 0x01] + escapeRBSP(w.bytes)
+}
+
+@MainActor func runHEVCIngestChecks(hvcC: [UInt8]) {
+    // SPS parser: the whole tail
+    let sps4K = hevcSPS4K50HLG()
+    let full = CastVideoCodecConfig.parseHEVCSPS(sps4K)
+    expect(full?.width == 3840 && full?.height == 2160, "hevc sps: 3840x2160, no conformance window")
+    expectEq(full?.bitDepthLumaMinus8, 2, "hevc sps: 10-bit luma")
+    expectEq(full?.generalProfileIDC, 2, "hevc sps: Main10 profile")
+    expectEq(full?.generalLevelIDC, 153, "hevc sps: level 5.1")
+    expectEq(full?.maxNumReorderPics, 2, "hevc sps: reorder depth through the ordering info")
+    expectEq(full?.fps, 50, "hevc sps: VUI 50 fps past scaling lists and an inter-predicted RPS")
+    expect(full?.colourPrimaries == 9 && full?.transferCharacteristics == 18 && full?.matrixCoefficients == 9,
+           "hevc sps: BT.2020 / HLG / BT.2020nc colour description")
+    expectEq(full?.fieldCoding, false, "hevc sps: progressive")
+    let info = CastVideoCodecConfig.hevcStreamInfo(sps: sps4K, vps: nil)
+    expectEq(info?.codec, .hevc, "hevc info: codec")
+    expectEq(info?.bitDepth, 10, "hevc info: bit depth")
+    expectEq(info?.codecString, "hvc1.2.4.L153.B0", "hevc info: hvc1 string from the PTL")
+    expectEq(info?.levelLabel, "5.1", "hevc info: level label")
+    expectEq(info?.maxNumReorderFrames, 2, "hevc info: reorder depth")
+    // Minimal SPS (ends after the bit depths): the tail is best effort.
+    let ps = hevcParameterSets()
+    let small = CastVideoCodecConfig.hevcStreamInfo(sps: ps.sps, vps: nil)
+    expect(small?.width == 1920 && small?.height == 1080 && small?.fps == nil,
+           "hevc info: truncated tail keeps the size, fps unknown")
+    // VPS timing fills in a frame rate the SPS lacks.
+    let vps = hevcVPSWithTiming()
+    expectEq(CastVideoCodecConfig.parseHEVCVPSFrameRate(vps).map { ($0 * 100).rounded() / 100 }, 59.94,
+             "hevc vps: 60000 / 1001 timing")
+    expectEq(CastVideoCodecConfig.hevcStreamInfo(sps: ps.sps, vps: vps)?.fps.map { ($0 * 100).rounded() / 100 },
+             59.94, "hevc info: VPS timing when the SPS VUI has none")
+    expectEq(CastVideoCodecConfig.parseHEVCVPSFrameRate(ps.vps), nil, "hevc vps: truncated VPS reads nil")
+
+    guard let src4K = info, let src1080 = small else { return }
+
+    // Codec-aware plan
+    let streamer = CastVideoPlan(caps: streamerCaps)
+    let d4K = streamer.decide(src4K)
+    expectEq(d4K.output, CastVideoOutputSpec(codec: .hevc, width: 1920, height: 1080, frameStep: 1,
+                                             bitrateCap: 12_000_000),
+             "hevc plan: Streamer 4K50 HEVC -> HEVC 1080 at the source rate")
+    let o4K = CastVideoPlanOutcome(source: src4K, decision: d4K)
+    expectEq(o4K.sourceDescription, "HEVC 3840x2160 at 50fps HDR", "hevc note: source line")
+    expectEq(o4K.outputDescription, "HEVC 1920x1080 at 50fps", "hevc note: output line")
+    expectEq(streamer.logLine(source: src4K, decision: d4K),
+             "[Cast] video plan: source=hvc1.2.4.L153.B0 3840x2160@50 10-bit HDR HLG receiver display "
+             + "h264_1080p60=yes h264_1080p30=yes hevc_1080p60=yes hevc_4k60=no hvc1=yes "
+             + "hevc_1080p60_hlg=no hevc_4k60_hlg=no hvc1.hlg=no "
+             + "-> transcode HEVC 1080p50 (12000 kbps) HDR HLG -> SDR BT.709",
+             "hevc plan: log line")
+    expectEq(streamer.decide(src1080).output, nil, "hevc plan: Streamer 1080 HEVC passes through")
+    var hevc4KRx = streamerCaps; hevc4KRx.display?["hevc_4k60"] = true
+    hevc4KRx.display?["hevc_4k60_hlg"] = true
+    expectEq(CastVideoPlan(caps: hevc4KRx).decide(src4K).output, nil,
+             "hevc plan: receiver displaying HEVC 4K60 HLG passes 4K HLG through")
+    var mseOnly4K = streamerCaps; mseOnly4K.mse["hvc1.4k"] = true
+    expectEq(CastVideoPlan(caps: mseOnly4K).decide(src4K).output?.width, 1920,
+             "hevc plan: MSE hvc1.4k without display hevc_4k60 still goes to 1080, never a 4K re-encode")
+
+    let ultra = CastVideoPlan(caps: ultraCaps)
+    expectEq(ultra.decide(src4K).output, CastVideoOutputSpec(codec: .h264, width: 1280, height: 720,
+                                                             frameStep: 1, bitrateCap: 8_000_000),
+             "hevc plan: Ultra 4K HEVC -> H.264 720p")
+    expectEq(CastVideoPlanOutcome(source: src4K, decision: ultra.decide(src4K)).outputDescription,
+             "H.264 1280x720 at 50fps", "hevc note: H.264 output line")
+    var ultra30 = ultra; ultra30.downProfile = .p1080p30
+    let d30 = ultra30.decide(src4K)
+    expectEq(d30.output, CastVideoOutputSpec(codec: .h264, width: 1920, height: 1080, frameStep: 2,
+                                             bitrateCap: 8_000_000),
+             "hevc plan: Ultra 1080p30 profile -> H.264 1080 at half rate")
+    expectEq(CastVideoPlanOutcome(source: src4K, decision: d30).outputDescription,
+             "H.264 1920x1080 at 25fps", "hevc note: half-rate output line")
+    expectEq(ultra.decide(src1080).output?.codec, .h264, "hevc plan: Ultra 1080 HEVC -> H.264")
+    var s720 = src1080; s720.width = 1280; s720.height = 720
+    expectEq(ultra.decide(s720).output?.codec, .h264, "hevc plan: 720 HEVC without MSE hvc1 -> H.264")
+    expectEq(streamer.decide(s720).output, nil, "hevc plan: 720 HEVC with MSE hvc1 passes through")
+
+    // No caps: transcode rather than refuse or pass blind; H.264 is unchanged.
+    let blind = CastVideoPlan.passthrough.decide(src4K)
+    expectEq(blind, CastVideoDecision(output: CastVideoOutputSpec(codec: .h264, width: 1280, height: 720,
+                                                                  frameStep: 1, bitrateCap: 8_000_000),
+                                      reason: "receiver caps not measured"),
+             "hevc plan: no caps -> H.264 down profile")
+    let oldPage = CastVideoPlan(caps: CastReceiverVideoCaps(mse: ["hvc1": true], display: nil))
+    expectEq(oldPage.decide(src1080).output, nil, "hevc plan: no display map, MSE hvc1 -> 1080 passes")
+    expectEq(oldPage.decide(src4K).output?.codec, .hevc, "hevc plan: no display map, 4K -> HEVC 1080")
+    let oldPageNoHEVC = CastVideoPlan(caps: CastReceiverVideoCaps(mse: [:], display: nil))
+    expectEq(oldPageNoHEVC.decide(src1080),
+             CastVideoDecision(output: CastVideoOutputSpec(codec: .h264, width: 1280, height: 720,
+                                                           frameStep: 1, bitrateCap: 8_000_000),
+                               reason: "receiver sent no display caps"),
+             "hevc plan: no display map, no hvc1 -> H.264 down profile")
+
+    var forced = streamer; forced.force = true
+    expectEq(forced.decide(src1080).output?.codec, .hevc, "hevc plan: force on an HEVC receiver -> HEVC")
+    var disabled = ultra; disabled.disabledReason = "VT failed"
+    expectEq(disabled.decide(src4K), CastVideoDecision(output: nil, reason: "VT failed"),
+             "hevc plan: disabled after a failure -> passthrough")
+    expectEq(CastVideoPlan.fpsLabel(59.94), "59.94", "fps label: 59.94")
+    expectEq(CastVideoPlan.fpsLabel(50), "50", "fps label: 50")
+    expectEq(CastVideoPlan.fpsLabel(59.9), "59.9", "fps label: trailing zero trimmed")
+
+    // Passthrough remux: hvc1 + hvcC from the source sets, sets out of the samples.
+    let (bytes, _) = straddlingCensusTS(videoFrames: 240, videoFrameTicks: 3_000, gop: 30,
+                                        frameLen: 400, audioLagTicks: 0, hevc: true)
+    var outcome: CastVideoPlanOutcome?
+    var videoInit: Data?
+    var segments: [Data] = []
+    let pass = CastFMP4Remuxer(videoPlan: CastVideoPlan(caps: streamerCaps))
+    pass.onVideoDecision = { outcome = $0 }
+    pass.onDemuxedInitSegments = { v, _ in videoInit = v }
+    pass.onDemuxedMediaSegments = { v, _, _, _ in segments.append(v) }
+    var thrown: Error?
+    do { try pass.feed(bytes) } catch { thrown = error }
+    pass.release()
+    expect(thrown == nil, "hevc remux: stream_type 0x24 is accepted")
+    expectEq(outcome?.source.codec, .hevc, "hevc remux: decision reported with the HEVC source")
+    expectEq(outcome?.decision.output, nil, "hevc remux: Streamer 1080 passes through")
+    expectEq(pass.videoPathDescription, "HEVC passthrough", "hevc remux: Stream Info path")
+    expect(videoInit.map { dataContains($0, "hvc1") && dataContains($0, "hvcC") && !dataContains($0, "avcC") } == true,
+           "hevc remux: init carries hvc1 + hvcC only")
+    expectEq(videoInit.flatMap { CastHLSSegmentStore.videoCodecString(from: $0) }, "hvc1.1.6.L153.B0",
+             "hevc remux: init codec string from the source sets")
+    expect(segments.count >= 2, "hevc remux: segments emitted (\(segments.count))")
+    expect(segments.allSatisfy { $0.range(of: Data(ps.vps)) == nil && $0.range(of: Data(ps.sps)) == nil },
+           "hevc remux: parameter sets stripped from the samples (hvc1)")
+
+    // Transcode wiring: the Ultra takes no HEVC, so the fake gets
+    // [VPS, SPS, PPS] and the plan reports an H.264 output.
+    var fake: FakeVideoTranscoder?
+    var tOutcome: CastVideoPlanOutcome?
+    let trans = CastFMP4Remuxer(
+        videoPlan: CastVideoPlan(caps: ultraCaps), videoDelivery: { block in block() },
+        videoTranscoderFactory: { _, _, keyTicks, sink, _ in
+            let f = FakeVideoTranscoder(sink: sink, keyTicks: keyTicks, latency: 2, config: hvcC)
+            fake = f
+            return f
+        })
+    trans.onVideoDecision = { tOutcome = $0 }
+    try? trans.feed(bytes)
+    trans.release()
+    expect(trans.videoIsTranscoded, "hevc transcode: video path is the transcoder")
+    expectEq(fake?.lastParameterSets, [ps.vps, ps.sps, ps.pps], "hevc transcode: VPS, SPS, PPS handed over")
+    expectEq(tOutcome?.outputDescription, "H.264 1280x720", "hevc transcode: note output, fps unknown omitted")
+    expectEq(trans.videoPathDescription, "HEVC -> H.264 1280x720", "hevc transcode: Stream Info path")
+}
+
 runVideoTranscodeChecks()
+
+// MARK: 19. HDR plan rules and the three-line note (2026-09-27)
+//
+// Measured: Sky Sports Main Event UHD is HEVC Main10 3840x2160@50 HLG
+// BT.2020. The Ultra got 8-bit H.264 with no tone map and looked washed
+// out; the plan now keeps HDR only where the receiver answers yes.
+
+@MainActor func runHDRPlanChecks() {
+    guard let hlg4K = CastVideoCodecConfig.hevcStreamInfo(sps: hevcSPS4K50HLG(), vps: nil) else {
+        expect(false, "hdr: 4K HLG SPS parses"); return
+    }
+    expectEq(hlg4K.hdrTransfer, .hlg, "hdr: transfer 18 reads as HLG")
+    expect(hlg4K.isHDR, "hdr: HLG source is HDR")
+    var pq4K = hlg4K; pq4K.transferCharacteristics = 16
+    expectEq(pq4K.hdrTransfer, .pq, "hdr: transfer 16 reads as PQ")
+    var sdr4K = hlg4K; sdr4K.transferCharacteristics = 1; sdr4K.colourPrimaries = 1
+    expect(!sdr4K.isHDR, "hdr: BT.709 source is SDR")
+    var hlg1080 = hlg4K; hlg1080.width = 1920; hlg1080.height = 1080
+    var hlg720 = hlg4K; hlg720.width = 1280; hlg720.height = 720
+
+    // Passthrough needs the HDR key at the source size class.
+    var sdrOnly4K = streamerCaps; sdrOnly4K.display?["hevc_4k60"] = true
+    let d = CastVideoPlan(caps: sdrOnly4K).decide(hlg4K)
+    expectEq(d.output, CastVideoOutputSpec(codec: .hevc, width: 1920, height: 1080, frameStep: 1,
+                                           bitrateCap: 12_000_000, hdr: false),
+             "hdr: 4K SDR yes, no HLG key -> HEVC 1080 SDR (tone mapped)")
+    expectEq(d.unsupported, ["HDR"], "hdr: only HDR ruled out")
+    var hdr4K = sdrOnly4K; hdr4K.display?["hevc_4k60_hlg"] = true
+    expectEq(CastVideoPlan(caps: hdr4K).decide(hlg4K).output, nil, "hdr: 4K HLG key -> passthrough")
+    expect(CastVideoPlan(caps: hdr4K).decide(pq4K).output != nil, "hdr: HLG key does not pass a PQ source")
+    var hdr1080 = streamerCaps; hdr1080.display?["hevc_1080p60_hlg"] = true
+    expectEq(CastVideoPlan(caps: hdr1080).decide(hlg1080).output, nil, "hdr: 1080 HLG key -> 1080 passthrough")
+    expect(CastVideoPlan(caps: streamerCaps).decide(hlg1080).output != nil,
+           "hdr: 1080 HEVC SDR yes without the HLG key -> transcode")
+    var mseHLG = streamerCaps; mseHLG.mse["hvc1.hlg"] = true
+    expectEq(CastVideoPlan(caps: mseHLG).decide(hlg720).output, nil, "hdr: 720 with MSE hvc1.hlg -> passthrough")
+    expect(CastVideoPlan(caps: mseHLG).decide(hlg1080).output != nil,
+           "hdr: MSE hvc1.hlg does not vouch for 1080")
+
+    // Transcode keeps HDR only with the key for the OUTPUT size class.
+    let keep = CastVideoPlan(caps: hdr1080).decide(hlg4K)
+    expectEq(keep.output, CastVideoOutputSpec(codec: .hevc, width: 1920, height: 1080, frameStep: 1,
+                                              bitrateCap: 12_000_000, hdr: true),
+             "hdr: 4K HLG, 1080 HLG key -> HEVC 1080 HDR kept")
+    expectEq(keep.unsupported, ["4K"], "hdr: Streamer with 1080 HLG rules out 4K only")
+    let keepOutcome = CastVideoPlanOutcome(source: hlg4K, decision: keep)
+    expectEq(keepOutcome.outputDescription, "HEVC 1920x1080 at 50fps HDR", "hdr note: kept output line")
+    expect(CastVideoTranscoder.outputTenBit(source: hlg4K, spec: keep.output!), "hdr: kept output is Main10")
+    let streamerD = CastVideoPlan(caps: streamerCaps).decide(hlg4K)
+    expectEq(streamerD.output?.hdr, false, "hdr: Streamer without HDR keys -> SDR HEVC 1080")
+    expect(!CastVideoTranscoder.outputTenBit(source: hlg4K, spec: streamerD.output!),
+           "hdr: tone-mapped HEVC output is 8-bit Main")
+    expectEq(streamerD.unsupported, ["4K", "HDR"], "hdr: Streamer rules out 4K, HDR")
+    var hevc8Bit10 = sdr4K; hevc8Bit10.width = 3840
+    expect(CastVideoTranscoder.outputTenBit(source: hevc8Bit10, spec: streamerD.output!),
+           "hdr: 10-bit SDR HEVC source keeps Main10")
+
+    // Chromecast Ultra: H.264, always SDR, full three-line note.
+    let ultraD = CastVideoPlan(caps: ultraCaps).decide(hlg4K)
+    expectEq(ultraD.output, CastVideoOutputSpec(codec: .h264, width: 1280, height: 720, frameStep: 1,
+                                                bitrateCap: 8_000_000, hdr: false),
+             "hdr: Ultra -> H.264 720p SDR")
+    let ultraOutcome = CastVideoPlanOutcome(source: hlg4K, decision: ultraD)
+    expectEq(ultraOutcome.sourceDescription, "HEVC 3840x2160 at 50fps HDR", "hdr note: source line")
+    expectEq(ultraOutcome.outputDescription, "H.264 1280x720 at 50fps", "hdr note: output line")
+    expectEq(ultraOutcome.receiverLine(deviceName: "Travel Chromecast TV"),
+             "Your Travel Chromecast TV doesn't support HEVC, 4K, HDR", "hdr note: receiver line")
+    expectEq(ultraOutcome.receiverLine(deviceName: nil),
+             "This receiver doesn't support HEVC, 4K, HDR", "hdr note: unnamed receiver")
+    var ultraHDR = ultraCaps; ultraHDR.display?["hevc_4k60_hlg"] = true
+    expectEq(CastVideoPlan(caps: ultraHDR).decide(hlg4K).output?.codec, .h264,
+             "hdr: an HDR yes without HEVC SDR yes still goes to H.264 (never HDR H.264)")
+
+    // H.264 sources: 1080p60 vs 1080p on the list.
+    let h264 = try? CastFMP4Remuxer.parseSPSInfo(h264SPS1080p60())
+    if let h264 {
+        expectEq(CastVideoPlan(caps: ultraCaps).decide(h264).unsupported, ["1080p60"],
+                 "note list: Ultra rules out 1080p60 for an H.264 1080p59.94 source")
+        var no1080 = ultraCaps; no1080.display?["h264_1080p30"] = false
+        expectEq(CastVideoPlan(caps: no1080).decide(h264).unsupported, ["1080p"],
+                 "note list: no 1080 at all -> 1080p")
+    }
+
+    // Forced and unmeasured.
+    var forced = CastVideoPlan(caps: streamerCaps); forced.force = true
+    let fo = CastVideoPlanOutcome(source: hlg1080, decision: forced.decide(hlg1080))
+    expectEq(fo.receiverLine(deviceName: "Den TV"), "Transcode forced by the Developer switch",
+             "hdr note: forced line")
+    let blind = CastVideoPlanOutcome(source: hlg4K, decision: CastVideoPlan.passthrough.decide(hlg4K))
+    expectEq(blind.decision.output?.hdr, false, "hdr: no caps -> H.264 SDR")
+    expectEq(blind.receiverLine(deviceName: "Den TV"), "Your Den TV didn't report what it supports",
+             "hdr note: no caps line")
+    expectEq(CastVideoPlanOutcome(source: hlg4K, decision: CastVideoPlan(caps: hdr4K).decide(hlg4K))
+                .receiverLine(deviceName: "Den TV"), nil, "hdr note: passthrough has no note")
+}
+
+runHDRPlanChecks()
 
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)
