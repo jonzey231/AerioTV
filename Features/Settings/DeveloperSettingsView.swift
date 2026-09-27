@@ -107,6 +107,7 @@ struct DeveloperSettingsView: View {
     /// - `ManageGroupsSheet` for the hide-filter / hide-search toggles
     @AppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
     @AppStorage("castForceAACAudio") private var castForceAACAudio = false
+    @AppStorage("castMuxedTSViaMPL") private var castMuxedTSViaMPL = false
 
     /// Companion toggles — previously only exposed inside the Manage
     /// Groups sheet, which made the parent "Compact Chrome" toggle
@@ -380,6 +381,26 @@ struct DeveloperSettingsView: View {
                             }
                             Spacer()
                             Toggle("", isOn: $castForceAACAudio)
+                                .labelsHidden()
+                                .tint(.accentPrimary)
+                        }
+                        .padding(.vertical, 4)
+                        .listRowBackground(Color.cardBackground)
+
+                        // Cast pipeline experiment (2026-09-26): muxed TS HLS
+                        // from the LAN listener, played by the receiver's
+                        // legacy Media Player Library instead of Shaka.
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Cast: muxed TS via legacy player (test)")
+                                    .scaledFont(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                                Text("Cast the muxed TS playlist and play it without Shaka")
+                                    .scaledFont(.labelSmall)
+                                    .foregroundColor(Color.contrastText(.textTertiary))
+                            }
+                            Spacer()
+                            Toggle("", isOn: $castMuxedTSViaMPL)
                                 .labelsHidden()
                                 .tint(.accentPrimary)
                         }
