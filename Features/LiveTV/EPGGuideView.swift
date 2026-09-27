@@ -6373,6 +6373,7 @@ struct EPGGuideView: View {
     private func channelCell(for channel: ChannelDisplayItem) -> some View {
         GuideChannelButton(channel: channel, columnWidth: channelColumnWidth,
                            rowHeight: rowHeight, onSelect: onSelectChannel)
+            .equatable()
     }
 
     #if os(tvOS)
@@ -7302,11 +7303,14 @@ struct EPGGuideView: View {
         // is no longer a competing UIKit overlay, so the binding is safe and
         // is what the focus-restore handlers drive. tvOS passes the binding;
         // iOS uses the no-binding init.
+        let now = Date()
+        let timeState = prog.end <= now ? 0 : (prog.start <= now ? 1 : 2)
         #if os(tvOS)
         return GuideProgramButton(
             prog: prog, channelItem: channelItem, width: width, rowHeight: rowHeight,
             leadingClip: leadingClip,
             shortTimeFormatter: shortTimeFormatter,
+            timeState: timeState,
             onSelect: onSelectChannel,
             onMultiviewIntent: { handleMultiviewIntent(channel: $0) },
             onWatchCatchup: { ch, gp in handleWatchCatchup(channel: ch, prog: gp) },
@@ -7314,16 +7318,19 @@ struct EPGGuideView: View {
             sidebarOpen: sidebarOpen,
             compact: previewMode
         )
+        .equatable()
         .offset(x: x, y: 0)
         #else
         return GuideProgramButton(
             prog: prog, channelItem: channelItem, width: width, rowHeight: rowHeight,
             leadingClip: leadingClip,
             shortTimeFormatter: shortTimeFormatter,
+            timeState: timeState,
             onSelect: onSelectChannel,
             onMultiviewIntent: { handleMultiviewIntent(channel: $0) },
             onWatchCatchup: { ch, gp in handleWatchCatchup(channel: ch, prog: gp) }
         )
+        .equatable()
         .offset(x: x, y: 0)
         #endif
     }
@@ -7797,13 +7804,19 @@ private struct GuideGlyphBand: ViewModifier {
 }
 #endif
 
-private struct GuideChannelButton: View {
+private struct GuideChannelButton: View, Equatable {
     let channel: ChannelDisplayItem
     /// Channel cell size, so the logo can grow into the space a hidden
     /// number and/or name frees up without changing the column or row.
     let columnWidth: CGFloat
     let rowHeight: CGFloat
     let onSelect: (ChannelDisplayItem) -> Void
+
+    /// Same reason as `GuideProgramButton.==`: skip the body on the guide's
+    /// per-focus-move re-render unless what the cell draws changed.
+    nonisolated static func == (a: GuideChannelButton, b: GuideChannelButton) -> Bool {
+        a.channel == b.channel && a.columnWidth == b.columnWidth && a.rowHeight == b.rowHeight
+    }
     @EnvironmentObject private var favoritesStore: FavoritesStore
     /// GH #19 (Android parity): hide the channel number in the guide rail.
     /// Same key as the List view's toggle; the guide's logo is gated by
@@ -8075,14 +8088,19 @@ private struct GuideChannelButton: View {
 }
 
 // MARK: - Guide Program Button (own @FocusState for tvOS highlight)
-private struct GuideProgramButton: View {
+private struct GuideProgramButton: View, Equatable {
     let prog: GuideProgram
     let channelItem: ChannelDisplayItem
     let width: CGFloat
     let rowHeight: CGFloat
     /// Pixels of the cell hidden behind the channel column (text pins to visible edge).
     let leadingClip: CGFloat
-    let shortTimeFormatter: DateFormatter
+    /// Shared, never mutated after creation; compared by identity in `==`.
+    nonisolated(unsafe) let shortTimeFormatter: DateFormatter
+    /// Aired (0), on now (1) or upcoming (2) as of the guide's last render.
+    /// The body styles by the clock, so this is part of `==`: a cell whose
+    /// programme starts airing redraws on the next guide render.
+    var timeState: Int = 0
     let onSelect: (ChannelDisplayItem) -> Void
     /// v1.7.x: routes "Add to Multiview" context-menu taps AND
     /// single-taps-while-staging back to `EPGGuideView`'s
@@ -8609,6 +8627,28 @@ private struct GuideProgramButton: View {
     /// so SwiftUI's own diffing handles any ancestor re-renders
     /// without visible animation churn.
     #endif
+
+    /// Skips the body when nothing the cell draws from changed. Every focus
+    /// move re-renders the guide, which rebuilt every visible cell because
+    /// the closures below never compare equal: ~50 cells per D-pad press,
+    /// 150-330 ms turns on an Apple TV 4K (A10X), 2026-09-27. The closures
+    /// and the focus binding are left out on purpose: they are rebuilt each
+    /// render but do the same thing. Observed objects and app storage the
+    /// cell reads still update it on their own.
+    nonisolated static func == (a: GuideProgramButton, b: GuideProgramButton) -> Bool {
+        // Width and clip within half a point: the guide's window is derived
+        // from the clock on every render, so a cell clipped at either edge
+        // gets a width a fraction of a point different each time (~0.2 pt per
+        // second), which failed a strict comparison for ~20 cells per press.
+        var same = a.prog == b.prog && a.channelItem == b.channelItem
+            && abs(a.width - b.width) < 0.5 && a.rowHeight == b.rowHeight
+            && abs(a.leadingClip - b.leadingClip) < 0.5 && a.timeState == b.timeState
+            && a.shortTimeFormatter === b.shortTimeFormatter
+        #if os(tvOS)
+        same = same && a.sidebarOpen == b.sidebarOpen && a.compact == b.compact
+        #endif
+        return same
+    }
 
     var body: some View {
         // [RENDER] per-cell body counter (Logan 2026-09-12). TabProbe flushes
