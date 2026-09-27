@@ -246,6 +246,13 @@ struct MoviesView: View {
     /// Focused poster id; the rail's Right returns to the last one that is
     /// still in the grid.
     @FocusState private var gridFocus: String?
+    #if os(tvOS)
+    /// First grid ROW drawn as real cards; see `gridWindowRows`.
+    @State private var gridWindowStartRow = 0
+    /// Measured row pitch (card height + row spacing), in view state so the
+    /// spacers appear once it is known. 0 until the first card lays out.
+    @State private var tvGridPitch: CGFloat = 0
+    #endif
     /// Set to move focus onto the hero's Resume (scroll-to-top landing).
     @State private var heroFocusRequest = false
     /// True while a hero button has focus: shows the fixed tab-bar guide.
@@ -2068,6 +2075,7 @@ struct MoviesView: View {
                                 } else if let last = lastGridFocus {
                                     gridFocus = last
                                 } else {
+                                    gridWindowStartRow = 0
                                     gridFocus = isSearching ? filteredMovies[0].id : libraryMovies[0].id
                                 }
                                 #endif
@@ -2088,6 +2096,8 @@ struct MoviesView: View {
                             if geometryBox.rowPitch > 0, geometryBox.gridWidth > 0 {
                                 #if os(tvOS)
                                 let cols = tvGridColumns
+                                keepGridRowInWindow(row: index / cols,
+                                                    rows: gridRowCount(libraryMovies.count))
                                 #else
                                 let cols = UIDevice.current.userInterfaceIdiom == .phone
                                     ? 3 : max(1, Int(geometryBox.gridWidth / 132))
@@ -2766,29 +2776,7 @@ struct MoviesView: View {
     /// the rows it draws, so only a window of titles is ever resident.
     private func posterGrid<C: RandomAccessCollection>(_ items: C) -> some View
     where C.Element == VODDisplayItem, C.Index == Int {
-        LazyVGrid(columns: columns, spacing: gridRowSpacing) {
-            ForEach(items.startIndex..<items.endIndex, id: \.self) { index in
-                let item = items[index]
-                NavigationLink(value: item) {
-                    VODPosterCard(item: item, headers: dispatcharrHeaders)
-                }
-                #if os(tvOS)
-                .buttonStyle(MoviesPosterFocusStyle())
-                .focused($gridFocus, equals: item.id)
-                #else
-                .buttonStyle(.plain)
-                #endif
-                .contextMenu { watchlistMenuButton(item) }
-                .id(VODWindowList.anchorID(index))
-                .background(GeometryReader { g in
-                    Color.clear.onAppear {
-                        if index == items.startIndex {
-                            geometryBox.rowPitch = g.size.height + gridRowSpacing
-                        }
-                    }
-                })
-            }
-        }
+        gridBody(items)
         // Symmetric 18 pt margins so the posters sit centered (Logan
         // 2026-09-09); the alphabet rail overlays the right edge instead of
         // owning a gutter. Column gap 8 gives the two extra edge points.
@@ -2805,6 +2793,106 @@ struct MoviesView: View {
         #if os(tvOS)
         .focusSection()
         #endif
+    }
+
+    #if os(tvOS)
+    /// Rows drawn as real cards when the library is large, and how close to
+    /// a window edge a realized row may get before the window re-centres.
+    ///
+    /// The grid used to hold every title in one LazyVGrid. Moving focus
+    /// toward it made the focus engine build a placeholder region for every
+    /// unrealized row and test them all against each other: with the full
+    /// 47,536-title catalog the first Down press on Movies never returned
+    /// (simulator 2026-09-27, main thread stuck in
+    /// `_UIFocusRegionEvaluator __regionsByEvaluatingOcclusionsForBaseRegions`).
+    /// Same cure as the guide's row window: a bounded set of real rows plus
+    /// spacers of the exact height of the rows they stand for, so scroll
+    /// offsets (the alphabet rail scrolls by row x pitch) are unchanged.
+    private static let gridWindowRows = 20
+    private static let gridWindowMargin = 6
+
+    private func gridRowCount(_ count: Int) -> Int {
+        (count + tvGridColumns - 1) / tvGridColumns
+    }
+
+    /// Re-centres the window on `row` when it is near an edge that still has
+    /// rows beyond it (or outside the window).
+    private func keepGridRowInWindow(row: Int, rows: Int) {
+        guard rows > Self.gridWindowRows else { return }
+        let start = min(max(0, gridWindowStartRow), rows - Self.gridWindowRows)
+        let end = start + Self.gridWindowRows
+        let nearTop = start > 0 && row < start + Self.gridWindowMargin
+        let nearBottom = end < rows && row >= end - Self.gridWindowMargin
+        guard nearTop || nearBottom || row < start || row >= end else { return }
+        let newStart = min(max(0, row - Self.gridWindowRows / 2), rows - Self.gridWindowRows)
+        if newStart != gridWindowStartRow { gridWindowStartRow = newStart }
+    }
+    #endif
+
+    @ViewBuilder
+    private func gridBody<C: RandomAccessCollection>(_ items: C) -> some View
+    where C.Element == VODDisplayItem, C.Index == Int {
+        #if os(tvOS)
+        let rows = gridRowCount(items.count)
+        let pitch = tvGridPitch
+        let windowed = rows > Self.gridWindowRows
+        let startRow = windowed && pitch > 0
+            ? min(max(0, gridWindowStartRow), rows - Self.gridWindowRows) : 0
+        let endRow = windowed ? startRow + Self.gridWindowRows : rows
+        let lo = items.startIndex + startRow * tvGridColumns
+        let hi = min(items.endIndex, items.startIndex + endRow * tvGridColumns)
+        VStack(spacing: 0) {
+            if startRow > 0 {
+                Color.clear.frame(height: CGFloat(startRow) * pitch)
+            }
+            LazyVGrid(columns: columns, spacing: gridRowSpacing) {
+                ForEach(lo..<hi, id: \.self) { index in
+                    gridCard(items, index: index, measure: index == lo)
+                        .onAppear {
+                            keepGridRowInWindow(row: (index - items.startIndex) / tvGridColumns, rows: rows)
+                        }
+                }
+            }
+            // Until the pitch is measured the window ends the grid: the
+            // spacer appears with the first laid-out card, before focus can
+            // reach the last rows.
+            if endRow < rows, pitch > 0 {
+                Color.clear.frame(height: CGFloat(rows - endRow) * pitch)
+            }
+        }
+        #else
+        LazyVGrid(columns: columns, spacing: gridRowSpacing) {
+            ForEach(items.startIndex..<items.endIndex, id: \.self) { index in
+                gridCard(items, index: index, measure: index == items.startIndex)
+            }
+        }
+        #endif
+    }
+
+    private func gridCard<C: RandomAccessCollection>(_ items: C, index: Int, measure: Bool) -> some View
+    where C.Element == VODDisplayItem, C.Index == Int {
+        let item = items[index]
+        return NavigationLink(value: item) {
+            VODPosterCard(item: item, headers: dispatcharrHeaders)
+        }
+        #if os(tvOS)
+        .buttonStyle(MoviesPosterFocusStyle())
+        .focused($gridFocus, equals: item.id)
+        #else
+        .buttonStyle(.plain)
+        #endif
+        .contextMenu { watchlistMenuButton(item) }
+        .id(VODWindowList.anchorID(index))
+        .background(GeometryReader { g in
+            Color.clear.onAppear {
+                guard measure else { return }
+                let pitch = g.size.height + gridRowSpacing
+                geometryBox.rowPitch = pitch
+                #if os(tvOS)
+                if abs(tvGridPitch - pitch) > 0.5 { tvGridPitch = pitch }
+                #endif
+            }
+        })
     }
 
     // MARK: - Empty / Error

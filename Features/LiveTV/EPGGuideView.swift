@@ -290,6 +290,29 @@ final class GuideStore: ObservableObject {
     /// above, and every focus move after it re-scanned up to 903 channels).
     /// One pass over ~17k programmes is cheaper than two such scans, and it
     /// happens at most once per EPG write.
+    /// The channel a programme id belongs to, read from the id itself
+    /// (`GuideProgram.id` is "<channelID>-<title>-<start>"): each dash left
+    /// of the start is tried as the channel boundary and confirmed against
+    /// that one channel's list. Titles and some channel ids contain dashes,
+    /// so a wrong split just misses the dictionary. A few lookups, where the
+    /// memo rebuild below walked every resident programme (~114k ids on an
+    /// 11.6k-channel playlist) on the first focus move after each guide write.
+    nonisolated static func channelID(fromProgramID pid: String,
+                                      in programs: [String: [GuideProgram]]) -> String? {
+        guard let lastDash = pid.lastIndex(of: "-"),
+              let startRef = Double(pid[pid.index(after: lastDash)...]) else { return nil }
+        var searchFrom = pid.startIndex
+        while searchFrom < lastDash, let dash = pid[searchFrom..<lastDash].firstIndex(of: "-") {
+            let candidate = String(pid[..<dash])
+            if let list = programs[candidate],
+               list.contains(where: { $0.start.timeIntervalSinceReferenceDate == startRef && $0.id == pid }) {
+                return candidate
+            }
+            searchFrom = pid.index(after: dash)
+        }
+        return nil
+    }
+
     func rebuildProgramChannelMemoIfNeeded() {
         guard programChannelMemo.isEmpty, !programs.isEmpty else { return }
         var memo: [String: String] = [:]
@@ -718,7 +741,13 @@ final class GuideStore: ObservableObject {
         let effectiveWindowHours = GuideStore.activeForwardDays() * 24
         // Catch-up: load retained history too, not just the last hour.
         let retentionSecs = GuideStore.activeRetentionSeconds()
-        let channelCount = channels.count
+        // The launch preload (AerioApp.kickoffSplashTimePreload) calls this
+        // with no channels yet, which read as a small playlist: the 6 h
+        // large-playlist history cap was skipped and a full extra day was
+        // read (178k programmes instead of ~116k on an 11.6k-channel list),
+        // then pruned 20 s later in one more guide-wide publish. Fall back to
+        // the count this playlist had last time.
+        let channelCount = max(channels.count, Self.lastChannelCount(serverID: serverID))
         let refreshMins = UserDefaults.standard.integer(forKey: "bgRefreshIntervalMins")
         let effectiveMins = refreshMins > 0 ? refreshMins : 1440 // 0 means unset → default 24h
         let stalenessThreshold = TimeInterval(effectiveMins * 60)
@@ -786,53 +815,105 @@ final class GuideStore: ObservableObject {
                 // governs what the cache HOLDS; see `residentHistorySeconds`.
                 // Day-aligned, matching what `residentWindow` will record and
                 // what `ensureResidentRange` asks for.
-                let windowStart = GuideStore.gridDayFloor(
-                    now.addingTimeInterval(-min(historySecs, GuideStore.residentHistorySeconds)))
+                // Large playlists keep only `historySecs` of aired programmes
+                // in memory (the history-bound prune drops the rest after the
+                // first refresh, and the guide never pages older days back
+                // in), so read exactly that. The day-floored start read up to
+                // ~18 h of programmes nothing would draw: ~40k of the 156k rows
+                // read at 00:06 UTC on an 11.6k-channel playlist (2026-09-27).
+                let windowStart = channelCount > GuideStore.largePlaylistChannels
+                    ? now.addingTimeInterval(-historySecs)
+                    : GuideStore.gridDayFloor(
+                        now.addingTimeInterval(-min(historySecs, GuideStore.residentHistorySeconds)))
                 let windowEnd = GuideStore.gridDayCeil(
                     now.addingTimeInterval(min(Double(effectiveWindowHours) * 3600,
                                                GuideStore.residentForwardSeconds)))
-                let descriptor = FetchDescriptor<EPGProgram>(
-                    predicate: #Predicate<EPGProgram> {
-                        $0.serverID == serverID && $0.endTime > windowStart && $0.startTime < windowEnd
-                    },
-                    sortBy: [SortDescriptor(\.startTime)]
-                )
                 // Paged read (Apple TV, 2026-09-03): fetching 208k rows in
                 // one call materialised every managed object at once and took
-                // the process from 380 MB to 1.8 GB. Pages of 20k rows, each in
-                // its own context so the objects are released as we go.
+                // the process from 380 MB to 1.8 GB. Pages, each in its own
+                // context so the objects are released as we go.
+                //
+                // Read as parallel slices of start time (2026-09-27): the
+                // sequential walk took ~4.4 s for 155k rows on the simulator,
+                // the wait before a warm launch shows any programme. Each
+                // slice is start-sorted, so joining them in slice order keeps
+                // every channel's list sorted. Four slices of 5k-row pages hold
+                // the same ~20k objects at once as the single 20k-row walk did.
+                let sliceCount = 4
+                let sliceSpan = windowEnd.timeIntervalSince(windowStart) / Double(sliceCount)
+                let bounds: [Date] = (0...sliceCount).map {
+                    $0 == sliceCount ? windowEnd : windowStart.addingTimeInterval(Double($0) * sliceSpan)
+                }
+                let slices = await withTaskGroup(
+                    of: (index: Int, dict: [String: [GuideProgram]], total: Int, newest: Date).self
+                ) { group in
+                    for index in 0..<sliceCount {
+                        let lo = bounds[index]
+                        let hi = bounds[index + 1]
+                        let first = index == 0
+                        group.addTask {
+                            // The first slice also holds programmes that began
+                            // before the window and are still on.
+                            let descriptor = first
+                                ? FetchDescriptor<EPGProgram>(
+                                    predicate: #Predicate<EPGProgram> {
+                                        $0.serverID == serverID && $0.endTime > windowStart && $0.startTime < hi
+                                    },
+                                    sortBy: [SortDescriptor(\.startTime)])
+                                : FetchDescriptor<EPGProgram>(
+                                    predicate: #Predicate<EPGProgram> {
+                                        $0.serverID == serverID && $0.startTime >= lo && $0.startTime < hi
+                                    },
+                                    sortBy: [SortDescriptor(\.startTime)])
+                            var dict: [String: [GuideProgram]] = [:]
+                            var total = 0
+                            var newestFetch = Date.distantPast
+                            var offset = 0
+                            let pageSize = 5_000
+                            while true {
+                                var page = descriptor
+                                page.fetchOffset = offset
+                                page.fetchLimit = pageSize
+                                let rows: [EPGProgram] = autoreleasepool {
+                                    let pageContext = ModelContext(container)
+                                    return (try? pageContext.fetch(page)) ?? []
+                                }
+                                if rows.isEmpty { break }
+                                for ep in rows {
+                                    let gp = GuideProgram(channelID: ep.channelID, title: ep.title,
+                                                          description: ep.programDescription,
+                                                          start: ep.startTime, end: ep.endTime,
+                                                          category: ep.category,
+                                                          programID: ep.programID,
+                                                          subTitle: ep.subTitle, season: ep.season,
+                                                          episode: ep.episode, isNew: ep.isNew,
+                                                          isLiveBroadcast: ep.isLiveBroadcast,
+                                                          isPremiere: ep.isPremiere, isFinale: ep.isFinale,
+                                                          isRepeat: ep.isRepeat,
+                                                          posterURL: ep.posterURL.isEmpty ? nil : ep.posterURL)
+                                    dict[ep.channelID, default: []].append(gp)
+                                    if ep.fetchedAt > newestFetch { newestFetch = ep.fetchedAt }
+                                }
+                                total += rows.count
+                                offset += rows.count
+                                if rows.count < pageSize { break }
+                            }
+                            return (index, dict, total, newestFetch)
+                        }
+                    }
+                    var collected: [(index: Int, dict: [String: [GuideProgram]], total: Int, newest: Date)] = []
+                    for await slice in group { collected.append(slice) }
+                    return collected.sorted { $0.index < $1.index }
+                }
                 var dict: [String: [GuideProgram]] = [:]
                 var total = 0
                 var newestFetch = Date.distantPast
-                var offset = 0
-                let pageSize = 20_000
-                while true {
-                    var page = descriptor
-                    page.fetchOffset = offset
-                    page.fetchLimit = pageSize
-                    let rows: [EPGProgram] = autoreleasepool {
-                        let pageContext = ModelContext(container)
-                        return (try? pageContext.fetch(page)) ?? []
+                for slice in slices {
+                    for (channelID, list) in slice.dict {
+                        dict[channelID, default: []].append(contentsOf: list)
                     }
-                    if rows.isEmpty { break }
-                    for ep in rows {
-                        let gp = GuideProgram(channelID: ep.channelID, title: ep.title,
-                                              description: ep.programDescription,
-                                              start: ep.startTime, end: ep.endTime,
-                                              category: ep.category,
-                                              programID: ep.programID,
-                                              subTitle: ep.subTitle, season: ep.season,
-                                              episode: ep.episode, isNew: ep.isNew,
-                                              isLiveBroadcast: ep.isLiveBroadcast,
-                                              isPremiere: ep.isPremiere, isFinale: ep.isFinale,
-                                              isRepeat: ep.isRepeat,
-                                              posterURL: ep.posterURL.isEmpty ? nil : ep.posterURL)
-                        dict[ep.channelID, default: []].append(gp)
-                        if ep.fetchedAt > newestFetch { newestFetch = ep.fetchedAt }
-                    }
-                    total += rows.count
-                    offset += rows.count
-                    if rows.count < pageSize { break }
+                    total += slice.total
+                    if slice.newest > newestFetch { newestFetch = slice.newest }
                 }
                 guard total > 0 else { return (nil, false) }
                 let isFresh = now.timeIntervalSince(newestFetch) < stalenessThreshold
@@ -1031,7 +1112,10 @@ final class GuideStore: ObservableObject {
                 h.combine(gp.title)
                 h.combine(gp.category)
                 h.combine(gp.isRepeat)
-                h.combine(gp.description.count)
+                // utf8.count, not count: String.count walks every character
+                // (grapheme breaking), ~20M characters per call on a 114k
+                // programme map, on the main actor, on every guide commit.
+                h.combine(gp.description.utf8.count)
             }
             fold ^= h.finalize()
         }
@@ -1046,7 +1130,7 @@ final class GuideStore: ObservableObject {
             for gp in progs {
                 h.combine(Int(gp.start.timeIntervalSince1970))
                 h.combine(Int(gp.end.timeIntervalSince1970))
-                h.combine(gp.title.count)
+                h.combine(gp.title.utf8.count)   // O(1); `.count` walks characters
                 count += 1
             }
         }
@@ -1055,7 +1139,17 @@ final class GuideStore: ObservableObject {
     }
 
     func saveToCache(modelContext: ModelContext, serverID: String) {
-        let container = modelContext.container
+        saveToCache(container: modelContext.container, serverID: serverID)
+    }
+
+    /// Save through the container `loadFromCache` captured, for the paths that
+    /// run without a `ModelContext` (the window walk, the scroll-edge fetch).
+    func saveToCacheIfPossible(serverID: String) {
+        guard let container = cachedContainer, displayedServerID == serverID else { return }
+        saveToCache(container: container, serverID: serverID)
+    }
+
+    private func saveToCache(container: ModelContainer, serverID: String) {
         let snapshot = programs
         guard snapshot.contains(where: { !$0.value.isEmpty }) else {
             debugLog("📺 GuideStore: skipped saveToCache — nothing to save (refusing to blank the cache)")
@@ -1168,27 +1262,41 @@ final class GuideStore: ObservableObject {
                   let start = ch.currentProgramStart,
                   let end = ch.currentProgramEnd else { continue }
             let desc = ch.currentProgramDescription ?? ""
-            let gp = GuideProgram(channelID: ch.id, title: title,
-                                  description: desc, start: start, end: end, category: "")
-            if result[ch.id] == nil || result[ch.id]?.isEmpty == true {
+            guard let existing = result[ch.id], !existing.isEmpty else {
                 // No programs yet for this channel — seed it
-                result[ch.id] = [gp]
+                result[ch.id] = [GuideProgram(channelID: ch.id, title: title,
+                                              description: desc, start: start, end: end, category: "")]
                 mutated = true
-            } else if !desc.isEmpty, var list = result[ch.id] {
-                // Channel has programs but check if current one is missing its description
-                var updated = false
-                for i in list.indices {
-                    if list[i].title == title
-                        && abs(list[i].start.timeIntervalSince(start)) < 60
-                        && list[i].description.isEmpty {
-                        list[i] = gp
-                        updated = true
-                    }
+                continue
+            }
+            // Channel has programs: fill in the current one's description if
+            // it is missing. Only programmes starting within a minute of the
+            // current one can match, and every write path keeps the lists
+            // start-sorted, so binary-search to them. This used to compare
+            // every programme's title on every channel (~180k string
+            // compares, 127 ms on the main actor per call on an 11.6k-channel
+            // playlist), and it runs on each guide mount and group switch.
+            guard !desc.isEmpty else { continue }
+            let lower = start.addingTimeInterval(-60)
+            var lo = 0
+            var hi = existing.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if existing[mid].start <= lower { lo = mid + 1 } else { hi = mid }
+            }
+            var list: [GuideProgram]? = nil
+            var i = lo
+            while i < existing.count, existing[i].start.timeIntervalSince(start) < 60 {
+                if existing[i].description.isEmpty, existing[i].title == title {
+                    if list == nil { list = existing }
+                    list?[i] = GuideProgram(channelID: ch.id, title: title,
+                                            description: desc, start: start, end: end, category: "")
                 }
-                if updated {
-                    result[ch.id] = list
-                    mutated = true
-                }
+                i += 1
+            }
+            if let list {
+                result[ch.id] = list
+                mutated = true
             }
         }
         // Only fire @Published if we actually changed anything. On
@@ -1271,6 +1379,17 @@ final class GuideStore: ObservableObject {
     /// Above this many channels the in-memory guide keeps only
     /// [largePlaylistHistorySecs] of aired programming (see loadFromCache).
     nonisolated static let largePlaylistChannels = 5_000
+
+    /// The playlist's channel count as of its last load, for decisions made
+    /// before this launch's channel list is available.
+    nonisolated static func rememberChannelCount(_ count: Int, serverID: String) {
+        guard count > 0 else { return }
+        UserDefaults.standard.set(count, forKey: "guide.lastChannelCount.\(serverID)")
+    }
+
+    nonisolated static func lastChannelCount(serverID: String) -> Int {
+        UserDefaults.standard.integer(forKey: "guide.lastChannelCount.\(serverID)")
+    }
     nonisolated static let largePlaylistHistorySecs: TimeInterval = 6 * 3_600
 
     /// Channel-matching maps from the last base grid fetch, kept for the
@@ -1333,8 +1452,12 @@ final class GuideStore: ObservableObject {
 
     /// How much aired guide data stays resident at launch.
     nonisolated static let residentHistorySeconds: TimeInterval = 24 * 3600
-    /// How much future guide data stays resident at launch.
-    nonisolated static let residentForwardSeconds: TimeInterval = 48 * 3600
+    /// How much future guide data stays resident at launch. 24 h (was 48 h):
+    /// the launch read is the wait before the guide shows programmes, and on
+    /// an 11.6k-channel playlist each forward day is ~45k rows. The network
+    /// grid never reaches past +24 h, and scrolling within
+    /// `residentPagePadding` of the edge pages the next cached day in.
+    nonisolated static let residentForwardSeconds: TimeInterval = 24 * 3600
     /// Page a further day in once the view's right edge is this close to the
     /// resident edge, so the cells are there before the user reaches them.
     nonisolated static let residentPagePadding: TimeInterval = 6 * 3600
@@ -1514,6 +1637,17 @@ final class GuideStore: ObservableObject {
 
     /// One chunk is one UTC day.
     nonisolated static let gridChunkSeconds: TimeInterval = 86_400
+    /// Dispatcharr 0.30+: the first grid request of a load covers only the
+    /// next few hours, which is what the guide opens on. A whole day is a
+    /// ~48 MB response on a 12k-channel server (most of it the server's
+    /// placeholder blocks for channels without guide data), so the rest of
+    /// today and tomorrow follow in the background walk.
+    nonisolated static let baseGridForwardSeconds: TimeInterval = 6 * 3600
+    /// Days ahead the background walk fetches by itself. Guide Days still
+    /// sets how far the timeline scrolls: later days load when the user
+    /// scrolls or jumps towards them (`ensureForwardWindow`), so a day nobody
+    /// looks at is never downloaded, and never re-swept.
+    nonisolated static let autoForwardDays = 1
 
     /// FIXED UTC day grid (Android `dayFloorMs`, Logan 2026-09-12). Chunk edges
     /// must NOT be derived from `now`: edges that drift by the wall clock give
@@ -1654,7 +1788,19 @@ final class GuideStore: ObservableObject {
         }.value
         let trimmed = trim.dict
         let droppedPrograms = trim.dropped
-        if droppedPrograms > 0 { _ = commitPrograms(trimmed, for: serverID, source: "history-bound-prune") }
+        // The dropped programmes ended before the history bound, left of
+        // anything the guide draws. A whole-map publish for a few hundred of
+        // them (every refresh drops the hour that just aged out) re-rendered
+        // the guide right after the refresh's own publish; the second of two
+        // back-to-back turns landed on a D-pad press (238 ms, 2026-09-27).
+        // Publish only once the prune is worth it; the disk prune below
+        // still runs every time.
+        let totalBefore = snapshot.values.reduce(0) { $0 + $1.count }
+        if droppedPrograms >= max(2_000, totalBefore / 20) {
+            _ = commitPrograms(trimmed, for: serverID, source: "history-bound-prune")
+        } else if droppedPrograms > 0 {
+            debugLog("[EPG grid window] history prune: \(droppedPrograms) aired programme(s) left in memory until the prune is worth a publish")
+        }
 
         if droppedPrograms > 0, let container = cachedContainer {
             await Task.detached(priority: .utility) {
@@ -1691,13 +1837,43 @@ final class GuideStore: ObservableObject {
         debugLog("📺 GuideStore.trimExpiredPrograms: trimmed resident EPG to live window — \(total) programs across \(trimmed.count) channels")
     }
 
+    /// The network guide fetch in flight. Every caller (the launch
+    /// orchestrator, the guide view, refresh paths) shares it: a second caller
+    /// used to be dropped with `false`, which the guide view read as "no
+    /// data" while the orchestrator fetched the same 48 MB grid next to it.
+    private var inFlightUpcomingFetch: Task<Bool, Never>?
+
+    /// True while a network guide fetch is running.
+    var isFetchingUpcoming: Bool { inFlightUpcomingFetch != nil }
+
     /// Phase 2 — async: fetch upcoming programs to fill in the timeline beyond "now playing."
-    /// Loads an initial batch quickly, then backfills remaining channels at lower priority.
+    /// A call made while another is in flight joins it instead of starting a
+    /// second download.
     @discardableResult
     func fetchUpcoming(
         channels: [ChannelDisplayItem],
         servers: [ServerConnection],
         replaceExisting: Bool = false
+    ) async -> Bool {
+        if let inFlight = inFlightUpcomingFetch {
+            debugLog("📺 GuideStore.fetchUpcoming: joining the fetch already in flight")
+            return await inFlight.value
+        }
+        let task = Task { @MainActor [weak self] () -> Bool in
+            guard let self else { return false }
+            return await self.performFetchUpcoming(channels: channels, servers: servers,
+                                                   replaceExisting: replaceExisting)
+        }
+        inFlightUpcomingFetch = task
+        let result = await task.value
+        inFlightUpcomingFetch = nil
+        return result
+    }
+
+    private func performFetchUpcoming(
+        channels: [ChannelDisplayItem],
+        servers: [ServerConnection],
+        replaceExisting: Bool
     ) async -> Bool {
         guard !isLoading else {
             debugLog("📺 GuideStore.fetchUpcoming: already loading, skipping")
@@ -1849,8 +2025,22 @@ final class GuideStore: ObservableObject {
         // because the user switched playlists mid-flight reports true (to
         // suppress the backstop) but refreshed nothing the user can see, and
         // must not mark the NEW playlist's guide as fresh.
-        if didRefresh, displayedServerID == server.id.uuidString { newestFetchedAt = now }
+        if didRefresh, displayedServerID == server.id.uuidString {
+            newestFetchedAt = now
+            // The replayed cache verdict still said "stale" after this fetch,
+            // so every later `channels.count` change in the guide (a group
+            // switch) downloaded the whole grid again.
+            lastLoadFromCacheResult = (serverID: server.id.uuidString, isFresh: true)
+        }
         return didRefresh
+    }
+
+    /// True when any channel has a programme that has not started yet, the
+    /// same "genuine upcoming schedule" test the launch gates use, over the
+    /// whole map. Short-circuits on the first hit.
+    var hasAnyFuturePrograms: Bool {
+        let now = Date()
+        return programs.contains { _, progs in progs.contains { $0.start > now } }
     }
 
     // MARK: - Dispatcharr
@@ -2019,7 +2209,13 @@ final class GuideStore: ObservableObject {
         debugLog("📺 Dispatcharr: fetching EPG grid, tvgID map has \(tvgIDToChannelIDs.count) entries, intID map has \(intIDToChannelID.count) entries, uuid map has \(uuidToChannelID.count) entries")
         #endif
         do {
-            let gridPrograms = try await api.getEPGGrid()
+            // 0.30+ honours start/end: ask for the hours the guide opens on
+            // and let the window walk fill the rest. Older servers ignore the
+            // parameters, so they keep the default -1h..+24h.
+            let gridPrograms = server.dispatcharrVersionAtLeast("0.30.0")
+                ? try await api.getEPGGrid(start: windowStart,
+                                           end: windowStart.addingTimeInterval(3600 + Self.baseGridForwardSeconds))
+                : try await api.getEPGGrid()
             #if DEBUG
             debugLog("📺 Dispatcharr: EPG grid returned \(gridPrograms.count) programs")
             #endif
@@ -2052,29 +2248,11 @@ final class GuideStore: ObservableObject {
             debugLog("📺 Dispatcharr: EPG grid matched \(matched) programs to channels (\(matchedViaUUID) via Dummy EPG UUID key)")
             #endif
 
-            // v1.6.22: API-only category enrichment for Guide cells
-            // and Live-TV cards. Walks the gridPrograms we just
-            // merged, identifies the currently-airing program per
-            // channel, fans out `/api/epg/programs/<id>/` (the only
-            // REST endpoint with categories), throttles at cap-of-4,
-            // applies results to BOTH `GuideStore.programs[cid]`
-            // (the matching airing GuideProgram's `category` for
-            // grid cell tinting) AND `ChannelStore.applyXMLTVCategories`
-            // (channel card stripe). API-only. No XMLTV stream.
-            //
-            // Fire-and-forget: don't block the Guide tab from
-            // becoming interactive on the enrichment fan-out (which
-            // can be 300+ requests, several seconds of background
-            // work even on a healthy server). The Guide cells render
-            // with grid data immediately; categories tint in
-            // progressively as detail responses land.
-            Task { [self] in
-                await self.enrichDispatcharrCategories(gridPrograms: gridPrograms,
-                                                        api: api,
-                                                        tvgIDToChannelIDs: tvgIDToChannelIDs,
-                                                        uuidToChannelID: uuidToChannelID,
-                                                        serverID: categoryServerID)
-            }
+            // Categories (the grid strips them) are fetched per programme
+            // for the rows on screen, as they come on screen: see
+            // `noteRowVisible(channelID:)`. Fanning out for every channel
+            // here cost one request per channel with guide data on every
+            // load (3,391 on a 12k-channel server) and republished the map.
 
             // An empty grid is a failed fetch, not an empty guide: leave
             // shouldCommitBatch false so cancelBatch discards the pending
@@ -2364,6 +2542,9 @@ final class GuideStore: ObservableObject {
                     var viaUUID = 0
                     var touched = Set<String>()
                     for prog in gridPrograms {
+                        // The guide draws the channel name for an empty row
+                        // itself; see DispatcharrCurrentProgram.isStandardDummy.
+                        if prog.isStandardDummy { continue }
                         guard let start = prog.startTime?.toDate(),
                               let end = prog.endTime?.toDate(),
                               end > windowStart && start < windowEnd else { continue }
@@ -2527,7 +2708,7 @@ final class GuideStore: ObservableObject {
               server.type == .dispatcharrAPI, server.dispatcharrVersionAtLeast("0.30.0"),
               let maps = lastDispatcharrMaps, maps.serverID == server.id.uuidString,
               !forwardExtensionInFlight else { return }
-        let from = max(forwardLoadedUntil ?? Date().addingTimeInterval(24 * 3600), Date())
+        let from = max(forwardLoadedUntil ?? Date().addingTimeInterval(Self.baseGridForwardSeconds), Date())
         guard end > from.addingTimeInterval(60) else { return }
         forwardExtensionInFlight = true
         defer { forwardExtensionInFlight = false }
@@ -2549,8 +2730,9 @@ final class GuideStore: ObservableObject {
                                  serverID: server.id,
                                  savedUsername: server.dispatcharrCredentialType == .usernamePassword
                                      ? server.username : nil)
-        await fetchGridChunks(chunks, api: api, maps: maps, serverID: server.id.uuidString)
+        let walk = await fetchGridChunks(chunks, api: api, maps: maps, serverID: server.id.uuidString)
         persistGridCoverage()
+        if walk.fetched > 0 { saveToCacheIfPossible(serverID: server.id.uuidString) }
     }
 
     /// Result of one chunk walk, for the summary log and the All Available
@@ -2600,10 +2782,17 @@ final class GuideStore: ObservableObject {
         let historySecs = historyReachSeconds(default: rawHistorySecs)
         let historyStart = now.addingTimeInterval(-historySecs)
         let baseStart = now.addingTimeInterval(-3600)
-        let baseEnd = now.addingTimeInterval(24 * 3600)
-        let forwardEnd = allAvailable
+        let baseEnd = now.addingTimeInterval(Self.baseGridForwardSeconds)
+        // The Guide Days edge bounds what is KEPT (coverage prune below); the
+        // walk itself only goes `autoForwardDays` ahead and later days load
+        // on browse. All Available keeps walking until the server runs dry,
+        // because its timeline length is whatever got loaded.
+        let guideDaysEnd = allAvailable
             ? now.addingTimeInterval(TimeInterval(Self.allAvailableMaxDaysAhead) * 86_400)
             : max(windowEnd, now.addingTimeInterval(TimeInterval(playlistDays) * 86_400))
+        let forwardEnd = allAvailable
+            ? guideDaysEnd
+            : now.addingTimeInterval(TimeInterval(min(max(playlistDays, 1), Self.autoForwardDays)) * 86_400)
         // The live window is fetched unconditionally on every load (the base
         // grid just committed it), so record whichever aligned days it fully
         // covers rather than let a later walk ask for them again.
@@ -2637,7 +2826,7 @@ final class GuideStore: ObservableObject {
         let forwardHours = Int(forwardEnd.timeIntervalSince(now) / 3600)
         guard !historyChunks.isEmpty || !forwardChunks.isEmpty else {
             forceFullGridReload = false
-            await pruneOutsideGridWindow(historyStart: historyStart, forwardEnd: forwardEnd, serverID: serverID)
+            await pruneOutsideGridWindow(historyStart: historyStart, forwardEnd: guideDaysEnd, serverID: serverID)
             persistGridCoverage()
             return
         }
@@ -2668,12 +2857,16 @@ final class GuideStore: ObservableObject {
         // An explicit refresh forced this walk to ignore coverage; the walk has
         // now rewritten it, so later walks in this session are incremental again.
         forceFullGridReload = false
-        await pruneOutsideGridWindow(historyStart: historyStart, forwardEnd: forwardEnd, serverID: serverID)
+        await pruneOutsideGridWindow(historyStart: historyStart, forwardEnd: guideDaysEnd, serverID: serverID)
         // Catch-up reach prune on the launch guide load. This is the first point
         // where `channels` (and therefore every channel's catchupDays) is known:
         // `loadFromCache` runs in parallel with the channel fetch, so its own
         // prune call is a no-op on a cold launch.
         await pruneBeyondCatchupReach(channels: channels, serverID: serverID)
+        // The walked days go to disk now: the coverage file below records them
+        // as fetched, and a later launch pages covered days in from SwiftData
+        // rather than asking the server again.
+        if walk.fetched > 0 { saveToCacheIfPossible(serverID: serverID) }
         // Source-change gate (Logan 2026-09-12). One request for the source
         // list: an explicit Refresh just rewrote every chunk in the foreground
         // so it simply ADOPTS the current fingerprint, while an ordinary load
@@ -2721,6 +2914,9 @@ final class GuideStore: ObservableObject {
                 consecutiveEmpty = 0
                 result.cached += 1
                 result.depth = i + 1
+                // A covered day is on disk (and paged in on scroll), so it
+                // counts as loaded for the scroll-edge fetch too.
+                if end > now, end > (forwardLoadedUntil ?? .distantPast) { forwardLoadedUntil = end }
                 continue
             }
             let programs: [DispatcharrCurrentProgram]
@@ -2882,13 +3078,19 @@ final class GuideStore: ObservableObject {
         // stays on the cached chunk and is refreshed only by an explicit
         // Refresh, which still walks the full window.
         let historyTail = Array(history.prefix(Self.backgroundSweepHistoryDays))
-        // The sweep covers the WHOLE cached forward range (Logan 2026-09-12:
-        // full cache kept, and a low-resource sweep scans for changes after
+        // The sweep covers the cached forward range (Logan 2026-09-12: full
+        // cache kept, and a low-resource sweep scans for changes after
         // settle). Days outside the resident window do not publish: see
         // `persistSweptDay`, which merges them straight into the on-disk store
         // off the main actor, so the resident cap holds while the cache stays
         // correct all the way out to the last cached day.
-        return [today] + forward + historyTail
+        //
+        // Only days that were actually fetched are re-swept: later days load
+        // on browse (`autoForwardDays`), and re-downloading every Guide Days
+        // day whenever a source refreshes (nightly on most servers) cost a
+        // ~48 MB grid per day on a 12k-channel playlist for days nobody opened.
+        let cachedDays = Set(gridCoverage.map(\.start))
+        return [today] + forward.filter { cachedDays.contains($0) } + historyTail
     }
 
     private func startBackgroundGridSweep(server: ServerConnection,
@@ -3231,7 +3433,7 @@ final class GuideStore: ObservableObject {
                                     category: "EPG", level: .warning)
                             }
                         }
-                        for p in progs { mergeProgram(p, for: channelID) }
+                        mergePrograms(progs, for: channelID)
                     }
                 }
                 launched += 1
@@ -3273,7 +3475,7 @@ final class GuideStore: ObservableObject {
 
             for await (channelID, progs, didRespond) in group {
                 didReceiveAnyResponse = didReceiveAnyResponse || didRespond
-                for p in progs { mergeProgram(p, for: channelID) }
+                mergePrograms(progs, for: channelID)
             }
 
             return didReceiveAnyResponse
@@ -3283,65 +3485,64 @@ final class GuideStore: ObservableObject {
         return didReceiveAnyResponse
     }
 
-    // MARK: - Dispatcharr Category Enrichment (v1.6.22)
+    // MARK: - Dispatcharr Category Enrichment (visible rows)
 
-    /// Pulls categories for the currently-airing program per channel
-    /// via `/api/epg/programs/<id>/` (the only REST endpoint with
-    /// the `categories` array (the bulk `/api/epg/grid/` strips
-    /// them server-side). Fans out at cap-of-4 concurrency, then
-    /// writes the result to BOTH the matching `GuideProgram.category`
-    /// in `programs[channelID]` (for Guide-grid cell tinting) AND
+    /// Channels whose guide rows came on screen since the last pass.
+    private var pendingCategoryChannelIDs = Set<String>()
+    /// Programme ids already asked for this session (hit or miss), so a row
+    /// that scrolls off and back on screen does not ask again.
+    private var requestedCategoryProgramIDs = Set<Int>()
+    private var categoryEnrichTask: Task<Void, Never>?
+
+    /// A guide row came on screen. Categories (and the rerun flag) exist only
+    /// on `/api/epg/programs/<id>/`, one request per programme, so they are
+    /// fetched for the rows the user is looking at, once scrolling settles,
+    /// instead of for every channel on every guide load.
+    func noteRowVisible(channelID: String) {
+        pendingCategoryChannelIDs.insert(channelID)
+        scheduleCategoryEnrichment()
+    }
+
+    private func scheduleCategoryEnrichment() {
+        guard categoryEnrichTask == nil else { return }
+        categoryEnrichTask = Task { [weak self] in
+            // One batch per scroll stop rather than one per row.
+            try? await Task.sleep(for: .milliseconds(600))
+            guard let self else { return }
+            await self.enrichPendingCategories()
+            self.categoryEnrichTask = nil
+            if !self.pendingCategoryChannelIDs.isEmpty { self.scheduleCategoryEnrichment() }
+        }
+    }
+
+    /// Pulls categories for the currently-airing programme of each pending
+    /// channel via `/api/epg/programs/<id>/` (the bulk `/api/epg/grid/`
+    /// strips them server-side), at cap-of-4 concurrency, then writes the
+    /// result to BOTH the matching `GuideProgram.category` in
+    /// `programs[channelID]` (for Guide-grid cell tinting) AND
     /// `ChannelStore.applyXMLTVCategories` (for Live-TV card stripe).
-    /// Pure REST API path; no XMLTV stream involved.
-    private func enrichDispatcharrCategories(
-        gridPrograms: [DispatcharrCurrentProgram],
-        api: DispatcharrAPI,
-        tvgIDToChannelIDs: [String: [String]],
-        uuidToChannelID: [String: String],
-        serverID: String
-    ) async {
+    private func enrichPendingCategories() async {
+        let channelIDs = pendingCategoryChannelIDs
+        pendingCategoryChannelIDs.removeAll()
+        guard let serverID = displayedServerID,
+              let server = ChannelStore.shared.activeServer,
+              server.id.uuidString == serverID,
+              server.type == .dispatcharrAPI else { return }
         let now = Date()
         var currentByChannelID: [String: Int] = [:]
-        var programIDByChannelID: [String: Int] = [:]
-        for prog in gridPrograms {
-            guard let pid = prog.programID,
-                  let start = prog.startTime?.toDate(),
-                  let end = prog.endTime?.toDate(),
-                  start <= now, end > now else { continue }
-            let key = (prog.tvgID ?? "").lowercased()
-            guard !key.isEmpty else { continue }
-            // v1.7.3 (Issue #20): a single program can match multiple
-            // channels sharing the tvg-id; fan the categories out so
-            // all of them get the same currently-airing category tint.
-            let cids: [String]
-            if let arr = tvgIDToChannelIDs[key], !arr.isEmpty {
-                cids = arr
-            } else if let cid = uuidToChannelID[key] {
-                cids = [cid]
-            } else {
-                continue
-            }
-            for cid in cids {
-                if currentByChannelID[cid] == nil {
-                    currentByChannelID[cid] = pid
-                    programIDByChannelID[cid] = pid
-                }
-            }
+        for cid in channelIDs {
+            guard let airing = programs[cid]?.first(where: { $0.start <= now && $0.end > now }),
+                  let pid = airing.programID, airing.category.isEmpty,
+                  !requestedCategoryProgramIDs.contains(pid) else { continue }
+            currentByChannelID[cid] = pid
         }
-        guard !currentByChannelID.isEmpty else {
-            // v1.7.x diagnostic: surface why enrichment skipped so a
-            // user with empty pills can capture the exact condition.
-            // Three failure modes worth distinguishing:
-            //   • gridPrograms empty (grid endpoint returned nothing)
-            //   • gridPrograms had entries but none had a non-nil
-            //     programID (Dummy EPG / string-id rows only)
-            //   • programIDs were present but none mapped to a channel
-            //     via tvgID/uuid lookup (mapping miss)
-            debugLog("📺 enrich SKIP: gridPrograms=\(gridPrograms.count) tvgMap=\(tvgIDToChannelIDs.count) uuidMap=\(uuidToChannelID.count); no currently-airing program matched all guards")
-            return
-        }
-        debugLog("📺 Dispatcharr category enrichment: \(currentByChannelID.count) currently-airing programs; fetching /api/epg/programs/<id>/ at cap-of-4")
-        let cats = await api.enrichCategories(programIDs: Array(currentByChannelID.values))
+        guard !currentByChannelID.isEmpty else { return }
+        requestedCategoryProgramIDs.formUnion(currentByChannelID.values)
+        debugLog("📺 Dispatcharr category enrichment: \(currentByChannelID.count) on-screen programme(s); fetching /api/epg/programs/<id>/ at cap-of-4")
+        let cats = await dispatcharrAPI(for: server)
+            .enrichCategories(programIDs: Array(Set(currentByChannelID.values)))
+        // The user may have switched playlists while the requests ran.
+        guard displayedServerID == serverID else { return }
         var byChannel: [String: String] = [:]
         var repeatChannels: Set<String> = []
         for (cid, pid) in currentByChannelID {
@@ -4000,6 +4201,11 @@ final class GuideStore: ObservableObject {
         // finishes successfully, cells already have data; if the
         // bulk fails, the user can pull-to-refresh to retry.
         guard !isLoading else { return }
+        // Nor while the launch's disk-cache read is still in flight: rows
+        // appear the moment the saved channel list is restored, before the
+        // cache lands, and each one used to fire a network prefetch for
+        // programmes the cache was about to supply anyway.
+        guard inFlightLoadTask == nil else { return }
 
         // Skip the per-channel network fetch when we already have
         // upcoming program data for this channel from the bulk
@@ -4109,7 +4315,7 @@ final class GuideStore: ObservableObject {
                         do {
                             let upcoming = try await api.getUpcomingPrograms(
                                 tvgIDs: hasTvgID ? [tvgID!] : nil,
-                                channelIDs: hasTvgID ? nil : (chID.map { [$0] })
+                                channelIDs: chID.map { [$0] }
                             )
                             let programs: [GuideProgram] = upcoming.compactMap { prog in
                                 guard let start = prog.startTime?.toDate(),
@@ -4176,9 +4382,7 @@ final class GuideStore: ObservableObject {
                     debugLog("📺 GuideStore.prefetch: DISCARDED stale per-cell result for \(prefetchServerKey.prefix(8)) — guide now displays \(self.displayedServerID!.prefix(8))")
                     return
                 }
-                for prog in fetched {
-                    self.mergeProgram(prog, for: channelID)
-                }
+                self.mergePrograms(fetched, for: channelID)
                 // Mark this channel as fetched ONLY if we actually got
                 // programs back. Previously the id was inserted BEFORE
                 // the fetch ran, so a timeout / transient failure left
@@ -4255,6 +4459,25 @@ final class GuideStore: ObservableObject {
             Self.mergeProgramInto(&_pendingPrograms, program: prog, for: channelID)
         } else {
             Self.mergeProgramInto(&programs, program: prog, for: channelID)
+        }
+    }
+
+    /// Merges one channel's programmes with a single write to `programs`.
+    /// Merging them one by one published once PER PROGRAMME: a per-row
+    /// prefetch returning 20 programmes re-rendered the guide 20 times
+    /// (`pub:guide.programs=40` in one second at a warm launch, 2026-09-27).
+    private func mergePrograms(_ progs: [GuideProgram], for channelID: String) {
+        guard !progs.isEmpty else { return }
+        if _isBatching {
+            for p in progs { Self.mergeProgramInto(&_pendingPrograms, program: p, for: channelID) }
+            return
+        }
+        // `mergeProgramInto` only reads and writes `dict[channelID]`.
+        var working: [String: [GuideProgram]] = [:]
+        if let existing = programs[channelID] { working[channelID] = existing }
+        for p in progs { Self.mergeProgramInto(&working, program: p, for: channelID) }
+        if let merged = working[channelID], merged != programs[channelID] {
+            programs[channelID] = merged
         }
     }
 
@@ -4368,7 +4591,7 @@ final class GuideStore: ObservableObject {
             //     pill-less on cold-launch upgrades. Capturing
             //     the programID here closes that gap.
             let existing = list[idx]
-            let mergedDescription = prog.description.count > existing.description.count
+            let mergedDescription = prog.description.utf8.count > existing.description.utf8.count
                 ? prog.description
                 : existing.description
             let mergedCategory = existing.category.isEmpty ? prog.category : existing.category
@@ -4697,6 +4920,10 @@ struct EPGGuideView: View {
     /// handler; always nil on iOS, so the inline `focusTargetID`
     /// resolution falls through to `channels.first?.id`.
     @State private var guideFocusTargetChannelID: String? = nil
+    #if os(tvOS)
+    /// First channel index drawn as a real row; see `rowWindowSize`.
+    @State private var rowWindowStart = 0
+    #endif
 
     /// v1.7.x: transient toast string for staging actions ("Added X
     /// to Multiview", "Removed Y", "Max reached", etc.). Set by
@@ -5020,7 +5247,14 @@ struct EPGGuideView: View {
                 // channel identity is stale regardless of age; letting
                 // orphans satisfy this guard skips the network while the
                 // guide renders blank.
-                let liveChannelIDs = Set(channels.map(\.id))
+                //
+                // Judged over the whole playlist, not the group on screen:
+                // this task re-runs on every group switch, and a group whose
+                // channels carry no guide data at all (common on large
+                // provider playlists) used to fail the test and re-download
+                // the entire grid each time it was opened.
+                let playlistChannels = channelStore.channels.isEmpty ? channels : channelStore.channels
+                let liveChannelIDs = Set(playlistChannels.map(\.id))
                 let hasFuturePrograms = guideStore.programs.contains { channelID, progs in
                     liveChannelIDs.contains(channelID) && progs.contains { $0.start > gateNow }
                 }
@@ -5029,7 +5263,10 @@ struct EPGGuideView: View {
                     return
                 }
                 channelStore.isEPGLoading = true
-                await guideStore.fetchUpcoming(channels: channels, servers: servers)
+                // The whole playlist, so the one grid download serves every
+                // group (and joins the launch orchestrator's fetch when that
+                // is already running) instead of a group-narrowed merge.
+                await guideStore.fetchUpcoming(channels: playlistChannels, servers: servers)
                 // Save fetched data to persistent cache
                 let serverID = activeServer?.id.uuidString ?? "unknown"
                 guideStore.saveToCache(modelContext: modelContext, serverID: serverID)
@@ -5134,6 +5371,50 @@ struct EPGGuideView: View {
         min(0, -(totalGridWidth - visibleProgramWidth))
     }
 
+    // MARK: - Row window (tvOS)
+    #if os(tvOS)
+    /// tvOS draws the guide rows through a sliding window: real rows around
+    /// where the user is, fixed-height spacers for everything above and
+    /// below. On every vertical move the focus engine asks SwiftUI's lazy
+    /// stack for a placeholder ("filler") focus item per unrealized row below
+    /// the focused one, so on an 11,625-channel "All" list a single Down took
+    /// 21 s in the simulator and 33 s on an Apple TV 4K (traces 2026-09-27:
+    /// `_UIFocusMovementPerformer` → `PlatformGroupContainer.fillerFocusItems`).
+    /// The window keeps that search to a bounded number of rows. The spacers
+    /// have the exact height of the rows they stand for, so scroll positions
+    /// do not move when the window slides.
+    private static let rowWindowSize = 120
+    /// Slide once a realized row this close to either end of the window appears.
+    private static let rowWindowMargin = 40
+    /// Short lists render every row, as before.
+    private static let rowWindowThreshold = 200
+
+    private var usesRowWindow: Bool { channels.count > Self.rowWindowThreshold }
+
+    private var rowWindow: Range<Int> {
+        guard usesRowWindow else { return 0..<channels.count }
+        let start = min(max(0, rowWindowStart), channels.count - Self.rowWindowSize)
+        return start..<(start + Self.rowWindowSize)
+    }
+
+    /// Re-centres the window on `index` when that row is outside it, or near
+    /// an end that still has rows beyond it.
+    private func keepRowInWindow(index: Int) {
+        guard usesRowWindow, channels.indices.contains(index) else { return }
+        let window = rowWindow
+        let nearTop = window.lowerBound > 0 && index < window.lowerBound + Self.rowWindowMargin
+        let nearBottom = window.upperBound < channels.count && index >= window.upperBound - Self.rowWindowMargin
+        guard nearTop || nearBottom || !window.contains(index) else { return }
+        let start = min(max(0, index - Self.rowWindowSize / 2), channels.count - Self.rowWindowSize)
+        if start != rowWindowStart { rowWindowStart = start }
+    }
+
+    private func keepRowInWindow(channelID: String) {
+        guard usesRowWindow, let index = channels.firstIndex(where: { $0.id == channelID }) else { return }
+        keepRowInWindow(index: index)
+    }
+    #endif
+
     // MARK: - Guide Content
     // Vertical ScrollView + LazyVStack for rows.
     // Horizontal position is driven by manual @State offset, not ScrollView,
@@ -5184,9 +5465,28 @@ struct EPGGuideView: View {
                         // deduped by stream URL at load time, so these ids
                         // are unique even when a provider reuses a tvg-id
                         // across distinct channels.
+                        #if os(tvOS)
+                        // Sliding window with exact-height spacers: see
+                        // `rowWindowSize`. The stack's spacing sits between
+                        // every child, hence the `- rowGap`.
+                        let window = rowWindow
+                        let rowPitch = rowHeight + rowGap
+                        if window.lowerBound > 0 {
+                            Color.clear
+                                .frame(height: CGFloat(window.lowerBound) * rowPitch - rowGap)
+                        }
+                        ForEach(channels[window]) { channel in
+                            guideRow(for: channel, screenWidth: geo.size.width, focusTargetID: focusTargetID)
+                        }
+                        if window.upperBound < channels.count {
+                            Color.clear
+                                .frame(height: CGFloat(channels.count - window.upperBound) * rowPitch - rowGap)
+                        }
+                        #else
                         ForEach(channels) { channel in
                             guideRow(for: channel, screenWidth: geo.size.width, focusTargetID: focusTargetID)
                         }
+                        #endif
                     }
                     .overlay(alignment: .topLeading) {
                         TimelineView(.periodic(from: .now, by: 60)) { context in
@@ -5263,7 +5563,13 @@ struct EPGGuideView: View {
                 // `GuideStore.residentForwardSeconds`).
                 let visibleEnd = windowStart.addingTimeInterval(
                     Double(-offset + visibleProgramWidth) / Double(pixelsPerHour) * 3600)
-                Task { await guideStore.ensureResidentRange(through: visibleEnd.addingTimeInterval(GuideStore.residentPagePadding)) }
+                let wantEnd = visibleEnd.addingTimeInterval(GuideStore.residentPagePadding)
+                Task {
+                    await guideStore.ensureResidentRange(through: wantEnd)
+                    // Days that were never fetched load from the server as the
+                    // timeline nears them (the launch walk stops at tomorrow).
+                    await guideStore.ensureForwardWindow(through: wantEnd, channels: channels, servers: servers)
+                }
                 guard jumpTarget != nil, -offset <= xOffset(for: Date()) else { return }
                 debugLog("[GUIDE] jump ended: scrolled back to now")
                 jumpTarget = nil
@@ -5405,6 +5711,12 @@ struct EPGGuideView: View {
                 debugLog("🧭 [GuideFocus] column snap ch=\(chID) landed=\(landed.start) -> anchor cell")
                 Task { @MainActor in
                     for _ in 0..<4 {
+                        // The user may already have moved on (fast Down
+                        // presses): re-asserting this row's anchor cell then
+                        // pulled focus back UP to the row they had just left.
+                        // `lastFocusedChannel` follows every focus change
+                        // (nil on an empty row), so stand down once it differs.
+                        guard focusScratch.lastFocusedChannel == chID else { break }
                         Slow.time("focus.columnSnapWrite") { focusedProgramID = target }
                         try? await Task.sleep(nanoseconds: 60_000_000)
                         if focusedProgramID == target { break }
@@ -5499,6 +5811,9 @@ struct EPGGuideView: View {
                 // still hours in the future was useless. This keeps the sacred
                 // Menu semantics (top channel) and completes the home position.
                 if timelineIsAwayFromNow() { reAnchorTimelineToNow() }
+                #if os(tvOS)
+                rowWindowStart = 0
+                #endif
                 Task { @MainActor in
                     // Focus the top of the guide. Channel-column cells are non-
                     // focusable on tvOS, so we focus a PROGRAM cell via
@@ -5550,6 +5865,11 @@ struct EPGGuideView: View {
             .onReceive(NotificationCenter.default.publisher(for: .aerioJumpToGuideProgram)) { _ in
                 consumePendingGuideJump(proxy: proxy)
             }
+            #if os(tvOS)
+            // A different list (group switch) starts its window at the top;
+            // runs before the task below, so a pending jump still re-centres.
+            .onChange(of: channels.count) { _, _ in rowWindowStart = 0 }
+            #endif
             .task(id: channels.count) {
                 consumePendingGuideJump(proxy: proxy)
             }
@@ -5613,6 +5933,8 @@ struct EPGGuideView: View {
                     // a retention Jump). With the row on screen,
                     // prefersDefaultFocus (guideFocusTargetChannelID) lets the
                     // reset land directly; the loop below is now a backstop.
+                    keepRowInWindow(channelID: valid)
+                    try? await Task.sleep(nanoseconds: 30_000_000)
                     proxy.scrollTo(valid, anchor: .center)
                     try? await Task.sleep(nanoseconds: 120_000_000)
                     if Task.isCancelled { return }
@@ -5751,6 +6073,13 @@ struct EPGGuideView: View {
         .onAppear {
             LiveCensus.rowAppeared()
             guideStore.prefetchIfNeeded(channel: channel, servers: servers)
+            guideStore.noteRowVisible(channelID: channel.id)
+            #if os(tvOS)
+            // Rows appear just before they scroll on screen, whatever kind of
+            // cell holds focus (empty rows track focus locally), so this is
+            // what slides the row window along with the user.
+            keepRowInWindow(channelID: channel.id)
+            #endif
         }
         .onDisappear {
             LiveCensus.rowDisappeared()
@@ -6189,6 +6518,8 @@ struct EPGGuideView: View {
             // a row a full page away is not composed and a focus write into
             // it is silently dropped (the other half of the one-press bug).
             // ForEach(channels) tags each row with channel.id for scrollTo.
+            keepRowInWindow(index: target)
+            try? await Task.sleep(nanoseconds: 30_000_000)
             proxy.scrollTo(channels[target].id, anchor: down ? .bottom : .top)
             try? await Task.sleep(nanoseconds: 50_000_000)
             // The row may compose without guide data; resolveFocusProgramID
@@ -6208,6 +6539,10 @@ struct EPGGuideView: View {
 
     private func channelID(ofProgram pid: String) -> String? {
         if let hit = guideStore.programChannelMemo[pid] { return hit }
+        if let parsed = GuideStore.channelID(fromProgramID: pid, in: guideStore.programs) {
+            guideStore.programChannelMemo[pid] = parsed
+            return parsed
+        }
         Slow.time("focus.memoRebuild") { guideStore.rebuildProgramChannelMemoIfNeeded() }
         if let hit = guideStore.programChannelMemo[pid] { return hit }
         // Fallback scan: a programme id the resident map does not carry.
@@ -6392,10 +6727,15 @@ struct EPGGuideView: View {
         let targetIdx = max(0, min(channels.count - 1, currentIdx + step))
         guard targetIdx != currentIdx, targetIdx < channels.count else { return }
         let targetChannel = channels[targetIdx]
-        withAnimation(.easeInOut(duration: 0.25)) {
-            proxy.scrollTo(targetChannel.id, anchor: .center)
-        }
+        #if os(tvOS)
+        keepRowInWindow(index: targetIdx)
+        #endif
         Task { @MainActor in
+            // One frame so a row the window just added is composed.
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            withAnimation(.easeInOut(duration: 0.25)) {
+                proxy.scrollTo(targetChannel.id, anchor: .center)
+            }
             try? await Task.sleep(nanoseconds: 120_000_000)
             if let target = resolveFocusProgramID(preferringChannel: targetChannel.id) {
                 focusedProgramID = target
@@ -7035,6 +7375,9 @@ struct EPGGuideView: View {
         defaults.removeObject(forKey: "guideJumpChannelID")
         defaults.removeObject(forKey: "guideJumpStart")
         let start = Date(timeIntervalSince1970: startTS)
+        #if os(tvOS)
+        keepRowInWindow(channelID: channelID)
+        #endif
         Task { @MainActor in
             // Let the guide's own initial scroll-to-now settle first.
             try? await Task.sleep(nanoseconds: 250_000_000)
@@ -7045,8 +7388,19 @@ struct EPGGuideView: View {
             }
             #if os(tvOS)
             guideFocusTargetChannelID = channelID
+            // A search hit can be days ahead, past what the launch loaded:
+            // page that day in (disk first, then the server) before choosing
+            // the cell to focus.
+            if start > Date().addingTimeInterval(GuideStore.baseGridForwardSeconds) {
+                let through = start.addingTimeInterval(GuideStore.residentPagePadding)
+                await guideStore.ensureResidentRange(from: start.addingTimeInterval(-3600), through: through)
+                await guideStore.ensureForwardWindow(through: through, channels: channels, servers: servers)
+            }
             try? await Task.sleep(nanoseconds: 120_000_000)
-            if let target = focusTargetProgramID(forChannel: channelID) {
+            // The searched programme itself, not whatever airs now.
+            if let exact = guideStore.programs[channelID]?.first(where: { abs($0.start.timeIntervalSince(start)) < 60 }) {
+                focusedProgramID = exact.id
+            } else if let target = focusTargetProgramID(forChannel: channelID) {
                 focusedProgramID = target
             }
             #endif

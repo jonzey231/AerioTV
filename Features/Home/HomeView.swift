@@ -152,6 +152,10 @@ final class VODStore: ObservableObject {
     /// Resolves a poster URL string that may be absolute or relative.
     /// Dispatcharr commonly returns relative paths like "/media/posters/xxx.jpg".
     private func resolveURL(_ raw: String, base: String) -> URL? {
+        Self.resolvePosterURL(raw, base: base)
+    }
+
+    nonisolated private static func resolvePosterURL(_ raw: String, base: String) -> URL? {
         guard !raw.isEmpty else { return nil }
         if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
             // SSRF gate: a malicious VOD source could emit poster URLs that
@@ -436,7 +440,11 @@ final class VODStore: ObservableObject {
             debugLog("[VOD] background sweep: already running, \(reason) ignored")
             return
         }
-        backgroundSweepTask = Task(priority: .background) { [weak self] in
+        // `.utility`, not `.background`: the fetch tasks inherit this, and
+        // at background QoS decoding and shaping one 1,000-row page took
+        // ~2 s of throttled CPU, which left the request window idle between
+        // pages (47k movies: 57 s, nearly all of it waiting on the CPU).
+        backgroundSweepTask = Task(priority: .utility) { [weak self] in
             await self?.runBackgroundSweep(servers: servers, reason: reason)
             self?.backgroundSweepTask = nil
         }
@@ -496,13 +504,23 @@ final class VODStore: ObservableObject {
         if !sweepMovies { VODSweepActivity.shared.markIdle(.movie) }
         if !sweepSeries { VODSweepActivity.shared.markIdle(.series) }
         guard gate != .skipped else { return }
-        if sweepMovies {
-            guard !Task.isCancelled else { return }
-            await loadMovies(servers: servers, background: true)
-        }
-        if sweepSeries {
-            guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else { return }
+        // Movies and series sweep side by side. In turn, TV Shows waited for
+        // every movie page first: on a 47k-movie library that was ~700 pages,
+        // so series only started ~12 minutes in. Both walks run on the main
+        // actor (VODStore), so sharing the server list between them is safe.
+        nonisolated(unsafe) let sweepServers = servers
+        async let movies: Void = runSweep(.movie, enabled: sweepMovies, servers: sweepServers)
+        async let series: Void = runSweep(.series, enabled: sweepSeries, servers: sweepServers)
+        _ = await (movies, series)
+    }
+
+    private func runSweep(_ kind: VODItemType, enabled: Bool, servers: [ServerConnection]) async {
+        guard enabled, !Task.isCancelled else { return }
+        if kind == .series {
             await loadSeries(servers: servers, background: true)
+        } else {
+            await loadMovies(servers: servers, background: true)
         }
     }
 
@@ -811,7 +829,6 @@ final class VODStore: ObservableObject {
             isRefillingMovies = false
             VODSweepActivity.shared.markIdle(.movie)
         }
-        var lastProgressivePublish = Date.distantPast
         moviesError = nil
         DebugLogger.shared.log("VODStore loadMovies — \(server.name) (\(server.type.rawValue)) url=\(server.effectiveBaseURL)",
                                category: "Movies", level: .info)
@@ -870,173 +887,18 @@ final class VODStore: ObservableObject {
                 return
             }
 
-            // Per-category fetch so every movie carries its REAL Dispatcharr
-            // category (the list response omits it). Sequential, not parallel,
-            // to avoid saturating Dispatcharr's uwsgi pool. A movie in two
-            // categories keeps the stamp of whichever page wrote it first,
-            // which the catalog's "do not touch a row this generation already
-            // wrote" rule enforces in SQL.
-            var lastError: APIError?
-            var failedCategories: [String] = []
-            // GH #109 parity: NO total cap. Every page the server offers is
-            // stored. Fairness comes from the round-robin walk below, which
-            // takes ONE page per category per rotation. Positions are saved
-            // in the catalog after every few pages, so a sweep killed by
-            // process death, jetsam or a playlist switch resumes where it
-            // stopped rather than restarting.
+            // Every enabled category, pipelined; see `sweepDispatcharrCatalog`.
             let lanes = enabledMovieCats
             let plan = await catalog.beginSweep(playlistKey: identity, kind: .movie,
                                                 lanes: lanes.map(\.name))
-            var nextPage = plan.nextPage
-            var finished = plan.done
-            var total = moviesCount
-            if plan.resumed {
-                let mid = nextPage.filter { $0.value > 1 && !finished.contains($0.key) }.count
-                debugLog("🎬 [VOD-CAT] resumed from saved positions kind=movies done=\(finished.count) mid-category=\(mid) stored=\(total)")
-            }
             debugLog("🎬 [VOD-CAT] sweep start kind=movies server=\(server.name) lanes=\(lanes.count) mode=\(background ? "background" : "foreground") generation=\(plan.generation)")
-            debugLog("🎬 [VOD-CAT] no total cap applied kind=movies (every page the server offers is stored)")
-
-            var pagesSinceProgressSave = 0
-            while finished.count < lanes.count {
-                guard !Task.isCancelled else { isLoadingMovies = false; return }
-                // Round-robin rotation: one page per unfinished category.
-                // Admitted at most `pageConcurrency` at a time (one quiet lane
-                // off screen, three while the user is watching the grid grow).
-                let rotation = lanes.filter { !finished.contains($0.name) }
-                var laneIndex = 0
-                while laneIndex < rotation.count {
-                    guard !Task.isCancelled else { isLoadingMovies = false; return }
-                    let limit = max(1, VODSweepActivity.shared.pageConcurrency(for: .movie))
-                    let upper = min(laneIndex + limit, rotation.count)
-                    let requests: [(name: String, catID: String, page: Int)] =
-                        rotation[laneIndex..<upper].map {
-                            (name: $0.name, catID: String($0.id), page: nextPage[$0.name] ?? 1)
-                        }
-                    laneIndex = upper
-                    let pages = await withTaskGroup(
-                        of: (String, Result<DispatcharrAPI.VODPageResult<DispatcharrVODMovie>, Error>).self
-                    ) { group in
-                        for req in requests {
-                            group.addTask {
-                                do {
-                                    let r = try await api.fetchVODMoviePage(category: req.name,
-                                                                page: req.page,
-                                                                background: background)
-                                    return (req.name, .success(r))
-                                } catch {
-                                    return (req.name, .failure(error))
-                                }
-                            }
-                        }
-                        var acc: [String: Result<DispatcharrAPI.VODPageResult<DispatcharrVODMovie>, Error>] = [:]
-                        for await item in group { acc[item.0] = item.1 }
-                        return acc
-                    }
-                    // The catalog write, the lane bookkeeping and the 5-page
-                    // checkpoint all run back here on the main actor, one page
-                    // at a time, exactly as they did when lanes were serial.
-                    for req in requests {
-                        guard !Task.isCancelled else { isLoadingMovies = false; return }
-                        guard let outcome = pages[req.name] else { continue }
-                        let cat = req
-                        let category = VODCategory(id: req.catID, name: req.name)
-                        let page = req.page
-                        var written = 0
-                        do {
-                            let result = try outcome.get()
-                            var batch: [VODDisplayItem] = []
-                            batch.reserveCapacity(result.items.count)
-                            for m in result.items {
-                                let streamURL = api.proxyMovieURL(
-                                    uuid: m.uuid,
-                                    preferredStreamID: m.streams?.first?.streamID
-                                )
-                                let cp = m.customProperties
-                                var movie = VODMovie(
-                                    id: String(m.id), name: m.title,
-                                    posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
-                                    backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
-                                        .flatMap { VODService.resolveImageURL($0, base: baseURL) },
-                                    rating: m.rating ?? "", plot: m.plot ?? "",
-                                    genre: m.genre ?? "", releaseDate: m.year.map(String.init) ?? "", duration: "",
-                                    cast: cp?.cast ?? "", director: cp?.director ?? "", imdbID: "",
-                                    categoryID: category.id,
-                                    categoryName: category.name,
-                                    streamURL: streamURL, containerExtension: "mp4",
-                                    serverID: sID
-                                )
-                                movie.dispatcharrUUID = m.uuid
-                                movie.addedAt = m.createdAt.flatMap(VODService.parseISODate)
-                                batch.append(VODDisplayItem(movie: movie))
-                            }
-                            // The page is on disk before the next one is asked
-                            // for, so nothing is held in memory between pages.
-                            written = await catalog.writePage(batch, playlistKey: identity,
-                                                              kind: .movie, generation: plan.generation)
-                            total += written
-                            nextPage[cat.name] = page + 1
-                            if !result.hasMore { finished.insert(cat.name) }
-                            debugLog("🎬 [VOD-CAT] page kind=movies cat=\(cat.name) p=\(page) "
-                                     + "+\(written) total=\(total) "
-                                     + "serverCount=\(result.serverCount.map(String.init) ?? "?")")
-                        } catch let err as APIError {
-                            // One category failing must not abort the whole sweep,
-                            // and its stored titles must survive the cleanup.
-                            lastError = err
-                            finished.insert(cat.name)
-                            failedCategories.append(cat.name)
-                            DebugLogger.shared.logError(err, context: "VODStore.loadMovies(\(server.name)) cat=\(cat.name) p=\(page)")
-                            debugLog("🎬 [VOD-CAT] page kind=movies cat=\(cat.name) p=\(page) failed: \(err.localizedDescription)")
-                        } catch {
-                            finished.insert(cat.name)
-                            failedCategories.append(cat.name)
-                            DebugLogger.shared.log(
-                                "VODStore.loadMovies(\(server.name)) cat=\(cat.name) error: \(error.localizedDescription)",
-                                category: "Movies", level: .warning
-                            )
-                        }
-
-                        // First batch overall: reveal content + hide the spinner.
-                        // Then publish at most every 5 s. A publish is now one
-                        // integer, not a multi-thousand element array.
-                        if isLoadingMovies {
-                            publishMovieCount(total, "sweep first batch")
-                            isLoadingMovies = false
-                            lastProgressivePublish = Date()
-                        } else if written > 0, Date().timeIntervalSince(lastProgressivePublish) >= 5 {
-                            publishMovieCount(total, "sweep progressive")
-                            lastProgressivePublish = Date()
-                        }
-
-                        // Checkpoint the lane positions every few pages. They are
-                        // rows now, written in the same database as the titles.
-                        pagesSinceProgressSave += 1
-                        if pagesSinceProgressSave >= 5 {
-                            pagesSinceProgressSave = 0
-                            await catalog.saveLanes(playlistKey: identity, kind: .movie,
-                                                    generation: plan.generation,
-                                                    nextPage: nextPage, done: finished)
-                        }
-
-                        // Pacing. A sweep whose own screen is in front of the
-                        // user runs unpaced: the wait is the thing being
-                        // optimized and the growing count is visible. Off screen
-                        // it keeps the quiet pace so it never competes with
-                        // playback, and holds while a tune is before first frame
-                        // or the app is backgrounded.
-                        if VODSweepActivity.shared.isForeground(.movie) {
-                            await AppSettleGate.shared.awaitResumeIfPaused()
-                        } else if background {
-                            try? await Task.sleep(for: VODSweepActivity.backgroundPageDelay)
-                            await AppSettleGate.shared.awaitResumeIfPaused()
-                        } else if !MultiviewStore.shared.tiles.isEmpty {
-                            // Cold-load yields to playback (2026-06-29).
-                            try? await Task.sleep(for: .milliseconds(200))
-                        }
-                    }
-                }
-            }
+            let outcome = await sweepDispatcharrCatalog(kind: .movie, lanes: lanes, api: api,
+                                                        baseURL: baseURL, serverID: sID,
+                                                        identity: identity, plan: plan)
+            guard !outcome.cancelled else { isLoadingMovies = false; return }
+            let failedCategories = outcome.failedCategories
+            let lastError = outcome.lastError
+            var total = 0
 
             // Close the sweep: rows older generations wrote and this one
             // never re-confirmed go, except the groups whose lane failed.
@@ -1166,7 +1028,6 @@ final class VODStore: ObservableObject {
             isRefillingSeries = false
             VODSweepActivity.shared.markIdle(.series)
         }
-        var lastSeriesProgressivePublish = Date()
         seriesError = nil
         DebugLogger.shared.log("VODStore loadSeries — \(server.name) (\(server.type.rawValue)) url=\(server.effectiveBaseURL)",
                                category: "TVShows", level: .info)
@@ -1215,143 +1076,17 @@ final class VODStore: ObservableObject {
                 return
             }
 
-            var lastError: APIError?
-            var failedCategories: [String] = []
             let lanes = enabledSeriesCats
             let plan = await catalog.beginSweep(playlistKey: identity, kind: .series,
                                                 lanes: lanes.map(\.name))
-            var nextPage = plan.nextPage
-            var finished = plan.done
-            var total = seriesCount
-            if plan.resumed {
-                let mid = nextPage.filter { $0.value > 1 && !finished.contains($0.key) }.count
-                debugLog("📺 [VOD-CAT] resumed from saved positions kind=series done=\(finished.count) mid-category=\(mid) stored=\(total)")
-            }
             debugLog("📺 [VOD-CAT] sweep start kind=series server=\(server.name) lanes=\(lanes.count) mode=\(background ? "background" : "foreground") generation=\(plan.generation)")
-            debugLog("📺 [VOD-CAT] no total cap applied kind=series (every page the server offers is stored)")
-
-            var pagesSinceProgressSave = 0
-            while finished.count < lanes.count {
-                guard !Task.isCancelled else { isLoadingSeries = false; return }
-                // Round-robin rotation: one page per unfinished category.
-                // Admitted at most `pageConcurrency` at a time (one quiet lane
-                // off screen, three while the user is watching the grid grow).
-                let rotation = lanes.filter { !finished.contains($0.name) }
-                var laneIndex = 0
-                while laneIndex < rotation.count {
-                    guard !Task.isCancelled else { isLoadingSeries = false; return }
-                    let limit = max(1, VODSweepActivity.shared.pageConcurrency(for: .series))
-                    let upper = min(laneIndex + limit, rotation.count)
-                    let requests: [(name: String, catID: String, page: Int)] =
-                        rotation[laneIndex..<upper].map {
-                            (name: $0.name, catID: String($0.id), page: nextPage[$0.name] ?? 1)
-                        }
-                    laneIndex = upper
-                    let pages = await withTaskGroup(
-                        of: (String, Result<DispatcharrAPI.VODPageResult<DispatcharrVODSeries>, Error>).self
-                    ) { group in
-                        for req in requests {
-                            group.addTask {
-                                do {
-                                    let r = try await api.fetchVODSeriesPage(category: req.name,
-                                                                page: req.page,
-                                                                background: background)
-                                    return (req.name, .success(r))
-                                } catch {
-                                    return (req.name, .failure(error))
-                                }
-                            }
-                        }
-                        var acc: [String: Result<DispatcharrAPI.VODPageResult<DispatcharrVODSeries>, Error>] = [:]
-                        for await item in group { acc[item.0] = item.1 }
-                        return acc
-                    }
-                    // The catalog write, the lane bookkeeping and the 5-page
-                    // checkpoint all run back here on the main actor, one page
-                    // at a time, exactly as they did when lanes were serial.
-                    for req in requests {
-                        guard !Task.isCancelled else { isLoadingSeries = false; return }
-                        guard let outcome = pages[req.name] else { continue }
-                        let cat = req
-                        let category = VODCategory(id: req.catID, name: req.name)
-                        let page = req.page
-                        var written = 0
-                        do {
-                            let result = try outcome.get()
-                            var batch: [VODDisplayItem] = []
-                            batch.reserveCapacity(result.items.count)
-                            for sItem in result.items {
-                                let cp = sItem.customProperties
-                                var show = VODSeries(
-                                    id: String(sItem.id), name: sItem.name,
-                                    posterURL: sItem.posterURL.flatMap { resolveURL($0, base: baseURL) },
-                                    backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
-                                        .flatMap { VODService.resolveImageURL($0, base: baseURL) },
-                                    rating: sItem.rating ?? "", plot: sItem.plot ?? "",
-                                    genre: sItem.genre ?? "", releaseDate: sItem.year.map(String.init) ?? "",
-                                    cast: cp?.cast ?? "", director: cp?.director ?? "",
-                                    categoryID: category.id,
-                                    categoryName: category.name,
-                                    serverID: sID, seasons: [], episodeCount: 0
-                                )
-                                show.tmdbID = sItem.tmdbID ?? ""
-                                show.addedAt = sItem.createdAt.flatMap(VODService.parseISODate)
-                                batch.append(VODDisplayItem(series: show))
-                            }
-                            written = await catalog.writePage(batch, playlistKey: identity,
-                                                              kind: .series, generation: plan.generation)
-                            total += written
-                            nextPage[cat.name] = page + 1
-                            if !result.hasMore { finished.insert(cat.name) }
-                            debugLog("📺 [VOD-CAT] page kind=series cat=\(cat.name) p=\(page) "
-                                     + "+\(written) total=\(total) "
-                                     + "serverCount=\(result.serverCount.map(String.init) ?? "?")")
-                        } catch let err as APIError {
-                            lastError = err
-                            finished.insert(cat.name)
-                            failedCategories.append(cat.name)
-                            DebugLogger.shared.logError(err, context: "VODStore.loadSeries(\(server.name)) cat=\(cat.name) p=\(page)")
-                            debugLog("📺 [VOD-CAT] page kind=series cat=\(cat.name) p=\(page) failed: \(err.localizedDescription)")
-                        } catch {
-                            finished.insert(cat.name)
-                            failedCategories.append(cat.name)
-                            DebugLogger.shared.log(
-                                "VODStore.loadSeries(\(server.name)) cat=\(cat.name) error: \(error.localizedDescription)",
-                                category: "TVShows", level: .warning
-                            )
-                        }
-
-                        if isLoadingSeries {
-                            publishSeriesCount(total, "sweep first batch")
-                            isLoadingSeries = false
-                            lastSeriesProgressivePublish = Date()
-                        } else if written > 0,
-                                  Date().timeIntervalSince(lastSeriesProgressivePublish) >= 5 {
-                            publishSeriesCount(total, "sweep progressive")
-                            lastSeriesProgressivePublish = Date()
-                        }
-
-                        pagesSinceProgressSave += 1
-                        if pagesSinceProgressSave >= 5 {
-                            pagesSinceProgressSave = 0
-                            await catalog.saveLanes(playlistKey: identity, kind: .series,
-                                                    generation: plan.generation,
-                                                    nextPage: nextPage, done: finished)
-                        }
-
-                        // See loadMovies: unpaced while the TV Shows screen is
-                        // in front of the user, quiet pace otherwise.
-                        if VODSweepActivity.shared.isForeground(.series) {
-                            await AppSettleGate.shared.awaitResumeIfPaused()
-                        } else if background {
-                            try? await Task.sleep(for: VODSweepActivity.backgroundPageDelay)
-                            await AppSettleGate.shared.awaitResumeIfPaused()
-                        } else if !MultiviewStore.shared.tiles.isEmpty {
-                            try? await Task.sleep(for: .milliseconds(200))
-                        }
-                    }
-                }
-            }
+            let outcome = await sweepDispatcharrCatalog(kind: .series, lanes: lanes, api: api,
+                                                        baseURL: baseURL, serverID: sID,
+                                                        identity: identity, plan: plan)
+            guard !outcome.cancelled else { isLoadingSeries = false; return }
+            let failedCategories = outcome.failedCategories
+            let lastError = outcome.lastError
+            var total = 0
 
             let deleted = await catalog.finishSweep(playlistKey: identity, kind: .series,
                                                     generation: plan.generation,
@@ -1406,6 +1141,281 @@ final class VODStore: ObservableObject {
         hasLoadedSeries = true
     }
 
+    // MARK: - Dispatcharr catalog sweep
+
+    private struct CatalogSweepOutcome {
+        var failedCategories: [String] = []
+        var lastError: APIError?
+        var cancelled = false
+    }
+
+    /// Pages in flight while nothing plays. The bulk listing is raw SQL on
+    /// the server, so three at once finish a 57k-title library in well
+    /// under a minute without crowding Dispatcharr's four workers.
+    nonisolated private static let catalogPagesInFlight = 3
+
+    private typealias CatalogPage = (rows: VODCatalogStore.PreparedRows, hasMore: Bool,
+                                     serverCount: Int?, pageSize: Int)
+
+    private func sweepIsLoading(_ kind: VODItemType) -> Bool {
+        kind == .series ? isLoadingSeries : isLoadingMovies
+    }
+
+    private func setSweepLoading(_ kind: VODItemType, _ value: Bool) {
+        if kind == .series { isLoadingSeries = value } else { isLoadingMovies = value }
+    }
+
+    private func publishSweepCount(_ kind: VODItemType, _ total: Int, _ why: String) {
+        if kind == .series { publishSeriesCount(total, why) } else { publishMovieCount(total, why) }
+    }
+
+    /// Walks every lane (enabled category) of `kind` and writes each page to
+    /// the catalog as it lands. Pages come from `/api/vod/all/` (1,000 rows
+    /// without per-row serializer work, 0.06-0.45 s each), with the typed
+    /// 100-row listings as the fallback for servers that lack it. Requests
+    /// are pipelined: a finished page admits the next request at once, and a
+    /// lane with more pages goes to the back of the queue, so every category
+    /// shows its first page early. Decoding and row mapping run in the child
+    /// tasks; the main actor only hands pages to the catalog.
+    ///
+    /// Before this, each kind walked 100-row pages one lane at a time with a
+    /// 500 ms pause per page, and series waited for all movies: ~900 pages
+    /// and 15+ minutes on a 57k-title server before TV Shows even started.
+    private func sweepDispatcharrCatalog(kind: VODItemType, lanes: [DispatcharrVODCategory],
+                                         api: DispatcharrAPI, baseURL: String, serverID: UUID,
+                                         identity: String, plan: VODSweepPlan) async -> CatalogSweepOutcome {
+        let label = kind == .series ? "series" : "movies"
+        let icon = kind == .series ? "📺" : "🎬"
+        var outcome = CatalogSweepOutcome()
+        var finished = plan.done
+        // Saved mid-category positions count 100-row pages of the typed
+        // listings. The bulk listing pages by 1,000, so an unfinished lane
+        // restarts at its first page (one cheap request) instead.
+        var nextPage: [String: Int] = [:]
+        let categoryIDs = Dictionary(lanes.map { ($0.name, String($0.id)) },
+                                     uniquingKeysWith: { first, _ in first })
+        var queue: [(name: String, page: Int)] = lanes.map(\.name)
+            .filter { !finished.contains($0) }
+            .map { (name: $0, page: 1) }
+        // Pages queued or in flight per lane, and the highest page queued.
+        // A lane is finished when its last outstanding page lands.
+        var outstanding = Dictionary(queue.map { ($0.name, 1) }, uniquingKeysWith: { a, _ in a })
+        var lastQueued = Dictionary(queue.map { ($0.name, 1) }, uniquingKeysWith: { a, _ in a })
+        var failedLanes = Set<String>()
+        var useBulk = !DispatcharrBulkCatalogSupport.isUnsupported(baseURL)
+        var total = count(kind)
+        var lastPublish = Date.distantPast
+        var pagesSinceSave = 0
+        var pages = 0
+        let started = Date()
+
+        let generation = plan.generation
+        await withTaskGroup(of: (name: String, page: Int, result: Result<CatalogPage?, Error>).self) { group in
+            var inFlight = 0
+            // Keeps the request window full. Called again before each write,
+            // so the network never waits on the database.
+            func fill(playing: Bool) {
+                let limit = playing ? 1 : Self.catalogPagesInFlight
+                while inFlight < limit, !queue.isEmpty {
+                    let job = queue.removeFirst()
+                    let bulk = useBulk
+                    let categoryID = categoryIDs[job.name] ?? job.name
+                    group.addTask {
+                        do {
+                            let page = try await Self.fetchCatalogPage(kind: kind, bulk: bulk, api: api,
+                                                                       category: job.name,
+                                                                       categoryID: categoryID,
+                                                                       page: job.page, quiet: playing,
+                                                                       baseURL: baseURL, serverID: serverID,
+                                                                       identity: identity,
+                                                                       generation: generation)
+                            return (job.name, job.page, .success(page))
+                        } catch {
+                            return (job.name, job.page, .failure(error))
+                        }
+                    }
+                    inFlight += 1
+                }
+            }
+            while true {
+                if Task.isCancelled { group.cancelAll(); break }
+                fill(playing: !MultiviewStore.shared.tiles.isEmpty)
+                guard inFlight > 0, let done = await group.next() else { break }
+                inFlight -= 1
+                if Task.isCancelled { group.cancelAll(); break }
+                pages += 1
+                switch done.result {
+                case .success(nil):
+                    // No bulk listing on this server: the lane goes again
+                    // through the typed listings (so does every later one).
+                    useBulk = false
+                    queue.append((name: done.name, page: 1))
+                case .success(let page?):
+                    outstanding[done.name, default: 1] -= 1
+                    nextPage[done.name] = done.page + 1
+                    if page.hasMore {
+                        let queuedUpTo = lastQueued[done.name] ?? done.page
+                        if done.page == 1, let count = page.serverCount, page.pageSize > 0 {
+                            // Queue every remaining page now, so a big category
+                            // (15k titles = 15 pages) is fetched in parallel
+                            // instead of one page after another at the end.
+                            let lastPage = (count + page.pageSize - 1) / page.pageSize
+                            if lastPage > queuedUpTo {
+                                for p in (queuedUpTo + 1)...lastPage { queue.append((name: done.name, page: p)) }
+                                outstanding[done.name, default: 0] += lastPage - queuedUpTo
+                                lastQueued[done.name] = lastPage
+                            }
+                        } else if done.page >= queuedUpTo {
+                            // The tail page says more arrived since the count.
+                            queue.append((name: done.name, page: done.page + 1))
+                            outstanding[done.name, default: 0] += 1
+                            lastQueued[done.name] = done.page + 1
+                        }
+                    }
+                    if outstanding[done.name, default: 0] <= 0 { finished.insert(done.name) }
+                    fill(playing: !MultiviewStore.shared.tiles.isEmpty)
+                    let written = await catalog.writePrepared(page.rows, generation: generation)
+                    total += written
+                    debugLog("\(icon) [VOD-CAT] page kind=\(label) cat=\(done.name) p=\(done.page) "
+                             + "+\(written) total=\(total) "
+                             + "serverCount=\(page.serverCount.map(String.init) ?? "?")")
+                    // First page overall reveals the grid; then at most one
+                    // count publish every 5 s (each one re-renders observers).
+                    if sweepIsLoading(kind) {
+                        publishSweepCount(kind, total, "sweep first batch")
+                        setSweepLoading(kind, false)
+                        lastPublish = Date()
+                    } else if written > 0, Date().timeIntervalSince(lastPublish) >= 5 {
+                        publishSweepCount(kind, total, "sweep progressive")
+                        lastPublish = Date()
+                    }
+                case .failure(let error):
+                    // One category failing must not abort the sweep, and its
+                    // stored titles must survive the cleanup.
+                    outstanding[done.name, default: 1] -= 1
+                    finished.insert(done.name)
+                    if failedLanes.insert(done.name).inserted {
+                        outcome.failedCategories.append(done.name)
+                    }
+                    if let apiError = error as? APIError {
+                        outcome.lastError = apiError
+                        DebugLogger.shared.logError(apiError, context: "VODStore sweep kind=\(label) cat=\(done.name) p=\(done.page)")
+                    }
+                    debugLog("\(icon) [VOD-CAT] page kind=\(label) cat=\(done.name) p=\(done.page) failed: \(error.localizedDescription)")
+                }
+                pagesSinceSave += 1
+                if pagesSinceSave >= 10 {
+                    pagesSinceSave = 0
+                    await catalog.saveLanes(playlistKey: identity, kind: kind, generation: plan.generation,
+                                            nextPage: nextPage, done: finished)
+                }
+                // Beside playback keep the old quiet pace; hold while a tune
+                // is before first frame or the app is in the background.
+                if !MultiviewStore.shared.tiles.isEmpty {
+                    try? await Task.sleep(for: VODSweepActivity.backgroundPageDelay)
+                }
+                await AppSettleGate.shared.awaitResumeIfPaused()
+            }
+        }
+        outcome.cancelled = Task.isCancelled
+        debugLog("\(icon) [VOD-CAT] sweep pages done kind=\(label) pages=\(pages) "
+                 + "in \(String(format: "%.1f", Date().timeIntervalSince(started)))s via "
+                 + "\(useBulk ? "/api/vod/all/" : "typed listings") failed=\(outcome.failedCategories.count)"
+                 + (outcome.cancelled ? " (cancelled)" : ""))
+        return outcome
+    }
+
+    /// Fetches one catalog page and maps it to display items, off the main
+    /// actor. nil when the bulk listing is unavailable on this server.
+    nonisolated private static func fetchCatalogPage(kind: VODItemType, bulk: Bool, api: DispatcharrAPI,
+                                                     category: String, categoryID: String, page: Int,
+                                                     quiet: Bool, baseURL: String, serverID: UUID,
+                                                     identity: String,
+                                                     generation: Int64) async throws -> CatalogPage? {
+        if kind == .series {
+            let result: DispatcharrAPI.VODPageResult<DispatcharrVODSeries>
+            if bulk {
+                guard let bulkPage: DispatcharrAPI.VODPageResult<DispatcharrVODSeries> =
+                        try await api.fetchVODBulkPage(type: "series", category: category,
+                                                       page: page, background: quiet) else { return nil }
+                result = bulkPage
+            } else {
+                result = try await api.fetchVODSeriesPage(category: category, page: page, background: quiet)
+            }
+            let items = catalogSeries(result.items, categoryID: categoryID, categoryName: category,
+                                      baseURL: baseURL, serverID: serverID)
+            return (VODCatalogStore.prepareRows(items, playlistKey: identity, kind: kind,
+                                                generation: generation),
+                    result.hasMore, result.serverCount,
+                    bulk ? DispatcharrAPI.bulkCatalogPageSize : DispatcharrAPI.typedCatalogPageSize)
+        }
+        let result: DispatcharrAPI.VODPageResult<DispatcharrVODMovie>
+        if bulk {
+            guard let bulkPage: DispatcharrAPI.VODPageResult<DispatcharrVODMovie> =
+                    try await api.fetchVODBulkPage(type: "movie", category: category,
+                                                   page: page, background: quiet) else { return nil }
+            result = bulkPage
+        } else {
+            result = try await api.fetchVODMoviePage(category: category, page: page, background: quiet)
+        }
+        let items = catalogMovies(result.items, categoryID: categoryID, categoryName: category,
+                                  api: api, baseURL: baseURL, serverID: serverID)
+        return (VODCatalogStore.prepareRows(items, playlistKey: identity, kind: kind,
+                                            generation: generation),
+                result.hasMore, result.serverCount,
+                bulk ? DispatcharrAPI.bulkCatalogPageSize : DispatcharrAPI.typedCatalogPageSize)
+    }
+
+    nonisolated private static func catalogMovies(_ rows: [DispatcharrVODMovie], categoryID: String,
+                                                  categoryName: String, api: DispatcharrAPI,
+                                                  baseURL: String, serverID: UUID) -> [VODDisplayItem] {
+        rows.map { m in
+            let cp = m.customProperties
+            var movie = VODMovie(
+                id: String(m.id), name: m.title,
+                posterURL: m.posterURL.flatMap { resolvePosterURL($0, base: baseURL) },
+                backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
+                    .flatMap { VODService.resolveImageURL($0, base: baseURL) },
+                rating: m.rating ?? "", plot: m.plot ?? "",
+                genre: m.genre ?? "", releaseDate: m.year.map(String.init) ?? "", duration: "",
+                cast: cp?.cast ?? "", director: cp?.director ?? "", imdbID: "",
+                categoryID: categoryID,
+                categoryName: categoryName,
+                streamURL: api.proxyMovieURL(uuid: m.uuid,
+                                             preferredStreamID: m.streams?.first?.streamID),
+                containerExtension: "mp4",
+                serverID: serverID
+            )
+            movie.dispatcharrUUID = m.uuid
+            movie.addedAt = m.createdAt.flatMap(VODService.parseISODate)
+            return VODDisplayItem(movie: movie)
+        }
+    }
+
+    nonisolated private static func catalogSeries(_ rows: [DispatcharrVODSeries], categoryID: String,
+                                                  categoryName: String, baseURL: String,
+                                                  serverID: UUID) -> [VODDisplayItem] {
+        rows.map { sItem in
+            let cp = sItem.customProperties
+            var show = VODSeries(
+                id: String(sItem.id), name: sItem.name,
+                posterURL: sItem.posterURL.flatMap { resolvePosterURL($0, base: baseURL) },
+                backdropURL: cp?.backdropPath?.first(where: { !$0.isEmpty })
+                    .flatMap { VODService.resolveImageURL($0, base: baseURL) },
+                rating: sItem.rating ?? "", plot: sItem.plot ?? "",
+                genre: sItem.genre ?? "", releaseDate: sItem.year.map(String.init) ?? "",
+                cast: cp?.cast ?? "", director: cp?.director ?? "",
+                categoryID: categoryID,
+                categoryName: categoryName,
+                serverID: serverID, seasons: [], episodeCount: 0
+            )
+            // Empty from the bulk listing; the catalog keeps a stored id.
+            show.tmdbID = sItem.tmdbID ?? ""
+            show.addedAt = sItem.createdAt.flatMap(VODService.parseISODate)
+            return VODDisplayItem(series: show)
+        }
+    }
+
     // MARK: - Helpers
 
     /// Build categories from items when the server's category API returns nothing.
@@ -1440,7 +1450,7 @@ final class ChannelStore: ObservableObject {
     /// matching `fetchDispatcharr`'s pre-stripped `base` local. `nil` /
     /// empty `uuid` yields an empty array (non-Dispatcharr or unconfigured
     /// channels have no server-side UUID).
-    static func dispatcharrStreamURLs(base: String, uuid: String?) -> [URL] {
+    nonisolated static func dispatcharrStreamURLs(base: String, uuid: String?) -> [URL] {
         guard let uuid, !uuid.isEmpty else { return [] }
         let trimmedBase = base.hasSuffix("/") ? String(base.dropLast()) : base
         // TS stream — the only working Dispatcharr proxy endpoint.
@@ -1559,6 +1569,29 @@ final class ChannelStore: ObservableObject {
 
         await GuideStore.shared.seedEPGCache(channels: channels, server: server)
         if didRefreshGuide, let modelContext {
+            GuideStore.shared.saveToCache(modelContext: modelContext, serverID: server.id.uuidString)
+        }
+    }
+
+    /// The periodic "guide is stale" refresh for Dispatcharr 0.30+. Unlike
+    /// `forceRefresh` it keeps the per-day grid coverage: the channel list is
+    /// re-read (published only when it changed) and the guide fetch re-reads
+    /// the live hours, while days already fetched stay until their coverage
+    /// expires or a source changes (`considerBackgroundGridSweep`). The forced
+    /// path re-downloaded every Guide Days day every 30 minutes.
+    func refreshQuietly(servers: [ServerConnection], modelContext: ModelContext?) async {
+        guard let server = servers.first(where: { $0.isActive }) ?? servers.first else { return }
+        activeServer = server
+        currentChannelServerID = server.id
+        loadTask?.cancel()
+        epgEnrichTask?.cancel()
+        await load(server: server)
+        guard !Task.isCancelled, !channels.isEmpty else { return }
+        isEPGLoading = true
+        let didRefresh = await GuideStore.shared.fetchUpcoming(channels: channels, servers: servers)
+        isEPGLoading = false
+        await GuideStore.shared.seedEPGCache(channels: channels, server: server)
+        if didRefresh, let modelContext {
             GuideStore.shared.saveToCache(modelContext: modelContext, serverID: server.id.uuidString)
         }
     }
@@ -1807,6 +1840,94 @@ final class ChannelStore: ObservableObject {
         return xmltvDidLand
     }
 
+    // MARK: - Channel list snapshot (instant start)
+
+    /// The last Dispatcharr channel list, kept on disk so a cold launch shows
+    /// the Live TV rows at once instead of waiting on /api/channels/channels/
+    /// (8.4 MB and several seconds on a 12.7k-channel server) plus the
+    /// conversion. The network load runs right after and replaces the list
+    /// only when something changed. Dispatcharr only: its stream URLs carry
+    /// no credentials (auth rides in headers), Xtream's do.
+    private struct ChannelListSnapshot: Codable {
+        static let currentVersion = 1
+        let version: Int
+        let identity: String
+        let baseURL: String
+        let channels: [ChannelDisplayItem]
+        let groups: [String]
+    }
+
+    /// Everything that changes WHICH channels the server hands this account.
+    /// A snapshot written under another identity is ignored.
+    private static func snapshotIdentity(for server: ServerConnection) -> String {
+        "\(server.id.uuidString)|\(server.credentialGeneration)|\(server.dispatcharrChannelProfileIDs)|"
+            + (server.dispatcharrSelectedProfileID.map(String.init) ?? "-")
+    }
+
+    nonisolated private static func snapshotURL(serverID: UUID) -> URL {
+        AppCacheDirectory.url.appendingPathComponent("channel-list-\(serverID.uuidString).plist")
+    }
+
+    nonisolated private static func writeSnapshot(channels: [ChannelDisplayItem], groups: [String],
+                                                  identity: String, baseURL: String, serverID: UUID) {
+        let snapshot = ChannelListSnapshot(version: ChannelListSnapshot.currentVersion, identity: identity,
+                                           baseURL: baseURL, channels: channels, groups: groups)
+        do {
+            let encoder = PropertyListEncoder()
+            encoder.outputFormat = .binary
+            try encoder.encode(snapshot).write(to: snapshotURL(serverID: serverID), options: .atomic)
+        } catch {
+            debugLog("🔷 ChannelStore: channel snapshot write failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// The saved list for this server, rebased onto `baseURL` when the app has
+    /// switched between the LAN and remote address since. nil when there is
+    /// none, it belongs to another identity, or it cannot be read.
+    nonisolated private static func readSnapshot(serverID: UUID, identity: String,
+                                                 baseURL: String) -> (channels: [ChannelDisplayItem], groups: [String])? {
+        guard let data = try? Data(contentsOf: snapshotURL(serverID: serverID)),
+              let snap = try? PropertyListDecoder().decode(ChannelListSnapshot.self, from: data),
+              snap.version == ChannelListSnapshot.currentVersion,
+              snap.identity == identity,
+              !snap.channels.isEmpty else { return nil }
+        let oldBase = snap.baseURL.hasSuffix("/") ? String(snap.baseURL.dropLast()) : snap.baseURL
+        let newBase = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
+        guard oldBase != newBase else { return (snap.channels, snap.groups) }
+        func rebase(_ url: URL?) -> URL? {
+            guard let url else { return nil }
+            let s = url.absoluteString
+            guard s.hasPrefix(oldBase) else { return url }
+            return URL(string: newBase + s.dropFirst(oldBase.count))
+        }
+        let rebased = snap.channels.map { item -> ChannelDisplayItem in
+            var c = item
+            c.logoURL = rebase(c.logoURL)
+            c.streamURL = rebase(c.streamURL)
+            c.streamURLs = c.streamURLs.compactMap { rebase($0) }
+            return c
+        }
+        return (rebased, snap.groups)
+    }
+
+    /// Carries the now-airing fields the guide filled in (they are not part
+    /// of the server's channel list) onto a freshly fetched list, so a
+    /// refresh that changes nothing compares equal and publishes nothing.
+    private func carryingNowAiring(into items: [ChannelDisplayItem]) -> [ChannelDisplayItem] {
+        guard !channels.isEmpty else { return items }
+        let existing = Dictionary(channels.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return items.map { item in
+            guard let old = existing[item.id] else { return item }
+            var c = item
+            c.currentProgram = old.currentProgram
+            c.currentProgramDescription = old.currentProgramDescription
+            c.currentProgramStart = old.currentProgramStart
+            c.currentProgramEnd = old.currentProgramEnd
+            c.currentProgramCategory = old.currentProgramCategory
+            return c
+        }
+    }
+
     // MARK: - Private Loader
 
     private func load(server: ServerConnection) async {
@@ -1835,7 +1956,27 @@ final class ChannelStore: ObservableObject {
         // non-empty, fetchDispatcharr filters the channel list to the
         // union of those profiles' memberships - a child-safety filter.
         let channelProfileIDs = server.dispatcharrProfileIDList
+        let snapshotIdentity = Self.snapshotIdentity(for: server)
         debugLog("🔷 ChannelStore.load: snapshot done (type=\(type), baseURL=\(DebugLogger.sanitize(baseURL)), hasPw=\(!password.isEmpty), hasKey=\(!apiKey.isEmpty))")
+
+        // Instant start (Dispatcharr): with nothing loaded yet, show the list
+        // saved by the last successful load while the fetch below refreshes
+        // it. The "Setting Up" cover then never appears on a normal launch,
+        // and the guide paints from the SwiftData EPG cache straight away.
+        if channels.isEmpty, type == .dispatcharrAPI {
+            let restoreStart = Date()
+            let restored = await Task.detached(priority: .userInitiated) {
+                Self.readSnapshot(serverID: serverID, identity: snapshotIdentity, baseURL: baseURL)
+            }.value
+            if let restored, !Task.isCancelled, channels.isEmpty, currentChannelServerID == serverID {
+                channels = restored.channels
+                orderedGroups = restored.groups
+                GuideStore.rememberChannelCount(restored.channels.count, serverID: serverID.uuidString)
+                isLoading = false
+                primeCategoriesFromCache(serverID: serverID.uuidString)
+                debugLog("🔷 ChannelStore.load: restored \(restored.channels.count) channels from the saved list in \(Int(Date().timeIntervalSince(restoreStart) * 1000))ms; refreshing from the server in the background")
+            }
+        }
 
         // Fast reachability probe (only on a cold load). A dead Docker
         // container, a wrong host, or a stopped VPN would otherwise
@@ -1881,17 +2022,33 @@ final class ChannelStore: ObservableObject {
                 )
                 debugLog("🔷 ChannelStore.load: fetchChannels returned \(items.count) items")
                 guard !Task.isCancelled else { isLoading = false; return }
-                channels      = items
-                orderedGroups = groups
+                // A list already on screen (the saved snapshot, or a warm
+                // refresh) is only replaced when the server's list differs:
+                // republishing 12k identical rows re-runs every channel
+                // observer for nothing.
+                let fresh = type == .dispatcharrAPI ? carryingNowAiring(into: items) : items
+                GuideStore.rememberChannelCount(items.count, serverID: serverID.uuidString)
+                if fresh != channels || groups != orderedGroups {
+                    channels      = fresh
+                    orderedGroups = groups
+                    debugLog("🔷 ChannelStore.load: published \(items.count) channels")
+                    // Apply any cached categories RIGHT NOW so the tint
+                    // stripe renders on the first frame channels appear,
+                    // instead of fading in 5–10 seconds later when the
+                    // live XMLTV parse wraps. The fresh XMLTV pass in
+                    // `loadAllEPG` still overwrites with current data.
+                    primeCategoriesFromCache(serverID: serverID.uuidString)
+                    TopShelfDataManager.syncTopChannels(channels: items)
+                } else {
+                    debugLog("🔷 ChannelStore.load: server list unchanged (\(items.count) channels), nothing to publish")
+                }
                 error = nil
-                debugLog("🔷 ChannelStore.load: published \(items.count) channels")
-                // Apply any cached categories RIGHT NOW so the tint
-                // stripe renders on the first frame channels appear,
-                // instead of fading in 5–10 seconds later when the
-                // live XMLTV parse wraps. The fresh XMLTV pass in
-                // `loadAllEPG` still overwrites with current data.
-                primeCategoriesFromCache(serverID: serverID.uuidString)
-                TopShelfDataManager.syncTopChannels(channels: items)
+                if type == .dispatcharrAPI {
+                    Task.detached(priority: .utility) {
+                        Self.writeSnapshot(channels: items, groups: groups, identity: snapshotIdentity,
+                                           baseURL: baseURL, serverID: serverID)
+                    }
+                }
                 DebugLogger.shared.logChannelLoad(
                     serverType: type.rawValue,
                     channelCount: items.count,
@@ -2051,6 +2208,19 @@ final class ChannelStore: ObservableObject {
 
     // MARK: - Bulk EPG Loading
 
+    /// Now-airing programme per channel from the guide's programme map, for
+    /// the List view rows (`applyCurrentPrograms`). Pure, runs off the main actor.
+    nonisolated static func currentProgramSnapshots(in programs: [String: [GuideProgram]],
+                                                    at now: Date) -> [String: CurrentProgramSnapshot] {
+        var out: [String: CurrentProgramSnapshot] = [:]
+        for (channelID, list) in programs {
+            guard let p = list.first(where: { $0.start <= now && $0.end > now }) else { continue }
+            out[channelID] = CurrentProgramSnapshot(title: p.title, description: p.description,
+                                                    start: p.start, end: p.end)
+        }
+        return out
+    }
+
     /// Loads ALL EPG data upfront so browsing/playback never triggers network requests.
     /// Called immediately after channels load. Sets isEPGLoading during the process.
     func loadAllEPG() async {
@@ -2059,405 +2229,39 @@ final class ChannelStore: ObservableObject {
         let type     = server.type
         let username = server.username
         let password = server.effectivePassword
-        let apiKey   = server.effectiveApiKey
-        // Snapshot the Dispatcharr XMLTV override early. `server` is
+        // Snapshot the Xtream XMLTV override early. `server` is
         // a SwiftData model; reading a property after an `await`
         // suspension risks a thread-context violation.
-        let dispatcharrXMLTVOverride = server.dispatcharrXMLTVURL
         let xtreamXMLTVOverride = server.xtreamXMLTVURL
         let categoryServerID = server.id.uuidString
-        // v1.6.20: snapshot the auto-detected auth header mode + UA
-        // so the off-main-thread API constructor uses the per-server
-        // shape instead of the default `.xapikey`.
-        let authMode = server.dispatcharrHeaderMode
-        let userAgent = server.effectiveUserAgent
 
         isEPGLoading = true
         defer { isEPGLoading = false }
 
         switch type {
         case .dispatcharrAPI:
-            // v1.6.21: track whether the bulk EPG fetch succeeded.
-            // When it fails (slow / parse error / network failure)
-            // we skip the follow-up `primeXMLTVFromURL` pass below.
-            // The XMLTV endpoint lives on the same Dispatcharr
-            // container as the bulk grid; if the grid couldn't
-            // respond after 30+ seconds, hammering the same server
-            // for another 24+ MB of XMLTV right after is the
-            // classic pile-on that wedges fragile deployments.
-            // EPGGuideView still triggers its own XMLTV fetch
-            // lazily when the user opens the Guide tab, so the
-            // category data is just deferred, not abandoned.
-            var bulkEPGSucceeded = false
-            // Dispatcharr: one bulk call via /api/epg/grid/ — all channels, -1h to +24h
-            do {
-                let dAPI = DispatcharrAPI(baseURL: baseURL,
-                                          auth: .apiKey(apiKey),
-                                          userAgent: userAgent,
-                                          authMode: authMode)
-                let programs = try await dAPI.getEPGGrid()
-                bulkEPGSucceeded = true
-
-                // v1.6.22: fetch the EPGData lookup so we can bridge
-                // `Channel.epg_data_id → EPGData.tvg_id` when
-                // `Channel.tvg_id` doesn't agree with how the bulk
-                // grid keys programs. On a real Dispatcharr instance
-                // about 25% of channels with EPG have mismatched
-                // ids; without the bridge those channels show up
-                // blank in the Live TV guide. Failure is non-fatal:
-                // an empty map degrades gracefully to today's behavior.
-                var epgDataMap: [Int: String] = [:]
-                do {
-                    epgDataMap = try await dAPI.getAllEPGData()
-                    debugLog("📺 Bulk EPG: fetched epg_data_id → tvg_id map (\(epgDataMap.count) rows)")
-                } catch {
-                    debugLog("📺 Bulk EPG: epg_data_id map fetch failed (\(error.localizedDescription)); channels with mismatched tvg_id won't be bridged")
-                }
-
-                // Everything below (dictionary build, ~7k-item sort,
-                // cache writes, fallback loop) used to run on the
-                // MainActor here and produced a ~560 ms hang while
-                // the user was staring at the Loading Guide screen.
-                // Offload all of it to a detached task. The channels
-                // snapshot is captured by value so the task doesn't
-                // reach back into the MainActor-isolated store.
-                let channelSnapshot = self.channels
-                let base = baseURL
-                let bridgeMap = epgDataMap
-                await Task.detached(priority: .utility) {
-                    let now = Date()
-
-                    // Group by tvgID
-                    var byTvgID: [String: [EPGEntry]] = [:]
-                    for p in programs {
-                        guard let start = p.startTime?.toDate(), let end = p.endTime?.toDate(),
-                              end > now else { continue }
-                        let key = p.tvgID ?? (p.channel.map { "ch_\($0)" } ?? "")
-                        guard !key.isEmpty else { continue }
-                        let entry = EPGEntry(title: p.title, description: p.description, startTime: start, endTime: end)
-                        byTvgID[key, default: []].append(entry)
-                    }
-                    // Sort each channel's programs then cache them by
-                    // the program's own tvg_id key. This covers the
-                    // case `Channel.tvg_id == program.tvg_id` (the 75%
-                    // path on a real instance).
-                    for (tvgID, entries) in byTvgID {
-                        let sorted = entries.sorted { ($0.startTime ?? .distantPast) < ($1.startTime ?? .distantPast) }
-                        await EPGCache.shared.set(sorted, for: "d_\(base)_\(tvgID)")
-                    }
-                    debugLog("📺 Bulk EPG loaded: \(programs.count) programs across \(byTvgID.count) channels")
-
-                    // Populate cache entries for each channel at the
-                    // EXACT key its reader will look at:
-                    //   `d_<base>_<channel.tvgID ?? channel.id>`
-                    // matches `ChannelListView.makeFetchUpcoming`.
-                    //
-                    // For channels where `Channel.tvg_id !=
-                    // EPGData.tvg_id` (the 25% mismatch case), the
-                    // first-pass write above landed under the EPGData
-                    // tvg_id, which doesn't match the reader's key.
-                    // Bridge via `epg_data_id → EPGData.tvg_id` to
-                    // copy the same programs to the reader's key.
-                    //
-                    // v1.7: also try the channel's UUID. Dispatcharr's
-                    // `/api/epg/grid/` emits synthetic "Dummy EPG"
-                    // entries for channels without real EPG data,
-                    // tagging them with `tvg_id == str(channel.uuid)`.
-                    // Pre-v1.7 the bulk path missed those, leading to
-                    // hundreds of "filled empty fallbacks" entries
-                    // that hid valid (if synthetic) program data
-                    // from the List view rows. The Guide view's
-                    // `fetchDispatcharr` path always handled this
-                    // case; the cold-launch bulk path now matches.
-                    //
-                    // Falls through to an empty fallback so per-cell
-                    // prefetch can't trigger post-loading network
-                    // fetches for genuinely EPG-less channels.
-                    //
-                    // While iterating, also build a map of channel.id
-                    // → currently-airing program so we can populate
-                    // `ChannelDisplayItem.currentProgram*` in one
-                    // batched MainActor write. The List view's
-                    // `liveProgram` lookup reads those fields first;
-                    // pre-v1.7 they were never set on the Dispatcharr
-                    // path so List rows showed only the channel name
-                    // until the user opened the Guide tab.
-                    var bridgedCount = 0
-                    var matchedViaUUID = 0
-                    var filledFallbacks = 0
-                    var currentByChannelID: [String: ChannelStore.CurrentProgramSnapshot] = [:]
-
-                    /// Helper. Pluck the now-airing entry from a
-                    /// pre-sorted list (start ascending). Used three
-                    /// times below so factored into a closure.
-                    func nowAiring(in entries: [EPGEntry]) -> EPGEntry? {
-                        return entries.first(where: { entry in
-                            guard let s = entry.startTime, let e = entry.endTime else { return false }
-                            return s <= now && e > now
-                        })
-                    }
-
-                    for channel in channelSnapshot {
-                        let tvgID = channel.tvgID ?? ""
-                        let keyPart = tvgID.isEmpty ? channel.id : tvgID
-                        let cacheKey = "d_\(base)_\(keyPart)"
-
-                        // 1. Direct tvg_id match (the 75% path).
-                        //    Already cached by the program-keyed
-                        //    write above when keyPart matches a
-                        //    program's tvg_id. Capture now-airing
-                        //    for the List-view enrichment.
-                        if let directEntries = byTvgID[keyPart] {
-                            if let nowProg = nowAiring(in: directEntries) {
-                                currentByChannelID[channel.id] = .init(
-                                    title: nowProg.title,
-                                    description: nowProg.description,
-                                    start: nowProg.startTime ?? now,
-                                    end: nowProg.endTime ?? now
-                                )
-                            }
-                            // Already cached at this key, no copy needed.
-                            if await EPGCache.shared.get(cacheKey) != nil {
-                                continue
-                            }
-                        }
-
-                        // 2. EPGData bridge (the 25% mismatch case).
-                        if let epgID = channel.dispatcharrEPGDataID,
-                           let epgTvgID = bridgeMap[epgID],
-                           let bridgeEntries = byTvgID[epgTvgID] {
-                            let sorted = bridgeEntries.sorted { ($0.startTime ?? .distantPast) < ($1.startTime ?? .distantPast) }
-                            await EPGCache.shared.set(sorted, for: cacheKey)
-                            if currentByChannelID[channel.id] == nil,
-                               let nowProg = nowAiring(in: sorted) {
-                                currentByChannelID[channel.id] = .init(
-                                    title: nowProg.title,
-                                    description: nowProg.description,
-                                    start: nowProg.startTime ?? now,
-                                    end: nowProg.endTime ?? now
-                                )
-                            }
-                            bridgedCount += 1
-                            continue
-                        }
-
-                        // 3. UUID match (Dummy EPG entries). The
-                        //    bulk grid emits synthetic entries with
-                        //    tvg_id == channel.uuid for channels
-                        //    that have no real EPG data assigned.
-                        //    Match those so the List view shows
-                        //    "<channel name>" placeholder programs
-                        //    instead of an empty subtitle.
-                        if let uuid = channel.uuid?.lowercased(),
-                           let dummyEntries = byTvgID[uuid] {
-                            let sorted = dummyEntries.sorted { ($0.startTime ?? .distantPast) < ($1.startTime ?? .distantPast) }
-                            await EPGCache.shared.set(sorted, for: cacheKey)
-                            if currentByChannelID[channel.id] == nil,
-                               let nowProg = nowAiring(in: sorted) {
-                                currentByChannelID[channel.id] = .init(
-                                    title: nowProg.title,
-                                    description: nowProg.description,
-                                    start: nowProg.startTime ?? now,
-                                    end: nowProg.endTime ?? now
-                                )
-                            }
-                            matchedViaUUID += 1
-                            continue
-                        }
-
-                        // No match. Empty fallback so per-cell
-                        // prefetch doesn't fire post-loading.
-                        if await EPGCache.shared.get(cacheKey) == nil {
-                            await EPGCache.shared.set([], for: cacheKey)
-                            filledFallbacks += 1
-                        }
-                    }
-                    debugLog("📺 Bulk EPG: bridged \(bridgedCount) channels via epg_data_id, matched \(matchedViaUUID) via Dummy EPG UUID, filled \(filledFallbacks) empty fallbacks; \(currentByChannelID.count) now-airing programs ready for List view")
-
-                    // Hop to MainActor for the @Published write.
-                    // ChannelStore lives there; SwiftUI will see one
-                    // invalidation and the List view rows pick up
-                    // the now-airing program data immediately.
-                    let currentMap = currentByChannelID
-                    await MainActor.run {
-                        ChannelStore.shared.applyCurrentPrograms(currentMap)
-                    }
-                }.value
-
-                // Refresh Top Shelf with updated program info
-                TopShelfDataManager.syncTopChannels(channels: self.channels)
-
-                // v1.6.22: API-only category enrichment.
-                // `/api/epg/grid/` deliberately strips `<category>`
-                // tags (server-side serializer omission, see
-                // Dispatcharr's `EPGGridAPIView`). The fix:
-                // `/api/epg/programs/<id>/` returns categories per
-                // program. We fan out detail fetches for the
-                // CURRENTLY-AIRING program of each channel,
-                // throttled at cap-of-4 concurrency, fire-and-forget
-                // so initial sync isn't blocked. ~330 calls at 41ms
-                // each = ~3-7s background; channel cards tint
-                // progressively as results land. Strictly /api/*;
-                // no XMLTV stream involved.
-                let chSnapForEnrich = self.channels
-                let progSnap = programs
-                let bridgeMapForEnrich = epgDataMap
-                let dAPIForEnrich = DispatcharrAPI(baseURL: baseURL,
-                                                   auth: .apiKey(apiKey),
-                                                   userAgent: userAgent,
-                                                   authMode: authMode)
-                Task.detached(priority: .utility) {
-                    let now = Date()
-                    // Build the same channel lookup used by the bulk
-                    // cache write (Channel.tvg_id + EPGData.tvg_id
-                    // bridge), so currently-airing matching covers
-                    // the 25% of channels with mismatched ids.
-                    var tvgToChan: [String: String] = [:]
-                    for ch in chSnapForEnrich {
-                        if let tvg = ch.tvgID, !tvg.isEmpty {
-                            tvgToChan[tvg.lowercased()] = ch.id
-                        }
-                    }
-                    for ch in chSnapForEnrich {
-                        guard let epgID = ch.dispatcharrEPGDataID,
-                              let bridgedTvg = bridgeMapForEnrich[epgID],
-                              !bridgedTvg.isEmpty else { continue }
-                        let key = bridgedTvg.lowercased()
-                        if tvgToChan[key] == nil { tvgToChan[key] = ch.id }
-                    }
-
-                    var currentByChannelID: [String: Int] = [:]
-                    for p in progSnap {
-                        guard let pid = p.programID,
-                              let start = p.startTime?.toDate(),
-                              let end = p.endTime?.toDate(),
-                              start <= now, end > now,
-                              let tvg = p.tvgID, !tvg.isEmpty,
-                              let cid = tvgToChan[tvg.lowercased()] else { continue }
-                        if currentByChannelID[cid] == nil {
-                            currentByChannelID[cid] = pid
-                        }
-                    }
-                    let pids = Array(currentByChannelID.values)
-                    debugLog("📺 Category enrichment: \(pids.count) currently-airing programs across \(currentByChannelID.count) channels; fetching /api/epg/programs/<id>/")
-                    let cats = await dAPIForEnrich.enrichCategories(programIDs: pids)
-
-                    // v1.7.x Phase 3: capture title alongside category
-                    // so propagation can match by exact title rather
-                    // than tinting channel-wide. Look up titles by
-                    // program_id from the bulk grid snapshot.
-                    var titlesByPID: [Int: String] = [:]
-                    for p in progSnap {
-                        if let pid = p.programID, !p.title.isEmpty {
-                            titlesByPID[pid] = p.title
-                        }
-                    }
-                    var byChan: [String: String] = [:]
-                    var enrichedByChannel: [String: (category: String, title: String)] = [:]
-                    for (cid, pid) in currentByChannelID {
-                        guard let c = cats[pid]?.categories else { continue }
-                        byChan[cid] = c
-                        let title = titlesByPID[pid] ?? ""
-                        enrichedByChannel[cid] = (c, title)
-                    }
-                    debugLog("📺 Category enrichment: \(byChan.count)/\(currentByChannelID.count) channels got categories")
-                    await MainActor.run {
-                        ChannelStore.shared.applyXMLTVCategories(byChan, serverID: categoryServerID)
-                    }
-
-                    // v1.7.x Phase 3: title-matched category
-                    // propagation. v1.7.0 ran a channel-wide sweep
-                    // (every entry in a channel's EPGCache got the
-                    // now-airing category) which was correct >90% of
-                    // the time on sports / news / weather channels
-                    // but over-tinted variety channels (HBO etc.) by
-                    // applying the wrong genre to every program.
-                    // v1.7.x narrows the sweep: only entries whose
-                    // title EXACTLY matches the enriched program's
-                    // now-airing title are tinted. Recurring shows
-                    // (SportsCenter ×6/day on ESPN HD, Anderson
-                    // Cooper 360 ×2/day on CNN) still get full
-                    // coverage; one-off entries (NHL Hockey at
-                    // 4-6AM, a movie premiere) stay neutral until
-                    // we have their own category. Honest partial
-                    // coverage > confident wrong tinting.
-                    //
-                    // The category-stripe at the channel-card level
-                    // (driven by `applyXMLTVCategories` above) still
-                    // reflects the now-airing category since that's
-                    // about what's playing right now, not the whole
-                    // schedule.
-                    //
-                    // Cost: same number of EPGCache reads + writes
-                    // as before (one read per enriched channel, one
-                    // write only when at least one entry matches).
-                    // The `.map` walks every entry but the title
-                    // comparison is cheap (String == String, no
-                    // allocations).
-                    let baseSnap = base
-                    let chSnap = chSnapForEnrich
-                    var rewritten = 0
-                    var entriesTinted = 0
-                    for (cid, info) in enrichedByChannel {
-                        guard !info.category.isEmpty,
-                              !info.title.isEmpty,
-                              let channel = chSnap.first(where: { $0.id == cid })
-                        else { continue }
-                        let tvgID = channel.tvgID ?? ""
-                        let keyPart = tvgID.isEmpty ? channel.id : tvgID
-                        let cacheKey = "d_\(baseSnap)_\(keyPart)"
-                        guard let entries = await EPGCache.shared.get(cacheKey),
-                              !entries.isEmpty else { continue }
-                        // Walk entries; tint only exact title matches
-                        // that don't already carry the right category
-                        // (idempotent on warm relaunch).
-                        var localTinted = 0
-                        let updated = entries.map { entry -> EPGEntry in
-                            guard entry.title == info.title,
-                                  entry.category != info.category else {
-                                return entry
-                            }
-                            localTinted += 1
-                            return EPGEntry(title: entry.title,
-                                            description: entry.description,
-                                            startTime: entry.startTime,
-                                            endTime: entry.endTime,
-                                            category: info.category)
-                        }
-                        guard localTinted > 0 else { continue }
-                        await EPGCache.shared.set(updated, for: cacheKey)
-                        rewritten += 1
-                        entriesTinted += localTinted
-                    }
-                    debugLog("📺 Category propagation: tinted \(entriesTinted) title-matched entries across \(rewritten) channels (title-match heuristic; one-off programs stay neutral)")
-                }
-            } catch {
-                debugLog("📺 Bulk EPG failed: \(error.localizedDescription); falling back to lazy loading")
-            }
-
-            // v1.6.22: dropped the secondary auto-derived
-            // `{base}/output/epg?tvg_id_source=tvg_id` XMLTV pass.
-            // Dispatcharr 0.23.0+ (commit 3c55649, 2026-02-01) gates
-            // `/output/epg` LAN-only by default; every Cloudflare,
-            // Synology QuickConnect, or port-forward user hit HTTP
-            // 403. The default EPG path is now REST-only.
-            //
-            // We DO still honor an explicit user-provided XMLTV
-            // override here. Power users who have a reachable
-            // XMLTV source (their own LAN-side Dispatcharr URL, a
-            // separate XMLTV aggregator, etc.) can paste it into
-            // Settings → Custom XMLTV URL and get the
-            // `<category>` data the bulk grid omits, layered on
-            // top of the REST data already cached above.
-            if bulkEPGSucceeded,
-               let xmltvURL = Self.dispatcharrXMLTVURL(override: dispatcharrXMLTVOverride) {
-                let dAPIForXMLTV = DispatcharrAPI(baseURL: baseURL,
-                                                  auth: .apiKey(apiKey),
-                                                  userAgent: userAgent,
-                                                  authMode: authMode)
-                debugLog("📺 loadAllEPG: honoring user XMLTV override at \(xmltvURL.host ?? "?") (in addition to /api/epg/grid/)")
-                await primeXMLTVFromURL(xmltvURL, headers: dAPIForXMLTV.streamAuthHeaders)
-            }
+            // One guide load serves the whole app (2026-09-26). This branch
+            // used to download the same /api/epg/grid/ (48 MB on a 12k-channel
+            // server) and /api/epg/epgdata/ that GuideStore.fetchUpcoming
+            // fetches for the guide, in parallel with it, re-read the XMLTV
+            // override the guide fetch already merges, and fan out one
+            // category request per channel on top. Now the guide's fetch
+            // (joined when the guide view already started it) builds the
+            // programme map, and the List view's EPGCache entries and
+            // now-airing rows are derived from that map.
+            let guide = GuideStore.shared
+            let channelSnapshot = channels
+            let didRefresh = await guide.fetchUpcoming(channels: channelSnapshot, servers: [server])
+            guard !Task.isCancelled else { return }
+            await guide.seedEPGCache(channels: channelSnapshot, server: server)
+            let programsSnapshot = guide.programs
+            let current = await Task.detached(priority: .utility) {
+                Self.currentProgramSnapshots(in: programsSnapshot, at: Date())
+            }.value
+            applyCurrentPrograms(current)
+            TopShelfDataManager.syncTopChannels(channels: self.channels)
+            if didRefresh { guide.saveToCacheIfPossible(serverID: categoryServerID) }
+            NotificationCenter.default.post(name: .epgCategoriesDidUpdate, object: nil)
 
         case .xtreamCodes:
             // Standard XC EPG: pull the server's bulk xmltv.php guide (full
@@ -2647,7 +2451,7 @@ final class ChannelStore: ObservableObject {
 
     // MARK: - Channel Sorting Helpers
 
-    private func numericChannelValue(_ value: String) -> Double {
+    nonisolated private static func numericChannelValue(_ value: String) -> Double {
         let t = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if t.isEmpty { return Double.greatestFiniteMagnitude }
         if let d = Double(t) { return d }
@@ -2741,6 +2545,11 @@ final class ChannelStore: ObservableObject {
     }
 
     private func sortChannels(_ items: [ChannelDisplayItem], groupOrder: [String]) -> [ChannelDisplayItem] {
+        Self.sortChannels(items, groupOrder: groupOrder)
+    }
+
+    /// Pure, so the Dispatcharr load can sort off the main actor.
+    nonisolated private static func sortChannels(_ items: [ChannelDisplayItem], groupOrder: [String]) -> [ChannelDisplayItem] {
         // Belt-and-suspenders dedup: drop EXACT-duplicate streams before
         // sorting. A messy provider can return two rows that resolve to
         // the same stream URL (a repeated M3U entry, or a reseller Xtream
@@ -2770,16 +2579,23 @@ final class ChannelStore: ObservableObject {
         if deduped.contains(where: { $0.panelOrder != nil }) {
             return deduped.sorted { ($0.panelOrder ?? Int.max) < ($1.panelOrder ?? Int.max) }
         }
-        return deduped.sorted {
-            let n0 = numericChannelValue($0.number), n1 = numericChannelValue($1.number)
-            if n0 != n1 { return n0 < n1 }
-            let g0 = idx[$0.group] ?? Int.max, g1 = idx[$1.group] ?? Int.max
-            if g0 != g1 { return g0 < g1 }
-            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-        }
+        // Keys computed once per channel: parsing the number inside the
+        // comparator ran ~2·n·log n string parses (about 350k for 12.7k
+        // channels) on every load.
+        let keyed = deduped.map { (item: $0, number: numericChannelValue($0.number),
+                                   group: idx[$0.group] ?? Int.max) }
+        return keyed.sorted {
+            if $0.number != $1.number { return $0.number < $1.number }
+            if $0.group != $1.group { return $0.group < $1.group }
+            return $0.item.name.localizedCaseInsensitiveCompare($1.item.name) == .orderedAscending
+        }.map(\.item)
     }
 
     private func derivedGroupOrder(from items: [ChannelDisplayItem]) -> [String] {
+        Self.derivedGroupOrder(from: items)
+    }
+
+    nonisolated private static func derivedGroupOrder(from items: [ChannelDisplayItem]) -> [String] {
         var seen = Set<String>(); var order: [String] = []
         for item in items { if seen.insert(item.group).inserted { order.append(item.group) } }
         return order
@@ -3135,6 +2951,37 @@ final class ChannelStore: ObservableObject {
         var groupOrder    = dGroups.filter { usedGroupIDs.contains($0.id) }.map { $0.name }
         if dChannels.contains(where: { $0.channelGroupID == nil }) { groupOrder.append("Uncategorized") }
 
+        // Read once on the main actor: evaluated per catch-up channel inside
+        // the map, it rebuilt the capability snapshot (a JSON decode plus
+        // SwiftData reads) for every one of them.
+        let canUseCatchup = activeServer?.dispatcharrCanUseCatchup ?? true
+        let channelsToConvert = dChannels
+        let groupsInOrder = groupOrder
+        // The conversion and sort run off the main actor: on a 12.7k-channel
+        // playlist they were a visible stall right as the list first appeared.
+        let converted: (items: [ChannelDisplayItem], groups: [String]) = await Task.detached(priority: .userInitiated) {
+            Self.convertDispatcharrChannels(channelsToConvert, base: base,
+                                            groupNameByID: groupNameByID,
+                                            groupOrder: groupsInOrder,
+                                            canUseCatchup: canUseCatchup)
+        }.value
+
+        // Current-program enrichment used to live here (populated
+        // from the removed `getCurrentPrograms()` call above). It
+        // now happens lazily via the EPG guide's bulk grid fetch
+        // plus per-cell prefetch, so we just return the channels
+        // without now-airing data at load time.
+
+        return converted
+    }
+
+    /// `DispatcharrChannel` rows to sorted `ChannelDisplayItem`s plus the
+    /// derived group order. Pure; runs off the main actor.
+    nonisolated private static func convertDispatcharrChannels(
+        _ dChannels: [DispatcharrChannel], base: String,
+        groupNameByID: [Int: String], groupOrder: [String],
+        canUseCatchup: Bool
+    ) -> (items: [ChannelDisplayItem], groups: [String]) {
         func logoURL(_ logoID: Int?) -> URL? {
             guard let id = logoID else { return nil }
             return URL(string: "\(base)/api/channels/logos/\(id)/cache/")
@@ -3148,6 +2995,9 @@ final class ChannelStore: ObservableObject {
             // byte-identical to the previous inline format.
             return ChannelStore.dispatcharrStreamURLs(base: base, uuid: uuid)
         }
+        // Dictionary, not `groupOrder.firstIndex(of:)` per channel (n × groups).
+        let groupIndex = Dictionary(groupOrder.enumerated().map { ($1, $0) },
+                                    uniquingKeysWith: { first, _ in first })
 
         var items: [ChannelDisplayItem] = dChannels.enumerated().map { (i, ch) in
             let grp  = ch.channelGroupID.flatMap { groupNameByID[$0] } ?? "Uncategorized"
@@ -3161,7 +3011,7 @@ final class ChannelStore: ObservableObject {
             var item = ChannelDisplayItem(
                 id: String(ch.id), name: ch.name, number: num,
                 logoURL: logoURL(ch.logoID), group: grp,
-                categoryOrder: groupOrder.firstIndex(of: grp) ?? Int.max,
+                categoryOrder: groupIndex[grp] ?? Int.max,
                 streamURL: urls.first, streamURLs: urls)
             item.tvgID = ch.tvgID
             // Carry the channel's Dispatcharr UUID so the guide's
@@ -3188,7 +3038,7 @@ final class ChannelStore: ObservableObject {
             // streams (is_catchup + MAX catchup_days, Dispatcharr dev).
             // Dispatcharr 0.30: catchup_enabled off for this account
             // hides every catch-up affordance (the server 403s them).
-            if ch.isCatchup, ch.catchupDays > 0, activeServer?.dispatcharrCanUseCatchup ?? true {
+            if ch.isCatchup, ch.catchupDays > 0, canUseCatchup {
                 item.catchupDays = ch.catchupDays
             }
             return item
@@ -3202,13 +3052,6 @@ final class ChannelStore: ObservableObject {
         let sample = items.filter { $0.catchupDays > 0 }.prefix(6)
             .map { "\($0.name)=\($0.catchupDays)d" }.joined(separator: ", ")
         debugLog("📺 Dispatcharr catch-up days across \(items.count) channels: [\(catchupHistogram)] e.g. \(sample)")
-
-        // Current-program enrichment used to live here (populated
-        // from the removed `getCurrentPrograms()` call above). It
-        // now happens lazily via the EPG guide's bulk grid fetch
-        // plus per-cell prefetch, so we just return the channels
-        // without now-airing data at load time.
-
         return (items, derivedGroupOrder(from: items))
     }
 }
@@ -4385,13 +4228,16 @@ struct MainTabView: View {
     /// recording even when it belongs to a server the user has switched away
     /// from. See `hasRecordings`.
     @ObservedObject private var recordingCoordinator = RecordingCoordinator.shared
-    /// Watches the shared GuideStore so the initial-sync loading cover
-    /// can wait for the XMLTV parse (which populates category data and
-    /// most of the guide content) to finish before dismissing. Without
-    /// this, the cover would close on the faster JSON bulk-EPG signal
-    /// and drop the user into a partially-populated guide while
-    /// XMLTV was still loading silently in the background.
-    @ObservedObject private var guideStore = GuideStore.shared
+    /// The shared GuideStore, deliberately NOT observed. It publishes
+    /// `programs` (up to ~180k programmes on a large playlist) several
+    /// times during a launch, and observing it re-evaluated this whole tab
+    /// view on each one: 110-320 ms main-thread turns while the guide was
+    /// on screen and loading (simulator trace 2026-09-27). The only
+    /// published value this view renders from is `isLoading`, which the
+    /// initial-sync loading cover waits on; it is mirrored into
+    /// `guideIsLoading` below.
+    private var guideStore: GuideStore { GuideStore.shared }
+    @State private var guideIsLoading = GuideStore.shared.isLoading
     /// Watches `PlayerSession.shared.mode` so the inline-player slot
     /// can mode-branch between single-stream `PlayerView` and the new
     /// `MultiviewContainerView`. `@ObservedObject` on a singleton is
@@ -4748,7 +4594,7 @@ struct MainTabView: View {
         // sees — dismissing before XMLTV finishes produces the
         // "partial guide appears, then pops in more content" UX that
         // users reported as "no loading indicator, took forever."
-        let epgDone      = !channelStore.isEPGLoading && !guideStore.isLoading
+        let epgDone      = !channelStore.isEPGLoading && !guideIsLoading
         let dvrDone      = didInitialDVRReconcile || !needsInitialDVRSync
         let errorPresent = channelStore.error != nil
         return "\(channelsDone)|\(epgDone)|\(dvrDone)|\(errorPresent)"
@@ -4767,7 +4613,7 @@ struct MainTabView: View {
         // have wrapped, so the row flips to `.done` only when the
         // guide is actually usable.
         let channelsReady = !channelStore.isLoading && !channelStore.channels.isEmpty
-        let epgReady = !channelStore.isEPGLoading && !guideStore.isLoading
+        let epgReady = !channelStore.isEPGLoading && !guideIsLoading
         var epgStage = SyncStage(id: "epg", label: "Loading EPG")
         if channelsReady && epgReady {
             let channelCount = channelStore.channels.count
@@ -5090,9 +4936,15 @@ struct MainTabView: View {
         // short enough that "opened it after a few hours" always lands fresh.
         let staleAfter: TimeInterval = 30 * 60
         guard GuideStore.shared.isEPGStale(olderThan: staleAfter) else { return }
-        debugLog("🔄 Guide refresh (\(reason)): EPG stale (>\(Int(staleAfter / 60))m old) — forcing channels + guide refresh")
         let servers = allServers
         let ctx = modelContext
+        if let server = servers.first(where: { $0.isActive }) ?? servers.first,
+           server.type == .dispatcharrAPI, server.dispatcharrVersionAtLeast("0.30.0") {
+            debugLog("🔄 Guide refresh (\(reason)): EPG stale (>\(Int(staleAfter / 60))m old) — quiet refresh (channel list + live hours, cached days kept)")
+            Task { await channelStore.refreshQuietly(servers: servers, modelContext: ctx) }
+            return
+        }
+        debugLog("🔄 Guide refresh (\(reason)): EPG stale (>\(Int(staleAfter / 60))m old) — forcing channels + guide refresh")
         Task { await channelStore.forceRefresh(servers: servers, modelContext: ctx) }
     }
 
@@ -5157,7 +5009,7 @@ struct MainTabView: View {
     /// server-side search flags so users searching a huge library
     /// see the ongoing background activity.
     private var isAnyBackgroundWork: Bool {
-        channelStore.isLoading || channelStore.isEPGLoading || guideStore.isLoading
+        channelStore.isLoading || channelStore.isEPGLoading || guideIsLoading
             || vodStore.isLoadingMovies || vodStore.isLoadingSeries
             || vodStore.isRefillingMovies || vodStore.isRefillingSeries
             || vodStore.isSearchingMovies || vodStore.isSearchingSeries
@@ -5169,7 +5021,7 @@ struct MainTabView: View {
         var labels: [String] = []
         if channelStore.isLoading        { labels.append("channels") }
         if channelStore.isEPGLoading     { labels.append("epg") }
-        if guideStore.isLoading          { labels.append("xmltv-parse") }
+        if guideIsLoading                { labels.append("xmltv-parse") }
         if vodStore.isLoadingMovies      { labels.append("vod-movies-initial") }
         if vodStore.isLoadingSeries      { labels.append("vod-series-initial") }
         if vodStore.isRefillingMovies    { labels.append("vod-movies-refill") }
@@ -6462,6 +6314,7 @@ struct MainTabView: View {
         // on-screen state honest. The key is a Hashable digest of
         // every signal; onChange fires each time any of them flip.
         .onChange(of: initialSyncKey) { _, _ in tryDismissInitialLoading() }
+        .onReceive(GuideStore.shared.$isLoading.removeDuplicates()) { guideIsLoading = $0 }
         // v1.6.13 (GH #8): auto-resume the last-played channel into
         // the corner mini-player as soon as the channel list is
         // resolvable. Fires on the first non-empty `channels`

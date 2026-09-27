@@ -29,7 +29,7 @@ final class AppSettleGate {
 
     /// How long after launch or a foreground return the app counts as settled.
     /// Matches the EPG sweep's `backgroundSweepSettleDelay`.
-    nonisolated static let settleDelay: TimeInterval = 20
+    nonisolated static let settleDelay: TimeInterval = 12
 
     /// Start of the current settle window: process start, then every
     /// foreground return.
@@ -39,6 +39,20 @@ final class AppSettleGate {
     /// then no background sweep may start, however long the window has run:
     /// the guide is the screen the user is looking at.
     private var guideRendered = false
+
+    /// Set when the user opens a screen that is waiting on deferred work
+    /// (Movies / TV Shows before the catalog sweep ran). The wait for the
+    /// window and for the guide no longer applies: holding the sweep back
+    /// for the guide's sake is pointless once the user is looking at the
+    /// thing the sweep fills, and the guide may never render at all when
+    /// the user goes straight to On Demand. Tune and background holds stay.
+    private var expedited = false
+
+    func expedite(reason: String) {
+        guard !expedited else { return }
+        expedited = true
+        debugLog("[SETTLE] expedited (\(reason))")
+    }
 
     private init() {}
 
@@ -80,12 +94,13 @@ final class AppSettleGate {
         while !Task.isCancelled {
             let elapsed = Date().timeIntervalSince(windowStart)
             let remaining = Self.settleDelay - elapsed
-            if remaining > 0 {
-                try? await Task.sleep(for: .seconds(min(remaining, 5)))
+            if remaining > 0, !expedited {
+                // Short slices so `expedite` takes effect at once.
+                try? await Task.sleep(for: .seconds(min(remaining, 0.5)))
                 continue
             }
-            if !guideRendered || shouldPause {
-                try? await Task.sleep(for: .seconds(2))
+            if (!guideRendered && !expedited) || shouldPause {
+                try? await Task.sleep(for: .seconds(0.5))
                 continue
             }
             debugLog("[SETTLE] settled (\(reason)) after \(Int(elapsed))s")

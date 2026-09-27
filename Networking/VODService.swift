@@ -758,7 +758,15 @@ final class VODService {
         } catch {
             info = nil
         }
-        let episodes = try await api.getVODSeriesEpisodes(seriesID: sid)
+        // provider-info already carries every episode (Dispatcharr's
+        // `include_episodes`, on by default); page the separate listing only
+        // when it did not (older server, or the refresh returned nothing).
+        let episodes: [DispatcharrVODEpisode]
+        if let embedded = info?.episodes, !embedded.isEmpty {
+            episodes = embedded
+        } else {
+            episodes = try await api.getVODSeriesEpisodes(seriesID: sid)
+        }
 
         // Build season map from episodes. v1.6.12 also surfaces
         // episode runtime via `duration_secs` (was always blank
@@ -796,8 +804,8 @@ final class VODService {
                 // Route through resolveImageURL (same as the backdrops below)
                 // so a TMDB path is rewritten and an absolute URL is validated
                 // against the SSRF guard, instead of trusting raw URL(string:).
-                if let img = ep.customProperties?.movieImage,
-                   !img.isEmpty,
+                if let img = [ep.customProperties?.movieImage, ep.movieImage]
+                    .compactMap({ $0 }).first(where: { !$0.isEmpty }),
                    let url = resolveImageURL(img, base: base) {
                     return url
                 }
@@ -2150,6 +2158,8 @@ final class TMDBArtCache: ObservableObject {
     private var dirty = false
     private var saveTask: Task<Void, Never>?
     private var enrichTasks: [String: Task<Void, Never>] = [:]
+    /// Library walks currently running (finished tasks stay in `enrichTasks`).
+    private var activeWalks = 0
 
     private static var fileURL: URL {
         AppCacheDirectory.url.appendingPathComponent("tmdb-art-cache.json")
@@ -2202,7 +2212,11 @@ final class TMDBArtCache: ObservableObject {
     private func scheduleSave() {
         guard saveTask == nil else { return }
         saveTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2))
+            // Every `version` bump re-renders each visible poster card and
+            // re-encodes the whole art table to disk. A library walk stores
+            // a title every ~100 ms for as long as an hour on a 57k-title
+            // catalog, so while one runs, batch the art into 20 s steps.
+            try? await Task.sleep(for: .seconds(activeWalks > 0 ? 20 : 2))
             saveTask = nil
             guard dirty else { return }
             dirty = false
@@ -2233,6 +2247,8 @@ final class TMDBArtCache: ObservableObject {
         let cutoff = Date().addingTimeInterval(-30 * 86_400)
         debugLog("[TMDB-ART] enrich \(kindKey): walking the catalog a page at a time")
         enrichTasks[kindKey] = Task { @MainActor in
+            activeWalks += 1
+            defer { activeWalks -= 1 }
             var resolved = 0
             var seen = Set<String>()
             var afterID: Int64 = 0
@@ -2291,6 +2307,8 @@ final class TMDBArtCache: ObservableObject {
         guard !todo.isEmpty else { return }
         debugLog("[TMDB-ART] enrich \(kindKey): \(todo.count) of \(ordered.count) titles to resolve")
         enrichTasks[kindKey] = Task { @MainActor in
+            activeWalks += 1
+            defer { activeWalks -= 1 }
             var resolved = 0
             for (k, title) in todo {
                 guard !Task.isCancelled else { return }

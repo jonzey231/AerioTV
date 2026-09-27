@@ -37,6 +37,8 @@ final class VODSweepActivity: ObservableObject {
     /// Pause between pages on the quiet (off screen) path. Same 500 ms the
     /// sweep loop used before this file existed.
     static let backgroundPageDelay: Duration = .milliseconds(500)
+    /// The same path while nothing is playing: just enough to yield.
+    static let idlePageDelay: Duration = .milliseconds(100)
 
     // MARK: Sweep state
 
@@ -116,6 +118,9 @@ final class VODSweepActivity: ObservableObject {
             moviesOnScreen = visible
         }
         debugLog("[VOD-CAT] on screen kind=\(kind == .series ? "series" : "movies") -> \(visible)")
+        // The user is looking at the catalog: start the sweep now instead
+        // of after the launch settle window.
+        if visible { AppSettleGate.shared.expedite(reason: kind == .series ? "TV Shows on screen" : "Movies on screen") }
     }
 
     /// True when the sweep for `kind` may run unpaced and concurrent: its own

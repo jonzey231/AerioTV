@@ -393,6 +393,10 @@ struct ChannelListView: View {
     // #42 Part 1: focus target for the group-filter pills (the "All" pill is the
     // jump target for a guide long-press Left).
     @FocusState private var groupPillFocused: String?
+    #if os(tvOS)
+    /// First group token drawn as a real pill; see `pillWindowSize`.
+    @State private var pillWindowStart = 0
+    #endif
     // #42 Part 1: auto-clears the pin if the Left release event is missed.
     // (`leftHoldPinningAll` itself is declared unconditionally above — shared
     // group-filter-bar code reads it to gate collection-pill focus.)
@@ -1256,6 +1260,7 @@ struct ChannelListView: View {
                                     .focused($pillEntryCatcherFocused)
                                     .onChange(of: pillEntryCatcherFocused) { _, focused in
                                         guard focused, let first = groupTokens.first else { return }
+                                        pillWindowStart = 0
                                         groupPillFocused = first
                                     }
                             }
@@ -1438,6 +1443,7 @@ struct ChannelListView: View {
                     // needs the focus pin.
                     if action == .focusGroupPills {
                         leftHoldPinningAll = true
+                        pillWindowStart = 0
                         groupPillFocused = groupTokens.first ?? "All"
                         leftHoldSafetyTask?.cancel()
                         leftHoldSafetyTask = Task { @MainActor in
@@ -1451,6 +1457,7 @@ struct ChannelListView: View {
                 .onReceive(NotificationCenter.default.publisher(for: .guideFocusGroupPills)) { _ in
                     // Mapped "Go to group pills" / pills-mode "Open sidebar".
                     guard !guideSidebarSelectorActive else { return }
+                    pillWindowStart = 0
                     groupPillFocused = groupTokens.first ?? "All"
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .guideLeftHoldEnded)) { _ in
@@ -1886,6 +1893,70 @@ struct ChannelListView: View {
 
     // MARK: - Group Filter Bar
 
+    #if os(tvOS)
+    /// Playlists with this many groups get fixed-width pills drawn through a
+    /// sliding window, with exact-width spacers for the rest. A Right press
+    /// in the row made the focus engine weigh every pill to its right: with
+    /// 815 groups that took ~380 ms per press in the simulator, several times
+    /// that on an Apple TV (the same scaling as the guide rows; see
+    /// `EPGGuideView.rowWindowSize`). Natural-width pills cannot be windowed
+    /// without the row jumping, hence the fixed width here only.
+    private static let pillWindowThreshold = 60
+    private static let pillWindowSize = 40
+    private static let pillWindowMargin = 12
+    private static let windowedPillWidth: CGFloat = 300
+    private static let pillSpacing: CGFloat = 8
+
+    @ViewBuilder private var tvGroupPills: some View {
+        let tokens = groupTokens
+        if tokens.count > Self.pillWindowThreshold {
+            let start = min(max(0, pillWindowStart), tokens.count - Self.pillWindowSize)
+            let window = start..<(start + Self.pillWindowSize)
+            let pitch = Self.windowedPillWidth + Self.pillSpacing
+            if window.lowerBound > 0 {
+                Color.clear.frame(width: CGFloat(window.lowerBound) * pitch - Self.pillSpacing, height: 1)
+            }
+            ForEach(Array(tokens[window].enumerated()), id: \.element) { offset, group in
+                tvGroupPill(group, fixedWidth: Self.windowedPillWidth)
+                    .onAppear { keepPillInWindow(index: window.lowerBound + offset, count: tokens.count) }
+            }
+            if window.upperBound < tokens.count {
+                Color.clear.frame(width: CGFloat(tokens.count - window.upperBound) * pitch - Self.pillSpacing, height: 1)
+            }
+        } else {
+            ForEach(tokens, id: \.self) { group in
+                tvGroupPill(group, fixedWidth: nil)
+            }
+        }
+    }
+
+    private func tvGroupPill(_ group: String, fixedWidth: CGFloat?) -> some View {
+        TVGroupPill(
+            group: group,
+            isSelected: selectedGroup == group,
+            action: { withAnimation(.spring(response: 0.25)) { selectedGroup = group } },
+            systemImage: pillIcon(for: group),
+            title: Self.groupTitle(group),
+            fixedWidth: fixedWidth
+        )
+        // #42 Part 1: make the pills programmatic focus targets so a
+        // guide long-press Left can land focus on the "All" pill.
+        .focused($groupPillFocused, equals: group)
+    }
+
+    /// Slides the pill window when a pill near one of its ends appears.
+    private func keepPillInWindow(index: Int, count: Int) {
+        guard count > Self.pillWindowThreshold else { return }
+        let start = min(max(0, pillWindowStart), count - Self.pillWindowSize)
+        let end = start + Self.pillWindowSize
+        let nearStart = start > 0 && index < start + Self.pillWindowMargin
+        let nearEnd = end < count && index >= end - Self.pillWindowMargin
+        guard nearStart || nearEnd else { return }
+        let newStart = min(max(0, index - Self.pillWindowSize / 2), count - Self.pillWindowSize)
+        if newStart != pillWindowStart { pillWindowStart = newStart }
+    }
+    #endif
+
     private var groupFilterBar: some View {
         // ScrollViewReader so a group swipe on the list (GH #55) can glide
         // the pill row to the newly selected pill - the pills visibly follow
@@ -2001,19 +2072,10 @@ struct ChannelListView: View {
                     collectionPill(c, canFocus: !leftHoldPinningAll)
                 }
 
+                #if os(tvOS)
+                tvGroupPills
+                #else
                 ForEach(groupTokens, id: \.self) { group in
-                    #if os(tvOS)
-                    TVGroupPill(
-                        group: group,
-                        isSelected: selectedGroup == group,
-                        action: { withAnimation(.spring(response: 0.25)) { selectedGroup = group } },
-                        systemImage: pillIcon(for: group),
-                        title: Self.groupTitle(group)
-                    )
-                    // #42 Part 1: make the pills programmatic focus targets so a
-                    // guide long-press Left can land focus on the "All" pill.
-                    .focused($groupPillFocused, equals: group)
-                    #else
                     Button {
                         withAnimation(.spring(response: 0.25)) { selectedGroup = group }
                     } label: {
@@ -2030,8 +2092,8 @@ struct ChannelListView: View {
                     }
                     .buttonStyle(.plain)
                     .id("pill_\(group)")
-                    #endif
                 }
+                #endif
 
                 // #45: collections placed at the end sit after the last group.
                 ForEach(collectionsStore.endCollections) { c in
@@ -2571,7 +2633,7 @@ struct ChannelListView: View {
                     debugLog("📺 EPG fetch: \(identifier)")
                     let programs = try await dAPI.getUpcomingPrograms(
                         tvgIDs: tvgID.isEmpty ? nil : [tvgID],
-                        channelIDs: tvgID.isEmpty ? (channelID.map { [$0] }) : nil
+                        channelIDs: channelID.map { [$0] }
                     )
                     debugLog("📺 EPG result: \(identifier) → \(programs.count) upcoming programs")
                     let entries = programs.map {
@@ -2666,11 +2728,15 @@ struct ChannelListView: View {
 }
 
 // MARK: - Channel Display Item
-struct ChannelDisplayItem: Identifiable, Equatable {
+/// `Codable` for the Dispatcharr channel-list snapshot (`ChannelStore`), which
+/// lets a cold launch show the rows before the network answers.
+struct ChannelDisplayItem: Identifiable, Equatable, Codable {
     let id: String
     let name: String
     let number: String
-    let logoURL: URL?
+    /// `var` so a restored snapshot can be rebased onto the current
+    /// LAN/WAN address.
+    var logoURL: URL?
     let group: String
     let categoryOrder: Int
     var streamURL: URL?
@@ -4907,6 +4973,10 @@ private struct TVGroupPill: View {
     var systemImage: String? = nil
     /// Display title when the token is a sentinel ("favorites").
     var title: String? = nil
+    /// Windowed pill row (very large playlists): every pill this wide, long
+    /// names truncated, so the spacers standing in for off-window pills are
+    /// exact. nil keeps the natural width.
+    var fixedWidth: CGFloat? = nil
 
     var body: some View {
         Button(action: action) {
@@ -4917,7 +4987,11 @@ private struct TVGroupPill: View {
                 }
                 Text(title ?? group)
                     .scaledFont(.system(size: 22, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
+            // The button style pads 26 pt each side around this label.
+            .frame(width: fixedWidth.map { max(0, $0 - 52) })
         }
         .buttonStyle(TVGroupPillButtonStyle(isSelected: isSelected))
     }

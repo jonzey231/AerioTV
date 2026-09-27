@@ -252,6 +252,33 @@ final class VODCatalogStore: @unchecked Sendable {
 
     private func rowValues(_ item: VODDisplayItem, playlistKey: String,
                            kind: VODItemType, generation: Int64) -> [Bound]? {
+        Self.shapeRow(item, encoder: encoder, playlistKey: playlistKey,
+                      kindCode: kindCode(kind), generation: generation)
+    }
+
+    /// Rows of one page, shaped before they reach the database queue.
+    struct PreparedRows: Sendable {
+        fileprivate let rows: [[Bound]]
+        var count: Int { rows.count }
+    }
+
+    /// Shapes a page's rows on the caller's thread. Encoding the payload and
+    /// folding the sort and search keys is most of a row's write cost (the
+    /// catalog sweep measured ~1 ms per title, all of it on the one serial
+    /// queue); the sweep calls this in its parallel fetch tasks so the queue
+    /// only runs SQL.
+    nonisolated static func prepareRows(_ items: [VODDisplayItem], playlistKey: String,
+                                        kind: VODItemType, generation: Int64) -> PreparedRows {
+        let encoder = JSONEncoder()
+        let code = kind == .series ? "s" : "m"
+        return PreparedRows(rows: items.compactMap {
+            shapeRow($0, encoder: encoder, playlistKey: playlistKey, kindCode: code, generation: generation)
+        })
+    }
+
+    nonisolated private static func shapeRow(_ item: VODDisplayItem, encoder: JSONEncoder,
+                                             playlistKey: String, kindCode: String,
+                                             generation: Int64) -> [Bound]? {
         guard let payload = try? encoder.encode(item) else { return nil }
         let year = Int64(item.releaseYear)
         let ratingValue = Double(item.rating)
@@ -260,7 +287,7 @@ final class VODCatalogStore: @unchecked Sendable {
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
         let tmdb = item.movie?.tmdbID ?? item.series?.tmdbID ?? ""
         return [
-            .text(playlistKey), .text(kindCode(kind)), .text(item.id),
+            .text(playlistKey), .text(kindCode), .text(item.id),
             .text(item.name), .text(Self.sortKey(for: item.name)),
             .text(AlphabetRail.bucket(for: item.name)),
             year.map { Bound.int($0) } ?? .null,
@@ -295,30 +322,65 @@ final class VODCatalogStore: @unchecked Sendable {
         guard !items.isEmpty else { return 0 }
         return await offMain { [weak self] in
             guard let self, self.ensureOpen() != nil else { return 0 }
-            let columns = "playlistKey, kind, itemKey, title, sortKey, bucket, year, ratingValue, "
-                + "addedAt, category, tmdbId, normTitle, cleanTitle, searchText, payload, generation"
-            let insertSQL = "INSERT OR IGNORE INTO vod_title (\(columns)) VALUES (\(Self.placeholders(16)))"
-            let updateSQL = """
-            UPDATE vod_title SET title = ?, sortKey = ?, bucket = ?, year = ?, ratingValue = ?,
-                addedAt = ?, category = ?, tmdbId = ?, normTitle = ?, cleanTitle = ?,
-                searchText = ?, payload = ?, generation = ?
-            WHERE playlistKey = ? AND kind = ? AND itemKey = ? AND generation <> ?
-            """
-            var touched = 0
-            self.run("BEGIN IMMEDIATE;")
-            for item in items {
-                guard let values = self.rowValues(item, playlistKey: playlistKey,
-                                                  kind: kind, generation: generation) else { continue }
-                // Refresh an older generation's row first.
-                let updateValues = Array(values[3...]) + [values[0], values[1], values[2], .int(generation)]
-                self.run(updateSQL, updateValues)
-                if sqlite3_changes(self.db) > 0 { touched += 1; continue }
-                self.run(insertSQL, values)
-                if sqlite3_changes(self.db) > 0 { touched += 1 }
-            }
-            self.run("COMMIT;")
-            return touched
+            let rows = items.compactMap { self.rowValues($0, playlistKey: playlistKey,
+                                                          kind: kind, generation: generation) }
+            return self.executeWrite(rows, generation: generation)
         }
+    }
+
+    /// `writePage` for rows already shaped by `prepareRows`.
+    @discardableResult
+    func writePrepared(_ page: PreparedRows, generation: Int64) async -> Int {
+        guard page.count > 0 else { return 0 }
+        return await offMain { [weak self] in
+            guard let self, self.ensureOpen() != nil else { return 0 }
+            return self.executeWrite(page.rows, generation: generation)
+        }
+    }
+
+    /// Runs on the database queue. Both statements are prepared once per
+    /// page and re-bound per row (they used to be prepared twice per row).
+    private func executeWrite(_ rows: [[Bound]], generation: Int64) -> Int {
+        guard let db else { return 0 }
+        let columns = "playlistKey, kind, itemKey, title, sortKey, bucket, year, ratingValue, "
+            + "addedAt, category, tmdbId, normTitle, cleanTitle, searchText, payload, generation"
+        let insertSQL = "INSERT OR IGNORE INTO vod_title (\(columns)) VALUES (\(Self.placeholders(16)))"
+        let updateSQL = """
+        UPDATE vod_title SET title = ?, sortKey = ?, bucket = ?, year = ?, ratingValue = ?,
+            addedAt = ?, category = ?, tmdbId = COALESCE(NULLIF(?, ''), tmdbId),
+            normTitle = ?, cleanTitle = ?,
+            searchText = ?, payload = ?, generation = ?
+        WHERE playlistKey = ? AND kind = ? AND itemKey = ? AND generation <> ?
+        """
+        var updateStmt: OpaquePointer?
+        var insertStmt: OpaquePointer?
+        defer {
+            sqlite3_finalize(updateStmt)
+            sqlite3_finalize(insertStmt)
+        }
+        guard sqlite3_prepare_v2(db, updateSQL, -1, &updateStmt, nil) == SQLITE_OK,
+              sqlite3_prepare_v2(db, insertSQL, -1, &insertStmt, nil) == SQLITE_OK else {
+            debugLog("[VOD-CAT] prepare failed: \(String(cString: sqlite3_errmsg(db)))")
+            return 0
+        }
+        var touched = 0
+        run("BEGIN IMMEDIATE;")
+        for values in rows {
+            // Refresh an older generation's row first.
+            let updateValues = Array(values[3...]) + [values[0], values[1], values[2], .int(generation)]
+            sqlite3_reset(updateStmt)
+            sqlite3_clear_bindings(updateStmt)
+            bind(updateStmt, updateValues)
+            sqlite3_step(updateStmt)
+            if sqlite3_changes(db) > 0 { touched += 1; continue }
+            sqlite3_reset(insertStmt)
+            sqlite3_clear_bindings(insertStmt)
+            bind(insertStmt, values)
+            sqlite3_step(insertStmt)
+            if sqlite3_changes(db) > 0 { touched += 1 }
+        }
+        run("COMMIT;")
+        return touched
     }
 
     // MARK: - Sweep bookkeeping
