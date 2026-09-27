@@ -94,6 +94,9 @@ final class AerioCastController: NSObject, ObservableObject {
     /// next beginSession so the new receiver opens on the same channel.
     private var handoffContent: Content?
     func rememberHandoff() { handoffContent = castingContent }
+    /// Device picked while another session was up; started when that
+    /// session reports its end.
+    private var switchTarget: GCKDevice?
     /// Set by stopCasting() so a deliberate teardown is never reported as a
     /// drop, even if the SDK attaches an error to it (Android parity, dce3074).
     private var userRequestedStop = false
@@ -664,6 +667,19 @@ final class AerioCastController: NSObject, ObservableObject {
     /// session connects, never a bare receiver.
     func beginSession(with device: GCKDevice) {
         let name = device.friendlyName ?? device.deviceID
+        // The SDK refuses startSession while another Cast session is up
+        // (measured 2026-09-27 10:24: "startSession refused" when the idle
+        // sheet's Change Cast Device picked a second receiver). End the
+        // current one, keep the channel, and start on the new device once
+        // the end is reported.
+        if let current = GCKCastContext.sharedInstance().sessionManager.currentCastSession,
+           current.device.deviceID != device.deviceID {
+            debugLog("[Cast] picker selected \(name) while \(current.device.friendlyName ?? "?") is connected: ending it first")
+            switchTarget = device
+            if handoffContent == nil { handoffContent = castingContent }
+            stopCasting()
+            return
+        }
         connectError = nil
         connectingDeviceID = device.deviceID
         awaitingChannelPick = false
@@ -1559,6 +1575,10 @@ extension AerioCastController: GCKSessionManagerListener {
         awaitingChannelPick = false
         connectingDeviceID = nil
         debugLog("[Cast] session ended reason=\(wasUserStop ? "user stop" : (error != nil ? "error: \(error!.localizedDescription)" : "remote end"))")
+        if let next = switchTarget {
+            switchTarget = nil
+            DispatchQueue.main.async { [weak self] in self?.beginSession(with: next) }
+        }
         if involuntary {
             debugLog("[CAST] session ended involuntarily: \(error.map(String.init(describing:)) ?? "?")")
         }
