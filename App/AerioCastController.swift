@@ -3473,10 +3473,10 @@ struct CastOptionsSheet: View {
 
     @StateObject private var airPlayOptions = AirPlayMediaOptions()
 
-    /// The web receiver page has no handlers for the track, speed, scale or
-    /// audio-only commands, so those rows stay listed (same list on every
-    /// platform) but only act on the AerioTV Android TV receiver.
-    private var receiverControls: Bool { cast.receiverTarget == .androidTVApp }
+    /// The receiver page handles the track, speed, scale and audio-only
+    /// commands since 2026-09-27 (gh-pages 877c7681), so the rows act on
+    /// both receiver targets once the receiver has answered hello.
+    private var receiverControls: Bool { cast.receiverTarget != .unknown }
 
     /// The channel the TV is playing, resolved locally (castingContent
     /// carries the id; ChannelStore has the Dispatcharr fields).
