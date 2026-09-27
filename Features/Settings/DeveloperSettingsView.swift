@@ -106,8 +106,6 @@ struct DeveloperSettingsView: View {
     /// - `ChannelListView` for the chrome layout branch
     /// - `ManageGroupsSheet` for the hide-filter / hide-search toggles
     @AppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
-    @AppStorage("castForceAACAudio") private var castForceAACAudio = false
-    @AppStorage("castMuxedTSViaMPL") private var castMuxedTSViaMPL = false
     @AppStorage("castForceHEVCTranscode") private var castForceHEVCTranscode = false
     @AppStorage("castTranscodeDownProfile") private var castTranscodeDownProfile = "720p60"
 
@@ -364,45 +362,6 @@ struct DeveloperSettingsView: View {
                             Spacer()
 
                             Toggle("", isOn: $compactChromeiPhone)
-                                .labelsHidden()
-                                .tint(.accentPrimary)
-                        }
-                        .padding(.vertical, 4)
-                        .listRowBackground(Color.cardBackground)
-
-                        // Cast audio test switch (2026-09-26): force the AAC
-                        // transcode even when the receiver reports AC-3.
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Cast: force AAC audio")
-                                    .scaledFont(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                                Text("Transcode AC-3 to AAC for every Chromecast receiver (test)")
-                                    .scaledFont(.labelSmall)
-                                    .foregroundColor(Color.contrastText(.textTertiary))
-                            }
-                            Spacer()
-                            Toggle("", isOn: $castForceAACAudio)
-                                .labelsHidden()
-                                .tint(.accentPrimary)
-                        }
-                        .padding(.vertical, 4)
-                        .listRowBackground(Color.cardBackground)
-
-                        // Cast pipeline experiment (2026-09-26): muxed TS HLS
-                        // from the LAN listener, played by the receiver's
-                        // legacy Media Player Library instead of Shaka.
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Cast: muxed TS via legacy player (test)")
-                                    .scaledFont(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                                Text("Cast the muxed TS playlist and play it without Shaka")
-                                    .scaledFont(.labelSmall)
-                                    .foregroundColor(Color.contrastText(.textTertiary))
-                            }
-                            Spacer()
-                            Toggle("", isOn: $castMuxedTSViaMPL)
                                 .labelsHidden()
                                 .tint(.accentPrimary)
                         }

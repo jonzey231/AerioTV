@@ -826,12 +826,7 @@ final class AerioCastController: NSObject, ObservableObject {
                 if Task.isCancelled { return }
             }
             if caps == nil { debugLog("[Cast] caps not received, assuming no AC-3") }
-            // Developer test switch (2026-09-26): force the AAC transcode on a
-            // receiver that reports AC-3, to measure whether AC-3 passthrough
-            // paces 1080p60 playback on the Chromecast Ultra.
-            let forceAAC = UserDefaults.standard.bool(forKey: "castForceAACAudio")
-            let allowAC3 = !forceAAC && (caps?["ac-3"] == true || caps?["ec-3"] == true)
-            if forceAAC { debugLog("[Cast] audio plan: Developer switch forces AAC (receiver AC-3 ignored)") }
+            let allowAC3 = caps?["ac-3"] == true || caps?["ec-3"] == true
             // No AC-3 on the receiver: decode it here instead of refusing the
             // channel, as long as this device can build the decoder.
             let transcodeAC3 = !allowAC3 && CastAudioTranscoder.canDecode(.ac3)
@@ -848,14 +843,6 @@ final class AerioCastController: NSObject, ObservableObject {
             debugLog("[Cast] video plan inputs: receiver=\(receiverModel) hvc1=\(cap("hvc1")) "
                 + "display=\(videoPlan.caps?.display == nil ? "none" : "measured") "
                 + "force=\(videoPlan.force ? "yes" : "no") down=\(videoPlan.downProfile.rawValue)")
-            // Developer experiment (2026-09-26): muxed TS HLS from the
-            // TSHLSRemuxer LAN listener, played by the receiver's legacy
-            // Media Player Library instead of Shaka/MSE.
-            if UserDefaults.standard.bool(forKey: "castMuxedTSViaMPL") {
-                await self?.startMPLPipeline(content: content, rawTS: rawTS,
-                                             wantAAC: !allowAC3, token: token)
-                return
-            }
             let playlistURL: URL
             // The previous channel's note must not describe this one while
             // the new source is still being read.
@@ -920,124 +907,6 @@ final class AerioCastController: NSObject, ObservableObject {
                 self.armStaleReceiverCheck(playlistURL: playlistURL, content: content, afterReload: false)
             }
         }
-    }
-
-    // MARK: - Muxed TS via MPL (Developer experiment, 2026-09-26)
-
-    /// Remuxer owned by the cast for the MPL experiment. The local tile's
-    /// remuxer is not reused: local playback is torn down while casting, so
-    /// this is a dedicated ingest of the same stream URL whose loopback side
-    /// is simply never read; only its LAN listener is served.
-    private var mplRemuxer: TSHLSRemuxer?
-
-    private func stopMPLRemuxer() {
-        guard let mux = mplRemuxer else { return }
-        mplRemuxer = nil
-        mux.onReady = nil
-        mux.onError = nil
-        mux.stopLANDelivery()
-        mux.stop()
-    }
-
-    private final class MPLReadyLatch: @unchecked Sendable { var result: Bool? }
-
-    private func startMPLPipeline(content: Content, rawTS: URL, wantAAC: Bool, token: Int) async {
-        await Task.detached { CastHLSProxySession.shared.stop() }.value
-        stopMPLRemuxer()
-        guard !Task.isCancelled, flipToken == token else { return }
-        func fail(_ text: String) {
-            debugLog("[Cast] load pipeline=mpl failed: \(text)")
-            stopMPLRemuxer()
-            if flipToken == token { switchingToTitle = nil }
-            surfaceCastFailure(text)
-            stopCasting()
-        }
-        let mux = TSHLSRemuxer(sourceURL: rawTS, headers: content.streamHeaders)
-        mplRemuxer = mux
-        let latch = MPLReadyLatch()
-        mux.onReady = { _ in if latch.result == nil { latch.result = true } }
-        mux.onError = { error in
-            debugLog("[Cast] mpl remux error: \(error)")
-            if latch.result == nil { latch.result = false }
-        }
-        mux.start()
-        let readyDeadline = Date().addingTimeInterval(20)
-        while latch.result == nil, Date() < readyDeadline {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-            if Task.isCancelled || mplRemuxer !== mux { return }
-        }
-        guard latch.result == true else {
-            fail("The stream did not start for the muxed TS cast test")
-            return
-        }
-        let codec = mux.sourceAudioCodec
-        let transcodable = codec == "AC-3" || codec == "E-AC-3"
-        var aac = false
-        if wantAAC && transcodable {
-            aac = await withCheckedContinuation { cont in
-                mux.setLANAudioAAC(true) { cont.resume(returning: $0) }
-            }
-            if !aac { debugLog("[Cast] mpl audio: AAC rewrite unavailable, passthrough") }
-        }
-        debugLog("[Cast] mpl audio: source=\(codec) lan=\(aac ? "aac" : "passthrough")")
-        guard !Task.isCancelled, mplRemuxer === mux else { return }
-        let lan: TSHLSRemuxer.LANDeliveryResult = await withCheckedContinuation { cont in
-            mux.startLANDelivery { cont.resume(returning: $0) }
-        }
-        guard !Task.isCancelled, mplRemuxer === mux else { return }
-        let url: URL
-        switch lan {
-        case .ready(let ip, let port):
-            guard let u = URL(string: "http://\(ip):\(port)/live.m3u8") else {
-                fail("AerioTV could not start the local cast server on this iPhone."); return
-            }
-            url = u
-        case .noAddress:
-            fail("Casting needs Wi-Fi: a Google Cast device cannot reach this iPhone over cellular."); return
-        case .unavailable:
-            fail("AerioTV could not start the local cast server on this iPhone."); return
-        }
-        // Same handover rule as AirPlay: a few published segments first so
-        // the receiver's live start point lands inside the list.
-        let waitDeadline = Date().addingTimeInterval(12)
-        while mux.lanPublishedState().segments < 3, Date() < waitDeadline {
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            if Task.isCancelled || mplRemuxer !== mux { return }
-        }
-        guard let live = GCKCastContext.sharedInstance().sessionManager.currentCastSession,
-              flipToken == token,
-              castingContent?.mediaID == content.mediaID,
-              let client = live.remoteMediaClient else { return }
-        debugLog("[Cast] load pipeline=mpl url=\(url.absoluteString)")
-        let metadata = GCKMediaMetadata(metadataType: .generic)
-        metadata.setString(content.title, forKey: kGCKMetadataKeyTitle)
-        if let sub = content.subtitle, !sub.isEmpty {
-            metadata.setString(sub, forKey: kGCKMetadataKeySubtitle)
-        }
-        if let art = content.artURL, let artURL = URL(string: art) {
-            metadata.addImage(GCKImage(url: artURL, width: 480, height: 270))
-        }
-        let builder = GCKMediaInformationBuilder(entity: content.mediaID)
-        builder.contentID = url.absoluteString
-        builder.contentURL = url
-        builder.streamType = .live
-        builder.contentType = "application/x-mpegurl"
-        builder.hlsSegmentFormat = .TS
-        builder.metadata = metadata
-        builder.customData = [
-            AerioCast.keyMediaID: content.mediaID,
-            AerioCast.keyKind: AerioCast.kindLive,
-            "pipeline": "mpl",
-        ]
-        let requestBuilder = GCKMediaLoadRequestDataBuilder()
-        requestBuilder.mediaInformation = builder.build()
-        requestBuilder.autoplay = true
-        let request = client.loadMedia(with: requestBuilder.build())
-        request.delegate = self
-        loadRequest = request
-        webReceiverHasLoadedMedia = true
-        // No stale-receiver check: it reads CastHLSProxySession counters,
-        // which this pipeline never touches.
     }
 
     // Cast audio, 2026-09-13: the "retry once without the output_profile
@@ -1109,7 +978,6 @@ final class AerioCastController: NSObject, ObservableObject {
         }
         // Any proxy left over from an earlier web-receiver session has no client.
         Task.detached { CastHLSProxySession.shared.stop() }
-        stopMPLRemuxer()
 
         let metadata = GCKMediaMetadata(metadataType: .generic)
         metadata.setString(content.title, forKey: kGCKMetadataKeyTitle)
@@ -1199,11 +1067,6 @@ final class AerioCastController: NSObject, ObservableObject {
     /// channel flips use, device-verified). No loadMedia; the loaded media
     /// stays untouched.
     private func handleSwitchStreamReprime(uuid: String?) {
-        // The MPL experiment has no CastHLSProxy session to reprime.
-        guard mplRemuxer == nil else {
-            debugLog("[CAST-HLS] switch-stream reprime skipped: pipeline=mpl")
-            return
-        }
         guard isCasting, let uuid, let content = castingContent,
               let rawTS = content.streamURL,
               let item = ChannelStore.shared.channels.first(where: { $0.id == content.mediaID }),
@@ -1623,7 +1486,6 @@ extension AerioCastController: GCKSessionManagerListener {
         sleepTimerTask = nil
         sleepEndsAt = nil
         Task.detached { CastHLSProxySession.shared.stop() }
-        stopMPLRemuxer()
         syncCastState(GCKCastContext.sharedInstance().castState)
         let skipResume = suppressLocalResume
         suppressLocalResume = false
@@ -1686,7 +1548,6 @@ extension AerioCastController: GCKRequestDelegate {
             self.loadRequest = nil
             debugLog("[CAST-HLS] receiver load failed: \(errorText)")
             Task.detached { CastHLSProxySession.shared.stop() }
-            self.stopMPLRemuxer()
             self.surfaceCastFailure("The TV could not start this channel")
         }
     }
