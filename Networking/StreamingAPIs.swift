@@ -893,6 +893,46 @@ enum NativeHLSClientResolver {
         /// `client_<id>` (or the closest path segment), for the log line
         /// that proves one tune equals one client.
         let clientID: String
+        /// Dispatcharr's HLS session token (`X-Dispatcharr-Session-Token`,
+        /// else the `/proxy/hls/<token>/index.m3u8` path segment). nil
+        /// when the server issued none. `DELETE
+        /// /api/proxy/hls/sessions/<token>/` ends that server client at
+        /// once instead of waiting for the ghost reaper.
+        var sessionToken: String? = nil
+    }
+
+    /// The token path component of a Dispatcharr client playlist URL:
+    /// the segment between `/proxy/hls/` and `/index.m3u8`.
+    static func sessionToken(fromPlaylist url: URL) -> String? {
+        let parts = url.pathComponents.filter { $0 != "/" }
+        guard parts.count >= 4,
+              parts[parts.count - 1].lowercased() == "index.m3u8",
+              parts[parts.count - 3] == "hls",
+              parts[parts.count - 4] == "proxy" else { return nil }
+        let token = parts[parts.count - 2]
+        return token.isEmpty ? nil : token
+    }
+
+    /// Ends a Dispatcharr HLS session on the server. Fire and forget:
+    /// one attempt, 5 s timeout, never awaited by a teardown. The task is
+    /// resumed synchronously, so a caller that invokes this before
+    /// starting the next resolve has put the DELETE on the wire first.
+    /// Dispatcharr servers only (the token exists nowhere else).
+    @MainActor
+    static func endSession(token: String, server: ServerConnection?) {
+        let prefix = String(token.prefix(6))
+        guard let server, server.type == .dispatcharrAPI else {
+            debugLog("[AVP-NHLS] session \(prefix) end skipped: active server is not Dispatcharr")
+            return
+        }
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode,
+                                 serverID: server.id,
+                                 savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                                     ? server.username : nil)
+        api.endHLSSession(token: token)
     }
 
     /// Why a resolve did not produce a client playlist. The distinction
@@ -976,9 +1016,9 @@ enum NativeHLSClientResolver {
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
 
-        let outcome: (url: URL?, status: Int) = await withCheckedContinuation { continuation in
-            let delegate = RedirectCatcher { url, status in
-                continuation.resume(returning: (url, status))
+        let outcome: (url: URL?, status: Int, token: String?) = await withCheckedContinuation { continuation in
+            let delegate = RedirectCatcher { url, status, token in
+                continuation.resume(returning: (url, status, token))
             }
             let session = URLSession(configuration: .ephemeral,
                                      delegate: delegate,
@@ -993,7 +1033,11 @@ enum NativeHLSClientResolver {
         guard HLSCapabilityStore.redirectLooksLikeHLS(location) else {
             return .failure(.notAPlaylist(status: outcome.status))
         }
-        return .success(Resolved(playlistURL: location, clientID: clientID(from: location)))
+        let headerToken = outcome.token?.trimmingCharacters(in: .whitespaces)
+        let token = (headerToken?.isEmpty == false ? headerToken : nil)
+            ?? sessionToken(fromPlaylist: location)
+        return .success(Resolved(playlistURL: location, clientID: clientID(from: location),
+                                 sessionToken: token))
     }
 
     /// `client_<id>` when the path carries one, else the last meaningful
@@ -1107,25 +1151,26 @@ enum NativeHLSClientResolver {
     /// 503) or simply does not do this (200). Status 0 means no response
     /// reached us at all.
     private final class RedirectCatcher: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-        private let onResult: @Sendable (URL?, Int) -> Void
+        private let onResult: @Sendable (URL?, Int, String?) -> Void
         private let lock = NSLock()
         private var reported = false
-        init(onResult: @escaping @Sendable (URL?, Int) -> Void) { self.onResult = onResult }
+        init(onResult: @escaping @Sendable (URL?, Int, String?) -> Void) { self.onResult = onResult }
 
-        private func report(_ url: URL?, _ status: Int) {
+        private func report(_ url: URL?, _ status: Int, _ token: String? = nil) {
             lock.lock()
             let already = reported
             reported = true
             lock.unlock()
             guard !already else { return }
-            onResult(url, status)
+            onResult(url, status, token)
         }
 
         func urlSession(_ session: URLSession, task: URLSessionTask,
                         willPerformHTTPRedirection response: HTTPURLResponse,
                         newRequest request: URLRequest,
                         completionHandler: @escaping (URLRequest?) -> Void) {
-            report(request.url, response.statusCode)
+            report(request.url, response.statusCode,
+                   response.value(forHTTPHeaderField: "X-Dispatcharr-Session-Token"))
             completionHandler(nil)
         }
 
@@ -4447,6 +4492,30 @@ struct DispatcharrAPI {
     /// connection (a mid-stream TS discontinuity, no EOF); libmpv follows
     /// it on its own, so the caller does NOT reload the player after this.
     @discardableResult
+    /// `DELETE /api/proxy/hls/sessions/<token>/`: ends one native HLS
+    /// client on the server immediately (204; 404 when missing or owned
+    /// by another user). Same auth headers as every other API call. One
+    /// attempt, 5 s timeout, resumed synchronously and never awaited.
+    func endHLSSession(token: String) {
+        let prefix = String(token.prefix(6))
+        let escaped = token.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? token
+        guard let url = try? buildURL(path: "/api/proxy/hls/sessions/\(escaped)/") else {
+            debugLog("[AVP-NHLS] session \(prefix) end failed: bad URL")
+            return
+        }
+        var request = URLRequest(url: url, timeoutInterval: 5)
+        request.httpMethod = "DELETE"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error {
+                debugLog("[AVP-NHLS] session \(prefix) end failed: \(error.localizedDescription)")
+            } else {
+                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                debugLog("[AVP-NHLS] session \(prefix) ended on the server (HTTP \(code))")
+            }
+        }.resume()
+    }
+
     func changeStream(channelUUID: String, streamID: Int) async throws -> String? {
         let url = try buildURL(path: "/proxy/ts/change_stream/\(channelUUID)")
         var request = URLRequest(url: url, timeoutInterval: 30)

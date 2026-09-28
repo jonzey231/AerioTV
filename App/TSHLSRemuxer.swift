@@ -4314,6 +4314,12 @@ struct AVPlayerMultiviewTile: View {
     @State private var resolvedNativeHLSFor: URL?
     @State private var resolvedNativeHLSAt: CFTimeInterval = 0
     @State private var nativeHLSResolveInFlight = false
+    /// Dispatcharr HLS session this tile's resolved client belongs to,
+    /// and the server it was minted on. Ended with a DELETE whenever the
+    /// client is released (flip, re-resolve, remux fallback, teardown),
+    /// so the old server client never lingers beside the next one.
+    @State private var nativeHLSSessionToken: String?
+    @State private var nativeHLSSessionServer: ServerConnection?
     /// True while the native-HLS client this tile is playing was minted
     /// by THIS tune. Only a fresh client gets the cold-start extension:
     /// a reused (warm) client is already filled, so its deadline stays
@@ -4578,6 +4584,7 @@ struct AVPlayerMultiviewTile: View {
             // Cancels any standing slow retry in flight.
             teardownToken = UUID()
             stop()
+            endNativeHLSSession("tile teardown")
             progressStore.liveStopNotice = nil
             progressStore.liveStopRetryAction = nil
             // Tile teardown clears the stream-failover walk
@@ -4713,6 +4720,9 @@ struct AVPlayerMultiviewTile: View {
             // failed over, which is its own "picture stays on the old
             // channel" bug.
             directHLSFallbackURL = nil
+            // Release the outgoing channel's server client BEFORE the
+            // incoming tune resolves, so two never overlap.
+            endNativeHLSSession("channel flip")
             resolvedNativeHLSURL = nil
             resolvedNativeHLSFor = nil
             resolvedNativeHLSAt = 0
@@ -5675,6 +5685,10 @@ struct AVPlayerMultiviewTile: View {
             let plain = removingHLSOutputFormat(streamURL)
             debugLog("[AVP-MV] direct HLS failed (\(reason)); re-tuning via TS remux channel=\(channelName)")
             directHLSFallbackURL = plain
+            endNativeHLSSession("direct HLS failed, remux fallback")
+            resolvedNativeHLSURL = nil
+            resolvedNativeHLSFor = nil
+            resolvedNativeHLSAt = 0
             stop()
             statusText = "Retrying..."
             let token = teardownToken
@@ -6383,10 +6397,14 @@ struct AVPlayerMultiviewTile: View {
                 + "channel=\(channelName)")
             return
         }
+        // A fresh resolve replaces whatever client this tile held (reuse
+        // window lapsed, or a re-resolve): end the old one first.
+        endNativeHLSSession("re-resolve")
         nativeHLSResolveInFlight = true
         statusText = "Preparing..."
         let token = teardownToken
         let name = channelName
+        let mintServer = ChannelStore.shared.activeServer
         Task { @MainActor in
             let outcome = await NativeHLSClientResolver.resolveWithRetry(
                 upgradedURL, headers: headers)
@@ -6397,6 +6415,9 @@ struct AVPlayerMultiviewTile: View {
             // starting a player now would be a stray connection.
             guard token == teardownToken else {
                 debugLog("[AVP-NHLS] resolve landed after teardown; dropped channel=\(name)")
+                if case .success(let stray) = outcome, let t = stray.sessionToken {
+                    NativeHLSClientResolver.endSession(token: t, server: mintServer)
+                }
                 return
             }
             guard case .success(let resolved) = outcome else {
@@ -6420,6 +6441,11 @@ struct AVPlayerMultiviewTile: View {
             }
             resolvedNativeHLSURL = resolved.playlistURL
             resolvedNativeHLSFor = upgradedURL
+            if let t = resolved.sessionToken, mintServer?.type == .dispatcharrAPI {
+                nativeHLSSessionToken = t
+                nativeHLSSessionServer = mintServer
+                debugLog("[AVP-NHLS] session token \(t.prefix(6))\u{2026} minted for \(name)")
+            }
             resolvedNativeHLSAt = CACurrentMediaTime()
             nativeHLSClientIsFresh = true
             debugLog("[AVP-NHLS] resolved to client \(resolved.clientID) "
@@ -6449,8 +6475,21 @@ struct AVPlayerMultiviewTile: View {
     /// nothing about whether the server does native HLS, and poisoning
     /// the persisted verdict would push every later tune onto the remux
     /// arm for a week over one transient.
+    /// Ends the Dispatcharr HLS session this tile holds, if any. Fire
+    /// and forget: the DELETE is on the wire when this returns, and
+    /// nothing waits on its answer.
+    private func endNativeHLSSession(_ why: String) {
+        guard let token = nativeHLSSessionToken else { return }
+        let server = nativeHLSSessionServer
+        nativeHLSSessionToken = nil
+        nativeHLSSessionServer = nil
+        debugLog("[AVP-NHLS] ending session \(token.prefix(6))... (\(why)) channel=\(channelName)")
+        NativeHLSClientResolver.endSession(token: token, server: server)
+    }
+
     private func fallBackToRemuxAfterResolveFailure() {
         guard directHLSFallbackURL == nil else { return }
+        endNativeHLSSession("remux fallback")
         directHLSFallbackURL = removingHLSOutputFormat(streamURL)
         resolvedNativeHLSURL = nil
         resolvedNativeHLSFor = nil
