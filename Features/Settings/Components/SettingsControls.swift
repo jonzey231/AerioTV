@@ -229,8 +229,8 @@ struct StreamBufferSlider: View {
                     .foregroundColor(.textPrimary)
                 Spacer()
                 Text(valueLabel)
-                    .scaledFont(.monoSmall)
-                    .foregroundColor(Color.contrastText(theme.accent))
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
             }
             Slider(value: $value, in: Self.range, step: Self.step)
                 .tint(theme.accent)

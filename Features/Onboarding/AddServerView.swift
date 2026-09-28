@@ -280,7 +280,7 @@ struct AddServerView: View {
                     // how Enhanced Channel Manager and Teamarr handle
                     // their server-to-server connection to Dispatcharr.
                     infoBox(icon: "checkmark.shield.fill",
-                            message: "Save credentials and refresh automatically. AerioTV signs in with these credentials, then keeps your session alive in the background. If your Dispatcharr admin rotates your API key, AerioTV silently re-authenticates without prompting you. Stored in your iOS Keychain (and iCloud Keychain when iCloud sync is on, so your other AerioTV devices stay signed in too).")
+                            message: "Save credentials and refresh automatically. AerioTV signs in with these credentials, then keeps your session alive in the background. If your Dispatcharr admin rotates your API key, AerioTV silently re-authenticates without prompting you. Stored in your Keychain (and iCloud Keychain when iCloud sync is on, so your other AerioTV devices stay signed in too).")
                 case .apiKey:
                     AppTextField("Admin API Key", placeholder: "••••••••••••••••",
                                  text: $viewModel.apiKey, icon: "key.fill", isSecure: true)

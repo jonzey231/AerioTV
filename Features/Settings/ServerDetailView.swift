@@ -949,7 +949,7 @@ struct ServerDetailView: View {
                     .foregroundColor(.statusOnline)
             }
             Text(value)
-                .scaledFont(.monoSmall)
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.middle)

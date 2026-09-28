@@ -517,9 +517,13 @@ struct ServerListRow: View {
                 .fill(server.isVerified ? Color.statusOnline : Color.textTertiary)
                 .frame(width: statusDotSize, height: statusDotSize)
 
+            // iOS rows sit inside a NavigationLink that already draws
+            // the system disclosure chevron; only tvOS draws its own.
+            #if os(tvOS)
             Image(systemName: "chevron.right")
                 .scaledFont(.system(size: chevronSize, weight: .semibold))
                 .foregroundColor(Color.contrastText(.textTertiary))
+            #endif
         }
         #if os(tvOS)
         .padding(.vertical, 16)

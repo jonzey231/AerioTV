@@ -371,7 +371,7 @@ struct AppearanceSettingsView: View {
         case .forest:     return "Green on near-black"
         case .lavender:   return "Purple on near-black"
         case .monochrome: return "Grayscale on near-black"
-        case .light:      return "Neutral teal-grey that reads on white"
+        case .light:      return "Neutral teal-gray that reads on white"
         }
     }
 
