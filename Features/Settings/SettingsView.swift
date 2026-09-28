@@ -85,6 +85,10 @@ struct SettingsView: View {
     // selection falls back to Playlists.
     @Environment(\.horizontalSizeClass) private var hSizeClass
     @State private var padSelection: SettingsRoute? = .category(.playlists)
+    /// Bumped by the `playlists` deep link on the single-column layout:
+    /// Playlists is the first section of the root list there, so the
+    /// link pops to the root and scrolls to its top.
+    @State private var phoneScrollToPlaylistsToken = 0
     /// Phase 2 (2026-09-17): whether the Settings tab is currently wide
     /// enough for two panes. Written by the GeometryReader at the tab
     /// root; read by the deep-link handler so `aerio://settings/<page>`
@@ -208,6 +212,18 @@ struct SettingsView: View {
                 // Edit is a sheet on both iPhone and iPad.
                 if isPad { padSelection = .server(server.id) } else { phonePath = NavigationPath() }
                 serverToEdit = server
+            case .playlists:
+                // iPad split: the Playlists pane. Single column (iPhone,
+                // narrow iPad): there is no Playlists page, the playlists
+                // are the root's first section, so pop to the root and
+                // scroll there. Pushing .category(.playlists) here used to
+                // land on an EmptyView destination (black screen).
+                if isPad {
+                    padSelection = .category(.playlists)
+                } else {
+                    phonePath = NavigationPath()
+                    phoneScrollToPlaylistsToken += 1
+                }
             case .remote:
                 // Remote Control is tvOS-only: fall back to the root.
                 phonePath = NavigationPath()
@@ -573,6 +589,13 @@ struct SettingsView: View {
                         rootProxy.scrollTo("settings.top", anchor: .top)
                     }
                 }
+                .onChange(of: phoneScrollToPlaylistsToken) { _, _ in
+                    // Playlists is the first section, directly under the
+                    // top anchor.
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        rootProxy.scrollTo("settings.top", anchor: .top)
+                    }
+                }
                 #endif
                 }
                 #endif
@@ -606,7 +629,13 @@ struct SettingsView: View {
                 // Edit is a sheet here.
                 case .category(.playlists), .category(.remoteControl),
                      .editServer:
-                    EmptyView()
+                    // Nothing should push these on iOS. If something does,
+                    // log it and pop straight back rather than sit on a
+                    // blank page.
+                    Color.clear.onAppear {
+                        debugLog("SettingsView: route \(route) has no iPhone screen; popping to root")
+                        phonePath = NavigationPath()
+                    }
                 }
             }
             #endif
