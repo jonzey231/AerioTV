@@ -1447,7 +1447,7 @@ struct VODDetailView: View {
                 tmdbNoteRow(
                     icon: "sparkles",
                     tint: .accentPrimary,
-                    text: "No artwork from your provider. Enter a TMDB API key in Settings > App Behaviors to fill it in automatically. Only works when TMDB has a matching title."
+                    text: "No artwork from your provider. Enter a TMDB API key in Settings > Movies & TV Shows to fill it in automatically. Only works when TMDB has a matching title."
                 )
             } else if tmdbLookupDone {
                 // Key supplied and TMDB was queried, but nothing matched.

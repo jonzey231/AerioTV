@@ -505,6 +505,10 @@ final class HLSCapabilityStore: NSObject {
         }
     }
 
+    /// Engine used when the developer has not picked one for a server.
+    /// feature/native-hls test builds: Force Native HLS (shipped value: .auto).
+    static let defaultEngineOverride: EngineOverride = .forceNativeHLS
+
     private static let overridesKey = "playback.hlsEngineOverrides"
     /// Host key -> EngineOverride.rawValue. Persisted like the verdicts:
     /// a developer comparing two engines across relaunches should not
@@ -574,7 +578,7 @@ final class HLSCapabilityStore: NSObject {
     func serverKey(_ url: URL) -> String? { hostKey(url) }
 
     func engineOverride(forKey key: String) -> EngineOverride {
-        overrides[key].flatMap(EngineOverride.init(rawValue:)) ?? .auto
+        overrides[key].flatMap(EngineOverride.init(rawValue:)) ?? Self.defaultEngineOverride
     }
 
     func engineOverride(for url: URL) -> EngineOverride {
@@ -583,7 +587,7 @@ final class HLSCapabilityStore: NSObject {
     }
 
     func setEngineOverride(_ value: EngineOverride, forKey key: String) {
-        if value == .auto {
+        if value == Self.defaultEngineOverride {
             overrides.removeValue(forKey: key)
         } else {
             overrides[key] = value.rawValue

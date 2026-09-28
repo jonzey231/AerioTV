@@ -145,6 +145,12 @@ struct MoreCategoriesView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+        #if os(iOS)
+        // Phase 3 (Logan 2026-09-18): floating tab bar parity -
+        // content runs under the bar, the bar tucks away on scroll,
+        // and the last row clears it.
+        .settingsPhoneTabBarChrome()
+        #endif
         .background(Color.appBackground)
         .navigationTitle("More Categories")
         .navigationBarTitleDisplayMode(.inline)
@@ -245,7 +251,11 @@ struct SingleCategoryColorEditor: View {
                             .scaledFont(.system(size: 14, weight: .semibold))
                         Text("Reset to Default")
                     }
-                    .foregroundColor(.statusWarning)
+                    // Phase 3: reset rows carry the same danger color as
+                    // the DVR Danger Zone. The hardcoded orange was the
+                    // only action-row color in Settings that ignored the
+                    // destructive role.
+                    .foregroundColor(.red)
                 }
                 .listRowBackground(Color.cardBackground)
             } footer: {
@@ -255,6 +265,12 @@ struct SingleCategoryColorEditor: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+        #if os(iOS)
+        // Phase 3 (Logan 2026-09-18): floating tab bar parity -
+        // content runs under the bar, the bar tucks away on scroll,
+        // and the last row clears it.
+        .settingsPhoneTabBarChrome()
+        #endif
         .background(Color.appBackground)
         .navigationTitle(category.displayName)
         .navigationBarTitleDisplayMode(.inline)
@@ -337,6 +353,12 @@ struct CustomCategoriesView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+        #if os(iOS)
+        // Phase 3 (Logan 2026-09-18): floating tab bar parity -
+        // content runs under the bar, the bar tucks away on scroll,
+        // and the last row clears it.
+        .settingsPhoneTabBarChrome()
+        #endif
         .background(Color.appBackground)
         .navigationTitle("Custom Categories")
         .navigationBarTitleDisplayMode(.inline)
@@ -400,9 +422,13 @@ struct CustomCategoryEditor: View {
     var body: some View {
         List {
             Section {
-                TextField("Match string (e.g. Horror)", text: $entry.match)
+                // Phase 3: the shared Settings field, so this name box
+                // has the same label/helper/focus shape as every other
+                // text entry in Settings.
+                SettingsTextField("Name",
+                                  placeholder: "Match string (e.g. Horror)",
+                                  text: $entry.match)
                     .listRowBackground(Color.cardBackground)
-                    .autocorrectionDisabled()
                 ColorPicker("Color", selection: colorBinding, supportsOpacity: false)
                     .listRowBackground(Color.cardBackground)
                 HStack {
@@ -415,7 +441,7 @@ struct CustomCategoryEditor: View {
                 }
                 .listRowBackground(Color.cardBackground)
             } footer: {
-                Text("Matching is case-insensitive and uses `contains`: entering \"Horror\" will colour any program whose XMLTV category includes the word horror.")
+                Text("Matching is case-insensitive and uses `contains`: entering \"Horror\" will color any program whose XMLTV category includes the word horror.")
                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
 
@@ -437,6 +463,12 @@ struct CustomCategoryEditor: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+        #if os(iOS)
+        // Phase 3 (Logan 2026-09-18): floating tab bar parity -
+        // content runs under the bar, the bar tucks away on scroll,
+        // and the last row clears it.
+        .settingsPhoneTabBarChrome()
+        #endif
         .background(Color.appBackground)
         .navigationTitle(isNew ? "New Custom Category" : "Edit Category")
         .navigationBarTitleDisplayMode(.inline)

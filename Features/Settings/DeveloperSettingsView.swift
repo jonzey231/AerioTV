@@ -16,6 +16,51 @@ import AVFoundation
 import CoreMedia
 #endif
 
+// MARK: - Developer Icon Tile
+
+/// The rounded-rect tinted icon tile every Settings row uses. Phase 3:
+/// this page had it on the engine toggles only, so the log-file rows and
+/// the What's Captured rows carried a bare glyph and read as a different
+/// page. Sized to match the toggles already here (36 pt box on iOS,
+/// 48 pt on tvOS) and kept at a low tint opacity, never a bright fill.
+struct DevIconTile: View {
+    let icon: String
+    var tint: Color = .accentPrimary
+    /// Off-state rows sit on the neutral elevated fill instead of the
+    /// tinted one, exactly as the engine toggles already do.
+    var isActive: Bool = true
+
+    #if os(tvOS)
+    private let boxSize: CGFloat = 48
+    private let glyphSize: CGFloat = 22
+    private let corner: CGFloat = 10
+    #else
+    private let boxSize: CGFloat = 36
+    private let glyphSize: CGFloat = 16
+    private let corner: CGFloat = 8
+    #endif
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: corner, style: .continuous)
+                .fill(isActive ? tint.opacity(0.18) : Color.elevatedBackground)
+                .frame(width: boxSize, height: boxSize)
+            Image(systemName: icon)
+                .scaledFont(.system(size: glyphSize, weight: .medium))
+                .foregroundColor(isActive ? tint : Color.contrastText(.textSecondary))
+        }
+    }
+}
+
+/// Which playback engine the Developer page's one picker reports and
+/// writes. `custom` is display-only: it appears when the individual flags
+/// are a mix that matches neither preset.
+enum PlaybackEnginePreset: String, Hashable {
+    case avPlayer
+    case mpv
+    case custom
+}
+
 // MARK: - Developer Settings View
 
 struct DeveloperSettingsView: View {
@@ -61,6 +106,8 @@ struct DeveloperSettingsView: View {
     /// - `ChannelListView` for the chrome layout branch
     /// - `ManageGroupsSheet` for the hide-filter / hide-search toggles
     @AppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
+    @AppStorage("castForceHEVCTranscode") private var castForceHEVCTranscode = false
+    @AppStorage("castTranscodeDownProfile") private var castTranscodeDownProfile = "720p60"
 
     /// Companion toggles — previously only exposed inside the Manage
     /// Groups sheet, which made the parent "Compact Chrome" toggle
@@ -77,7 +124,7 @@ struct DeveloperSettingsView: View {
     /// output and through our TS remuxer back to back (Logan,
     /// 2026-09-16). Persisted per server host in HLSCapabilityStore, so
     /// it survives relaunch and does not leak to another server.
-    @State private var liveEngineOverride: HLSCapabilityStore.EngineOverride = .auto
+    @State private var liveEngineOverride: HLSCapabilityStore.EngineOverride = HLSCapabilityStore.defaultEngineOverride
 
     private var activeServer: ServerConnection? {
         servers.first(where: { $0.isActive })
@@ -101,16 +148,13 @@ struct DeveloperSettingsView: View {
 
     private func loadLiveEngineOverride() {
         guard let key = overrideHostKeys.first else {
-            liveEngineOverride = .auto
+            liveEngineOverride = HLSCapabilityStore.defaultEngineOverride
             return
         }
         liveEngineOverride = HLSCapabilityStore.shared.engineOverride(forKey: key)
     }
 
-    private func cycleLiveEngineOverride() {
-        let all = HLSCapabilityStore.EngineOverride.allCases
-        let idx = all.firstIndex(of: liveEngineOverride) ?? 0
-        let next = all[(idx + 1) % all.count]
+    private func setLiveEngineOverride(_ next: HLSCapabilityStore.EngineOverride) {
         liveEngineOverride = next
         for key in overrideHostKeys {
             HLSCapabilityStore.shared.setEngineOverride(next, forKey: key)
@@ -155,10 +199,6 @@ struct DeveloperSettingsView: View {
     /// Default ON since 1.8.11 (absent-key-means-on in the engine gate);
     /// this toggle is the escape hatch for metal-path regressions.
     @AppStorage("playback.metalHDR") private var metalHDREngine = true
-    /// HDR prototype cover. Non-nil = presenting, carrying the resolved
-    /// stream URL for the requested channel number.
-    @State private var metalHDRTestItem: MetalHDRTestItem?
-    @State private var metalHDRTestError: String?
     #endif
     @State private var logSize = "Empty"
     private let logger = DebugLogger.shared
@@ -175,7 +215,9 @@ struct DeveloperSettingsView: View {
         .onAppear { loadLiveEngineOverride() }
         .navigationTitle("Developer")
         #if os(iOS)
-        .navigationBarTitleDisplayMode(.large)
+        // Every other Settings sub-page uses an inline title; Developer
+        // was the only large one (Logan screenshots 2026-09-18).
+        .navigationBarTitleDisplayMode(.inline)
         #else
         .toolbar(.hidden, for: .navigationBar)
         #endif
@@ -232,473 +274,12 @@ struct DeveloperSettingsView: View {
     private var iOSBody: some View {
         List {
 
-                // MARK: - What's Logged
-                Section {
-                    logCategoryRow(icon: "network",                title: "Network",     detail: "All API requests: URL, method, status code, duration, payload size")
-                    logCategoryRow(icon: "play.rectangle.fill",    title: "Playback",    detail: "Stream URLs loaded, player state transitions, DVR mode, failover attempts")
-                    logCategoryRow(icon: "calendar",               title: "EPG",         detail: "Current program fetches, upcoming program loads, decode errors")
-                    logCategoryRow(icon: "antenna.radiowaves.left.and.right", title: "Channels", detail: "Channel list loads, server type, item counts, timing")
-                    logCategoryRow(icon: "app.badge",              title: "Lifecycle",   detail: "App foreground/background, launch, scene transitions")
-                    logCategoryRow(icon: "exclamationmark.triangle.fill", title: "Errors", detail: "Caught exceptions with full context, source file and line number")
-                    logCategoryRow(icon: "gauge.with.dots.needle.67percent", title: "Performance", detail: "Timed operations: parse time, load time, memory at session start")
-                } header: {
-                    Text("What's Captured")
-                        .sectionHeaderStyle()
-                } footer: {
-                    Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as aerio_debug_logs_archive.txt.")
-                        .scaledFont(.labelSmall.subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
-                }
-                #if os(iOS)
-                .listSectionSeparator(.hidden)
-                #endif
-
-                // MARK: - Unified Playback (experimental)
-                Section {
-                    HStack(spacing: 14) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(unifiedPlayback
-                                      ? Color.accentPrimary.opacity(0.18)
-                                      : Color.elevatedBackground)
-                                .frame(width: 36, height: 36)
-                            Image(systemName: unifiedPlayback
-                                  ? "rectangle.stack.fill"
-                                  : "rectangle.stack")
-                                .scaledFont(.system(size: 16, weight: .medium))
-                                .foregroundColor(unifiedPlayback ? .accentPrimary : Color.contrastText(.textSecondary))
-                        }
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Unified Playback")
-                                .scaledFont(.bodyMedium)
-                                .foregroundColor(.textPrimary)
-                            Text(unifiedPlayback
-                                 ? "On: live playback uses the multiview engine. Required for the AVPlayer options below."
-                                 : "Off: legacy single-stream player (mpv only, no AVPlayer or multiview)")
-                                .scaledFont(.labelSmall)
-                                .foregroundColor(unifiedPlayback ? Color.contrastText(.accentPrimary) : Color.contrastText(.textTertiary))
-                        }
-
-                        Spacer()
-
-                        Toggle("", isOn: $unifiedPlayback)
-                            .labelsHidden()
-                            .tint(.accentPrimary)
-                    }
-                    .padding(.vertical, 4)
-                    .listRowBackground(Color.cardBackground)
-                } header: {
-                    Text("Playback Engine")
-                        .sectionHeaderStyle()
-                } footer: {
-                    Text("mpv is the default engine and plays every live channel, including HEVC. The two AVPlayer options route specific stream types to Apple's native player; anything AVPlayer cannot render (such as HEVC inside MPEG-TS) automatically falls back to mpv, so turning them on never loses a channel. Unified Playback hosts all of this: a single tile mounts MultiviewContainerView from the first frame, so adding a second stream is seamless. Disable it only if you hit a unified-path regression; the legacy PlayerView covers single-stream playback but has no multiview, mini-player, or AVPlayer support. Live only (VOD always uses the legacy path). Restart playback for changes to take effect.")
-                        .scaledFont(.labelSmall.subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
-                        .padding(.top, 4)
-                }
-                #if os(iOS)
-                .listSectionSeparator(.hidden)
-                #endif
-
-                // MARK: - AVPlayer for HLS (test branch)
-                Section {
-                    HStack(spacing: 14) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(avPlayerHLS
-                                      ? Color.accentPrimary.opacity(0.18)
-                                      : Color.elevatedBackground)
-                                .frame(width: 36, height: 36)
-                            Image(systemName: avPlayerHLS ? "play.tv.fill" : "play.tv")
-                                .scaledFont(.system(size: 16, weight: .medium))
-                                .foregroundColor(avPlayerHLS ? .accentPrimary : Color.contrastText(.textSecondary))
-                        }
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("AVPlayer for HLS Streams")
-                                .scaledFont(.bodyMedium)
-                                .foregroundColor(.textPrimary)
-                            Text(avPlayerHLS
-                                 ? "On (default): HLS-capable channels auto-play on Apple's AVPlayer; everything else stays on mpv"
-                                 : "Off: every channel uses the mpv engine")
-                                .scaledFont(.labelSmall)
-                                .foregroundColor(avPlayerHLS ? Color.contrastText(.accentPrimary) : Color.contrastText(.textTertiary))
-                        }
-
-                        Spacer()
-
-                        Toggle("", isOn: $avPlayerHLS)
-                            .labelsHidden()
-                            .tint(.accentPrimary)
-                    }
-                    .padding(.vertical, 4)
-                    .listRowBackground(Color.cardBackground)
-
-                    HStack(spacing: 14) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(avPlayerRemuxTS
-                                      ? Color.accentPrimary.opacity(0.18)
-                                      : Color.elevatedBackground)
-                                .frame(width: 36, height: 36)
-                            Image(systemName: avPlayerRemuxTS ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.triangle.2.circlepath.circle")
-                                .scaledFont(.system(size: 16, weight: .medium))
-                                .foregroundColor(avPlayerRemuxTS ? .accentPrimary : Color.contrastText(.textSecondary))
-                        }
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("AVPlayer Remux for TS Streams")
-                                .scaledFont(.bodyMedium)
-                                .foregroundColor(.textPrimary)
-                            Text(avPlayerRemuxTS
-                                 ? "On: raw MPEG-TS remuxed to HLS for AVPlayer (HEVC/MPEG-2 fall back to mpv)"
-                                 : "Off: raw TS channels use the mpv engine (the default)")
-                                .scaledFont(.labelSmall)
-                                .foregroundColor(avPlayerRemuxTS ? Color.contrastText(.accentPrimary) : Color.contrastText(.textTertiary))
-                        }
-
-                        Spacer()
-
-                        Toggle("", isOn: $avPlayerRemuxTS)
-                            .labelsHidden()
-                            .tint(.accentPrimary)
-                    }
-                    .padding(.vertical, 4)
-                    .listRowBackground(Color.cardBackground)
-
-                    // Live engine override for the ACTIVE server: tap to
-                    // cycle Automatic -> Force Native HLS -> Force Remux TS.
-                    Button {
-                        cycleLiveEngineOverride()
-                    } label: {
-                        HStack(spacing: 14) {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(liveEngineOverride == .auto
-                                          ? Color.elevatedBackground
-                                          : Color.accentPrimary.opacity(0.18))
-                                    .frame(width: 36, height: 36)
-                                Image(systemName: liveEngineOverrideIcon)
-                                    .scaledFont(.system(size: 16, weight: .medium))
-                                    .foregroundColor(liveEngineOverride == .auto
-                                                     ? Color.contrastText(.textSecondary)
-                                                     : .accentPrimary)
-                            }
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Live Engine for this Server")
-                                    .scaledFont(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                                Text(liveEngineOverrideSubtitle)
-                                    .scaledFont(.labelSmall)
-                                    .foregroundColor(liveEngineOverride == .auto
-                                                     ? Color.contrastText(.textTertiary)
-                                                     : Color.contrastText(.accentPrimary))
-                            }
-
-                            Spacer()
-
-                            Text(liveEngineOverride.label)
-                                .scaledFont(.labelSmall)
-                                .foregroundColor(Color.contrastText(.textSecondary))
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(activeServer == nil)
-                    .padding(.vertical, 4)
-                    .listRowBackground(Color.cardBackground)
-
-                    HStack(spacing: 14) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(mpvEngineEnabled
-                                      ? Color.accentPrimary.opacity(0.18)
-                                      : Color.elevatedBackground)
-                                .frame(width: 36, height: 36)
-                            Image(systemName: mpvEngineEnabled ? "shield.lefthalf.filled" : "shield.slash")
-                                .scaledFont(.system(size: 16, weight: .medium))
-                                .foregroundColor(mpvEngineEnabled ? .accentPrimary : Color.contrastText(.textSecondary))
-                        }
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("mpv Engine")
-                                .scaledFont(.bodyMedium)
-                                .foregroundColor(.textPrimary)
-                            Text(mpvEngineEnabled
-                                 ? "On: mpv is the fallback when AVPlayer can't play something"
-                                 : "Off: AVPlayer only; unplayable content shows an error (test default)")
-                                .scaledFont(.labelSmall)
-                                .foregroundColor(mpvEngineEnabled ? Color.contrastText(.accentPrimary) : Color.contrastText(.textTertiary))
-                        }
-
-                        Spacer()
-
-                        Toggle("", isOn: $mpvEngineEnabled)
-                            .labelsHidden()
-                            .tint(.accentPrimary)
-                    }
-                    .padding(.vertical, 4)
-                    .listRowBackground(Color.cardBackground)
-                } header: {
-                    Text("AVPlayer Engine (Test)")
-                        .sectionHeaderStyle()
-                } footer: {
-                    Text("Experimental engine router: live channels whose URL is genuine HLS (.m3u8, typically Xtream Codes sources) play through Apple's native AVPlayer for true HDR (PQ) output, surround sound passthrough, and AirPlay. Channels are presented in the system player without the app's custom chrome, channel flipping, or multiview. Raw MPEG-TS streams (Dispatcharr) are unaffected; AVPlayer cannot play them. Takes effect on the next channel start.")
-                        .scaledFont(.labelSmall.subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
-                        .padding(.top, 4)
-                }
-                #if os(iOS)
-                .listSectionSeparator(.hidden)
-                #endif
-
-                // MARK: - Experimental UI (iPhone only)
-                // Veldmuus-proposal flag. Only show on actual iPhones — the
-                // feature doesn't apply to iPad (its layout isn't cramped) or
-                // to Mac Catalyst (no UIDevice.phone idiom in the iOS-family
-                // sense). When toggled, the compact-chrome layout moves the
-                // Manage Groups icon to the nav-bar trailing edge and lets
-                // users hide the filter pills + search from inside the sheet.
-                if UIDevice.current.userInterfaceIdiom == .phone {
-                    Section {
-                        HStack(spacing: 14) {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(compactChromeiPhone
-                                          ? Color.accentPrimary.opacity(0.18)
-                                          : Color.elevatedBackground)
-                                    .frame(width: 36, height: 36)
-                                Image(systemName: compactChromeiPhone
-                                      ? "iphone.gen3.landscape"
-                                      : "iphone.gen3")
-                                    .scaledFont(.system(size: 16, weight: .medium))
-                                    .foregroundColor(compactChromeiPhone ? .accentPrimary : Color.contrastText(.textSecondary))
-                            }
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("iPhone Compact Chrome")
-                                    .scaledFont(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                                Text(compactChromeiPhone
-                                     ? "On: Manage Groups lives in the Live TV nav bar"
-                                     : "Off: classic layout")
-                                    .scaledFont(.labelSmall)
-                                    .foregroundColor(compactChromeiPhone ? Color.contrastText(.accentPrimary) : Color.contrastText(.textTertiary))
-                            }
-
-                            Spacer()
-
-                            Toggle("", isOn: $compactChromeiPhone)
-                                .labelsHidden()
-                                .tint(.accentPrimary)
-                        }
-                        .padding(.vertical, 4)
-                        .listRowBackground(Color.cardBackground)
-
-                        // Companion toggles — only meaningful when
-                        // Compact Chrome is ON. Previously these were
-                        // buried inside the Manage Groups sheet, which
-                        // made the parent toggle seem inert ("I can't
-                        // tell what iPhone Compact Chrome even does").
-                        // Surfacing them here means turning Compact
-                        // Chrome on immediately reveals its actual
-                        // controls — users can see at a glance what
-                        // the feature does before toggling sub-options.
-                        if compactChromeiPhone {
-                            Toggle(isOn: $hideFilterBarCompact) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Hide Filter Bar")
-                                        .scaledFont(.bodyMedium)
-                                        .foregroundColor(.textPrimary)
-                                    Text("Removes the group pills strip above the channel list.")
-                                        .scaledFont(.labelSmall.subtext())
-                                        .foregroundColor(Color.contrastText(.textTertiary))
-                                }
-                            }
-                            .tint(.accentPrimary)
-                            .listRowBackground(Color.cardBackground)
-
-                            Toggle(isOn: $hideSearchBarCompact) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Hide Search Bar")
-                                        .scaledFont(.bodyMedium)
-                                        .foregroundColor(.textPrimary)
-                                    Text("Replaces the always-visible search row with the nav-bar search icon.")
-                                        .scaledFont(.labelSmall.subtext())
-                                        .foregroundColor(Color.contrastText(.textTertiary))
-                                }
-                            }
-                            .tint(.accentPrimary)
-                            .listRowBackground(Color.cardBackground)
-                        }
-                    } header: {
-                        Text("Experimental UI")
-                            .sectionHeaderStyle()
-                    } footer: {
-                        Text(compactChromeiPhone
-                             ? "Compact Chrome moves Manage Groups into the Live TV nav bar. The two toggles above let you further reclaim vertical space by hiding the filter pills and/or the search row. All three options revert instantly: no restart required."
-                             : "Designed for iPhone landscape. When enabled, Manage Groups moves to the nav bar and two further toggles appear for hiding the filter pills and search row. Reverting restores the classic layout instantly."
-                        )
-                        .scaledFont(.labelSmall.subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
-                        .padding(.top, 4)
-                    }
-                    #if os(iOS)
-                    .listSectionSeparator(.hidden)
-                    #endif
-                }
-
-                // MARK: - Log File Actions (only when logging is active or file exists)
-                if debugLoggingEnabled || (logger.logFileURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false) {
-                    Section {
-
-                        // File size row
-                        HStack {
-                            Label {
-                                Text("Log File Size")
-                                    .scaledFont(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                            } icon: {
-                                Image(systemName: "doc.text")
-                                    .foregroundColor(Color.contrastText(.textSecondary))
-                            }
-                            Spacer()
-                            // v1.7.x: poll the file size every 2s while the
-                            // screen is up. Pre-fix this only refreshed inside
-                            // .task(once-on-appear), so a user enabling
-                            // logging and watching the row would see "Empty"
-                            // until they backed out and re-entered Developer
-                            // Settings. Now Empty -> 1 KB -> 5 KB updates
-                            // live as the firehose lands in the file, which
-                            // is the simplest possible signal that the write
-                            // path is actually working.
-                            TimelineView(.periodic(from: Date(), by: 2)) { _ in
-                                Text(logSize)
-                                    .scaledFont(.monoSmall.subtext())
-                                    .foregroundColor(Color.contrastText(.textTertiary))
-                                    .onAppear { refreshLogSize() }
-                                    .onChange(of: Date().timeIntervalSinceReferenceDate) { _, _ in
-                                        refreshLogSize()
-                                    }
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-                        .task { refreshLogSize() }
-
-                        // View
-                        // v1.7.x: show this whenever Debug Logging is enabled
-                        // OR the file already has bytes on disk. Pre-fix the
-                        // guard was file-existence only, but the file is
-                        // created lazily on the first write - so users who
-                        // just toggled logging on, then opened this screen,
-                        // saw no View / Share buttons until they triggered
-                        // something log-worthy (a channel play). LogViewerView
-                        // and the share path both handle empty content
-                        // gracefully, so it is safe to surface the buttons
-                        // immediately on enable.
-                        if let url = logger.logFileURL,
-                           (debugLoggingEnabled || FileManager.default.fileExists(atPath: url.path)) {
-                            Button {
-                                showLogViewer = true
-                            } label: {
-                                Label {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("View Log File")
-                                            .scaledFont(.bodyMedium)
-                                            .foregroundColor(.textPrimary)
-                                        Text("Scroll through entries in the app")
-                                            .scaledFont(.labelSmall.subtext())
-                                            .foregroundColor(Color.contrastText(.textTertiary))
-                                    }
-                                } icon: {
-                                    Image(systemName: "doc.text.magnifyingglass")
-                                        .foregroundColor(.accentPrimary)
-                                }
-                            }
-                            .listRowBackground(Color.cardBackground)
-                            .sheet(isPresented: $showLogViewer) {
-                                LogViewerView(url: url)
-                            }
-                        }
-
-                        // Share — uses a UIKit sheet with proper iPad popover anchoring
-                        // (iOS) or a LAN HTTP server + QR sheet (tvOS). Same
-                        // relaxed guard as View above so the button appears
-                        // the moment Debug Logging is on, not after the
-                        // first log flush.
-                        if let url = logger.logFileURL,
-                           (debugLoggingEnabled || FileManager.default.fileExists(atPath: url.path)) {
-                            Button {
-                                shareFile(url)
-                            } label: {
-                                Label {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("Share Log File")
-                                            .scaledFont(.bodyMedium)
-                                            .foregroundColor(.textPrimary)
-                                        #if os(tvOS)
-                                        // tvOS share sheet is AirDrop-only in
-                                        // practice (Mail / Messages / third-
-                                        // party apps are not on the platform),
-                                        // so we say so up front instead of the
-                                        // iOS-style "Email, Messages, ...".
-                                        Text("Send via AirDrop to a nearby Mac or iPhone")
-                                            .scaledFont(.labelSmall.subtext())
-                                            .foregroundColor(Color.contrastText(.textTertiary))
-                                        #else
-                                        Text("Email, Messages, Discord, Signal…")
-                                            .scaledFont(.labelSmall.subtext())
-                                            .foregroundColor(Color.contrastText(.textTertiary))
-                                        #endif
-                                    }
-                                } icon: {
-                                    Image(systemName: "square.and.arrow.up")
-                                        .foregroundColor(.accentPrimary)
-                                }
-                            }
-                            // v1.7.x: removed the platform-split buttonStyle.
-                            // On tvOS the previous TVNoHighlightButtonStyle()
-                            // returned only the label content with a focus-
-                            // ring overlay - no card chrome, no padding - and
-                            // in a List/Form row it rendered effectively
-                            // invisible against the dark background until
-                            // focused. The sibling View Log File button right
-                            // above this one uses no buttonStyle at all and
-                            // gets the default tvOS form-row chrome the user
-                            // expects, so match that pattern exactly. iOS
-                            // List handles the .plain treatment naturally too.
-                            .listRowBackground(Color.cardBackground)
-                        }
-
-                        // Clear
-                        Button(role: .destructive) {
-                            showClearConfirmation = true
-                        } label: {
-                            Label("Delete All Logs", systemImage: "trash")
-                                .scaledFont(.bodyMedium)
-                        }
-                        .listRowBackground(Color.cardBackground)
-
-                    } header: {
-                        Text("Log File")
-                            .sectionHeaderStyle()
-                    }
-                    #if os(iOS)
-                    .listSectionSeparator(.hidden)
-                    #endif
-                }
-
                 // MARK: - Debug Logging Toggle
-                // Relocated from the top of this screen to sit just
-                // above "What's Captured" — that positioning makes
-                // the toggle's effect self-documenting: you see the
-                // toggle, immediately below you see "here's what
-                // enabling it will log", and below that the log
-                // file actions. Previously the toggle was at the
-                // very top and the explainer + file actions were
-                // buried several sections down, which made it
-                // unclear to users what the toggle actually did.
+                // Phase 3 (Logan 2026-09-18): the page opens with the
+                // toggle, so the toggle's effect is self-documenting:
+                // you see the toggle, immediately below it "What's
+                // Captured" says what enabling it will log, and the
+                // log file actions follow. Matches the tvOS order.
                 Section {
                     HStack(spacing: 14) {
                         ZStack {
@@ -756,10 +337,356 @@ struct DeveloperSettingsView: View {
                 .listSectionSeparator(.hidden)
                 #endif
 
+                // MARK: - What's Logged
+                Section {
+                    logCategoryRow(icon: "network",                title: "Network",     detail: "All API requests: URL, method, status code, duration, payload size")
+                    logCategoryRow(icon: "play.rectangle.fill",    title: "Playback",    detail: "Stream URLs loaded, player state transitions, DVR mode, failover attempts")
+                    logCategoryRow(icon: "calendar",               title: "EPG",         detail: "Current program fetches, upcoming program loads, decode errors")
+                    logCategoryRow(icon: "antenna.radiowaves.left.and.right", title: "Channels", detail: "Channel list loads, server type, item counts, timing")
+                    logCategoryRow(icon: "app.badge",              title: "Lifecycle",   detail: "App foreground/background, launch, scene transitions")
+                    logCategoryRow(icon: "exclamationmark.triangle.fill", title: "Errors", detail: "Caught exceptions with full context, source file and line number")
+                    logCategoryRow(icon: "gauge.with.dots.needle.67percent", title: "Performance", detail: "Timed operations: parse time, load time, memory at session start")
+                } header: {
+                    Text("What's Captured")
+                        .sectionHeaderStyle()
+                } footer: {
+                    Text("Logs rotate automatically when the file exceeds 4 MB. The previous log is preserved as aerio_debug_logs.1.txt.")
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
+                }
+                // Was the only Settings card left on the system row
+                // background, so it read darker than every other card
+                // in Settings (Logan screenshots 2026-09-18).
+                .listRowBackground(Color.cardBackground)
+                #if os(iOS)
+                .listSectionSeparator(.hidden)
+                #endif
+
+                // MARK: - Playback Engine
+                // Logan 2026-09-19: six flag toggles became ONE picker
+                // plus a troubleshooting page. No storage key, default or
+                // player code changed; the picker just writes the flag
+                // COMBINATION that means "AVPlayer" or "mpv", and reads
+                // the current combination back to decide what to display.
+                Section {
+                    SettingsChoicePicker("Playback Engine",
+                                         options: engineOptions,
+                                         selection: engineSelection,
+                                         icon: "play.rectangle.on.rectangle")
+                    liveEngineOverridePicker
+                    engineAdvancedGroup
+                } header: {
+                    Text("Playback Engine")
+                        .sectionHeaderStyle()
+                } footer: {
+                    Text(Self.playbackEngineFooter)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
+                        .padding(.top, 4)
+                }
+                #if os(iOS)
+                .listSectionSeparator(.hidden)
+                #endif
+
+
+                // MARK: - Experimental UI (iPhone only)
+                // Veldmuus-proposal flag. Only show on actual iPhones — the
+                // feature doesn't apply to iPad (its layout isn't cramped) or
+                // to Mac Catalyst (no UIDevice.phone idiom in the iOS-family
+                // sense). When toggled, the compact-chrome layout moves the
+                // Manage Groups icon to the nav-bar trailing edge and lets
+                // users hide the filter pills + search from inside the sheet.
+                if UIDevice.current.userInterfaceIdiom == .phone {
+                    Section {
+                        HStack(spacing: 14) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(compactChromeiPhone
+                                          ? Color.accentPrimary.opacity(0.18)
+                                          : Color.elevatedBackground)
+                                    .frame(width: 36, height: 36)
+                                Image(systemName: compactChromeiPhone
+                                      ? "iphone.gen3.landscape"
+                                      : "iphone.gen3")
+                                    .scaledFont(.system(size: 16, weight: .medium))
+                                    .foregroundColor(compactChromeiPhone ? .accentPrimary : Color.contrastText(.textSecondary))
+                            }
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("iPhone Compact Chrome")
+                                    .scaledFont(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                                Text(compactChromeiPhone
+                                     ? "On: Manage Groups lives in the Live TV nav bar"
+                                     : "Off: classic layout")
+                                    .scaledFont(.labelSmall)
+                                    .foregroundColor(compactChromeiPhone ? Color.contrastText(.accentPrimary) : Color.contrastText(.textTertiary))
+                            }
+
+                            Spacer()
+
+                            Toggle("", isOn: $compactChromeiPhone)
+                                .labelsHidden()
+                                .tint(.accentPrimary)
+                        }
+                        .padding(.vertical, 4)
+                        .listRowBackground(Color.cardBackground)
+
+                        // Cast video transcode test switch (2026-09-26):
+                        // re-encode any H.264 source on the phone, HEVC when
+                        // the receiver presents it, else the H.264 profile
+                        // picked below.
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Cast: transcode video to HEVC (test)")
+                                    .scaledFont(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                                Text("Re-encode every H.264 channel; H.264 profile below when the receiver has no HEVC")
+                                    .scaledFont(.labelSmall)
+                                    .foregroundColor(Color.contrastText(.textTertiary))
+                            }
+                            Spacer()
+                            Toggle("", isOn: $castForceHEVCTranscode)
+                                .labelsHidden()
+                                .tint(.accentPrimary)
+                        }
+                        .padding(.vertical, 4)
+                        .listRowBackground(Color.cardBackground)
+
+                        // H.264 output when the receiver cannot present the
+                        // source or HEVC: 720p at the source rate, or the
+                        // source size at half rate.
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Cast: H.264 transcode profile")
+                                    .scaledFont(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                                Text("720p60 keeps motion; 1080p30 keeps resolution")
+                                    .scaledFont(.labelSmall)
+                                    .foregroundColor(Color.contrastText(.textTertiary))
+                            }
+                            Spacer()
+                            Picker("", selection: $castTranscodeDownProfile) {
+                                Text("720p60").tag("720p60")
+                                Text("1080p30").tag("1080p30")
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                            .tint(.accentPrimary)
+                        }
+                        .padding(.vertical, 4)
+                        .listRowBackground(Color.cardBackground)
+
+                        // Companion toggles — only meaningful when
+                        // Compact Chrome is ON. Previously these were
+                        // buried inside the Manage Groups sheet, which
+                        // made the parent toggle seem inert ("I can't
+                        // tell what iPhone Compact Chrome even does").
+                        // Surfacing them here means turning Compact
+                        // Chrome on immediately reveals its actual
+                        // controls — users can see at a glance what
+                        // the feature does before toggling sub-options.
+                        if compactChromeiPhone {
+                            Toggle(isOn: $hideFilterBarCompact) {
+                                HStack(spacing: 14) {
+                                    DevIconTile(icon: "line.3.horizontal.decrease.circle",
+                                                isActive: hideFilterBarCompact)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Hide Filter Bar")
+                                            .scaledFont(.bodyMedium)
+                                            .foregroundColor(.textPrimary)
+                                        Text("Removes the group pills strip above the channel list.")
+                                            .scaledFont(.labelSmall.subtext())
+                                            .foregroundColor(Color.contrastText(.textTertiary))
+                                    }
+                                }
+                            }
+                            .tint(.accentPrimary)
+                            .listRowBackground(Color.cardBackground)
+
+                            Toggle(isOn: $hideSearchBarCompact) {
+                                HStack(spacing: 14) {
+                                    DevIconTile(icon: "magnifyingglass",
+                                                isActive: hideSearchBarCompact)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Hide Search Bar")
+                                            .scaledFont(.bodyMedium)
+                                            .foregroundColor(.textPrimary)
+                                        Text("Replaces the always-visible search row with the nav-bar search icon.")
+                                            .scaledFont(.labelSmall.subtext())
+                                            .foregroundColor(Color.contrastText(.textTertiary))
+                                    }
+                                }
+                            }
+                            .tint(.accentPrimary)
+                            .listRowBackground(Color.cardBackground)
+                        }
+                    } header: {
+                        Text("Experimental UI")
+                            .sectionHeaderStyle()
+                    } footer: {
+                        Text(compactChromeiPhone
+                             ? "Compact Chrome moves Manage Groups into the Live TV nav bar. The two toggles above let you further reclaim vertical space by hiding the filter pills and/or the search row. All three options revert instantly: no restart required."
+                             : "Designed for iPhone landscape. When enabled, Manage Groups moves to the nav bar and two further toggles appear for hiding the filter pills and search row. Reverting restores the classic layout instantly."
+                        )
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
+                        .padding(.top, 4)
+                    }
+                    #if os(iOS)
+                    .listSectionSeparator(.hidden)
+                    #endif
+                }
+
+                // MARK: - Log File Actions (only when logging is active or file exists)
+                if debugLoggingEnabled || (logger.logFileURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false) {
+                    Section {
+
+                        // File size row
+                        HStack(spacing: 14) {
+                            DevIconTile(icon: "doc.text", isActive: false)
+                            Text("Log File Size")
+                                .scaledFont(.bodyMedium)
+                                .foregroundColor(.textPrimary)
+                            Spacer()
+                            // v1.7.x: poll the file size every 2s while the
+                            // screen is up. Pre-fix this only refreshed inside
+                            // .task(once-on-appear), so a user enabling
+                            // logging and watching the row would see "Empty"
+                            // until they backed out and re-entered Developer
+                            // Settings. Now Empty -> 1 KB -> 5 KB updates
+                            // live as the firehose lands in the file, which
+                            // is the simplest possible signal that the write
+                            // path is actually working.
+                            TimelineView(.periodic(from: Date(), by: 2)) { _ in
+                                Text(logSize)
+                                    .scaledFont(.monoSmall.subtext())
+                                    .foregroundColor(Color.contrastText(.textTertiary))
+                                    .onAppear { refreshLogSize() }
+                                    .onChange(of: Date().timeIntervalSinceReferenceDate) { _, _ in
+                                        refreshLogSize()
+                                    }
+                            }
+                        }
+                        .listRowBackground(Color.cardBackground)
+                        .task { refreshLogSize() }
+
+                        // View
+                        // v1.7.x: show this whenever Debug Logging is enabled
+                        // OR the file already has bytes on disk. Pre-fix the
+                        // guard was file-existence only, but the file is
+                        // created lazily on the first write - so users who
+                        // just toggled logging on, then opened this screen,
+                        // saw no View / Share buttons until they triggered
+                        // something log-worthy (a channel play). LogViewerView
+                        // and the share path both handle empty content
+                        // gracefully, so it is safe to surface the buttons
+                        // immediately on enable.
+                        if let url = logger.logFileURL,
+                           (debugLoggingEnabled || FileManager.default.fileExists(atPath: url.path)) {
+                            Button {
+                                showLogViewer = true
+                            } label: {
+                                HStack(spacing: 14) {
+                                    DevIconTile(icon: "doc.text.magnifyingglass")
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("View Log File")
+                                            .scaledFont(.bodyMedium)
+                                            .foregroundColor(.textPrimary)
+                                        Text("Scroll through entries in the app")
+                                            .scaledFont(.labelSmall.subtext())
+                                            .foregroundColor(Color.contrastText(.textTertiary))
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                            }
+                            .listRowBackground(Color.cardBackground)
+                            .sheet(isPresented: $showLogViewer) {
+                                LogViewerView(url: url)
+                            }
+                        }
+
+                        // Share — uses a UIKit sheet with proper iPad popover anchoring
+                        // (iOS) or a LAN HTTP server + QR sheet (tvOS). Same
+                        // relaxed guard as View above so the button appears
+                        // the moment Debug Logging is on, not after the
+                        // first log flush.
+                        if let url = logger.logFileURL,
+                           (debugLoggingEnabled || FileManager.default.fileExists(atPath: url.path)) {
+                            Button {
+                                shareFile(url)
+                            } label: {
+                                HStack(spacing: 14) {
+                                    DevIconTile(icon: "square.and.arrow.up")
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Share Log File")
+                                            .scaledFont(.bodyMedium)
+                                            .foregroundColor(.textPrimary)
+                                        #if os(tvOS)
+                                        // tvOS share sheet is AirDrop-only in
+                                        // practice (Mail / Messages / third-
+                                        // party apps are not on the platform),
+                                        // so we say so up front instead of the
+                                        // iOS-style "Email, Messages, ...".
+                                        Text("Send via AirDrop to a nearby Mac or iPhone")
+                                            .scaledFont(.labelSmall.subtext())
+                                            .foregroundColor(Color.contrastText(.textTertiary))
+                                        #else
+                                        Text("Email, Messages, Discord, Signal…")
+                                            .scaledFont(.labelSmall.subtext())
+                                            .foregroundColor(Color.contrastText(.textTertiary))
+                                        #endif
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                            }
+                            // v1.7.x: removed the platform-split buttonStyle.
+                            // On tvOS the previous TVNoHighlightButtonStyle()
+                            // returned only the label content with a focus-
+                            // ring overlay - no card chrome, no padding - and
+                            // in a List/Form row it rendered effectively
+                            // invisible against the dark background until
+                            // focused. The sibling View Log File button right
+                            // above this one uses no buttonStyle at all and
+                            // gets the default tvOS form-row chrome the user
+                            // expects, so match that pattern exactly. iOS
+                            // List handles the .plain treatment naturally too.
+                            .listRowBackground(Color.cardBackground)
+                        }
+
+                        // Clear
+                        Button(role: .destructive) {
+                            showClearConfirmation = true
+                        } label: {
+                            HStack(spacing: 14) {
+                                DevIconTile(icon: "trash", tint: .red)
+                                Text("Delete All Logs")
+                                    .scaledFont(.bodyMedium)
+                                Spacer(minLength: 0)
+                            }
+                        }
+                        .listRowBackground(Color.cardBackground)
+
+                    } header: {
+                        Text("Log File")
+                            .sectionHeaderStyle()
+                    }
+                    #if os(iOS)
+                    .listSectionSeparator(.hidden)
+                    #endif
+                }
+
+
 
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
+            #if os(iOS)
+            // Phase 3 (Logan 2026-09-18): floating tab bar parity -
+            // content runs under the bar, the bar tucks away on scroll,
+            // and the last row clears it.
+            .settingsPhoneTabBarChrome()
+            #endif
     }
     #endif
 
@@ -793,99 +720,34 @@ struct DeveloperSettingsView: View {
                     ) { _ in }
                 }
 
-                SettingsSection("Experimental", style: .plain) {
-                    TVSettingsToggleRow(
-                        icon: unifiedPlayback ? "rectangle.stack.fill" : "rectangle.stack",
-                        iconColor: unifiedPlayback ? .accentPrimary : .textSecondary,
-                        title: "Unified Playback",
-                        subtitle: unifiedPlayback
-                            ? "On: required for the AVPlayer engines below; also enables multiview"
-                            : "Off: legacy single-stream player (mpv only)",
-                        isOn: $unifiedPlayback
-                    ) { _ in }
+                SettingsSection("Playback Engine", style: .plain) {
+                    SettingsChoicePicker("Playback Engine",
+                                         options: engineOptions,
+                                         selection: engineSelection,
+                                         icon: "play.rectangle.fill")
 
-                    TVSettingsToggleRow(
-                        icon: avPlayerHLS ? "play.tv.fill" : "play.tv",
-                        iconColor: avPlayerHLS ? .accentPrimary : .textSecondary,
-                        title: "AVPlayer for HLS Streams",
-                        subtitle: avPlayerHLS
-                            ? "On: HLS channels play on Apple's AVPlayer (HEVC auto-falls back to mpv)"
-                            : "Off: every channel uses the mpv engine (the default)",
-                        isOn: $avPlayerHLS
-                    ) { _ in }
-
-                    TVSettingsToggleRow(
-                        icon: avPlayerRemuxTS ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.triangle.2.circlepath.circle",
-                        iconColor: avPlayerRemuxTS ? .accentPrimary : .textSecondary,
-                        title: "AVPlayer Remux for TS Streams",
-                        subtitle: avPlayerRemuxTS
-                            ? "On: raw MPEG-TS remuxed to HLS for AVPlayer (HEVC/MPEG-2 fall back to mpv)"
-                            : "Off: raw TS channels use the mpv engine (the default)",
-                        isOn: $avPlayerRemuxTS
-                    ) { _ in }
-
-                    // Live engine override for the ACTIVE server: press to
-                    // cycle Automatic -> Force Native HLS -> Force Remux TS,
-                    // so the same channel can be compared on both engines.
-                    TVSettingsActionRow(
-                        icon: liveEngineOverrideIcon,
-                        label: "Live Engine for this Server: \(liveEngineOverride.label)",
-                        isAccent: liveEngineOverride != .auto
-                    ) {
-                        cycleLiveEngineOverride()
+                    // Only affects mpv, so it only shows when mpv can run.
+                    if enginePreset != .avPlayer {
+                        TVSettingsToggleRow(
+                            icon: metalHDREngine ? "sparkles.tv.fill" : "sparkles.tv",
+                            iconColor: metalHDREngine ? .accentPrimary : .textSecondary,
+                            title: "Metal HDR Engine",
+                            subtitle: metalHDREngine
+                                ? "On: solo live channels render HDR10 with zero-copy 4K decode (the default)"
+                                : "Off: all channels use the classic GLES engine",
+                            isOn: $metalHDREngine
+                        ) { _ in }
                     }
 
-                    TVSettingsToggleRow(
-                        icon: mpvEngineEnabled ? "shield.lefthalf.filled" : "shield.slash",
-                        iconColor: mpvEngineEnabled ? .accentPrimary : .textSecondary,
-                        title: "mpv Engine",
-                        subtitle: mpvEngineEnabled
-                            ? "On: mpv is the fallback when AVPlayer can't play something"
-                            : "Off: AVPlayer only; unplayable content shows an error (test default)",
-                        isOn: $mpvEngineEnabled
-                    ) { _ in }
+                    liveEngineOverridePicker
+                    engineAdvancedGroup
 
-                    TVSettingsToggleRow(
-                        icon: metalHDREngine ? "sparkles.tv.fill" : "sparkles.tv",
-                        iconColor: metalHDREngine ? .accentPrimary : .textSecondary,
-                        title: "Metal HDR Engine",
-                        subtitle: metalHDREngine
-                            ? "On: solo live channels render HDR10 with zero-copy 4K decode (the default)"
-                            : "Off: all channels use the classic GLES engine",
-                        isOn: $metalHDREngine
-                    ) { _ in }
-
-                    #if DEBUG
-                    // Phase 0 HDR prototype: play channel 35 (UHD HDR test
-                    // channel) through the Metal/MoltenVK render path with
-                    // hwdec=videotoolbox (zero-copy) and
-                    // target-colorspace-hint=yes. Diagnostic only; results
-                    // land in the debug log as [METAL-HDR] lines.
-                    TVSettingsActionRow(
-                        icon: "tv.and.mediabox",
-                        label: "Metal HDR Test (Channel 35)",
-                        isAccent: true,
-                        action: {
-                            let channels = ChannelStore.shared.channels
-                            if let ch = channels.first(where: { $0.number == "35" }),
-                               let url = ch.streamURL ?? ch.streamURLs.first {
-                                debugLog("[METAL-HDR] launching test ch=35 name=\(ch.name)")
-                                metalHDRTestError = nil
-                                metalHDRTestItem = MetalHDRTestItem(url: url)
-                            } else {
-                                metalHDRTestError = channels.isEmpty
-                                    ? "Channels not loaded yet - open Live TV first."
-                                    : "No channel numbered 35 in the active playlist."
-                                debugLog("[METAL-HDR] launch failed: \(metalHDRTestError ?? "?")")
-                            }
-                        }
-                    )
-                    if let err = metalHDRTestError {
-                        Text(err)
-                            .scaledFont(.caption.subtext())
-                            .foregroundColor(Color.contrastText(.textSecondary))
-                    }
-                    #endif
+                    Text(Self.playbackEngineFooter)
+                        .scaledFont(.system(size: SettingsMetrics.tvFootnoteSize).subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
+                        .padding(.horizontal, 20)
+                        .padding(.top, 4)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if debugLoggingEnabled || (logger.logFileURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false) {
@@ -938,19 +800,19 @@ struct DeveloperSettingsView: View {
                     tvLogCategoryCard
                 }
             }
+            // Phase 3 item 7: the same centered reading column every other
+            // tvOS Settings page uses. Inside the split view's pane this is
+            // already the cap; it matters when Developer is pushed as a
+            // classic child, where the content otherwise ran the full width.
+            .frame(maxWidth: SettingsMetrics.tvReadingColumnWidth, alignment: .leading)
             .padding(48)
-        }
-        .fullScreenCover(item: $metalHDRTestItem) { item in
-            MetalHDRTestScreen(url: item.url)
+            .frame(maxWidth: .infinity)
         }
     }
 
     private var tvLogSizeCard: some View {
         HStack(spacing: 16) {
-            Image(systemName: "doc.text")
-                .scaledFont(.system(size: 28))
-                .foregroundColor(Color.contrastText(.textSecondary))
-                .frame(width: 36)
+            DevIconTile(icon: "doc.text", isActive: false)
             Text("Log File Size")
                 .scaledFont(.system(size: 26, weight: .medium))
                 .foregroundColor(.textPrimary)
@@ -996,7 +858,7 @@ struct DeveloperSettingsView: View {
                           title: "Performance",
                           detail: "Timed operations: parse time, load time, memory at session start")
 
-            Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as aerio_debug_logs_archive.txt.")
+            Text("Logs rotate automatically when the file exceeds 4 MB. The previous log is preserved as aerio_debug_logs.1.txt.")
                 .scaledFont(.system(size: 20).subtext())
                 .foregroundColor(Color.contrastText(.textTertiary))
                 .padding(.top, 8)
@@ -1015,11 +877,8 @@ struct DeveloperSettingsView: View {
 
     private func tvLogCategory(icon: String, title: String, detail: String) -> some View {
         HStack(alignment: .top, spacing: 16) {
-            Image(systemName: icon)
-                .scaledFont(.system(size: 22, weight: .medium))
-                .foregroundColor(.accentSecondary)
-                .frame(width: 32)
-                .padding(.top, 2)
+            // Phase 3: tiled like every other Settings row.
+            DevIconTile(icon: icon, tint: .accentSecondary)
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .scaledFont(.system(size: 24, weight: .semibold))
@@ -1032,6 +891,148 @@ struct DeveloperSettingsView: View {
     }
 
     #endif
+
+    // MARK: - Playback Engine preset
+    //
+    // The four flags are the real state the player reads (see
+    // PlaybackFeatureFlags); this picker is a friendly face over the two
+    // combinations that matter. Mapping:
+    //
+    //   AVPlayer     unified ON,  HLS ON,  remux ON,  mpv OFF  (defaults)
+    //   mpv (Legacy) unified ON,  HLS OFF, remux OFF, mpv ON
+    //
+    // Anything else reads as Custom. `mpvEngineEnabled` is the hinge:
+    // with it off, PlaybackFeatureFlags force the AVPlayer arms on
+    // regardless of their keys, so "AVPlayer" writes them on explicitly
+    // and the displayed value never disagrees with what plays.
+    private static let playbackEngineFooter = "AVPlayer is Apple's native player: fast first frame, HDR (PQ) output, surround passthrough and AirPlay. Anything it cannot render falls back automatically when mpv is the selected engine. Live only (VOD always uses the container path). Restart playback for changes to take effect."
+
+    private var enginePreset: PlaybackEnginePreset {
+        if unifiedPlayback && avPlayerHLS && avPlayerRemuxTS && !mpvEngineEnabled {
+            return .avPlayer
+        }
+        if unifiedPlayback && !avPlayerHLS && !avPlayerRemuxTS && mpvEngineEnabled {
+            return .mpv
+        }
+        return .custom
+    }
+
+    private var engineOptions: [SettingsChoice<PlaybackEnginePreset>] {
+        var out: [SettingsChoice<PlaybackEnginePreset>] = [
+            SettingsChoice(.avPlayer, "AVPlayer",
+                           subtitle: "Default. Apple's player for live, HLS and remuxed TS streams."),
+            SettingsChoice(.mpv, "mpv (Legacy)",
+                           subtitle: "Fallback engine. Use only if a stream will not play with AVPlayer.")
+        ]
+        // Only offered while the flags actually are a custom mix, so the
+        // collapsed row can display it. Choosing it changes nothing.
+        if enginePreset == .custom {
+            out.append(SettingsChoice(.custom, "Custom",
+                                      subtitle: "Set by hand in Advanced Engine Flags."))
+        }
+        return out
+    }
+
+    /// Live engine override for the ACTIVE server (feature/native-hls):
+    /// Automatic / Force Native HLS / Force Remux TS, persisted per host
+    /// in HLSCapabilityStore for both of the server's host keys.
+    private var liveEngineOverridePicker: some View {
+        SettingsChoicePicker("Live Engine for this Server",
+                             options: HLSCapabilityStore.EngineOverride.allCases.map {
+                                 SettingsChoice($0, $0.label)
+                             },
+                             selection: Binding(
+                                get: { liveEngineOverride },
+                                set: { setLiveEngineOverride($0) }),
+                             footer: activeServer == nil ? "No active server" : liveEngineOverrideSubtitle,
+                             icon: liveEngineOverrideIcon)
+            .disabled(activeServer == nil)
+    }
+
+    private var engineSelection: Binding<PlaybackEnginePreset> {
+        Binding(
+            get: { enginePreset },
+            set: { preset in
+                switch preset {
+                case .avPlayer:
+                    unifiedPlayback = true
+                    avPlayerHLS = true
+                    avPlayerRemuxTS = true
+                    mpvEngineEnabled = false
+                case .mpv:
+                    unifiedPlayback = true
+                    avPlayerHLS = false
+                    avPlayerRemuxTS = false
+                    mpvEngineEnabled = true
+                case .custom:
+                    break
+                }
+            }
+        )
+    }
+
+    /// The original four flag switches, kept verbatim in wording, behind
+    /// one row. Mixed controls, so it is a PAGE on every platform, never
+    /// the option sheet.
+    private var engineAdvancedGroup: some View {
+        SettingsSubgroup("Advanced Engine Flags",
+                         summary: "Individual switches for troubleshooting",
+                         icon: "slider.horizontal.3",
+                         iconColor: theme.accent,
+                         footer: "These are set for you by Playback Engine. Change them only when asked to while troubleshooting.") {
+            engineFlagToggle(
+                title: "Unified Playback",
+                subtitle: unifiedPlayback
+                    ? "On: required for the AVPlayer engines; also enables multiview"
+                    : "Off: legacy single-stream player (mpv only)",
+                icon: unifiedPlayback ? "rectangle.stack.fill" : "rectangle.stack",
+                isOn: $unifiedPlayback)
+            engineFlagToggle(
+                title: "AVPlayer for HLS Streams",
+                subtitle: avPlayerHLS
+                    ? "On: HLS channels play on Apple's AVPlayer (HEVC auto-falls back to mpv)"
+                    : "Off: every channel uses the mpv engine",
+                icon: avPlayerHLS ? "play.tv.fill" : "play.tv",
+                isOn: $avPlayerHLS)
+            engineFlagToggle(
+                title: "AVPlayer Remux for TS Streams",
+                subtitle: avPlayerRemuxTS
+                    ? "On: raw MPEG-TS remuxed to HLS for AVPlayer (HEVC/MPEG-2 fall back to mpv)"
+                    : "Off: raw TS channels use the mpv engine",
+                icon: avPlayerRemuxTS ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.triangle.2.circlepath.circle",
+                isOn: $avPlayerRemuxTS)
+            engineFlagToggle(
+                title: "mpv Engine",
+                subtitle: mpvEngineEnabled
+                    ? "On: mpv is the fallback when AVPlayer can't play something"
+                    : "Off: AVPlayer only; unplayable content shows an error",
+                icon: mpvEngineEnabled ? "shield.lefthalf.filled" : "shield.slash",
+                isOn: $mpvEngineEnabled)
+        }
+    }
+
+    @ViewBuilder
+    private func engineFlagToggle(title: String, subtitle: String,
+                                  icon: String, isOn: Binding<Bool>) -> some View {
+        #if os(tvOS)
+        TVSettingsToggleRow(icon: icon,
+                            iconColor: isOn.wrappedValue ? .accentPrimary : .textSecondary,
+                            title: title, subtitle: subtitle, isOn: isOn) { _ in }
+        #else
+        Toggle(isOn: isOn) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .scaledFont(.bodyMedium)
+                    .foregroundColor(.textPrimary)
+                Text(subtitle)
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+            }
+        }
+        .tint(theme.accent)
+        .listRowBackground(Color.cardBackground)
+        #endif
+    }
 
     // MARK: - Helpers
 
@@ -1212,12 +1213,9 @@ private struct LogTextView: UIViewRepresentable {
 
 @MainActor
 private func logCategoryRow(icon: String, title: String, detail: String) -> some View {
-    HStack(alignment: .top, spacing: 12) {
-        Image(systemName: icon)
-            .scaledFont(.system(size: 14, weight: .medium))
-            .foregroundColor(.accentSecondary)
-            .frame(width: 20)
-            .padding(.top, 2)
+    HStack(alignment: .top, spacing: 14) {
+        // Phase 3: tiled like every other Settings row.
+        DevIconTile(icon: icon, tint: .accentSecondary)
 
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
@@ -1465,13 +1463,12 @@ struct TvOSLogShareSheet: View {
                         .padding()
                 }
 
-                Button {
+                // Phase 3 item 8 (Logan 2026-09-19): this was a bare
+                // Button, so tvOS drew its own oversized glowing platter
+                // pill. It now uses the standard Settings primary button
+                // metrics and the one accent 2pt focus ring, no glow.
+                TVCompactButton(title: "Close", role: .primary) {
                     isPresented = false
-                } label: {
-                    Text("Close")
-                        .scaledFont(.system(size: 26, weight: .semibold))
-                        .padding(.horizontal, 48)
-                        .padding(.vertical, 16)
                 }
                 .padding(.top, 12)
             }
@@ -1502,11 +1499,6 @@ struct TvOSLogShareSheet: View {
 //   frame-drop counters -> smoothness vs tonight's 44-71 drops/15s baseline
 // Color CORRECTNESS still needs eyes on the TV (Logan's morning review).
 #if os(tvOS)
-
-struct MetalHDRTestItem: Identifiable {
-    let id = UUID()
-    let url: URL
-}
 
 /// MoltenVK workaround: it momentarily forces drawableSize to 1x1 to
 /// complete presentation; without this clamp the size can stick at 1x1

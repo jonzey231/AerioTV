@@ -85,6 +85,16 @@ struct EditServerPage: View {
     /// See `ServerCredentialChange` for what a swap has to invalidate.
     @State private var originalCredentials: DispatcharrCredentialSnapshot? = nil
 
+    /// See `EditServerSheet.saveEdits` for the rationale: Save verifies a
+    /// credential change before persisting anything, shows "Saving…", and
+    /// stays on the page with the typed values when the server rejects it.
+    @State private var isSaving = false
+    @State private var saveErrorMessage: String? = nil
+
+    /// Stage source for the "Saving Changes" cover, the same staged screen
+    /// the Add Playlist flow shows. See `PlaylistSaveRunner`.
+    @StateObject private var saveProgress = PlaylistSaveProgress()
+
     private var baseURLBinding: Binding<String> {
         Binding(
             get: { pendingBaseURL ?? server.baseURL },
@@ -119,6 +129,41 @@ struct EditServerPage: View {
         guard let pending = pendingCredentialType else { return }
         server.dispatcharrCredentialTypeRaw = (pending == .apiKey) ? "" : pending.rawValue
         pendingCredentialType = nil
+    }
+
+    /// Save Playlist (tvOS). Mirrors `EditServerSheet.saveEdits`.
+    @MainActor
+    private func saveEdits() async {
+        guard !isSaving else { return }
+        saveErrorMessage = nil
+        // Raises the "Saving Changes" cover. Cleared explicitly rather than
+        // in a `defer` so it is down before the page pops on success.
+        isSaving = true
+
+        let typedBaseURL = (pendingBaseURL ?? server.baseURL)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let mode = effectiveCredentialType
+        let message = await PlaylistSaveRunner.run(
+            server: server,
+            typedBaseURL: typedBaseURL,
+            credentialType: mode,
+            originalCredentials: originalCredentials,
+            progress: saveProgress,
+            commitStaged: {
+                commitBaseURLIfStaged()
+                commitCredentialModeIfStaged()
+            }
+        )
+        isSaving = false
+        if let message {
+            // Straight back to the form with the typed values intact. The
+            // "Save Failed" section sits directly above the Save button, so
+            // it is on screen where focus already is.
+            saveErrorMessage = message
+            return
+        }
+        originalCredentials = DispatcharrCredentialSnapshot.capture(from: server)
+        dismiss()
     }
 
     private func maskedAPIKey(_ key: String) -> String {
@@ -212,22 +257,31 @@ struct EditServerPage: View {
                 VStack(alignment: .leading, spacing: 32) {
                     // Connection
                     SettingsSection("Connection", style: .eyebrowCard) {
-                        tvField("Name", text: $server.name)
-                        tvField("URL", text: baseURLBinding)
+                        // Phase 3 item 2: every Settings field is now the
+                        // shared SettingsTextField, so label placement,
+                        // helper copy and focus outline match iOS and
+                        // Android exactly.
+                        SettingsTextField("Name", text: $server.name)
+                        SettingsTextField("URL", text: baseURLBinding,
+                                          keyboardType: .URL)
                     }
 
                     // Credentials
                     if server.type == .xtreamCodes {
                         SettingsSection("Credentials", style: .eyebrowCard) {
-                            tvField("Username", text: $server.username)
-                            tvField("Password", text: $server.password, isSecure: true)
+                            SettingsTextField("Username", text: $server.username)
+                            SettingsTextField("Password", text: $server.password,
+                                              isSecure: true)
                         }
                         SettingsSection("EPG Source", style: .eyebrowCard) {
-                            tvField("Custom XMLTV URL (optional)", text: $server.xtreamXMLTVURL)
-                            Text("Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own.")
-                                .scaledFont(.system(size: 22).subtext())
-                                .foregroundColor(Color.contrastText(.textTertiary))
-                                .padding(.top, 4)
+                            // Phase 3 item 2: the old section footer described
+                            // this one field, so it became the field's helper.
+                            // Same string as iOS and Android.
+                            SettingsTextField("Custom XMLTV URL (optional)",
+                                              placeholder: "https://example.com/xmltv.xml",
+                                              text: $server.xtreamXMLTVURL,
+                                              helper: "Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own. Leave blank to skip.",
+                                              keyboardType: .URL)
                         }
                     } else if server.type == .dispatcharrAPI {
                         Group {
@@ -248,15 +302,14 @@ struct EditServerPage: View {
 
                                 switch effectiveCredentialType {
                                 case .usernamePassword:
-                                    tvField("Username", text: $server.username)
-                                    tvField("Password", text: $server.password, isSecure: true)
-                                    // v1.7.x: Dashboard-vs-XC password
-                                    // hint mirrored on tvOS Edit Server
-                                    // (the legacy ScrollView+VStack path).
-                                    Text("Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.")
-                                        .scaledFont(.system(size: 22).subtext())
-                                        .foregroundColor(Color.contrastText(.textTertiary))
-                                        .padding(.top, 4)
+                                    SettingsTextField("Username", text: $server.username)
+                                    // Phase 3 item 2: the Dashboard-vs-XC hint
+                                    // belongs to the password field alone, so
+                                    // it is the field's helper now instead of a
+                                    // loose caption under the section.
+                                    SettingsTextField("Password", text: $server.password,
+                                                      helper: "Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.",
+                                                      isSecure: true)
                                     if !server.effectiveApiKey.isEmpty {
                                         HStack {
                                             Text("API Key (cached)")
@@ -298,31 +351,36 @@ struct EditServerPage: View {
                                             .padding(.top, 2)
                                     }
                                 case .apiKey:
-                                    tvField("Admin API Key", text: $server.apiKey, isSecure: true)
+                                    SettingsTextField("Admin API Key", text: $server.apiKey,
+                                                      isSecure: true)
                                 }
                             }
                             SettingsSection("EPG Source", style: .eyebrowCard) {
-                                tvField("Custom XMLTV URL (optional)", text: $server.dispatcharrXMLTVURL)
-                                Text("EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.")
-                                    .scaledFont(.system(size: 22).subtext())
-                                    .foregroundColor(Color.contrastText(.textTertiary))
-                                    .padding(.top, 4)
+                                // Phase 3 item 2: footer copy folded into the
+                                // field it describes; matches iOS and Android.
+                                SettingsTextField("Custom XMLTV URL (optional)",
+                                                  placeholder: "https://example.com/xmltv.xml",
+                                                  text: $server.dispatcharrXMLTVURL,
+                                                  helper: "EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.",
+                                                  keyboardType: .URL)
                             }
                         }
                     } else if server.type == .m3uPlaylist {
                         SettingsSection("EPG Guide", style: .eyebrowCard) {
-                            tvField("EPG URL (optional)", text: $server.epgURL)
+                            SettingsTextField("EPG URL (optional)", text: $server.epgURL,
+                                              keyboardType: .URL)
                         }
                     }
 
                     // Local Network
                     if server.type != .m3uPlaylist {
                         SettingsSection("Local Network", style: .eyebrowCard) {
-                            tvField("Local URL", text: $server.localURL)
-                            Text("Used when the Apple TV detects the local server is reachable. Leave blank to always use the main URL.")
-                                .scaledFont(.system(size: 22).subtext())
-                                .foregroundColor(Color.contrastText(.textTertiary))
-                                .padding(.top, 4)
+                            // Phase 3 item 2: tvOS used to say "when the Apple
+                            // TV detects"; the helper is now the one shared
+                            // device-neutral string used on iOS and Android.
+                            SettingsTextField("Local URL", text: $server.localURL,
+                                              helper: "Used automatically whenever the server is reachable on your local network. No setup needed. Leave blank to always use the main URL.",
+                                              keyboardType: .URL)
                         }
                     }
 
@@ -330,11 +388,10 @@ struct EditServerPage: View {
                     // iOS edit sheet.
                     if server.type == .dispatcharrAPI {
                         SettingsSection("User-Agent", style: .eyebrowCard) {
-                            tvField("User-Agent", text: $server.customUserAgent)
-                            Text("Shown in Dispatcharr's admin Stats panel to identify this device. Leave blank for default: \(DeviceInfo.defaultUserAgent)")
-                                .scaledFont(.system(size: 22).subtext())
-                                .foregroundColor(Color.contrastText(.textTertiary))
-                                .padding(.top, 4)
+                            SettingsTextField("User-Agent",
+                                              placeholder: DeviceInfo.defaultUserAgent,
+                                              text: $server.customUserAgent,
+                                              helper: "Shown in Dispatcharr's admin Stats panel to identify this device. Leave blank for default: \(DeviceInfo.defaultUserAgent)")
                         }
                     }
 
@@ -406,34 +463,33 @@ struct EditServerPage: View {
                         .padding(.vertical, 8)
                     }
 
+                    // Save Failed: the server rejected the new credentials
+                    // (or the verification fetch failed). Same section
+                    // chrome as the rest of the page.
+                    if let saveErrorMessage {
+                        SettingsSection("Save Failed", style: .eyebrowCard) {
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: "exclamationmark.circle.fill")
+                                    .foregroundColor(.statusLive)
+                                Text(saveErrorMessage)
+                                    .scaledFont(.system(size: 24))
+                                    .foregroundColor(.statusLive)
+                            }
+                            .padding(.vertical, 4)
+                            Text("Your entries are still here. Fix them and select Save Changes again.")
+                                .scaledFont(.system(size: 22).subtext())
+                                .foregroundColor(Color.contrastText(.textTertiary))
+                                .padding(.top, 4)
+                        }
+                    }
+
                     // Save
                     HStack {
                         Spacer()
                         Button {
-                            // v1.7.x (Round 1 review): commit any
-                            // staged credential-mode change before
-                            // persisting credentials. tvOS edit
-                            // surface mirrors iOS Save behavior.
-                            commitBaseURLIfStaged()
-                            commitCredentialModeIfStaged()
-                            // Diff BEFORE saveCredentialsSynced: that
-                            // call moves the typed values into the
-                            // Keychain and blanks the in-memory
-                            // columns, after which the "did the
-                            // account change?" question can no longer
-                            // be answered.
-                            let credentialsChanged = ServerCredentialChange.commit(
-                                server: server,
-                                previous: originalCredentials
-                            )
-                            SyncManager.shared.saveCredentialsSynced(for: server)
-                            if credentialsChanged {
-                                originalCredentials =
-                                    DispatcharrCredentialSnapshot.capture(from: server)
-                            }
-                            dismiss()
+                            Task { await saveEdits() }
                         } label: {
-                            Text("Save Changes")
+                            Text(isSaving ? "Saving…" : "Save Changes")
                                 .scaledFont(.system(size: 28, weight: .semibold))
                                 .foregroundColor(.white)
                                 .padding(.horizontal, 48)
@@ -441,8 +497,10 @@ struct EditServerPage: View {
                                 .background(LinearGradient.accentGradient)
                                 .clipShape(Capsule())
                         }
-                        .buttonStyle(TVNoHighlightButtonStyle())
-                        .disabled(server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
+                        .buttonStyle(TVNoHighlightButtonStyle(settingsStyle: true))
+                        .tvFocusRingShape(.capsule)
+                        .disabled(isSaving ||
+                                  server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
                                   (pendingBaseURL ?? server.baseURL)
                                       .trimmingCharacters(in: .whitespaces).isEmpty)
                         Spacer()
@@ -464,20 +522,26 @@ struct EditServerPage: View {
         }
         .navigationTitle("Edit Playlist")
         .toolbar(.hidden, for: .navigationBar)
-    }
-
-
-    private func tvField(_ placeholder: String, text: Binding<String>, isSecure: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(placeholder)
-                .scaledFont(.system(size: 22, weight: .medium).subtext())
-                .foregroundColor(Color.contrastText(.textTertiary))
-            TVSettingsTextField(placeholder: placeholder, text: text, isSecure: isSecure)
+        // The staged screen the Add Playlist flow shows, titled "Saving
+        // Changes". Covers the page so nothing is focusable mid-save and
+        // swallows Menu so Back cannot abandon a half-applied change.
+        .fullScreenCover(isPresented: $isSaving) {
+            ServerSyncView(mode: .saving(stages: saveProgress.stages),
+                           title: "Saving Changes")
         }
     }
+
+    // Phase 3 item 2: `tvField` (a hand-drawn label over TVSettingsTextField)
+    // is gone. Every field on this page is SettingsTextField, which owns the
+    // label, the helper line, the accent focus outline and the reveal eye.
 }
 
-// MARK: - Shared tvOS settings text field
+// MARK: - Shared tvOS settings text field (history)
+//
+// Phase 3 item 2 retired this page's `tvField` in favour of
+// SettingsTextField; the note below is kept because it records WHY the
+// field has to be a UIKit dark-focus field rather than a plain TextField,
+// which is still true of the AppTextField that SettingsTextField wraps.
 //
 // v1.7.5 (Archie field screenshot): the tvOS settings field helpers
 // (tvField / tvEditField) rolled their own bare TextField that forced a

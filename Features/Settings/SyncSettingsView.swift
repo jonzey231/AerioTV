@@ -193,6 +193,12 @@ struct SyncSettingsView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+        #if os(iOS)
+        // Phase 3 (Logan 2026-09-18): floating tab bar parity -
+        // content runs under the bar, the bar tucks away on scroll,
+        // and the last row clears it.
+        .settingsPhoneTabBarChrome()
+        #endif
     }
     #endif
 

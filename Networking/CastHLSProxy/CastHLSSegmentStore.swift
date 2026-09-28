@@ -25,13 +25,16 @@ import Foundation
 /// Shaka fatals).
 final class CastHLSSegmentStore: @unchecked Sendable {
 
-    /// Segments advertised in the playlist.
-    static let windowSize = 5
+    /// Segments advertised in the playlist: 15 at the usual 4 s is 60 s.
+    /// Shaka on the receiver re-seeks forward whenever the playhead falls
+    /// behind the seekable window start (the oldest listed segment), so
+    /// a short window turns any stall over ~10 s into a seek loop.
+    static let windowSize = 15
 
     /// Segments retained in memory; the extra tail past the window lets
     /// a receiver that is a poll behind still fetch what the previous
     /// playlist advertised.
-    static let ringSize = 8
+    static let ringSize = 18
 
     /// Bound on holding a segment GET that names a sequence the ingest
     /// has not published yet (the receiver racing the live edge);
@@ -136,16 +139,27 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     @discardableResult
     func beginGeneration() -> Int {
         condition.lock()
-        defer { condition.unlock() }
         let oldGen = generation
         generation += 1
+        let newGen = generation
+        let lastSeq = nextSeq - 1
+        let firstNewSeq = nextSeq
         pendingDiscontinuity = !ring.isEmpty
         segmentsInGeneration = 0
         mediaTicksInGeneration = 0
+        // Incident 2026-09-25: wake held live-edge fetches on a roll so each
+        // re-checks against the new generation instead of sleeping out its
+        // whole timeout on a condition nobody may signal soon (the
+        // reconnect gap was 4.5 s against a 6 s hold).
+        condition.broadcast()
+        condition.unlock()
+        // Logged OUTSIDE the lock (incident 2026-09-25): the log closure
+        // is caller code, and the lock also gates every NWListener
+        // request, so it must never run under it.
         if oldGen > 0 {
-            log("splice oldGen=\(oldGen) newGen=\(generation) lastSeq=\(nextSeq - 1) firstNewSeq=\(nextSeq)")
+            log("splice oldGen=\(oldGen) newGen=\(newGen) lastSeq=\(lastSeq) firstNewSeq=\(firstNewSeq)")
         }
-        return generation
+        return newGen
     }
 
     /// Init segments for `gen`. `audio` is nil for a video-only
@@ -193,6 +207,17 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         // Wake any held fetch for the sequence just published.
         condition.broadcast()
         return publishedSeq
+    }
+
+    /// Published segments after `seq` (the receiver's newest video fetch)
+    /// and their media seconds: the runway the receiver has not pulled
+    /// yet (link line, device log 2026-09-25 17:04).
+    func runwayAfter(seq: Int) -> (count: Int, seconds: Double) {
+        condition.lock()
+        defer { condition.unlock() }
+        let ahead = ring.filter { $0.seq > seq }
+        let ticks = ahead.reduce(Int64(0)) { $0 + $1.durationTicks }
+        return (ahead.count, Double(ticks) / Double(CastFMP4Remuxer.ticksPerSecond))
     }
 
     /// Video init segment for `gen`, or nil when no longer retained.
@@ -251,8 +276,26 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         let videoInit = videoInits[generation]
         let audioInit = audioInits[generation]
         let attribute = audioCodecsAttribute
+        let decodesLevel42 = receiverDecodesAVCLevel42
+        let transcoded = videoTranscodedGenerations.contains(generation)
         condition.unlock()
-        let videoCodec = videoInit.flatMap { Self.avcCodecString(from: $0) } ?? "avc1.640028"
+        let streamCodec = videoInit.flatMap { Self.videoCodecString(from: $0) } ?? "avc1.640028"
+        // A re-encoded track declares exactly what the encoder wrote
+        // (hvc1.x, or avc1.640029 for the H.264 High 4.1 profile); the
+        // level relabel exists only for passthrough H.264.
+        let videoCodec = transcoded
+            ? streamCodec
+            : Self.declaredAVCCodec(streamCodec, receiverDecodesLevel42: decodesLevel42)
+        if videoCodec != streamCodec {
+            condition.lock()
+            let first = !loggedLevelClamp
+            loggedLevelClamp = true
+            condition.unlock()
+            if first {
+                log("[CAST-HLS] master declares \(videoCodec) (stream is \(streamCodec); "
+                    + "receiver answered no to level 4.2)")
+            }
+        }
         let audioCodec = audioInit.flatMap { Self.audioCodecString(from: $0) } ?? attribute
         var text = "#EXTM3U\n"
         if audioCodec != nil {
@@ -304,6 +347,61 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         condition.unlock()
     }
 
+    /// The receiver's own answer to isTypeSupported for
+    /// `video/mp4; codecs="avc1.64002A"` (level 4.2), set by the session
+    /// from the cast controller's caps; nil when caps were never measured.
+    private var receiverDecodesAVCLevel42: Bool?
+    /// The level clamp is logged once per store (one store per session).
+    private var loggedLevelClamp = false
+
+    func setReceiverDecodesAVCLevel42(_ value: Bool?) {
+        condition.lock()
+        receiverDecodesAVCLevel42 = value
+        condition.unlock()
+    }
+
+    /// The avc1 string the master declares. A Chromecast Ultra decodes
+    /// 1080p60 but its MSE answers no to level 4.2 (avc1.64002A) and Shaka
+    /// refuses the variant (Error 4032, device log 2026-09-26), while
+    /// avc1.640028 plays. So a level above 4.0 is declared as 4.0, keeping
+    /// profile and constraint bytes, unless the receiver said yes to 4.2.
+    static func declaredAVCCodec(_ codec: String, receiverDecodesLevel42: Bool?) -> String {
+        guard receiverDecodesLevel42 != true, codec.hasPrefix("avc1."), codec.count == 11,
+              let level = UInt8(codec.suffix(2), radix: 16), level > 0x28 else { return codec }
+        return String(codec.prefix(9)) + "28"
+    }
+
+    /// The video codec string of an init segment: hvc1.x from an hvcC box,
+    /// otherwise avc1.PPCCLL from the avcC box.
+    static func videoCodecString(from initSegment: Data) -> String? {
+        hevcCodecString(from: initSegment) ?? avcCodecString(from: initSegment)
+    }
+
+    /// RFC 6381 hvc1 string from the hvcC box inside an init segment.
+    static func hevcCodecString(from initSegment: Data) -> String? {
+        let bytes = [UInt8](initSegment)
+        guard bytes.count >= 8 else { return nil }
+        for i in 4...(bytes.count - 4) where bytes[i] == 0x68 && bytes[i + 1] == 0x76
+            && bytes[i + 2] == 0x63 && bytes[i + 3] == 0x43 {
+            let size = (Int(bytes[i - 4]) << 24) | (Int(bytes[i - 3]) << 16)
+                | (Int(bytes[i - 2]) << 8) | Int(bytes[i - 1])
+            let end = min(bytes.count, i - 4 + max(8, size))
+            guard i + 4 < end else { return nil }
+            return CastVideoCodecConfig.hevcCodecString(hvcC: Array(bytes[(i + 4)..<end]))
+        }
+        return nil
+    }
+
+    /// Generations whose video track is re-encoded on the phone, set by the
+    /// session at init time.
+    private var videoTranscodedGenerations: Set<Int> = []
+
+    func setVideoTranscoded(generation gen: Int, _ value: Bool) {
+        condition.lock()
+        if value { videoTranscodedGenerations.insert(gen) } else { videoTranscodedGenerations.remove(gen) }
+        condition.unlock()
+    }
+
     /// avc1.PPCCLL from the avcC box inside an init segment (profile,
     /// constraint flags, level right after the configuration version).
     static func avcCodecString(from initSegment: Data) -> String? {
@@ -348,6 +446,13 @@ final class CastHLSSegmentStore: @unchecked Sendable {
             }
             .max().map { max(1, $0) } ?? 4
         text += "#EXT-X-TARGETDURATION:\(targetSeconds)\n"
+        // Explicit HOLD-BACK (2026-09-21) at the RFC 8216bis minimum of three
+        // target durations, identical on both renditions, so the receiver's
+        // live join point is stated by the playlist instead of left to each
+        // player's default; CAN-BLOCK-RELOAD=NO because the proxy does not
+        // implement blocking playlist reload (_HLS_msn).
+        text += "#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,HOLD-BACK="
+            + String(format: "%.3f", Double(targetSeconds * 3)) + "\n"
         text += "#EXT-X-MEDIA-SEQUENCE:\(window.first?.seq ?? nextSeq)\n"
         if discontinuitySequence > 0 {
             text += "#EXT-X-DISCONTINUITY-SEQUENCE:\(discontinuitySequence)\n"
@@ -385,5 +490,75 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         // LIVE playlist: no EXT-X-ENDLIST, ever; the advancing
         // MEDIA-SEQUENCE is the manifest clock a progressive URL lacks.
         return text
+    }
+}
+
+/// Receiver request counters for the stale-receiver check (iOS incident
+/// 2026-09-25 15:26: a Cast session attached to a receiver page that fetched
+/// the master and both rendition playlists once, two segments, and then
+/// nothing while the proxy kept producing). The sender marks each accepted
+/// load and reads the counts 10 s later; a playlist with no segment means
+/// the page is stale and the load is re-issued once. Thread-safe (the serve
+/// queue is concurrent). Android parity: CastHlsProxyServer's
+/// playlistFetches / segmentFetches (963e5ed6).
+final class CastHLSRequestCounters: @unchecked Sendable {
+    struct Snapshot: Equatable, Sendable {
+        var generation: Int
+        var playlists: Int
+        var videoSegments: Int
+        var audioSegments: Int
+        /// Time of the first segment request since the mark, nil if none.
+        var firstSegmentAt: Date?
+        /// Time of the most recent segment request since the mark.
+        var lastSegmentAt: Date?
+        var markedAt: Date
+        var segments: Int { videoSegments + audioSegments }
+    }
+
+    enum Kind { case playlist, videoSegment, audioSegment, other }
+
+    private let lock = NSLock()
+    private var current: Snapshot
+
+    init(now: Date = Date()) {
+        current = Snapshot(generation: 0, playlists: 0, videoSegments: 0, audioSegments: 0,
+                           firstSegmentAt: nil, lastSegmentAt: nil, markedAt: now)
+    }
+
+    /// Classify a request path the way the server routes it.
+    static func kind(of path: String) -> Kind {
+        if path.hasSuffix(".m3u8") { return .playlist }
+        if path.hasPrefix("/vseg") && path.hasSuffix(".m4s") { return .videoSegment }
+        if path.hasPrefix("/aseg") && path.hasSuffix(".m4s") { return .audioSegment }
+        return .other
+    }
+
+    /// Count one request (called when it arrives, before any live-edge hold).
+    func record(path: String, now: Date = Date()) {
+        let kind = Self.kind(of: path)
+        guard kind != .other else { return }
+        lock.lock(); defer { lock.unlock() }
+        switch kind {
+        case .playlist: current.playlists += 1
+        case .videoSegment: current.videoSegments += 1
+        case .audioSegment: current.audioSegments += 1
+        case .other: break
+        }
+        if kind != .playlist {
+            if current.firstSegmentAt == nil { current.firstSegmentAt = now }
+            current.lastSegmentAt = now
+        }
+    }
+
+    /// Reset the counts at an accepted load for `generation`.
+    func mark(generation: Int, now: Date = Date()) {
+        lock.lock(); defer { lock.unlock() }
+        current = Snapshot(generation: generation, playlists: 0, videoSegments: 0, audioSegments: 0,
+                           firstSegmentAt: nil, lastSegmentAt: nil, markedAt: now)
+    }
+
+    var snapshot: Snapshot {
+        lock.lock(); defer { lock.unlock() }
+        return current
     }
 }

@@ -118,8 +118,10 @@ struct ManageGroupsSheet: View {
     /// changes so the host can re-render its group pills.
     var onConfigChanged: ((String, [String]) -> Void)? = nil
     /// Live TV only: UserDefaults key holding the group the guide opens on
-    /// ("" = All Channels, "favorites", or a group name). Nil hides the
-    /// default-group controls (VOD callers).
+    /// ("" = All Channels, "favorites", or a group name). The sheet no longer
+    /// SETS it (Logan 2026-09-17: that is a long press on the group itself,
+    /// in the sidebar / pill row); non-nil now only marks the Live TV caller,
+    /// whose pinned rows are orderable. Nil for VOD callers.
     var defaultGroupKey: String? = nil
     /// Whether the Favorites group exists right now (pinned row + default option).
     var favoritesAvailable: Bool = false
@@ -136,7 +138,6 @@ struct ManageGroupsSheet: View {
     /// Apple TV Live TV only: offers the guide Sidebar layout (Overlay / Shift
     /// guide) when Group Selection is Sidebar Menu (Logan 2026-09-14).
     var sidebarLayoutAvailable: Bool = false
-    @State private var defaultGroup: String = ""
     private let favoritesToken = "favorites"
     /// Token for the synthetic "last 25 channels watched" group. Handled
     /// everywhere the Favorites token is: group tokens, hidden groups,
@@ -262,9 +263,6 @@ struct ManageGroupsSheet: View {
         .onAppear {
             if recentOptionAvailable { Self.seedRecentlyWatchedHidden(storageKey: storageKey) }
             hiddenGroups = HiddenGroupsStore.load(forKey: storageKey)
-            if let dKey = defaultGroupKey {
-                defaultGroup = UserDefaults.standard.string(forKey: dKey) ?? ""
-            }
             if let key = orderStorageKey, let mKey = modeKey {
                 sortMode = GroupSortMode(rawValue: GroupOrderStore.loadMode(forKey: mKey)) ?? .default
                 manualOrder = seededOrder(GroupOrderStore.load(forKey: key))
@@ -284,18 +282,6 @@ struct ManageGroupsSheet: View {
     }
 
     // MARK: - Mutations
-
-    private func setDefault(_ token: String) {
-        guard let dKey = defaultGroupKey else { return }
-        defaultGroup = token
-        UserDefaults.standard.set(token, forKey: dKey)
-        // Opening on a group the user cannot see makes no sense: picking
-        // Recently Watched as the default un-hides it (Logan 2026-09-14).
-        if token == recentToken && hiddenGroups.contains(recentToken) {
-            toggleHidden(recentToken)
-        }
-        SyncManager.shared.pushPreferencesImmediate()
-    }
 
     private func defaultTitle(_ token: String) -> String {
         if token.isEmpty || token == allChannelsToken { return "All Channels" }
@@ -401,45 +387,6 @@ struct ManageGroupsSheet: View {
                             .foregroundColor(Color.contrastText(.textTertiary))
                             .textCase(nil)
                     }
-                }
-            }
-
-            if defaultGroupKey != nil {
-                Section {
-                    Picker("Opens On", selection: $defaultGroup) {
-                        Text("All Channels").tag("")
-                        if favoritesAvailable { Text("Favorites").tag(favoritesToken) }
-                        if recentOptionAvailable {
-                            Text("Recently Watched").tag(recentToken)
-                        }
-                        // In Manual order `displayList` also carries the
-                        // pinned sentinels, which used to render raw
-                        // ("favorites", "All") and duplicate the two rows
-                        // above. Filter them out and title the rest.
-                        ForEach(displayList.filter {
-                            $0 != favoritesToken && $0 != allChannelsToken && $0 != recentToken
-                        }, id: \.self) { g in Text(rowTitle(g)).tag(g) }
-                    }
-                    .onChange(of: defaultGroup) { _, v in
-                        // The onAppear load also lands here; only a real
-                        // change is worth a write and a sync push.
-                        guard let dKey = defaultGroupKey,
-                              v != (UserDefaults.standard.string(forKey: dKey) ?? "") else { return }
-                        setDefault(v)
-                    }
-                    .listRowBackground(Color.cardBackground)
-                } header: {
-                    Text("Default Group")
-                        .scaledFont(.labelSmall.subtext())
-                        .foregroundColor(Color.contrastText(.textSecondary))
-                        .textCase(nil)
-                } footer: {
-                    Text(recentOptionAvailable
-                         ? "The group Live TV shows when the app opens. Choosing Recently Watched also shows that group."
-                         : "The group Live TV shows when the app opens.")
-                        .scaledFont(.labelSmall.subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
-                        .textCase(nil)
                 }
             }
 
@@ -619,21 +566,11 @@ struct ManageGroupsSheet: View {
                         .padding(.bottom, 16)
                 }
 
-                if defaultGroupKey != nil {
-                    Text("Opens on \(defaultTitle(defaultGroup)). Long press a group to make it the default.")
-                        .scaledFont(.labelSmall.subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
-                        .padding(.horizontal, 48)
-                        .padding(.bottom, 12)
-                }
-
                 if hiddenCategoryAvailable {
                     TVGroupToggleRow(
                         group: "Hidden",
                         isOn: hiddenCategoryOn,
                         onToggle: { onToggleHiddenCategory?() },
-                        isDefault: false,
-                        onSetDefault: nil,
                         canFocus: grabbedGroup == nil
                     )
                 }
@@ -645,8 +582,6 @@ struct ManageGroupsSheet: View {
                         group: "Favorites",
                         isOn: !hiddenGroups.contains(favoritesToken),
                         onToggle: { toggleHidden(favoritesToken) },
-                        isDefault: defaultGroup == favoritesToken,
-                        onSetDefault: defaultGroupKey == nil ? nil : { setDefault(favoritesToken) },
                         canFocus: grabbedGroup == nil
                     )
                 }
@@ -658,8 +593,6 @@ struct ManageGroupsSheet: View {
                         group: "Recently Watched",
                         isOn: !hiddenGroups.contains(recentToken),
                         onToggle: { toggleHidden(recentToken) },
-                        isDefault: defaultGroup == recentToken,
-                        onSetDefault: defaultGroupKey == nil ? nil : { setDefault(recentToken) },
                         canFocus: grabbedGroup == nil
                     )
                 }
@@ -670,8 +603,6 @@ struct ManageGroupsSheet: View {
                     group: "All Channels",
                     isOn: !hiddenGroups.contains(allChannelsToken),
                     onToggle: { toggleHidden(allChannelsToken) },
-                    isDefault: defaultGroup.isEmpty || defaultGroup == allChannelsToken,
-                    onSetDefault: defaultGroupKey == nil ? nil : { setDefault("") },
                     canFocus: grabbedGroup == nil
                 )
                 }
@@ -696,9 +627,7 @@ struct ManageGroupsSheet: View {
                         TVGroupToggleRow(
                             group: rowTitle(group),
                             isOn: !hiddenGroups.contains(group),
-                            onToggle: { toggleHidden(group) },
-                            isDefault: defaultGroup == group,
-                            onSetDefault: defaultGroupKey == nil ? nil : { setDefault(group) }
+                            onToggle: { toggleHidden(group) }
                         )
                     }
                 }
@@ -830,9 +759,6 @@ struct TVGroupToggleRow: View {
     let group: String
     let isOn: Bool
     let onToggle: () -> Void
-    /// Live TV: this group is the one the guide opens on; long press sets it.
-    var isDefault: Bool = false
-    var onSetDefault: (() -> Void)? = nil
     /// False while another row is grabbed for reordering, so an Up press
     /// cannot carry focus onto the pinned rows (trace 2026-09-06 00:57).
     var canFocus: Bool = true
@@ -843,6 +769,8 @@ struct TVGroupToggleRow: View {
     // gives a clean rounded highlight instead.
     @State private var isFocused = false
 
+    // The default group is no longer set here (Logan 2026-09-17): it is a
+    // long press on the group itself, in the sidebar / pill row.
     var body: some View {
         rowBody.overlay(
             TVPressOverlay(
@@ -850,7 +778,7 @@ struct TVGroupToggleRow: View {
                 isFocused: $isFocused,
                 canFocus: canFocus,
                 onTap: onToggle,
-                onLongPress: { onSetDefault?() }
+                onLongPress: {}
             )
         )
     }
@@ -861,15 +789,6 @@ struct TVGroupToggleRow: View {
                 .scaledFont(.system(size: 28, weight: .medium))
                 .foregroundColor(isFocused ? .white : .textPrimary)
                 .lineLimit(1)
-
-            if isDefault {
-                Text("Default")
-                    .scaledFont(.system(size: 18, weight: .semibold))
-                    .foregroundColor(isFocused ? .white : .accentPrimary)
-                    .padding(.horizontal, 10).padding(.vertical, 3)
-                    .overlay(Capsule().stroke(isFocused ? Color.white : Color.accentPrimary, lineWidth: 1.5))
-                    .padding(.leading, 10)
-            }
 
             Spacer()
 

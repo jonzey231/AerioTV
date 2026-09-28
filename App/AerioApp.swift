@@ -506,6 +506,22 @@ struct AerioApp: App {
             fatalError("Could not initialize ModelContainer: \(error)")
         }
 
+        #if os(tvOS)
+        // Group selector seed (Logan 2026-09-18). Runs here, in App.init,
+        // because it must land before anything reads
+        // `RemoteControlStore.shared`. Synchronous on purpose: two tiny
+        // count fetches on an already-open container, and getting it wrong
+        // by one launch would move an existing user off pills.
+        do {
+            let seedContext = ModelContext(self.sharedModelContainer)
+            let serverCount = (try? seedContext.fetchCount(FetchDescriptor<ServerConnection>())) ?? 0
+            let playlistCount = (try? seedContext.fetchCount(FetchDescriptor<M3UPlaylist>())) ?? 0
+            RemoteControlStore.seedGroupSelectorIfNeeded(
+                hasAnyPlaylist: serverCount > 0 || playlistCount > 0
+            )
+        }
+        #endif
+
         // Fire a throwaway fetch off main to force SQLite open +
         // schema validation off the critical path. Uses a fresh
         // background `ModelContext`, never touches MainActor.
@@ -676,6 +692,12 @@ struct AerioApp: App {
                 // .failed only lands on resume); re-assert so the Control-TV
                 // button never shows a frozen device list.
                 CompanionClient.shared.ensureDiscovery()
+                // AirPlay (2026-09-21 rebuild): one launch-window route
+                // probe, and process-wide route observation so an AirPlay
+                // output picked before any channel shows the idle card.
+                AirPlayReceiverResolver.shared.probeRoutesAtLaunch()
+                AirPlayMonitor.shared.startObservingRoutes()
+                RemoteSessionNowPlaying.startObserving()
                 #endif
                 // Start iCloud sync if enabled (pull happens during EPG loading)
                 SyncManager.shared.startObserving()
@@ -699,6 +721,12 @@ struct AerioApp: App {
             case .inactive:    DebugLogger.shared.logLifecycle("Scene → inactive")
             case .background:
                 DebugLogger.shared.logLifecycle("Scene → background")
+                #if os(iOS)
+                // Incident 2026-09-25: a cast was suspended ~2 min after
+                // backgrounding with the keepalive nominally "running";
+                // record what iOS will judge background audio by.
+                BackgroundKeepalive.logBackgroundEntry()
+                #endif
                 // Flush any pending debounced iCloud pushes before the OS
                 // suspends us. Without this, preference changes (favorites,
                 // theme, etc.) made in the last 60 seconds get dropped when
@@ -1382,7 +1410,7 @@ struct RootView: View {
                     liveRewindPromptSeen = true
                 }
             } message: {
-                Text("Pause and rewind live TV. While you watch a channel fullscreen, AerioTV keeps a rolling buffer on this device so you can skip back, scrub the timeline, or pause and pick up where you left off.\n\nBuffered video is deleted automatically. You can change this anytime in Settings > App Behaviors > Live Rewind.")
+                Text("Pause and rewind live TV. While you watch a channel fullscreen, AerioTV keeps a rolling buffer on this device so you can skip back, scrub the timeline, or pause and pick up where you left off.\n\nBuffered video is deleted automatically. You can change this anytime in Settings > Player > Live Rewind.")
             }
             .onAppear {
                 debugLog("🟣 RootView.onAppear: hasCompletedOnboarding=\(hasCompletedOnboarding), hasAnySource=\(hasAnySource), servers=\(servers.count)")

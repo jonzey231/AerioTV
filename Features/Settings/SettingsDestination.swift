@@ -52,6 +52,4 @@ enum SettingsRoute: Hashable {
     case server(UUID)
     /// The full-screen Edit Playlist page (tvOS push).
     case editServer(UUID)
-    /// Classic full-screen push, never a pane (Rev 2 ruling).
-    case myRecordings
 }

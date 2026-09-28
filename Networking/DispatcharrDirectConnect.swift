@@ -881,29 +881,124 @@ struct DispatcharrCredentialSnapshot: Equatable {
 @MainActor
 enum ServerCredentialChange {
 
-    /// Apply an Edit Playlist save.
+    /// Did this edit replace the account the playlist is connected as?
     ///
     /// - Parameters:
-    ///   - server: the edited row. Its credential fields must already hold
-    ///     the user's new values (the edit surfaces bind straight to them).
+    ///   - server: the edited row. Its credential fields already hold the
+    ///     user's new values (the edit surfaces bind straight to them).
     ///   - previous: the snapshot taken when the edit surface opened.
-    /// - Returns: true when the credentials actually changed and a
-    ///   re-authentication was kicked off.
-    @discardableResult
-    static func commit(server: ServerConnection,
-                       previous: DispatcharrCredentialSnapshot?) -> Bool {
+    ///   - credentialType: the mode currently SHOWN by the edit surface,
+    ///     which may still be staged in @State rather than written to the
+    ///     row (the mode is only committed once the save is going through).
+    ///
+    /// Must be asked BEFORE `saveCredentialsSynced`: that call blanks the
+    /// in-memory columns, after which `capture` reads the new values back
+    /// out of the Keychain and every comparison matches.
+    static func credentialsChanged(server: ServerConnection,
+                                   previous: DispatcharrCredentialSnapshot?,
+                                   credentialType: DispatcharrCredentialType) -> Bool {
         guard let previous else { return false }
         let current = DispatcharrCredentialSnapshot.capture(from: server)
-        // Compare BEFORE the Keychain write: `saveCredentialsSynced` blanks
-        // the in-memory columns, after which `capture` would read the new
-        // values back out of the Keychain and every comparison would match.
-        guard current != previous else { return false }
+        let staged = DispatcharrCredentialSnapshot(
+            username: current.username,
+            password: current.password,
+            apiKey: current.apiKey,
+            credentialTypeRaw: (credentialType == .apiKey) ? "" : credentialType.rawValue
+        )
+        return staged != previous
+    }
+
+    /// Prove the typed credentials actually work BEFORE anything is
+    /// persisted or dropped. Returns nil on success, or a user-facing
+    /// message the edit surface shows in its "Save Failed" section while
+    /// staying open with the typed values.
+    ///
+    /// Same primitives the Playlist Detail "Test Connection" action uses,
+    /// aimed at the values on screen (and at the URL the user just typed,
+    /// which may not be on the row yet) instead of the stored ones.
+    ///
+    /// - Parameter onStep: fired with `.verify` at the moment a real login /
+    ///   verification round trip is about to run, and NOT fired when there
+    ///   is nothing to verify (an M3U playlist). The Edit Playlist save
+    ///   screen drives its "Verifying credentials" row off this, so the row
+    ///   exists only when the work does.
+    static func verify(server: ServerConnection,
+                       baseURL: String,
+                       credentialType: DispatcharrCredentialType,
+                       onStep: ((PlaylistSaveStep) -> Void)? = nil) async -> String? {
+        let url = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty else { return "Enter the server URL." }
+        let userAgent = server.effectiveUserAgent
+        // In-memory column wins: it is what the user just typed. Empty
+        // means "unchanged", so fall back to the stored credential.
+        let username = server.username
+        let password = server.password.isEmpty ? server.effectivePassword : server.password
+        let apiKey   = server.apiKey.isEmpty ? server.effectiveApiKey : server.apiKey
+        // An M3U playlist has no account model, so no login runs and no
+        // "Verifying credentials" row is published for it.
+        if server.type != .m3uPlaylist { onStep?(.verify) }
+        do {
+            switch server.type {
+            case .dispatcharrAPI:
+                switch credentialType {
+                case .usernamePassword:
+                    guard !username.isEmpty, !password.isEmpty else {
+                        return "Enter the username and password for this server."
+                    }
+                    let pair = try await DispatcharrAPI.login(baseURL: url,
+                                                             username: username,
+                                                             password: password,
+                                                             userAgent: userAgent)
+                    let bearerAPI = DispatcharrAPI(baseURL: url,
+                                                   auth: .bearer(pair.access),
+                                                   userAgent: userAgent)
+                    _ = try await bearerAPI.fetchCurrentUser()
+                case .apiKey:
+                    guard !apiKey.isEmpty else { return "Enter the API key for this server." }
+                    let api = DispatcharrAPI(baseURL: url,
+                                             auth: .apiKey(apiKey),
+                                             userAgent: userAgent,
+                                             authMode: server.dispatcharrHeaderMode)
+                    _ = try await api.verifyConnection()
+                }
+            case .xtreamCodes:
+                guard !username.isEmpty, !password.isEmpty else {
+                    return "Enter the username and password for this server."
+                }
+                let api = XtreamCodesAPI(baseURL: url, username: username, password: password)
+                _ = try await api.verifyConnection()
+            case .m3uPlaylist:
+                // No account model to verify against.
+                return nil
+            }
+        } catch let error as DispatcharrDirectConnectError {
+            return shorten(error.errorDescription)
+        } catch let error as APIError {
+            return shorten(error.errorDescription)
+        } catch {
+            return shorten(error.localizedDescription)
+        }
+        return nil
+    }
+
+    /// Apply a verified credential change: drop everything derived from
+    /// the old account, then re-authenticate as the new one. Returns nil
+    /// on success or a user-facing message on failure.
+    ///
+    /// - Parameter onStep: fired with `.verify` when the re-login round trip
+    ///   starts, so a caller that reached here WITHOUT a prior `verify` (or
+    ///   whose row already completed) still shows the step that is running.
+    static func applyChange(server: ServerConnection,
+                            onStep: ((PlaylistSaveStep) -> Void)? = nil) async -> String? {
         debugLog("📺 [CRED] credentials changed for \(server.name); re-authenticating as the new account")
         dropCachedIdentity(server)
-        Task { @MainActor in
-            await reauthenticate(server: server)
-        }
-        return true
+        return await reauthenticate(server: server, onStep: onStep)
+    }
+
+    private static func shorten(_ message: String?) -> String {
+        let raw = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return "Couldn't save these credentials." }
+        return raw.count > 200 ? String(raw.prefix(200)) + "…" : raw
     }
 
     /// Forget everything the app holds that was derived from the account
@@ -941,18 +1036,22 @@ enum ServerCredentialChange {
     /// `DispatcharrCapabilityProbe.refresh`). Same work as a credential
     /// edit, minus the diff -- the mismatch already is the evidence.
     ///
-    /// Not merged into `commit`: that one answers "did the user change
+    /// Not merged into `applyChange`: that one answers "did the user change
     /// anything?", this one answers "is what we cached still this account?".
     static func repairIdentityMismatch(server: ServerConnection) async {
         dropCachedIdentity(server)
-        await reauthenticate(server: server)
+        _ = await reauthenticate(server: server)
     }
 
     /// Mint a fresh api_key for the new account (Username & Password mode
     /// only -- API Key mode has no login to run), take a fresh capability
     /// snapshot, then bump `credentialGeneration` so the load orchestrator
     /// re-runs channels / EPG / VOD / DVR under the new identity.
-    private static func reauthenticate(server: ServerConnection) async {
+    ///
+    /// Returns nil on success, or a user-facing message the edit surface
+    /// shows instead of dismissing.
+    private static func reauthenticate(server: ServerConnection,
+                                       onStep: ((PlaylistSaveStep) -> Void)? = nil) async -> String? {
         defer {
             // Bumped even when the re-auth failed. The account-scoped
             // snapshot was already cleared, so the cached channel and VOD
@@ -964,15 +1063,16 @@ enum ServerCredentialChange {
             NotificationCenter.default.post(name: .dispatcharrCapabilitiesDidChange, object: nil)
         }
 
-        guard server.type == .dispatcharrAPI else { return }
+        guard server.type == .dispatcharrAPI else { return nil }
 
         if server.dispatcharrCredentialType == .usernamePassword {
             let username = server.username
             let password = server.password.isEmpty ? server.effectivePassword : server.password
             guard !username.isEmpty, !password.isEmpty else {
                 debugLog("📺 [CRED] re-auth SKIP: Username & Password mode with an empty field")
-                return
+                return "Enter the username and password for this server."
             }
+            onStep?(.verify)
             do {
                 let pair = try await DispatcharrAPI.login(
                     baseURL: server.effectiveBaseURL,
@@ -989,18 +1089,22 @@ enum ServerCredentialChange {
                 let user = try await bearerAPI.fetchCurrentUser()
                 guard !user.apiKey.isEmpty else {
                     debugLog("📺 [CRED] re-auth: users/me carried no api_key for '\(user.username)'")
-                    return
+                    return "Signed in, but this Dispatcharr account has no API key. Ask your admin to generate one."
                 }
                 server.apiKey = user.apiKey
                 SyncManager.shared.saveCredentialsSynced(for: server)
                 debugLog("📺 [CRED] re-auth OK: now connected as '\(user.username)' (was a different account)")
+            } catch let error as DispatcharrDirectConnectError {
+                debugLog("📺 [CRED] re-auth FAILED: \(error.localizedDescription)")
+                return shorten(error.errorDescription)
             } catch {
                 debugLog("📺 [CRED] re-auth FAILED: \(error.localizedDescription)")
-                return
+                return shorten(error.localizedDescription)
             }
         }
 
         // Fresh capability snapshot for the NEW account, TTL ignored.
         await DispatcharrCapabilityProbe.refresh(server, reason: "credential-change")
+        return nil
     }
 }

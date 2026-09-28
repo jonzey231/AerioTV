@@ -270,7 +270,11 @@ struct ChannelListOverlay: View {
                                 debugLog("[GROUP] focus preview -> \(groupSidebarLabel(token))")
                                 activeGroup = token
                             }
-                        }
+                        },
+                        // Long press a row: that group becomes the default
+                        // Live TV group, or the pinned one clears back to
+                        // "last used" (Logan 2026-09-17).
+                        onSetDefault: { token in DefaultChannelGroupStore.toggle(token) }
                     )
                     // The panel itself doesn't handle Right (only the guide
                     // pane does); add it here so Right steps back out of the

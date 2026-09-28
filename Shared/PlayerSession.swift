@@ -748,6 +748,40 @@ final class PlayerSession: ObservableObject {
             return false
         }
 
+        #if os(iOS)
+        // Seamless AirPlay flip (2026-09-27, device log dev_log18 11:16:00):
+        // a channel picked from the list, guide or card while a tile serves
+        // an AirPlay receiver used to take the swap-from-mini teardown
+        // below, which dropped LAN delivery and re-handshook the receiver
+        // (10.5 s handover). Swap the serving tile's content in place
+        // instead; the tile then retargets its remuxer under the same LAN
+        // playlist. Only live channels that ride the TS remux qualify; the
+        // tile itself falls back to a full re-tune for anything it cannot
+        // splice.
+        if isLive, AirPlayTileDelivery.isServingReceiver, store.tiles.count == 1,
+           let tileID = store.audioTileID,
+           store.tiles.first?.item.id != item.id,
+           let resolved = MultiviewStore.resolveStream(item, server: server),
+           classifyStreamURL(resolved.url) == .mpegTS,
+           PlayerSession.resolveEngine(item: item, server: server, isLive: true).engine == .avPlayerRemuxTS {
+            AirPlayTileDelivery.noteFlipEntry(NowPlayingManager.shared.isMinimized
+                ? "PlayerSession.begin(swap-from-mini)" : "PlayerSession.begin")
+            if store.swapTileContent(tileID: tileID, to: item, server: server) {
+                DebugLogger.shared.log(
+                    "[MV-Mode] begin(airplay-in-place): \(item.name)",
+                    category: "Playback", level: .info
+                )
+                NowPlayingManager.shared.startPlaying(
+                    item,
+                    headers: server?.authHeaders ?? ["Accept": "*/*"],
+                    isLive: true
+                )
+                return true
+            }
+            AirPlayTileDelivery.noteFlipEntry(nil)
+        }
+        #endif
+
         // Special case: user picks a channel from the guide while
         // the mini is up (N=1 + minimized). Expected UX is "swap the
         // mini's stream to the new channel", NOT "append a second

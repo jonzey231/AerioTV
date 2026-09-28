@@ -78,6 +78,12 @@ struct PhoneMediaPage: View {
     /// Optional content appended below the grid, e.g. the TMDB attribution on
     /// the pages that render TMDB artwork and metadata.
     var footer: (() -> AnyView)? = nil
+    /// The tab this page fills, and whether that tab is showing this page
+    /// rather than a pushed detail. Re-tapping the tab you are already on
+    /// takes the page back to the top; while a detail is pushed the re-tap is
+    /// UIKit's pop instead, so the page stays where the user left it.
+    var owningTab: AppTab? = nil
+    var isAtRoot: Bool = true
 
     private final class ScrollBox {
         let phoneRail = DVRPhoneRailState()
@@ -157,6 +163,19 @@ struct PhoneMediaPage: View {
                     .coordinateSpace(name: "pageScroll")
                     .scrollPosition(Binding(get: { box.position }, set: { box.position = $0 }))
                     .onChange(of: scrollTick) { _, _ in }
+                    .onReceive(
+                        NotificationCenter.default.publisher(for: .aerioTabReselected)
+                    ) { note in
+                        guard let owningTab, isAtRoot,
+                              (note.userInfo?["tab"] as? String) == owningTab.rawValue
+                        else { return }
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            proxy.scrollTo("page-top", anchor: .top)
+                        }
+                        // A programmatic jump is ignored by the tracker, so the
+                        // floating bar is expanded here (one write per tap).
+                        if tabBarHidden { tabBarHidden = false }
+                    }
                     .onChange(of: scrollToHeaderTick) { _, _ in
                         withAnimation(.easeInOut(duration: 0.45)) {
                             proxy.scrollTo("page-library", anchor: .top)

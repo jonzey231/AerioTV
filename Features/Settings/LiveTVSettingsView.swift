@@ -70,7 +70,7 @@ struct LiveTVSettingsView: View {
     private static let badgeKinds = ["NEW", "REPEAT", "LIVE", "PREMIERE", "FINALE"]
 
     private static func badgeTitle(_ label: String) -> String {
-        label.prefix(1) + label.dropFirst().lowercased() + " badge"
+        label.prefix(1) + label.dropFirst().lowercased() + " Badge"
     }
 
     private func badgeShownBinding(_ label: String) -> Binding<Bool> {
@@ -82,6 +82,15 @@ struct LiveTVSettingsView: View {
                 hiddenEpgBadgesRaw = set.sorted().joined(separator: "\n")
             }
         )
+    }
+
+    /// Phase 3 item 4: what the five badge sub-toggles currently add up to
+    /// ("All 5" / "3 of 5" / "None"), so the master row says the state
+    /// without the reader opening it. Same string on iOS, tvOS and Android.
+    private var badgesSummary: String {
+        let hidden = Set(hiddenEpgBadgesRaw.split(separator: "\n").map(String.init))
+        let shown = Self.badgeKinds.filter { !hidden.contains($0) }.count
+        return SettingsSummary.count(on: shown, of: Self.badgeKinds.count)
     }
 
     /// Summary text for the "Add more categories" disclosure row.
@@ -112,6 +121,16 @@ struct LiveTVSettingsView: View {
         .toolbar(.hidden, for: .navigationBar)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
+        .onAppear {
+            // Logan 2026-09-18: Live TV scales cap at 150% like Movies.
+            // A value saved under the old 175% range would sit outside the
+            // slider's bounds, so fold it back on entry (the layout sites
+            // clamp on read as well).
+            let g = min(max(guideScale, 0.85), 1.5)
+            if g != guideScale { guideScale = g }
+            let l = min(max(listScale, 0.85), 1.5)
+            if l != listScale { listScale = l }
+        }
     }
 
     // MARK: - iOS Body
@@ -175,7 +194,7 @@ struct LiveTVSettingsView: View {
                 }
                 Toggle(isOn: $roundedGuideCorners) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Rounded corners in Guide view")
+                        Text("Rounded Corners in Guide View")
                             .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                         Text("Rounds channel logos in the Guide's channel column.")
                             .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
@@ -195,7 +214,7 @@ struct LiveTVSettingsView: View {
             Section {
                 Toggle(isOn: $roundedLogoCorners) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Rounded corners in List view")
+                        Text("Rounded Corners in List View")
                             .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                         Text("Rounds channel logos and program artwork in the Live TV list and on the app's cards.")
                             .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
@@ -207,66 +226,50 @@ struct LiveTVSettingsView: View {
                     SyncManager.shared.pushPreferencesImmediate()
                 }
 
-                ForEach(Self.liveTVViewOptions, id: \.self) { option in
-                    Button {
-                        defaultLiveTVView = option
-                    } label: {
-                        HStack {
-                            Image(systemName: liveTVViewIcon(option))
-                                .scaledFont(.system(size: 15))
-                                .foregroundColor(theme.accent)
-                                .frame(width: 24)
-                            Text(liveTVViewLabel(option))
-                                .scaledFont(.bodyMedium)
-                                .foregroundColor(.textPrimary)
-                            Spacer()
-                            if defaultLiveTVView == option {
-                                Image(systemName: "checkmark")
-                                    .scaledFont(.system(size: 14, weight: .semibold))
-                                    .foregroundColor(theme.accent)
-                            }
-                        }
-                    }
-                    .listRowBackground(Color.cardBackground)
-                }
+                // Phase 3 item 3: one row that pushes the choice page,
+                // instead of three inline check rows. The old section
+                // footer moved into the picker, which is where it is now
+                // read.
+                SettingsChoicePicker(
+                    "Default Live TV View",
+                    options: Self.liveTVViewOptions.map {
+                        SettingsChoice($0, liveTVViewLabel($0), icon: liveTVViewIcon($0))
+                    },
+                    selection: $defaultLiveTVView,
+                    footer: "The layout Live TV opens in. Automatic uses List on compact, portrait phones and Guide on regular width (unfolded foldable, iPad, Apple TV). You can still switch anytime with the List / Guide button; that switch lasts for the current session and does not change this default.",
+                    icon: "rectangle.grid.1x2"
+                )
+                .listRowBackground(Color.cardBackground)
             } header: {
                 Text("List view").sectionHeaderStyle()
-            } footer: {
-                Text("The layout Live TV opens in. Automatic uses List on compact, portrait phones and Guide on regular width (unfolded foldable, iPad, Apple TV). You can still switch anytime with the List / Guide button; that switch lasts for the current session and does not change this default.")
-                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
             .listSectionSeparator(.hidden)
 
-            // MARK: Groups (phone)
+            // MARK: Group Selection
+            // Logan 2026-09-17: the Default Group picker is gone. The
+            // default group is set by LONG PRESSING the group itself, in
+            // the tvOS group sidebar or the iOS group pills; Settings does
+            // not need a second place to set it. The "defaultChannelGroup"
+            // key is untouched.
+            //
+            // Group Selection is the only row left, and it describes the
+            // phone's header drawer vs pill row, so the whole section is
+            // phone only again and takes the row's name.
             if UIDevice.current.userInterfaceIdiom == .phone {
                 Section {
-                    ForEach([true, false], id: \.self) { sidebar in
-                        Button {
-                            phoneGroupSelector = sidebar ? "sidebar" : "pills"
-                        } label: {
-                            HStack {
-                                Image(systemName: sidebar ? "sidebar.leading" : "capsule.lefthalf.filled")
-                                    .scaledFont(.system(size: 15))
-                                    .foregroundColor(theme.accent)
-                                    .frame(width: 24)
-                                Text(sidebar ? "Sidebar Menu" : "Top Group Pills")
-                                    .scaledFont(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                                Spacer()
-                                if (phoneGroupSelector != "pills") == sidebar {
-                                    Image(systemName: "checkmark")
-                                        .scaledFont(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(theme.accent)
-                                }
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    }
+                    SettingsChoicePicker(
+                        "Group Selection",
+                        options: [
+                            SettingsChoice("sidebar", "Sidebar Menu", icon: "sidebar.leading"),
+                            SettingsChoice("pills", "Top Group Pills", icon: "capsule.lefthalf.filled")
+                        ],
+                        selection: $phoneGroupSelector,
+                        footer: "How channel groups are picked in Live TV. Sidebar Menu opens a drawer from the header, where a long press also reorders groups. Top Group Pills put the group row at the top instead.",
+                        icon: "sidebar.leading"
+                    )
+                    .listRowBackground(Color.cardBackground)
                 } header: {
-                    Text("Groups").sectionHeaderStyle()
-                } footer: {
-                    Text("How channel groups are picked in Live TV. Sidebar Menu opens a drawer from the header, where a long press also reorders groups. Top Group Pills put the group row at the top instead.")
-                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                    Text("Group Selection").sectionHeaderStyle()
                 }
                 .listSectionSeparator(.hidden)
             }
@@ -275,7 +278,7 @@ struct LiveTVSettingsView: View {
             Section {
                 Toggle(isOn: $showEpgBadges) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Show program badges")
+                        Text("Show Program Badges")
                             .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
                         Text("LIVE, NEW, and season/episode pills on the guide")
@@ -286,15 +289,24 @@ struct LiveTVSettingsView: View {
                 .tint(theme.accent)
                 .listRowBackground(Color.cardBackground)
                 if showEpgBadges {
-                    ForEach(Self.badgeKinds, id: \.self) { kind in
-                        Toggle(isOn: badgeShownBinding(kind)) {
-                            Text(Self.badgeTitle(kind))
-                                .scaledFont(.bodyMedium)
-                                .foregroundColor(.textPrimary)
+                    // Phase 3 item 4: the five per-kind switches fold into
+                    // one master row that reports the count. Storage blob
+                    // and bindings are untouched.
+                    SettingsSubgroup("Badge Types",
+                                     summary: badgesSummary,
+                                     icon: "tag",
+                                     footer: "Which badges appear. Turning one off hides it everywhere badges are shown.") {
+                        ForEach(Self.badgeKinds, id: \.self) { kind in
+                            Toggle(isOn: badgeShownBinding(kind)) {
+                                Text(Self.badgeTitle(kind))
+                                    .scaledFont(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                            }
+                            .tint(theme.accent)
+                            .listRowBackground(Color.cardBackground)
                         }
-                        .tint(theme.accent)
-                        .listRowBackground(Color.cardBackground)
                     }
+                    .listRowBackground(Color.cardBackground)
                 }
             } header: {
                 Text("Badges").sectionHeaderStyle()
@@ -314,8 +326,8 @@ struct LiveTVSettingsView: View {
                 Text("Display Scale").sectionHeaderStyle()
             } footer: {
                 Text(UIDevice.current.userInterfaceIdiom == .phone
-                     ? "Independent scale for the Live TV List. 100% matches the default; 85-125% lets you trade density for readability. Changes apply live, no restart needed."
-                     : "Independent scale for the Guide grid and the Live TV List. 100% matches the default; 85-125% lets you trade density for readability. Changes apply live, no restart needed."
+                     ? "Independent scale for the Live TV List. 100% matches the default; 85-150% lets you trade density for readability. Changes apply live, no restart needed."
+                     : "Independent scale for the Guide grid and the Live TV List. 100% matches the default; 85-150% lets you trade density for readability. Changes apply live, no restart needed."
                 )
                 .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
@@ -329,7 +341,7 @@ struct LiveTVSettingsView: View {
                             .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                         Text(UIDevice.current.userInterfaceIdiom == .phone
                              ? "Unlocks category-based coloring. On iPhone this drives the Tint Channel Cards stripe below."
-                             : "Tint guide cells by program type - tap any color below to customise.")
+                             : "Tint guide cells by program type - tap any color below to customize.")
                             .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
@@ -410,7 +422,8 @@ struct LiveTVSettingsView: View {
                             .scaledFont(.system(size: 14, weight: .semibold))
                         Text("Reset Colors to Defaults").scaledFont(.bodyMedium)
                     }
-                    .foregroundColor(.statusWarning)
+                    // Phase 3: same danger color as the DVR Danger Zone.
+                    .foregroundColor(.red)
                 }
                 .listRowBackground(Color.cardBackground)
                 .disabled(!enableCategoryColors)
@@ -418,13 +431,19 @@ struct LiveTVSettingsView: View {
             } header: {
                 Text("Colors").sectionHeaderStyle()
             } footer: {
-                Text("Tap a swatch to customise the color used for that program bucket. Kids > Sports > News > Movie priority when a program matches multiple.")
+                Text("Tap a swatch to customize the color used for that program bucket. Kids > Sports > News > Movie priority when a program matches multiple.")
                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
             .listSectionSeparator(.hidden)
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+        #if os(iOS)
+        // Phase 3 (Logan 2026-09-18): floating tab bar parity -
+        // content runs under the bar, the bar tucks away on scroll,
+        // and the last row clears it.
+        .settingsPhoneTabBarChrome()
+        #endif
         // See SettingsView's identically-purposed `.id(...)` - keys the
         // List's identity to the active theme so cell-cache staleness on
         // theme switches doesn't leak accent colors across the rebuild.
@@ -439,7 +458,7 @@ struct LiveTVSettingsView: View {
                     .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                 Spacer()
-                Text("\(Int(binding.wrappedValue * 100))%")
+                Text("\(Int((binding.wrappedValue * 100).rounded()))%")
                     .scaledFont(.labelSmall.subtext())
                     .foregroundColor(Color.contrastText(.textTertiary))
             }
@@ -447,7 +466,7 @@ struct LiveTVSettingsView: View {
                 Image(systemName: "textformat.size.smaller")
                     .foregroundColor(Color.contrastText(.textTertiary))
                     .scaledFont(.system(size: 12))
-                Slider(value: binding, in: 0.85...1.75, step: 0.05)
+                Slider(value: binding, in: 0.85...1.5, step: 0.05)
                     .tint(theme.accent)
                 Image(systemName: "textformat.size.larger")
                     .foregroundColor(Color.contrastText(.textTertiary))
@@ -510,7 +529,7 @@ struct LiveTVSettingsView: View {
                     TVSettingsToggleRow(
                         icon: "square.grid.3x3",
                         iconColor: .accentPrimary,
-                        title: "Rounded corners in Guide view",
+                        title: "Rounded Corners in Guide View",
                         subtitle: "Rounds channel logos in the Guide's channel column.",
                         isOn: $roundedGuideCorners,
                         onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
@@ -528,20 +547,20 @@ struct LiveTVSettingsView: View {
                         TVSettingsToggleRow(
                             icon: "square.on.square",
                             iconColor: .accentPrimary,
-                            title: "Rounded corners in List view",
+                            title: "Rounded Corners in List View",
                             subtitle: "Rounds channel logos and program artwork in the Live TV list and on the app's cards.",
                             isOn: $roundedLogoCorners,
                             onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
                         )
-                        ForEach(Self.liveTVViewOptions, id: \.self) { option in
-                            TVSettingsSelectionRow(
-                                icon: liveTVViewIcon(option),
-                                iconColor: theme.accent,
-                                label: liveTVViewLabel(option),
-                                isSelected: defaultLiveTVView == option,
-                                action: { defaultLiveTVView = option }
-                            )
-                        }
+                        // Phase 3 item 3: same inline rows, now built by the
+                        // shared picker so tvOS and iOS offer one control.
+                        SettingsChoicePicker(
+                            "Default Live TV View",
+                            options: Self.liveTVViewOptions.map {
+                                SettingsChoice($0, liveTVViewLabel($0), icon: liveTVViewIcon($0))
+                            },
+                            selection: $defaultLiveTVView
+                        )
                     }
                 }
 
@@ -565,19 +584,23 @@ struct LiveTVSettingsView: View {
                     )
                 }
 
-                // MARK: Groups
-                SettingsSection("Groups", style: .plain) {
-                    TVSettingsSelectionRow(
-                        label: "Top Group Pills",
-                        isSelected: !remote.useGroupSidebar,
-                        action: { remote.useGroupSidebar = false }
+                // MARK: Group Selection
+                // Logan 2026-09-17: Default Group removed here too; it is
+                // set in Manage Groups. Group Selection is the only row
+                // left, so the section takes its name.
+                SettingsSection("Group Selection", style: .plain) {
+                    // Phase 3 item 3. The tvOS binding stays the remote
+                    // store's Bool; only the rows are shared now.
+                    SettingsChoicePicker(
+                        "Group Selection",
+                        options: [
+                            SettingsChoice(false, "Top Group Pills"),
+                            SettingsChoice(true, "Sidebar Menu")
+                        ],
+                        selection: $remote.useGroupSidebar,
+                        footer: "How channel groups are picked in the guide. Top Group Pills keep the group row above the grid; Sidebar Menu hides that row and opens when you hold Left in the guide (or from whichever button you set to Open sidebar in Remote Control). Only one is active at a time.",
+                        icon: "sidebar.left"
                     )
-                    TVSettingsSelectionRow(
-                        label: "Sidebar Menu",
-                        isSelected: remote.useGroupSidebar,
-                        action: { remote.useGroupSidebar = true }
-                    )
-                    tvFooter("How channel groups are picked in the guide. Top Group Pills keep the group row above the grid; Sidebar Menu hides that row and opens when you hold Left in the guide (or from whichever button you set to Open sidebar in Remote Control). Only one is active at a time.")
                 }
 
                 // MARK: Badges
@@ -591,14 +614,27 @@ struct LiveTVSettingsView: View {
                     ) { _ in }
 
                     if showEpgBadges {
-                        ForEach(Self.badgeKinds, id: \.self) { kind in
-                            TVSettingsToggleRow(
-                                icon: "tag",
-                                iconColor: theme.accent,
-                                title: Self.badgeTitle(kind),
-                                subtitle: "",
-                                isOn: badgeShownBinding(kind)
-                            ) { _ in }
+                        // Phase 3 item 4: same five toggles, now under a
+                        // master row carrying the same summary string the
+                        // phone shows.
+                        // Multi-select pop-up on tvOS: the checkmarks are
+                        // these toggles, the sheet stays open while they
+                        // are flipped, Menu closes it.
+                        SettingsSubgroup("Badge Types",
+                                         summary: badgesSummary,
+                                         icon: "tag",
+                                         iconColor: theme.accent,
+                                         footer: "Which badges appear. Turning one off hides it everywhere badges are shown.",
+                                         optionsOnly: true) {
+                            ForEach(Self.badgeKinds, id: \.self) { kind in
+                                TVSettingsToggleRow(
+                                    icon: "tag",
+                                    iconColor: theme.accent,
+                                    title: Self.badgeTitle(kind),
+                                    subtitle: "",
+                                    isOn: badgeShownBinding(kind)
+                                ) { _ in }
+                            }
                         }
                     }
 
@@ -616,7 +652,7 @@ struct LiveTVSettingsView: View {
                         icon: "paintpalette.fill",
                         iconColor: .accentPrimary,
                         title: "Color Programs by Category",
-                        subtitle: "Tint guide cells by program type. Customise the palette on iPhone / iPad - Settings → Live TV.",
+                        subtitle: "Tint guide cells by program type. Customize the palette on iPhone or iPad in Settings > Live TV.",
                         isOn: $enableCategoryColors,
                         onChange: { _ in }
                     )
@@ -646,7 +682,7 @@ struct LiveTVSettingsView: View {
 
     /// tvOS scale-slider row, unchanged from Appearance's Display Scale.
     private func scaleSliderRow_tvOS(title: String, binding: Binding<Double>) -> some View {
-        let steps: [Double] = [0.85, 0.92, 1.0, 1.15, 1.25, 1.5, 1.75]
+        let steps: [Double] = [0.85, 0.92, 1.0, 1.15, 1.25, 1.5]
         let current = steps.min(by: { abs($0 - binding.wrappedValue) < abs($1 - binding.wrappedValue) }) ?? 1.0
         return HStack(spacing: 24) {
             Text(title)
@@ -654,22 +690,20 @@ struct LiveTVSettingsView: View {
                 .foregroundColor(.textPrimary)
             Spacer()
             ForEach(steps, id: \.self) { step in
-                Button {
+                // `.rounded()` before the Int cast: 1.15 * 100 is
+                // 114.99999999999999 in binary floating point, and a
+                // plain truncating cast printed "114%" on the Apple TV
+                // (Logan 2026-09-19). Every step is exact after rounding.
+                //
+                // These used `.buttonStyle(.plain)`, so the focused pill
+                // came up as the system's white platter with grey text
+                // floating above the row (Logan 2026-09-19). They are now
+                // the shared Settings chip: accent fill when selected,
+                // accent 2pt ring when focused.
+                TVSettingsPill("\(Int((step * 100).rounded()))%",
+                               isSelected: step == current) {
                     binding.wrappedValue = step
-                } label: {
-                    Text("\(Int(step * 100))%")
-                        .scaledFont(.system(size: 22, weight: .medium))
-                        .foregroundColor(step == current ? Color.contrastText(theme.accent) : Color.contrastText(.textSecondary))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(step == current
-                                      ? theme.accent.opacity(0.18)
-                                      : Color.clear)
-                        )
                 }
-                .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 20)

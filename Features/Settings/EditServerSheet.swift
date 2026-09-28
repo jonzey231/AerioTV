@@ -60,6 +60,24 @@ struct EditServerSheet: View {
     /// See `ServerCredentialChange` for what a swap has to invalidate.
     @State private var originalCredentials: DispatcharrCredentialSnapshot? = nil
 
+    /// Save is no longer fire-and-forget. A credential change is verified
+    /// against the server BEFORE anything is persisted or dropped; the
+    /// sheet shows "Saving…", stays open with the typed values when the
+    /// server rejects them, and dismisses only once the save went through.
+    @State private var isSaving = false
+    @State private var saveErrorMessage: String? = nil
+
+    /// Stage source for the "Saving Changes" cover: the same staged screen
+    /// the Add Playlist flow shows, so a save is never a bare label over an
+    /// editable form. See `PlaylistSaveRunner`.
+    @StateObject private var saveProgress = PlaylistSaveProgress()
+
+    /// Anchor for scrolling the "Save Failed" section back into view after a
+    /// rejected save: the cover was covering the form, so the message has to
+    /// come to the user rather than wait to be found.
+    private enum FormAnchor: Hashable { case saveError }
+    @State private var formScrollAnchor: FormAnchor? = nil
+
     /// Binds the URL TextField. Reads through to the model until the user
     /// types; writes stage into `pendingBaseURL` only.
     private var baseURLBinding: Binding<String> {
@@ -113,6 +131,52 @@ struct EditServerSheet: View {
         guard let pending = pendingCredentialType else { return }
         server.dispatcharrCredentialTypeRaw = (pending == .apiKey) ? "" : pending.rawValue
         pendingCredentialType = nil
+    }
+
+    /// Save Playlist.
+    ///
+    /// Bug (Android parity audit, 2026-09-18): Save used to persist and
+    /// dismiss in the same tap while the re-login ran detached, so wrong
+    /// credentials closed the sheet, wiped the cached identity and left
+    /// the playlist visibly broken with the failure only in the debug log.
+    /// Now a credential change is VERIFIED first: nothing is persisted or
+    /// dropped until the server accepts the typed values, the sheet shows
+    /// "Saving…" meanwhile, a rejection keeps the sheet open with what was
+    /// typed, and dismiss happens only on success.
+    @MainActor
+    private func saveEdits() async {
+        guard !isSaving else { return }
+        saveErrorMessage = nil
+        // Raises the "Saving Changes" cover over the form: nothing can be
+        // edited, and no gesture dismisses it, until the save resolves.
+        // Cleared explicitly (not in a `defer`) so the cover is gone BEFORE
+        // the sheet itself dismisses on success.
+        isSaving = true
+
+        let typedBaseURL = (pendingBaseURL ?? server.baseURL)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let mode = effectiveCredentialType
+        let message = await PlaylistSaveRunner.run(
+            server: server,
+            typedBaseURL: typedBaseURL,
+            credentialType: mode,
+            originalCredentials: originalCredentials,
+            progress: saveProgress,
+            commitStaged: {
+                commitBaseURLIfStaged()
+                commitCredentialModeIfStaged()
+            }
+        )
+        isSaving = false
+        if let message {
+            // Back to the form with everything typed still in place, and the
+            // "Save Failed" section brought into view at the top.
+            saveErrorMessage = message
+            formScrollAnchor = .saveError
+            return
+        }
+        originalCredentials = DispatcharrCredentialSnapshot.capture(from: server)
+        dismiss()
     }
 
     /// v1.7.x: render the cached api_key as `i_•••••cudvh13H1A`
@@ -242,52 +306,78 @@ struct EditServerSheet: View {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel") { dismiss() }
                         .foregroundColor(.accentPrimary)
+                        .disabled(isSaving)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Save") {
-                        // v1.7.x (Round 1 review): commit any
-                        // staged credential-mode change before
-                        // persisting credentials. Cancel skips
-                        // this step, so toggling the picker and
-                        // backing out leaves the model unchanged.
-                        commitBaseURLIfStaged()
-                        commitCredentialModeIfStaged()
-                        // Diff BEFORE saveCredentialsSynced: that call
-                        // moves the typed values into the Keychain and
-                        // blanks the in-memory columns, after which the
-                        // "did the account change?" question can no
-                        // longer be answered.
-                        let credentialsChanged = ServerCredentialChange.commit(
-                            server: server,
-                            previous: originalCredentials
-                        )
-                        SyncManager.shared.saveCredentialsSynced(for: server)
-                        if credentialsChanged {
-                            originalCredentials = DispatcharrCredentialSnapshot.capture(from: server)
-                        }
-                        dismiss()
-                    }
-                    .foregroundColor(.accentPrimary)
-                    .fontWeight(.semibold)
-                    .disabled(server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
-                              (pendingBaseURL ?? server.baseURL)
-                                  .trimmingCharacters(in: .whitespaces).isEmpty)
+                    // The inline "Saving…" label is gone: the staged
+                    // "Saving Changes" cover below reports progress now.
+                    Button("Save") { Task { await saveEdits() } }
+                        .foregroundColor(.accentPrimary)
+                        .fontWeight(.semibold)
+                        .disabled(isSaving ||
+                                  server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
+                                  (pendingBaseURL ?? server.baseURL)
+                                      .trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
+        }
+        // The same staged screen the Add Playlist flow shows, titled "Saving
+        // Changes". Covers the form so nothing can be edited mid-save, and
+        // carries no dismissal affordance.
+        .fullScreenCover(isPresented: $isSaving) {
+            ServerSyncView(mode: .saving(stages: saveProgress.stages),
+                           title: "Saving Changes")
         }
     }
 
     // MARK: - iOS Form
     #if os(iOS)
     private var iOSEditForm: some View {
+        ScrollViewReader { proxy in
+            iOSEditFormBody
+                .onChange(of: formScrollAnchor) { _, anchor in
+                    guard let anchor else { return }
+                    withAnimation { proxy.scrollTo(anchor, anchor: .top) }
+                    formScrollAnchor = nil
+                }
+        }
+    }
+
+    private var iOSEditFormBody: some View {
         Form {
-            Section {
-                TextField("Name", text: $server.name)
+            // Save Failed: the server rejected the new credentials (or the
+            // verification fetch failed). Standard Settings section chrome
+            // so it reads as part of the form, not as an alert.
+            if let saveErrorMessage {
+                Section {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .foregroundColor(.statusLive)
+                        Text(saveErrorMessage)
+                            .scaledFont(.bodySmall)
+                            .foregroundColor(.statusLive)
+                    }
                     .listRowBackground(Color.cardBackground)
-                TextField("URL", text: baseURLBinding)
-                    .keyboardType(.URL)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
+                } header: {
+                    Text("Save Failed").sectionHeaderStyle()
+                } footer: {
+                    Text("Your entries are still here. Fix them and tap Save again.")
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
+                }
+                .id(FormAnchor.saveError)
+            }
+
+            Section {
+                // Phase 3 item 2: one field style across Settings. The bare
+                // Form TextField/SecureField rows are now SettingsTextField,
+                // which carries the label, helper line, focus outline and
+                // (for secure fields) the reveal eye. The per-field modifiers
+                // move into the initializer; the row backgrounds stay.
+                SettingsTextField("Name", text: $server.name)
+                    .listRowBackground(Color.cardBackground)
+                SettingsTextField("URL", text: baseURLBinding,
+                                  keyboardType: .URL)
                     .listRowBackground(Color.cardBackground)
             } header: {
                 Text("Connection").sectionHeaderStyle()
@@ -295,27 +385,26 @@ struct EditServerSheet: View {
 
             if server.type == .xtreamCodes {
                 Section {
-                    TextField("Username", text: $server.username)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
+                    SettingsTextField("Username", text: $server.username)
                         .listRowBackground(Color.cardBackground)
-                    SecureField("Password", text: $server.password)
+                    SettingsTextField("Password", text: $server.password,
+                                      isSecure: true)
                         .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("Credentials").sectionHeaderStyle()
                 }
                 Section {
-                    TextField("Custom XMLTV URL (optional)",
-                              text: $server.xtreamXMLTVURL,
-                              prompt: Text(verbatim: "https://example.com/xmltv.xml"))
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
+                    // Phase 3 item 2: this footer described only the XMLTV
+                    // field, so it is the field's helper now (same string on
+                    // tvOS and Android).
+                    SettingsTextField("Custom XMLTV URL (optional)",
+                                      placeholder: "https://example.com/xmltv.xml",
+                                      text: $server.xtreamXMLTVURL,
+                                      helper: "Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own. Leave blank to skip.",
+                                      keyboardType: .URL)
                         .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("EPG Source").sectionHeaderStyle()
-                } footer: {
-                    Text("Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own. Leave blank to skip.")
                 }
             } else if server.type == .dispatcharrAPI {
                 Section {
@@ -334,22 +423,15 @@ struct EditServerSheet: View {
 
                     switch effectiveCredentialType {
                     case .usernamePassword:
-                        TextField("Username", text: $server.username)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
+                        SettingsTextField("Username", text: $server.username)
                             .listRowBackground(Color.cardBackground)
-                        SecureField("Password", text: $server.password)
-                            .listRowBackground(Color.cardBackground)
-                        // v1.7.x: same Dashboard-vs-XC password hint
-                        // as the Add Server flow. Surface here too so
-                        // existing servers being switched to
-                        // Username & Password (or whose user just
-                        // rotated their UI password) see the same
-                        // guidance without having to retrace through
-                        // onboarding.
-                        Text("Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.")
-                            .scaledFont(.labelSmall.subtext())
-                            .foregroundColor(Color.contrastText(.textTertiary))
+                        // v1.7.x: same Dashboard-vs-XC password hint as the
+                        // Add Server flow. Phase 3 item 2: it is the password
+                        // field's helper now instead of its own Form row, so
+                        // iOS, tvOS and Android read identically.
+                        SettingsTextField("Password", text: $server.password,
+                                          helper: "Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.",
+                                          isSecure: true)
                             .listRowBackground(Color.cardBackground)
                         // Show the cached API key (read-only) so the
                         // user can see it was fetched from
@@ -370,9 +452,8 @@ struct EditServerSheet: View {
                             .listRowBackground(Color.cardBackground)
                         }
                     case .apiKey:
-                        SecureField("Admin API Key", text: $server.apiKey)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
+                        SettingsTextField("Admin API Key", text: $server.apiKey,
+                                          isSecure: true)
                             .listRowBackground(Color.cardBackground)
                     }
 
@@ -424,24 +505,20 @@ struct EditServerSheet: View {
                     Text("Authentication").sectionHeaderStyle()
                 }
                 Section {
-                    // `Text(verbatim:)` (not the implicit
-                    // `LocalizedStringKey` initializer) so the
-                    // placeholder URL renders as plain gray
-                    // placeholder text instead of getting
-                    // Markdown-auto-linkified into a blue
-                    // underlined hyperlink. The default
-                    // `Text("https://...")` initializer parses
-                    // its argument as a localized markdown
-                    // string and SwiftUI's data-detector turns
-                    // bare URL patterns into clickable
-                    // `[autolink]` references — same on iOS
-                    // and Mac Catalyst (user-reported v1.6.8).
-                    TextField("Custom XMLTV URL (optional)",
-                              text: $server.dispatcharrXMLTVURL,
-                              prompt: Text(verbatim: "https://example.com/xmltv.xml"))
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
+                    // The placeholder URL is passed as a plain `String`, not a
+                    // `LocalizedStringKey`, so SwiftUI does not
+                    // Markdown-auto-linkify it into a blue underlined
+                    // hyperlink. The localized-key initializer parses its
+                    // argument as markdown and the data-detector turns bare
+                    // URL patterns into clickable autolinks, on iOS and on Mac
+                    // Catalyst alike (user-reported v1.6.8).
+                    // Phase 3 item 2: the section footer described only this
+                    // field, so it is the helper now.
+                    SettingsTextField("Custom XMLTV URL (optional)",
+                                      placeholder: "https://example.com/xmltv.xml",
+                                      text: $server.dispatcharrXMLTVURL,
+                                      helper: "EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.",
+                                      keyboardType: .URL)
                         .listRowBackground(Color.cardBackground)
                         .onChange(of: server.dispatcharrXMLTVURL) { _, _ in
                             // Reset test result whenever the URL changes so
@@ -478,17 +555,11 @@ struct EditServerSheet: View {
                     .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("EPG Source").sectionHeaderStyle()
-                } footer: {
-                    Text("EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.")
-                        .scaledFont(.labelSmall.subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
             } else if server.type == .m3uPlaylist {
                 Section {
-                    TextField("EPG URL (optional)", text: $server.epgURL)
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
+                    SettingsTextField("EPG URL (optional)", text: $server.epgURL,
+                                      keyboardType: .URL)
                         .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("EPG Guide").sectionHeaderStyle()
@@ -497,26 +568,26 @@ struct EditServerSheet: View {
 
             if server.type != .m3uPlaylist {
                 Section {
-                    TextField("Local URL", text: $server.localURL)
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
+                    // Phase 3 item 2: single-field footer folded into the
+                    // field's helper; tvOS and Android carry the same string.
+                    SettingsTextField("Local URL", text: $server.localURL,
+                                      helper: "Used automatically whenever the server is reachable on your local network. No setup needed. Leave blank to always use the main URL.",
+                                      keyboardType: .URL)
                         .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("Local Network").sectionHeaderStyle()
-                } footer: {
-                    Text("Used automatically whenever the server is reachable on your local network. No setup needed. Leave blank to always use the main URL.")
-                        .scaledFont(.labelSmall.subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
             }
 
             if server.type == .dispatcharrAPI {
                 Section {
-                    TextField("User-Agent", text: $server.customUserAgent,
-                              prompt: Text(DeviceInfo.defaultUserAgent))
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
+                    // Phase 3 item 2: the default-User-Agent footer described
+                    // only this field, so it is the helper now, worded exactly
+                    // as tvOS and Android word it.
+                    SettingsTextField("User-Agent",
+                                      placeholder: DeviceInfo.defaultUserAgent,
+                                      text: $server.customUserAgent,
+                                      helper: "Shown in Dispatcharr's admin Stats panel to identify this device. Leave blank for default: \(DeviceInfo.defaultUserAgent)")
                         .listRowBackground(Color.cardBackground)
                     Button("Reset to Default") {
                         server.customUserAgent = ""
@@ -525,10 +596,6 @@ struct EditServerSheet: View {
                     .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("User-Agent").sectionHeaderStyle()
-                } footer: {
-                    Text("Shown in Dispatcharr's admin Stats panel to identify this device. Default: \(DeviceInfo.defaultUserAgent)")
-                        .scaledFont(.labelSmall.subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
                 }
             }
 

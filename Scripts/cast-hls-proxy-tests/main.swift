@@ -173,8 +173,9 @@ func mpegAudioFixtureTS(audioStreamType: UInt8, audioES: [UInt8],
         expectEq(t.released, 1, "\(label) release tears the codecs down")
     }
 
-    // AC-3 is NEVER transcoded: without receiver passthrough it refuses
-    // by name, and no transcoder is ever constructed.
+    // AC-3 without receiver passthrough and without the sender's
+    // transcode-aac plan refuses by name, and no transcoder is ever
+    // constructed.
     var built = false
     let ac3Remuxer = CastFMP4Remuxer(transcoderFactory: { _, onConfig, onFrame in
         built = true
@@ -186,8 +187,62 @@ func mpegAudioFixtureTS(audioStreamType: UInt8, audioES: [UInt8],
     var refusedName: String?
     do { try ac3Remuxer.feed(ac3TS) } catch let e as CastUnsupportedCodecError { refusedName = e.codecName }
     catch { refusedName = "other" }
-    expectEq(refusedName, "AC-3 audio", "AC-3 still refuses by name (never transcoded)")
-    expect(!built, "no transcoder is constructed for AC-3")
+    expectEq(refusedName, "AC-3 audio", "AC-3 refuses by name without a transcode plan")
+    expect(!built, "no transcoder is constructed for AC-3 without a transcode plan")
+
+    // transcode-aac plan (receiver answered ac-3=no): AC-3 syncframes go
+    // through the transcoder and the rendition declares AAC.
+    var ac3ES: [UInt8] = []
+    var ac3Frame: [UInt8] = [0x0B, 0x77, 0x00, 0x00, 0x1C, 0x40, 0xE1] // 48 kHz 384 kbps 5.1
+    ac3Frame.append(contentsOf: [UInt8](repeating: 0, count: 1536 - ac3Frame.count))
+    for _ in 0..<60 { ac3ES.append(contentsOf: ac3Frame) }
+    let ac3FrameTicks: Int64 = 1536 * CastFMP4Remuxer.ticksPerSecond / 48_000 // 2880
+    var ac3Fake: FakeCastAudioTranscoder?
+    var ac3Source: CastAudioSourceCodec?
+    var ac3Logs: [String] = []
+    let transcodeRemuxer = CastFMP4Remuxer(transcodeAC3: true, log: { ac3Logs.append($0) },
+                                           transcoderFactory: { source, onConfig, onFrame in
+        ac3Source = source
+        let t = FakeCastAudioTranscoder(onConfig: onConfig, onFrame: onFrame)
+        ac3Fake = t
+        return t
+    })
+    let ac3TranscodeTS = mpegAudioFixtureTS(audioStreamType: 0x81, audioES: ac3ES,
+                                            audioFrameLen: 1536, audioFrameTicks: ac3FrameTicks,
+                                            videoFrames: 90)
+    var ac3Threw = false
+    do { try transcodeRemuxer.feed(ac3TranscodeTS) } catch { ac3Threw = true }
+    expect(!ac3Threw, "AC-3 with transcode-aac is transcoded, not refused")
+    expect(ac3Source == .ac3, "AC-3 transcoder built for the AC-3 source")
+    expect((ac3Fake?.fedLengths.count ?? 0) >= 50, "framed whole AC-3 syncframes into the transcoder")
+    expect(ac3Fake?.fedLengths.allSatisfy { $0 == 1536 } ?? false, "every fed AC-3 frame is one syncframe")
+    expectEq(transcodeRemuxer.audioCodecsAttribute, "mp4a.40.2", "AC-3 transcode: CODECS names AAC")
+    expectEq(transcodeRemuxer.audioPathDescription, "AC-3 5.1 -> AAC stereo", "AC-3 transcode: audio path")
+    expect(ac3Logs.contains("transcoding AC-3 5.1 48000 Hz -> AAC-LC stereo (receiver cannot decode AC-3)"),
+           "AC-3 transcode: logs the transcoding line")
+    let transcodingIdx = ac3Logs.firstIndex { $0.hasPrefix("transcoding AC-3") }
+    let activeIdx = ac3Logs.firstIndex { $0.hasPrefix("audio transcode active: AC-3 6ch 48000Hz") }
+    expect(transcodingIdx != nil && activeIdx != nil && transcodingIdx! < activeIdx!,
+           "AC-3 transcode: transcoding line precedes audio transcode active")
+    let gated = ac3Logs.filter { $0.hasPrefix("transcoded audio gated: ") }
+    let resumed = ac3Logs.filter { $0.hasPrefix("transcoded audio resumed after ") }
+    expect(gated.count == resumed.count, "every gated run of transcoded audio logs its resume")
+    if let g = gated.first {
+        expect(g.hasPrefix("transcoded audio gated: 1 units dropped, pts ")
+               && g.hasSuffix("s below timeline base -0.000s"),
+               "gated line logs the first drop before the timeline base exists: \(g)")
+    }
+    transcodeRemuxer.release()
+
+    // Passthrough wins over the transcode plan when both are set.
+    var passthroughBuilt = false
+    let bothRemuxer = CastFMP4Remuxer(allowAC3Passthrough: true, transcodeAC3: true,
+                                      transcoderFactory: { _, onConfig, onFrame in
+        passthroughBuilt = true
+        return FakeCastAudioTranscoder(onConfig: onConfig, onFrame: onFrame)
+    })
+    do { try bothRemuxer.feed(ac3TranscodeTS) } catch {}
+    expect(!passthroughBuilt, "AC-3 passthrough takes precedence over the transcode plan")
 }
 
 runMPEGTranscodeChecks()
@@ -235,7 +290,7 @@ do {
     let text = store.videoPlaylistText()
     let lines = text.split(separator: "\n").map(String.init)
     expect(lines.contains("#EXT-X-VERSION:7"), "version 7")
-    expect(lines.contains("#EXT-X-MEDIA-SEQUENCE:0"), "media sequence starts at 0 (5-window covers all 5)")
+    expect(lines.contains("#EXT-X-MEDIA-SEQUENCE:0"), "media sequence starts at 0 (15-window covers all 5)")
     expect(lines.contains("#EXT-X-DISCONTINUITY"), "discontinuity tag present at splice")
     expect(lines.contains("#EXT-X-MAP:URI=\"vinit\(gen1).mp4\""), "old generation MAP present")
     expect(lines.contains("#EXT-X-MAP:URI=\"vinit\(gen2).mp4\""), "new generation MAP present")
@@ -279,20 +334,20 @@ do {
     }
     let gen2 = store.beginGeneration()
     store.setDemuxedInitSegments(generation: gen2, video: Data("i2".utf8), audio: nil)
-    // Ring size 8: after 6 gen2 segments (total 9) one gen1 segment evicts.
-    for _ in 0..<6 {
+    // Ring size 18: after 16 gen2 segments (total 19) one gen1 segment evicts.
+    for _ in 0..<16 {
         store.addSegment(generation: gen2, durationTicks: ticks, videoData: Data([2]), audioData: nil)
     }
     expect(store.videoInitSegment(generation: gen1) != nil,
            "gen1 init retained while a gen1 segment is ringed")
-    // Push the remaining gen1 segments out (11 total > 8 + 3).
+    // Push the remaining gen1 segments out (21 total > 18 + 3).
     for _ in 0..<2 {
         store.addSegment(generation: gen2, durationTicks: ticks, videoData: Data([2]), audioData: nil)
     }
     expectEq(store.videoInitSegment(generation: gen1), nil,
              "gen1 init dropped once no ring entry references it")
     expect(store.videoInitSegment(generation: gen2) != nil, "current generation init always retained")
-    // The flagged (discontinuity) segment was seg3; it evicts at 12 total.
+    // The flagged (discontinuity) segment was seg3; it evicts at 22 total.
     var text = store.videoPlaylistText()
     expect(!text.contains("#EXT-X-DISCONTINUITY-SEQUENCE"), "discontinuity-sequence absent while tag in ring")
     for _ in 0..<4 {
@@ -306,11 +361,11 @@ do {
     // Live-edge hold semantics: newest+1 blocks briefly then nils on
     // timeout; far future and evicted return nil immediately.
     let t0 = Date()
-    expectEq(store.awaitSegment(seq: 15, rendition: .video, timeout: 0.3), nil,
+    expectEq(store.awaitSegment(seq: 25, rendition: .video, timeout: 0.3), nil,
              "newest+1 held until timeout")
     expect(Date().timeIntervalSince(t0) >= 0.25, "newest+1 actually waited")
     let t1 = Date()
-    expectEq(store.awaitSegment(seq: 40, rendition: .video, timeout: 5), nil, "far future 404s fast")
+    expectEq(store.awaitSegment(seq: 50, rendition: .video, timeout: 5), nil, "far future 404s fast")
     expectEq(store.awaitSegment(seq: 0, rendition: .video, timeout: 5), nil, "evicted 404s fast")
     expect(Date().timeIntervalSince(t1) < 0.2, "no hold for far-future/evicted")
     // Publication wakes a held fetch.
@@ -319,7 +374,7 @@ do {
         store.addSegment(generation: gen2, durationTicks: ticks, videoData: Data([9]), audioData: nil)
     }
     publisher.start()
-    expectEq(store.awaitSegment(seq: 15, rendition: .video, timeout: 3), Data([9]),
+    expectEq(store.awaitSegment(seq: 25, rendition: .video, timeout: 3), Data([9]),
              "held fetch resolves on publish")
 }
 
@@ -375,6 +430,27 @@ do {
     let videoOnly = store.demuxedMasterPlaylistText()
     expect(!videoOnly.contains("mp4a") && !videoOnly.contains("ac-3"),
            "video-only master names no audio codec")
+
+    // Level clamp (Chromecast Ultra, 2026-09-26): 4.2 is declared as 4.0
+    // unless the receiver answered yes to avc1.64002A.
+    expectEq(CastHLSSegmentStore.declaredAVCCodec("avc1.64002A", receiverDecodesLevel42: nil),
+             "avc1.640028", "unknown caps clamp level 4.2")
+    expectEq(CastHLSSegmentStore.declaredAVCCodec("avc1.4D002A", receiverDecodesLevel42: false),
+             "avc1.4D0028", "no to 4.2 clamps, keeping profile and constraint")
+    expectEq(CastHLSSegmentStore.declaredAVCCodec("avc1.64002A", receiverDecodesLevel42: true),
+             "avc1.64002A", "yes to 4.2 keeps the stream level")
+    expectEq(CastHLSSegmentStore.declaredAVCCodec("avc1.64001F", receiverDecodesLevel42: false),
+             "avc1.64001F", "levels at or below 4.0 are untouched")
+    var avcInit = Data("xxxxavcC".utf8)
+    avcInit.append(contentsOf: [0x01, 0x64, 0x00, 0x2A, 0xFF])
+    let clampStore = CastHLSSegmentStore()
+    let clampGen = clampStore.beginGeneration()
+    clampStore.setDemuxedInitSegments(generation: clampGen, video: avcInit, audio: nil)
+    expect(clampStore.demuxedMasterPlaylistText().contains("CODECS=\"avc1.640028,"),
+           "master declares the clamped level when caps are unknown")
+    clampStore.setReceiverDecodesAVCLevel42(true)
+    expect(clampStore.demuxedMasterPlaylistText().contains("CODECS=\"avc1.64002A,"),
+           "master keeps level 4.2 when the receiver decodes it")
 }
 
 // MARK: 9. segment-run continuity against a real transport stream
@@ -933,15 +1009,15 @@ do {
     expect(windowSpanSeconds(first) - receiverPresentationDelay >= 3.0,
            "first window leaves a seek range at least one target duration wide")
 
-    // Slide the window: windowSize is 5, so six more segments roll the
-    // first four out, and the span stays the full five segments.
-    for _ in 0..<6 {
+    // Slide the window: windowSize is 15, so sixteen more segments roll
+    // the first five out, and the span stays the full fifteen segments.
+    for _ in 0..<16 {
         store.addSegment(generation: gen, durationTicks: ticks3s, videoData: Data([1]), audioData: nil)
     }
     let slid = store.videoPlaylistText()
     expect(slid.contains("#EXT-X-MEDIA-SEQUENCE:5"), "window head advanced with the ring")
     expectEq(programDateTimes(slid).count, 0, "still no PROGRAM-DATE-TIME after the window slid")
-    expectEq(windowSpanSeconds(slid), 15.0, "a full window spans five segments")
+    expectEq(windowSpanSeconds(slid), 45.0, "a full window spans fifteen segments")
 }
 
 // A playlist built across a discontinuity carries no absolute clock
@@ -1648,12 +1724,20 @@ func censusADTSFrame(_ frameLen: Int) -> [UInt8] {
     return f
 }
 
-func censusVideoAU(keyframe: Bool) -> [UInt8] {
+func censusVideoAU(keyframe: Bool, hevc: Bool = false) -> [UInt8] {
+    let start: [UInt8] = [0, 0, 0, 1]
+    if hevc {
+        // VPS + SPS + PPS, then an IDR_W_RADL (19) or TRAIL_R (1) slice.
+        let ps = hevcParameterSets()
+        var slice = [UInt8](repeating: 0x10, count: 400)
+        slice[0] = keyframe ? 19 << 1 : 1 << 1
+        slice[1] = 0x01
+        return start + ps.vps + start + ps.sps + start + ps.pps + start + slice
+    }
     let sps: [UInt8] = [0x67, 0x42, 0xC0, 0x1E, 0xD9, 0x00, 0xF0, 0x11, 0x7E, 0xF0, 0x3C, 0x80]
     let pps: [UInt8] = [0x68, 0xCE, 0x3C, 0x80]
     var slice = [UInt8](repeating: 0x10, count: 400)
     slice[0] = keyframe ? 0x65 : 0x41
-    let start: [UInt8] = [0, 0, 0, 1]
     return start + sps + start + pps + start + slice
 }
 
@@ -1662,7 +1746,7 @@ func censusVideoAU(keyframe: Bool) -> [UInt8] {
 /// PES. `audioLagTicks` delays the audio in MUX ORDER, which is what puts
 /// a segment's last frames behind the keyframe that cuts it.
 func straddlingCensusTS(videoFrames: Int, videoFrameTicks: Int64, gop: Int,
-                        frameLen: Int, audioLagTicks: Int64) -> (Data, Int) {
+                        frameLen: Int, audioLagTicks: Int64, hevc: Bool = false) -> (Data, Int) {
     let frameTicks = 1024 * CastFMP4Remuxer.ticksPerSecond / 48_000
     let base: Int64 = 10_000
     var writer = CensusTSWriter()
@@ -1689,11 +1773,11 @@ func straddlingCensusTS(videoFrames: Int, videoFrameTicks: Int64, gop: Int,
         audioPES.append((off, end, base + Int64(firstFrame) * frameTicks))
         off = end
     }
-    // PAT pointing at a PMT on pid 0x1000: H.264 on 0x100, ADTS on 0x101.
+    // PAT pointing at a PMT on pid 0x1000: H.264 (or HEVC) on 0x100, ADTS on 0x101.
     let pat: [UInt8] = [0x00, 0xB0, 13, 0x00, 0x01, 0xC1, 0, 0, 0, 0x01, 0xF0, 0x00, 0, 0, 0, 0]
     let pmtBody: [UInt8] = [0x00, 0x01, 0xC1, 0, 0,
                             0xE1, 0x00, 0xF0, 0x00,
-                            0x1B, 0xE1, 0x00, 0xF0, 0x00,
+                            hevc ? 0x24 : 0x1B, 0xE1, 0x00, 0xF0, 0x00,
                             0x0F, 0xE1, 0x01, 0xF0, 0x00]
     let pmt: [UInt8] = [0x02, 0xB0, UInt8(pmtBody.count + 4)] + pmtBody + [0, 0, 0, 0]
     writer.psi(pid: 0, table: pat)
@@ -1701,7 +1785,8 @@ func straddlingCensusTS(videoFrames: Int, videoFrameTicks: Int64, gop: Int,
     var next = 0
     for i in 0..<videoFrames {
         let dts = base + Int64(i) * videoFrameTicks
-        writer.pes(pid: 0x100, payload: censusPES(streamID: 0xE0, payload: censusVideoAU(keyframe: i % gop == 0),
+        writer.pes(pid: 0x100, payload: censusPES(streamID: 0xE0,
+                                                  payload: censusVideoAU(keyframe: i % gop == 0, hevc: hevc),
                                                   pts: dts, dts: dts))
         while next < audioPES.count, audioPES[next].pts <= dts - audioLagTicks {
             let a = audioPES[next]
@@ -1979,6 +2064,14 @@ func trunSampleCounts(_ segment: Data) -> [Int64] {
 
     let videoPlaylist = store.videoPlaylistText()
     let audioPlaylist = store.audioPlaylistText()
+    for (name, text) in [("video", videoPlaylist), ("audio", audioPlaylist)] {
+        let target = text.components(separatedBy: "\n")
+            .first { $0.hasPrefix("#EXT-X-TARGETDURATION:") }
+            .flatMap { Int($0.dropFirst("#EXT-X-TARGETDURATION:".count)) } ?? -1
+        expect(text.contains("#EXT-X-TARGETDURATION:\(target)\n#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,HOLD-BACK="
+                             + String(format: "%.3f", Double(target * 3)) + "\n#EXT-X-MEDIA-SEQUENCE:"),
+               "demuxed playlists: \(name) states HOLD-BACK at three target durations")
+    }
     func matches(_ text: String, _ pattern: String) -> [String] {
         guard let re = try? NSRegularExpression(pattern: pattern) else { return [] }
         let ns = text as NSString
@@ -2002,13 +2095,1073 @@ func trunSampleCounts(_ segment: Data) -> [Int64] {
     let aExtinf = matches(audioPlaylist, "#EXTINF:([0-9.]+)").compactMap(Double.init)
     var extinfOK = vExtinf.count == aExtinf.count && !vExtinf.isEmpty
     let frameSeconds = frameTicks / Double(CastFMP4Remuxer.ticksPerSecond)
-    for i in vExtinf.indices where i < aExtinf.count {
+    // The generation's first segment is exempt: audio starts a little
+    // after video there (the first-segment offset). The window used to
+    // be short enough to have slid past it; at 15 segments it still lists it.
+    let firstListed = matches(videoPlaylist, "#EXT-X-MEDIA-SEQUENCE:([0-9]+)").first.flatMap { Int($0) } ?? 0
+    for i in vExtinf.indices where i < aExtinf.count && !(firstListed == 0 && i == 0) {
         if abs(vExtinf[i] - aExtinf[i]) > frameSeconds + 0.001 { extinfOK = false }
     }
     expect(extinfOK, "demuxed playlists: EXTINF differs by less than one audio frame")
 }
 
 runDemuxedRenditionChecks()
+
+final class StoreRef: @unchecked Sendable {
+    var store: CastHLSSegmentStore?
+}
+
+final class LockedLines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    func append(_ s: String) { lock.lock(); lines.append(s); lock.unlock() }
+    var all: [String] { lock.lock(); defer { lock.unlock() }; return lines }
+}
+
+// MARK: generation splice with a held live-edge fetch (incident 2026-09-25)
+
+do {
+    let logs = LockedLines()
+    let storeRef = StoreRef()
+    // The log closure reads the store back: with the old log-under-lock
+    // beginGeneration this self-deadlocked on the non-recursive NSCondition.
+    let store = CastHLSSegmentStore(log: { line in
+        _ = storeRef.store?.currentReadyState
+        logs.append(line)
+    })
+    storeRef.store = store
+    let ticks: Int64 = 5 * CastFMP4Remuxer.ticksPerSecond
+    let gen1 = store.beginGeneration()
+    for _ in 0..<3 {
+        store.addSegment(generation: gen1, durationTicks: ticks, videoData: Data([1]), audioData: Data([1]))
+    }
+    // A receiver fetch for seq 3 is held at the live edge while the
+    // ingest drops, reconnects as gen 2 and publishes seq 3 from it. The
+    // splice's log closure re-enters the store (it runs outside the lock
+    // now), and a stale gen-1 add in the gap is gated without waking the
+    // waiter with the wrong bytes.
+    let spliceDone = DispatchSemaphore(value: 0)
+    let splicer = Thread {
+        Thread.sleep(forTimeInterval: 0.1)
+        store.addSegment(generation: gen1, durationTicks: ticks, videoData: Data([7]), audioData: nil)
+        let gen2 = store.beginGeneration()
+        _ = store.videoPlaylistText() // from the log path's thread: must not deadlock
+        Thread.sleep(forTimeInterval: 0.1)
+        _ = store.addSegment(generation: gen1, durationTicks: ticks, videoData: Data([8]), audioData: nil)
+        store.setDemuxedInitSegments(generation: gen2, video: Data([0x76]), audio: Data([0x61]))
+        store.addSegment(generation: gen2, durationTicks: ticks, videoData: Data([2]), audioData: Data([3]))
+        spliceDone.signal()
+    }
+    splicer.start()
+    let began = Date()
+    // seq 3 was published by gen 1 at 0.1 s: the held fetch resolves then.
+    expectEq(store.awaitSegment(seq: 3, rendition: .video, timeout: 3), Data([7]),
+             "splice: held fetch resolves with the last old-generation segment")
+    // seq 4 is held across the roll and resolves with the NEW generation's bytes.
+    expectEq(store.awaitSegment(seq: 4, rendition: .audio, timeout: 3), Data([3]),
+             "splice: fetch held across the generation roll resolves from gen 2")
+    expect(Date().timeIntervalSince(began) < 2, "splice: held fetches did not sleep out their timeout")
+    expect(spliceDone.wait(timeout: .now() + 3) == .success, "splice: publisher finished (no deadlock)")
+    expect(logs.all.contains { $0.hasPrefix("splice oldGen=1 newGen=2 lastSeq=3 firstNewSeq=4") },
+           "splice: log line intact: \(logs.all)")
+    expect(store.videoPlaylistText().contains("#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"vinit2.mp4\""),
+           "splice: discontinuity into gen 2 advertised")
+    // Teardown wakes a fetch still held after the splice.
+    let closer = Thread { Thread.sleep(forTimeInterval: 0.1); store.close() }
+    closer.start()
+    let t = Date()
+    expectEq(store.awaitSegment(seq: 5, rendition: .video, timeout: 5), nil, "splice: close fails a held fetch")
+    expect(Date().timeIntervalSince(t) < 1, "splice: close wakes the waiter promptly")
+}
+
+// MARK: 16. AirPlay LAN audio rewrite (2026-09-26)
+//
+// AirPlay always serves the TS LAN playlist; for an AAC receiver the LAN
+// copy of each segment carries AAC-LC stereo as ADTS PES on the source
+// audio PID. Checked here: CRC-32/MPEG-2, the PMT rewrite, ADTS headers,
+// PES packetization (CC, stuffing, PTS) and one synthetic segment end to
+// end with the fake transcoder.
+
+func tsPacket(pid: Int, pusi: Bool, cc: UInt8, payload: [UInt8]) -> [UInt8] {
+    precondition(payload.count <= 184)
+    var p: [UInt8] = [0x47, UInt8((pusi ? 0x40 : 0) | (pid >> 8)), UInt8(pid & 0xFF), 0x10 | cc]
+    p.append(contentsOf: payload)
+    p.append(contentsOf: [UInt8](repeating: 0xFF, count: 188 - p.count))
+    return p
+}
+
+func psiPacket(pid: Int, section body: [UInt8]) -> [UInt8] {
+    var section = body
+    let len = section.count - 3 + 4
+    section[1] = 0xB0 | UInt8(len >> 8)
+    section[2] = UInt8(len & 0xFF)
+    let crc = TSLANAudioRewriter.crc32MPEG(section)
+    section += [UInt8(crc >> 24), UInt8((crc >> 16) & 0xFF), UInt8((crc >> 8) & 0xFF), UInt8(crc & 0xFF)]
+    return tsPacket(pid: pid, pusi: true, cc: 0, payload: [0x00] + section)
+}
+
+/// Video 0x100 (PCR), AC-3 0x101 (language + AC-3 registration), AC-3 0x102.
+func syntheticPMT() -> [UInt8] {
+    var s: [UInt8] = [0x02, 0, 0, 0x00, 0x01, 0xC1, 0x00, 0x00, 0xE1, 0x00, 0xF0, 0x00]
+    s += [0x1B, 0xE1, 0x00, 0xF0, 0x00]
+    let desc: [UInt8] = [0x0A, 4, 0x65, 0x6E, 0x67, 0x00, 0x05, 4, 0x41, 0x43, 0x2D, 0x33]
+    s += [0x81, 0xE1, 0x01, 0xF0, UInt8(desc.count)] + desc
+    s += [0x81, 0xE1, 0x02, 0xF0, 0x00]
+    return psiPacket(pid: 0x1000, section: s)
+}
+
+func syntheticPAT() -> [UInt8] {
+    psiPacket(pid: 0, section: [0x00, 0, 0, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x01, 0xF0, 0x00])
+}
+
+/// One AC-3 syncframe: 48 kHz, 64 kbps (256 bytes), 2/0 stereo.
+func ac3Frame() -> [UInt8] {
+    var f = [UInt8](repeating: 0x21, count: 256)
+    f[0] = 0x0B; f[1] = 0x77; f[2] = 0; f[3] = 0
+    f[4] = 0x08       // fscod 0 (48 kHz), frmsizecod 8 (64 kbps)
+    f[5] = 0x40       // bsid 8, bsmod 0
+    f[6] = 0x40       // acmod 2, dsurmod 0, lfeon 0
+    return f
+}
+
+func pesBytes(streamID: UInt8, pts: Int64, payload: [UInt8]) -> [UInt8] {
+    [0, 0, 1, streamID, 0, 0, 0x80, 0x80, 5] + TSLANAudioRewriter.encodePTS(pts) + payload
+}
+
+/// Split a PES into full-payload packets; the last is 0xFF-filled (the
+/// rewriter parses by syncword and length, so filler after it is harmless).
+func packetsFor(pid: Int, pes: [UInt8]) -> [[UInt8]] {
+    var out: [[UInt8]] = []
+    var o = 0
+    var cc: UInt8 = 0
+    while o < pes.count {
+        let n = min(184, pes.count - o)
+        out.append(tsPacket(pid: pid, pusi: o == 0, cc: cc, payload: Array(pes[o..<(o + n)])))
+        cc = (cc + 1) & 0x0F
+        o += n
+    }
+    return out
+}
+
+@MainActor func runLANAudioRewriteChecks() {
+    // CRC-32/MPEG-2 check value.
+    expectEq(TSLANAudioRewriter.crc32MPEG(Array("123456789".utf8)), 0x0376_E6E7, "lan-audio: CRC-32/MPEG-2 check value")
+
+    // PMT rewrite.
+    let pmt = syntheticPMT()
+    let before = TSLANAudioRewriter.parsePMT(pmt)
+    expectEq(before?.audio.count, 2, "lan-audio: synthetic PMT has two audio PIDs")
+    guard let rewritten = TSLANAudioRewriter.rewritePMT(pmt, targetPID: 0x101) else {
+        expect(false, "lan-audio: PMT rewrite produced a packet"); return
+    }
+    expectEq(rewritten.count, 188, "lan-audio: rewritten PMT is one packet")
+    let after = TSLANAudioRewriter.parsePMT(rewritten)
+    expectEq(after?.audio, [TSLANAudioRewriter.PMTInfo.AudioES(pid: 0x101, type: 0x0F)],
+             "lan-audio: PMT names only PID 0x101, as stream_type 0x0F")
+    expectEq(after?.videoPID, 0x100, "lan-audio: video entry kept")
+    expectEq(after?.pcrPID, 0x100, "lan-audio: PCR PID untouched")
+    let sectionLength = (Int(rewritten[6] & 0x0F) << 8) | Int(rewritten[7])
+    let section = Array(rewritten[5..<(5 + 3 + sectionLength)])
+    expectEq(TSLANAudioRewriter.crc32MPEG(section), 0, "lan-audio: rewritten PMT CRC verifies (residue 0)")
+    let text = section.map { String(format: "%02X", $0) }.joined()
+    expect(text.contains("0FE101F0060A04656E6700"), "lan-audio: AAC entry keeps only the language descriptor: \(text)")
+    expect(!text.contains("0541432D33"), "lan-audio: AC-3 registration descriptor dropped")
+    expect(TSLANAudioRewriter.rewritePMT(pmt, targetPID: 0x1FF) == nil, "lan-audio: unknown target PID refused")
+
+    // ADTS header.
+    let adts = TSLANAudioRewriter.adtsHeader(payloadLength: 300, frequencyIndex: 3)
+    expectEq(adts.count, 7, "lan-audio: ADTS header is 7 bytes")
+    let adtsLen = (Int(adts[3] & 0x03) << 11) | (Int(adts[4]) << 3) | (Int(adts[5]) >> 5)
+    expectEq(adtsLen, 307, "lan-audio: ADTS frame length includes the header")
+    expectEq((Int(adts[2]) >> 6) + 1, 2, "lan-audio: ADTS profile AAC-LC")
+    expectEq((Int(adts[2]) >> 2) & 0x0F, 3, "lan-audio: ADTS 48 kHz")
+    expectEq(((Int(adts[2]) & 1) << 2) | (Int(adts[3]) >> 6), 2, "lan-audio: ADTS stereo")
+
+    // PES packetization.
+    var cc: UInt8 = 14
+    let pts: Int64 = (1 << 33) - 1234
+    let ts = TSLANAudioRewriter.packetizePES(payload: [UInt8](repeating: 0x5A, count: 400), pts: pts, pid: 0x101, cc: &cc)
+    expectEq(ts.count, 3 * 188, "lan-audio: 414-byte PES fills three packets")
+    expectEq(cc, 1, "lan-audio: CC advanced by three with wrap")
+    let ccs = stride(from: 0, to: ts.count, by: 188).map { ts[$0 + 3] & 0x0F }
+    expectEq(ccs, [14, 15, 0], "lan-audio: CC continuous across the wrap")
+    expect(ts[1] & 0x40 != 0 && ts[189] & 0x40 == 0, "lan-audio: PUSI on the first packet only")
+    expectEq(ts[376 + 3] >> 4, 3, "lan-audio: last packet carries adaptation stuffing")
+    expectEq(Int(ts[376 + 4]), 183 - 46, "lan-audio: stuffing length fills the packet")
+    expectEq(TSLANAudioRewriter.pesPTS(Array(ts[0..<188])), pts, "lan-audio: PTS round trip")
+    let pesLen = (Int(ts[8]) << 8) | Int(ts[9])
+    expectEq(pesLen, 3 + 5 + 400, "lan-audio: PES_packet_length")
+
+    // One synthetic segment end to end.
+    let logs = LockedLines()
+    var fakes: [FakeCastAudioTranscoder] = []
+    let rewriter = TSLANAudioRewriter(log: { logs.append($0) }, canDecode: { _ in true },
+                                      transcoderFactory: { _, onConfig, onFrame in
+        let f = FakeCastAudioTranscoder(onConfig: onConfig, onFrame: onFrame)
+        fakes.append(f)
+        return f
+    })
+    var seg: [UInt8] = syntheticPAT() + pmt
+    let videoPTS: Int64 = 900_000
+    for p in packetsFor(pid: 0x100, pes: pesBytes(streamID: 0xE0, pts: videoPTS, payload: [0, 0, 0, 1, 0x65, 0x88])) { seg += p }
+    // Audio starts one frame before the first picture: gated.
+    var acc: UInt8 = 0
+    seg += TSLANAudioRewriter.packetizePES(payload: ac3Frame() + ac3Frame() + ac3Frame(), pts: videoPTS - 2880,
+                                           pid: 0x101, cc: &acc)
+    acc = 0
+    seg += TSLANAudioRewriter.packetizePES(payload: ac3Frame(), pts: videoPTS - 2880, pid: 0x102, cc: &acc)
+    let out = [UInt8](rewriter.rewrite(Data(seg)))
+    expectEq(out.count % 188, 0, "lan-audio: output is whole packets")
+    var pids: [Int: Int] = [:]
+    var audioPackets: [[UInt8]] = []
+    for o in stride(from: 0, to: out.count, by: 188) {
+        let p = Array(out[o..<(o + 188)])
+        let pid = (Int(p[1] & 0x1F) << 8) | Int(p[2])
+        pids[pid, default: 0] += 1
+        if pid == 0x101 { audioPackets.append(p) }
+    }
+    expectEq(pids[0x102], nil, "lan-audio: second audio PID dropped")
+    expectEq(pids[0x100], 1, "lan-audio: video copied")
+    expectEq(TSLANAudioRewriter.parsePMT(Array(out[188..<376]))?.audio.first?.type, 0x0F, "lan-audio: segment PMT rewritten")
+    expectEq(fakes.count, 1, "lan-audio: one transcoder")
+    expectEq(fakes.first?.fedPTS, [videoPTS - 2880, videoPTS, videoPTS + 2880], "lan-audio: AC-3 frames stamped from the PES PTS")
+    expectEq(audioPackets.count, 1, "lan-audio: two gated-in AAC frames fit one packet")
+    if let first = audioPackets.first {
+        expectEq(TSLANAudioRewriter.pesPTS(first), videoPTS, "lan-audio: first AAC PTS = first video PTS (earlier frame gated)")
+        var es = Array(first[(TSLANAudioRewriter.payloadOffset(first)! + 14)...])
+        var frames = 0
+        while es.count >= 7, es[0] == 0xFF, es[1] & 0xF0 == 0xF0 {
+            let len = (Int(es[3] & 0x03) << 11) | (Int(es[4]) << 3) | (Int(es[5]) >> 5)
+            frames += 1
+            es.removeFirst(min(len, es.count))
+        }
+        expectEq(frames, 2, "lan-audio: two ADTS frames in the PES")
+    }
+    expect(logs.all.contains("LAN audio: AC-3 2ch -> AAC-LC stereo muxed into TS (PID 257, PMT rewritten)"),
+           "lan-audio: session line: \(logs.all)")
+    // Second segment: CC continues on the audio PID.
+    let out2 = [UInt8](rewriter.rewrite(Data(seg)))
+    let cc2 = stride(from: 0, to: out2.count, by: 188).first { (Int(out2[$0 + 1] & 0x1F) << 8 | Int(out2[$0 + 2])) == 0x101 }
+        .map { out2[$0 + 3] & 0x0F }
+    expectEq(cc2, 1, "lan-audio: audio CC continues into the next segment")
+
+    // Stage: lazy, in order, cached, evicted.
+    let stage = TSLANAudioStage(rewriter: TSLANAudioRewriter(log: { _ in }, canDecode: { _ in true },
+                                                             transcoderFactory: { _, c, f in FakeCastAudioTranscoder(onConfig: c, onFrame: f) }))
+    expectEq(stage.sourcesNeeded(for: 5), [5], "lan-audio stage: first request needs only itself")
+    _ = stage.produce(seq: 5, sources: [(5, Data(seg))], oldestSeq: 0)
+    expectEq(stage.sourcesNeeded(for: 5), [], "lan-audio stage: cached")
+    expectEq(stage.sourcesNeeded(for: 7), [6, 7], "lan-audio stage: a skipped segment is produced first")
+    _ = stage.produce(seq: 7, sources: [(6, Data(seg)), (7, Data(seg))], oldestSeq: 6)
+    expectEq(stage.cachedCount, 2, "lan-audio stage: evicted below the ring")
+
+    // Non-AC-3 source: passthrough, logged once.
+    let aacLogs = LockedLines()
+    let passthrough = TSLANAudioRewriter(log: { aacLogs.append($0) }, canDecode: { _ in true })
+    var aacPMT = pmt
+    aacPMT[5 + 12 + 5] = 0x0F; aacPMT[5 + 12 + 5 + 5 + 12] = 0x0F
+    let plain = syntheticPAT() + psiPacket(pid: 0x1000, section: Array(aacPMT[5..<(5 + 12 + 5 + 17 + 5)]))
+    expectEq([UInt8](passthrough.rewrite(Data(plain))), plain, "lan-audio: AAC source passes through unchanged")
+    expect(aacLogs.all.count == 1 && aacLogs.all[0].contains("stays passthrough"), "lan-audio: unsupported line: \(aacLogs.all)")
+}
+
+runLANAudioRewriteChecks()
+
+// MARK: Stale-receiver request counters (incident 2026-09-25 15:26)
+
+do {
+    let t0 = Date(timeIntervalSince1970: 1000)
+    let c = CastHLSRequestCounters(now: t0)
+    c.mark(generation: 3, now: t0)
+    for p in ["/demuxed.m3u8", "/video.m3u8", "/audio.m3u8", "/vinit3.mp4", "/ainit3.mp4"] {
+        c.record(path: p, now: t0.addingTimeInterval(0.5))
+    }
+    var s = c.snapshot
+    expectEq(s.playlists, 3, "counters: three playlists")
+    expectEq(s.segments, 0, "counters: inits are not segments (stale shape)")
+    expect(s.firstSegmentAt == nil, "counters: no first segment yet")
+    c.record(path: "/vseg0.m4s", now: t0.addingTimeInterval(1.25))
+    c.record(path: "/aseg0.m4s", now: t0.addingTimeInterval(1.5))
+    c.record(path: "/vseg1.m4s", now: t0.addingTimeInterval(2.0))
+    s = c.snapshot
+    expectEq(s.videoSegments, 2, "counters: video segments")
+    expectEq(s.audioSegments, 1, "counters: audio segments")
+    expectEq(s.generation, 3, "counters: generation")
+    expectEq(s.firstSegmentAt.map { $0.timeIntervalSince(s.markedAt) }, 1.25, "counters: first segment offset")
+    expectEq(s.lastSegmentAt, t0.addingTimeInterval(2.0), "counters: last segment time")
+    c.mark(generation: 4, now: t0.addingTimeInterval(10))
+    s = c.snapshot
+    expect(s.playlists == 0 && s.segments == 0 && s.generation == 4 && s.lastSegmentAt == nil,
+           "counters: mark resets for the reload")
+}
+
+// MARK: 17. video transcode plan, codec strings, hvcC, remux wiring (2026-09-26)
+//
+// The VideoToolbox sessions themselves cannot run here (no hardware
+// encoder contract on the CI Mac, and no real H.264 slices in the
+// fixtures); what runs is everything around them: the SPS facts the plan
+// reads, the plan's decision per receiver, the codec strings the master
+// declares, the hvcC record, and the remuxer's transcode wiring driven by
+// a fake transcoder that re-stamps like the real one (PTS kept, DTS = PTS,
+// forced IDR every 3 s, a few frames of encoder latency).
+
+struct BitWriter {
+    var bytes: [UInt8] = []
+    var nbits = 0
+    mutating func put(_ v: Int, _ n: Int) {
+        for i in stride(from: n - 1, through: 0, by: -1) {
+            if nbits % 8 == 0 { bytes.append(0) }
+            if (v >> i) & 1 == 1 { bytes[bytes.count - 1] |= UInt8(0x80 >> (nbits % 8)) }
+            nbits += 1
+        }
+    }
+    mutating func ue(_ v: Int) {
+        let x = v + 1
+        var len = 0
+        while (x >> len) > 1 { len += 1 }
+        put(0, len)
+        put(x, len + 1)
+    }
+    mutating func trailing() {
+        put(1, 1)
+        while nbits % 8 != 0 { put(0, 1) }
+    }
+}
+
+/// Insert emulation prevention bytes (00 00 0x -> 00 00 03 0x for x <= 3).
+func escapeRBSP(_ rbsp: [UInt8]) -> [UInt8] {
+    var out: [UInt8] = []
+    var zeros = 0
+    for b in rbsp {
+        if zeros >= 2, b <= 3 { out.append(3); zeros = 0 }
+        out.append(b)
+        zeros = b == 0 ? zeros + 1 : 0
+    }
+    return out
+}
+
+/// H.264 High level 4.2 1920x1080 SPS with VUI: BT.709, 59.94 fps
+/// (1001 / 120000), max_num_reorder_frames 2.
+func h264SPS1080p60() -> [UInt8] {
+    var w = BitWriter()
+    w.put(100, 8); w.put(0, 8); w.put(42, 8)
+    w.ue(0) // sps id
+    w.ue(1); w.ue(0); w.ue(0); w.put(0, 1); w.put(0, 1) // chroma, depths, qpprime, no scaling
+    w.ue(0); w.ue(0); w.ue(0) // log2_max_frame_num, poc type 0, log2_max_poc_lsb
+    w.ue(4); w.put(0, 1) // max refs, gaps
+    w.ue(119); w.ue(67) // 120 x 68 MBs
+    w.put(1, 1); w.put(1, 1) // frame_mbs_only, direct_8x8
+    w.put(1, 1); w.ue(0); w.ue(0); w.ue(0); w.ue(4) // crop 1088 -> 1080
+    w.put(1, 1) // vui
+    w.put(0, 1); w.put(0, 1) // aspect, overscan
+    w.put(1, 1); w.put(5, 3); w.put(0, 1); w.put(1, 1); w.put(1, 8); w.put(1, 8); w.put(1, 8)
+    w.put(0, 1) // chroma loc
+    w.put(1, 1); w.put(1001, 32); w.put(120_000, 32); w.put(1, 1)
+    w.put(0, 1); w.put(0, 1); w.put(0, 1) // nal hrd, vcl hrd, pic_struct
+    w.put(1, 1); w.put(1, 1); w.ue(0); w.ue(0); w.ue(16); w.ue(16); w.ue(2); w.ue(4)
+    w.trailing()
+    return [0x67] + escapeRBSP(w.bytes)
+}
+
+/// HEVC Main level 5.1 1920x1080 parameter sets (only the SPS is parsed).
+func hevcParameterSets() -> (vps: [UInt8], sps: [UInt8], pps: [UInt8]) {
+    var w = BitWriter()
+    w.put(0, 4); w.put(0, 3); w.put(1, 1) // vps id, max_sub_layers_minus1 0, nesting
+    w.put(0, 2); w.put(0, 1); w.put(1, 5) // space, tier, profile_idc 1 (Main)
+    w.put(0x6000_0000, 32) // compat flags 1 and 2
+    w.put(0xB0, 8); w.put(0, 40) // progressive, non-packed, frame-only
+    w.put(153, 8) // level 5.1
+    w.ue(0) // sps id
+    w.ue(1) // 4:2:0
+    w.ue(1920); w.ue(1088)
+    w.put(1, 1); w.ue(0); w.ue(0); w.ue(0); w.ue(4) // conformance 1088 -> 1080
+    w.ue(0); w.ue(0) // 8-bit
+    w.trailing()
+    let sps: [UInt8] = [0x42, 0x01] + escapeRBSP(w.bytes)
+    let vps: [UInt8] = [0x40, 0x01, 0x0C, 0x01, 0xFF, 0xFF]
+    let pps: [UInt8] = [0x44, 0x01, 0xC1, 0x72, 0xB4, 0x62, 0x40]
+    return (vps, sps, pps)
+}
+
+func boxBytes(_ type: String, _ payload: [UInt8]) -> Data {
+    let size = 8 + payload.count
+    var d = Data([UInt8((size >> 24) & 0xFF), UInt8((size >> 16) & 0xFF), UInt8((size >> 8) & 0xFF), UInt8(size & 0xFF)])
+    d.append(contentsOf: Array(type.utf8))
+    d.append(contentsOf: payload)
+    return d
+}
+
+func dataContains(_ data: Data, _ type: String) -> Bool {
+    data.range(of: Data(type.utf8)) != nil
+}
+
+/// Chromecast Ultra, measured 2026-09-26.
+let ultraCaps = CastReceiverVideoCaps(
+    mse: ["avc1.64002A": false, "hvc1": false, "hvc1.4k": false, "hev1": false],
+    display: ["h264_1080p60": false, "h264_1080p30": true, "hevc_1080p60": false,
+              "hevc_4k60": false, "h264_4k60": false])
+
+@MainActor func runVideoTranscodeChecks() {
+    // SPS facts
+    let sps = h264SPS1080p60()
+    let info = try? CastFMP4Remuxer.parseSPSInfo(sps)
+    expectEq(info?.width, 1920, "sps info: width")
+    expectEq(info?.height, 1080, "sps info: height (cropped)")
+    expectEq(info?.levelIDC, 42, "sps info: level")
+    expectEq(info?.codecString, "avc1.64002A", "sps info: codec string")
+    expectEq(info.flatMap { $0.fps.map { ($0 * 100).rounded() / 100 } }, 59.94, "sps info: VUI fps 59.94")
+    expectEq(info?.colourPrimaries, 1, "sps info: BT.709 primaries")
+    expectEq(info?.maxNumReorderFrames, 2, "sps info: max_num_reorder_frames")
+    expectEq(info?.progressive, true, "sps info: progressive")
+    let dims = try? CastFMP4Remuxer.parseSPSDimensions(sps)
+    expect(dims?.width == 1920 && dims?.height == 1080, "sps dimensions unchanged by the VUI parse")
+
+    guard let src = info else { return }
+
+    // Plan: the Ultra and 1080p59.94 -> H.264 720p at the source rate.
+    let ultra = CastVideoPlan(caps: ultraCaps)
+    let d = ultra.decide(src)
+    expectEq(d.output, CastVideoOutputSpec(codec: .h264, width: 1280, height: 720, frameStep: 1,
+                                           bitrateCap: 8_000_000), "plan: Ultra 1080p60 -> H.264 720p")
+    expectEq(ultra.logLine(source: src, decision: d),
+             "[Cast] video plan: source=avc1.64002A 1920x1080@59.94 receiver display h264_1080p60=no "
+             + "h264_1080p30=yes hevc_1080p60=no hvc1=no -> transcode H.264 720p59.94 level 4.1 (8000 kbps)",
+             "plan: log line format")
+
+    var ultra30 = ultra
+    ultra30.downProfile = .p1080p30
+    expectEq(ultra30.decide(src).output, CastVideoOutputSpec(codec: .h264, width: 1920, height: 1080,
+                                                             frameStep: 2, bitrateCap: 8_000_000),
+             "plan: 1080p30 profile halves the frame rate, keeps the size")
+
+    var s720 = src; s720.width = 1280; s720.height = 720; s720.levelIDC = 32
+    expectEq(ultra.decide(s720).output, nil, "plan: 720p60 fits the Ultra, passthrough")
+    var s1080i = src; s1080i.fps = 29.97; s1080i.progressive = false; s1080i.levelIDC = 40
+    expectEq(ultra.decide(s1080i).output, nil, "plan: 1080i29.97 fits the Ultra, passthrough")
+    var s1080p30NoVUI = src; s1080p30NoVUI.fps = nil; s1080p30NoVUI.levelIDC = 40
+    expectEq(ultra.decide(s1080p30NoVUI).output, nil, "plan: no VUI, level 4.0 reads as 30 fps")
+    var s1080p60NoVUI = src; s1080p60NoVUI.fps = nil
+    expectEq(ultra.decide(s1080p60NoVUI).output?.codec, .h264, "plan: no VUI, level 4.2 reads as 60 fps")
+
+    let hevcRx = CastVideoPlan(caps: CastReceiverVideoCaps(
+        mse: ["hvc1": true], display: ["h264_1080p60": false, "h264_1080p30": true, "hevc_1080p60": true]))
+    expectEq(hevcRx.decide(src).output, CastVideoOutputSpec(codec: .hevc, width: 1920, height: 1080,
+                                                            frameStep: 1, bitrateCap: 12_000_000),
+             "plan: HEVC receiver -> HEVC at the source size")
+    var s4K = src; s4K.width = 3840; s4K.height = 2160; s4K.levelIDC = 51
+    expectEq(hevcRx.decide(s4K).output?.width, 1920, "plan: 4K source, 1080-only HEVC -> 1080 HEVC")
+    let hevc4K = CastVideoPlan(caps: CastReceiverVideoCaps(mse: ["hvc1": true, "hvc1.4k": true],
+                                                           display: ["hevc_4k60": true]))
+    expectEq(hevc4K.decide(s4K).output, CastVideoOutputSpec(codec: .hevc, width: 3840, height: 2160,
+                                                            frameStep: 1, bitrateCap: 25_000_000),
+             "plan: 4K HEVC receiver -> 4K HEVC at 25 Mbps cap")
+
+    let streamer = CastVideoPlan(caps: CastReceiverVideoCaps(
+        mse: ["avc1.64002A": true], display: ["h264_1080p60": true, "h264_1080p30": true]))
+    expectEq(streamer.decide(src).output, nil, "plan: receiver displays 1080p60, passthrough")
+    var forced = streamer; forced.force = true
+    expectEq(forced.decide(src).output?.codec, .h264, "plan: force without HEVC -> H.264 profile")
+    expect(forced.logLine(source: src, decision: forced.decide(src)).hasSuffix("[forced]"),
+           "plan: forced log line is marked")
+    var forcedHEVC = hevcRx; forcedHEVC.force = true
+    var s720f = s720; s720f.fps = 59.94
+    expectEq(forcedHEVC.decide(s720f).output?.codec, .hevc, "plan: force with HEVC -> HEVC even when it fits")
+
+    let oldPage = CastVideoPlan(caps: CastReceiverVideoCaps(mse: ["avc1.64002A": false], display: nil))
+    expectEq(oldPage.decide(src), CastVideoDecision(output: nil, reason: "receiver sent no display caps"),
+             "plan: no display map -> passthrough")
+    expectEq(CastVideoPlan.passthrough.decide(src).output, nil, "plan: no caps -> passthrough")
+    var disabled = ultra; disabled.disabledReason = "VT failed"
+    expectEq(disabled.decide(src), CastVideoDecision(output: nil, reason: "VT failed"),
+             "plan: disabled after a failure -> passthrough")
+
+    // hvcC and codec strings
+    let ps = hevcParameterSets()
+    let parsed = CastVideoCodecConfig.parseHEVCSPS(ps.sps)
+    expect(parsed?.width == 1920 && parsed?.height == 1080, "hevc sps: 1920x1080 through emulation prevention")
+    let hvcC = CastVideoCodecConfig.buildHVCC(vps: ps.vps, sps: ps.sps, pps: ps.pps)
+    expectEq(hvcC.flatMap { CastVideoCodecConfig.hevcCodecString(hvcC: $0) }, "hvc1.1.6.L153.B0",
+             "hvcC: codec string for Main 5.1")
+    expectEq(hvcC?[21], 0x0F, "hvcC: one temporal layer, nested, 4-byte lengths")
+    expectEq(hvcC?[22], 3, "hvcC: three parameter set arrays")
+    var tier = hvcC ?? []
+    if tier.count > 13 { tier[1] |= 0x20; tier[12] = 120 }
+    expectEq(CastVideoCodecConfig.hevcCodecString(hvcC: tier), "hvc1.1.6.H120.B0", "hvcC: high tier string")
+
+    // Master playlist CODECS
+    let store = CastHLSSegmentStore()
+    var gen = store.beginGeneration()
+    let hevcInit = boxBytes("ftyp", [0, 0, 0, 0]) + boxBytes("hvcC", hvcC ?? [])
+    store.setVideoTranscoded(generation: gen, true)
+    store.setDemuxedInitSegments(generation: gen, video: hevcInit, audio: nil)
+    store.setAudioCodecsAttribute(nil)
+    expect(store.demuxedMasterPlaylistText().contains("CODECS=\"hvc1.1.6.L153.B0\""),
+           "master: HEVC transcode declares the hvcC string")
+    gen = store.beginGeneration()
+    let avc41 = boxBytes("avcC", [1, 0x64, 0x00, 0x29, 0xFF])
+    store.setVideoTranscoded(generation: gen, true)
+    store.setDemuxedInitSegments(generation: gen, video: avc41, audio: nil)
+    store.setReceiverDecodesAVCLevel42(false)
+    expect(store.demuxedMasterPlaylistText().contains("CODECS=\"avc1.640029\""),
+           "master: H.264 transcode declares avc1.640029 verbatim")
+    gen = store.beginGeneration()
+    let avc42 = boxBytes("avcC", [1, 0x64, 0x00, 0x2A, 0xFF])
+    store.setDemuxedInitSegments(generation: gen, video: avc42, audio: nil)
+    expect(store.demuxedMasterPlaylistText().contains("CODECS=\"avc1.640028\""),
+           "master: passthrough keeps the level 4.0 relabel")
+    expectEq(CastHLSSegmentStore.videoCodecString(from: avc42), "avc1.64002A", "codec string: avcC")
+
+    runTranscodeRemuxChecks(hvcC: hvcC ?? [])
+    runHEVCIngestChecks(hvcC: hvcC ?? [])
+}
+
+/// Stands in for VideoToolbox: keeps PTS, DTS = PTS, forced IDR every
+/// `keyTicks`, emits `latency` frames late, format before the first frame.
+final class FakeVideoTranscoder: CastVideoTranscoding {
+    let sink: CastVideoTranscodeSink
+    let keyTicks: Int64
+    let latency: Int
+    let config: [UInt8]
+    var held: [Int64] = []
+    var sentFormat = false
+    var lastKey: Int64 = -1
+    var fed = 0
+    var released = false
+    var failAfter: Int?
+    var lastParameterSets: [[UInt8]] = []
+
+    init(sink: CastVideoTranscodeSink, keyTicks: Int64, latency: Int, config: [UInt8], failAfter: Int? = nil) {
+        self.sink = sink; self.keyTicks = keyTicks; self.latency = latency
+        self.config = config; self.failAfter = failAfter
+    }
+
+    func feed(_ sample: [UInt8], pts: Int64, dts: Int64, keyframe: Bool, parameterSets: [[UInt8]]) {
+        fed += 1
+        lastParameterSets = parameterSets
+        if let failAfter, fed == failAfter { sink.onFailure("fake VT error"); return }
+        if held.isEmpty && lastKey < 0 && !keyframe { return }
+        held.append(pts)
+        while held.count > latency {
+            let p = held.removeFirst()
+            if !sentFormat { sentFormat = true; sink.onFormat(.hevc, config, 1920, 1080) }
+            let key = lastKey < 0 || p - lastKey >= keyTicks
+            if key { lastKey = p }
+            sink.onSample([0, 0, 0, 3, 0x26, 0x01, 0xAF], p, key)
+        }
+    }
+
+    func release() { released = true }
+}
+
+@MainActor func runTranscodeRemuxChecks(hvcC: [UInt8]) {
+    // 12 s of 30 fps H.264, source GOP 1 s, audio 170 ms behind in mux order.
+    let (bytes, inputFrames) = straddlingCensusTS(videoFrames: 360, videoFrameTicks: 3_000,
+                                                  gop: 30, frameLen: 400, audioLagTicks: 15_300)
+    var result = CensusResult()
+    var videoInit: Data?
+    var fake: FakeVideoTranscoder?
+    var plan = CastVideoPlan(caps: ultraCaps)
+    plan.force = true
+    let remuxer = CastFMP4Remuxer(
+        videoPlan: plan, videoDelivery: { block in block() },
+        log: { result.logs.append($0) },
+        videoTranscoderFactory: { _, spec, keyTicks, sink, _ in
+            let f = FakeVideoTranscoder(sink: sink, keyTicks: keyTicks, latency: 6, config: hvcC)
+            fake = f
+            _ = spec
+            return f
+        })
+    remuxer.onDemuxedInitSegments = { v, _ in videoInit = v }
+    remuxer.onDemuxedMediaSegments = { v, a, ticks, _ in
+        result.segments.append((v, a))
+        result.durations.append(ticks)
+    }
+    remuxer.onSegmentComposition = { _, audio, _, _, _, _ in result.audioCounts.append(audio) }
+    var offset = 0
+    while offset < bytes.count {
+        let n = min(64 * 1024, bytes.count - offset)
+        try? remuxer.feed(bytes.subdata(in: offset..<(offset + n)))
+        offset += n
+    }
+    remuxer.release()
+
+    expect(result.logs.contains { $0.hasPrefix("[Cast] video plan:") && $0.contains("-> transcode") },
+           "transcode remux: plan line logged")
+    expect(remuxer.videoIsTranscoded, "transcode remux: video path is the transcoder")
+    expect(fake?.released == true, "transcode remux: release reaches the transcoder")
+    expect(videoInit.map { dataContains($0, "hvc1") && dataContains($0, "hvcC") && !dataContains($0, "avcC") } == true,
+           "transcode remux: init carries hvc1 + hvcC only")
+    expectEq(videoInit.flatMap { CastHLSSegmentStore.videoCodecString(from: $0) }, "hvc1.1.6.L153.B0",
+             "transcode remux: init codec string")
+    // Every segment but the tail is cut on a forced IDR 3 s after the last.
+    let full = result.durations.dropLast()
+    expect(!full.isEmpty && full.allSatisfy { $0 == 270_000 },
+           "transcode remux: segments cut exactly on the 3 s encoder IDRs (\(result.durations))")
+    // Every video traf opens on a sync sample with DTS == PTS.
+    var syncFirst = true
+    for seg in result.segments {
+        let b = [UInt8](seg.video)
+        guard let trun = b.indices.first(where: { $0 + 3 < b.count && b[$0] == 0x74 && b[$0 + 1] == 0x72
+                                                  && b[$0 + 2] == 0x75 && b[$0 + 3] == 0x6E }) else {
+            syncFirst = false; continue
+        }
+        // trun: type, version/flags(4), count(4), data_offset(4), then
+        // duration, size, flags, cts per sample.
+        let flagsAt = trun + 4 + 4 + 4 + 4 + 4 + 4
+        let ctsAt = flagsAt + 4
+        if flagsAt + 8 > b.count { syncFirst = false; continue }
+        if be32(b, flagsAt) != 0x0200_0000 || be32(b, ctsAt) != 0 { syncFirst = false }
+    }
+    expect(syncFirst, "transcode remux: each segment opens on a sync sample, composition offset 0")
+    // Audio demuxed while the encoder warmed up is kept: the interior
+    // segments match the passthrough census frame for frame. The allowance
+    // is passthrough's 52 plus the audio under the 6 frames still inside
+    // the encoder at teardown (6 x 3000 ticks = 9.4 AAC frames), which the
+    // tail trims to the last encoded video.
+    censusChecks("transcode", result, inputFrames: inputFrames, lossAllowance: 62, minSegments: 3)
+
+    // Failure: the next feed throws CastVideoTranscodeError, callback first.
+    var failedReason: String?
+    let failing = CastFMP4Remuxer(
+        videoPlan: plan, videoDelivery: { block in block() },
+        videoTranscoderFactory: { _, _, keyTicks, sink, _ in
+            FakeVideoTranscoder(sink: sink, keyTicks: keyTicks, latency: 2, config: hvcC, failAfter: 5)
+        })
+    failing.onVideoTranscodeFailed = { failedReason = $0 }
+    var thrown: Error?
+    offset = 0
+    while offset < bytes.count, thrown == nil {
+        let n = min(4 * 1024, bytes.count - offset)
+        do { try failing.feed(bytes.subdata(in: offset..<(offset + n))) } catch { thrown = error }
+        offset += n
+    }
+    expectEq(failedReason, "fake VT error", "transcode failure: callback carries the reason")
+    expect(thrown is CastVideoTranscodeError, "transcode failure: feed throws for the reconnect")
+
+    // No delivery queue (a caller that never wired one): passthrough.
+    let plain = CastFMP4Remuxer(videoPlan: plan)
+    var plainInit: Data?
+    plain.onDemuxedInitSegments = { v, _ in plainInit = v }
+    try? plain.feed(bytes.subdata(in: 0..<min(256 * 1024, bytes.count)))
+    expect(plainInit.map { dataContains($0, "avcC") } == true && !plain.videoIsTranscoded,
+           "transcode remux: no delivery queue keeps passthrough")
+}
+
+// MARK: 18. HEVC ingest: SPS / VPS facts, codec-aware plan, passthrough (2026-09-27)
+//
+// Measured: a Google TV Streamer answered hevc_1080p60=yes hevc_4k60=no
+// h264_4k60=yes hvc1=yes; a 4K HEVC channel was refused by name before
+// this, because the remuxer only took stream_type 0x1B.
+
+/// Google TV Streamer, measured 2026-09-27.
+let streamerCaps = CastReceiverVideoCaps(
+    mse: ["h264": true, "hvc1": true, "hvc1.4k": false, "hev1": true],
+    display: ["h264_1080p60": true, "h264_1080p30": true, "hevc_1080p60": true,
+              "hevc_4k60": false, "h264_4k60": true])
+
+extension BitWriter {
+    mutating func se(_ v: Int) { ue(v > 0 ? 2 * v - 1 : -2 * v) }
+}
+
+/// HEVC Main10 level 5.1 3840x2160 SPS carrying the whole tail the plan
+/// reads past: 10-bit, reorder 2 at the highest sub-layer, scaling list
+/// data (one explicit 4x4 list, one explicit 16x16 with its DC), two
+/// short-term RPS (the second inter-predicted from the first), then a VUI
+/// with BT.2020 / HLG / BT.2020nc and 50 fps timing.
+func hevcSPS4K50HLG() -> [UInt8] {
+    var w = BitWriter()
+    w.put(0, 4); w.put(0, 3); w.put(1, 1) // vps id, max_sub_layers_minus1 0, nesting
+    w.put(0, 2); w.put(0, 1); w.put(2, 5) // space, tier, profile_idc 2 (Main10)
+    w.put(0x2000_0000, 32) // compat flag 2
+    w.put(0xB0, 8); w.put(0, 40)
+    w.put(153, 8) // level 5.1
+    w.ue(0) // sps id
+    w.ue(1) // 4:2:0
+    w.ue(3840); w.ue(2160)
+    w.put(0, 1) // no conformance window
+    w.ue(2); w.ue(2) // 10-bit luma and chroma
+    w.ue(4) // log2_max_pic_order_cnt_lsb_minus4
+    w.put(0, 1) // ordering info for the highest sub-layer only
+    w.ue(4); w.ue(2); w.ue(0) // dec pic buffering, num_reorder_pics 2, latency
+    w.ue(0); w.ue(3); w.ue(0); w.ue(3); w.ue(1); w.ue(1) // block sizes, hierarchy depths
+    w.put(1, 1); w.put(1, 1) // scaling_list_enabled, data present
+    for sizeId in 0..<4 {
+        for matrixId in stride(from: 0, to: 6, by: sizeId == 3 ? 3 : 1) {
+            if matrixId == 0 && (sizeId == 0 || sizeId == 2) {
+                w.put(1, 1)
+                if sizeId == 2 { w.se(8) } // DC
+                for _ in 0..<(sizeId == 0 ? 16 : 64) { w.se(1) }
+            } else {
+                w.put(0, 1); w.ue(0)
+            }
+        }
+    }
+    w.put(0, 1); w.put(1, 1) // amp off, SAO on
+    w.put(0, 1) // pcm off
+    w.ue(2) // two short-term RPS
+    w.ue(1); w.ue(0); w.ue(0); w.put(1, 1) // set 0: one negative picture, used
+    w.put(1, 1); w.put(0, 1); w.ue(0) // set 1: predicted, sign, abs_delta_rps_minus1
+    w.put(1, 1) // j 0: used
+    w.put(0, 1); w.put(1, 1) // j 1: not used, use_delta
+    w.put(0, 1) // no long-term pictures
+    w.put(1, 1); w.put(1, 1) // temporal mvp, strong intra smoothing
+    w.put(1, 1) // vui
+    w.put(1, 1); w.put(1, 8) // aspect_ratio_idc 1
+    w.put(0, 1) // overscan
+    w.put(1, 1); w.put(5, 3); w.put(0, 1); w.put(1, 1); w.put(9, 8); w.put(18, 8); w.put(9, 8)
+    w.put(0, 1) // chroma loc
+    w.put(0, 1); w.put(0, 1); w.put(0, 1) // neutral chroma, field_seq, frame_field_info
+    w.put(0, 1) // default display window
+    w.put(1, 1); w.put(1, 32); w.put(50, 32) // 50 fps
+    w.put(0, 1); w.put(0, 1); w.put(0, 1) // poc proportional, hrd, bitstream restriction
+    w.put(0, 1) // sps_extension_present
+    w.trailing()
+    return [0x42, 0x01] + escapeRBSP(w.bytes)
+}
+
+/// HEVC VPS with 59.94 fps timing (60000 / 1001).
+func hevcVPSWithTiming() -> [UInt8] {
+    var w = BitWriter()
+    w.put(0, 4); w.put(1, 1); w.put(1, 1); w.put(0, 6) // id, base layer flags, max_layers_minus1
+    w.put(0, 3); w.put(1, 1); w.put(0xFFFF, 16) // max_sub_layers_minus1, nesting, reserved
+    w.put(0, 2); w.put(0, 1); w.put(1, 5); w.put(0x6000_0000, 32); w.put(0xB0, 8); w.put(0, 40); w.put(123, 8)
+    w.put(1, 1); w.ue(4); w.ue(2); w.ue(0) // ordering info
+    w.put(0, 6); w.ue(0) // max_layer_id, num_layer_sets_minus1
+    w.put(1, 1); w.put(1001, 32); w.put(60000, 32)
+    w.put(0, 1); w.ue(0); w.put(0, 1) // poc proportional, num_hrd, extension
+    w.trailing()
+    return [0x40, 0x01] + escapeRBSP(w.bytes)
+}
+
+@MainActor func runHEVCIngestChecks(hvcC: [UInt8]) {
+    // SPS parser: the whole tail
+    let sps4K = hevcSPS4K50HLG()
+    let full = CastVideoCodecConfig.parseHEVCSPS(sps4K)
+    expect(full?.width == 3840 && full?.height == 2160, "hevc sps: 3840x2160, no conformance window")
+    expectEq(full?.bitDepthLumaMinus8, 2, "hevc sps: 10-bit luma")
+    expectEq(full?.generalProfileIDC, 2, "hevc sps: Main10 profile")
+    expectEq(full?.generalLevelIDC, 153, "hevc sps: level 5.1")
+    expectEq(full?.maxNumReorderPics, 2, "hevc sps: reorder depth through the ordering info")
+    expectEq(full?.fps, 50, "hevc sps: VUI 50 fps past scaling lists and an inter-predicted RPS")
+    expect(full?.colourPrimaries == 9 && full?.transferCharacteristics == 18 && full?.matrixCoefficients == 9,
+           "hevc sps: BT.2020 / HLG / BT.2020nc colour description")
+    expectEq(full?.fieldCoding, false, "hevc sps: progressive")
+    let info = CastVideoCodecConfig.hevcStreamInfo(sps: sps4K, vps: nil)
+    expectEq(info?.codec, .hevc, "hevc info: codec")
+    expectEq(info?.bitDepth, 10, "hevc info: bit depth")
+    expectEq(info?.codecString, "hvc1.2.4.L153.B0", "hevc info: hvc1 string from the PTL")
+    expectEq(info?.levelLabel, "5.1", "hevc info: level label")
+    expectEq(info?.maxNumReorderFrames, 2, "hevc info: reorder depth")
+    // Minimal SPS (ends after the bit depths): the tail is best effort.
+    let ps = hevcParameterSets()
+    let small = CastVideoCodecConfig.hevcStreamInfo(sps: ps.sps, vps: nil)
+    expect(small?.width == 1920 && small?.height == 1080 && small?.fps == nil,
+           "hevc info: truncated tail keeps the size, fps unknown")
+    // VPS timing fills in a frame rate the SPS lacks.
+    let vps = hevcVPSWithTiming()
+    expectEq(CastVideoCodecConfig.parseHEVCVPSFrameRate(vps).map { ($0 * 100).rounded() / 100 }, 59.94,
+             "hevc vps: 60000 / 1001 timing")
+    expectEq(CastVideoCodecConfig.hevcStreamInfo(sps: ps.sps, vps: vps)?.fps.map { ($0 * 100).rounded() / 100 },
+             59.94, "hevc info: VPS timing when the SPS VUI has none")
+    expectEq(CastVideoCodecConfig.parseHEVCVPSFrameRate(ps.vps), nil, "hevc vps: truncated VPS reads nil")
+
+    guard let src4K = info, let src1080 = small else { return }
+
+    // Codec-aware plan
+    let streamer = CastVideoPlan(caps: streamerCaps)
+    let d4K = streamer.decide(src4K)
+    expectEq(d4K.output, CastVideoOutputSpec(codec: .hevc, width: 1920, height: 1080, frameStep: 1,
+                                             bitrateCap: 12_000_000),
+             "hevc plan: Streamer 4K50 HEVC -> HEVC 1080 at the source rate")
+    let o4K = CastVideoPlanOutcome(source: src4K, decision: d4K)
+    expectEq(o4K.sourceDescription, "HEVC 3840x2160 at 50fps HDR", "hevc note: source line")
+    expectEq(o4K.outputDescription, "HEVC 1920x1080 at 50fps", "hevc note: output line")
+    expectEq(streamer.logLine(source: src4K, decision: d4K),
+             "[Cast] video plan: source=hvc1.2.4.L153.B0 3840x2160@50 10-bit HDR HLG receiver display "
+             + "h264_1080p60=yes h264_1080p30=yes hevc_1080p60=yes hevc_4k60=no hvc1=yes "
+             + "hevc_1080p60_hlg=no hevc_4k60_hlg=no hvc1.hlg=no "
+             + "-> transcode HEVC 1080p50 (12000 kbps) HDR HLG -> SDR BT.709",
+             "hevc plan: log line")
+    expectEq(streamer.decide(src1080).output, nil, "hevc plan: Streamer 1080 HEVC passes through")
+    var hevc4KRx = streamerCaps; hevc4KRx.display?["hevc_4k60"] = true
+    hevc4KRx.display?["hevc_4k60_hlg"] = true
+    expectEq(CastVideoPlan(caps: hevc4KRx).decide(src4K).output, nil,
+             "hevc plan: receiver displaying HEVC 4K60 HLG passes 4K HLG through")
+    var mseOnly4K = streamerCaps; mseOnly4K.mse["hvc1.4k"] = true
+    expectEq(CastVideoPlan(caps: mseOnly4K).decide(src4K).output?.width, 1920,
+             "hevc plan: MSE hvc1.4k without display hevc_4k60 still goes to 1080, never a 4K re-encode")
+
+    let ultra = CastVideoPlan(caps: ultraCaps)
+    expectEq(ultra.decide(src4K).output, CastVideoOutputSpec(codec: .h264, width: 1280, height: 720,
+                                                             frameStep: 1, bitrateCap: 8_000_000),
+             "hevc plan: Ultra 4K HEVC -> H.264 720p")
+    expectEq(CastVideoPlanOutcome(source: src4K, decision: ultra.decide(src4K)).outputDescription,
+             "H.264 1280x720 at 50fps", "hevc note: H.264 output line")
+    var ultra30 = ultra; ultra30.downProfile = .p1080p30
+    let d30 = ultra30.decide(src4K)
+    expectEq(d30.output, CastVideoOutputSpec(codec: .h264, width: 1920, height: 1080, frameStep: 2,
+                                             bitrateCap: 8_000_000),
+             "hevc plan: Ultra 1080p30 profile -> H.264 1080 at half rate")
+    expectEq(CastVideoPlanOutcome(source: src4K, decision: d30).outputDescription,
+             "H.264 1920x1080 at 25fps", "hevc note: half-rate output line")
+    expectEq(ultra.decide(src1080).output?.codec, .h264, "hevc plan: Ultra 1080 HEVC -> H.264")
+    var s720 = src1080; s720.width = 1280; s720.height = 720
+    expectEq(ultra.decide(s720).output?.codec, .h264, "hevc plan: 720 HEVC without MSE hvc1 -> H.264")
+    expectEq(streamer.decide(s720).output, nil, "hevc plan: 720 HEVC with MSE hvc1 passes through")
+
+    // No caps: transcode rather than refuse or pass blind; H.264 is unchanged.
+    let blind = CastVideoPlan.passthrough.decide(src4K)
+    expectEq(blind, CastVideoDecision(output: CastVideoOutputSpec(codec: .h264, width: 1280, height: 720,
+                                                                  frameStep: 1, bitrateCap: 8_000_000),
+                                      reason: "receiver caps not measured"),
+             "hevc plan: no caps -> H.264 down profile")
+    let oldPage = CastVideoPlan(caps: CastReceiverVideoCaps(mse: ["hvc1": true], display: nil))
+    expectEq(oldPage.decide(src1080).output, nil, "hevc plan: no display map, MSE hvc1 -> 1080 passes")
+    expectEq(oldPage.decide(src4K).output?.codec, .hevc, "hevc plan: no display map, 4K -> HEVC 1080")
+    let oldPageNoHEVC = CastVideoPlan(caps: CastReceiverVideoCaps(mse: [:], display: nil))
+    expectEq(oldPageNoHEVC.decide(src1080),
+             CastVideoDecision(output: CastVideoOutputSpec(codec: .h264, width: 1280, height: 720,
+                                                           frameStep: 1, bitrateCap: 8_000_000),
+                               reason: "receiver sent no display caps"),
+             "hevc plan: no display map, no hvc1 -> H.264 down profile")
+
+    var forced = streamer; forced.force = true
+    expectEq(forced.decide(src1080).output?.codec, .hevc, "hevc plan: force on an HEVC receiver -> HEVC")
+    var disabled = ultra; disabled.disabledReason = "VT failed"
+    expectEq(disabled.decide(src4K), CastVideoDecision(output: nil, reason: "VT failed"),
+             "hevc plan: disabled after a failure -> passthrough")
+    expectEq(CastVideoPlan.fpsLabel(59.94), "59.94", "fps label: 59.94")
+    expectEq(CastVideoPlan.fpsLabel(50), "50", "fps label: 50")
+    expectEq(CastVideoPlan.fpsLabel(59.9), "59.9", "fps label: trailing zero trimmed")
+
+    // Passthrough remux: hvc1 + hvcC from the source sets, sets out of the samples.
+    let (bytes, _) = straddlingCensusTS(videoFrames: 240, videoFrameTicks: 3_000, gop: 30,
+                                        frameLen: 400, audioLagTicks: 0, hevc: true)
+    var outcome: CastVideoPlanOutcome?
+    var videoInit: Data?
+    var segments: [Data] = []
+    let pass = CastFMP4Remuxer(videoPlan: CastVideoPlan(caps: streamerCaps))
+    pass.onVideoDecision = { outcome = $0 }
+    pass.onDemuxedInitSegments = { v, _ in videoInit = v }
+    pass.onDemuxedMediaSegments = { v, _, _, _ in segments.append(v) }
+    var thrown: Error?
+    do { try pass.feed(bytes) } catch { thrown = error }
+    pass.release()
+    expect(thrown == nil, "hevc remux: stream_type 0x24 is accepted")
+    expectEq(outcome?.source.codec, .hevc, "hevc remux: decision reported with the HEVC source")
+    expectEq(outcome?.decision.output, nil, "hevc remux: Streamer 1080 passes through")
+    expectEq(pass.videoPathDescription, "HEVC passthrough", "hevc remux: Stream Info path")
+    expect(videoInit.map { dataContains($0, "hvc1") && dataContains($0, "hvcC") && !dataContains($0, "avcC") } == true,
+           "hevc remux: init carries hvc1 + hvcC only")
+    expectEq(videoInit.flatMap { CastHLSSegmentStore.videoCodecString(from: $0) }, "hvc1.1.6.L153.B0",
+             "hevc remux: init codec string from the source sets")
+    expect(segments.count >= 2, "hevc remux: segments emitted (\(segments.count))")
+    expect(segments.allSatisfy { $0.range(of: Data(ps.vps)) == nil && $0.range(of: Data(ps.sps)) == nil },
+           "hevc remux: parameter sets stripped from the samples (hvc1)")
+
+    // Transcode wiring: the Ultra takes no HEVC, so the fake gets
+    // [VPS, SPS, PPS] and the plan reports an H.264 output.
+    var fake: FakeVideoTranscoder?
+    var tOutcome: CastVideoPlanOutcome?
+    let trans = CastFMP4Remuxer(
+        videoPlan: CastVideoPlan(caps: ultraCaps), videoDelivery: { block in block() },
+        videoTranscoderFactory: { _, _, keyTicks, sink, _ in
+            let f = FakeVideoTranscoder(sink: sink, keyTicks: keyTicks, latency: 2, config: hvcC)
+            fake = f
+            return f
+        })
+    trans.onVideoDecision = { tOutcome = $0 }
+    try? trans.feed(bytes)
+    trans.release()
+    expect(trans.videoIsTranscoded, "hevc transcode: video path is the transcoder")
+    expectEq(fake?.lastParameterSets, [ps.vps, ps.sps, ps.pps], "hevc transcode: VPS, SPS, PPS handed over")
+    expectEq(tOutcome?.outputDescription, "H.264 1280x720", "hevc transcode: note output, fps unknown omitted")
+    expectEq(trans.videoPathDescription, "HEVC -> H.264 1280x720", "hevc transcode: Stream Info path")
+}
+
+runVideoTranscodeChecks()
+
+// MARK: 19. HDR plan rules and the three-line note (2026-09-27)
+//
+// Measured: Sky Sports Main Event UHD is HEVC Main10 3840x2160@50 HLG
+// BT.2020. The Ultra got 8-bit H.264 with no tone map and looked washed
+// out; the plan now keeps HDR only where the receiver answers yes.
+
+@MainActor func runHDRPlanChecks() {
+    guard let hlg4K = CastVideoCodecConfig.hevcStreamInfo(sps: hevcSPS4K50HLG(), vps: nil) else {
+        expect(false, "hdr: 4K HLG SPS parses"); return
+    }
+    expectEq(hlg4K.hdrTransfer, .hlg, "hdr: transfer 18 reads as HLG")
+    expect(hlg4K.isHDR, "hdr: HLG source is HDR")
+    var pq4K = hlg4K; pq4K.transferCharacteristics = 16
+    expectEq(pq4K.hdrTransfer, .pq, "hdr: transfer 16 reads as PQ")
+    var sdr4K = hlg4K; sdr4K.transferCharacteristics = 1; sdr4K.colourPrimaries = 1
+    expect(!sdr4K.isHDR, "hdr: BT.709 source is SDR")
+    var hlg1080 = hlg4K; hlg1080.width = 1920; hlg1080.height = 1080
+    var hlg720 = hlg4K; hlg720.width = 1280; hlg720.height = 720
+
+    // Passthrough needs the HDR key at the source size class.
+    var sdrOnly4K = streamerCaps; sdrOnly4K.display?["hevc_4k60"] = true
+    let d = CastVideoPlan(caps: sdrOnly4K).decide(hlg4K)
+    expectEq(d.output, CastVideoOutputSpec(codec: .hevc, width: 1920, height: 1080, frameStep: 1,
+                                           bitrateCap: 12_000_000, hdr: false),
+             "hdr: 4K SDR yes, no HLG key -> HEVC 1080 SDR (tone mapped)")
+    expectEq(d.unsupported, ["HDR"], "hdr: only HDR ruled out")
+    var hdr4K = sdrOnly4K; hdr4K.display?["hevc_4k60_hlg"] = true
+    expectEq(CastVideoPlan(caps: hdr4K).decide(hlg4K).output, nil, "hdr: 4K HLG key -> passthrough")
+    expect(CastVideoPlan(caps: hdr4K).decide(pq4K).output != nil, "hdr: HLG key does not pass a PQ source")
+    var hdr1080 = streamerCaps; hdr1080.display?["hevc_1080p60_hlg"] = true
+    expectEq(CastVideoPlan(caps: hdr1080).decide(hlg1080).output, nil, "hdr: 1080 HLG key -> 1080 passthrough")
+    expect(CastVideoPlan(caps: streamerCaps).decide(hlg1080).output != nil,
+           "hdr: 1080 HEVC SDR yes without the HLG key -> transcode")
+    var mseHLG = streamerCaps; mseHLG.mse["hvc1.hlg"] = true
+    expectEq(CastVideoPlan(caps: mseHLG).decide(hlg720).output, nil, "hdr: 720 with MSE hvc1.hlg -> passthrough")
+    expect(CastVideoPlan(caps: mseHLG).decide(hlg1080).output != nil,
+           "hdr: MSE hvc1.hlg does not vouch for 1080")
+
+    // Transcode keeps HDR only with the key for the OUTPUT size class.
+    let keep = CastVideoPlan(caps: hdr1080).decide(hlg4K)
+    expectEq(keep.output, CastVideoOutputSpec(codec: .hevc, width: 1920, height: 1080, frameStep: 1,
+                                              bitrateCap: 12_000_000, hdr: true),
+             "hdr: 4K HLG, 1080 HLG key -> HEVC 1080 HDR kept")
+    expectEq(keep.unsupported, ["4K"], "hdr: Streamer with 1080 HLG rules out 4K only")
+    let keepOutcome = CastVideoPlanOutcome(source: hlg4K, decision: keep)
+    expectEq(keepOutcome.outputDescription, "HEVC 1920x1080 at 50fps HDR", "hdr note: kept output line")
+    expect(CastVideoTranscoder.outputTenBit(source: hlg4K, spec: keep.output!), "hdr: kept output is Main10")
+    let streamerD = CastVideoPlan(caps: streamerCaps).decide(hlg4K)
+    expectEq(streamerD.output?.hdr, false, "hdr: Streamer without HDR keys -> SDR HEVC 1080")
+    expect(!CastVideoTranscoder.outputTenBit(source: hlg4K, spec: streamerD.output!),
+           "hdr: tone-mapped HEVC output is 8-bit Main")
+    expectEq(streamerD.unsupported, ["4K", "HDR"], "hdr: Streamer rules out 4K, HDR")
+    var hevc8Bit10 = sdr4K; hevc8Bit10.width = 3840
+    expect(CastVideoTranscoder.outputTenBit(source: hevc8Bit10, spec: streamerD.output!),
+           "hdr: 10-bit SDR HEVC source keeps Main10")
+
+    // Chromecast Ultra: H.264, always SDR, full three-line note.
+    let ultraD = CastVideoPlan(caps: ultraCaps).decide(hlg4K)
+    expectEq(ultraD.output, CastVideoOutputSpec(codec: .h264, width: 1280, height: 720, frameStep: 1,
+                                                bitrateCap: 8_000_000, hdr: false),
+             "hdr: Ultra -> H.264 720p SDR")
+    let ultraOutcome = CastVideoPlanOutcome(source: hlg4K, decision: ultraD)
+    expectEq(ultraOutcome.sourceDescription, "HEVC 3840x2160 at 50fps HDR", "hdr note: source line")
+    expectEq(ultraOutcome.outputDescription, "H.264 1280x720 at 50fps", "hdr note: output line")
+    expectEq(ultraOutcome.receiverLine(deviceName: "Travel Chromecast TV"),
+             "Your Travel Chromecast TV doesn't support HEVC, 4K, HDR", "hdr note: receiver line")
+    expectEq(ultraOutcome.receiverLine(deviceName: nil),
+             "This receiver doesn't support HEVC, 4K, HDR", "hdr note: unnamed receiver")
+    var ultraHDR = ultraCaps; ultraHDR.display?["hevc_4k60_hlg"] = true
+    expectEq(CastVideoPlan(caps: ultraHDR).decide(hlg4K).output?.codec, .h264,
+             "hdr: an HDR yes without HEVC SDR yes still goes to H.264 (never HDR H.264)")
+
+    // H.264 sources: 1080p60 vs 1080p on the list.
+    let h264 = try? CastFMP4Remuxer.parseSPSInfo(h264SPS1080p60())
+    if let h264 {
+        expectEq(CastVideoPlan(caps: ultraCaps).decide(h264).unsupported, ["1080p60"],
+                 "note list: Ultra rules out 1080p60 for an H.264 1080p59.94 source")
+        var no1080 = ultraCaps; no1080.display?["h264_1080p30"] = false
+        expectEq(CastVideoPlan(caps: no1080).decide(h264).unsupported, ["1080p"],
+                 "note list: no 1080 at all -> 1080p")
+    }
+
+    // Forced and unmeasured.
+    var forced = CastVideoPlan(caps: streamerCaps); forced.force = true
+    let fo = CastVideoPlanOutcome(source: hlg1080, decision: forced.decide(hlg1080))
+    expectEq(fo.receiverLine(deviceName: "Den TV"), "Transcode forced by the Developer switch",
+             "hdr note: forced line")
+    let blind = CastVideoPlanOutcome(source: hlg4K, decision: CastVideoPlan.passthrough.decide(hlg4K))
+    expectEq(blind.decision.output?.hdr, false, "hdr: no caps -> H.264 SDR")
+    expectEq(blind.receiverLine(deviceName: "Den TV"), "Your Den TV didn't report what it supports",
+             "hdr note: no caps line")
+    expectEq(CastVideoPlanOutcome(source: hlg4K, decision: CastVideoPlan(caps: hdr4K).decide(hlg4K))
+                .receiverLine(deviceName: "Den TV"), nil, "hdr note: passthrough has no note")
+}
+
+runHDRPlanChecks()
+
+// MARK: 18. In-place AirPlay flip: LAN / loopback playlist splice (2026-09-27)
+//
+// The flip keeps one remuxer and one playlist URL; the new channel's
+// first segment carries EXT-X-DISCONTINUITY and the media sequence just
+// continues. TSHLSPlaylist is the renderer every TSHLSRemuxer playlist
+// (loopback, LAN, in-process) goes through.
+
+@MainActor func runInPlaceFlipPlaylistChecks() {
+    func window(_ seqs: ClosedRange<Int>, _ d: Double = 2.5) -> [TSHLSPlaylist.Entry] {
+        seqs.map { TSHLSPlaylist.Entry(seq: $0, duration: d, uri: "seg\($0).ts") }
+    }
+    func count(_ text: String, _ needle: String) -> Int { text.components(separatedBy: needle).count - 1 }
+
+    // No flip yet: byte-identical to the pre-flip format (no DSEQ line).
+    let plain = TSHLSPlaylist.render(window: window(3...3, 2.0), targetDuration: 4, version: 3,
+                                     discontinuitySeqs: [], eventPlaylist: false, mapURI: nil, complete: false)
+    expectEq(plain, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:3\n#EXTINF:2.000,\nseg3.ts\n",
+             "flip playlist: no discontinuity renders the classic text")
+    expectEq(TSHLSPlaylist.emptyText(targetDuration: 4),
+             "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n",
+             "flip playlist: empty playlist text")
+
+    // Flip at seq 14: the receiver's window straddles both channels.
+    let straddle = TSHLSPlaylist.render(window: window(10...17), targetDuration: 4, version: 3,
+                                        discontinuitySeqs: [14], eventPlaylist: false, mapURI: nil, complete: false)
+    expect(straddle.contains("#EXT-X-MEDIA-SEQUENCE:10\n"), "flip playlist: media sequence continues across the flip")
+    expect(straddle.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0\n"), "flip playlist: DSEQ 0 while the tag is in the window")
+    expectEq(count(straddle, "#EXT-X-DISCONTINUITY\n"), 1, "flip playlist: exactly one discontinuity tag")
+    expect(straddle.contains("seg13.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:2.500,\nseg14.ts\n"),
+           "flip playlist: the tag sits right before the new channel's first segment")
+    expect(straddle.contains("#EXT-X-TARGETDURATION:4\n"), "flip playlist: fixed LAN target duration kept")
+
+    // The tagged segment slid out: DSEQ bumps, tag gone.
+    let after = TSHLSPlaylist.render(window: window(15...22), targetDuration: 4, version: 3,
+                                     discontinuitySeqs: [14], eventPlaylist: false, mapURI: nil, complete: false)
+    expect(after.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1\n"), "flip playlist: DSEQ 1 once the tag slid out")
+    expectEq(count(after, "#EXT-X-DISCONTINUITY\n"), 0, "flip playlist: no tag after it slid out")
+
+    // Two flips: only the one still in the window is tagged.
+    let two = TSHLSPlaylist.render(window: window(15...22), targetDuration: 4, version: 3,
+                                   discontinuitySeqs: [14, 20], eventPlaylist: false, mapURI: nil, complete: false)
+    expect(two.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1\n"), "flip playlist: two flips, DSEQ counts the slid one")
+    expectEq(count(two, "#EXT-X-DISCONTINUITY\n"), 1, "flip playlist: two flips, one tag in the window")
+    expect(two.contains("#EXT-X-DISCONTINUITY\n#EXTINF:2.500,\nseg20.ts"), "flip playlist: second flip tagged")
+    expectEq(TSHLSPlaylist.discontinuitySequence(firstSeq: 21, discontinuitySeqs: [14, 20]), 2,
+             "flip playlist: DSEQ 2 once both slid out")
+
+    // Header order for the other variants (event, fMP4 map, finished).
+    let event = TSHLSPlaylist.render(window: window(0...1), targetDuration: 2, version: 7,
+                                     discontinuitySeqs: [1], eventPlaylist: true, mapURI: "init.mp4", complete: true)
+    expect(event.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MAP:URI=\"init.mp4\"\n"),
+           "flip playlist: DSEQ, event and map order")
+    expect(event.hasSuffix("seg1.ts\n#EXT-X-ENDLIST\n"), "flip playlist: ENDLIST last")
+
+    // Receiver crossing: first fetch of a new-generation segment.
+    expect(!TSHLSPlaylist.receiverCrossed(receiverHighestSeq: -1, generationFirstSeq: 0),
+           "flip cross: nothing fetched is not a crossing")
+    expect(!TSHLSPlaylist.receiverCrossed(receiverHighestSeq: 13, generationFirstSeq: 14),
+           "flip cross: still on the old channel")
+    expect(TSHLSPlaylist.receiverCrossed(receiverHighestSeq: 14, generationFirstSeq: 14),
+           "flip cross: first new-generation segment fetched")
+
+    // LAN audio stage (Roku AAC rewrite): the old channel's codec / PES
+    // state never runs into the new one across the flip.
+    var fakes: [FakeCastAudioTranscoder] = []
+    let stage = TSLANAudioStage(rewriter: TSLANAudioRewriter(log: { _ in }, canDecode: { _ in true },
+                                                             transcoderFactory: { _, c, f in
+        let fake = FakeCastAudioTranscoder(onConfig: c, onFrame: f)
+        fakes.append(fake)
+        return fake
+    }))
+    var seg: [UInt8] = syntheticPAT() + syntheticPMT()
+    for p in packetsFor(pid: 0x100, pes: pesBytes(streamID: 0xE0, pts: 900_000, payload: [0, 0, 0, 1, 0x65, 0x88])) { seg += p }
+    var acc: UInt8 = 0
+    seg += TSLANAudioRewriter.packetizePES(payload: ac3Frame(), pts: 900_000, pid: 0x101, cc: &acc)
+    _ = stage.produce(seq: 5, sources: [(5, Data(seg))], oldestSeq: 0, discontinuities: [7])
+    _ = stage.produce(seq: 6, sources: [(6, Data(seg))], oldestSeq: 0, discontinuities: [7])
+    let flushesBefore = fakes.reduce(0) { $0 + $1.flushes }
+    expectEq(flushesBefore, 0, "flip stage: contiguous same-source segments keep codec state")
+    _ = stage.produce(seq: 7, sources: [(7, Data(seg))], oldestSeq: 0, discontinuities: [7])
+    expectEq(fakes.reduce(0) { $0 + $1.flushes }, 1, "flip stage: the new channel's first segment resets the rewriter")
+}
+
+runInPlaceFlipPlaylistChecks()
 
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

@@ -487,7 +487,7 @@ struct AddServerView: View {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.statusOnline)
-                Text(count > 0 ? "Valid — \(count) programs" : "Valid XMLTV")
+                Text(count > 0 ? "Valid: \(count) programs" : "Valid XMLTV")
                     .scaledFont(.labelSmall.weight(.semibold))
                     .foregroundColor(.statusOnline)
                     .lineLimit(1)

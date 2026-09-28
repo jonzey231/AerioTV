@@ -385,7 +385,6 @@ final class SystemVolumeBridge {
 struct SystemVolumeHost: UIViewRepresentable {
     func makeUIView(context: Context) -> MPVolumeView {
         let v = MPVolumeView(frame: CGRect(x: -1000, y: -1000, width: 1, height: 1))
-        v.showsRouteButton = false
         v.isHidden = false
         v.alpha = 0.001
         v.isUserInteractionEnabled = false
@@ -4157,14 +4156,13 @@ struct PlayerOverflowMenu: View, Equatable {
                 // Swipe home to shrink the player into a floating window;
                 // controlled by Settings → Appearance → Picture-in-Picture.
 
-                // AirPlay. Routes audio only on iPhone (the mix of HLS +
-                // MPV-backed TS streams rules out reliable video routing),
-                // so the menu placement matches its actual scope — no
-                // point taking a top-bar chrome slot for audio routing.
+                // AirPlay. The AVPlayer engine hands video to the receiver
+                // (served over the LAN since the 2026-09-21 rebuild); the
+                // mpv engine still routes audio only.
                 Button {
                     AirPlayMenuTrigger.present()
                 } label: {
-                    Label("AirPlay (Audio Only)", systemImage: "airplay.audio")
+                    Label("AirPlay", systemImage: "airplay.video")
                 }
                 #endif
             }
@@ -4659,6 +4657,9 @@ struct AirPlayButton: UIViewRepresentable {
 enum AirPlayMenuTrigger {
     private static let pickerView: AVRoutePickerView = {
         let v = AVRoutePickerView(frame: CGRect(x: -100, y: -100, width: 1, height: 1))
+        // Video receivers (Apple TV, Roku, AirPlay TVs) first: the sheet is
+        // how a channel reaches a TV.
+        v.prioritizesVideoDevices = true
         v.alpha = 0.01       // kept non-zero so the subview button stays touch-enabled
         v.isUserInteractionEnabled = true
         return v
@@ -5436,6 +5437,9 @@ final class AVPlayerProgressDriver {
                     debugLog("[AVP-STREAM] error log: status=\(key.status) domain=\(key.domain) \(key.comment)")
                 }
                 guard !self.firedUnrecoverable else { return }
+                // The receiver owns playback; its fetch errors are not this
+                // engine's to escalate.
+                if self.externalRenderSuspended { return }
                 let code = event.errorStatusCode
                 // Fatal, one entry is enough: playlist parse/validation failure
                 // (-12642), variant/media selection failure (-12646), and
@@ -5495,9 +5499,21 @@ final class AVPlayerProgressDriver {
         itemNotificationTokens.append(nc.addObserver(
             forName: AVPlayerItem.playbackStalledNotification,
             object: item, queue: .main) { [weak self] _ in
-            let ms = Int((CACurrentMediaTime() - (self?.launchStart ?? 0)) * 1000)
+            guard let self else { return }
+            // A receiver (Roku and other non-Apple AirPlay targets) never
+            // reports its buffer back through this item, so "ran empty"
+            // here is the phone's view, not the TV's. No verdict.
+            if self.externalRenderSuspended {
+                if !self.loggedReceiverStallSkip {
+                    self.loggedReceiverStallSkip = true
+                    debugLog("[AVP-STREAM] stall check skipped: receiver owns playback")
+                }
+                self.stallGateSince = nil
+                return
+            }
+            let ms = Int((CACurrentMediaTime() - self.launchStart) * 1000)
             debugLog("[AVP-STREAM] STALL at +\(ms)ms (buffer ran empty)")
-            self?.armStallResumeGate()
+            self.armStallResumeGate()
         })
 
         // Periodic summary (15s), mpv [STREAM-SUMMARY] cadence: report
@@ -5521,7 +5537,27 @@ final class AVPlayerProgressDriver {
         }
     }
 
+    /// AirPlay (2026-09-21 rebuild): while a receiver plays this player the
+    /// local clock is the receiver's, and the phone must not judge, rejoin
+    /// or bounce the engine off it.
+    /// One "stall check skipped" line per driver, not one per stall.
+    private var loggedReceiverStallSkip = false
+    private var externalRenderSuspended: Bool {
+        #if os(iOS)
+        return AirPlayTileDelivery.isServingReceiver || AirPlayMonitor.shared.isExternal
+            || player.isExternalPlaybackActive
+        #else
+        return false
+        #endif
+    }
+
     private func freezeTick() {
+        if externalRenderSuspended {
+            freezeLastMediaTime = .invalid
+            freezeConsecutiveTicks = 0
+            endWaitStreak()
+            return
+        }
         guard let item = player.currentItem else {
             freezeLastMediaTime = .invalid
             freezeConsecutiveTicks = 0
@@ -5597,6 +5633,7 @@ final class AVPlayerProgressDriver {
     /// The watchdog fuse is untouched: if this does not help, it still
     /// fires exactly as before.
     private func maybeNudgeOutOfWait(item: AVPlayerItem, reason: String) {
+        if externalRenderSuspended { stallGateSince = nil; return }
         guard isLive else { return }
         guard reason == AVPlayer.WaitingReason.toMinimizeStalls.rawValue else {
             endWaitStreak()
@@ -5668,7 +5705,7 @@ final class AVPlayerProgressDriver {
     /// `attemptRepeatStallRejoin`, which moves the playhead back into the
     /// local window instead of waiting at the edge.
     private func armStallResumeGate() {
-        guard isLive else { return }
+        guard isLive, !externalRenderSuspended else { return }
         let now = Date()
         let repeated = lastStallAt.map { now.timeIntervalSince($0) < 60 } ?? false
         lastStallAt = now
@@ -5749,7 +5786,7 @@ final class AVPlayerProgressDriver {
         // The learned hold-back therefore stays a NEXT-TUNE setting, plus
         // the Return to Live floor; only the first-30 s targetDuration
         // correction below writes the offset.
-        guard isLive, let provider = liveTargetDuration,
+        guard isLive, !externalRenderSuspended, let provider = liveTargetDuration,
               let item = player.currentItem,
               CACurrentMediaTime() - launchStart < 30 else { return }
         let td = provider()

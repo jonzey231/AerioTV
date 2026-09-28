@@ -2,16 +2,18 @@
 //  CastAudioTranscoder.swift
 //  Aerio
 //
-//  Cast HLS proxy: on-phone audio transcode for the ONE source family
-//  the web receiver cannot decode and the app is allowed to re-encode.
-//  MPEG-1 Layer I/II/III audio (TS stream_type 0x03 / 0x04) is common on
-//  European and OTA muxes, no MSE decodes it, and its patents have
-//  expired, so it decodes with AudioToolbox's AudioConverter, downmixes
-//  to stereo and re-encodes as AAC-LC at about 160 kbps.
+//  Cast HLS proxy: on-phone audio transcode for source audio the web
+//  receiver cannot decode. Decodes with AudioToolbox's AudioConverter,
+//  downmixes to stereo and re-encodes as AAC-LC at about 160 kbps.
 //
-//  AC-3 / E-AC-3 are NEVER transcoded (Logan 2026-09-13): they pass
-//  through when the receiver reported support and are otherwise refused
-//  by name. H.264 video stays pure passthrough in the remuxer.
+//  - MPEG-1 Layer I/II/III audio (TS stream_type 0x03 / 0x04) is common
+//    on European and OTA muxes and no MSE decodes it.
+//  - AC-3 / E-AC-3 (2026-09-21): passed through when the receiver
+//    measured support for it; otherwise transcoded here when the sender
+//    planned `audio=transcode-aac` (a Chromecast answering ac-3=no), and
+//    refused by name only when the platform has no decoder for it.
+//
+//  H.264 video stays pure passthrough in the remuxer.
 //
 //  Frame headers are parsed by CastAudioFrameParser, the single shared
 //  parser; nothing here duplicates it.
@@ -75,10 +77,9 @@ final class CastAudioTranscoder: CastAudioTranscoding {
         }
     }
 
-    /// Interleaved 16-bit PCM to stereo. MPEG audio decodes to mono or
-    /// stereo, so this duplicates mono and passes stereo through; the
-    /// general coefficient mix stays for any decoder that hands back
-    /// more channels than the header advertised.
+    /// Interleaved 16-bit PCM to stereo. Mono is duplicated and stereo
+    /// passes through; multichannel (AC-3 5.1 decodes as L R C LFE Ls Rs)
+    /// folds centre and surrounds in at -3 dB and drops the LFE.
     static func downmixToStereo(_ pcm: [Int16], channels: Int) -> [Int16] {
         if channels == 2 { return pcm }
         if channels <= 0 { return [] }
@@ -155,11 +156,11 @@ final class CastAudioTranscoder: CastAudioTranscoding {
 
     deinit { release() }
 
-    /// Queue one source access unit (a whole MPEG audio frame) and drain
+    /// Queue one source access unit (a whole MPEG audio or AC-3 syncframe) and drain
     /// both converters. Called on the ingest queue.
     ///
-    /// Throws `CastUnsupportedCodecError` when the source is not MPEG
-    /// audio or the platform has no decoder for it (first call only);
+    /// Throws `CastUnsupportedCodecError` when the platform has no
+    /// decoder for the source (first call only);
     /// any other codec failure surfaces as an error the session's
     /// reconnect path absorbs.
     func feed(_ data: [UInt8], range: Range<Int>, ptsTicks: Int64, info: CastESFrameInfo) throws {
@@ -202,15 +203,9 @@ final class CastAudioTranscoder: CastAudioTranscoding {
     private struct ConverterError: Error { let status: OSStatus; let stage: String }
 
     private func initConverters(_ info: CastESFrameInfo) throws {
-        // MPEG audio only. AC-3 / E-AC-3 never reach here (the remuxer
-        // passes them through or refuses them by name); this guard keeps
-        // that contract local to the transcoder too.
-        guard source == .mp2 else {
-            throw CastUnsupportedCodecError(codecName: "\(source.displayName) audio")
-        }
         var inDesc = AudioStreamBasicDescription(
             mSampleRate: Float64(info.sampleRate),
-            mFormatID: kAudioFormatMPEGLayer2,
+            mFormatID: Self.formatID(source),
             mFormatFlags: 0,
             mBytesPerPacket: 0,
             mFramesPerPacket: UInt32(info.samplesPerFrame),
@@ -222,7 +217,7 @@ final class CastAudioTranscoder: CastAudioTranscoding {
         var pcmDesc = Self.pcmDescription(sampleRate: info.sampleRate, channels: info.channels)
         var status = AudioConverterNew(&inDesc, &pcmDesc, &dec)
         var outChannels = info.channels
-        if status != noErr || dec == nil {
+        if status != noErr || dec == nil, source == .mp2 {
             // Layer III frames carry the MPEGLayer3 format id; the Layer
             // II id decodes Layer II and I. Try the other id before
             // giving up, then fall back to a stereo PCM output.
@@ -275,6 +270,42 @@ final class CastAudioTranscoder: CastAudioTranscoding {
             + "encoder=AAC-LC stereo \(Self.targetAACBitrate / 1000)kbps @\(info.sampleRate)Hz"
             + (decoderOutputsStereo ? " (decoder downmix)" : ""))
         deliverConfigIfNeeded()
+    }
+
+    /// AudioToolbox format id for the source's elementary stream.
+    private static func formatID(_ source: CastAudioSourceCodec) -> AudioFormatID {
+        switch source {
+        case .ac3: return kAudioFormatAC3
+        case .eac3: return kAudioFormatEnhancedAC3
+        case .mp2: return kAudioFormatMPEGLayer2
+        }
+    }
+
+    /// Whether this platform can build a decoder for `source` at all.
+    /// The sender asks before planning `audio=transcode-aac`, so a device
+    /// without an AC-3 decoder falls back to refusing the channel by name
+    /// instead of promising a transcode it cannot run.
+    static func canDecode(_ source: CastAudioSourceCodec) -> Bool {
+        let samplesPerFrame: UInt32 = source == .mp2 ? 1152 : 1536
+        for channels in source == .mp2 ? [2] : [6, 2] {
+            var inDesc = AudioStreamBasicDescription(
+                mSampleRate: 48_000,
+                mFormatID: formatID(source),
+                mFormatFlags: 0,
+                mBytesPerPacket: 0,
+                mFramesPerPacket: samplesPerFrame,
+                mBytesPerFrame: 0,
+                mChannelsPerFrame: UInt32(channels),
+                mBitsPerChannel: 0,
+                mReserved: 0)
+            var pcmDesc = pcmDescription(sampleRate: 48_000, channels: 2)
+            var probe: AudioConverterRef?
+            if AudioConverterNew(&inDesc, &pcmDesc, &probe) == noErr, let probe {
+                AudioConverterDispose(probe)
+                return true
+            }
+        }
+        return false
     }
 
     private static func pcmDescription(sampleRate: Int, channels: Int) -> AudioStreamBasicDescription {

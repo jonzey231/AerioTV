@@ -556,6 +556,15 @@ software under GPL-3.0-or-later and grants no patent license; users are
 responsible for compliance with any patent or licensing requirements where they
 live.
 
+AerioTV also encodes video on the device for casting, in H.264/AVC (High
+profile) and HEVC/H.265 (Main profile). This encoding, like hardware and
+platform decoding of these formats, uses only the codecs provided by the
+operating system: VideoToolbox on Apple devices and MediaCodec on Android
+devices. AerioTV does not bundle any third-party video encoder. These operating
+system codecs are licensed by Apple, and by Google or the device manufacturer, respectively for use on those
+devices; AerioTV grants no additional patent license for H.264/AVC or HEVC/H.265
+encoding or decoding.
+
 Dolby, Dolby Digital, Dolby Digital Plus, Dolby TrueHD, DTS, DTS-HD and other
 codec and format names are trademarks of their respective owners. AerioTV is
 not affiliated with, endorsed by, or certified by any of them, and codec names

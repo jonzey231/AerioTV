@@ -48,6 +48,46 @@ final class RemoteControlStore: ObservableObject {
     nonisolated static let sidebarLayoutKey = "guideSidebarLayout.tv"
     nonisolated static let tuneInMiniKey = "guideTuneInMini.tv"
 
+    /// One-time seed of the tvOS group selector (Logan 2026-09-18): NEW
+    /// installs default to Sidebar Menu, everyone who already had the app
+    /// stays on pills.
+    ///
+    /// `guideGroupSelector.tv` used to be a soft default: unset fell back to
+    /// `.pills` at every read, so flipping that fallback would have moved
+    /// existing users. Instead this writes the key ONCE, at launch, and the
+    /// fallback never decides anything again.
+    ///
+    /// Fresh install is the conjunction of four signals, all of which an
+    /// upgrade would fail:
+    ///   1. `guideGroupSelector.tv` is unset (the user never chose, and no
+    ///      iCloud pull has landed a choice yet);
+    ///   2. `whatsNew.lastSeenVersion` is unset - the same marker
+    ///      `WhatsNewStore` uses to know a previous version ran here;
+    ///   3. `hasCompletedOnboarding` is false;
+    ///   4. SwiftData holds no playlists at all (the caller counts both
+    ///      `ServerConnection` and `M3UPlaylist`).
+    ///
+    /// The write goes straight to `UserDefaults`, never through the
+    /// `@Published` setters, so the seed never pushes to iCloud. A value that
+    /// arrives from iCloud later simply wins through the normal merge, and a
+    /// pull that already landed makes signal 1 false, so the seed is skipped
+    /// entirely.
+    ///
+    /// Must run BEFORE anything touches `RemoteControlStore.shared`; the app
+    /// calls it from `AerioApp.init`.
+    #if os(tvOS)
+    nonisolated static func seedGroupSelectorIfNeeded(hasAnyPlaylist: Bool) {
+        let ud = UserDefaults.standard
+        guard ud.string(forKey: groupSelectorKey) == nil else { return }
+        let ranBefore = ud.string(forKey: "whatsNew.lastSeenVersion") != nil
+            || ud.bool(forKey: "hasCompletedOnboarding")
+            || hasAnyPlaylist
+        let seeded: GroupSelectorMode = ranBefore ? .pills : .sidebar
+        ud.set(seeded.rawValue, forKey: groupSelectorKey)
+        debugLog("[GROUPS] seeded tvOS group selector = \(seeded.rawValue) (freshInstall=\(!ranBefore))")
+    }
+    #endif
+
     /// The effective remote-control map (resolved through DEFAULT for any
     /// unset slot).
     @Published private(set) var map: RemoteControlMap

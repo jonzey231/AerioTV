@@ -73,6 +73,22 @@ final class CastHLSProxyServer: @unchecked Sendable {
 
     private(set) var boundPort: UInt16 = 0
 
+    /// Link counters (device log 2026-09-25 17:04): bytes sent, the last
+    /// peer and the newest video segment the receiver fetched.
+    private let linkLock = NSLock()
+    private var servedBytesTotal: Int64 = 0
+    private var lastPeer: String?
+    private var highestVideoSeq = -1
+
+    /// Playlist / segment request counts since the last accepted load
+    /// (stale-receiver check, incident 2026-09-25 15:26).
+    let requestCounters = CastHLSRequestCounters()
+
+    var linkCounters: (servedBytes: Int64, peer: String?, highestVideoSeq: Int) {
+        linkLock.lock(); defer { linkLock.unlock() }
+        return (servedBytesTotal, lastPeer, highestVideoSeq)
+    }
+
     init(store: CastHLSSegmentStore, log: @escaping (String) -> Void) {
         self.store = store
         self.log = log
@@ -150,6 +166,7 @@ final class CastHLSProxyServer: @unchecked Sendable {
             send(connection, status: "405 Method Not Allowed", contentType: nil, body: Data())
             return
         }
+        requestCounters.record(path: path)
         let body: Data?
         let mime: String
         // Wait time is only meaningful for a segment fetch that was held
@@ -191,6 +208,9 @@ final class CastHLSProxyServer: @unchecked Sendable {
             let began = Date()
             body = seq.flatMap { store.awaitSegment(seq: $0, rendition: .video) }
             waitMs = Int(Date().timeIntervalSince(began) * 1000)
+            if let seq, body != nil {
+                linkLock.lock(); highestVideoSeq = max(highestVideoSeq, seq); linkLock.unlock()
+            }
             mime = Self.mimeSegment
         case let p where p.hasPrefix("/aseg") && p.hasSuffix(".m4s"):
             let seq = Int(p.dropFirst(5).dropLast(4))
@@ -204,6 +224,10 @@ final class CastHLSProxyServer: @unchecked Sendable {
         }
         logRequest(method: method, path: path, status: body == nil ? 404 : 200,
                    bytes: body?.count ?? 0, waitMs: waitMs)
+        linkLock.lock()
+        servedBytesTotal += Int64(method == "HEAD" ? 0 : (body?.count ?? 0))
+        lastPeer = Self.host(of: peer)
+        linkLock.unlock()
         if let body {
             send(connection, status: "200 OK", contentType: mime,
                  body: method == "HEAD" ? Data() : body, declaredLength: body.count)

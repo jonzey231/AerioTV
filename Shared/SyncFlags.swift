@@ -60,7 +60,7 @@ enum SyncCategory: String, CaseIterable, Identifiable {
         case .preferences:
             return "Theme, appearance mode, accent color, default tab, refresh schedule, hidden groups, and Guide Display settings."
         case .remoteControl:
-            return "Your customised Apple TV remote button assignments. Turn this off on a TV whose remote is a different model from your others."
+            return "Your customized Apple TV remote button assignments. Turn this off on a TV whose remote is a different model from your others."
         case .credentials:
             return "Server passwords and API keys, stored in iCloud Keychain."
         }

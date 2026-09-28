@@ -1,5 +1,9 @@
 use_frameworks!
 
+# Dev is a Debug-shaped configuration that installs as app.molinete.aerio.dev
+# so a development build can sit beside the App Store build on one device.
+project 'Aerio', 'Dev' => :debug
+
 target 'Aerio_iOS' do
   platform :ios, '18.0'
   # Google Cast iOS sender (GH #33). iOS-only: casts to the same Android TV

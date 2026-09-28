@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 
@@ -37,6 +38,17 @@ final class VODSweepActivity: ObservableObject {
     /// Pause between pages on the quiet (off screen) path. Same 500 ms the
     /// sweep loop used before this file existed.
     static let backgroundPageDelay: Duration = .milliseconds(500)
+
+    /// Pause between pages while the GUIDE is the screen in front of the user
+    /// (tvOS, 1.8.40 regression). The uncapped sweep walks for tens of
+    /// minutes, and every page still costs the main actor a little: the lane
+    /// bookkeeping, the count publish, the SQLite hand-off. At 500 ms those
+    /// slices arrive twice a second under a screen whose whole job is to
+    /// answer a remote press instantly, and the presses felt delayed.
+    /// Tripling the pace off screen costs the background sweep time nobody is
+    /// watching. A sweep the user IS watching (Movies / TV Shows in front) and
+    /// a Saving Changes rebuild both stay on the fast foreground path.
+    static let guidePageDelay: Duration = .milliseconds(1500)
 
     // MARK: Sweep state
 
@@ -104,6 +116,9 @@ final class VODSweepActivity: ObservableObject {
     // churn rule). Only the sweep loop reads it.
     private var moviesOnScreen = false
     private var seriesOnScreen = false
+    /// Live TV (the guide) is the frontmost tab. Same plain-state rule as the
+    /// two above: nothing re-renders because of it, only the sweep reads it.
+    private var liveTVOnScreen = false
 
     /// Driven by the real on-screen state of the Movies / TV Shows views
     /// (their appear / disappear and tab selection), never guessed.
@@ -125,9 +140,116 @@ final class VODSweepActivity: ObservableObject {
         kind == .series ? seriesOnScreen : moviesOnScreen
     }
 
+    /// Driven by the frontmost tab, so the quiet sweep can get quieter still
+    /// while the guide has the screen. See `guidePageDelay`.
+    func setLiveTVOnScreen(_ visible: Bool) {
+        guard liveTVOnScreen != visible else { return }
+        liveTVOnScreen = visible
+        debugLog("[VOD-CAT] on screen kind=livetv -> \(visible)")
+    }
+
     /// How many page requests the sweep for `kind` may keep in flight.
     func pageConcurrency(for kind: VODItemType) -> Int {
         isForeground(kind) ? Self.foregroundConcurrency : 1
+    }
+
+    /// Pause the BACKGROUND sweep takes between pages of `kind`. Stretched
+    /// while the guide is in front on tvOS; unchanged everywhere else, and
+    /// never consulted on the foreground path.
+    func backgroundPageDelay(for kind: VODItemType) -> Duration {
+        #if os(tvOS)
+        if liveTVOnScreen, !isForeground(kind) { return Self.guidePageDelay }
+        #endif
+        return Self.backgroundPageDelay
+    }
+}
+
+// MARK: - Catalog facts the tab bar reads
+
+/// The handful of BOOLEANS `MainTabView` needs about the VOD catalog, on their
+/// own tiny observable.
+///
+/// `MainTabView` used to observe `VODStore` directly, which meant every
+/// progressive count publish the sweep made (one integer, every 5 s, for as
+/// long as an uncapped walk takes) invalidated `MainTabView.body` and with it
+/// the Live TV subtree underneath it. That is the other half of the 1.8.40
+/// guide navigation lag. The tab bar never wanted the counts: it wanted "is
+/// there a Movies tab", which only moves on a real false -> true transition.
+///
+/// So the counts stay on `VODStore` for the screens that DISPLAY them (Movies,
+/// TV Shows, Settings keep observing the detailed store) and `MainTabView`
+/// observes this instead. Values are recomputed from both sources whenever
+/// either announces a change and republished only when one actually differs,
+/// so a sweep that adds 100 titles a page publishes nothing here.
+@MainActor
+final class VODCatalogFacts: ObservableObject {
+    static let shared = VODCatalogFacts()
+
+    /// The catalog half of the tab gate: titles stored, or a sweep in flight
+    /// that will store some. The PERMISSION half stays in the view, which is
+    /// where the active server lives.
+    @Published private(set) var hasMovies = false
+    @Published private(set) var hasSeries = false
+
+    /// The background-work flags the "Syncing" indicator and the heartbeat log
+    /// read. Booleans that flip a handful of times per sweep, not per page.
+    @Published private(set) var isLoadingMovies = false
+    @Published private(set) var isLoadingSeries = false
+    @Published private(set) var isRefillingMovies = false
+    @Published private(set) var isRefillingSeries = false
+    @Published private(set) var isSearchingMovies = false
+    @Published private(set) var isSearchingSeries = false
+
+    private var cancellables: Set<AnyCancellable> = []
+    private var recomputeQueued = false
+    private var pull: (@MainActor () -> Void)?
+
+    /// Wires the facts to their sources. Idempotent, and called from
+    /// `MainTabView` rather than from `init` so neither singleton has to exist
+    /// before the other.
+    ///
+    /// `objectWillChange` fires BEFORE the source's value is written, so the
+    /// recompute is deferred one main-actor turn and coalesced: a burst of
+    /// publishes costs one pass, and a pass that finds nothing changed
+    /// publishes nothing.
+    func start(recompute: @escaping @MainActor () -> Void,
+               sources: [ObservableObjectPublisher]) {
+        guard pull == nil else { return }
+        pull = recompute
+        for source in sources {
+            source
+                .sink { [weak self] _ in self?.scheduleRecompute() }
+                .store(in: &cancellables)
+        }
+        recompute()
+    }
+
+    private func scheduleRecompute() {
+        guard !recomputeQueued else { return }
+        recomputeQueued = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.recomputeQueued = false
+            self.pull?()
+        }
+    }
+
+    /// Called by the recompute closure with everything read in one place.
+    /// Every write is guarded: an equal-value `@Published` write still
+    /// re-renders every observer, which is the whole thing this type exists to
+    /// avoid.
+    func apply(hasMovies: Bool, hasSeries: Bool,
+               isLoadingMovies: Bool, isLoadingSeries: Bool,
+               isRefillingMovies: Bool, isRefillingSeries: Bool,
+               isSearchingMovies: Bool, isSearchingSeries: Bool) {
+        if self.hasMovies != hasMovies { self.hasMovies = hasMovies }
+        if self.hasSeries != hasSeries { self.hasSeries = hasSeries }
+        if self.isLoadingMovies != isLoadingMovies { self.isLoadingMovies = isLoadingMovies }
+        if self.isLoadingSeries != isLoadingSeries { self.isLoadingSeries = isLoadingSeries }
+        if self.isRefillingMovies != isRefillingMovies { self.isRefillingMovies = isRefillingMovies }
+        if self.isRefillingSeries != isRefillingSeries { self.isRefillingSeries = isRefillingSeries }
+        if self.isSearchingMovies != isSearchingMovies { self.isSearchingMovies = isSearchingMovies }
+        if self.isSearchingSeries != isSearchingSeries { self.isSearchingSeries = isSearchingSeries }
     }
 }
 

@@ -10,19 +10,27 @@
 
 import Foundation
 
-/// A stream the cast HLS proxy cannot serve. The web receiver is a
-/// Chromium page; MSE there decodes H.264 + AAC only, and video is never
-/// re-encoded, so non-H.264 video refuses up front with the codec name
-/// for the user-facing message. AAC audio passes through, AC-3 / E-AC-3
+/// A stream the cast HLS proxy cannot serve. H.264 and HEVC video pass
+/// through or transcode on the phone (the sender's `CastVideoPlan`); any
+/// other video codec refuses up front with the codec name for the
+/// user-facing message. AAC audio passes through, AC-3 / E-AC-3
 /// pass through only when the receiver reported support for them, MPEG
 /// audio transcodes on the phone, and everything else fires this.
 struct CastUnsupportedCodecError: Error, CustomStringConvertible {
     /// Which elementary stream refused; the sender words a different
-    /// message for each (video can never be re-encoded, MPEG audio can).
+    /// message for each.
     enum Stream { case video, audio }
     let codecName: String
     var stream: Stream = .audio
     var description: String { "cast HLS proxy cannot serve \(codecName)" }
+}
+
+/// The on-phone video transcode failed mid-ingest. Thrown from `feed` so
+/// the session reconnects with a fresh remuxer, which it builds with the
+/// video plan disabled (source passthrough) for the rest of the session.
+struct CastVideoTranscodeError: Error, CustomStringConvertible {
+    let reason: String
+    var description: String { "video transcode failed: \(reason)" }
 }
 
 /// Abstraction over the AudioToolbox transcoder so the remuxer's pure
@@ -51,10 +59,15 @@ protocol CastAudioTranscoding: AnyObject {
 ///    frame PTS (audio) rebased to the generation start, carried through
 ///    the 33-bit PTS wraparound by a per-track unwrapper.
 ///
-/// H.264 video is pure passthrough (Annex B converted to 4-byte-length
-/// avc1 samples); audio is ADTS AAC passthrough, AC-3 / E-AC-3
-/// passthrough, or an on-phone MPEG audio to AAC-LC stereo transcode.
-/// The AC-3 family is never re-encoded.
+/// H.264 and HEVC video are passthrough (Annex B converted to
+/// 4-byte-length avc1 samples, or hvc1 samples with the parameter sets
+/// moved to the hvcC) unless the sender's `CastVideoPlan` asks for the
+/// on-phone transcode, in which case the access units go through
+/// `CastVideoTranscoder` and the video track becomes hvc1 (HEVC) or a
+/// re-encoded avc1 (H.264 High 4.1); audio is ADTS AAC passthrough, AC-3 / E-AC-3
+/// passthrough, or an on-phone MPEG audio / AC-3 / E-AC-3 to AAC-LC
+/// stereo transcode. The AC-3 family is re-encoded only when the sender
+/// asked for it (`transcodeAC3`, a receiver that cannot decode AC-3).
 ///
 /// Threading: single-caller. `feed` runs on the ingest queue only; no
 /// internal locking.
@@ -74,6 +87,7 @@ final class CastFMP4Remuxer {
 
     /// ISO 13818-1 stream_type values this remux understands.
     private static let streamTypeH264 = 0x1B
+    private static let streamTypeHEVC = 0x24
     private static let streamTypeAACADTS = 0x0F
 
     /// Names for the refusal message; anything not listed reports the
@@ -88,7 +102,8 @@ final class CastFMP4Remuxer {
     private static let audioStreamTypes: Set<Int> = [0x03, 0x04, 0x0F, 0x11, 0x81, 0x87, 0x82, 0x8A]
 
     /// stream_types the audio passthrough can take instead of a refusal,
-    /// and only when the receiver reported AC-3 support.
+    /// and only when the receiver reported AC-3 support. The same types
+    /// go through the on-phone transcode when `transcodeAC3` is set.
     private static let passthroughSources: [Int: CastAudioSourceCodec] = [
         0x81: .ac3, 0x87: .eac3,
     ]
@@ -96,7 +111,7 @@ final class CastFMP4Remuxer {
     /// stream_types the on-phone audio transcode takes instead of a
     /// refusal: MPEG-1 Layer I/II/III only (0x03 and 0x04 ride the same
     /// decoder family). No MSE decodes them and their patents have
-    /// expired; the AC-3 family is never transcoded.
+    /// expired. The AC-3 family transcodes only under `transcodeAC3`.
     private static let transcodeSources: [Int: CastAudioSourceCodec] = [
         0x03: .mp2, 0x04: .mp2,
     ]
@@ -105,10 +120,18 @@ final class CastFMP4Remuxer {
     /// `allowAC3Passthrough` flips AC-3 / E-AC-3 to a pure passthrough
     /// (no decode, no encode, original channel layout) and is set by the
     /// sender only for receivers that measured support for it; an AC-3
-    /// source without it is REFUSED by name rather than transcoded
-    /// (Logan 2026-09-13). MPEG audio still uses the AudioToolbox
+    /// source without it is transcoded when `transcodeAC3` is set and
+    /// otherwise REFUSED by name. MPEG audio always uses the AudioToolbox
     /// transcode; nothing else is ever re-encoded.
     private let allowAC3Passthrough: Bool
+
+    /// AC-3 / E-AC-3 the receiver cannot decode is decoded on the phone
+    /// and re-encoded as AAC-LC stereo (2026-09-21, sender audio plan
+    /// `audio=transcode-aac`). Before this a Chromecast that answered
+    /// ac-3=no could not play any AC-3 channel at all: every load ended
+    /// in "unsupported codec, refusing to cast: AC-3 audio". Ignored when
+    /// `allowAC3Passthrough` is set (passthrough keeps the surround mix).
+    private let transcodeAC3: Bool
 
     /// Speaker-layout label for the Stream Info audio path. Total decoded
     /// channels (LFE included) to the familiar x.1 names.
@@ -190,17 +213,37 @@ final class CastFMP4Remuxer {
                                     @escaping (_ asc: [UInt8], _ sampleRate: Int) -> Void,
                                     @escaping (_ data: [UInt8], _ ptsTicks: Int64) -> Void) -> CastAudioTranscoding
 
+    /// Decides passthrough vs transcode once the source SPS is known.
+    private let videoPlan: CastVideoPlan
+    /// Hop onto the ingest queue for transcoder output. nil (the CLI tests)
+    /// keeps the video path passthrough whatever the plan says.
+    private let videoDelivery: CastIngestDelivery?
+    private let videoTranscoderFactory: (CastVideoStreamInfo, CastVideoOutputSpec, Int64,
+                                         CastVideoTranscodeSink, @escaping CastIngestDelivery) -> CastVideoTranscoding
+
     init(targetSegmentTicks: Int64 = 3 * CastFMP4Remuxer.ticksPerSecond,
          allowAC3Passthrough: Bool = false,
+         transcodeAC3: Bool = false,
+         videoPlan: CastVideoPlan = .passthrough,
+         videoDelivery: CastIngestDelivery? = nil,
          log: @escaping (String) -> Void = { _ in },
          transcoderFactory: ((CastAudioSourceCodec,
                               @escaping (_ asc: [UInt8], _ sampleRate: Int) -> Void,
-                              @escaping (_ data: [UInt8], _ ptsTicks: Int64) -> Void) -> CastAudioTranscoding)? = nil) {
+                              @escaping (_ data: [UInt8], _ ptsTicks: Int64) -> Void) -> CastAudioTranscoding)? = nil,
+         videoTranscoderFactory: ((CastVideoStreamInfo, CastVideoOutputSpec, Int64,
+                                   CastVideoTranscodeSink, @escaping CastIngestDelivery) -> CastVideoTranscoding)? = nil) {
         self.targetSegmentTicks = targetSegmentTicks
         self.allowAC3Passthrough = allowAC3Passthrough
+        self.transcodeAC3 = transcodeAC3
+        self.videoPlan = videoPlan
+        self.videoDelivery = videoDelivery
         self.log = log
         self.transcoderFactory = transcoderFactory ?? { source, onConfig, onFrame in
             CastAudioTranscoder(source: source, onEncoderConfig: onConfig, onAACFrame: onFrame, log: log)
+        }
+        self.videoTranscoderFactory = videoTranscoderFactory ?? { info, spec, keyTicks, sink, deliver in
+            CastVideoTranscoder(source: info, spec: spec, targetKeyTicks: keyTicks,
+                                sink: sink, deliver: deliver, log: log)
         }
     }
 
@@ -219,7 +262,7 @@ final class CastFMP4Remuxer {
     private var pmtSeen = false
 
     private lazy var videoPES = PESAssembler { [weak self] payload, pts, dts in
-        self?.onVideoAccessUnit(payload, pts33: pts, dts33: dts)
+        try self?.onVideoAccessUnit(payload, pts33: pts, dts33: dts)
     }
     private lazy var audioPES = PESAssembler { [weak self] payload, pts, _ in
         try self?.onAudioPES(payload, pts33: pts)
@@ -227,8 +270,15 @@ final class CastFMP4Remuxer {
 
     // MARK: codec config
 
+    /// From the PMT stream_type: 0x1B H.264, 0x24 HEVC.
+    private var videoCodec: CastVideoCodec = .h264
+    /// HEVC only.
+    private var vps: [UInt8]?
     private var sps: [UInt8]?
     private var pps: [UInt8]?
+    /// HEVC passthrough sample entry record, built once from the first
+    /// VPS / SPS / PPS.
+    private var passthroughHVCC: [UInt8]?
     private var aacObjectType = 0
     private var aacFreqIndex = -1
     private var aacChannelConfig = 0
@@ -237,6 +287,39 @@ final class CastFMP4Remuxer {
     /// for every frame of the connection.
     private var aacPCELogged = false
     private var initSent = false
+
+    // MARK: video path (passthrough or transcode)
+
+    private enum VideoMode { case undecided, passthrough, transcode }
+    private var videoMode: VideoMode = .undecided
+    private var videoTranscoder: CastVideoTranscoding?
+    /// The transcoder's output format: gates the init segment in transcode
+    /// mode and supplies the sample entry.
+    private var transcodedFormat: (codec: CastVideoOutputSpec.Codec, config: [UInt8], width: Int, height: Int)?
+    /// Parameter sets in force for the transcoder input (the latest in-band
+    /// ones; `vps` / `sps` / `pps` above latch the first).
+    private var transcodeVPS: [UInt8] = []
+    private var transcodeSPS: [UInt8] = []
+    private var transcodePPS: [UInt8] = []
+    /// Last transcoded sample PTS; output must be strictly increasing.
+    private var lastTranscodedPTS: Int64 = -1
+    private var transcodeFailure: String?
+    private var released = false
+
+    /// Stream Info card: "H.264 passthrough" / "H.264 -> HEVC 1920x1080@59.94".
+    private(set) var videoPathDescription: String?
+    /// The source facts the plan decided on; nil until the first SPS.
+    private(set) var sourceVideoInfo: CastVideoStreamInfo?
+    /// Fired once per remuxer (on the ingest queue) when the plan decides,
+    /// passthrough included, so the sender can show or clear the cast
+    /// card's transcode note.
+    var onVideoDecision: ((CastVideoPlanOutcome) -> Void)?
+    /// True once the video track is re-encoded (the master then declares the
+    /// output codec verbatim, no level relabel).
+    var videoIsTranscoded: Bool { videoMode == .transcode }
+    /// Fired once (on the ingest queue) when the transcode fails, before
+    /// `feed` throws `CastVideoTranscodeError`.
+    var onVideoTranscodeFailed: ((String) -> Void)?
 
     // MARK: audio path
 
@@ -404,6 +487,7 @@ final class CastFMP4Remuxer {
     /// Feed raw TS bytes off the wire. Throws `CastUnsupportedCodecError`
     /// as soon as the PMT declares a codec the remux cannot carry.
     func feed(_ data: Data) throws {
+        if let transcodeFailure { throw CastVideoTranscodeError(reason: transcodeFailure) }
         var merged: [UInt8]
         if carry.isEmpty {
             merged = [UInt8](data)
@@ -447,6 +531,11 @@ final class CastFMP4Remuxer {
         flushGenerationTail()
         transcoder?.release()
         transcoder = nil
+        // Frames still inside the video transcoder are the outgoing
+        // channel's last fraction of a second; they are dropped.
+        videoTranscoder?.release()
+        videoTranscoder = nil
+        released = true
     }
 
     /// Emit this generation's pending tail as one last segment, with both
@@ -579,11 +668,12 @@ final class CastFMP4Remuxer {
         }
         // Refuse before any media flows: the ingest surfaces this as the
         // user-visible cast failure with the codec name.
-        if video >= 0, videoType != Self.streamTypeH264 {
+        if video >= 0, videoType != Self.streamTypeH264, videoType != Self.streamTypeHEVC {
             throw CastUnsupportedCodecError(
                 codecName: Self.streamTypeNames[videoType] ?? String(format: "video stream_type 0x%02X", videoType),
                 stream: .video)
         }
+        videoCodec = videoType == Self.streamTypeHEVC ? .hevc : .h264
         if audio >= 0, audioType != Self.streamTypeAACADTS {
             // The AC-3 family PASSES THROUGH to a receiver that measured
             // support for it and is otherwise REFUSED by name (Logan
@@ -593,14 +683,19 @@ final class CastFMP4Remuxer {
             // patents have expired. Everything else refuses.
             let name = Self.streamTypeNames[audioType]
                 ?? String(format: "audio stream_type 0x%02X", audioType)
+            // 2026-09-21: an AC-3 source for a receiver that cannot
+            // decode it transcodes to AAC-LC stereo on the phone when the
+            // sender planned it; the refusal remains for the case where
+            // the sender found no platform decoder.
             if let source = Self.transcodeSources[audioType] {
                 audioSource = source
-            } else {
-                guard let source = Self.passthroughSources[audioType], allowAC3Passthrough else {
-                    log("unsupported cast audio: \(name)")
-                    throw CastUnsupportedCodecError(codecName: name, stream: .audio)
-                }
+            } else if let source = Self.passthroughSources[audioType], allowAC3Passthrough {
                 audioPassthrough = source
+            } else if let source = Self.passthroughSources[audioType], transcodeAC3 {
+                audioSource = source
+            } else {
+                log("unsupported cast audio: \(name)")
+                throw CastUnsupportedCodecError(codecName: name, stream: .audio)
             }
         }
         if video < 0 { throw CastUnsupportedCodecError(codecName: "no video stream in PMT", stream: .video) }
@@ -690,19 +785,51 @@ final class CastFMP4Remuxer {
 
     // MARK: video path
 
-    private func onVideoAccessUnit(_ payload: [UInt8], pts33: Int64, dts33: Int64) {
+    private func onVideoAccessUnit(_ payload: [UInt8], pts33: Int64, dts33: Int64) throws {
         // One PES with PUSI per access unit is the broadcast norm; split
         // Annex B, harvest parameter sets, convert to 4-byte-length AVCC.
         let nals = Self.splitAnnexB(payload)
         guard !nals.isEmpty else { return }
         var keyframe = false
         for nal in nals {
-            switch nal[nal.startIndex] & 0x1F {
-            case 5: keyframe = true
-            case 7: if sps == nil { sps = Array(nal) }
-            case 8: if pps == nil { pps = Array(nal) }
-            default: break
+            let type = Self.nalType(nal, videoCodec)
+            switch videoCodec {
+            case .h264:
+                switch type {
+                case 5: keyframe = true
+                case 7:
+                    if sps == nil { sps = Array(nal) }
+                    transcodeSPS = Array(nal)
+                case 8:
+                    if pps == nil { pps = Array(nal) }
+                    transcodePPS = Array(nal)
+                default: break
+                }
+            case .hevc:
+                switch type {
+                // IRAP pictures (BLA, IDR, CRA and the reserved IRAP types):
+                // random access points a segment may open on.
+                case 16...23: keyframe = true
+                case 32:
+                    if vps == nil { vps = Array(nal) }
+                    transcodeVPS = Array(nal)
+                case 33:
+                    if sps == nil { sps = Array(nal) }
+                    transcodeSPS = Array(nal)
+                case 34:
+                    if pps == nil { pps = Array(nal) }
+                    transcodePPS = Array(nal)
+                default: break
+                }
             }
+        }
+        if videoMode == .undecided {
+            guard sps != nil, pps != nil, videoCodec == .h264 || vps != nil else { return }
+            try decideVideoMode()
+        }
+        if videoMode == .transcode {
+            onTranscodeSourceAccessUnit(nals, pts33: pts33, dts33: dts33, keyframe: keyframe)
+            return
         }
         maybeEmitInit()
         guard initSent else { return }
@@ -719,27 +846,166 @@ final class CastFMP4Remuxer {
             timelineBasePTS = pts
         }
 
-        if pendingCutDTS < 0, keyframe, let first = videoQueue.first,
-           dts - first.dts >= targetSegmentTicks {
-            pendingCutDTS = dts
+        // AVCC conversion: length-prefixed NALs. H.264 keeps its parameter
+        // sets in-band (a mid-stream resolution change then stays
+        // decodable); HEVC is hvc1, whose sets live only in the hvcC.
+        let sample = Self.lengthPrefixed(nals, codec: videoCodec,
+                                         dropping: videoCodec == .hevc ? [32, 33, 34] : [])
+        enqueueVideoSample(VideoSample(data: sample, dts: dts, pts: pts, keyframe: keyframe))
+    }
+
+    /// nal_unit_type: 5 bits of the one-byte H.264 header, 6 bits of the
+    /// two-byte HEVC one.
+    private static func nalType(_ nal: ArraySlice<UInt8>, _ codec: CastVideoCodec) -> UInt8 {
+        let first = nal[nal.startIndex]
+        return codec == .hevc ? (first >> 1) & 0x3F : first & 0x1F
+    }
+
+    /// Queue one video sample for the segmenter (passthrough and transcode
+    /// paths alike). The cut rule: the first keyframe at or after
+    /// `targetSegmentTicks` of the segment's first DTS.
+    private func enqueueVideoSample(_ queued: VideoSample) {
+        if pendingCutDTS < 0, queued.keyframe, let first = videoQueue.first,
+           queued.dts - first.dts >= targetSegmentTicks {
+            pendingCutDTS = queued.dts
         }
-        // AVCC conversion: length-prefixed NALs, parameter sets kept
-        // in-band (a mid-stream resolution change then stays decodable).
+        if pendingCutDTS >= 0 {
+            heldVideo.append(queued)
+            maybeCut(latestDTS: queued.dts)
+            return
+        }
+        videoQueue.append(queued)
+    }
+
+    /// 4-byte-length NAL units, skipping the given nal_unit_types.
+    private static func lengthPrefixed(_ nals: [ArraySlice<UInt8>], codec: CastVideoCodec,
+                                       dropping: Set<UInt8>) -> [UInt8] {
         var sample = [UInt8]()
         sample.reserveCapacity(nals.reduce(0) { $0 + 4 + $1.count })
-        for nal in nals {
+        for nal in nals where !dropping.contains(nalType(nal, codec)) {
             let n = nal.count
             sample.append(contentsOf: [UInt8((n >> 24) & 0xFF), UInt8((n >> 16) & 0xFF),
                                        UInt8((n >> 8) & 0xFF), UInt8(n & 0xFF)])
             sample.append(contentsOf: nal)
         }
-        let queued = VideoSample(data: sample, dts: dts, pts: pts, keyframe: keyframe)
-        if pendingCutDTS >= 0 {
-            heldVideo.append(queued)
-            maybeCut(latestDTS: dts)
+        return sample
+    }
+
+    // MARK: video transcode
+
+    /// Runs once, at the first access unit that completes the parameter
+    /// sets (SPS + PPS, plus the VPS for HEVC): the sender's plan against
+    /// the source's SPS. Logs the plan line.
+    private func decideVideoMode() throws {
+        let sourceName = videoCodec.displayName
+        let parsed: CastVideoStreamInfo?
+        switch videoCodec {
+        case .h264: parsed = sps.flatMap { try? Self.parseSPSInfo($0) }
+        case .hevc: parsed = sps.flatMap { CastVideoCodecConfig.hevcStreamInfo(sps: $0, vps: vps) }
+        }
+        guard let info = parsed else {
+            if videoCodec == .hevc {
+                // Neither HEVC path can run blind: hvc1 passthrough needs the
+                // SPS fields for its hvcC, and the plan needs the size.
+                log("[Cast] video plan: source HEVC SPS unreadable -> refusing")
+                throw CastUnsupportedCodecError(codecName: "HEVC video with an unreadable SPS", stream: .video)
+            }
+            videoMode = .passthrough
+            videoPathDescription = "H.264 passthrough"
+            log("[Cast] video plan: source SPS unreadable -> passthrough")
             return
         }
-        videoQueue.append(queued)
+        sourceVideoInfo = info
+        var decision = videoPlan.decide(info)
+        if decision.output != nil, videoDelivery == nil {
+            decision = CastVideoDecision(output: nil, reason: "no transcode delivery queue")
+        }
+        if videoCodec == .hevc, decision.output == nil {
+            guard let vps, let sps, let pps,
+                  let record = CastVideoCodecConfig.buildHVCC(vps: vps, sps: sps, pps: pps) else {
+                log("[Cast] video plan: HEVC hvcC could not be built -> refusing")
+                throw CastUnsupportedCodecError(codecName: "HEVC video with an unreadable SPS", stream: .video)
+            }
+            passthroughHVCC = record
+        }
+        log(videoPlan.logLine(source: info, decision: decision))
+        onVideoDecision?(CastVideoPlanOutcome(source: info, decision: decision))
+        guard let spec = decision.output, let deliver = videoDelivery else {
+            videoMode = .passthrough
+            videoPathDescription = "\(sourceName) passthrough"
+            return
+        }
+        videoMode = .transcode
+        let fps = spec.outputFPS(info.fps).map(CastVideoPlan.fpsLabel).map { "@\($0)" } ?? ""
+        videoPathDescription = "\(sourceName) -> \(spec.codec.displayName) \(spec.width)x\(spec.height)\(fps)"
+        let sink = CastVideoTranscodeSink(
+            onFormat: { [weak self] codec, config, width, height in
+                self?.onTranscodedFormat(codec: codec, config: config, width: width, height: height)
+            },
+            onSample: { [weak self] data, pts, keyframe in
+                self?.onTranscodedSample(data, pts: pts, keyframe: keyframe)
+            },
+            onFailure: { [weak self] reason in
+                self?.onTranscodeFailed(reason)
+            })
+        videoTranscoder = videoTranscoderFactory(info, spec, targetSegmentTicks, sink, deliver)
+    }
+
+    /// Source access unit on the transcode path. The timeline is anchored
+    /// here, on the SOURCE IDR, not when the first encoded frame comes
+    /// back: output PTS are the source PTS, so the first encoded frame IS
+    /// this IDR's presentation time, and anchoring now lets the audio that
+    /// is demuxed while the encoder warms up queue instead of being gated.
+    private func onTranscodeSourceAccessUnit(_ nals: [ArraySlice<UInt8>], pts33: Int64, dts33: Int64,
+                                             keyframe: Bool) {
+        guard let videoTranscoder, !released else { return }
+        // The audio config has to be known before anything is anchored, so
+        // the init segment can go out with the encoder's first frame.
+        guard timelineBase >= 0 || (keyframe && audioConfigReady) else { return }
+        let dts = videoClock.unwrap(dts33)
+        let pts = Self.unwrapPTSAgainstDTS(pts33, dts)
+        if timelineBase < 0 {
+            // Encoded samples carry DTS == PTS, so the video tfdt base is
+            // the IDR's presentation time.
+            timelineBase = pts
+            timelineBasePTS = pts
+        }
+        // Parameter sets travel separately (the decoder format), AUD and
+        // filler mean nothing to VideoToolbox.
+        let sample: [UInt8]
+        let parameterSets: [[UInt8]]
+        switch videoCodec {
+        case .h264:
+            sample = Self.lengthPrefixed(nals, codec: .h264, dropping: [7, 8, 9, 12])
+            parameterSets = [transcodeSPS, transcodePPS]
+        case .hevc:
+            sample = Self.lengthPrefixed(nals, codec: .hevc, dropping: [32, 33, 34, 35, 38])
+            parameterSets = [transcodeVPS, transcodeSPS, transcodePPS]
+        }
+        guard !sample.isEmpty else { return }
+        videoTranscoder.feed(sample, pts: pts, dts: dts, keyframe: keyframe, parameterSets: parameterSets)
+    }
+
+    private func onTranscodedFormat(codec: CastVideoOutputSpec.Codec, config: [UInt8], width: Int, height: Int) {
+        guard !released, transcodedFormat == nil else { return }
+        transcodedFormat = (codec, config, width, height)
+        maybeEmitInit()
+    }
+
+    private func onTranscodedSample(_ data: [UInt8], pts: Int64, keyframe: Bool) {
+        guard !released, initSent, transcodeFailure == nil else { return }
+        // Monotonic output, and every segment (the first one included)
+        // opens on an encoder IDR.
+        if pts <= lastTranscodedPTS || pts < timelineBase { return }
+        if videoQueue.isEmpty, heldVideo.isEmpty, emittedMediaTicks == 0, !keyframe { return }
+        lastTranscodedPTS = pts
+        enqueueVideoSample(VideoSample(data: data, dts: pts, pts: pts, keyframe: keyframe))
+    }
+
+    private func onTranscodeFailed(_ reason: String) {
+        guard !released, transcodeFailure == nil else { return }
+        transcodeFailure = reason
+        onVideoTranscodeFailed?(reason)
     }
 
     /// Take the pending cut once the audio queue has caught up past it,
@@ -847,7 +1113,7 @@ final class CastFMP4Remuxer {
             let frameTicks = Int64(info.samplesPerFrame) * Self.ticksPerSecond / Int64(info.sampleRate)
             let framePTS = stampAudioFrame(pesAnchor: pesAnchor, frameTicks: frameTicks)
             audioRunPTS = framePTS + frameTicks
-            if initSent, timelineBasePTS >= 0, framePTS >= timelineBasePTS {
+            if audioQueueOpen, framePTS >= timelineBasePTS {
                 audioQueue.append(AudioSample(data: Array(data[p..<next]), pts: framePTS))
             }
             p = next
@@ -898,17 +1164,15 @@ final class CastFMP4Remuxer {
                     self.audioFrameTicks = 1024 * Self.ticksPerSecond / Int64(rate)
                     self.maybeEmitInit()
                 }, { [weak self] frame, pts in
-                    guard let self else { return }
-                    // Same gate as the passthrough path: audio only queues
-                    // once the init exists and video anchored the timeline,
-                    // and never before the first video PRESENTATION time.
-                    if self.initSent, self.timelineBasePTS >= 0, pts >= self.timelineBasePTS {
-                        self.audioQueue.append(AudioSample(data: frame, pts: pts))
-                    }
+                    self?.queueTranscodedAudio(frame, pts: pts)
                 })
                 transcoder = t
             }
             if !transcodeLogged {
+                if source != .mp2 {
+                    log("transcoding \(source.displayName) \(Self.channelLabel(info.channels)) "
+                        + "\(info.sampleRate) Hz -> AAC-LC stereo (receiver cannot decode \(source.displayName))")
+                }
                 log("audio transcode active: \(source.displayName) \(info.channels)ch \(info.sampleRate)Hz -> AAC-LC stereo")
                 audioPathDescription = "\(source.displayName) \(Self.channelLabel(info.channels)) -> AAC stereo"
                 transcodeLogged = true
@@ -931,6 +1195,36 @@ final class CastFMP4Remuxer {
             p = next
         }
         if p < data.count { audioCarry = Array(data[p...]) }
+    }
+
+    /// Units the transcoded-audio gate has dropped in the current run of
+    /// drops; 0 while audio is flowing.
+    private var transcodeGatedUnits = 0
+
+    /// Encoder output lands here. Same gate as the passthrough path:
+    /// audio only queues once the init exists and video anchored the
+    /// timeline, and never before the first video PRESENTATION time.
+    /// The encoder starts on the first decodable audio frame, which on a
+    /// mid-GOP join is well before the first video keyframe, so the first
+    /// units of every session are dropped here; the drop and the resume
+    /// are logged once per run so the field log shows how much audio the
+    /// join cost.
+    private func queueTranscodedAudio(_ frame: [UInt8], pts: Int64) {
+        guard audioQueueOpen, pts >= timelineBasePTS else {
+            transcodeGatedUnits += 1
+            if transcodeGatedUnits == 1 {
+                let seconds = Double(pts) / Double(Self.ticksPerSecond)
+                let base = Double(timelineBasePTS) / Double(Self.ticksPerSecond)
+                log(String(format: "transcoded audio gated: %d units dropped, pts %.3fs below timeline base %.3fs",
+                           transcodeGatedUnits, seconds, base))
+            }
+            return
+        }
+        if transcodeGatedUnits > 0 {
+            log("transcoded audio resumed after \(transcodeGatedUnits) gated units")
+            transcodeGatedUnits = 0
+        }
+        audioQueue.append(AudioSample(data: frame, pts: pts))
     }
 
     private func onADTSAudioPES(_ payload: [UInt8], pts33: Int64) throws {
@@ -1048,7 +1342,7 @@ final class CastFMP4Remuxer {
                 // with the new PES PTS cost on the device.
                 let framePTS = stampAudioFrame(pesAnchor: pesAnchor, frameTicks: audioFrameTicks)
                 audioRunPTS = framePTS + audioFrameTicks
-                if initSent, timelineBasePTS >= 0, framePTS >= timelineBasePTS {
+                if audioQueueOpen, framePTS >= timelineBasePTS {
                     audioQueue.append(AudioSample(data: Array(data[payloadStart..<(p + frameLen)]), pts: framePTS))
                 }
             }
@@ -1302,23 +1596,34 @@ final class CastFMP4Remuxer {
 
     // MARK: segmenter
 
+    /// Audio config gate: the first syncframe's bitstream config on the
+    /// AC-3 passthrough path, the encoder's AudioSpecificConfig on the
+    /// transcode path (which means the first audio already went through
+    /// both codecs), the ADTS header otherwise.
+    private var audioConfigReady: Bool {
+        if audioPID < 0 { return true }
+        if audioPassthrough != nil { return passthroughConfig != nil }
+        if audioSource != nil { return transcodeASC != nil }
+        return aacFreqIndex >= 0
+    }
+
+    /// Audio may queue once video anchored the timeline. Passthrough video
+    /// anchors only after the init is out; transcoded video anchors on the
+    /// source IDR while the encoder is still warming up, and the audio
+    /// demuxed meanwhile belongs to the first segment.
+    private var audioQueueOpen: Bool {
+        timelineBasePTS >= 0 && (initSent || videoMode == .transcode)
+    }
+
     private func maybeEmitInit() {
-        guard !initSent, pmtSeen, sps != nil, pps != nil else { return }
-        // Audio config gate: the first syncframe's bitstream config on
-        // the AC-3 passthrough path, the encoder's AudioSpecificConfig on
-        // the transcode path (which means the first audio already went
-        // through both codecs), the ADTS header otherwise.
-        let audioReady: Bool
-        if audioPID < 0 {
-            audioReady = true
-        } else if audioPassthrough != nil {
-            audioReady = passthroughConfig != nil
-        } else if audioSource != nil {
-            audioReady = transcodeASC != nil
-        } else {
-            audioReady = aacFreqIndex >= 0
+        guard !initSent, pmtSeen else { return }
+        switch videoMode {
+        case .undecided: return
+        case .passthrough:
+            guard sps != nil, pps != nil, videoCodec == .h264 || passthroughHVCC != nil else { return }
+        case .transcode: guard transcodedFormat != nil else { return }
         }
-        guard audioReady else { return }
+        guard audioConfigReady else { return }
         // A receiver that refuses a muxed ac-3 codec string is handed the
         // audio in its own SourceBuffer.
         onDemuxedInitSegments?(buildInitSegment(.videoOnly),
@@ -1411,8 +1716,20 @@ final class CastFMP4Remuxer {
         out.append(Self.box("ftyp", Self.bytes("iso5"), Self.u32(0), Self.bytes("iso5"), Self.bytes("iso6"), Self.bytes("mp41")))
         var traks: [Data] = []
         if hasVideo {
-            let dims = (try? Self.parseSPSDimensions(sps!)) ?? (width: 1280, height: 720)
-            traks.append(videoTrak(width: dims.width, height: dims.height))
+            if let format = transcodedFormat {
+                traks.append(videoTrak(width: format.width, height: format.height,
+                                       entryType: format.codec == .hevc ? "hvc1" : "avc1",
+                                       configType: format.codec == .hevc ? "hvcC" : "avcC",
+                                       config: Data(format.config)))
+            } else if let hvcC = passthroughHVCC, let info = sourceVideoInfo {
+                traks.append(videoTrak(width: info.width, height: info.height, entryType: "hvc1",
+                                       configType: "hvcC", config: Data(hvcC)))
+            } else {
+                let dims = (try? Self.parseSPSDimensions(sps!)) ?? (width: 1280, height: 720)
+                traks.append(videoTrak(width: dims.width, height: dims.height, entryType: "avc1",
+                                       configType: "avcC",
+                                       config: CastVideoCodecConfig.avcCPayload(sps: sps!, pps: pps!)))
+            }
         }
         if hasAudio { traks.append(audioTrak()) }
         var trexes: [Data] = []
@@ -1584,31 +1901,24 @@ final class CastFMP4Remuxer {
         return out
     }
 
-    private func videoTrak(width: Int, height: Int) -> Data {
-        let s = sps!
-        let p = pps!
-        var avcCBody = Data(capacity: 16 + s.count + p.count)
-        avcCBody.append(1) // configurationVersion
-        avcCBody.append(s[1]) // AVCProfileIndication
-        avcCBody.append(s[2]) // profile_compatibility
-        avcCBody.append(s[3]) // AVCLevelIndication
-        avcCBody.append(0xFF) // 4-byte NAL lengths (lengthSizeMinusOne = 3)
-        avcCBody.append(0xE1) // 1 SPS
-        avcCBody.append(Self.u16(s.count)); avcCBody.append(contentsOf: s)
-        avcCBody.append(1) // 1 PPS
-        avcCBody.append(Self.u16(p.count)); avcCBody.append(contentsOf: p)
-        let avcC = Self.box("avcC", avcCBody)
-
-        var avc1Body = Data(capacity: 96 + avcC.count)
-        avc1Body.append(Data(count: 6)); avc1Body.append(Self.u16(1)) // reserved, data_reference_index
-        avc1Body.append(Data(count: 16)) // pre_defined/reserved
-        avc1Body.append(Self.u16(width)); avc1Body.append(Self.u16(height))
-        avc1Body.append(Self.u32(0x00480000)); avc1Body.append(Self.u32(0x00480000)) // 72 dpi
-        avc1Body.append(Self.u32(0)); avc1Body.append(Self.u16(1)) // reserved, frame_count
-        avc1Body.append(Data(count: 32)) // compressorname
-        avc1Body.append(Self.u16(0x0018)); avc1Body.append(Self.u16(0xFFFF)) // depth, pre_defined
-        avc1Body.append(avcC)
-        let avc1 = Self.box("avc1", avc1Body)
+    /// Video trak with an avc1 + avcC (passthrough, or re-encoded H.264)
+    /// or hvc1 + hvcC (HEVC passthrough or transcode) sample entry. hvc1,
+    /// not hev1: the encoder keeps its parameter sets out of the samples
+    /// and the HEVC passthrough strips them, so the record in the sample
+    /// entry is the only copy, which is what hvc1 means.
+    private func videoTrak(width: Int, height: Int, entryType: String, configType: String,
+                           config: Data) -> Data {
+        let configBox = Self.box(configType, config)
+        var entryBody = Data(capacity: 96 + configBox.count)
+        entryBody.append(Data(count: 6)); entryBody.append(Self.u16(1)) // reserved, data_reference_index
+        entryBody.append(Data(count: 16)) // pre_defined/reserved
+        entryBody.append(Self.u16(width)); entryBody.append(Self.u16(height))
+        entryBody.append(Self.u32(0x00480000)); entryBody.append(Self.u32(0x00480000)) // 72 dpi
+        entryBody.append(Self.u32(0)); entryBody.append(Self.u16(1)) // reserved, frame_count
+        entryBody.append(Data(count: 32)) // compressorname
+        entryBody.append(Self.u16(0x0018)); entryBody.append(Self.u16(0xFFFF)) // depth, pre_defined
+        entryBody.append(configBox)
+        let avc1 = Self.box(entryType, entryBody)
 
         return Self.trak(trackID: Self.videoTrackID, width: width, height: height, volume: 0,
                          handler: "vide", handlerName: "VideoHandler",
@@ -1810,28 +2120,43 @@ final class CastFMP4Remuxer {
         return nil
     }
 
-    // MARK: SPS dimensions (best effort; tkhd/avc1 sizing only, decoders
-    // read the SPS itself from avcC)
+    // MARK: SPS parsing (dimensions for tkhd/avc1 sizing; level, frame
+    // rate and colour for the video plan and the transcoder)
 
-    private struct SPSParseError: Error {}
+    struct SPSParseError: Error {}
 
     static func parseSPSDimensions(_ spsNAL: [UInt8]) throws -> (width: Int, height: Int) {
-        // Strip emulation prevention bytes, skip the NAL header byte.
+        let info = try parseSPSInfo(spsNAL)
+        return (info.width, info.height)
+    }
+
+    /// Strip emulation prevention bytes (00 00 03) from `nal` starting at
+    /// `from` (past the NAL header).
+    static func unescapeRBSP(_ nal: [UInt8], from: Int) -> [UInt8] {
         var rbsp = [UInt8]()
-        rbsp.reserveCapacity(spsNAL.count)
-        var i = 1
-        while i < spsNAL.count {
-            if i + 2 < spsNAL.count, spsNAL[i] == 0, spsNAL[i + 1] == 0, spsNAL[i + 2] == 3 {
+        rbsp.reserveCapacity(nal.count)
+        var i = from
+        while i < nal.count {
+            if i + 2 < nal.count, nal[i] == 0, nal[i + 1] == 0, nal[i + 2] == 3 {
                 rbsp.append(0); rbsp.append(0)
                 i += 3
             } else {
-                rbsp.append(spsNAL[i])
+                rbsp.append(nal[i])
                 i += 1
             }
         }
-        var r = BitReader(rbsp)
+        return rbsp
+    }
+
+    /// H.264 SPS to the stream facts the video plan needs. The VUI is read
+    /// best effort: a truncated or exotic VUI leaves fps / colour nil
+    /// instead of failing the dimensions.
+    static func parseSPSInfo(_ spsNAL: [UInt8]) throws -> CastVideoStreamInfo {
+        guard spsNAL.count >= 4 else { throw SPSParseError() }
+        var r = BitReader(unescapeRBSP(spsNAL, from: 1))
         let profileIDC = try r.bits(8)
-        _ = try r.bits(16) // constraints + level
+        let constraints = try r.bits(8)
+        let levelIDC = try r.bits(8)
         _ = try r.ue() // seq_parameter_set_id
         var chromaFormat = 1
         if [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134].contains(profileIDC) {
@@ -1871,7 +2196,60 @@ final class CastFMP4Remuxer {
         let width = widthMBs * 16 - (cropL + cropR) * cropUnitX
         let height = heightMapUnits * 16 * (2 - frameMBsOnly) - (cropT + cropB) * cropUnitY
         guard width > 0, height > 0, width <= 8192, height <= 8192 else { throw SPSParseError() }
-        return (width, height)
+        var info = CastVideoStreamInfo(width: width, height: height, profileIDC: profileIDC,
+                                      constraintFlags: constraints, levelIDC: levelIDC,
+                                      progressive: frameMBsOnly == 1)
+        try? parseVUI(&r, into: &info)
+        return info
+    }
+
+    private static func parseVUI(_ r: inout BitReader, into info: inout CastVideoStreamInfo) throws {
+        guard try r.bits(1) == 1 else { return } // vui_parameters_present_flag
+        if try r.bits(1) == 1 { // aspect_ratio_info_present_flag
+            if try r.bits(8) == 255 { _ = try r.bits(16); _ = try r.bits(16) } // Extended_SAR
+        }
+        if try r.bits(1) == 1 { _ = try r.bits(1) } // overscan
+        if try r.bits(1) == 1 { // video_signal_type_present_flag
+            _ = try r.bits(3) // video_format
+            info.fullRange = try r.bits(1) == 1
+            if try r.bits(1) == 1 { // colour_description_present_flag
+                info.colourPrimaries = try r.bits(8)
+                info.transferCharacteristics = try r.bits(8)
+                info.matrixCoefficients = try r.bits(8)
+            }
+        }
+        if try r.bits(1) == 1 { _ = try r.ue(); _ = try r.ue() } // chroma_loc_info
+        if try r.bits(1) == 1 { // timing_info_present_flag
+            let unitsInTick = try r.bits(32)
+            let timeScale = try r.bits(32)
+            _ = try r.bits(1) // fixed_frame_rate_flag
+            if unitsInTick > 0, timeScale > 0 {
+                // One frame is two ticks (field-based timing, E.2.1).
+                let fps = Double(timeScale) / Double(2 * unitsInTick)
+                if fps >= 1, fps <= 300 { info.fps = fps }
+            }
+        }
+        let nalHRD = try r.bits(1) == 1
+        if nalHRD { try skipHRD(&r) }
+        let vclHRD = try r.bits(1) == 1
+        if vclHRD { try skipHRD(&r) }
+        if nalHRD || vclHRD { _ = try r.bits(1) } // low_delay_hrd_flag
+        _ = try r.bits(1) // pic_struct_present_flag
+        if try r.bits(1) == 1 { // bitstream_restriction_flag
+            _ = try r.bits(1) // motion_vectors_over_pic_boundaries
+            _ = try r.ue(); _ = try r.ue(); _ = try r.ue(); _ = try r.ue()
+            info.maxNumReorderFrames = try r.ue()
+            _ = try r.ue() // max_dec_frame_buffering
+        }
+    }
+
+    private static func skipHRD(_ r: inout BitReader) throws {
+        let count = try r.ue() + 1 // cpb_cnt_minus1
+        _ = try r.bits(8) // bit_rate_scale, cpb_size_scale
+        for _ in 0..<min(count, 32) {
+            _ = try r.ue(); _ = try r.ue(); _ = try r.bits(1)
+        }
+        _ = try r.bits(20) // four 5-bit length fields
     }
 
     private static func skipScalingList(_ r: inout BitReader, _ size: Int) throws {
@@ -1883,7 +2261,7 @@ final class CastFMP4Remuxer {
         }
     }
 
-    private struct BitReader {
+    struct BitReader {
         private let data: [UInt8]
         private var pos = 0
 

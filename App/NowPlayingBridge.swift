@@ -177,6 +177,7 @@ final class NowPlayingBridge {
             info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0.0
         }
 
+        if let remoteDeviceLabel { info[MPMediaItemPropertyAlbumTitle] = remoteDeviceLabel }
         infoDict = info
         publishInfo()
 
@@ -205,6 +206,23 @@ final class NowPlayingBridge {
     /// (now − programStart), not the raw stream clock `time` — otherwise the
     /// per-tick perf pump would overwrite the program timeline with the mpv
     /// playback position (which resets to ~0 on every tune).
+    /// Receiver label for the lock screen while an AirPlay or Cast receiver
+    /// plays the session ("AirPlay · Living Room Apple TV", "Casting to X"),
+    /// nil otherwise. Survives `configure` so a channel flip keeps it.
+    private var remoteDeviceLabel: String?
+
+    func setRemoteDeviceLabel(_ label: String?) {
+        guard remoteDeviceLabel != label else { return }
+        remoteDeviceLabel = label
+        guard !infoDict.isEmpty else { return }
+        if let label {
+            infoDict[MPMediaItemPropertyAlbumTitle] = label
+        } else {
+            infoDict.removeValue(forKey: MPMediaItemPropertyAlbumTitle)
+        }
+        publishInfo()
+    }
+
     func updateElapsed(_ time: Double, rate: Float) {
         if currentIsLive, let bounds = programBounds() {
             // EPG is (now) available: upgrade to a bounded programme timeline,
