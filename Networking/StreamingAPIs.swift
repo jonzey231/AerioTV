@@ -57,7 +57,40 @@ func appendingHLSOutputFormat(_ url: URL) -> URL {
     }
     items.append(URLQueryItem(name: "output_format", value: "hls"))
     components.queryItems = items
-    return components.url ?? url
+    let upgraded = components.url ?? url
+    NativeHLSOriginalURLs.record(original: url, upgraded: upgraded)
+    return upgraded
+}
+
+/// Device log 2026-09-26 22:02 (Dispatcharr 0.31.0, default output HLS):
+/// the remux fallback reused the native HLS URL with its query stripped,
+/// so `/proxy/ts/stream/<uuid>` answered 302 to an HLS playlist and the
+/// remuxer cycled the server channel every 20 to 60 s. Every upgrade to
+/// `?output_format=hls` keeps an exact copy of the URL it came from, and
+/// the fallback plays that copy.
+enum NativeHLSOriginalURLs {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var map: [String: URL] = [:]
+
+    static func record(original: URL, upgraded: URL) {
+        guard original != upgraded else { return }
+        lock.lock(); defer { lock.unlock() }
+        if map.count > 512 { map.removeAll() }
+        map[upgraded.absoluteString] = original
+    }
+
+    /// The TS URL a native HLS tile falls back to: the recorded original,
+    /// always pinned to `output_format=mpegts` on a Dispatcharr TS path.
+    static func tsFallbackURL(for upgraded: URL) -> URL {
+        lock.lock()
+        let original = map[upgraded.absoluteString]
+        lock.unlock()
+        let base = original ?? removingHLSOutputFormat(upgraded)
+        let pinned = pinningDispatcharrMPEGTSOutput(base)
+        debugLog("[AVP-NHLS] remux fallback URL \(original != nil ? "restored from the original" : "rebuilt (no original recorded)"): "
+            + "\(pinned.path)?\(pinned.query ?? "")")
+        return pinned
+    }
 }
 
 /// Single-connection invariant for live channel URLs (stream_limit 1 field

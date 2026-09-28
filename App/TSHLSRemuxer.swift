@@ -929,7 +929,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         urlSession = session
         firstByteLock.lock(); activeSession = session; firstByteLock.unlock()
-        var request = URLRequest(url: sourceURL)
+        var request = URLRequest(url: pinningDispatcharrMPEGTSOutput(sourceURL))
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
         let task = session.dataTask(with: request)
         ingestTask = task
@@ -3234,6 +3234,23 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
             + "local=\(t.localAddress ?? "?") reused=\(t.isReusedConnection)")
     }
 
+    /// Device log 2026-09-26 22:02: a TS ingest without
+    /// `output_format=mpegts` on a server whose default output is HLS got
+    /// a 302 to a playlist, read ~200 bytes, saw "clean EOF" and re-tuned
+    /// every 20 to 60 s, cycling the server channel. Refuse that redirect
+    /// and fail the URL hard (not in the tile's retryable classes).
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        guard isDispatcharrHLSRedirect(request.url) else { completionHandler(request); return }
+        completionHandler(nil)
+        guard isCurrentIngest(session), !eventPlaylist else { return }
+        debugLog("[TS-REMUX] ingest redirected to an HLS playlist (\(request.url?.absoluteString ?? "-")); "
+            + "this path needs output_format=mpegts")
+        queue.async { [weak self] in self?.fail(.ingestFailed("redirected to an HLS playlist")) }
+    }
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                     didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
@@ -3491,6 +3508,7 @@ final class AVPStallWatchdog {
          interval: TimeInterval = 4.0,
          mediaBytes: (() -> Int64)? = nil,
          coldStart: NativeHLSColdStart? = nil,
+         receiverOwnsPlayback: (() -> Bool)? = nil,
          onDead: @escaping (String) -> Void) {
         self.player = player
         self.item = item
@@ -3498,8 +3516,19 @@ final class AVPStallWatchdog {
         self.interval = interval
         self.mediaBytes = mediaBytes
         self.coldStart = coldStart
+        self.receiverOwnsPlayback = receiverOwnsPlayback
         self.onDead = onDead
     }
+
+    /// Device log 2026-09-26 22:02:45: AirPlay picked while a native HLS
+    /// tile played; 2 s later this watchdog read "ready but no renderable
+    /// video" (the phone renders no frames while the Apple TV plays) and
+    /// tore the tile down. The native HLS tile has no delivery to suspend
+    /// it, so every poll asks: external playback active on the player, or
+    /// the caller says the AirPlay route belongs to this tile. Either one
+    /// stands every verdict down, like `setSuspended` does for the remux tile.
+    private let receiverOwnsPlayback: (() -> Bool)?
+    private var externalStandDownLogged = false
 
     /// Fire-and-forget read of the client playlist, at most one in
     /// flight. Records growth (more segments, or a higher media
@@ -3587,6 +3616,24 @@ final class AVPStallWatchdog {
         guard !cancelled, !fired else { return }
         if suspended { schedule(); return }
         guard let player, let item, player.currentItem === item else { return }
+        let external = player.isExternalPlaybackActive
+        if external || receiverOwnsPlayback?() == true {
+            if !externalStandDownLogged {
+                externalStandDownLogged = true
+                debugLog("[AVP-WATCHDOG] \(label): stands down, receiver owns playback "
+                    + "(isExternalPlaybackActive=\(external), AirPlay route on this tile=\(!external))")
+            }
+            lastTime = -1
+            stuckPolls = 0
+            unknownPolls = 0
+            lastMediaBytes = -1
+            schedule()
+            return
+        }
+        if externalStandDownLogged {
+            externalStandDownLogged = false
+            debugLog("[AVP-WATCHDOG] \(label): receiver released playback; verdicts resume")
+        }
         func die(_ reason: String) {
             fired = true
             debugLog("[AVP-WATCHDOG] \(label): \(reason); falling back to mpv")
@@ -5682,7 +5729,7 @@ struct AVPlayerMultiviewTile: View {
            classifyStreamURL(streamURL) == .hls,
            (streamURL.query ?? "").contains("output_format=hls") {
             HLSCapabilityStore.shared.markNotCapable(streamURL)
-            let plain = removingHLSOutputFormat(streamURL)
+            let plain = NativeHLSOriginalURLs.tsFallbackURL(for: streamURL)
             debugLog("[AVP-MV] direct HLS failed (\(reason)); re-tuning via TS remux channel=\(channelName)")
             directHLSFallbackURL = plain
             endNativeHLSSession("direct HLS failed, remux fallback")
@@ -6490,7 +6537,7 @@ struct AVPlayerMultiviewTile: View {
     private func fallBackToRemuxAfterResolveFailure() {
         guard directHLSFallbackURL == nil else { return }
         endNativeHLSSession("remux fallback")
-        directHLSFallbackURL = removingHLSOutputFormat(streamURL)
+        directHLSFallbackURL = NativeHLSOriginalURLs.tsFallbackURL(for: streamURL)
         resolvedNativeHLSURL = nil
         resolvedNativeHLSFor = nil
         resolvedNativeHLSAt = 0
@@ -6753,6 +6800,12 @@ struct AVPlayerMultiviewTile: View {
         releaseAVStartGate(reason: String(format: "moving picture (%.1f fps) + playback", videoFPS))
     }
 
+    /// Native HLS join depth (see `shortWindowRunwayHold` and startPlayer).
+    private static let nativeHLSWarmWindow = 12.0
+    private static let nativeHLSWarmOffset = 12.0
+    private static let nativeHLSColdRunway = 8.0
+    private static let nativeHLSColdHoldCap = 6.0
+
     /// Media loaded ahead of the playhead right now, in seconds.
     private func forwardBufferSeconds() -> Double {
         guard let item = player?.currentItem else { return 0 }
@@ -6773,11 +6826,13 @@ struct AVPlayerMultiviewTile: View {
         guard let w = nativeHLSWindow, w.windowSeconds > 0 else { return nil }
         // TARGETDURATION is the server's own statement of a segment; a
         // playlist that omits it falls back to what its segments measure.
-        let target = w.targetDuration > 0 ? w.targetDuration : w.segmentSeconds
-        guard target > 0, w.windowSeconds < target * 3 else { return nil }
-        guard CACurrentMediaTime() - avStartGateAt < 8.0 else { return nil }
-        // Never ask for more runway than the window can hold.
-        let needed = min(6.0, w.windowSeconds / 2)
+        // Join depth rule (device log 2026-09-26 22:00): a window shorter
+        // than 12 s is a cold client; the join goes to its OLDEST segment
+        // and this holds until 8 s of runway is loaded or 6 s have passed
+        // since the gate armed, whichever comes first.
+        guard w.windowSeconds < Self.nativeHLSWarmWindow else { return nil }
+        guard CACurrentMediaTime() - avStartGateAt < Self.nativeHLSColdHoldCap else { return nil }
+        let needed = Self.nativeHLSColdRunway
         let have = forwardBufferSeconds()
         guard have < needed else { return nil }
         return (w.windowSeconds, needed, have)
@@ -6889,10 +6944,12 @@ struct AVPlayerMultiviewTile: View {
         let isNativeServerHLS = isLiveTune && !isLANItem && remuxer == nil
             && url.scheme != HLSDelivery.scheme && url.host != "127.0.0.1"
         if isNativeServerHLS {
-            debugLog("[AVP-NHLS] join point left to the server (EXT-X-START honored; "
-                + "no configuredTimeOffsetFromLive) channel=\(channelName)")
             // START-UP POLICY, native server HLS only.
             //
+            // SUPERSEDED 2026-09-27 by the JOIN DEPTH rule below, which
+            // derives the offset from the measured window and clamps it
+            // inside that window (the failure described here was an
+            // offset larger than the window). History kept:
             // NO COMPUTED JOIN OFFSET. This is the third and last word on
             // it, and the reason is arithmetic rather than taste. Our
             // offset does not replace AVPlayer's live hold-back, it
@@ -6930,11 +6987,35 @@ struct AVPlayerMultiviewTile: View {
                 let forward = max(1.0, min(4.0, window.segmentSeconds))
                 playerItem.preferredForwardBufferDuration = forward
                 debugLog(String(format:
-                    "[AVP-NHLS] start-up policy: join left to AVPlayer's own hold-back "
-                    + "(no configuredTimeOffsetFromLive), fwdBuf %.2fs from measured segment "
+                    "[AVP-NHLS] start-up policy: fwdBuf %.2fs from measured segment "
                     + "%.2fs (window %.2fs across %d, TARGETDURATION %.0f) channel=%@",
                     forward, window.segmentSeconds, window.windowSeconds,
                     window.segmentCount, window.targetDuration, channelName))
+                // JOIN DEPTH (device log 2026-09-26 22:00, Dispatcharr
+                // 0.31.0): the server's EXT-X-START -5 s joined a 7.5 s
+                // window and ran dry at +10.6 s and +20.5 s, because this
+                // server's playlist grows in bursts with gaps up to 9 s.
+                // Warm window (>= 12 s): sit 12 s back, never less than
+                // 3 measured segments, never past the oldest segment.
+                // Cold window (< 12 s): join at the OLDEST segment for the
+                // most runway, and the A/V start gate holds until 8 s is
+                // loaded or 6 s have passed.
+                let w = window.windowSeconds
+                let offset: Double
+                let holdMs: Int
+                if w >= Self.nativeHLSWarmWindow {
+                    let wanted = max(Self.nativeHLSWarmOffset, 3 * window.segmentSeconds)
+                    offset = min(wanted, w - window.segmentSeconds / 2)
+                    holdMs = 0
+                } else {
+                    offset = max(0.5, w - 0.1)
+                    holdMs = Int(Self.nativeHLSColdHoldCap * 1000)
+                }
+                playerItem.configuredTimeOffsetFromLive =
+                    CMTime(seconds: offset, preferredTimescale: 600)
+                debugLog(String(format:
+                    "[AVP-NHLS] join: window %.1f s, offset %.1f s, runway %.1f s, hold %d ms channel=%@",
+                    w, offset, offset, holdMs, channelName))
             } else {
                 playerItem.preferredForwardBufferDuration = 4
                 debugLog("[AVP-NHLS] start-up policy: playlist window unknown; fwdBuf 4s, "
@@ -7245,6 +7326,14 @@ struct AVPlayerMultiviewTile: View {
             player: avPlayer, item: playerItem, label: "tile \(channelName)",
             mediaBytes: progressServer.map { s in { s.mediaBytesStreamed } },
             coldStart: coldStart,
+            receiverOwnsPlayback: { [tileID] in
+                #if os(iOS)
+                return HLSDelivery.airPlayRouteActive
+                    && MultiviewStore.shared.audioTileID == tileID
+                #else
+                return false
+                #endif
+            },
             onDead: { failOrFallback($0) })
         #if os(iOS)
         // Started on the LAN for an AirPlay receiver: the local clock is

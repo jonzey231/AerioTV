@@ -17,6 +17,34 @@
 //
 
 import Foundation
+
+/// Dispatcharr TS paths (`/proxy/ts/stream/<uuid>`, `/proxy/ts/channel/<uuid>`)
+/// answer in the server's DEFAULT output format when the request names none,
+/// and a server whose default is HLS answers a 302 to a playlist (device log
+/// 2026-09-26 22:02, Dispatcharr 0.31.0). Every TS ingest (remux, AirPlay
+/// tile, Cast proxy, retries) goes through this: it pins
+/// `output_format=mpegts`, replacing any other value. Other URLs pass through.
+func pinningDispatcharrMPEGTSOutput(_ url: URL) -> URL {
+    let path = url.path.lowercased()
+    guard path.contains("/proxy/ts/stream/") || path.contains("/proxy/ts/channel/"),
+          var c = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+    var items = c.queryItems ?? []
+    if items.contains(where: { $0.name == "output_format" && $0.value == "mpegts" })
+        && !items.contains(where: { $0.name == "output" }) {
+        return url
+    }
+    items.removeAll { $0.name == "output_format" || $0.name == "output" }
+    items.append(URLQueryItem(name: "output_format", value: "mpegts"))
+    c.queryItems = items
+    return c.url ?? url
+}
+
+/// True when a TS ingest's redirect points at Dispatcharr's HLS output.
+func isDispatcharrHLSRedirect(_ location: URL?) -> Bool {
+    guard let s = location?.absoluteString.lowercased() else { return false }
+    return s.contains("/proxy/hls/") || s.contains("output_format=hls")
+}
+
 #if os(iOS)
 import AVFoundation
 #endif
@@ -902,7 +930,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             config.timeoutIntervalForResource = .infinity
             let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
             self.session = session
-            var request = URLRequest(url: url)
+            var request = URLRequest(url: pinningDispatcharrMPEGTSOutput(url))
             for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
             let task = session.dataTask(with: request)
             self.task = task
@@ -924,6 +952,23 @@ final class CastHLSProxySession: @unchecked Sendable {
             session?.invalidateAndCancel()
             task = nil
             session = nil
+        }
+
+        /// A TS ingest redirected to Dispatcharr's HLS output is the wrong
+        /// path (the request lacked `output_format=mpegts`): refuse it so
+        /// the 302 surfaces as a hard failure instead of HLS bytes fed to
+        /// the TS demuxer.
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            if isDispatcharrHLSRedirect(request.url) {
+                debugLog("[CAST-HLS] ingest redirected to an HLS playlist (\(request.url?.absoluteString ?? "-")); "
+                    + "this path needs output_format=mpegts")
+                completionHandler(nil)
+                return
+            }
+            completionHandler(request)
         }
 
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
