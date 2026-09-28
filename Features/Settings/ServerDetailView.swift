@@ -177,6 +177,9 @@ struct ServerDetailView: View {
     @State private var isRefreshingPlaylist = false
     @State private var playlistRefreshDone = false
     @Environment(\.dismiss) private var dismiss
+    #if os(iOS)
+    @Environment(\.editPlaylist) private var editPlaylist
+    #endif
 
     private var hasLANConfigured: Bool {
         // LAN means "we have a localURL we can probe" on every
@@ -237,7 +240,15 @@ struct ServerDetailView: View {
         #if os(iOS)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Edit") { editingServer = server }
+                Button("Edit") {
+                    if let editPlaylist {
+                        debugLog("[Settings] Edit playlist tapped: \(server.name) via root serverToEdit")
+                        editPlaylist(server)
+                    } else {
+                        debugLog("[Settings] Edit playlist tapped: \(server.name) via local sheet")
+                        editingServer = server
+                    }
+                }
                     .foregroundColor(.accentPrimary)
             }
         }

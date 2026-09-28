@@ -5111,12 +5111,8 @@ struct MainTabView: View {
         // the bottom MiniPlayerBar UX is too jarring for an unsolicited
         // appear; iPad + tvOS get the corner mini-player which feels
         // ambient.
-        #if os(iOS)
-        guard UIDevice.current.userInterfaceIdiom == .pad else {
-            didAttemptAutoResume = true
-            return
-        }
-        #endif
+        // Android parity (Logan 2026-09-27): iPhone resumes too, into its
+        // bottom MiniPlayerBar; the Settings row now shows on every idiom.
 
         // If a channel is already playing (warm-resume case where
         // tvOS suspended us with the player intact and then woke us

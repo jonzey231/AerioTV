@@ -195,21 +195,18 @@ struct MoviesTVSettingsView: View {
             .listSectionSeparator(.hidden)
 
             // MARK: Display Scale
-            // iPad / Mac only (Logan 2026-09-18): the phone grids use fixed
-            // column counts and ignore `uiScale` entirely, so the slider did
-            // nothing there. The row is hidden, not deleted, until the phone
-            // layouts read the scale.
-            if UIDevice.current.userInterfaceIdiom != .phone {
-                Section {
-                    scaleSliderRow_iOS(title: "Movies & Series", binding: $vodScale)
-                } header: {
-                    Text("Display Scale").sectionHeaderStyle()
-                } footer: {
-                    Text("Independent scale for Movies & Series. 100% matches the default; 85-150% lets you trade density for readability. Changes apply live, no restart needed.")
-                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
-                }
-                .listSectionSeparator(.hidden)
+            // Every idiom (Android parity, Logan 2026-09-27): the Movies and
+            // TV Shows pages multiply their text by `uiScale` everywhere
+            // (VODDisplayScale), and iPad / Mac also stretch the grid.
+            Section {
+                scaleSliderRow_iOS(title: "Movies & TV Shows", binding: $vodScale)
+            } header: {
+                Text("Display Scale").sectionHeaderStyle()
+            } footer: {
+                Text("Independent scale for Movies & Series. 100% matches the default; 85-150% lets you trade density for readability. Changes apply live, no restart needed.")
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
+            .listSectionSeparator(.hidden)
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
@@ -326,10 +323,17 @@ struct MoviesTVSettingsView: View {
                         .padding(.top, 12)
                 }
 
-                // Display Scale is hidden on tvOS (Logan 2026-09-18): the TV
-                // Movies / TV Shows layouts never read `uiScale`, so the
-                // control did nothing. `scaleSliderRow_tvOS` below is kept
-                // for when they do.
+                // Display Scale (Android parity, Logan 2026-09-27): the TV
+                // Movies / TV Shows pages now scale their text by `uiScale`
+                // through VODDisplayScale.
+                SettingsSection("Display Scale", style: .plain) {
+                    scaleSliderRow_tvOS(title: "Movies & TV Shows", binding: $vodScale)
+                    Text("Independent scale for Movies & Series. 100% matches the default; 85-150% lets you trade density for readability. Changes apply live, no restart needed.")
+                        .scaledFont(.system(size: 22).subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
+                        .padding(.horizontal, 20)
+                        .padding(.top, 4)
+                }
             }
             .padding(.horizontal, 80)
             .padding(.vertical, 60)

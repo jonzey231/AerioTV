@@ -39,7 +39,7 @@ struct TVShowsView: View {
 
     private let hiddenGroupsKey = "hiddenSeriesGroups"
 
-    /// User-tunable UI scale (0.85-1.5). iPhone + tvOS ignore the value;
+    /// User-tunable UI scale (0.85-1.5). Text scales on every idiom (VODDisplayScale);
     /// iPad / Mac Catalyst stretch the poster minimum so the grid reads
     /// comfortably on wider displays (see AppearanceSettingsView).
     @AppStorage("uiScale") private var uiScale: Double = 1.0
@@ -106,7 +106,15 @@ struct TVShowsView: View {
     /// Whether the navigation stack is at root (no detail pushed).
     var isAtRoot: Bool { navPath.isEmpty }
 
+    /// Movies & TV Shows Display Scale (Android parity, Logan 2026-09-27):
+    /// multiplies the app text scale for this page on every platform, the
+    /// way Android's WithDisplayScale multiplies fontScale.
     var body: some View {
+        vodPageContent.modifier(VODDisplayScale())
+    }
+
+    @ViewBuilder
+    private var vodPageContent: some View {
         NavigationStack(path: $navPath) {
             ZStack {
                 Color.appBackground.ignoresSafeArea()

@@ -219,20 +219,20 @@ struct GeneralSettingsView: View {
                 .tint(theme.accent)
                 .listRowBackground(Color.cardBackground)
 
-                if UIDevice.current.userInterfaceIdiom == .pad {
-                    Toggle(isOn: $autoResumeLastChannel) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Resume last channel")
-                                .scaledFont(.bodyMedium)
-                                .foregroundColor(.textPrimary)
-                            Text("Auto-start the last-played channel in the corner mini-player on launch")
-                                .scaledFont(.labelSmall.subtext())
-                                .foregroundColor(Color.contrastText(.textTertiary))
-                        }
+                // Every idiom (Android parity, Logan 2026-09-27): iPhone
+                // resumes into its bottom mini-player bar.
+                Toggle(isOn: $autoResumeLastChannel) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Resume Last Channel")
+                            .scaledFont(.bodyMedium)
+                            .foregroundColor(.textPrimary)
+                        Text("Auto-start the last-played channel in the corner mini-player on launch")
+                            .scaledFont(.labelSmall.subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
                     }
-                    .tint(theme.accent)
-                    .listRowBackground(Color.cardBackground)
                 }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
 
                 Toggle(isOn: $autoRotate) {
                     VStack(alignment: .leading, spacing: 2) {

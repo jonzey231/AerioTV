@@ -440,7 +440,7 @@ struct MoviesView: View {
     #endif
     @State private var scrollIsIdle = true
 
-    /// User-tunable UI scale (0.85-1.5). Only consumed on iPad / Mac Catalyst
+    /// User-tunable UI scale (0.85-1.5). Text scales everywhere (VODDisplayScale); the grid only
     /// where the default 120 px minimum can feel cramped on wide displays;
     /// iPhone grids stay at their designed minimums (user scale is a no-op in
     /// the ternary below), and tvOS ignores the setting entirely.
@@ -543,7 +543,15 @@ struct MoviesView: View {
     /// Whether the navigation stack is at root (no detail pushed).
     var isAtRoot: Bool { navPath.isEmpty }
 
+    /// Movies & TV Shows Display Scale (Android parity, Logan 2026-09-27):
+    /// multiplies the app text scale for this page on every platform, the
+    /// way Android's WithDisplayScale multiplies fontScale.
     var body: some View {
+        vodPageContent.modifier(VODDisplayScale())
+    }
+
+    @ViewBuilder
+    private var vodPageContent: some View {
         let _ = TabProbe.body("MoviesView")
         NavigationStack(path: $navPath) {
             ZStack {
@@ -4308,3 +4316,16 @@ struct MoviesPillStyle: ButtonStyle {
 /// rail state, so a show/hide flip re-renders this modifier's content and
 /// not the tab.
 #endif
+
+/// Applies Settings > Movies & TV Shows > Display Scale (`uiScale`,
+/// 0.85 to 1.5) to a Movies or TV Shows page by multiplying the inherited
+/// `aerioTextScale`, mirroring Android's `WithDisplayScale` (fontScale x scale).
+struct VODDisplayScale: ViewModifier {
+    @AppStorage("uiScale") private var uiScale: Double = 1.0
+    @Environment(\.aerioTextScale) private var textScale
+
+    func body(content: Content) -> some View {
+        let clamped = CGFloat(max(0.85, min(1.5, uiScale)))
+        content.environment(\.aerioTextScale, textScale * clamped)
+    }
+}

@@ -270,7 +270,7 @@ struct PlayerSettingsView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Keep Recent Channels Live")
                                     .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                                Text("Flipped-away channels keep buffering so their rewind timeline survives")
+                                Text("Buffer flipped-away channels in the background")
                                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                             }
                         }
@@ -599,7 +599,7 @@ struct PlayerSettingsView: View {
                                 icon: "rectangle.stack.badge.play",
                                 iconColor: theme.accent,
                                 title: "Keep Recent Channels Live",
-                                subtitle: "Flipped-away channels keep buffering so their rewind timeline survives",
+                                subtitle: "Buffer flipped-away channels in the background",
                                 isOn: $liveRewindRetainChannels
                             ) { _ in }
                             if liveRewindRetainChannels {

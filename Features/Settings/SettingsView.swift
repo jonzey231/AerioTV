@@ -129,6 +129,12 @@ struct SettingsView: View {
         // (ServerDetailView, DVR → MyRecordingsView) opt into the
         // same pop mechanism despite bypassing `navPath`.
         settingsNavigationStack
+            #if os(iOS)
+            // One Edit Playlist mechanism on iPhone and iPad: pushed pages
+            // (ServerDetailView) set the root's `serverToEdit`, the same
+            // binding the row context menu and the deep link use.
+            .environment(\.editPlaylist, EditPlaylistAction { serverToEdit = $0 })
+            #endif
             // aerio://settings/<page>. Warm app: the notification. Cold
             // launch: the page parked on SettingsDeepLink before this view
             // existed, consumed on the first mount.
@@ -1171,3 +1177,15 @@ struct SettingsView: View {
 /// Internal (not private) so DVR / Developer / Appearance settings pages
 /// can reuse the same focus treatment for uniform tvOS UI.
 #endif  // Phase 1 split: closes a block that spanned the extraction cut
+
+#if os(iOS)
+/// Presents Edit Playlist through SettingsView's root `serverToEdit` sheet.
+struct EditPlaylistAction {
+    let present: (ServerConnection) -> Void
+    func callAsFunction(_ server: ServerConnection) { present(server) }
+}
+
+extension EnvironmentValues {
+    @Entry var editPlaylist: EditPlaylistAction? = nil
+}
+#endif
