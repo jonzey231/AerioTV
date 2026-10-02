@@ -1939,9 +1939,15 @@ struct ChannelListView: View {
                 } else if y < 20 && chrome.targetCollapsed {
                     chrome.applyCollapsed(false, deferred: deferred)
                 }
+                // The tab bar is never deferred: it slides with a layer
+                // transform (TabBarCollapseState) and changes no inset, so
+                // the deceleration relayout the deferral guards against does
+                // not apply. Holding it to idle made a long flick tuck the
+                // bar away seconds after the gesture (iPhone recording
+                // 2026-10-02 13:47: hide decided at 24.5 s, applied at 26.9 s).
                 if let hidden = tabBarTracker.update(oldY: oldY, newY: y,
                                                      hidden: chrome.targetTabBarAway) {
-                    chrome.applyTabBarAway(hidden, deferred: deferred)
+                    chrome.applyTabBarAway(hidden, deferred: false)
                 }
             }
             .onScrollPhaseChange { _, phase in
@@ -1952,7 +1958,15 @@ struct ChannelListView: View {
                 case .idle:
                     chrome.flushPending()
                 default:
-                    chrome.isDecelerating = false
+                    // A finger landing mid-deceleration ends the deceleration
+                    // just as surely as coming to rest, so publish anything
+                    // parked for idle now. Leaving it parked lost the first
+                    // hide of every flick that was caught before it settled:
+                    // the next scroll up cleared the pending hide and the bar
+                    // only tucked away on the second scroll down (iPhone log
+                    // 2026-10-02 13:43, [CHROME] tabBarAway=true deferred then
+                    // tabBarAway=false 0.5 s later with no idle between).
+                    chrome.flushPending()
                 }
             }
             // GH #20 (Android parity): tuck the tab bar away on scroll so

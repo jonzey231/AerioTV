@@ -8830,11 +8830,14 @@ final class TabBarCollapseState: ObservableObject {
             let frame = superview.convert(bar.frame, to: window)
             let target = CGPoint(x: 28 + 24,
                                  y: window.bounds.height - window.safeAreaInsets.bottom + 6 - 24)
+            // The mini button's anchor and scale, measured from the bar's
+            // laid-out frame: the hide animates toward it, the show starts
+            // from it.
+            let ax = ((target.x - frame.minX) / max(frame.width, 1)).clamped(to: 0...1)
+            let ay = ((target.y - frame.minY) / max(frame.height, 1)).clamped(to: 0...1)
+            let sx = 48 / max(frame.width, 1), sy = 48 / max(frame.height, 1)
+            Self.setAnchor(bar, CGPoint(x: ax, y: ay))
             if hide {
-                let ax = ((target.x - frame.minX) / max(frame.width, 1)).clamped(to: 0...1)
-                let ay = ((target.y - frame.minY) / max(frame.height, 1)).clamped(to: 0...1)
-                Self.setAnchor(bar, CGPoint(x: ax, y: ay))
-                let sx = 48 / max(frame.width, 1), sy = 48 / max(frame.height, 1)
                 UIView.animate(withDuration: 0.32, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState]) {
                     bar.transform = CGAffineTransform(scaleX: sx, y: sy)
                 }
@@ -8842,8 +8845,15 @@ final class TabBarCollapseState: ObservableObject {
                     bar.alpha = 0
                 }
             } else {
-                // The collapse in reverse: scale back up from the mini
-                // button's anchor, fading in first.
+                // The collapse in reverse (Logan 2026-10-02): the normalize
+                // above put the bar at full size, so with no start state the
+                // transform animation had nothing to do and the show was a
+                // bare fade (the "flash to full width"). Park the bar at the
+                // mini button's scale first, without animation, then grow
+                // from there.
+                UIView.performWithoutAnimation {
+                    bar.transform = CGAffineTransform(scaleX: sx, y: sy)
+                }
                 UIView.animate(withDuration: 0.32, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState], animations: {
                     bar.transform = .identity
                 }, completion: { finished in
