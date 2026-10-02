@@ -11,6 +11,16 @@ import SwiftData
 
 #if os(tvOS)  // Phase 1 split: re-opened, block spanned the extraction cut
 struct EditServerPage: View {
+
+    /// Guide Days choices shared by the TV page and the phone sheet; 0 = All
+    /// Available. Labels match Android's picker.
+    static let guideDayChoices: [SettingsChoice<Int>] = [
+        SettingsChoice(1, "1 Day"),
+        SettingsChoice(3, "3 Days"),
+        SettingsChoice(7, "7 Days (Default)"),
+        SettingsChoice(14, "14 Days"),
+        SettingsChoice(0, "All Available"),
+    ]
     @Bindable var server: ServerConnection
     @Environment(\.dismiss) private var dismiss
     /// Task #189: Channel Profile picker state (Dispatcharr only).
@@ -277,7 +287,7 @@ struct EditServerPage: View {
                             // Phase 3 item 2: the old section footer described
                             // this one field, so it became the field's helper.
                             // Same string as iOS and Android.
-                            SettingsTextField("Custom XMLTV URL (optional)",
+                            SettingsTextField("Custom XMLTV URL (Optional)",
                                               placeholder: "https://example.com/xmltv.xml",
                                               text: $server.xtreamXMLTVURL,
                                               helper: "Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own. Leave blank to skip.",
@@ -358,7 +368,7 @@ struct EditServerPage: View {
                             SettingsSection("EPG Source", style: .eyebrowCard) {
                                 // Phase 3 item 2: footer copy folded into the
                                 // field it describes; matches iOS and Android.
-                                SettingsTextField("Custom XMLTV URL (optional)",
+                                SettingsTextField("Custom XMLTV URL (Optional)",
                                                   placeholder: "https://example.com/xmltv.xml",
                                                   text: $server.dispatcharrXMLTVURL,
                                                   helper: "EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.",
@@ -367,7 +377,7 @@ struct EditServerPage: View {
                         }
                     } else if server.type == .m3uPlaylist {
                         SettingsSection("EPG Guide", style: .eyebrowCard) {
-                            SettingsTextField("EPG URL (optional)", text: $server.epgURL,
+                            SettingsTextField("EPG URL (Optional)", text: $server.epgURL,
                                               keyboardType: .URL)
                         }
                     }
@@ -412,19 +422,14 @@ struct EditServerPage: View {
                     }
 
                     // Guide Days (window back AND ahead; Logan 2026-09-11)
+                    // A choice row like Default Destination, not a segmented
+                    // control (Logan 2026-10-02: the pills felt out of place);
+                    // same labels as Android.
                     SettingsSection("Guide Days", style: .eyebrowCard) {
-                        Picker("Guide Days", selection: $server.epgRetentionDays) {
-                            Text("1 day").tag(1)
-                            Text("3 days").tag(3)
-                            Text("7 days (default)").tag(7)
-                            Text("14 days").tag(14)
-                            Text("All Available").tag(0)
-                        }
-                        .pickerStyle(.segmented)
-                        Text("How many days of guide data to load, back and ahead. Dispatcharr only; other sources show what their guide carries.")
-                            .scaledFont(.system(size: 22).subtext())
-                            .foregroundColor(Color.contrastText(.textTertiary))
-                            .padding(.top, 4)
+                        SettingsChoicePicker("Guide Days",
+                                             options: Self.guideDayChoices,
+                                             selection: $server.epgRetentionDays,
+                                             footer: "How many days of guide data to load, back and ahead. Dispatcharr only; other sources show what their guide carries.")
                     }
 
                     // Task #189 (Android parity): user-chosen Channel

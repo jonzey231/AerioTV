@@ -397,7 +397,7 @@ struct EditServerSheet: View {
                     // Phase 3 item 2: this footer described only the XMLTV
                     // field, so it is the field's helper now (same string on
                     // tvOS and Android).
-                    SettingsTextField("Custom XMLTV URL (optional)",
+                    SettingsTextField("Custom XMLTV URL (Optional)",
                                       placeholder: "https://example.com/xmltv.xml",
                                       text: $server.xtreamXMLTVURL,
                                       helper: "Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own. Leave blank to skip.",
@@ -514,7 +514,7 @@ struct EditServerSheet: View {
                     // Catalyst alike (user-reported v1.6.8).
                     // Phase 3 item 2: the section footer described only this
                     // field, so it is the helper now.
-                    SettingsTextField("Custom XMLTV URL (optional)",
+                    SettingsTextField("Custom XMLTV URL (Optional)",
                                       placeholder: "https://example.com/xmltv.xml",
                                       text: $server.dispatcharrXMLTVURL,
                                       helper: "EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.",
@@ -558,7 +558,7 @@ struct EditServerSheet: View {
                 }
             } else if server.type == .m3uPlaylist {
                 Section {
-                    SettingsTextField("EPG URL (optional)", text: $server.epgURL,
+                    SettingsTextField("EPG URL (Optional)", text: $server.epgURL,
                                       keyboardType: .URL)
                         .listRowBackground(Color.cardBackground)
                 } header: {
@@ -619,13 +619,10 @@ struct EditServerSheet: View {
             // "Previously aired" history in the List view and the
             // replay window shown in the Guide.
             Section {
-                Picker("Guide Days", selection: $server.epgRetentionDays) {
-                    Text("1 day").tag(1)
-                    Text("3 days").tag(3)
-                    Text("7 days (default)").tag(7)
-                    Text("14 days").tag(14)
-                    Text("All Available").tag(0)
-                }
+                // Choice row, not a menu (Logan 2026-10-02); labels as Android.
+                SettingsChoicePicker("Guide Days",
+                                     options: EditServerPage.guideDayChoices,
+                                     selection: $server.epgRetentionDays)
                 .listRowBackground(Color.cardBackground)
             } header: {
                 Text("Guide Days").sectionHeaderStyle()

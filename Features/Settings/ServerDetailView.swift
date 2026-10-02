@@ -293,6 +293,10 @@ struct ServerDetailView: View {
                     // clearing it for all servers is harmless.)
                     await EPGCache.shared.invalidateAll()
                     if server.isActive {
+                        // Refresh EPG Data must refetch the grid too: with the
+                        // chunk coverage still valid the walk fetched 0 of 61
+                        // chunks after a purge (atv log 2026-10-02 16:21:03).
+                        GuideStore.shared.invalidateGridCoverage()
                         await ChannelStore.shared.forceRefresh(servers: Array(servers), modelContext: modelContext)
                     }
                     isPurgingEPG = false

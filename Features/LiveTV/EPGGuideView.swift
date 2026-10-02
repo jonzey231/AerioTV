@@ -557,6 +557,16 @@ final class GuideStore: ObservableObject {
             debugLog("📺 GuideStore: DISCARDED stale \(source) write for \(serverID.prefix(8)) — guide now displays \(displayedServerID!.prefix(8))")
             return false
         }
+        // Inside a batch the write lands on the staging map; endBatch publishes
+        // once. The two prunes after a grid walk used to publish the whole map
+        // back to back (history-bound-prune, catchup-reach-prune), 1.6 s of
+        // main-thread render apiece on the Apple TV (atv log 2026-10-02
+        // 16:16:26 to 16:16:29, three publishes of ~200k programs in 3 s).
+        if _isCoalescingPrunes {
+            _pendingPrograms = dict
+            debugLog("[PUBLISH] guide.programs \(source) staged for one publish")
+            return true
+        }
         // A bulk write that would leave the guide with NOTHING is a failed
         // fetch, not an empty guide, and it never wins over data we already
         // have. The bulk paths pre-strip the fetch window out of their base
@@ -1423,7 +1433,7 @@ final class GuideStore: ObservableObject {
         // filter runs off the main actor (session8: the sibling
         // `pruneOutsideGridWindow` filter was inside a 1004 ms [HANG] at
         // 14:54:12.903); main only commits the result.
-        let snapshot = programs
+        let snapshot = residentPrograms
         let noCatchupSecs = Self.noCatchupHistorySeconds
         let trim: (dict: [String: [GuideProgram]], dropped: Int) = await Task.detached(priority: .utility) {
             var trimmed: [String: [GuideProgram]] = [:]
@@ -1641,7 +1651,7 @@ final class GuideStore: ObservableObject {
 
         // Off the main actor: this filter over the whole resident map was inside
         // the 1004 ms [HANG] at 14:54:12.903 in session8.
-        let snapshot = programs
+        let snapshot = residentPrograms
         let trim: (dict: [String: [GuideProgram]], dropped: Int) = await Task.detached(priority: .utility) {
             var trimmed: [String: [GuideProgram]] = [:]
             var dropped = 0
@@ -2668,12 +2678,21 @@ final class GuideStore: ObservableObject {
         // An explicit refresh forced this walk to ignore coverage; the walk has
         // now rewritten it, so later walks in this session are incremental again.
         forceFullGridReload = false
+        // Both prunes inside one batch: one publish instead of two (see
+        // commitPrograms). The identical-content guard skips it when neither
+        // prune dropped anything.
+        _isCoalescingPrunes = true
+        _pendingPrograms = programs
         await pruneOutsideGridWindow(historyStart: historyStart, forwardEnd: forwardEnd, serverID: serverID)
         // Catch-up reach prune on the launch guide load. This is the first point
         // where `channels` (and therefore every channel's catchupDays) is known:
         // `loadFromCache` runs in parallel with the channel fetch, so its own
         // prune call is a no-op on a cold launch.
         await pruneBeyondCatchupReach(channels: channels, serverID: serverID)
+        _isCoalescingPrunes = false
+        let pruned = _pendingPrograms
+        _pendingPrograms = [:]
+        _ = commitPrograms(pruned, for: serverID, source: "grid-window-prune")
         // Source-change gate (Logan 2026-09-12). One request for the source
         // list: an explicit Refresh just rewrote every chunk in the foreground
         // so it simply ADOPTS the current fingerprint, while an ordinary load
@@ -2755,7 +2774,16 @@ final class GuideStore: ObservableObject {
             unpublished += 1
             debugLog("📺 grid window chunk \(Self.chunkStamp(start))..\(Self.chunkStamp(end)): \(programs.count) from server, \(merged.matched) matched")
             let isForward = end > Date()
-            if isForward || unpublished >= 6 || i == chunks.count - 1 {
+            // Publish at once only for the chunks the guide can show right
+            // now (the next 48 h). Every forward chunk used to publish, and on
+            // the Apple TV each publish of the whole map cost a 500 to 960 ms
+            // main-thread stall as 663 rows re-rendered; an All Available walk
+            // is 61 chunks, so the app stuttered for most of a minute after
+            // every launch and refresh (atv log 2026-10-02 16:13 to 16:14,
+            // 279 [HANG] lines). Later days merge into the staging copy and
+            // publish every six chunks and at the end.
+            let isNearTerm = isForward && start < Date().addingTimeInterval(48 * 3600)
+            if isNearTerm || unpublished >= 6 || i == chunks.count - 1 {
                 guard commitPrograms(staged, for: serverID, source: "dispatcharr-grid-window") else { return result }
                 unpublished = 0
                 staged = programs_snapshotForMerge()
@@ -3155,7 +3183,16 @@ final class GuideStore: ObservableObject {
     }
 
     /// Current committed programmes as the merge base for a window chunk.
-    private func programs_snapshotForMerge() -> [String: [GuideProgram]] { programs }
+    private func programs_snapshotForMerge() -> [String: [GuideProgram]] { residentPrograms }
+
+    /// The map a merge or prune must start from: the staging copy while a
+    /// batch is open (so a second pass sees the first pass's result), else
+    /// the published map.
+    private var residentPrograms: [String: [GuideProgram]] { _isCoalescingPrunes ? _pendingPrograms : programs }
+    /// Set only around the post-walk prunes. Kept apart from `_isBatching`,
+    /// whose XMLTV batch writes `_pendingPrograms` itself and must not have a
+    /// concurrent commit land on top of it.
+    private var _isCoalescingPrunes = false
 
     /// Standard XC EPG: the server's bulk `xmltv.php` guide (full programmes,
     /// server-native naming + categories), matched by tvg-id through the same

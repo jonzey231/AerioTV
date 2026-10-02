@@ -300,7 +300,7 @@ struct RecordProgramSheet: View {
                 if isDispatcharr && !isSeriesRule {
                     Toggle(isOn: $comskip) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Remove commercials (Comskip)")
+                            Text("Remove Commercials (Comskip)")
                                 .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text(destination == .local
@@ -517,7 +517,7 @@ struct RecordProgramSheet: View {
                 }
                 .labelsHidden()
             }
-            TextField("Description contains (optional)", text: $ruleDescription)
+            TextField("Description Contains (Optional)", text: $ruleDescription)
                 .textFieldStyle(.roundedBorder)
             if !ruleDescription.isEmpty {
                 HStack {
