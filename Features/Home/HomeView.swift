@@ -7469,6 +7469,35 @@ struct MainTabView: View {
                     debugLog("🟢 [Orchestrator] phase 2 EPG: starting loadAllEPG (cache stale, fresh=\(cacheIsFresh), hasFuture=\(hasFuturePrograms), coverage=\(coveragePct)%), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
                 }
                 await channelStore.loadAllEPG()
+                // The bulk grid alone leaves rows blank: Dispatcharr's
+                // /api/epg/grid/ answers for most channels but not all
+                // (643 of 662 on 2026-10-02 16:03, ESPN among the missing;
+                // 224 of 653 on 2026-09-26), and only the day-chunk window
+                // walk in fetchUpcoming fills the rest. The fresh-cache path
+                // above already runs that walk in the background; the stale
+                // and empty-cache paths never did, so a launch over a stale
+                // cache showed blank rows until a foreground return or the
+                // Guide tab triggered the walk 30 s or more later (iPhone
+                // log 2026-10-02 16:03:41 to 16:04:24). Same settle and
+                // playback holds as the fresh path.
+                if let activeServer, activeServer.type == .dispatcharrAPI {
+                    debugLog("🟢 [Orchestrator] phase 2 EPG: firing background fetchUpcoming on Dispatcharr (after loadAllEPG, fills channels the bulk grid omitted)")
+                    Task { @MainActor [allServers] in
+                        var heldSec = 0
+                        while !MultiviewStore.shared.tiles.isEmpty, heldSec < 60 {
+                            try? await Task.sleep(for: .seconds(5))
+                            heldSec += 5
+                        }
+                        await AppSettleGate.shared.awaitSettled(reason: "EPG post-bulk window walk")
+                        let fetchStart = Date()
+                        let didRefresh = await guideStore.fetchUpcoming(
+                            channels: channelStore.channels,
+                            servers: allServers,
+                            replaceExisting: false
+                        )
+                        debugLog("🟢 [Orchestrator] background fetchUpcoming COMPLETE — didRefresh=\(didRefresh), elapsed=\(Int(Date().timeIntervalSince(fetchStart)))s (post-bulk window walk, held \(heldSec)s)")
+                    }
+                }
             }
         } else {
             // Channel load failed (auth, server down, or LAN host
