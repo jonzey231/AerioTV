@@ -2782,8 +2782,12 @@ final class GuideStore: ObservableObject {
             // every launch and refresh (atv log 2026-10-02 16:13 to 16:14,
             // 279 [HANG] lines). Later days merge into the staging copy and
             // publish every six chunks and at the end.
+            // Far chunks batch 20 at a time: on the Release build every
+            // batched publish past 100k programs still cost 500 to 700 ms
+            // (16:55 run, 12 publishes for 43 chunks), so a 61-chunk walk now
+            // publishes about five times in all.
             let isNearTerm = isForward && start < Date().addingTimeInterval(48 * 3600)
-            if isNearTerm || unpublished >= 6 || i == chunks.count - 1 {
+            if isNearTerm || unpublished >= 20 || i == chunks.count - 1 {
                 guard commitPrograms(staged, for: serverID, source: "dispatcharr-grid-window") else { return result }
                 unpublished = 0
                 staged = programs_snapshotForMerge()
