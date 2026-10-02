@@ -240,7 +240,8 @@ struct RecordProgramSheet: View {
                         cardDivider
                         ruleRow("Customize rule", "Choose how the title and description are matched.",
                                 selected: showCustomRule && ruleMode != .once) {
-                            if ruleMode == .once { ruleMode = .all }
+                            // Customize rule records every airing, as on Android.
+                            ruleMode = .all
                             withAnimation { showCustomRule = true }
                         }
                         if ruleMode != .once, showCustomRule {
@@ -504,12 +505,10 @@ struct RecordProgramSheet: View {
 
     /// The rule options (formerly the "Rule Options" section), inside the card.
     private var customRuleOptions: some View {
+        // Same shape as the Android sheet: Customize rule is its own choice
+        // that records every airing with custom matching; there is no
+        // Every/New picker inside it (Logan 2026-10-02).
         VStack(alignment: .leading, spacing: 10) {
-            Picker("Episodes", selection: $ruleMode) {
-                Text("Every episode").tag(RuleMode.all)
-                Text("New episodes only").tag(RuleMode.new)
-            }
-            .pickerStyle(.segmented)
             HStack {
                 Text("Match").scaledFont(.bodyMedium)
                 Spacer()
@@ -530,10 +529,8 @@ struct RecordProgramSheet: View {
                     .labelsHidden()
                 }
             }
-            if ruleMode == .new {
-                Toggle("Untagged programs count as new", isOn: $ruleUntaggedIsNew)
-                    .scaledFont(.bodyMedium)
-            }
+            Toggle("Untagged programs count as new", isOn: $ruleUntaggedIsNew)
+                .scaledFont(.bodyMedium)
             if channelTVGID != nil {
                 Toggle("Match on every channel", isOn: $ruleAllChannels)
                     .scaledFont(.bodyMedium)
