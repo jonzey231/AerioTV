@@ -621,7 +621,7 @@ struct EditServerSheet: View {
             Section {
                 // Choice row, not a menu (Logan 2026-10-02); labels as Android.
                 SettingsChoicePicker("Guide Days",
-                                     options: EditServerPage.guideDayChoices,
+                                     options: GuideDayChoices.all,
                                      selection: $server.epgRetentionDays)
                 .listRowBackground(Color.cardBackground)
             } header: {
@@ -772,3 +772,16 @@ private struct ChannelProfilePickerSection: View {
 
 #if os(tvOS)
 #endif  // Phase 1 split: closes a block that spanned the extraction cut
+
+/// Guide Days choices shared by the TV page and the phone sheet; 0 = All
+/// Available. Labels match Android's picker. Lives here because
+/// EditServerPage is tvOS-only.
+enum GuideDayChoices {
+    static var all: [SettingsChoice<Int>] { [
+        SettingsChoice(1, "1 Day"),
+        SettingsChoice(3, "3 Days"),
+        SettingsChoice(7, "7 Days (Default)"),
+        SettingsChoice(14, "14 Days"),
+        SettingsChoice(0, "All Available"),
+    ] }
+}

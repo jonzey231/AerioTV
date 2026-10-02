@@ -12,15 +12,6 @@ import SwiftData
 #if os(tvOS)  // Phase 1 split: re-opened, block spanned the extraction cut
 struct EditServerPage: View {
 
-    /// Guide Days choices shared by the TV page and the phone sheet; 0 = All
-    /// Available. Labels match Android's picker.
-    static let guideDayChoices: [SettingsChoice<Int>] = [
-        SettingsChoice(1, "1 Day"),
-        SettingsChoice(3, "3 Days"),
-        SettingsChoice(7, "7 Days (Default)"),
-        SettingsChoice(14, "14 Days"),
-        SettingsChoice(0, "All Available"),
-    ]
     @Bindable var server: ServerConnection
     @Environment(\.dismiss) private var dismiss
     /// Task #189: Channel Profile picker state (Dispatcharr only).
@@ -427,7 +418,7 @@ struct EditServerPage: View {
                     // same labels as Android.
                     SettingsSection("Guide Days", style: .eyebrowCard) {
                         SettingsChoicePicker("Guide Days",
-                                             options: Self.guideDayChoices,
+                                             options: GuideDayChoices.all,
                                              selection: $server.epgRetentionDays,
                                              footer: "How many days of guide data to load, back and ahead. Dispatcharr only; other sources show what their guide carries.")
                     }

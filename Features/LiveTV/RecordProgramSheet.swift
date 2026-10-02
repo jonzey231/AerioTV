@@ -67,12 +67,13 @@ struct RecordProgramSheet: View {
     // when destination == .dispatcharrServer; ignored for local.
     @State private var comskip = false
 
-    /// Dispatcharr series rules (Logan 2026-09-06): record this airing, every
-    /// episode, or new episodes only, with the server's rule options behind
-    /// "Customize rule".
-    enum RuleMode: String, CaseIterable { case once, all, new }
-    @State private var ruleMode: RuleMode = .once
-    @State private var showCustomRule = false
+    /// Dispatcharr series rules (Logan 2026-10-02): Record is Just this one
+    /// or Series; Series offers Every episode / New episodes only, with the
+    /// server's match options behind "Customize Matching". Same on Android.
+    enum EpisodesMode: String, CaseIterable { case all, new }
+    @State private var isSeries = false
+    @State private var episodes: EpisodesMode = .all
+    @State private var customizeMatching = false
     @State private var ruleTitleMode: DispatcharrAPI.SeriesRule.TitleMode = .exact
     @State private var ruleDescription = ""
     @State private var ruleDescriptionMode: DispatcharrAPI.SeriesRule.DescriptionMode = .contains
@@ -85,13 +86,12 @@ struct RecordProgramSheet: View {
     private var canOfferSeriesRule: Bool {
         isDispatcharr && canRecordToServer && !programTitle.trimmingCharacters(in: .whitespaces).isEmpty
     }
-    private var isSeriesRule: Bool { canOfferSeriesRule && ruleMode != .once }
+    private var isSeriesRule: Bool { canOfferSeriesRule && isSeries }
 
-    private static func ruleLabel(_ m: RuleMode) -> String {
+    private static func episodesLabel(_ m: EpisodesMode) -> String {
         switch m {
-        case .once: return "Just this one"
-        case .all:  return "Every episode"
-        case .new:  return "New episodes only"
+        case .all: return "Every episode"
+        case .new: return "New episodes only"
         }
     }
     private static func titleModeLabel(_ m: DispatcharrAPI.SeriesRule.TitleMode) -> String {
@@ -220,37 +220,50 @@ struct RecordProgramSheet: View {
                 if canOfferSeriesRule {
                     sectionHeader("Record")
                     VStack(spacing: 0) {
-                        ruleRow("Just this one", "Record this airing only.",
-                                selected: ruleMode == .once && !showCustomRule) {
-                            ruleMode = .once
-                            withAnimation { showCustomRule = false }
+                        ruleRow("Just this one", "Record this airing only.", selected: !isSeries) {
+                            withAnimation { isSeries = false }
                         }
                         cardDivider
-                        ruleRow("Every episode", "A series rule on the server records every airing of this title.",
-                                selected: ruleMode == .all && !showCustomRule) {
-                            ruleMode = .all
-                            withAnimation { showCustomRule = false }
-                        }
-                        cardDivider
-                        ruleRow("New episodes only", "Skips airings the guide marks as repeats.",
-                                selected: ruleMode == .new && !showCustomRule) {
-                            ruleMode = .new
-                            withAnimation { showCustomRule = false }
-                        }
-                        cardDivider
-                        ruleRow("Customize rule", "Choose how the title and description are matched.",
-                                selected: showCustomRule && ruleMode != .once) {
-                            // Customize rule records every airing, as on Android.
-                            ruleMode = .all
-                            withAnimation { showCustomRule = true }
-                        }
-                        if ruleMode != .once, showCustomRule {
-                            cardDivider
-                            customRuleOptions
+                        ruleRow("Series", "A rule on the server records this title's airings.", selected: isSeries) {
+                            withAnimation { isSeries = true }
                         }
                     }
                     .background(cardShape.fill(Color.cardBackground))
                     .padding(.horizontal, 16)
+                    if isSeries {
+                        sectionHeader("Episodes")
+                        VStack(spacing: 0) {
+                            ruleRow("Every episode", "Records every airing of this title.",
+                                    selected: episodes == .all) { episodes = .all }
+                            cardDivider
+                            ruleRow("New episodes only", "Skips airings the guide marks as repeats.",
+                                    selected: episodes == .new) { episodes = .new }
+                            cardDivider
+                            Button {
+                                withAnimation { customizeMatching.toggle() }
+                            } label: {
+                                HStack {
+                                    Text("Customize Matching")
+                                        .scaledFont(.bodyMedium)
+                                        .foregroundColor(.textPrimary)
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .foregroundColor(Color.contrastText(.textSecondary))
+                                        .rotationEffect(.degrees(customizeMatching ? 90 : 0))
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 10)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            if customizeMatching {
+                                cardDivider
+                                customRuleOptions
+                            }
+                        }
+                        .background(cardShape.fill(Color.cardBackground))
+                        .padding(.horizontal, 16)
+                    }
                     if let ruleError {
                         Text(ruleError)
                             .foregroundColor(.red)
@@ -328,7 +341,7 @@ struct RecordProgramSheet: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button(isSeriesRule ? "Save" : "Record") { scheduleRecording() }
+                Button(isSeriesRule ? "Save Rule" : "Record") { scheduleRecording() }
                     .bold()
                     .foregroundColor(.red)
                     .disabled(isSavingRule)
@@ -505,9 +518,7 @@ struct RecordProgramSheet: View {
 
     /// The rule options (formerly the "Rule Options" section), inside the card.
     private var customRuleOptions: some View {
-        // Same shape as the Android sheet: Customize rule is its own choice
-        // that records every airing with custom matching; there is no
-        // Every/New picker inside it (Logan 2026-10-02).
+        // Same shape as the Android sheet (Logan 2026-10-02).
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("Match").scaledFont(.bodyMedium)
@@ -529,8 +540,10 @@ struct RecordProgramSheet: View {
                     .labelsHidden()
                 }
             }
-            Toggle("Untagged programs count as new", isOn: $ruleUntaggedIsNew)
-                .scaledFont(.bodyMedium)
+            if episodes == .new {
+                Toggle("Untagged programs count as new", isOn: $ruleUntaggedIsNew)
+                    .scaledFont(.bodyMedium)
+            }
             if channelTVGID != nil {
                 Toggle("Match on every channel", isOn: $ruleAllChannels)
                     .scaledFont(.bodyMedium)
@@ -569,7 +582,7 @@ struct RecordProgramSheet: View {
         let tvg = ruleAllChannels ? nil : channelTVGID
         let rule = DispatcharrAPI.SeriesRule(
             tvgID: tvg,
-            mode: ruleMode == .new ? .new : .all,
+            mode: episodes == .new ? .new : .all,
             untaggedIsNew: ruleUntaggedIsNew,
             title: programTitle,
             titleMode: ruleTitleMode,
@@ -712,13 +725,13 @@ struct RecordProgramSheet: View {
 
     /// "Every episode of College Football on ESPN HD" for the rule pills.
     private var seriesRuleSummary: String {
-        let what = ruleMode == .new ? "New episodes of" : "Every episode of"
+        let what = episodes == .new ? "New episodes of" : "Every episode of"
         let scope = (ruleAllChannels || channelTVGID == nil) ? "on any channel" : "on \(channelName)"
         return "\(what) \"\(programTitle)\" \(scope), scheduled by the Dispatcharr server"
     }
 
-    /// Record: Just this one / Every episode / New episodes only, plus the
-    /// rule options (title match, untagged-as-new, every channel). The
+    /// Record: Just this one / Series; Series adds Episodes (Every / New)
+    /// and Customize Matching with the rule options (title match, untagged-as-new, every channel). The
     /// description match needs typing and stays on iOS.
     private var ruleRow: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -726,18 +739,28 @@ struct RecordProgramSheet: View {
                 .scaledFont(.system(size: 24, weight: .semibold))
                 .padding(.leading, 4)
             HStack(spacing: 12) {
-                ForEach(RuleMode.allCases, id: \.self) { m in
-                    RecordOptionPill(label: Self.ruleLabel(m), isSelected: ruleMode == m) { ruleMode = m }
-                }
-                if ruleMode != .once {
-                    RecordOptionPill(label: showCustomRule ? "Hide Options" : "Customize", isSelected: showCustomRule) {
-                        showCustomRule.toggle()
-                    }
-                }
+                RecordOptionPill(label: "Just this one", isSelected: !isSeries) { isSeries = false }
+                RecordOptionPill(label: "Series", isSelected: isSeries) { isSeries = true }
                 Spacer(minLength: 0)
             }
             .focusSection()
-            if ruleMode != .once, showCustomRule {
+            if isSeries {
+                Text("Episodes")
+                    .scaledFont(.system(size: 20, weight: .semibold))
+                    .foregroundColor(Color.contrastText(.textSecondary))
+                    .padding(.leading, 4)
+                HStack(spacing: 12) {
+                    ForEach(EpisodesMode.allCases, id: \.self) { m in
+                        RecordOptionPill(label: Self.episodesLabel(m), isSelected: episodes == m) { episodes = m }
+                    }
+                    RecordOptionPill(label: "Customize Matching", isSelected: customizeMatching) {
+                        customizeMatching.toggle()
+                    }
+                    Spacer(minLength: 0)
+                }
+                .focusSection()
+            }
+            if isSeries, customizeMatching {
                 Text("Title Match")
                     .scaledFont(.system(size: 20, weight: .semibold))
                     .foregroundColor(Color.contrastText(.textSecondary))
@@ -750,11 +773,11 @@ struct RecordProgramSheet: View {
                 }
                 .focusSection()
                 HStack(spacing: 12) {
-                    if ruleMode == .new {
+                    if episodes == .new {
                         RecordOptionPill(label: "Untagged Counts as New", isSelected: ruleUntaggedIsNew) { ruleUntaggedIsNew.toggle() }
                     }
                     if channelTVGID != nil {
-                        RecordOptionPill(label: "Every Channel", isSelected: ruleAllChannels) { ruleAllChannels.toggle() }
+                        RecordOptionPill(label: "Match on Every Channel", isSelected: ruleAllChannels) { ruleAllChannels.toggle() }
                     }
                     Spacer(minLength: 0)
                 }
