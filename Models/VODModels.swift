@@ -1632,6 +1632,19 @@ final class HiddenVODStore: ObservableObject {
         }
     }
 
+    /// Pull from iCloud (replace): the cloud blob becomes the whole table.
+    /// A nil blob means the cloud has nothing hidden, so local clears.
+    func replaceWithRemote(_ blob: Data?) {
+        var remote: [String: [String: Entry]] = [:]
+        if let blob, let decoded = try? JSONDecoder().decode([String: [String: Entry]].self, from: blob) {
+            remote = decoded
+        }
+        entries = remote
+        if let data = try? JSONEncoder().encode(entries) {
+            UserDefaults.standard.set(data, forKey: Self.key)
+        }
+    }
+
     // MARK: Filtering helpers
 
     /// Drops hidden titles, or keeps only hidden titles when `onlyHidden`.

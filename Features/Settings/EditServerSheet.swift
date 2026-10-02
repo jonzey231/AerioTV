@@ -604,7 +604,7 @@ struct EditServerSheet: View {
             // don't carry it.
             if server.supportsVOD {
                 Section {
-                    Toggle("Fetch On Demand from this playlist", isOn: $server.vodEnabled)
+                    Toggle("Fetch On Demand from This Playlist", isOn: $server.vodEnabled)
                         .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("On Demand").sectionHeaderStyle()

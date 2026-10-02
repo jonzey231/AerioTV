@@ -400,7 +400,7 @@ struct EditServerPage: View {
                     // sheet; Apple TV users had no way to change them.
                     if server.supportsVOD {
                         SettingsSection("On Demand", style: .eyebrowCard) {
-                            Toggle("Fetch On Demand from this playlist", isOn: $server.vodEnabled)
+                            Toggle("Fetch On Demand from This Playlist", isOn: $server.vodEnabled)
                                 .scaledFont(.system(size: 28, weight: .medium))
                                 .foregroundColor(.textPrimary)
                                 .padding(.vertical, 4)

@@ -773,8 +773,8 @@ struct AddServerView: View {
                     .foregroundColor(Color.contrastText(.textSecondary))
 
                 Picker("Destination", selection: $dvrDestination) {
-                    Text("Dispatcharr server (recommended)").tag(RecordingDestination.dispatcharrServer)
-                    Text("This device").tag(RecordingDestination.local)
+                    Text("Dispatcharr Server (Recommended)").tag(RecordingDestination.dispatcharrServer)
+                    Text("This Device").tag(RecordingDestination.local)
                 }
                 .pickerStyle(.segmented)
             }

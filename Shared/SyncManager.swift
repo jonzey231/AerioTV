@@ -912,7 +912,7 @@ final class SyncManager: ObservableObject {
         )
     }
 
-    private func doApplyPreferences(prefs: [String: Any]?) {
+    private func doApplyPreferences(prefs: [String: Any]?, replace: Bool = false) {
         guard let dict = prefs else {
             debugLog("🔵 SyncManager.doApplyPreferences: no preference data")
             return
@@ -968,7 +968,16 @@ final class SyncManager: ObservableObject {
         // Hidden VOD titles: merged per entry rather than overwritten, so a
         // hide made here and an unhide made there both land, newest stamp
         // winning, with per-playlist scoping intact.
-        if let blob = dict[HiddenVODStore.syncKey] as? Data {
+        if replace {
+            // Pull from iCloud replaces outright: a synced key the cloud copy
+            // does not carry returns to its default here instead of keeping
+            // this device's value, and hidden titles take the cloud table.
+            let allKeys = syncStringKeys + syncBoolKeys + syncDoubleKeys + syncIntKeys
+                + syncDataKeys.filter { $0 != RemoteControlStore.mapKey || SyncCategory.remoteControl.isEnabled }
+                + syncStringArrayKeys + syncHiddenGroupKeys
+            for k in allKeys where dict[k] == nil { ud.removeObject(forKey: k) }
+            HiddenVODStore.shared.replaceWithRemote(dict[HiddenVODStore.syncKey] as? Data)
+        } else if let blob = dict[HiddenVODStore.syncKey] as? Data {
             HiddenVODStore.shared.mergeRemote(blob)
         }
 
@@ -1631,7 +1640,7 @@ final class SyncManager: ObservableObject {
 
             SyncManager.shared.doMerge(servers: servers, isInitial: false, replace: replace)
             await Task.yield()
-            SyncManager.shared.doApplyPreferences(prefs: prefs)
+            SyncManager.shared.doApplyPreferences(prefs: prefs, replace: replace)
             await Task.yield()
             SyncManager.shared.mergeRemoteWatchProgress(wp, replace: replace)
             await Task.yield()

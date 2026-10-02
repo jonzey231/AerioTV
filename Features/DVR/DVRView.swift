@@ -1355,7 +1355,7 @@ struct DVRView: View {
         }
         let location: String
         if rec.destination == .local {
-            location = "This device"
+            location = "This Device"
         } else {
             location = servers.first(where: { $0.id.uuidString == rec.serverID })?.name ?? "Dispatcharr"
         }

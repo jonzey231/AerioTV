@@ -441,17 +441,6 @@ struct SettingsView: View {
                                     .scaledFont(.labelSmall.subtext())
                                     .foregroundColor(Color.contrastText(.textTertiary))
                                     #endif
-                                if servers.count > 1 {
-                                    #if os(iOS)
-                                    Label("Tap Edit to reorder", systemImage: "arrow.up.arrow.down")
-                                        .scaledFont(.labelSmall.subtext())
-                                        .foregroundColor(Color.contrastText(.textTertiary))
-                                    #else
-                                    Label("Use ▲ ▼ to reorder", systemImage: "arrow.up.arrow.down")
-                                        .scaledFont(.system(size: 20, weight: .regular).subtext())
-                                        .foregroundColor(Color.contrastText(.textSecondary))
-                                    #endif
-                                }
                             }
                             .padding(.top, 4)
                         }
@@ -990,11 +979,6 @@ struct SettingsView: View {
                         Label(Self.playlistFooterHint, systemImage: "list.bullet")
                             .scaledFont(.labelSmall.subtext())
                             .foregroundColor(Color.contrastText(.textTertiary))
-                        if servers.count > 1 {
-                            Label("Touch and hold, then drag to reorder", systemImage: "arrow.up.arrow.down")
-                                .scaledFont(.labelSmall.subtext())
-                                .foregroundColor(Color.contrastText(.textTertiary))
-                        }
                     }
                     .padding(.top, 4)
                 }

@@ -69,11 +69,20 @@ struct DVRSettingsView: View {
         // "DVR" header inside the pane and shifts the content down.
         .toolbar(.hidden, for: .navigationBar)
         #endif
-        .alert("Delete All Local Recordings?", isPresented: $showClearConfirmation) {
-            Button("Delete", role: .destructive) { clearAllLocalRecordings() }
+        .alert("Delete All Recordings?", isPresented: $showClearConfirmation) {
+            Button("Delete Finished", role: .destructive) {
+                Task { await clearLocalRecordings(includingInProgress: false) }
+            }
+            if inProgressLocalCount > 0 {
+                Button("Delete All Including In-Progress", role: .destructive) {
+                    Task { await clearLocalRecordings(includingInProgress: true) }
+                }
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will permanently remove all locally stored recordings from this device. Server-side recordings are not affected.")
+            let n = inProgressLocalCount
+            Text("Finished recordings will be deleted."
+                 + (n > 0 ? " \(n) in-progress recordings can also be stopped and deleted." : ""))
         }
         #if os(iOS)
         // iOS only: the TV steps through the stops instead, so nothing
@@ -475,10 +484,10 @@ struct DVRSettingsView: View {
     /// only tvOS used to show.
     private var destinationOptions: [SettingsChoice<RecordingDestination>] {
         [
-            SettingsChoice(.dispatcharrServer, "Dispatcharr server",
+            SettingsChoice(.dispatcharrServer, "Dispatcharr Server",
                            subtitle: "Keeps recording even when AerioTV is closed",
                            icon: "server.rack"),
-            SettingsChoice(.local, "This device",
+            SettingsChoice(.local, "This Device",
                            subtitle: "Requires AerioTV to remain open",
                            icon: "internaldrive"),
         ]
@@ -565,19 +574,46 @@ struct DVRSettingsView: View {
         return "Documents/Recordings"
     }
 
-    private func clearAllLocalRecordings() {
-        if let dir = coordinator.localRecordingsDirectory,
-           isInsideAppSandbox(dir) {
-            try? FileManager.default.removeItem(at: dir)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
-        // Delete Recording rows that are local
+    private func localRecordingRows() -> [Recording] {
         let descriptor = FetchDescriptor<Recording>(
             predicate: #Predicate<Recording> { $0.destinationRaw == "local" }
         )
-        if let rows = try? modelContext.fetch(descriptor) {
-            for r in rows { modelContext.delete(r) }
-            try? modelContext.save()
+        return (try? modelContext.fetch(descriptor)) ?? []
+    }
+
+    /// Local recordings currently being written. Read when the confirmation
+    /// renders, so the count and the extra button match the moment of asking.
+    private var inProgressLocalCount: Int {
+        localRecordingRows().filter { $0.isInProgress }.count
+    }
+
+    /// Deletes finished local recordings (anything not recording and not
+    /// scheduled). Scheduled rows are always kept. With
+    /// `includingInProgress`, recordings being written are stopped first and
+    /// deleted too. Files in the recordings folder that no kept row points
+    /// at are removed, as the old wipe-the-folder version did.
+    private func clearLocalRecordings(includingInProgress: Bool) async {
+        let rows = localRecordingRows()
+        var keepPaths = Set<String>()
+        for r in rows {
+            if r.isUpcoming {
+                if let p = r.localFilePath { keepPaths.insert(URL(fileURLWithPath: p).resolvingSymlinksInPath().path) }
+                continue
+            }
+            if r.isInProgress {
+                guard includingInProgress else {
+                    if let p = r.localFilePath { keepPaths.insert(URL(fileURLWithPath: p).resolvingSymlinksInPath().path) }
+                    continue
+                }
+                await coordinator.stopLocalRecording(r, modelContext: modelContext)
+            }
+            coordinator.deleteLocalRecording(r, modelContext: modelContext)
+        }
+        if let dir = coordinator.localRecordingsDirectory, isInsideAppSandbox(dir),
+           let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+            for f in files where !keepPaths.contains(f.resolvingSymlinksInPath().path) {
+                try? FileManager.default.removeItem(at: f)
+            }
         }
     }
 

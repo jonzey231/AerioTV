@@ -374,7 +374,7 @@ struct DeveloperSettingsView: View {
                         // picked below.
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Cast: transcode video to HEVC (test)")
+                                Text("Cast: Transcode Video to HEVC (Test)")
                                     .scaledFont(.bodyMedium)
                                     .foregroundColor(.textPrimary)
                                 Text("Re-encode every H.264 channel; H.264 profile below when the receiver has no HEVC")
@@ -394,7 +394,7 @@ struct DeveloperSettingsView: View {
                         // source size at half rate.
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Cast: H.264 transcode profile")
+                                Text("Cast: H.264 Transcode Profile")
                                     .scaledFont(.bodyMedium)
                                     .foregroundColor(.textPrimary)
                                 Text("720p60 keeps motion; 1080p30 keeps resolution")

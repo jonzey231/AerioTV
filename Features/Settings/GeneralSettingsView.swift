@@ -239,9 +239,7 @@ struct GeneralSettingsView: View {
                         Text("Auto-Rotate")
                             .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
-                        Text(UIDevice.current.userInterfaceIdiom == .pad
-                             ? "Follow the device orientation. When off, AerioTV stays in its current orientation"
-                             : "Follow the device orientation. When off, AerioTV stays portrait")
+                        Text("Follow the device orientation. When off, AerioTV stays in its current orientation")
                             .scaledFont(.labelSmall.subtext())
                             .foregroundColor(Color.contrastText(.textTertiary))
                     }

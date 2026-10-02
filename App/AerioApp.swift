@@ -263,10 +263,20 @@ enum AppOrientationLock {
         // restores it; the force-landscape toggle still pins `.landscape`.
         if UIDevice.current.userInterfaceIdiom == .pad {
             guard !autoRotateEnabled else { return .all }
-            return currentInterfaceOrientationMask ?? .all
+            return frozenMask ?? currentInterfaceOrientationMask ?? .all
         }
-        return autoRotateEnabled ? .allButUpsideDown : .portrait
+        // Off freezes the orientation the phone was in when the toggle was
+        // turned off (owner decision 2026-10-02, matching iPad and Android),
+        // not portrait. `frozenMask` is captured by `refreshBase` at that
+        // moment so a fullscreen player releasing landscape returns to the
+        // frozen orientation rather than reading the player's own.
+        guard !autoRotateEnabled else { return .allButUpsideDown }
+        return frozenMask ?? currentInterfaceOrientationMask ?? .portrait
     }
+
+    /// The orientation Auto-Rotate was turned off in; nil while it is on or
+    /// before any toggle this launch (then the launch orientation applies).
+    private static var frozenMask: UIInterfaceOrientationMask?
 
     /// The foreground scene's current orientation as a single-orientation
     /// mask, for the frozen-iPad case. Nil before any scene is live.
@@ -323,6 +333,7 @@ enum AppOrientationLock {
     /// No-op while the player is forcing landscape - the release path
     /// re-reads `base` and lands on the fresh setting anyway.
     static func refreshBase() {
+        frozenMask = autoRotateEnabled ? nil : currentInterfaceOrientationMask
         guard !isForcingLandscape else { return }
         mask = base
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }

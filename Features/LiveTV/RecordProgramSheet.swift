@@ -308,8 +308,8 @@ struct RecordProgramSheet: View {
             if isDispatcharr && isLive && canRecordToServer && !isSeriesRule {
                 Section {
                     Picker("Record to", selection: $destination) {
-                        Text("Dispatcharr server").tag(RecordingDestination.dispatcharrServer)
-                        Text("This device").tag(RecordingDestination.local)
+                        Text("Dispatcharr Server").tag(RecordingDestination.dispatcharrServer)
+                        Text("This Device").tag(RecordingDestination.local)
                     }
                     .pickerStyle(.segmented)
                 } header: {
@@ -705,12 +705,12 @@ struct RecordProgramSheet: View {
                 .padding(.leading, 4)
             HStack(spacing: 12) {
                 RecordOptionPill(
-                    label: "Dispatcharr server",
+                    label: "Dispatcharr Server",
                     isSelected: destination == .dispatcharrServer,
                     action: { destination = .dispatcharrServer }
                 )
                 RecordOptionPill(
-                    label: "This device",
+                    label: "This Device",
                     isSelected: destination == .local,
                     action: { destination = .local }
                 )

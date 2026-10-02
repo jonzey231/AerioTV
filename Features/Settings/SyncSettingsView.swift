@@ -29,6 +29,7 @@ struct SyncSettingsView: View {
 
     @State private var showClearICloudConfirm = false
     @State private var showPullConfirm = false
+    @State private var showPushConfirm = false
     @State private var clearICloudConfirmationVisible = false
 
     /// Human-readable "X minutes ago" string for the last sync timestamp.
@@ -92,7 +93,16 @@ struct SyncSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This replaces this device's playlists and watch progress with the copy in iCloud. Playlists or progress on this device that are not in iCloud are removed. Preferences merge normally. If this device has the newest changes, push them up first.")
+            Text("This replaces this device's playlists, settings and watch progress with the copy in iCloud. Anything on this device that is not in iCloud is removed. If this device has the newest changes, push them up first.")
+        }
+        .alert("Push to iCloud?", isPresented: $showPushConfirm) {
+            Button("Push") {
+                debugLog("🔵 Push to iCloud confirmed")
+                pushEverything()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This replaces the snapshot in iCloud with this device's playlists and settings.")
         }
         .overlay(alignment: .bottom) {
             if clearICloudConfirmationVisible {
@@ -126,7 +136,8 @@ struct SyncSettingsView: View {
 
                 if iCloudSyncEnabled {
                     Button {
-                        pushEverything()
+                        guard sync.activity == .idle else { return }
+                        showPushConfirm = true
                     } label: {
                         SettingsRow(icon: "arrow.triangle.2.circlepath.icloud",
                                     iconColor: .accentPrimary,
@@ -232,7 +243,8 @@ struct SyncSettingsView: View {
                         // tvOS rows are never `.disabled` (that would drop them
                         // out of the focus engine), so a run in flight swallows
                         // the press instead.
-                        pushEverything()
+                        guard sync.activity == .idle else { return }
+                        showPushConfirm = true
                     }
                     TVSettingsActionRow(
                         icon: "icloud.and.arrow.down",
