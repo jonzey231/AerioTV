@@ -20,7 +20,7 @@ struct RecordProgramSheet: View {
     /// Dispatcharr-only: the numeric channel ID for the Dispatcharr
     /// recording API. `nil` for M3U / Xtream channels, or for
     /// Dispatcharr channels that haven't loaded a numeric ID yet.
-    /// v1.6.8 (Codex A2) — replaces the prior `Int(channelID) ?? 0`
+    /// v1.6.8 (Codex A2): replaces the prior `Int(channelID) ?? 0`
     /// fallback, which silently sent `0` to Dispatcharr's recording
     /// endpoint when the string `channelID` wasn't parseable. Now the
     /// "Record on Server" path is hard-disabled when this is nil so
@@ -207,224 +207,122 @@ struct RecordProgramSheet: View {
 
     #if os(iOS)
     private var iOSForm: some View {
-        Form {
-            // Program info
-            Section {
-                LabeledContent("Program", value: programTitle)
-                LabeledContent("Channel", value: channelName)
-                LabeledContent("Time", value: timeLabel)
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                // Program info: plain label/value rows, no card (Android density).
+                VStack(spacing: 0) {
+                    infoRow("Program", programTitle)
+                    infoRow("Channel", channelName)
+                    infoRow("Time", timeLabel)
+                }
+                .padding(.top, 8)
 
-            if canOfferSeriesRule {
-                Section {
-                    ForEach(RuleMode.allCases, id: \.self) { m in
-                        Button {
-                            ruleMode = m
-                        } label: {
-                            HStack {
-                                Text(Self.ruleLabel(m)).foregroundColor(.primary)
-                                Spacer()
-                                if ruleMode == m { Image(systemName: "checkmark").foregroundColor(.accentColor) }
-                            }
+                if canOfferSeriesRule {
+                    sectionHeader("Record")
+                    VStack(spacing: 0) {
+                        ruleRow("Just this one", "Record this airing only.",
+                                selected: ruleMode == .once && !showCustomRule) {
+                            ruleMode = .once
+                            withAnimation { showCustomRule = false }
+                        }
+                        cardDivider
+                        ruleRow("Every episode", "A series rule on the server records every airing of this title.",
+                                selected: ruleMode == .all && !showCustomRule) {
+                            ruleMode = .all
+                            withAnimation { showCustomRule = false }
+                        }
+                        cardDivider
+                        ruleRow("New episodes only", "Skips airings the guide marks as repeats.",
+                                selected: ruleMode == .new && !showCustomRule) {
+                            ruleMode = .new
+                            withAnimation { showCustomRule = false }
+                        }
+                        cardDivider
+                        ruleRow("Customize rule", "Choose how the title and description are matched.",
+                                selected: showCustomRule && ruleMode != .once) {
+                            if ruleMode == .once { ruleMode = .all }
+                            withAnimation { showCustomRule = true }
+                        }
+                        if ruleMode != .once, showCustomRule {
+                            cardDivider
+                            customRuleOptions
                         }
                     }
-                    if ruleMode != .once {
-                        Button(showCustomRule ? "Hide rule options" : "Customize rule...") {
-                            withAnimation { showCustomRule.toggle() }
-                        }
-                    }
-                } header: {
-                    Text("Record")
-                } footer: {
-                    if ruleMode != .once {
-                        Text("Episodes are scheduled on the Dispatcharr server as the guide updates, with the server's default padding. \(ruleMode == .new ? "Only programs the guide marks as new are recorded." : "")")
-                    }
-                }
-                if ruleMode != .once, showCustomRule {
-                    Section("Rule Options") {
-                        Picker("Match", selection: $ruleTitleMode) {
-                            ForEach(DispatcharrAPI.SeriesRule.TitleMode.allCases, id: \.self) { Text(Self.titleModeLabel($0)).tag($0) }
-                        }
-                        TextField("Description contains (optional)", text: $ruleDescription)
-                        if !ruleDescription.isEmpty {
-                            Picker("Description match", selection: $ruleDescriptionMode) {
-                                ForEach(DispatcharrAPI.SeriesRule.DescriptionMode.allCases, id: \.self) { Text(Self.descriptionModeLabel($0)).tag($0) }
-                            }
-                        }
-                        if ruleMode == .new {
-                            Toggle("Untagged programs count as new", isOn: $ruleUntaggedIsNew)
-                        }
-                        if channelTVGID != nil {
-                            Toggle("Match on every channel", isOn: $ruleAllChannels)
-                        }
+                    .background(cardShape.fill(Color.cardBackground))
+                    .padding(.horizontal, 16)
+                    if let ruleError {
+                        Text(ruleError)
+                            .foregroundColor(.red)
+                            .scaledFont(.footnote)
+                            .padding(.horizontal, 20)
+                            .padding(.top, 8)
                     }
                 }
-                if let ruleError {
-                    Section { Text(ruleError).foregroundColor(.red).scaledFont(.footnote) }
-                }
-            }
 
-            // Pre-roll
-            if !isSeriesRule {
-            Section("Start Early") {
-                if isLive {
-                    Text("Pre-roll unavailable (program already started)")
-                        .foregroundColor(.secondary)
-                } else {
-                    bufferOptions(
-                        selection: $preRoll,
-                        options: [0, 5, 10, 15, 30],
-                        customAction: {
+                if !isSeriesRule {
+                    sectionHeader("Start Early")
+                    if isLive {
+                        Text("Pre-roll unavailable (program already started).")
+                            .scaledFont(.bodyMedium)
+                            .foregroundColor(Color.contrastText(.textSecondary))
+                            .padding(.horizontal, 20)
+                    } else {
+                        bufferChips(selection: preRoll, options: [0, 5, 10, 15, 30],
+                                    select: { preRoll = $0 }) {
                             customValue = preRoll > 0 ? preRoll : 5
                             showCustomPreRoll = true
                         }
-                    )
-                }
-            }
+                    }
 
-            // Post-roll
-            Section("End Late") {
-                bufferOptions(
-                    selection: $postRoll,
-                    options: [0, 5, 10, 15, 30, 60],
-                    customAction: {
+                    sectionHeader("End Late")
+                    bufferChips(selection: postRoll, options: [0, 5, 10, 15, 30, 60],
+                                select: { postRoll = $0 }) {
                         customValue = postRoll > 0 ? postRoll : 5
                         showCustomPostRoll = true
                     }
-                )
-            }
-            }   // !isSeriesRule
+                }
 
-            // Destination picker, only shown for live recordings on
-            // Dispatcharr playlists. For future programs (`!isLive`),
-            // destination is forced to `.dispatcharrServer` (see
-            // `.onAppear` above) because AerioTV can't auto-start a
-            // local recording at a scheduled future time, so we
-            // never offer the choice in the first place. v1.6.22.
-            // v1.7.x: also hidden when the account can't record to the
-            // server (Standard / Streamer); only local is valid then,
-            // so there's no choice to present and destination is
-            // already forced to `.local` in `.onAppear`.
-            if isDispatcharr && isLive && canRecordToServer && !isSeriesRule {
-                Section {
+                // Destination: live recordings on Dispatcharr only (future
+                // programs are forced to the server in .onAppear; non-admin
+                // accounts are forced local). v1.6.22 / v1.7.x gating kept.
+                if isDispatcharr && isLive && canRecordToServer && !isSeriesRule {
+                    sectionHeader("Destination")
                     Picker("Record to", selection: $destination) {
                         Text("Dispatcharr Server").tag(RecordingDestination.dispatcharrServer)
                         Text("This Device").tag(RecordingDestination.local)
                     }
                     .pickerStyle(.segmented)
-                } header: {
-                    Text("Destination")
+                    .padding(.horizontal, 16)
                 }
-            }
 
-            // Comskip — always shown for Dispatcharr, but disabled
-            // when destination == .local (Comskip is a server-side
-            // feature; local recordings can't run it). The footer
-            // explains why so users don't wonder if it's broken.
-            if isDispatcharr && !isSeriesRule {
-                Section {
-                    Toggle("Remove commercials (Comskip)", isOn: $comskip)
-                        .disabled(destination == .local)
-                } footer: {
-                    if destination == .local {
-                        Text("Comskip is only available when recording to a Dispatcharr server via a Dispatcharr API playlist.")
-                    } else {
-                        Text("Automatically detect and remove commercial breaks after the recording completes. Processed server-side.")
-                    }
-                }
-            }
-
-            // Warnings
-            if destination == .local {
-                Section {
-                    Label {
-                        Text("Keep AerioTV open — closing the app will stop this recording.")
-                            .scaledFont(.footnote)
-                    } icon: {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.yellow)
-                    }
-                }
-            }
-
-            // v1.6.8 (B1 Phase 1 final): Aerio deliberately doesn't
-            // run background tasks for DVR — local recording is only
-            // available while the app is foregrounded ("Record from
-            // Now"). Future-scheduled recordings always route to
-            // Dispatcharr server, which is always running and
-            // doesn't depend on the app being open. If the user is
-            // on a non-Dispatcharr playlist (M3U / Xtream) AND
-            // picks a future program, there's no recording path at
-            // all — explain that here so the action doesn't appear
-            // to silently fail.
-            if !isLive && !isDispatcharr {
-                Section {
-                    Label {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Scheduled recordings need a Dispatcharr playlist")
-                                .scaledFont(.footnote.bold())
-                            Text("Aerio doesn't run in the background to record on your device — that would drain battery and use storage while you're not watching. Future-scheduled recordings happen on a Dispatcharr server, which keeps running on its own. Switch to a Dispatcharr playlist to schedule this recording, or wait until the program is airing to record it locally.")
-                                .scaledFont(.footnote)
+                // Comskip: shown for Dispatcharr, disabled for local.
+                if isDispatcharr && !isSeriesRule {
+                    Toggle(isOn: $comskip) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Remove commercials (Comskip)")
+                                .scaledFont(.bodyMedium)
+                                .foregroundColor(.textPrimary)
+                            Text(destination == .local
+                                 ? "Comskip is only available when recording to a Dispatcharr server via a Dispatcharr API playlist."
+                                 : "Detect and remove ad breaks after recording. Processed server-side.")
+                                .scaledFont(.labelSmall.subtext())
+                                .foregroundColor(Color.contrastText(.textSecondary))
                         }
-                    } icon: {
-                        Image(systemName: "clock.badge.exclamationmark.fill")
-                            .foregroundColor(.orange)
                     }
+                    .disabled(destination == .local)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(cardShape.fill(Color.cardBackground))
+                    .padding(.horizontal, 16)
+                    .padding(.top, 18)
                 }
-            }
 
-            // v1.7.x: future program on a Dispatcharr server where the
-            // connected account isn't an admin. Server scheduling 403s
-            // and a future local recording can't auto-start, so there's
-            // no path. Explain it instead of letting Record fail.
-            if !isLive && isDispatcharr && !canRecordToServer {
-                Section {
-                    Label {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Recording requires DVR access on Dispatcharr")
-                                .scaledFont(.footnote.bold())
-                            Text("Scheduling a recording on the Dispatcharr server needs DVR manage access on your account. Your account can watch and record live programs to this device, but not schedule server recordings. Contact your server administrator for more information, or wait until the program is airing to record it on this device.")
-                                .scaledFont(.footnote)
-                        }
-                    } icon: {
-                        Image(systemName: "lock.fill")
-                            .foregroundColor(.orange)
-                    }
-                }
+                warningCards
+                    .padding(.top, 18)
             }
-
-            // v1.7.x: live program on a Dispatcharr server where the
-            // connected account isn't an admin. Recording is allowed but
-            // lands on this device (server scheduling needs admin), so say
-            // so rather than letting the user assume the server DVR has it.
-            if isLive && isDispatcharr && !canRecordToServer {
-                Section {
-                    Label {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Saving to this device")
-                                .scaledFont(.footnote.bold())
-                            Text("Recording to the Dispatcharr server needs DVR manage access on your account. Contact your server administrator for more information.")
-                                .scaledFont(.footnote)
-                        }
-                    } icon: {
-                        Image(systemName: "internaldrive.fill")
-                            .foregroundColor(.orange)
-                    }
-                }
-            }
-
-            if destination == .local && coordinator.isApproachingQuotaLimit {
-                Section {
-                    Label {
-                        Text("Storage is running low. This recording may not finish if the limit is reached.")
-                            .scaledFont(.footnote)
-                    } icon: {
-                        Image(systemName: "externaldrive.badge.exclamationmark")
-                            .foregroundColor(.orange)
-                    }
-                }
-            }
+            .padding(.bottom, 24)
         }
+        .background(Color.appBackground)
         .navigationTitle(isLive ? "Record from Now" : "Record Program")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -444,6 +342,220 @@ struct RecordProgramSheet: View {
                 Button("Cancel") { dismiss() }
             }
         }
+    }
+
+    /// Existing warning sections, as cards.
+    private var warningCards: some View {
+        VStack(spacing: 12) {
+            // Warnings
+            if destination == .local {
+                WarningCard {
+                    Label {
+                        Text("Keep AerioTV open. Closing the app will stop this recording.")
+                            .scaledFont(.footnote)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.yellow)
+                    }
+                }
+            }
+
+            // v1.6.8 (B1 Phase 1 final): Aerio deliberately doesn't
+            // run background tasks for DVR; local recording is only
+            // available while the app is foregrounded ("Record from
+            // Now"). Future-scheduled recordings always route to
+            // Dispatcharr server, which is always running and
+            // doesn't depend on the app being open. If the user is
+            // on a non-Dispatcharr playlist (M3U / Xtream) AND
+            // picks a future program, there's no recording path at
+            // all: explain that here so the action doesn't appear
+            // to silently fail.
+            if !isLive && !isDispatcharr {
+                WarningCard {
+                    Label {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Scheduled recordings need a Dispatcharr playlist")
+                                .scaledFont(.footnote.bold())
+                            Text("AerioTV doesn't run in the background to record on your device; that would drain battery and use storage while you're not watching. Future-scheduled recordings happen on a Dispatcharr server, which keeps running on its own. Switch to a Dispatcharr playlist to schedule this recording, or wait until the program is airing to record it locally.")
+                                .scaledFont(.footnote)
+                        }
+                    } icon: {
+                        Image(systemName: "clock.badge.exclamationmark.fill")
+                            .foregroundColor(.orange)
+                    }
+                }
+            }
+
+            // v1.7.x: future program on a Dispatcharr server where the
+            // connected account isn't an admin. Server scheduling 403s
+            // and a future local recording can't auto-start, so there's
+            // no path. Explain it instead of letting Record fail.
+            if !isLive && isDispatcharr && !canRecordToServer {
+                WarningCard {
+                    Label {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Recording requires DVR access on Dispatcharr")
+                                .scaledFont(.footnote.bold())
+                            Text("Scheduling a recording on the Dispatcharr server needs DVR manage access on your account. Your account can watch and record live programs to this device, but not schedule server recordings. Contact your server administrator for more information, or wait until the program is airing to record it on this device.")
+                                .scaledFont(.footnote)
+                        }
+                    } icon: {
+                        Image(systemName: "lock.fill")
+                            .foregroundColor(.orange)
+                    }
+                }
+            }
+
+            // v1.7.x: live program on a Dispatcharr server where the
+            // connected account isn't an admin. Recording is allowed but
+            // lands on this device (server scheduling needs admin), so say
+            // so rather than letting the user assume the server DVR has it.
+            if isLive && isDispatcharr && !canRecordToServer {
+                WarningCard {
+                    Label {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Saving to this device")
+                                .scaledFont(.footnote.bold())
+                            Text("Recording to the Dispatcharr server needs DVR manage access on your account. Contact your server administrator for more information.")
+                                .scaledFont(.footnote)
+                        }
+                    } icon: {
+                        Image(systemName: "internaldrive.fill")
+                            .foregroundColor(.orange)
+                    }
+                }
+            }
+
+            if destination == .local && coordinator.isApproachingQuotaLimit {
+                WarningCard {
+                    Label {
+                        Text("Storage is running low. This recording may not finish if the limit is reached.")
+                            .scaledFont(.footnote)
+                    } icon: {
+                        Image(systemName: "externaldrive.badge.exclamationmark")
+                            .foregroundColor(.orange)
+                    }
+                }
+            }
+                }
+        .padding(.horizontal, 16)
+    }
+
+    private var cardShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+    }
+
+    private var cardDivider: some View {
+        Divider().padding(.leading, 16)
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .scaledFont(.bodyMedium)
+            .fontWeight(.semibold)
+            .foregroundColor(Color.contrastText(.textSecondary))
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
+            .padding(.bottom, 8)
+    }
+
+    private func infoRow(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 12) {
+            Text(label)
+                .scaledFont(.bodyMedium)
+                .foregroundColor(Color.contrastText(.textSecondary))
+            Spacer(minLength: 8)
+            Text(value)
+                .scaledFont(.bodyMedium)
+                .foregroundColor(.textPrimary)
+                .lineLimit(1)
+                .multilineTextAlignment(.trailing)
+        }
+        .frame(minHeight: 34)
+        .padding(.horizontal, 20)
+    }
+
+    private func ruleRow(_ title: String, _ detail: String, selected: Bool,
+                         action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .scaledFont(.bodyMedium)
+                        .foregroundColor(.textPrimary)
+                    Text(detail)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                }
+                Spacer(minLength: 8)
+                if selected {
+                    Image(systemName: "checkmark")
+                        .foregroundColor(.accentPrimary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The rule options (formerly the "Rule Options" section), inside the card.
+    private var customRuleOptions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Episodes", selection: $ruleMode) {
+                Text("Every episode").tag(RuleMode.all)
+                Text("New episodes only").tag(RuleMode.new)
+            }
+            .pickerStyle(.segmented)
+            HStack {
+                Text("Match").scaledFont(.bodyMedium)
+                Spacer()
+                Picker("Match", selection: $ruleTitleMode) {
+                    ForEach(DispatcharrAPI.SeriesRule.TitleMode.allCases, id: \.self) { Text(Self.titleModeLabel($0)).tag($0) }
+                }
+                .labelsHidden()
+            }
+            TextField("Description contains (optional)", text: $ruleDescription)
+                .textFieldStyle(.roundedBorder)
+            if !ruleDescription.isEmpty {
+                HStack {
+                    Text("Description match").scaledFont(.bodyMedium)
+                    Spacer()
+                    Picker("Description match", selection: $ruleDescriptionMode) {
+                        ForEach(DispatcharrAPI.SeriesRule.DescriptionMode.allCases, id: \.self) { Text(Self.descriptionModeLabel($0)).tag($0) }
+                    }
+                    .labelsHidden()
+                }
+            }
+            if ruleMode == .new {
+                Toggle("Untagged programs count as new", isOn: $ruleUntaggedIsNew)
+                    .scaledFont(.bodyMedium)
+            }
+            if channelTVGID != nil {
+                Toggle("Match on every channel", isOn: $ruleAllChannels)
+                    .scaledFont(.bodyMedium)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    /// Wrapping chip row for pre/post-roll: preset values plus Custom.
+    private func bufferChips(selection: Int, options: [Int], select: @escaping (Int) -> Void,
+                             custom: @escaping () -> Void) -> some View {
+        let isCustom = !options.contains(selection)
+        return ChipFlowLayout(spacing: 8) {
+            ForEach(options, id: \.self) { mins in
+                RecordChip(label: mins == 0 ? "None" : "\(mins) min",
+                           isSelected: selection == mins) { select(mins) }
+            }
+            RecordChip(label: isCustom ? "Custom \(selection) min" : "Custom",
+                       isSelected: isCustom, action: custom)
+        }
+        .padding(.horizontal, 16)
     }
     #endif
 
@@ -492,7 +604,7 @@ struct RecordProgramSheet: View {
     //   2. Focused Form rows paint a screen-wide white halo that hides
     //      both the option being selected and its neighbours.
     // Replaced with a hand-rolled layout using RecordOptionPill /
-    // RecordActionPill — same focus pattern as the Live TV group bar.
+    // RecordActionPill: same focus pattern as the Live TV group bar.
     #if os(tvOS)
     /// Sheet card: title, the programme line, option rows, Record. Menu
     /// closes the sheet (no Cancel pill, Logan 2026-09-05).
@@ -802,7 +914,7 @@ struct RecordProgramSheet: View {
                 }
             }
             Label {
-                Text("Keep AerioTV open — closing the app will stop this recording.")
+                Text("Keep AerioTV open. Closing the app will stop this recording.")
             } icon: {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundColor(.yellow)
@@ -1011,7 +1123,7 @@ struct RecordProgramSheet: View {
             if effectiveDestination == .dispatcharrServer, let server = activeServer {
                 // v1.6.8 (Codex A2): use the explicit numeric ID
                 // plumbed through `ChannelDisplayItem.dispatcharrChannelID`
-                // — populated at Dispatcharr load time in
+                // populated at Dispatcharr load time in
                 // `HomeView.fetchDispatcharr` from `DispatcharrChannel.id`.
                 // Fall back to a string-parse of the legacy `channelID`
                 // for any caller that hasn't migrated yet, but bail
@@ -1020,7 +1132,7 @@ struct RecordProgramSheet: View {
                 // recording schedule on the server.
                 guard let channelIntID = dispatcharrChannelID ?? Int(channelID),
                       channelIntID > 0 else {
-                    debugLog("⚠️ RecordProgramSheet: cannot start Dispatcharr recording — no numeric channel ID resolved (dispatcharrChannelID=\(String(describing: dispatcharrChannelID)), channelID=\(channelID))")
+                    debugLog("⚠️ RecordProgramSheet: cannot start Dispatcharr recording: no numeric channel ID resolved (dispatcharrChannelID=\(String(describing: dispatcharrChannelID)), channelID=\(channelID))")
                     DebugLogger.shared.log(
                         "Dispatcharr recording skipped: channel \"\(channelName)\" has no resolvable numeric ID",
                         category: "DVR", level: .warning)
@@ -1071,7 +1183,7 @@ struct RecordProgramSheet: View {
             // at `effectiveEnd`.
             //
             // FUTURE-SCHEDULED LOCAL RECORDINGS are deliberately
-            // NOT started here — the per-platform scheduler that
+            // NOT started here: the per-platform scheduler that
             // would wake up at `effectiveStart` doesn't exist yet
             // (Phase 2 = tvOS, Phase 3 = iOS). The recording row
             // is still inserted into SwiftData with status
@@ -1083,7 +1195,7 @@ struct RecordProgramSheet: View {
             // missed-start time.
             if effectiveDestination == .local && rec.effectiveStart <= Date() {
                 guard let streamURL else {
-                    debugLog("⚠️ RecordProgramSheet: cannot start local recording — no streamURL plumbed in for channel \"\(channelName)\"")
+                    debugLog("⚠️ RecordProgramSheet: cannot start local recording: no streamURL plumbed in for channel \"\(channelName)\"")
                     DebugLogger.shared.log(
                         "Local recording skipped: channel \"\(channelName)\" has no stream URL on the ChannelDisplayItem (caller didn't plumb)",
                         category: "DVR", level: .warning)
@@ -1156,7 +1268,7 @@ private struct RecordOptionPillButtonStyle: ButtonStyle {
 
 #if os(tvOS)
 /// Record/Cancel buttons for the tvOS Record sheet. Same rationale as
-/// `RecordOptionPill` above — Button + ButtonStyle avoids the
+/// `RecordOptionPill` above: Button + ButtonStyle avoids the
 /// `_UIReplicantView` warning that `.focusable + .onTapGesture`
 /// produces, while still giving us a custom focus effect.
 private struct RecordActionPill: View {
@@ -1197,6 +1309,82 @@ private struct RecordActionPillButtonStyle: ButtonStyle {
             )
             .scaleEffect(focused ? 1.08 : 1.0)
             .animation(.easeInOut(duration: 0.15), value: focused)
+    }
+}
+#endif
+
+#if os(iOS)
+/// Capsule chip used by the record sheet's buffer rows.
+private struct RecordChip: View {
+    let label: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .scaledFont(.bodyMedium)
+                .foregroundColor(isSelected ? .white : .textPrimary)
+                .padding(.horizontal, 12)
+                .frame(height: 32)
+                .background(Capsule().fill(isSelected ? Color.accentPrimary : Color.cardBackground))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Wraps chips onto as many lines as needed.
+private struct ChipFlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(width: proposal.width ?? .infinity, subviews: subviews)
+        let width = rows.map { $0.width }.max() ?? 0
+        let height = rows.reduce(0) { $0 + $1.height } + spacing * CGFloat(max(rows.count - 1, 0))
+        return CGSize(width: proposal.width ?? width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in arrange(width: bounds.width, subviews: subviews) {
+            var x = bounds.minX
+            for i in row.indices {
+                let size = subviews[i].sizeThatFits(.unspecified)
+                subviews[i].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += row.height + spacing
+        }
+    }
+
+    private struct Row { var indices: [Int] = []; var width: CGFloat = 0; var height: CGFloat = 0 }
+
+    private func arrange(width: CGFloat, subviews: Subviews) -> [Row] {
+        var rows: [Row] = [Row()]
+        for i in subviews.indices {
+            let size = subviews[i].sizeThatFits(.unspecified)
+            let needed = rows[rows.count - 1].indices.isEmpty ? size.width : rows[rows.count - 1].width + spacing + size.width
+            if needed > width, !rows[rows.count - 1].indices.isEmpty {
+                rows.append(Row())
+            }
+            var r = rows[rows.count - 1]
+            r.width = r.indices.isEmpty ? size.width : r.width + spacing + size.width
+            r.height = max(r.height, size.height)
+            r.indices.append(i)
+            rows[rows.count - 1] = r
+        }
+        return rows
+    }
+}
+
+/// Card wrapper for the sheet's warning notes.
+private struct WarningCard<Content: View>: View {
+    @ViewBuilder let content: Content
+    var body: some View {
+        content
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.cardBackground))
     }
 }
 #endif
