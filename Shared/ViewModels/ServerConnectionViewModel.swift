@@ -276,6 +276,11 @@ final class ServerConnectionViewModel {
         validationErrors().first(where: { $0.field == field })?.message
     }
 
+    /// Plain-words name of the request the current verify attempt is
+    /// running, so a decode failure names the step instead of surfacing
+    /// Foundation's "The data couldn't be read because it is missing".
+    private var verifyStep = "server info"
+
     func verifyConnection() async {
         guard isFormValid else { return }
         isVerifying = true
@@ -316,10 +321,9 @@ final class ServerConnectionViewModel {
             try? await Task.sleep(nanoseconds: 400_000_000)
             do {
                 try await runVerifyAttempt()
-            } catch let error as APIError {
-                verificationError = error.errorDescription
             } catch {
-                verificationError = error.localizedDescription
+                verificationError = DispatcharrDirectConnectError.userMessage(
+                    for: error, step: verifyStep)
             }
         }
 
@@ -457,6 +461,7 @@ final class ServerConnectionViewModel {
                     // wrapper surfaces its localizedDescription verbatim
                     // (e.g. "Invalid username or password" instead of
                     // the legacy API-key copy).
+                    self.verifyStep = "sign-in"
                     let pair = try await DispatcharrAPI.login(
                         baseURL: url,
                         username: self.username,
@@ -470,6 +475,7 @@ final class ServerConnectionViewModel {
                     // re-routing through `.jwtSession` would force us to wire
                     // up a placeholder UUID just for this single call.
                     let bearerAPI = DispatcharrAPI(baseURL: url, auth: .bearer(pair.access))
+                    self.verifyStep = "user profile"
                     let user = try await bearerAPI.fetchCurrentUser()
                     self.apiKey = user.apiKey
                     // Capture the permission tier so Save can persist it
@@ -497,6 +503,7 @@ final class ServerConnectionViewModel {
                     // a credential error — only with a transport error
                     // or an unrecognised-server-shape error, which are
                     // worth surfacing.
+                    self.verifyStep = "server info"
                     let api = DispatcharrAPI(baseURL: url, auth: .apiKey(user.apiKey))
                     let info = try await api.verifyConnection()
                     if let name = info.serverName, !name.isEmpty {

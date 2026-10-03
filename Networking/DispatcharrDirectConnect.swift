@@ -476,6 +476,57 @@ enum DispatcharrDirectConnectError: Error, LocalizedError {
     }
 }
 
+// MARK: - User-facing error text
+
+extension DispatcharrDirectConnectError {
+    /// Turns any error from the Username & Password sign-in / verify / save
+    /// flows into copy a user can act on. A raw DecodingError's
+    /// localizedDescription is Foundation's "The data couldn't be read
+    /// because it is missing", which names neither the request nor the
+    /// field (field report on 1.8.40, 2026-10-02), so decode failures are
+    /// translated here with the step that failed and the offending key.
+    ///
+    /// - Parameter step: the request that was running, in plain words
+    ///   ("user profile", "server info", "token refresh").
+    static func userMessage(for error: Error, step: String) -> String {
+        if let error = error as? DispatcharrDirectConnectError {
+            return error.errorDescription ?? "Sign-in failed."
+        }
+        if let decoding = error as? DecodingError {
+            return decodeMessage(decoding, step: step)
+        }
+        if let api = error as? APIError {
+            if case .decodingError(let inner) = api, let decoding = inner as? DecodingError {
+                return decodeMessage(decoding, step: step)
+            }
+            return api.errorDescription ?? "Unexpected response from server"
+        }
+        return error.localizedDescription
+    }
+
+    private static func decodeMessage(_ error: DecodingError, step: String) -> String {
+        let hint = "Verify the URL points at a Dispatcharr 0.23.0 or newer instance."
+        func path(_ ctx: DecodingError.Context) -> String {
+            let joined = ctx.codingPath.map(\.stringValue).joined(separator: ".")
+            return joined.isEmpty ? "(top level)" : joined
+        }
+        switch error {
+        case .keyNotFound(let key, let ctx):
+            let parent = ctx.codingPath.map(\.stringValue)
+            let field = (parent + [key.stringValue]).joined(separator: ".")
+            return "Signed in, but the server's \(step) response was missing '\(field)'. \(hint)"
+        case .valueNotFound(_, let ctx):
+            return "Signed in, but the server's \(step) response was missing '\(path(ctx))'. \(hint)"
+        case .typeMismatch(_, let ctx):
+            return "Signed in, but the server's \(step) response had an unexpected value for '\(path(ctx))'. \(hint)"
+        case .dataCorrupted:
+            return "Signed in, but the server's \(step) response was not valid JSON. \(hint)"
+        @unknown default:
+            return "Signed in, but the server's \(step) response could not be read. \(hint)"
+        }
+    }
+}
+
 // MARK: - DispatcharrAPI Direct Connect extensions
 
 extension DispatcharrAPI {
@@ -937,6 +988,7 @@ enum ServerCredentialChange {
         // An M3U playlist has no account model, so no login runs and no
         // "Verifying credentials" row is published for it.
         if server.type != .m3uPlaylist { onStep?(.verify) }
+        var step = "sign-in"
         do {
             switch server.type {
             case .dispatcharrAPI:
@@ -952,9 +1004,11 @@ enum ServerCredentialChange {
                     let bearerAPI = DispatcharrAPI(baseURL: url,
                                                    auth: .bearer(pair.access),
                                                    userAgent: userAgent)
+                    step = "user profile"
                     _ = try await bearerAPI.fetchCurrentUser()
                 case .apiKey:
                     guard !apiKey.isEmpty else { return "Enter the API key for this server." }
+                    step = "server info"
                     let api = DispatcharrAPI(baseURL: url,
                                              auth: .apiKey(apiKey),
                                              userAgent: userAgent,
@@ -971,12 +1025,8 @@ enum ServerCredentialChange {
                 // No account model to verify against.
                 return nil
             }
-        } catch let error as DispatcharrDirectConnectError {
-            return shorten(error.errorDescription)
-        } catch let error as APIError {
-            return shorten(error.errorDescription)
         } catch {
-            return shorten(error.localizedDescription)
+            return shorten(DispatcharrDirectConnectError.userMessage(for: error, step: step))
         }
         return nil
     }
@@ -1073,6 +1123,7 @@ enum ServerCredentialChange {
                 return "Enter the username and password for this server."
             }
             onStep?(.verify)
+            var step = "sign-in"
             do {
                 let pair = try await DispatcharrAPI.login(
                     baseURL: server.effectiveBaseURL,
@@ -1086,20 +1137,14 @@ enum ServerCredentialChange {
                 let bearerAPI = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                                auth: .bearer(pair.access),
                                                userAgent: server.effectiveUserAgent)
+                step = "user profile"
                 let user = try await bearerAPI.fetchCurrentUser()
-                guard !user.apiKey.isEmpty else {
-                    debugLog("📺 [CRED] re-auth: users/me carried no api_key for '\(user.username)'")
-                    return "Signed in, but this Dispatcharr account has no API key. Ask your admin to generate one."
-                }
                 server.apiKey = user.apiKey
                 SyncManager.shared.saveCredentialsSynced(for: server)
                 debugLog("📺 [CRED] re-auth OK: now connected as '\(user.username)' (was a different account)")
-            } catch let error as DispatcharrDirectConnectError {
-                debugLog("📺 [CRED] re-auth FAILED: \(error.localizedDescription)")
-                return shorten(error.errorDescription)
             } catch {
-                debugLog("📺 [CRED] re-auth FAILED: \(error.localizedDescription)")
-                return shorten(error.localizedDescription)
+                debugLog("📺 [CRED] re-auth FAILED at \(step): \(error)")
+                return shorten(DispatcharrDirectConnectError.userMessage(for: error, step: step))
             }
         }
 

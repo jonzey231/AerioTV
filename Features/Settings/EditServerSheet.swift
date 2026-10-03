@@ -258,12 +258,10 @@ struct EditServerSheet: View {
             sessionRefreshMessage = apiKeyRotated
                 ? "Session refreshed. Cached API key updated."
                 : "Session refreshed. API key unchanged."
-        } catch let error as DispatcharrDirectConnectError {
-            sessionRefreshSucceeded = false
-            sessionRefreshMessage = error.errorDescription ?? "Refresh failed."
         } catch {
             sessionRefreshSucceeded = false
-            sessionRefreshMessage = error.localizedDescription
+            sessionRefreshMessage = DispatcharrDirectConnectError.userMessage(
+                for: error, step: "sign-in")
         }
     }
 
@@ -430,7 +428,7 @@ struct EditServerSheet: View {
                         // field's helper now instead of its own Form row, so
                         // iOS, tvOS and Android read identically.
                         SettingsTextField("Password", text: $server.password,
-                                          helper: "Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.",
+                                          helper: "Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.\nYour Dispatcharr account must already have an API key. In Dispatcharr, open System, then Users, edit the user, and generate an API key before signing in here.",
                                           isSecure: true)
                             .listRowBackground(Color.cardBackground)
                         // Show the cached API key (read-only) so the
