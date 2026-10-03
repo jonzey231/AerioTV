@@ -88,9 +88,13 @@ struct TVSettingsSplitView<Detail: View>: View {
                 }
         }
         .onChange(of: entryCatcherFocused) { _, on in
-            if on { assertRailFocus() }
+            if on {
+                SettingsFocusLog.log("focus set rail: entry catcher took focus from tab bar")
+                assertRailFocus()
+            }
         }
-        .onChange(of: focusedPane) { _, pane in
+        .onChange(of: focusedPane) { old, pane in
+            SettingsFocusLog.log("pane focus \(String(describing: old)) -> \(String(describing: pane))")
             if pane == .detail { flushPendingSelection() }
             focusInDetail = (pane == .detail)
         }
@@ -100,13 +104,19 @@ struct TVSettingsSplitView<Detail: View>: View {
             if id != nil { focusInDetail = false }
             guard let id,
                   let item = items.first(where: { $0.id == id }) else { return }
+            SettingsFocusLog.rowFocused(page: "Rail", row: item.label)
             scheduleSelection(item.route)
         }
         .onChange(of: railReturnToken) { _, _ in
+            SettingsFocusLog.log("focus set rail: railReturnToken (Menu in detail or deep link)")
             assertRailFocus()
         }
         .onChange(of: detailFocusToken) { _, _ in
+            SettingsFocusLog.log("focus set detail: detailFocusToken (deep link)")
             assertDetailFocus()
+        }
+        .onChange(of: selection) { old, new in
+            SettingsFocusLog.log("rail selection \(old) -> \(new)")
         }
         // Down from the Settings pill lands geometrically in the detail
         // pane (the pill is far right; the nearest row below it is a
@@ -119,7 +129,10 @@ struct TVSettingsSplitView<Detail: View>: View {
                   let prev = ctx.previouslyFocusedItem,
                   String(describing: type(of: prev)) == "UITabBarButton" else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                if focusedPane == .detail { assertRailFocus() }
+                if focusedPane == .detail {
+                    SettingsFocusLog.log("focus set rail: Down from tab bar landed in detail")
+                    assertRailFocus()
+                }
             }
         }
         .onAppear {
@@ -129,7 +142,10 @@ struct TVSettingsSplitView<Detail: View>: View {
             // the Playlists row 0.6 s later with no press (trace
             // 2026-09-05 00:22:14, "Settings auto-selects Playlists").
             // Down from the pill still lands on the rail via defaultFocus.
-            if focusedPane != nil { assertRailFocus() }
+            if focusedPane != nil {
+                SettingsFocusLog.log("focus set rail: split view appeared with focus in a pane")
+                assertRailFocus()
+            }
         }
     }
 
@@ -170,11 +186,15 @@ struct TVSettingsSplitView<Detail: View>: View {
         let target = items.first(where: { $0.route == selection })?.id ?? items.first?.id
         guard let target else { return }
         Task { @MainActor in
-            for _ in 0..<10 {
+            for attempt in 0..<10 {
                 focusedRow = target
                 try? await Task.sleep(nanoseconds: 60_000_000)
-                if focusedRow == target { break }
+                if focusedRow == target {
+                    SettingsFocusLog.log("focus set rail: focusedRow = \(target) took on attempt \(attempt + 1)")
+                    return
+                }
             }
+            SettingsFocusLog.log("focus set rail: focusedRow = \(target) did not take after 10 attempts")
         }
     }
 
@@ -183,11 +203,15 @@ struct TVSettingsSplitView<Detail: View>: View {
     private func assertDetailFocus() {
         flushPendingSelection()
         Task { @MainActor in
-            for _ in 0..<10 {
+            for attempt in 0..<10 {
                 focusedPane = .detail
                 try? await Task.sleep(nanoseconds: 60_000_000)
-                if focusedPane == .detail { break }
+                if focusedPane == .detail {
+                    SettingsFocusLog.log("focus set detail: focusedPane = detail took on attempt \(attempt + 1)")
+                    return
+                }
             }
+            SettingsFocusLog.log("focus set detail: focusedPane = detail did not take after 10 attempts")
         }
     }
 
@@ -222,6 +246,7 @@ struct TVSettingsSplitView<Detail: View>: View {
             debounceTask?.cancel()
             pendingSelection = nil
             selection = item.route
+            SettingsFocusLog.log("focus set detail: rail row \(item.label) clicked")
             focusedPane = .detail
         } label: {
             HStack(spacing: 14) {

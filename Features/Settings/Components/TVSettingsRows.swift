@@ -13,10 +13,13 @@ import SwiftData
 struct TVSettingsNavRow<Destination: View, Content: View>: View {
     let destination: Destination
     let content: Content
+    /// [SETTINGS] trace name for this row.
+    var logTitle: String? = nil
     @FocusState private var isFocused: Bool
 
-    init(destination: Destination, @ViewBuilder content: () -> Content) {
+    init(destination: Destination, logTitle: String? = nil, @ViewBuilder content: () -> Content) {
         self.destination = destination
+        self.logTitle = logTitle
         self.content = content()
     }
 
@@ -31,6 +34,7 @@ struct TVSettingsNavRow<Destination: View, Content: View>: View {
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
+        .settingsRowFocusLog(logTitle ?? "nav row", isFocused: isFocused)
         // No focus scale: a focused row must share its siblings'
         // exact frame (Logan 2026-09-19 - the 1.02 bump made the
         // focused row read as wider than its neighbours). The
@@ -60,6 +64,7 @@ struct TVSettingsNavButton: View {
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
+        .settingsRowFocusLog(label, isFocused: isFocused)
         // No focus scale: a focused row must share its siblings'
         // exact frame (Logan 2026-09-19 - the 1.02 bump made the
         // focused row read as wider than its neighbours). The
@@ -74,6 +79,8 @@ struct TVSettingsNavButton: View {
 /// focus scale as `TVSettingsNavRow`, with caller-supplied content.
 struct TVSettingsCardButtonRow<Content: View>: View {
     let action: () -> Void
+    /// [SETTINGS] trace name for this row.
+    var logTitle: String? = nil
     @ViewBuilder let content: Content
     @FocusState private var isFocused: Bool
 
@@ -88,6 +95,7 @@ struct TVSettingsCardButtonRow<Content: View>: View {
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
+        .settingsRowFocusLog(logTitle ?? "card row", isFocused: isFocused)
         // No focus scale: a focused row must share its siblings'
         // exact frame (Logan 2026-09-19 - the 1.02 bump made the
         // focused row read as wider than its neighbours). The
@@ -153,6 +161,7 @@ struct TVSettingsActionRow: View {
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
+        .settingsRowFocusLog(label, isFocused: isFocused)
         // No focus scale: a focused row must share its siblings'
         // exact frame (Logan 2026-09-19 - the 1.02 bump made the
         // focused row read as wider than its neighbours). The
@@ -192,6 +201,7 @@ struct TVSettingsTileActionRow: View {
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
+        .settingsRowFocusLog(title, isFocused: isFocused)
         // No focus scale: a focused row must share its siblings'
         // exact frame (Logan 2026-09-19 - the 1.02 bump made the
         // focused row read as wider than its neighbours). The
@@ -226,6 +236,7 @@ struct TVSettingsReadOnlyCard<Content: View>: View {
         // and no "focusable without an action" warning is produced.
         .focusable(true)
         .focused($isFocused)
+        .settingsRowFocusLog("read-only card", isFocused: isFocused)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
 }
@@ -272,6 +283,7 @@ struct TVSettingsSelectionRow<Leading: View>: View {
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
+        .settingsRowFocusLog(label, isFocused: isFocused)
         // No focus scale: a focused row must share its siblings'
         // exact frame (Logan 2026-09-19 - the 1.02 bump made the
         // focused row read as wider than its neighbours). The
@@ -353,6 +365,7 @@ struct TVSettingsToggleRow: View {
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
+        .settingsRowFocusLog(title, isFocused: isFocused)
         // No focus scale: a focused row must share its siblings'
         // exact frame (Logan 2026-09-19 - the 1.02 bump made the
         // focused row read as wider than its neighbours). The

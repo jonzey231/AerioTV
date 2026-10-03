@@ -3445,7 +3445,10 @@ struct OpenSourceLicensesView: View {
             if let c = selected {
                 OSSTVDetailView(component: c)
                     // Back closes the license text, not the sheet.
-                    .onExitCommand { selected = nil }
+                    .onExitCommand {
+                        SettingsFocusLog.log("menu handled by OpenSourceLicensesView (close license text)")
+                        selected = nil
+                    }
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {

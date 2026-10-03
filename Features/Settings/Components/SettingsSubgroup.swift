@@ -175,7 +175,7 @@ struct SettingsSubgroup<Content: View>: View {
     @ViewBuilder
     private var tvBody: some View {
         if showsMasterRow && optionsOnly {
-            TVSettingsCardButtonRow(action: { isSheetPresented = true }) {
+            TVSettingsCardButtonRow(action: { isSheetPresented = true }, logTitle: title) {
                 tvMasterRowLabel
             }
             .fullScreenCover(isPresented: $isSheetPresented) {
@@ -184,7 +184,8 @@ struct SettingsSubgroup<Content: View>: View {
         } else if showsMasterRow {
             TVSettingsNavRow(
                 destination: TVSettingsSubgroupPage(title: title, footer: footer) { content }
-                    .trackedAsClassicSettingsChild()
+                    .trackedAsClassicSettingsChild(title),
+                logTitle: title
             ) {
                 tvMasterRowLabel
             }

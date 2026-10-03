@@ -201,6 +201,7 @@ struct DeveloperSettingsView: View {
         #if os(tvOS)
         .fullScreenCover(isPresented: $showTvOSShareSheet) {
             TvOSLogShareSheet(isPresented: $showTvOSShareSheet)
+                .settingsSheetLog("Share Log File")
         }
         #endif
     }

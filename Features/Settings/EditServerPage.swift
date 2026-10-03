@@ -522,6 +522,7 @@ struct EditServerPage: View {
         .fullScreenCover(isPresented: $isSaving) {
             ServerSyncView(mode: .saving(stages: saveProgress.stages),
                            title: "Saving Changes")
+                .settingsSheetLog("Saving Changes")
         }
     }
 

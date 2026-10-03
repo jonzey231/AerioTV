@@ -251,7 +251,8 @@ struct SettingsView: View {
             // Mirror "is any subview pushed" up to MainTabView. Both
             // sources update independently: navPath via SwiftUI state
             // change, dismissStack.depth via its own @Published.
-            .onChange(of: navPath.count) { _, _ in
+            .onChange(of: navPath.count) { old, new in
+                SettingsFocusLog.log("navPath \(old) -> \(new)")
                 syncIsSubviewPushed()
             }
             .onChange(of: tvFocusInDetail) { _, _ in
@@ -265,6 +266,7 @@ struct SettingsView: View {
             // level — classic stack first (LIFO), then navPath.
             .onChange(of: popRequested) { _, requested in
                 guard requested else { return }
+                SettingsFocusLog.log("menu handled by SettingsView.performOnePop (classic depth \(dismissStack.depth), navPath \(navPath.count), focusInDetail \(tvFocusInDetail))")
                 performOnePop()
                 popRequested = false
             }
@@ -329,10 +331,13 @@ struct SettingsView: View {
     /// innermost view first, matching user expectation.
     private func performOnePop() {
         if dismissStack.depth > 0 {
+            SettingsFocusLog.log("menu pop: classic dismiss stack top")
             dismissStack.popTop()
         } else if !navPath.isEmpty {
+            SettingsFocusLog.log("menu pop: navPath removeLast")
             navPath.removeLast()
         } else if tvFocusInDetail {
+            SettingsFocusLog.log("menu pop: detail pane to rail (railReturnToken)")
             // Nothing pushed: Menu in the detail pane returns focus to the
             // rail. Menu in the rail keeps falling through to MainTabView's
             // default (exit toward the tab bar).
@@ -630,6 +635,7 @@ struct SettingsView: View {
             #endif
             #if os(tvOS)
             .navigationDestination(for: SettingsRoute.self) { route in
+                Group {
                 switch route {
                 case .category(.liveTV):         LiveTVSettingsView()
                 case .category(.player):         PlayerSettingsView()
@@ -657,9 +663,12 @@ struct SettingsView: View {
                     EmptyView()
                 }
             }
+            .settingsPushLog("route \(route)")
+            }
             #endif
             .sheet(isPresented: $showAddServer) {
                 NavigationStack { AddServerView(onSave: { _ in }) }
+                    .settingsSheetLog("Add Playlist")
                     .overlay(alignment: .top) {
                         Capsule()
                             .fill(.ultraThinMaterial)
@@ -1071,6 +1080,12 @@ struct SettingsView: View {
 
     @ViewBuilder
     private func tvDetailPane(for route: SettingsRoute) -> some View {
+        tvDetailPaneContent(for: route)
+            .settingsLogPage("pane \(route)")
+    }
+
+    @ViewBuilder
+    private func tvDetailPaneContent(for route: SettingsRoute) -> some View {
         switch route {
         case .server(let id):
             if let server = servers.first(where: { $0.id == id }) {
@@ -1119,7 +1134,8 @@ struct SettingsView: View {
                         .fill(Color.cardBackground))
                 } else {
                     ForEach(sortedServers) { server in
-                        TVSettingsNavRow(destination: ServerDetailView(server: server).trackedAsClassicSettingsChild()) {
+                        TVSettingsNavRow(destination: ServerDetailView(server: server).trackedAsClassicSettingsChild("Playlist Detail \(server.name)"),
+                                         logTitle: server.name) {
                             ServerListRow(server: server)
                         }
                         .contextMenu {

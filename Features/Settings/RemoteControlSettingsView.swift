@@ -354,7 +354,7 @@ private struct TVSlotChoiceRow<Action: Hashable>: View {
     @State private var isSheetPresented = false
 
     var body: some View {
-        TVSettingsCardButtonRow(action: { isSheetPresented = true }) {
+        TVSettingsCardButtonRow(action: { isSheetPresented = true }, logTitle: title) {
             HStack(spacing: 16) {
                 Text(title)
                     .scaledFont(.system(size: SettingsMetrics.tvRowTitleSize, weight: .medium))

@@ -257,7 +257,8 @@ struct SyncSettingsView: View {
 
                     SyncActivityRow()
                 }
-                TVSettingsNavRow(destination: SyncCategoriesSettingsView().trackedAsClassicSettingsChild()) {
+                TVSettingsNavRow(destination: SyncCategoriesSettingsView().trackedAsClassicSettingsChild("Sync Categories"),
+                                 logTitle: "Sync Categories") {
                     SettingsRow(icon: "slider.horizontal.3",
                                 iconColor: .accentPrimary,
                                 title: "Sync Categories",

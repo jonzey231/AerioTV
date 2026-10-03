@@ -290,9 +290,11 @@ struct AboutSettingsView: View {
         }
         .sheet(item: $tvQRLink) { link in
             TVQRLinkSheet(link: link)
+                .settingsSheetLog("QR Link")
         }
         .fullScreenCover(isPresented: $showOSSLicenses) {
             OpenSourceLicensesView(standalone: true)
+                .settingsSheetLog("Open Source Licenses")
         }
     }
 

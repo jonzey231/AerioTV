@@ -158,7 +158,7 @@ struct SettingsChoicePicker<Value: Hashable>: View {
     @State private var isSheetPresented = false
 
     private var tvBody: some View {
-        TVSettingsCardButtonRow(action: { isSheetPresented = true }) {
+        TVSettingsCardButtonRow(action: { isSheetPresented = true }, logTitle: title) {
             HStack(spacing: 16) {
                 if let icon {
                     // Phase 3 item 5: the tiled icon, never a bare glyph,
@@ -260,11 +260,15 @@ struct TVSettingsSingleChoiceSheet<Value: Hashable>: View {
             }
         }
         .defaultFocus($focusedOption, selection, priority: .userInitiated)
-        .onAppear { placeFocus() }
+        .onAppear {
+            SettingsFocusLog.log("focus set \(title): defaultFocus current option (sheet appear)")
+            placeFocus()
+        }
         // The system makes its own first pick as the cover settles. Override
         // that pick exactly once, then leave the user in control.
         .onChange(of: focusedOption) { _, newValue in
             guard !didPlaceFocus, let newValue, newValue != selection else { return }
+            SettingsFocusLog.log("focus set \(title): system picked another option first, re-placing on current")
             placeFocus()
         }
     }
@@ -273,6 +277,7 @@ struct TVSettingsSingleChoiceSheet<Value: Hashable>: View {
         for delay in [0.05, 0.2, 0.45] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 guard !didPlaceFocus || focusedOption == nil else { return }
+                SettingsFocusLog.log("focus set \(title): focusedOption = current (placeFocus +\(delay)s)")
                 focusedOption = selection
                 if delay >= 0.45 { didPlaceFocus = true }
             }
@@ -367,7 +372,9 @@ struct TVSettingsSheetCard<Content: View>: View {
         }
         .presentationBackground(.clear)
         // Menu closes the sheet first, never Settings itself.
-        .trackedAsClassicSettingsChild()
+        // nil: the sheet logs itself as a sheet, not a push.
+        .trackedAsClassicSettingsChild(nil)
+        .settingsSheetLog(title)
     }
 }
 #endif

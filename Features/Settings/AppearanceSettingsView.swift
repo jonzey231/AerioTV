@@ -314,6 +314,7 @@ struct AppearanceSettingsView: View {
             // enters on; without it tvOS picked the LAST chip.
             TVSettingsStepKey(systemImage: "minus", action: decrease)
                 .prefersDefaultFocus(true, in: stepperFocusScope)
+                .onAppear { SettingsFocusLog.log("focus prefer \(title): prefersDefaultFocus minus key in stepper scope") }
                 .accessibilityLabel(decreaseLabel)
 
             Text("\(percent)%")

@@ -270,6 +270,7 @@ struct MyRecordingsView: View {
                 vodType: "recording",
                 resumePositionMs: item.resumePositionMs
             )
+            .settingsSheetLog("Recording Player")
         }
         // Pull Dispatcharr server state whenever the view shows, then
         // keep it honest on a 30s tick while visible. SwiftUI cancels the

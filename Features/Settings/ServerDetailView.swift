@@ -395,7 +395,7 @@ struct ServerDetailView: View {
                     // TV: a top-right toolbar button is off the D-pad
                     // path, so editing is the first action row here
                     // (same pattern as Android TV).
-                    NavigationLink(destination: EditServerPage(server: server).trackedAsClassicSettingsChild()) {
+                    NavigationLink(destination: EditServerPage(server: server).trackedAsClassicSettingsChild("Edit Playlist")) {
                         HStack {
                             Image(systemName: "pencil")
                                 .foregroundColor(.accentPrimary)
@@ -701,7 +701,8 @@ struct ServerDetailView: View {
             // editing is an action row here (same pattern as Android TV).
             TVSettingsNavRow(
                 destination: EditServerPage(server: server)
-                    .trackedAsClassicSettingsChild()
+                    .trackedAsClassicSettingsChild("Edit Playlist"),
+                logTitle: "Edit Playlist"
             ) {
                 SettingsRow(icon: "pencil", iconColor: .accentPrimary,
                             title: "Edit Playlist")

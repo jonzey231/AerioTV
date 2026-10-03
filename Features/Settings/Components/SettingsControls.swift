@@ -41,6 +41,8 @@ struct TVSettingsPill<Label: View>: View {
     /// was invisible against it. An action pill is never "selected", so it
     /// is a ghost at rest and takes the standard ring on focus.
     var isGhost: Bool = false
+    /// [SETTINGS] trace name for this pill.
+    var logTitle: String? = nil
     let action: () -> Void
     @ViewBuilder let label: () -> Label
     @FocusState private var isFocused: Bool
@@ -85,6 +87,7 @@ struct TVSettingsPill<Label: View>: View {
                                    lineWidth: isFocused ? SettingsMetrics.tvFocusRingWidth : 0)
         )
         .focused($isFocused)
+        .settingsRowFocusLog(logTitle ?? "pill", isFocused: isFocused)
         .disabled(isDisabled)
         .opacity(isDisabled ? 0.4 : 1)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
@@ -97,6 +100,7 @@ extension TVSettingsPill where Label == AnyView {
         self.isSelected = isSelected
         self.isDisabled = isDisabled
         self.isGhost = isGhost
+        self.logTitle = title
         self.action = action
         self.label = {
             AnyView(
@@ -116,7 +120,7 @@ struct TVSettingsStepKey: View {
     let action: () -> Void
 
     var body: some View {
-        TVSettingsPill(isDisabled: isDisabled, action: action) {
+        TVSettingsPill(isDisabled: isDisabled, logTitle: systemImage, action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 22, weight: .semibold))
                 .frame(minWidth: 28)
@@ -293,6 +297,7 @@ struct StreamBufferSlider: View {
                               lineWidth: isFocused ? SettingsMetrics.tvFocusRingWidth : 0)
         )
         .animation(.easeInOut(duration: 0.15), value: isFocused)
+        .settingsRowFocusLog("Stream Buffer", isFocused: isFocused)
         .overlay(
             TVPressOverlay(
                 isFocused: $isFocused,
@@ -308,8 +313,14 @@ struct StreamBufferSlider: View {
                 onMoveDown: {},
                 onMenu: {},
                 // Left/right adjust the value, clamped 0...5.
-                onMoveLeft: { adjust(by: -Self.step) },
-                onMoveRight: { adjust(by: Self.step) }
+                onMoveLeft: {
+                    SettingsFocusLog.log("move LEFT handled by StreamBufferSlider")
+                    adjust(by: -Self.step)
+                },
+                onMoveRight: {
+                    SettingsFocusLog.log("move RIGHT handled by StreamBufferSlider")
+                    adjust(by: Self.step)
+                }
             )
         )
         .accessibilityElement()
@@ -390,6 +401,7 @@ struct TVCompactButton: View {
         // 12pt radius instead of the style's default 14pt.
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false, settingsStyle: true))
         .focused($isFocused)
+        .settingsRowFocusLog(title, isFocused: isFocused)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
         .disabled(disabled)
     }
