@@ -4227,6 +4227,44 @@ final class TVFocusTracer {
         method_exchangeImplementations(original, swizzled)
     }
     var isOn: Bool { token != nil }
+
+    /// Time of the most recent remote press-down. Programmatic refocus
+    /// uses it to tell a focus steal from the user's own move.
+    static var lastPressAt = Date.distantPast
+
+    /// The item the tvOS focus engine actually holds right now (type,
+    /// label, window frame). @FocusState readbacks can report a write the
+    /// engine later overrode; this is the authoritative check.
+    static func focusedItemDescription() -> String {
+        guard let item = focusedItem() else { return "nil" }
+        let name = String(describing: type(of: item))
+        var f = item.frame
+        var label = ""
+        if let v = item as? UIView {
+            f = v.convert(v.bounds, to: nil)
+            label = v.accessibilityLabel ?? (v as? UIButton)?.currentTitle ?? ""
+        }
+        return "\(name)\(label.isEmpty ? "" : "(\(label))") @\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))"
+    }
+
+    /// True when focus sits on the system tab bar (a UITabBarButton or
+    /// anything inside the tab bar), i.e. it escaped the guide.
+    static func focusIsOnTabBar() -> Bool {
+        guard let item = focusedItem() else { return false }
+        if String(describing: type(of: item)).contains("TabBar") { return true }
+        var v = item as? UIView
+        while let cur = v {
+            if cur is UITabBar { return true }
+            v = cur.superview
+        }
+        return false
+    }
+
+    private static func focusedItem() -> UIFocusItem? {
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+        return window.flatMap { UIFocusSystem.focusSystem(for: $0)?.focusedItem }
+    }
 }
 
 extension UIApplication {
@@ -4235,6 +4273,7 @@ extension UIApplication {
             // Guide key rows: Left/Right edges, recorded whether or not the
             // tracer logs (the guide fires a remapped short arrow at release).
             for press in presses { GuideArrowPressEdges.record(press) }
+            if presses.contains(where: { $0.phase == .began }) { TVFocusTracer.lastPressAt = Date() }
         }
         if event.type == .presses, let presses = (event as? UIPressesEvent)?.allPresses, TVFocusTracer.shared.isOn {
             for press in presses where press.phase == .began || press.phase == .ended {

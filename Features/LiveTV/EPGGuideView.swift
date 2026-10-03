@@ -6092,12 +6092,23 @@ struct EPGGuideView: View {
                     let mvLastID = MultiviewStore.shared.tiles
                         .max(by: { $0.addedAt < $1.addedAt })?.item.id
                     let singleID = NowPlayingManager.shared.playingItem?.id
-                    let candidateID = mvLastID ?? singleID
+                    // Full exit (double Back, catch-up exit) clears playingItem
+                    // before this runs; the breadcrumb still names the channel
+                    // that was on screen, so focus returns there, not row 0.
+                    let lastID = NowPlayingManager.shared.lastPlayedChannelID
+                    let candidateID = mvLastID ?? singleID ?? lastID
+                    debugLog("[FOCUS] guide refocus requested (epg): mvLast=\(mvLastID ?? "nil") playing=\(singleID ?? "nil") last=\(lastID ?? "nil") focused=\(TVFocusTracer.focusedItemDescription())")
                     // The 400ms delay covers the 350ms minimize spring
                     // animation; triggering during it lets tvOS ignore the
                     // reset because the mini tile's frame is still in flux.
                     try? await Task.sleep(nanoseconds: 400_000_000)
                     if Task.isCancelled { return }
+                    // Never pull focus out from under a fullscreen player
+                    // (expanded again, or a new tune, during the delay).
+                    if NowPlayingManager.shared.isActive && !NowPlayingManager.shared.isMinimized {
+                        debugLog("[FOCUS] guide refocus skipped (epg): player is fullscreen")
+                        return
+                    }
                     // Re-validate against the current (possibly filtered)
                     // channel list AFTER the delay, in case it changed.
                     let valid = candidateID.flatMap { id in
@@ -6133,6 +6144,29 @@ struct EPGGuideView: View {
                         try? await Task.sleep(nanoseconds: 70_000_000)
                         debugLog("🧭 [GuideFocus] assert(return) attempt=\(attempt) set=\(target) got=\(focusedProgramID ?? "nil")")
                         if focusedProgramID == target { break }
+                    }
+                    debugLog("[FOCUS] guide refocus landed (epg): channel=\(valid) cell=\(target) state=\(focusedProgramID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription())")
+                    // Late steal guard: the container teardown / tab bar can
+                    // re-seat focus after the assert loop (the Android TV
+                    // symptom: cell focused, then the top bar within ~0.5 s).
+                    // Watch for that and put focus back on the cell.
+                    let landedAt = Date()
+                    for check in [250, 600] as [UInt64] {
+                        try? await Task.sleep(nanoseconds: check * 1_000_000)
+                        if Task.isCancelled { return }
+                        let userMoved = TVFocusTracer.lastPressAt > landedAt
+                        let stolen = !userMoved && (TVFocusTracer.focusIsOnTabBar() || focusedProgramID == nil)
+                        debugLog("[FOCUS] guide refocus check +\(check)ms (epg): userMoved=\(userMoved) state=\(focusedProgramID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription()) stolen=\(stolen)")
+                        guard stolen else { continue }
+                        if NowPlayingManager.shared.isActive && !NowPlayingManager.shared.isMinimized { return }
+                        for _ in 0..<6 {
+                            if Task.isCancelled { return }
+                            proxy.scrollTo(valid, anchor: .center)
+                            focusedProgramID = target
+                            try? await Task.sleep(nanoseconds: 70_000_000)
+                            if focusedProgramID == target && !TVFocusTracer.focusIsOnTabBar() { break }
+                        }
+                        debugLog("[FOCUS] guide refocus re-asserted (epg): state=\(focusedProgramID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription())")
                     }
                 }
             }

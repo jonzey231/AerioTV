@@ -4131,8 +4131,14 @@ final class NowPlayingManager: ObservableObject {
         #endif
     }
 
+    /// True when the last stop() tore down a session that was fullscreen
+    /// (not the corner mini). tvOS uses it to send focus back to the
+    /// guide row of the channel that was playing after a full exit.
+    var lastStopWasFullscreen = false
+
     func stop() {
         debugLog("🎮 NowPlaying.stop: \(playingItem?.name ?? "nil")")
+        if playingItem != nil { lastStopWasFullscreen = !isMinimized }
         playingItem = nil
         isMinimized = false
         pendingMinimize?.cancel()
@@ -7105,6 +7111,21 @@ struct MainTabView: View {
         // recognizers can disarm while search is up.
         .onChange(of: showSearch) { _, isUp in
             TVSearchOverlayState.shared.isUp = isUp
+        }
+        // Full exit from a fullscreen player (double Back, catch-up exit,
+        // multiview exit) unmounts the container without a minimize, so
+        // nothing claimed focus and the engine fell back to the tab bar or
+        // the first row. Claim it for the guide row of the channel that
+        // was playing (lastPlayedChannelID). A mini closed from the guide
+        // is skipped: the user is already browsing there.
+        .onChange(of: nowPlaying.isActive) { _, active in
+            guard !active else { return }
+            let fullscreen = nowPlaying.lastStopWasFullscreen
+            debugLog("[FOCUS] player closed: fullscreen=\(fullscreen) tab=\(selectedTab.rawValue) last=\(nowPlaying.lastPlayedChannelID ?? "nil") focused=\(TVFocusTracer.focusedItemDescription())")
+            guard fullscreen, selectedTab == .liveTV else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+            }
         }
         #endif
         .liquidGlassTabBar()

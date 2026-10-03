@@ -1749,8 +1749,14 @@ struct ChannelListView: View {
                             debugLog("[GuideFocus] forceGuideFocus suppressed (native player presented)")
                             return
                         }
+                        debugLog("[FOCUS] guide refocus requested (list): playing=\(nowPlaying.playingItem?.id ?? "nil") last=\(nowPlaying.lastPlayedChannelID ?? "nil") focused=\(TVFocusTracer.focusedItemDescription())")
                         try? await Task.sleep(nanoseconds: 400_000_000)  // minimize spring
                         if Task.isCancelled { return }
+                        // Never pull focus out from under a fullscreen player.
+                        if nowPlaying.isActive && !nowPlaying.isMinimized {
+                            debugLog("[FOCUS] guide refocus skipped (list): player is fullscreen")
+                            return
+                        }
                         let resolved = nowPlaying.playingItem?.id ?? nowPlaying.lastPlayedChannelID
                         let valid = resolved.flatMap { id in
                             filteredChannels.contains(where: { $0.id == id }) ? id : nil
@@ -1772,6 +1778,28 @@ struct ChannelListView: View {
                             try? await Task.sleep(nanoseconds: 70_000_000)
                             debugLog("🧭 [GuideFocus] assert(return) attempt=\(attempt) set=\(valid) got=\(focusedGuideRowID ?? "nil")")
                             if focusedGuideRowID == valid { break }
+                        }
+                        debugLog("[FOCUS] guide refocus landed (list): row=\(valid) state=\(focusedGuideRowID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription())")
+                        // Late steal guard (see the EPG handler): put focus
+                        // back on the row if the tab bar takes it without a
+                        // remote press in between.
+                        let landedAt = Date()
+                        for check in [250, 600] as [UInt64] {
+                            try? await Task.sleep(nanoseconds: check * 1_000_000)
+                            if Task.isCancelled { return }
+                            let userMoved = TVFocusTracer.lastPressAt > landedAt
+                            let stolen = !userMoved && (TVFocusTracer.focusIsOnTabBar() || focusedGuideRowID == nil)
+                            debugLog("[FOCUS] guide refocus check +\(check)ms (list): userMoved=\(userMoved) state=\(focusedGuideRowID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription()) stolen=\(stolen)")
+                            guard stolen else { continue }
+                            if nowPlaying.isActive && !nowPlaying.isMinimized { return }
+                            for _ in 0..<6 {
+                                if Task.isCancelled { return }
+                                proxy.scrollTo(valid, anchor: .center)
+                                focusedGuideRowID = valid
+                                try? await Task.sleep(nanoseconds: 70_000_000)
+                                if focusedGuideRowID == valid && !TVFocusTracer.focusIsOnTabBar() { break }
+                            }
+                            debugLog("[FOCUS] guide refocus re-asserted (list): state=\(focusedGuideRowID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription())")
                         }
                     }
                 }
