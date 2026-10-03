@@ -423,6 +423,9 @@ struct AerioApp: App {
     nonisolated(unsafe) static var sharedContainer: ModelContainer?
 
     init() {
+        // About page "Last Updated": note this launch's version, build and
+        // bundle date; a change since the previous launch is an update.
+        DeviceInfo.recordLaunch()
         // Carries a pre-split "Rounded corners on logos and artwork" choice
         // into the List key before any view reads it, so nobody's current
         // setting changes (Logan 2026-09-16).

@@ -364,6 +364,11 @@ struct MoviesTVSettingsView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Color.cardBackground)
         )
+        // The whole row is a focus target: the Save button above sits at
+        // the far left and these pills at the far right, so a Down press
+        // from Save found nothing in its band and the page could not be
+        // scrolled past the TMDB buttons (Logan, Apple TV 2026-10-02).
+        .focusSection()
     }
     #endif
 }

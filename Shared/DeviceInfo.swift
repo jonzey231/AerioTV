@@ -137,29 +137,38 @@ enum DeviceInfo {
 
     /// Human-readable "last updated" date for the About screen.
     ///
-    /// The bundle's modification date is set to the build time of the .app
-    /// when the app is first installed. Because macOS file modification
-    /// times are preserved across installs (xcodebuild copies mtime from
-    /// the built artifact), on a fresh install the bundle mtime can be
-    /// earlier than the install time, older than the first-installed date,
-    /// or at the Unix epoch depending on build pipeline quirks.
-    ///
-    /// The rule: if `bundleModificationDate` is within 1 day of
-    /// `firstInstalledDate` (or earlier), the app has never been updated
-    /// since install, so return "Never". Otherwise return the bundle's
-    /// modification date as a long-form formatted string.
+    /// Tracked explicitly: `recordLaunch()` stores the version, build and
+    /// bundle date the app last launched with, and when any of them differ
+    /// it records "now" as the update date. A reinstall changes the bundle
+    /// date, so it counts as an update, like Android's packageInfo
+    /// lastUpdateTime. The old heuristic compared the bundle date with the
+    /// container's creation date and read "Never" on a bundle built three
+    /// weeks after install (Apple TV, 2026-10-02).
     static var lastUpdatedText: String {
-        guard let installDate = firstInstalledDate,
-              let updateDate = bundleModificationDate else {
-            return "Never"
+        guard let t = UserDefaults.standard.object(forKey: lastUpdatedKey) as? Double else { return "Never" }
+        return Date(timeIntervalSince1970: t).formatted(date: .long, time: .omitted)
+    }
+
+    private static let launchStampKey = "about.launchStamp"
+    private static let lastUpdatedKey = "about.lastUpdated"
+
+    /// Call once per launch, before the About page can be shown.
+    static func recordLaunch() {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "0"
+        let build = info?["CFBundleVersion"] as? String ?? "0"
+        let mtime = Int(bundleModificationDate?.timeIntervalSince1970 ?? 0)
+        let stamp = "\(version)|\(build)|\(mtime)"
+        let ud = UserDefaults.standard
+        if let previous = ud.string(forKey: launchStampKey) {
+            if previous != stamp {
+                ud.set(Date().timeIntervalSince1970, forKey: lastUpdatedKey)
+                ud.set(stamp, forKey: launchStampKey)
+            }
+        } else {
+            // First launch of this install: nothing to compare against yet.
+            ud.set(stamp, forKey: launchStampKey)
         }
-        // If the bundle mtime is earlier than or within 24 hours of the
-        // install date, treat it as "never updated".
-        let oneDay: TimeInterval = 86_400
-        if updateDate.timeIntervalSince(installDate) < oneDay {
-            return "Never"
-        }
-        return updateDate.formatted(date: .long, time: .omitted)
     }
 
     /// Human-readable "first installed" date for the About screen, or
@@ -184,7 +193,11 @@ enum DeviceInfo {
     /// and changes when the app is updated (because iOS installs a new
     /// .app bundle on upgrade).
     private static var bundleModificationDate: Date? {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: Bundle.main.bundlePath) else {
+        // The executable, not the bundle folder: on tvOS the folder's
+        // attributes were unreadable (date 0 in the launch stamp, Apple TV
+        // 2026-10-02), while the binary keeps the build's modification date.
+        let path = Bundle.main.executableURL?.path ?? Bundle.main.bundlePath
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else {
             return nil
         }
         return attrs[.modificationDate] as? Date
