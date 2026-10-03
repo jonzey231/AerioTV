@@ -8880,10 +8880,23 @@ final class TabBarCollapseState: ObservableObject {
                 UIView.animate(withDuration: 0.32, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState]) {
                     bar.transform = CGAffineTransform(scaleX: sx, y: sy)
                 }
-                UIView.animate(withDuration: 0.14, delay: 0.16, options: [.curveEaseIn, .beginFromCurrentState]) {
+                UIView.animate(withDuration: 0.14, delay: 0.16, options: [.curveEaseIn, .beginFromCurrentState], animations: {
                     bar.alpha = 0
-                }
+                }, completion: { _ in
+                    // The fade alone did not keep the bar invisible: UIKit
+                    // writes the tab bar's alpha back to 1 on its own (tab
+                    // and push transitions), leaving the bar parked at the
+                    // mini scale and fully opaque, a squashed second item
+                    // beside the mini button. Logged 2026-10-02 17:24:11
+                    // and 2026-10-03 16:49:19: collapse=false found t=0.11,
+                    // 0.58 with alpha=1.0. An empty layer mask is ours
+                    // alone, so the collapsed bar draws nothing whatever
+                    // UIKit does to alpha.
+                    guard self.collapsed else { return }
+                    Self.setCollapsedMask(bar, on: true)
+                })
             } else {
+                Self.setCollapsedMask(bar, on: false)
                 // The collapse in reverse (Logan 2026-10-02): the normalize
                 // above put the bar at full size, so with no start state the
                 // transform animation had nothing to do and the show was a
@@ -8907,6 +8920,22 @@ final class TabBarCollapseState: ObservableObject {
             }
         }
     }
+
+    /// Hides every pixel of the bar with an empty mask layer while it is
+    /// collapsed; the minimized button draws the selected tab instead.
+    private static func setCollapsedMask(_ bar: UIView, on: Bool) {
+        if on {
+            guard bar.layer.mask?.name != collapsedMaskName else { return }
+            let mask = CALayer()
+            mask.name = collapsedMaskName
+            mask.frame = .zero
+            bar.layer.mask = mask
+            debugLog("[TABBAR] collapsed mask on alpha=\(bar.alpha)")
+        } else if bar.layer.mask?.name == collapsedMaskName {
+            bar.layer.mask = nil
+        }
+    }
+    private static let collapsedMaskName = "aerio.tabbar.collapsed"
 
     /// Identity transform, centred anchor, and the frame the tab bar
     /// controller lays out (its layoutSubviews owns the bar's frame).

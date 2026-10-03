@@ -390,6 +390,12 @@ struct VODDetailView: View {
                 // card's scale had nowhere to grow into. Give the column a
                 // bottom inset to scroll past.
                 .padding(.bottom, 60)
+                #else
+                // iPhone: the tab bar floats over this scroll view (and the
+                // cast button beside it), so the TMDB attribution under the
+                // last strip was cut off with no room to scroll it clear.
+                // Reserve the same clearance the scrolling tabs keep.
+                .padding(.bottom, SettingsMetrics.phoneTabBarClearance)
                 #endif
                 #if os(tvOS)
                 // Scope focus so the movie Play button can be the default
