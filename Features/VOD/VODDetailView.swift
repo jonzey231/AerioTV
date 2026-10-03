@@ -391,11 +391,11 @@ struct VODDetailView: View {
                 // bottom inset to scroll past.
                 .padding(.bottom, 60)
                 #else
-                // iPhone: the tab bar floats over this scroll view (and the
-                // cast button beside it), so the TMDB attribution under the
-                // last strip was cut off with no room to scroll it clear.
-                // Reserve the same clearance the scrolling tabs keep.
-                .padding(.bottom, SettingsMetrics.phoneTabBarClearance)
+                // iPhone/iPad: the tab bar is hidden on detail pages (Android
+                // parity, 2026-10-03), so only a small margin above the
+                // bottom safe area keeps the TMDB attribution clear of the
+                // home indicator.
+                .padding(.bottom, 16)
                 #endif
                 #if os(tvOS)
                 // Scope focus so the movie Play button can be the default
@@ -485,6 +485,12 @@ struct VODDetailView: View {
         .navigationDestination(item: $knownForPush) { pushed in
             VODDetailView(item: pushed, isPlaying: $isPlaying)
         }
+        #if os(iOS)
+        // Android parity (2026-10-03): no bottom tab bar on VOD detail pages.
+        // Counted push/pop so a detail pushed from a detail stays bar-less.
+        .onAppear { TabBarCollapseState.shared.enterDetail() }
+        .onDisappear { TabBarCollapseState.shared.leaveDetail() }
+        #endif
         .fullScreenCover(item: $playingURL) { wrapper in
             PlayerView(
                 urls: [wrapper.url],

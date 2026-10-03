@@ -8825,6 +8825,62 @@ final class TabBarScrollTracker {
 final class TabBarCollapseState: ObservableObject {
     static let shared = TabBarCollapseState()
     @Published private(set) var collapsed = false
+    /// True while a VOD detail page is on screen (Android parity, 2026-10-03):
+    /// the whole bar, its mini button and the system bar are hidden, and the
+    /// collapse state is kept untouched for the pop.
+    @Published private(set) var detailHidden = false
+    private var detailDepth = 0
+
+    func enterDetail() {
+        detailDepth += 1
+        guard !detailHidden else { return }
+        detailHidden = true
+        debugLog("[TABBAR] detail hide depth=\(detailDepth) collapsed=\(collapsed)")
+        DispatchQueue.main.async { [self] in applyDetailVisibility() }
+    }
+
+    func leaveDetail() {
+        detailDepth = max(0, detailDepth - 1)
+        guard detailDepth == 0, detailHidden else { return }
+        detailHidden = false
+        debugLog("[TABBAR] detail restore collapsed=\(collapsed)")
+        DispatchQueue.main.async { [self] in applyDetailVisibility() }
+    }
+
+    /// Hides the bar with the same empty mask the collapse uses (UIKit writes
+    /// alpha back to 1 on push transitions, the mask is ours alone) and
+    /// leaves the transform alone so a collapsed bar stays parked at the mini
+    /// button's scale. Restore returns to whatever `collapsed` says.
+    private func applyDetailVisibility() {
+        let bars = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .flatMap { Self.tabBars(in: $0) }
+        for bar in bars {
+            if detailHidden {
+                Self.setCollapsedMask(bar, on: true)
+                bar.alpha = 0
+            } else if collapsed {
+                if bar.transform == .identity {
+                    // Collapsed while the detail was up: park it as the
+                    // collapse would have.
+                    applyToSystemBar()
+                    return
+                }
+                Self.setCollapsedMask(bar, on: true)
+            } else {
+                if bar.transform != .identity || bar.layer.anchorPoint != CGPoint(x: 0.5, y: 0.5) {
+                    Self.normalize(bar)
+                }
+                Self.setCollapsedMask(bar, on: false)
+                UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+                    bar.alpha = 1
+                }
+            }
+        }
+        debugLog("[TABBAR] detail \(detailHidden ? "hidden" : "restored") bars=\(bars.count)")
+    }
+
     func set(_ value: Bool) {
         guard collapsed != value else { return }
         collapsed = value
@@ -8832,7 +8888,12 @@ final class TabBarCollapseState: ObservableObject {
         // callback inside a SwiftUI update, where UIView.animate completed
         // in 5 to 19 ms (a flash), while the hide arrives "at scroll idle"
         // and animated. Measured 2026-09-27 01:39 to 01:53.
-        DispatchQueue.main.async { [self] in applyToSystemBar() }
+        DispatchQueue.main.async { [self] in
+            // A detail page owns the bar's visibility; its restore applies
+            // the latest collapse state.
+            guard !detailHidden else { return }
+            applyToSystemBar()
+        }
     }
 
     /// Slides the UIKit tab bar off screen instead of hiding it through the
@@ -9030,6 +9091,14 @@ final class RemoteSessionCardMetrics: ObservableObject {
         if abs(top - tabBarTopInWindow) > 0.5 { tabBarTopInWindow = top }
     }
 
+    /// Bottom safe-area inset of the key window (home indicator).
+    static var windowSafeBottom: CGFloat {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first { $0.isKeyWindow }?.safeAreaInsets.bottom ?? 0
+    }
+
     func setCardHeight(_ height: CGFloat) {
         let value = height > 1 ? height : 0
         if abs(value - contentInset) > 0.5 { contentInset = value }
@@ -9050,6 +9119,7 @@ final class RemoteSessionCardMetrics: ObservableObject {
 /// whether the container is safe-area inset.
 private struct RemoteSessionCardDock<Content: View>: View {
     @ObservedObject private var metrics = RemoteSessionCardMetrics.shared
+    @ObservedObject private var collapse = TabBarCollapseState.shared
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -9065,7 +9135,11 @@ private struct RemoteSessionCardDock<Content: View>: View {
             // (Logan 2026-09-27: "sits at the top and then snaps down").
             // No tab bar is ever taller than about twice the stock one, so a
             // larger lift is a stale reading: use the fallback instead.
-            let lift = barTop > 0 && measured <= fallback * 2
+            // VOD detail pages hide the bar (2026-10-03): sit the card on
+            // the bottom safe area instead.
+            let lift = collapse.detailHidden
+                ? RemoteSessionCardMetrics.windowSafeBottom + RemoteSessionCardMetrics.gap
+                : barTop > 0 && measured <= fallback * 2
                 ? max(RemoteSessionCardMetrics.gap, measured)
                 : fallback
             VStack(spacing: 0) {
@@ -9135,10 +9209,11 @@ private struct MinimizedTabButton: View {
             .glassEffect(.regular, in: Circle())
             .padding(.leading, 28)
             .padding(.bottom, -6)
-            .opacity(collapse.collapsed ? 1 : 0)
+            .opacity(collapse.collapsed && !collapse.detailHidden ? 1 : 0)
             .scaleEffect(collapse.collapsed ? 1 : 0.6)
-            .allowsHitTesting(collapse.collapsed)
+            .allowsHitTesting(collapse.collapsed && !collapse.detailHidden)
             .animation(.easeInOut(duration: 0.2), value: collapse.collapsed)
+            .animation(.easeInOut(duration: 0.2), value: collapse.detailHidden)
             .accessibilityLabel("Show tab bar")
         }
     }
