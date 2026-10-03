@@ -2752,7 +2752,9 @@ struct RemoteSessionSheet: View {
 
     @State private var contentHeight: CGFloat = 320
     @State private var showOptions = false
-    @ObservedObject private var guideStore = GuideStore.shared
+    /// Observes only this channel's now/next cell (the programme block
+    /// reads the store directly at its TimelineView tick).
+    @StateObject private var nowNext = GuideNowNextWatch()
     @ObservedObject private var channelStore = ChannelStore.shared
     @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
     @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
@@ -2761,6 +2763,7 @@ struct RemoteSessionSheet: View {
     private var accent: Color { ThemeManager.shared.accent }
 
     var body: some View {
+        let _ = nowNext.bind(channelID)
         ZStack {
             Color.black.ignoresSafeArea()
             Group {

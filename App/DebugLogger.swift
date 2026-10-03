@@ -796,6 +796,10 @@ enum TabProbe {
         subs.append(guide.objectWillChange.sink { _ in body("pub:guide") })
         subs.append(guide.$programs.dropFirst().sink { _ in body("pub:guide.programs") })
         subs.append(guide.$isLoading.dropFirst().sink { _ in body("pub:guide.isLoading") })
+        // Narrow guide publishers (2026-10-03): what MainTabView and the grid
+        // observe now instead of the whole store.
+        subs.append(GuideLoadState.shared.objectWillChange.sink { _ in body("pub:guideLoad") })
+        subs.append(GuideGridSignal.shared.$revision.dropFirst().sink { _ in body("pub:guide.grid") })
     }
     private static var counts: [String: Int] = [:]
     private static var distinct: [String: Set<String>] = [:]

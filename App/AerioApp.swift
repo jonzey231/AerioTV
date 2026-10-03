@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import os
 #if os(iOS)
 import UIKit
 #endif
@@ -101,6 +102,7 @@ final class MainThreadWatchdog: @unchecked Sendable {
     /// Call right after any `@Published` write big enough to matter. The label
     /// stays attached until the run loop goes idle again.
     func notePublish(_ label: String) {
+        GuideSignposts.signposter.emitEvent("notePublish", "\(label, privacy: .public)")
         lock.lock()
         pendingRenderLabel = label
         pendingRenderAt = CFAbsoluteTimeGetCurrent()

@@ -40,12 +40,11 @@ struct CompactChannelRow: View {
     /// to keep callers honest about the semantic.
     let onTap: () -> Void
 
-    /// Observe `GuideStore.programs` so the row can fall back to the
-    /// guide dataset when the item-level current-program payload is
-    /// empty. SwiftUI invalidates only when the specific channel's
-    /// program list changes (the published property is the whole
-    /// dictionary, but the diff per row is cheap).
-    @ObservedObject private var guideStore = GuideStore.shared
+    /// Observe this channel's now/next cell so the row can fall back to
+    /// the guide dataset when the item-level current-program payload is
+    /// empty. The cell publishes only when this channel's pair changes,
+    /// not on every write to the whole guide map.
+    @StateObject private var nowNext = GuideNowNextWatch()
 
     /// Currently-airing program for this row, picking the best
     /// available source. Mirrors `ChannelRow.liveProgram` so both
@@ -56,13 +55,14 @@ struct CompactChannelRow: View {
            let end = item.currentProgramEnd {
             return (title, item.currentProgramDescription, start, end)
         }
-        if let p = guideStore.liveProgram(for: item.id) {
+        if let p = nowNext.live(for: item.id) {
             return (p.title, p.description, p.start, p.end)
         }
         return nil
     }
 
     var body: some View {
+        let _ = nowNext.bind(item.id)
         Button(action: onTap) {
             HStack(alignment: .center, spacing: rowSpacing) {
                 // Channel number — monospaced, matches Live TV List

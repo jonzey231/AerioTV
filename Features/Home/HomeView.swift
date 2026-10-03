@@ -1593,7 +1593,10 @@ final class ChannelStore: ObservableObject {
     }
 
     // MARK: - Published State
-    @Published private(set) var channels: [ChannelDisplayItem] = []
+    @Published private(set) var channels: [ChannelDisplayItem] = [] {
+        // Now/next cells belong to channels in the list; drop the rest.
+        didSet { GuideStore.shared.pruneNowNextCells(keeping: Set(channels.map(\.id))) }
+    }
     @Published private(set) var orderedGroups: [String] = []
     @Published private(set) var isLoading = false
     @Published var isEPGLoading = false
@@ -4586,7 +4589,10 @@ struct MainTabView: View {
     /// this, the cover would close on the faster JSON bulk-EPG signal
     /// and drop the user into a partially-populated guide while
     /// XMLTV was still loading silently in the background.
-    @ObservedObject private var guideStore = GuideStore.shared
+    private var guideStore: GuideStore { GuideStore.shared }
+    /// Only the loading flag and count are observed (GuideLoadState); a
+    /// programs publish no longer re-renders the tab root.
+    @ObservedObject private var guideLoad = GuideLoadState.shared
     /// Watches `PlayerSession.shared.mode` so the inline-player slot
     /// can mode-branch between single-stream `PlayerView` and the new
     /// `MultiviewContainerView`. `@ObservedObject` on a singleton is
@@ -4943,7 +4949,7 @@ struct MainTabView: View {
         // sees — dismissing before XMLTV finishes produces the
         // "partial guide appears, then pops in more content" UX that
         // users reported as "no loading indicator, took forever."
-        let epgDone      = !channelStore.isEPGLoading && !guideStore.isLoading
+        let epgDone      = !channelStore.isEPGLoading && !guideLoad.isLoading
         let dvrDone      = didInitialDVRReconcile || !needsInitialDVRSync
         let errorPresent = channelStore.error != nil
         return "\(channelsDone)|\(epgDone)|\(dvrDone)|\(errorPresent)"
@@ -4962,12 +4968,14 @@ struct MainTabView: View {
         // have wrapped, so the row flips to `.done` only when the
         // guide is actually usable.
         let channelsReady = !channelStore.isLoading && !channelStore.channels.isEmpty
-        let epgReady = !channelStore.isEPGLoading && !guideStore.isLoading
+        let epgReady = !channelStore.isEPGLoading && !guideLoad.isLoading
         var epgStage = SyncStage(id: "epg", label: "Loading EPG")
         if channelsReady && epgReady {
             let channelCount = channelStore.channels.count
             // Cached count, not a scan: `loadingStages` is evaluated from the
             // initial-sync cover's body (2026-09-12 render-path fix).
+            // GuideLoadState republishes its count when a load ends, which
+            // re-renders this; the direct cached read keeps the number exact.
             let programCount = guideStore.loadedProgramCount
             let detail: String
             if programCount > 0 {
@@ -5329,7 +5337,7 @@ struct MainTabView: View {
         guard !channelStore.isLoading, !channelStore.channels.isEmpty else { return }
         guard !channelStore.isEPGLoading else { return }
         // XMLTV parse must also complete — see `initialSyncKey` doc comment.
-        guard !guideStore.isLoading else { return }
+        guard !guideLoad.isLoading else { return }
         // VOD loading intentionally NOT gated here. VOD can take
         // minutes on large libraries and the user shouldn't wait on
         // On Demand before they can watch Live TV. The On Demand tab
@@ -5363,7 +5371,7 @@ struct MainTabView: View {
     /// server-side search flags so users searching a huge library
     /// see the ongoing background activity.
     private var isAnyBackgroundWork: Bool {
-        channelStore.isLoading || channelStore.isEPGLoading || guideStore.isLoading
+        channelStore.isLoading || channelStore.isEPGLoading || guideLoad.isLoading
             || vodFacts.isLoadingMovies || vodFacts.isLoadingSeries
             || vodFacts.isRefillingMovies || vodFacts.isRefillingSeries
             || vodFacts.isSearchingMovies || vodFacts.isSearchingSeries
@@ -5375,7 +5383,7 @@ struct MainTabView: View {
         var labels: [String] = []
         if channelStore.isLoading        { labels.append("channels") }
         if channelStore.isEPGLoading     { labels.append("epg") }
-        if guideStore.isLoading          { labels.append("xmltv-parse") }
+        if guideLoad.isLoading           { labels.append("xmltv-parse") }
         if vodStore.isLoadingMovies      { labels.append("vod-movies-initial") }
         if vodStore.isLoadingSeries      { labels.append("vod-series-initial") }
         if vodStore.isRefillingMovies    { labels.append("vod-movies-refill") }
@@ -8105,7 +8113,8 @@ struct MainTabView: View {
 /// the chrome on every channel-flip — no separate timer.
 private struct ChannelInfoBanner: View {
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
-    @ObservedObject private var guideStore = GuideStore.shared
+    /// Observes only the playing channel's now/next cell, not the whole map.
+    @StateObject private var nowNext = GuideNowNextWatch()
     @ObservedObject private var multiviewStore = MultiviewStore.shared
     // #42 Part 4: gate the "Up/Down changes channels" hint on the same Settings
     // toggle that enables that gesture (default on).
@@ -8199,7 +8208,7 @@ private struct ChannelInfoBanner: View {
            let end = item.currentProgramEnd {
             return (title, start, end)
         }
-        if let p = guideStore.liveProgram(for: item.id) {
+        if let p = nowNext.live(for: item.id) {
             return (p.title, p.start, p.end)
         }
         return nil
@@ -8240,6 +8249,7 @@ private struct ChannelInfoBanner: View {
     }
 
     var body: some View {
+        let _ = nowNext.bind(nowPlaying.playingItem?.id)
         VStack(alignment: .leading, spacing: 0) {
             if shouldRender, let item = nowPlaying.playingItem, nowPlaying.isLive,
                hasCardContent(for: item) {

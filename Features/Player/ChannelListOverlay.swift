@@ -38,9 +38,10 @@ struct ChannelPickRow: View {
     var isPlaying: Bool
     let onSelect: () -> Void
 
-    /// Observe the shared guide store so the now-airing line fills in as EPG
-    /// data lands, mirroring `ChannelRow.liveProgram`'s behaviour.
-    @ObservedObject private var guideStore = GuideStore.shared
+    /// Observe this channel's now/next cell so the now-airing line fills in
+    /// as EPG data lands, mirroring `ChannelRow.liveProgram`'s behaviour,
+    /// without re-rendering on publishes that leave this channel alone.
+    @StateObject private var nowNext = GuideNowNextWatch()
 
     /// Honor the same visibility prefs the Live TV rows use so the overlay
     /// stays visually consistent with the guide/list.
@@ -61,7 +62,7 @@ struct ChannelPickRow: View {
     /// group-name fallback, matching `ChannelRow`).
     private var nowTitle: String? {
         if let t = item.currentProgram, !t.isEmpty { return t }
-        if let live = guideStore.liveProgram(for: item.id),
+        if let live = nowNext.live(for: item.id),
            !live.title.isEmpty {
             return live.title
         }
@@ -69,6 +70,7 @@ struct ChannelPickRow: View {
     }
 
     var body: some View {
+        let _ = nowNext.bind(item.id)
         Button(action: onSelect) {
             HStack(spacing: 16) {
                 if showChannelNumbers {

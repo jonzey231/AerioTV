@@ -3018,7 +3018,13 @@ struct ChannelRow: View {
     /// a different key-mismatch or timing race surfaced.
     /// Reading from GuideStore eliminates the whole class of
     /// problems: if the Guide view can tint it, so can we.
-    @ObservedObject private var guideStore = GuideStore.shared
+    ///
+    /// Not observed (2026-10-03): ~650 rows re-rendered on every
+    /// whole-map publish. The collapsed row observes its own now/next
+    /// cell; the expanded panel observes a per-channel slice cell
+    /// (`GuideChannelSliceScope`) only while open.
+    private var guideStore: GuideStore { GuideStore.shared }
+    @StateObject private var nowNext = GuideNowNextWatch()
     /// Opt-in sub-toggle nested under Settings → Guide Display →
     /// "Color Programs by Category". When on AND the currently-airing
     /// program's category matches one of the four buckets, a thin
@@ -3056,14 +3062,14 @@ struct ChannelRow: View {
             // XMLTV <sub-title>; when GuideStore has the same now-airing
             // program, borrow both so the collapsed row can show LIVE/NEW and
             // the episode / sports-match name (GH #34).
-            let liveGuideProg = guideStore.liveProgram(for: item.id)
+            let liveGuideProg = nowNext.live(for: item.id)
             let flags = liveGuideProg
                 .map { EPGFlags(isNew: $0.isNew, isLiveBroadcast: $0.isLiveBroadcast,
                                 isPremiere: $0.isPremiere, isFinale: $0.isFinale,
                                 isRepeat: $0.isRepeat) } ?? EPGFlags()
             return (title, liveGuideProg?.subTitle, item.currentProgramDescription, start, end, flags)
         }
-        if let p = guideStore.liveProgram(for: item.id) {
+        if let p = nowNext.live(for: item.id) {
             return (p.title, p.subTitle, p.description, p.start, p.end,
                     EPGFlags(isNew: p.isNew, isLiveBroadcast: p.isLiveBroadcast,
                              isPremiere: p.isPremiere, isFinale: p.isFinale,
@@ -3292,6 +3298,7 @@ struct ChannelRow: View {
 
     var body: some View {
         let _ = TabProbe.body("ChannelRow", key: item.id)
+        let _ = nowNext.bind(item.id)
         VStack(spacing: 0) {
             #if os(tvOS)
             tvRow
@@ -3306,7 +3313,7 @@ struct ChannelRow: View {
             #endif
 
             if isExpanded {
-                guidePanel
+                GuideChannelSliceScope(channelID: item.id) { guidePanel }
             }
         }
         // When the XMLTV parse lands and EPGCache is re-seeded

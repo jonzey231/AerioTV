@@ -1,6 +1,7 @@
 import Combine
 import SwiftUI
 import SwiftData
+import os
 import Combine  // Xcode 26.5 requires explicit Combine import for the
                // Timer.publish().autoconnect() (Publishers.Autoconnect)
                // stored-property type; transitive SwiftUI import no longer suffices.
@@ -223,11 +224,34 @@ final class GuideStore: ObservableObject {
         return nil
     }
 
+    // MARK: Derived observation state (render-scope split, 2026-10-03)
+    //
+    // One publish of `programs` re-renders every observer: MainTabView, ~650
+    // ChannelRows and the guide grid. The objects below carry narrower
+    // slices so each view re-renders only when ITS slice moves. `programs`
+    // stays @Published for now; these are mirrors written from its didSet.
+
+    /// Per-channel now/next cells, created lazily by the rows that show them
+    /// and pruned when the channel list changes.
+    private(set) var nowNextCells: [String: GuideNowNextCell] = [:]
+    /// Per-channel schedule slices, alive only while a row is expanded.
+    private var sliceCells: [String: GuideChannelSliceCell] = [:]
+    /// Set by callers that know the single channel a write touches.
+    private var _changedHint: Set<String>?
+    /// Nesting count of grid walks in flight (fetchGridChunks).
+    private var _walkInFlight = 0
+    /// Counts from the last derived-state pass, for the [PUBLISH] line.
+    private(set) var lastDerive: (changedChannels: Int, cellsFired: Int) = (0, 0)
+    /// Store-level rollover timer for the now/next cells.
+    private var nowNextTimerTask: Task<Void, Never>?
+    private var nowNextDeadline: Date?
+
     @Published var programs: [String: [GuideProgram]] = [:] {  // channelID → programs
         // Task #188: any EPG mutation invalidates the focus-path memo below.
         didSet {
             programChannelMemo.removeAll()
             loadedEdges = nil
+            refreshDerivedState(previous: oldValue)
         }
     }
 
@@ -300,7 +324,11 @@ final class GuideStore: ObservableObject {
         programChannelMemo = memo
         debugLog("[SLOW] guide.memoRebuild \(memo.count) programme ids")
     }
-    @Published var isLoading = false
+    @Published var isLoading = false {
+        // Mirrored into GuideLoadState so MainTabView (the initial-sync cover)
+        // observes the flag without re-rendering on every programs publish.
+        didSet { GuideLoadState.shared.mirror(isLoading: isLoading, store: self) }
+    }
 
     /// Wall-clock age of the currently-loaded EPG data: the newest
     /// `fetchedAt` across loaded rows (set by `loadFromCache`) or `now`
@@ -552,6 +580,8 @@ final class GuideStore: ObservableObject {
     @discardableResult
     private func commitPrograms(_ dict: [String: [GuideProgram]],
                                 for serverID: String, source: String) -> Bool {
+        let signpostState = GuideSignposts.signposter.beginInterval("guide.commit")
+        defer { GuideSignposts.signposter.endInterval("guide.commit", signpostState) }
         debugLog("[MEM] commitPrograms begin rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         guard displayedServerID == nil || displayedServerID == serverID else {
             debugLog("📺 GuideStore: DISCARDED stale \(source) write for \(serverID.prefix(8)) — guide now displays \(displayedServerID!.prefix(8))")
@@ -623,7 +653,7 @@ final class GuideStore: ObservableObject {
             _ = outgoing.count
         }
         let publishMs = Int((CFAbsoluteTimeGetCurrent() - publishStart) * 1000)
-        debugLog("[PUBLISH] guide.programs \(programCount) items across \(dict.count) channels took \(publishMs)ms (\(source))")
+        debugLog("[PUBLISH] guide.programs \(programCount) items across \(dict.count) channels took \(publishMs)ms (\(source)) changedChannels=\(lastDerive.changedChannels) cellsFired=\(lastDerive.cellsFired)")
         return true
     }
 
@@ -2722,6 +2752,14 @@ final class GuideStore: ObservableObject {
         var total = 0
         var consecutiveEmpty = 0
         let now = Date()
+        // Hold grid extent bumps until the walk is over (GuideGridSignal):
+        // each batched publish moves the loaded edge, and a re-render of the
+        // whole grid per batch is what this walk is trying to avoid.
+        _walkInFlight += 1
+        defer {
+            _walkInFlight -= 1
+            if _walkInFlight == 0 { GuideGridSignal.shared.releaseHeldExtentBump() }
+        }
         // Publish sparingly: every chunk used to replace `programs`, and one
         // publish re-renders the tab roots and every channel row (probe
         // 2026-09-06: 656 row bodies twice a second for the ~25 s of a
@@ -4336,6 +4374,10 @@ final class GuideStore: ObservableObject {
         if _isBatching {
             Self.mergeProgramInto(&_pendingPrograms, program: prog, for: channelID)
         } else {
+            // The only channel this write can touch; the derived-state pass
+            // uses it instead of diffing the whole map.
+            _changedHint = [channelID]
+            defer { _changedHint = nil }
             Self.mergeProgramInto(&programs, program: prog, for: channelID)
         }
     }
@@ -4594,6 +4636,358 @@ final class GuideStore: ObservableObject {
     }
 }
 
+// MARK: - Guide derived observation (render-scope split, 2026-10-03)
+
+/// Signposts for the guide publish path (Instruments: Points of Interest /
+/// os_signpost, subsystem app.molinete.aerio, category Guide).
+enum GuideSignposts {
+    nonisolated static let signposter = OSSignposter(subsystem: "app.molinete.aerio", category: "Guide")
+}
+
+/// Loading flag and a program count for views that need only those
+/// (MainTabView's initial-sync cover). Mirrored from GuideStore; every write
+/// is guarded so an equal value never publishes.
+@MainActor
+final class GuideLoadState: ObservableObject {
+    static let shared = GuideLoadState()
+    @Published private(set) var isLoading = false
+    /// Resident program count, refreshed only when a load ends.
+    @Published private(set) var programCount = 0
+
+    func mirror(isLoading newValue: Bool, store: GuideStore) {
+        if isLoading != newValue { isLoading = newValue }
+        guard !newValue else { return }
+        let count = store.loadedProgramCount
+        if programCount != count { programCount = count }
+    }
+}
+
+/// Now/next for one channel. Written only when the pair differs, so a whole
+/// map publish that leaves this channel alone does not re-render its row.
+@MainActor
+final class GuideNowNextCell: ObservableObject {
+    typealias NowNext = (live: GuideProgram?, next: GuideProgram?)
+    @Published private(set) var nowNext: NowNext
+    /// When this pair next goes stale: the live program's end, else the next
+    /// program's start.
+    private(set) var boundary: Date?
+
+    init(_ value: NowNext) {
+        nowNext = value
+        boundary = value.live?.end ?? value.next?.start
+    }
+
+    @discardableResult
+    func update(_ value: NowNext) -> Bool {
+        guard value.live != nowNext.live || value.next != nowNext.next else { return false }
+        nowNext = value
+        boundary = value.live?.end ?? value.next?.start
+        return true
+    }
+}
+
+/// One channel's full program list, alive only while a channel row's
+/// schedule panel is expanded.
+@MainActor
+final class GuideChannelSliceCell: ObservableObject {
+    @Published private(set) var programs: [GuideProgram]
+    var refs = 0
+
+    init(_ programs: [GuideProgram]) { self.programs = programs }
+
+    @discardableResult
+    func update(_ value: [GuideProgram]) -> Bool {
+        guard value != programs else { return false }
+        programs = value
+        return true
+    }
+}
+
+/// Bumped only when the guide grid has something new to draw: a changed
+/// channel with programs overlapping the grid window, or a moved loaded
+/// extent. Extent bumps are held while a grid walk is in flight and released
+/// once at the end.
+@MainActor
+final class GuideGridSignal: ObservableObject {
+    static let shared = GuideGridSignal()
+    @Published private(set) var revision = 0
+
+    /// Grid window registered by EPGGuideView (plain storage, never
+    /// published). Nil until the guide has rendered once; then every change
+    /// counts.
+    private(set) var window: (start: Date, end: Date)?
+    /// Programs this far before the window start still count (the grid
+    /// draws a cell that started before its left edge).
+    static let windowPadding: TimeInterval = 6 * 3600
+
+    private var lastExtent: (minStart: Date, maxEnd: Date)?
+    private var heldExtentBump = false
+
+    func noteWindow(start: Date, end: Date) {
+        window = (start, end)
+    }
+
+    func releaseHeldExtentBump() {
+        guard heldExtentBump else { return }
+        heldExtentBump = false
+        revision &+= 1
+        debugLog("[PUBLISH] guide.grid revision \(revision) (held extent bump released)")
+    }
+
+    /// Returns true when it bumped.
+    @discardableResult
+    func evaluate(changed: [String], old: [String: [GuideProgram]], new: [String: [GuideProgram]],
+                  extent: (minStart: Date, maxEnd: Date), walkInFlight: Bool) -> Bool {
+        var bump = false
+        if !changed.isEmpty {
+            if let window {
+                let lo = window.start.addingTimeInterval(-Self.windowPadding)
+                let hi = window.end
+                for id in changed where Self.slice(old[id], lo, hi) != Self.slice(new[id], lo, hi) {
+                    bump = true
+                    break
+                }
+            } else {
+                bump = true
+            }
+        }
+        let extentMoved = lastExtent.map { $0.minStart != extent.minStart || $0.maxEnd != extent.maxEnd } ?? true
+        if extentMoved {
+            lastExtent = extent
+            if walkInFlight && !bump {
+                heldExtentBump = true
+            } else {
+                bump = true
+            }
+        }
+        if bump {
+            heldExtentBump = false
+            revision &+= 1
+        }
+        return bump
+    }
+
+    /// Programs of a start-sorted list overlapping [lo, hi).
+    private static func slice(_ list: [GuideProgram]?, _ lo: Date, _ hi: Date) -> ArraySlice<GuideProgram> {
+        guard let list, !list.isEmpty else { return [] }
+        // First index whose end is after lo (ends are monotonic in a sorted,
+        // non-overlapping feed; a glitchy feed only widens the slice).
+        var a = 0, b = list.count
+        while a < b {
+            let m = (a + b) / 2
+            if list[m].start < lo { a = m + 1 } else { b = m }
+        }
+        var first = a
+        while first > 0, list[first - 1].end > lo { first -= 1 }
+        var last = first
+        while last < list.count, list[last].start < hi { last += 1 }
+        return list[first..<last]
+    }
+}
+
+/// Adapter a view holds as @StateObject to observe one channel's now/next
+/// cell. Rebinding is plain storage (no publish), so `bind` is safe to call
+/// from a view body; the cell's changes are forwarded to this object.
+@MainActor
+final class GuideNowNextWatch: ObservableObject {
+    private var cell: GuideNowNextCell?
+    private var subscription: AnyCancellable?
+
+    @discardableResult
+    func bind(_ channelID: String?) -> GuideNowNextCell? {
+        guard let channelID else {
+            cell = nil
+            subscription = nil
+            return nil
+        }
+        let current = GuideStore.shared.nowNextCell(for: channelID)
+        if current !== cell {
+            cell = current
+            subscription = current.objectWillChange.sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.objectWillChange.send() }
+            }
+        }
+        return current
+    }
+
+    func live(for channelID: String) -> GuideProgram? {
+        bind(channelID)?.nowNext.live
+    }
+}
+
+/// Adapter for the expanded schedule: holds a slice cell while bound.
+@MainActor
+final class GuideChannelSliceWatch: ObservableObject {
+    private var channelID: String?
+    private var subscription: AnyCancellable?
+
+    func bind(_ id: String) {
+        guard id != channelID else { return }
+        unbind()
+        channelID = id
+        let cell = GuideStore.shared.acquireSliceCell(for: id)
+        subscription = cell.objectWillChange.sink { [weak self] _ in
+            MainActor.assumeIsolated { self?.objectWillChange.send() }
+        }
+    }
+
+    func unbind() {
+        guard let id = channelID else { return }
+        channelID = nil
+        subscription = nil
+        GuideStore.shared.releaseSliceCell(for: id)
+    }
+}
+
+/// Wraps a channel's expanded schedule so only this subtree re-renders when
+/// that channel's programs change. The content reads GuideStore directly.
+struct GuideChannelSliceScope<Content: View>: View {
+    let channelID: String
+    @ViewBuilder let content: () -> Content
+    @StateObject private var watch = GuideChannelSliceWatch()
+
+    var body: some View {
+        let _ = watch.bind(channelID)
+        content()
+            .onAppear { watch.bind(channelID) }
+            .onDisappear { watch.unbind() }
+    }
+}
+
+extension GuideStore {
+    /// Live program and the one after it for a channel at `now`.
+    func nowNext(for channelID: String, at now: Date = Date()) -> GuideNowNextCell.NowNext {
+        let live = liveProgram(for: channelID, at: now)
+        guard let list = programs[channelID], !list.isEmpty else { return (live, nil) }
+        var lo = 0, hi = list.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if list[mid].start <= now { lo = mid + 1 } else { hi = mid }
+        }
+        return (live, lo < list.count ? list[lo] : nil)
+    }
+
+    /// The now/next cell for a channel, created on first use.
+    func nowNextCell(for channelID: String) -> GuideNowNextCell {
+        if let cell = nowNextCells[channelID] { return cell }
+        let cell = GuideNowNextCell(nowNext(for: channelID))
+        nowNextCells[channelID] = cell
+        if let b = cell.boundary, b > Date(), nowNextDeadline.map({ b < $0 }) ?? true {
+            armNowNextTimer(at: b)
+        }
+        return cell
+    }
+
+    /// Drops cells for channels no longer in the list.
+    func pruneNowNextCells(keeping ids: Set<String>) {
+        let stale = nowNextCells.keys.filter { !ids.contains($0) }
+        guard !stale.isEmpty else { return }
+        for id in stale { nowNextCells[id] = nil }
+    }
+
+    func acquireSliceCell(for channelID: String) -> GuideChannelSliceCell {
+        let cell = sliceCells[channelID] ?? GuideChannelSliceCell(programs[channelID] ?? [])
+        cell.refs += 1
+        sliceCells[channelID] = cell
+        return cell
+    }
+
+    func releaseSliceCell(for channelID: String) {
+        guard let cell = sliceCells[channelID] else { return }
+        cell.refs -= 1
+        if cell.refs <= 0 { sliceCells[channelID] = nil }
+    }
+
+    /// Runs after every write to `programs`: works out which channels moved
+    /// and updates only the cells and grid signal that care.
+    func refreshDerivedState(previous old: [String: [GuideProgram]]) {
+        var changed: [String] = []
+        if let hint = _changedHint {
+            changed = Array(hint)
+        } else {
+            for (id, list) in programs where !Self.sameStorage(list, old[id]) { changed.append(id) }
+            for id in old.keys where programs[id] == nil { changed.append(id) }
+        }
+        var fired = 0
+        if !changed.isEmpty {
+            let now = Date()
+            if !nowNextCells.isEmpty {
+                for id in changed {
+                    if let cell = nowNextCells[id], cell.update(nowNext(for: id, at: now)) { fired += 1 }
+                }
+            }
+            if !sliceCells.isEmpty {
+                for id in changed {
+                    if let cell = sliceCells[id], cell.update(programs[id] ?? []) { fired += 1 }
+                }
+            }
+        }
+        lastDerive = (changed.count, fired)
+        if fired > 0 { scheduleNowNextTimer() }
+        GuideGridSignal.shared.evaluate(changed: changed, old: old, new: programs,
+                                        extent: (loadedMinProgramStart, loadedMaxProgramEnd),
+                                        walkInFlight: _walkInFlight > 0)
+    }
+
+    /// Same backing buffer (an untouched channel after a merge) or both absent.
+    nonisolated static func sameStorage(_ a: [GuideProgram]?, _ b: [GuideProgram]?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (x?, y?):
+            guard x.count == y.count else { return false }
+            if x.isEmpty { return true }
+            return x.withUnsafeBufferPointer { px in
+                y.withUnsafeBufferPointer { py in px.baseAddress == py.baseAddress }
+            }
+        default: return false
+        }
+    }
+
+    /// Re-arms the rollover timer at the earliest boundary among live cells.
+    func scheduleNowNextTimer() {
+        let now = Date()
+        var earliest: Date?
+        for cell in nowNextCells.values {
+            guard let b = cell.boundary, b > now else { continue }
+            if earliest.map({ b < $0 }) ?? true { earliest = b }
+        }
+        guard let earliest else {
+            nowNextTimerTask?.cancel()
+            nowNextTimerTask = nil
+            nowNextDeadline = nil
+            return
+        }
+        guard earliest != nowNextDeadline else { return }
+        armNowNextTimer(at: earliest)
+    }
+
+    private func armNowNextTimer(at deadline: Date) {
+        nowNextTimerTask?.cancel()
+        nowNextDeadline = deadline
+        // A quarter second past the boundary so `now` lands inside the next program.
+        let delay = max(0.25, deadline.timeIntervalSinceNow + 0.25)
+        nowNextTimerTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self else { return }
+            self.nowNextDeadline = nil
+            self.rollNowNextCells()
+        }
+    }
+
+    /// Program-boundary pass: re-evaluates every live cell, writes only the
+    /// ones whose pair moved.
+    private func rollNowNextCells() {
+        let now = Date()
+        var fired = 0
+        for (id, cell) in nowNextCells where cell.update(nowNext(for: id, at: now)) { fired += 1 }
+        if fired > 0 {
+            GuideSignposts.signposter.emitEvent("guide.nowNext.roll")
+            debugLog("[PUBLISH] guide.nowNext rollover cellsFired=\(fired) of \(nowNextCells.count)")
+        }
+        scheduleNowNextTimer()
+    }
+}
+
 // MARK: - EPG Guide View
 /// Per-focus-step bookkeeping that NO view body reads.
 ///
@@ -4754,7 +5148,13 @@ struct EPGGuideView: View {
     // also means the guide keeps its populated programs dictionary across
     // view mounts — no more blank guide on a tab switch while XMLTV
     // re-parses from scratch.
-    @ObservedObject private var guideStore = GuideStore.shared
+    //
+    // 2026-10-03: the store itself is no longer observed. The grid
+    // re-renders on GuideGridSignal.revision, which bumps only when a
+    // changed channel overlaps the grid window or the loaded extent moves.
+    // Reads of the map stay direct.
+    private var guideStore: GuideStore { GuideStore.shared }
+    @ObservedObject private var gridSignal = GuideGridSignal.shared
     /// v1.7.x: observed so the staging banner appears / disappears
     /// when `isStagingFromGuide` flips, and so the cell-level tap
     /// behavior swaps between "play" and "toggle in pile". Shared
@@ -5035,6 +5435,9 @@ struct EPGGuideView: View {
     private var shortTimeFormatter: DateFormatter { ClockFormat.guideShort() }
 
     var body: some View {
+        // Register the grid window with the signal (plain storage, no
+        // publish) so off-window writes do not re-render the grid.
+        let _ = gridSignal.noteWindow(start: windowStart, end: windowEnd)
         bodyContent
             // Input-to-frame + render-load probe runs only while the guide is
             // on screen (Logan 2026-09-12).
@@ -5053,7 +5456,7 @@ struct EPGGuideView: View {
             .ignoresSafeArea(.all, edges: [.leading, .trailing, .bottom])
         #endif
             #if os(tvOS)
-            .onChange(of: guideStore.programs.count) { _, _ in seedPreviewIfNeeded() }
+            .onChange(of: gridSignal.revision) { _, _ in seedPreviewIfNeeded() }
             .onAppear { seedPreviewIfNeeded() }
             // The Channel Preview banner is drawn by ChannelListView above the
             // pill row (focus order: rows, pills, banner, tab bar; Logan
