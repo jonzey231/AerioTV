@@ -6101,11 +6101,16 @@ struct EPGGuideView: View {
                     // The 400ms delay covers the 350ms minimize spring
                     // animation; triggering during it lets tvOS ignore the
                     // reset because the mini tile's frame is still in flux.
-                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    // Full exit (nothing active): no minimize spring to wait out,
+                    // so claim focus now, before tvOS settles on a default.
+                    if NowPlayingManager.shared.isActive {
+                        try? await Task.sleep(nanoseconds: 400_000_000)  // minimize spring
+                    }
                     if Task.isCancelled { return }
                     // Never pull focus out from under a fullscreen player
                     // (expanded again, or a new tune, during the delay).
                     if NowPlayingManager.shared.isActive && !NowPlayingManager.shared.isMinimized {
+                        NowPlayingManager.shared.endGuideRefocusHold()
                         debugLog("[FOCUS] guide refocus skipped (epg): player is fullscreen")
                         return
                     }
@@ -6145,6 +6150,7 @@ struct EPGGuideView: View {
                         debugLog("🧭 [GuideFocus] assert(return) attempt=\(attempt) set=\(target) got=\(focusedProgramID ?? "nil")")
                         if focusedProgramID == target { break }
                     }
+                    NowPlayingManager.shared.endGuideRefocusHold()
                     debugLog("[FOCUS] guide refocus landed (epg): channel=\(valid) cell=\(target) state=\(focusedProgramID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription())")
                     // Late steal guard: the container teardown / tab bar can
                     // re-seat focus after the assert loop (the Android TV

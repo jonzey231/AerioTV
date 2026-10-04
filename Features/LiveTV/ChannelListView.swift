@@ -1750,10 +1750,15 @@ struct ChannelListView: View {
                             return
                         }
                         debugLog("[FOCUS] guide refocus requested (list): playing=\(nowPlaying.playingItem?.id ?? "nil") last=\(nowPlaying.lastPlayedChannelID ?? "nil") focused=\(TVFocusTracer.focusedItemDescription())")
-                        try? await Task.sleep(nanoseconds: 400_000_000)  // minimize spring
+                        // Full exit (nothing active): no minimize spring to wait out,
+                        // so claim focus now, before tvOS settles on a default.
+                        if NowPlayingManager.shared.isActive {
+                            try? await Task.sleep(nanoseconds: 400_000_000)  // minimize spring
+                        }
                         if Task.isCancelled { return }
                         // Never pull focus out from under a fullscreen player.
                         if nowPlaying.isActive && !nowPlaying.isMinimized {
+                            NowPlayingManager.shared.endGuideRefocusHold()
                             debugLog("[FOCUS] guide refocus skipped (list): player is fullscreen")
                             return
                         }
@@ -1779,6 +1784,7 @@ struct ChannelListView: View {
                             debugLog("🧭 [GuideFocus] assert(return) attempt=\(attempt) set=\(valid) got=\(focusedGuideRowID ?? "nil")")
                             if focusedGuideRowID == valid { break }
                         }
+                        NowPlayingManager.shared.endGuideRefocusHold()
                         debugLog("[FOCUS] guide refocus landed (list): row=\(valid) state=\(focusedGuideRowID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription())")
                         // Late steal guard (see the EPG handler): put focus
                         // back on the row if the tab bar takes it without a

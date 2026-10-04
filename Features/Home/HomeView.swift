@@ -4107,6 +4107,9 @@ final class NowPlayingManager: ObservableObject {
 
     /// The state half of minimize, without the iPhone PiP routing.
     func applyMinimized() {
+        #if os(tvOS)
+        if !isMinimized { beginGuideRefocusHold() }
+        #endif
         isMinimized = true
         SearchDismissCenter.resignKeyboard()
         // #42: the chrome can't be visible once we minimize. Clear the shared
@@ -4136,9 +4139,40 @@ final class NowPlayingManager: ObservableObject {
     /// guide row of the channel that was playing after a full exit.
     var lastStopWasFullscreen = false
 
+    #if os(tvOS)
+    /// True from the moment a fullscreen player leaves the screen (minimize
+    /// or full exit) until the guide has put focus on the playing channel's
+    /// cell. The Live TV nav circles (Refresh, Search) are inserted in that
+    /// same update and, being the only focusable views on screen while the
+    /// guide rebuilds, took the engine's default focus first (the visible
+    /// Refresh detour, logged 2026-10-03 20:14:31 and 20:15:03). Written in
+    /// the same transaction as isMinimized / playingItem so the circles are
+    /// never focusable in between. Cleared by the guide refocus, or after
+    /// 3 s if no guide is on screen to claim focus.
+    @Published private(set) var guideRefocusPending = false
+    private var guideRefocusHoldTimeout: DispatchWorkItem?
+
+    func beginGuideRefocusHold() {
+        if !guideRefocusPending { guideRefocusPending = true }
+        guideRefocusHoldTimeout?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.endGuideRefocusHold() }
+        guideRefocusHoldTimeout = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
+    }
+
+    func endGuideRefocusHold() {
+        guideRefocusHoldTimeout?.cancel()
+        guideRefocusHoldTimeout = nil
+        if guideRefocusPending { guideRefocusPending = false }
+    }
+    #endif
+
     func stop() {
         debugLog("🎮 NowPlaying.stop: \(playingItem?.name ?? "nil")")
         if playingItem != nil { lastStopWasFullscreen = !isMinimized }
+        #if os(tvOS)
+        if playingItem != nil && !isMinimized { beginGuideRefocusHold() }
+        #endif
         playingItem = nil
         isMinimized = false
         pendingMinimize?.cancel()
@@ -4411,6 +4445,9 @@ struct TVNavActionCircle: View {
     /// Android-parity selected fill: the Search circle stays accent-filled
     /// while its screen is up, so the chrome shows where you are.
     var isSelected: Bool = false
+    /// Not focusable while the guide reclaims focus after the player
+    /// leaves fullscreen (the style ignores isEnabled, so no visual change).
+    var focusHold: Bool = false
     let action: () -> Void
 
     var body: some View {
@@ -4427,7 +4464,7 @@ struct TVNavActionCircle: View {
             .frame(width: 60, height: 60)
         }
         .buttonStyle(TVNavCircleButtonStyle(isSelected: isSelected))
-        .disabled(spinning)
+        .disabled(spinning || focusHold)
         .accessibilityLabel(label)
     }
 }
@@ -5478,7 +5515,8 @@ struct MainTabView: View {
                             TVNavActionCircle(
                                 systemImage: "arrow.clockwise",
                                 label: "Refresh channels and guide",
-                                spinning: isAnyBackgroundWork
+                                spinning: isAnyBackgroundWork,
+                                focusHold: nowPlaying.guideRefocusPending
                             ) {
                                 let servers = allServers
                                 let ctx = modelContext
@@ -5490,7 +5528,8 @@ struct MainTabView: View {
                             TVNavActionCircle(
                                 systemImage: "magnifyingglass",
                                 label: "Search",
-                                isSelected: showSearch
+                                isSelected: showSearch,
+                                focusHold: nowPlaying.guideRefocusPending
                             ) {
                                 withAnimation(.easeOut(duration: 0.2)) { showSearch.toggle() }
                             }
@@ -5503,7 +5542,8 @@ struct MainTabView: View {
                         if !retention.entries.isEmpty {
                             TVNavActionCircle(
                                 systemImage: "\(min(retention.entries.count, 5)).circle",
-                                label: "Channels kept live in background"
+                                label: "Channels kept live in background",
+                                focusHold: nowPlaying.guideRefocusPending
                             ) {
                                 if retention.entries.count == 1 {
                                     retentionActionFromList = false
@@ -7122,10 +7162,13 @@ struct MainTabView: View {
             guard !active else { return }
             let fullscreen = nowPlaying.lastStopWasFullscreen
             debugLog("[FOCUS] player closed: fullscreen=\(fullscreen) tab=\(selectedTab.rawValue) last=\(nowPlaying.lastPlayedChannelID ?? "nil") focused=\(TVFocusTracer.focusedItemDescription())")
-            guard fullscreen, selectedTab == .liveTV else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+            guard fullscreen, selectedTab == .liveTV else {
+                nowPlaying.endGuideRefocusHold()
+                return
             }
+            // Same turn as the teardown: a delayed post let tvOS pick its
+            // own default (the Refresh circle) before the guide asked.
+            NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
         }
         #endif
         .liquidGlassTabBar()
