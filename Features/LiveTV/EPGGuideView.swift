@@ -7244,7 +7244,12 @@ struct EPGGuideView: View {
         ZStack(alignment: .leading) {
             Color.appBackground
 
-            ForEach(hourMarkers(), id: \.self) { date in
+            // Only the markers over the visible strip (plus the same 30 min
+            // pad the program rows use). The strip spans the whole loaded
+            // extent, which at All Available is up to 60 days ahead: about
+            // 2,900 half-hour labels, each formatted and laid out on every
+            // guide body pass (every D-pad move). 2026-10-04.
+            ForEach(hourMarkers(from: visibleTimeRange().start, to: visibleTimeRange().end), id: \.self) { date in
                 let offset = xOffset(for: date)
                 VStack(spacing: 0) {
                     #if os(tvOS)
@@ -7775,10 +7780,24 @@ struct EPGGuideView: View {
         }
     }
 
-    private func hourMarkers() -> [Date] {
+    /// Time span the program area shows at the current horizontal offset,
+    /// padded 30 min each side. Shared by the program rows and the time strip
+    /// so both build only what is on screen.
+    private func visibleTimeRange() -> (start: Date, end: Date) {
+        let visibleFraction = -horizontalOffset / totalGridWidth
+        let visibleWidthFraction = visibleProgramWidth / totalGridWidth
+        let visibleTimeStart = windowStart.addingTimeInterval(Double(visibleFraction) * totalDuration)
+        let visibleTimeEnd = visibleTimeStart.addingTimeInterval(Double(visibleWidthFraction) * totalDuration)
+        let pad: TimeInterval = 1800 // 30 minutes
+        return (visibleTimeStart.addingTimeInterval(-pad), visibleTimeEnd.addingTimeInterval(pad))
+    }
+
+    private func hourMarkers(from: Date, to: Date) -> [Date] {
         var markers: [Date] = []
         let cal = Calendar.current
-        var comps = cal.dateComponents([.year, .month, .day, .hour, .minute], from: windowStart)
+        let lower = max(windowStart, from.addingTimeInterval(-1800))
+        let upper = min(windowEnd, to)
+        var comps = cal.dateComponents([.year, .month, .day, .hour, .minute], from: lower)
         let m = comps.minute ?? 0
         if m < 30 {
             comps.minute = 30
@@ -7789,10 +7808,13 @@ struct EPGGuideView: View {
         comps.second = 0
         guard var cursor = cal.date(from: comps) else { return markers }
 
-        while cursor < windowEnd {
+        while cursor < upper {
             markers.append(cursor)
             cursor = cursor.addingTimeInterval(1800)
         }
+        #if os(tvOS)
+        LiveCensus.noteMarkers(markers.count)
+        #endif
         return markers
     }
 }

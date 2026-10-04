@@ -963,6 +963,9 @@ enum LiveCensus {
     /// whether the per-row lookup over the resident 72 h map is the cost.
     static var progsScanned = 0
     static func noteScan(_ n: Int) { progsScanned += n }
+    /// Time-strip labels built by guide body passes (per second).
+    static var markersBuilt = 0
+    static func noteMarkers(_ n: Int) { markersBuilt += n }
     static func rowDisappeared() { rows = max(0, rows - 1) }
 
     /// Total CALayers under the key window. Walked once per second only.
@@ -1043,7 +1046,9 @@ final class FrameProbe: NSObject {
         frames = 0; slowFrames = 0; worst = 0
         let scanned = LiveCensus.progsScanned
         LiveCensus.progsScanned = 0
-        debugLog("[RENDER] live cells \(LiveCensus.cells), live rows \(LiveCensus.rows), layers ~\(LiveCensus.layerCount()), frames \(f)/s, last frame \(lastMS)ms, worst \(worstMS)ms, frames over 100ms: \(slow), programs scanned \(scanned)")
+        let markers = LiveCensus.markersBuilt
+        LiveCensus.markersBuilt = 0
+        debugLog("[RENDER] live cells \(LiveCensus.cells), live rows \(LiveCensus.rows), layers ~\(LiveCensus.layerCount()), frames \(f)/s, last frame \(lastMS)ms, worst \(worstMS)ms, frames over 100ms: \(slow), programs scanned \(scanned), header labels built \(markers)")
     }
 }
 #endif
