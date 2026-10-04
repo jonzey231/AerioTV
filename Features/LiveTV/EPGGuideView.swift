@@ -5033,6 +5033,9 @@ final class GuideFocusScratch {
     /// tvOS boundary refocus: the focused programme last seen airing, so only
     /// a cell that was live while focused is moved when it ends.
     var boundaryLiveProgramID: String?
+    /// tvOS: the focused cell when the scene left active, restored when it
+    /// comes back (plain guide, no player).
+    var backgroundFocusedProgramID: String?
     /// When a remapped arrow's focus move was last vetoed before the engine
     /// applied it, and for which key; the onMoveCommand that follows the
     /// same press skips so the action runs once.
@@ -6107,6 +6110,15 @@ struct EPGGuideView: View {
                     let lastID = NowPlayingManager.shared.lastPlayedChannelID
                     let candidateID = mvLastID ?? singleID ?? lastID
                     debugLog("[FOCUS] guide refocus requested (epg): mvLast=\(mvLastID ?? "nil") playing=\(singleID ?? "nil") last=\(lastID ?? "nil") focused=\(TVFocusTracer.focusedItemDescription())")
+                    // No focus system while the scene is not active (Home /
+                    // TV button): owe the refocus to the next scene-active
+                    // instead of asserting into the void.
+                    guard NowPlayingManager.sceneIsActive else {
+                        NowPlayingManager.shared.guideRefocusOwed = true
+                        NowPlayingManager.shared.endGuideRefocusHold()
+                        debugLog("[FOCUS] guide refocus deferred (epg): scene not active")
+                        return
+                    }
                     // The 400ms delay covers the 350ms minimize spring
                     // animation; triggering during it lets tvOS ignore the
                     // reset because the mini tile's frame is still in flux.
@@ -6153,6 +6165,12 @@ struct EPGGuideView: View {
                     resetFocus(in: guideFocusNS)
                     for attempt in 0..<8 {
                         if Task.isCancelled { return }
+                        if !NowPlayingManager.sceneIsActive {
+                            NowPlayingManager.shared.guideRefocusOwed = true
+                            NowPlayingManager.shared.endGuideRefocusHold()
+                            debugLog("[FOCUS] guide refocus deferred (epg): scene left active mid-assert")
+                            return
+                        }
                         proxy.scrollTo(valid, anchor: .center)
                         focusedProgramID = target
                         try? await Task.sleep(nanoseconds: 70_000_000)
@@ -6169,13 +6187,21 @@ struct EPGGuideView: View {
                     for check in [250, 600] as [UInt64] {
                         try? await Task.sleep(nanoseconds: check * 1_000_000)
                         if Task.isCancelled { return }
+                        // Exactly two checks (250, 600 ms), never more. No
+                        // focus system (scene not active, engine=nil) means
+                        // nothing can act: stop, and owe it to scene-active.
+                        guard NowPlayingManager.sceneIsActive, TVFocusTracer.engineHasFocus else {
+                            if !NowPlayingManager.sceneIsActive { NowPlayingManager.shared.guideRefocusOwed = true }
+                            debugLog("[FOCUS] guide refocus check +\(check)ms (epg): cannot act (sceneActive=\(NowPlayingManager.sceneIsActive) engine=nil); stopping")
+                            return
+                        }
                         let userMoved = TVFocusTracer.lastPressAt > landedAt
                         let stolen = !userMoved && (TVFocusTracer.focusIsOnTabBar() || focusedProgramID == nil)
                         debugLog("[FOCUS] guide refocus check +\(check)ms (epg): userMoved=\(userMoved) state=\(focusedProgramID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription()) stolen=\(stolen)")
                         guard stolen else { continue }
                         if NowPlayingManager.shared.isActive && !NowPlayingManager.shared.isMinimized { return }
                         for _ in 0..<6 {
-                            if Task.isCancelled { return }
+                            if Task.isCancelled || !NowPlayingManager.sceneIsActive { return }
                             proxy.scrollTo(valid, anchor: .center)
                             focusedProgramID = target
                             try? await Task.sleep(nanoseconds: 70_000_000)
@@ -6184,6 +6210,13 @@ struct EPGGuideView: View {
                         debugLog("[FOCUS] guide refocus re-asserted (epg): state=\(focusedProgramID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription())")
                     }
                 }
+            }
+            // Background round trip (Home / TV button, app switcher): record
+            // the focused cell on the way out, land focus on the way back.
+            .onReceive(
+                NotificationCenter.default.publisher(for: .guideScenePhaseChanged)
+            ) { note in
+                handleGuideScenePhase(note, proxy: proxy)
             }
             // Docked group sidebar closed: re-assert focus onto the guide grid
             // (the cells became focusable again the same render pass) so Right /
@@ -6336,6 +6369,96 @@ struct EPGGuideView: View {
         let progs = guideStore.programs[channelID] ?? []
         let now = Date()
         return (progs.first { $0.start <= now && now < $0.end } ?? progs.first)?.id
+    }
+
+    /// Scene-phase half of the guide focus model (tvOS). Leaving active saves
+    /// the focused cell. Returning dumps the focus flags and, once the guide
+    /// has rendered, either pays a refocus owed by a background player stop
+    /// (`.forceGuideFocus`, the last channel's cell) or restores the saved
+    /// cell. Both paths scroll the target row to center first, which also
+    /// re-seats the vertical offset (the 2026-10-04 01:48 return drew one
+    /// row: the offset had been driven by scrollTo calls made while the
+    /// scene was in the background).
+    private func handleGuideScenePhase(_ note: Notification, proxy: ScrollViewProxy) {
+        let active = (note.userInfo?["active"] as? Bool) ?? false
+        guard active else {
+            if let pid = focusedProgramID { focusScratch.backgroundFocusedProgramID = pid }
+            if focusRestoreTask != nil {
+                focusRestoreTask?.cancel()
+                focusRestoreTask = nil
+            }
+            debugLog("[FOCUS] scene leaving active (epg): saved=\(focusScratch.backgroundFocusedProgramID ?? "nil")")
+            return
+        }
+        let owed = (note.userInfo?["owed"] as? Bool) ?? false
+        let saved = focusScratch.backgroundFocusedProgramID
+        debugLog("[FOCUS] scene active (epg): owed=\(owed) pending=\(NowPlayingManager.shared.guideRefocusPending) chromeHold=\(chromeFocusHold) clockCanFocus=\(!chromeFocusHold) clockFocused=\(clockFocused) state=\(focusedProgramID ?? "nil") saved=\(saved ?? "nil") boundaryLive=\(focusScratch.boundaryLiveProgramID ?? "nil") target=\(guideFocusTargetChannelID ?? "nil") sidebar=\(sidebarOpen) gridRev=\(gridSignal.revision) channels=\(channels.count) hOffset=\(Int(horizontalOffset)) engine=\(TVFocusTracer.focusedItemDescription())")
+        // A cell seen live before the trip may have ended; re-learn it.
+        focusScratch.boundaryLiveProgramID = nil
+        focusRestoreTask?.cancel()
+        focusRestoreTask = Task { @MainActor in
+            let activeAt = Date()
+            // Let the resumed guide lay out, and wait (bounded) for rows.
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            var waited = 0
+            while channels.isEmpty && waited < 20 {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                waited += 1
+            }
+            if Task.isCancelled || !NowPlayingManager.sceneIsActive { return }
+            if TVFocusTracer.lastPressAt > activeAt {
+                NowPlayingManager.shared.endGuideRefocusHold()
+                debugLog("[FOCUS] scene return refocus skipped (epg): remote pressed since active")
+                return
+            }
+            if owed {
+                debugLog("[FOCUS] scene return (epg): paying owed refocus, last=\(NowPlayingManager.shared.lastPlayedChannelID ?? "nil")")
+                focusRestoreTask = nil
+                NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+                return
+            }
+            // Plain return: the saved cell, or the cell now airing on its row
+            // if it ended while away; else the guide's default target row.
+            var target: String?
+            var chID: String?
+            if let saved, let ch = channelID(ofProgram: saved), channels.contains(where: { $0.id == ch }) {
+                chID = ch
+                let prog = guideStore.programs[ch]?.first(where: { $0.id == saved })
+                if let prog, Date() < prog.end {
+                    target = saved
+                } else {
+                    target = programID(forChannel: ch, containing: Date()) ?? resolveFocusProgramID(preferringChannel: ch)
+                }
+            } else {
+                target = resolveFocusProgramID(preferringChannel: guideFocusTargetChannelID)
+            }
+            if let t = target, chID == nil { chID = channelID(ofProgram: t) }
+            guard let target, let chID else {
+                debugLog("[FOCUS] scene return refocus (epg): no target")
+                return
+            }
+            if focusedProgramID == target && TVFocusTracer.engineHasFocus && !TVFocusTracer.focusIsOnTabBar() {
+                proxy.scrollTo(chID, anchor: .center)
+                debugLog("[FOCUS] scene return (epg): focus already on \(target); row re-centered")
+                return
+            }
+            guideFocusTargetChannelID = chID
+            proxy.scrollTo(chID, anchor: .center)
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            if Task.isCancelled || !NowPlayingManager.sceneIsActive { return }
+            if focusedProgramID == nil { resetFocus(in: guideFocusNS) }
+            for attempt in 0..<8 {
+                if Task.isCancelled || !NowPlayingManager.sceneIsActive { return }
+                proxy.scrollTo(chID, anchor: .center)
+                focusedProgramID = target
+                try? await Task.sleep(nanoseconds: 70_000_000)
+                if focusedProgramID == target {
+                    debugLog("[FOCUS] scene return refocus landed (epg): attempt=\(attempt) channel=\(chID) cell=\(target) engine=\(TVFocusTracer.focusedItemDescription())")
+                    return
+                }
+            }
+            debugLog("[FOCUS] scene return refocus missed (epg): channel=\(chID) cell=\(target) state=\(focusedProgramID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription())")
+        }
     }
 
     /// Boundary refocus (Logan 2026-10-03, Android TV parity): when the guide

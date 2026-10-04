@@ -1768,6 +1768,12 @@ struct ChannelListView: View {
                             return
                         }
                         debugLog("[FOCUS] guide refocus requested (list): playing=\(nowPlaying.playingItem?.id ?? "nil") last=\(nowPlaying.lastPlayedChannelID ?? "nil") focused=\(TVFocusTracer.focusedItemDescription())")
+                        guard NowPlayingManager.sceneIsActive else {
+                            NowPlayingManager.shared.guideRefocusOwed = true
+                            NowPlayingManager.shared.endGuideRefocusHold()
+                            debugLog("[FOCUS] guide refocus deferred (list): scene not active")
+                            return
+                        }
                         // Full exit (nothing active): no minimize spring to wait out,
                         // so claim focus now, before tvOS settles on a default.
                         if NowPlayingManager.shared.isActive {
@@ -1796,6 +1802,11 @@ struct ChannelListView: View {
                         resetFocus(in: guideFocusNS)
                         for attempt in 0..<8 {
                             if Task.isCancelled { return }
+                            if !NowPlayingManager.sceneIsActive {
+                                NowPlayingManager.shared.guideRefocusOwed = true
+                                NowPlayingManager.shared.endGuideRefocusHold()
+                                return
+                            }
                             proxy.scrollTo(valid, anchor: .center)
                             focusedGuideRowID = valid
                             try? await Task.sleep(nanoseconds: 70_000_000)
@@ -1811,13 +1822,18 @@ struct ChannelListView: View {
                         for check in [250, 600] as [UInt64] {
                             try? await Task.sleep(nanoseconds: check * 1_000_000)
                             if Task.isCancelled { return }
+                            guard NowPlayingManager.sceneIsActive, TVFocusTracer.engineHasFocus else {
+                                if !NowPlayingManager.sceneIsActive { NowPlayingManager.shared.guideRefocusOwed = true }
+                                debugLog("[FOCUS] guide refocus check +\(check)ms (list): cannot act (sceneActive=\(NowPlayingManager.sceneIsActive) engine=nil); stopping")
+                                return
+                            }
                             let userMoved = TVFocusTracer.lastPressAt > landedAt
                             let stolen = !userMoved && (TVFocusTracer.focusIsOnTabBar() || focusedGuideRowID == nil)
                             debugLog("[FOCUS] guide refocus check +\(check)ms (list): userMoved=\(userMoved) state=\(focusedGuideRowID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription()) stolen=\(stolen)")
                             guard stolen else { continue }
                             if nowPlaying.isActive && !nowPlaying.isMinimized { return }
                             for _ in 0..<6 {
-                                if Task.isCancelled { return }
+                                if Task.isCancelled || !NowPlayingManager.sceneIsActive { return }
                                 proxy.scrollTo(valid, anchor: .center)
                                 focusedGuideRowID = valid
                                 try? await Task.sleep(nanoseconds: 70_000_000)

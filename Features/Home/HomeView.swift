@@ -4108,7 +4108,9 @@ final class NowPlayingManager: ObservableObject {
     /// The state half of minimize, without the iPhone PiP routing.
     func applyMinimized() {
         #if os(tvOS)
-        if !isMinimized { beginGuideRefocusHold() }
+        // Only a minimize the user sees claims the guide; a scene that is
+        // not active has no focus system to hand focus to.
+        if !isMinimized && Self.sceneIsActive { beginGuideRefocusHold() }
         #endif
         isMinimized = true
         SearchDismissCenter.resignKeyboard()
@@ -4165,13 +4167,35 @@ final class NowPlayingManager: ObservableObject {
         guideRefocusHoldTimeout = nil
         if guideRefocusPending { guideRefocusPending = false }
     }
+
+    /// Set when playback ends while the scene is NOT active (Home / TV
+    /// button, app switcher: the background stop in
+    /// `.stopPlaybackForBackground`). Nothing can take focus then, so the
+    /// guide refocus is owed and is performed once on the next scene-active,
+    /// after the guide has rendered (2026-10-04 01:47 blank-guide trace: the
+    /// refocus and its re-asserts ran in the background with engine=nil).
+    var guideRefocusOwed = false
+
+    /// The app's scene is frontmost and owns a focus system.
+    static var sceneIsActive: Bool {
+        UIApplication.shared.applicationState == .active
+    }
     #endif
 
     func stop() {
         debugLog("🎮 NowPlaying.stop: \(playingItem?.name ?? "nil")")
         if playingItem != nil { lastStopWasFullscreen = !isMinimized }
         #if os(tvOS)
-        if playingItem != nil && !isMinimized { beginGuideRefocusHold() }
+        if playingItem != nil {
+            if Self.sceneIsActive {
+                if !isMinimized { beginGuideRefocusHold() }
+            } else {
+                // Background stop: fullscreen OR mini, focus returns to this
+                // channel's cell when the app comes back.
+                guideRefocusOwed = true
+                debugLog("[FOCUS] player stopped while scene not active: refocus owed (fullscreen=\(!isMinimized) last=\(lastPlayedChannelID ?? "nil"))")
+            }
+        }
         #endif
         playingItem = nil
         isMinimized = false
@@ -5249,6 +5273,31 @@ struct MainTabView: View {
     /// Extracted from the inline `.onChange(of: scenePhase)` closure
     /// so MainTabView's body modifier chain stays under Swift's
     /// type-checker budget on tvOS x86_64.
+    #if os(tvOS)
+    /// Guide focus across a background round trip. Leaving active: the guide
+    /// records the focused cell. Returning: any stale refocus hold is cleared
+    /// (its 3 s timeout may not have fired while suspended), the hold is
+    /// re-armed if a refocus is owed, and the guide is asked to land focus
+    /// once it has rendered (owed: the last channel's live cell; otherwise
+    /// the cell that had focus).
+    private func handleGuideScenePhase(from oldPhase: ScenePhase, to newPhase: ScenePhase) {
+        if oldPhase == .active && newPhase != .active {
+            NotificationCenter.default.post(name: .guideScenePhaseChanged, object: nil,
+                                            userInfo: ["active": false])
+            return
+        }
+        guard oldPhase != .active, newPhase == .active else { return }
+        let owed = nowPlaying.guideRefocusOwed
+        nowPlaying.guideRefocusOwed = false
+        debugLog("[FOCUS] scene active: tab=\(selectedTab.rawValue) owed=\(owed) pending=\(nowPlaying.guideRefocusPending) playerActive=\(nowPlaying.isActive) minimized=\(nowPlaying.isMinimized) last=\(nowPlaying.lastPlayedChannelID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription())")
+        nowPlaying.endGuideRefocusHold()
+        guard selectedTab == .liveTV, !(nowPlaying.isActive && !nowPlaying.isMinimized) else { return }
+        if owed { nowPlaying.beginGuideRefocusHold() }
+        NotificationCenter.default.post(name: .guideScenePhaseChanged, object: nil,
+                                        userInfo: ["active": true, "owed": owed])
+    }
+    #endif
+
     private func handleAutoResumeScenePhase(from oldPhase: ScenePhase, to newPhase: ScenePhase) {
         guard oldPhase != .active, newPhase == .active else { return }
         guard !nowPlaying.isActive else { return }
@@ -6911,6 +6960,9 @@ struct MainTabView: View {
             onResumeAttempt: { attemptAutoResume() },
             onScenePhaseChange: { old, new in
                 handleAutoResumeScenePhase(from: old, to: new)
+                #if os(tvOS)
+                handleGuideScenePhase(from: old, to: new)
+                #endif
                 refreshGuideIfStaleOnForeground(from: old, to: new)
                 // Audit P1 memory: trim aired programs out of the resident
                 // GuideStore dict on every warm foreground so it tracks the
@@ -7161,7 +7213,14 @@ struct MainTabView: View {
         .onChange(of: nowPlaying.isActive) { _, active in
             guard !active else { return }
             let fullscreen = nowPlaying.lastStopWasFullscreen
-            debugLog("[FOCUS] player closed: fullscreen=\(fullscreen) tab=\(selectedTab.rawValue) last=\(nowPlaying.lastPlayedChannelID ?? "nil") focused=\(TVFocusTracer.focusedItemDescription())")
+            debugLog("[FOCUS] player closed: fullscreen=\(fullscreen) tab=\(selectedTab.rawValue) last=\(nowPlaying.lastPlayedChannelID ?? "nil") focused=\(TVFocusTracer.focusedItemDescription()) sceneActive=\(NowPlayingManager.sceneIsActive)")
+            // Backgrounded (Home / TV button): not a user exit. stop() has
+            // recorded guideRefocusOwed; the scene-active handler pays it.
+            guard NowPlayingManager.sceneIsActive else {
+                nowPlaying.endGuideRefocusHold()
+                debugLog("[FOCUS] player closed in background: refocus deferred to scene active")
+                return
+            }
             guard fullscreen, selectedTab == .liveTV else {
                 nowPlaying.endGuideRefocusHold()
                 return

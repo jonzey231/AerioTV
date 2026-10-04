@@ -4260,6 +4260,11 @@ final class TVFocusTracer {
         return false
     }
 
+    /// The engine holds some item. False when the scene is in the background
+    /// or no focus system exists; a refocus cannot act then, so a nil
+    /// @FocusState readback is not a steal.
+    static var engineHasFocus: Bool { focusedItem() != nil }
+
     private static func focusedItem() -> UIFocusItem? {
         let window = UIApplication.shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.keyWindow }.first

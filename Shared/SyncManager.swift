@@ -1807,6 +1807,9 @@ extension Notification.Name {
     /// explicitly claims it. This notification is that explicit
     /// claim. Body has no userInfo.
     static let forceGuideFocus = Notification.Name("forceGuideFocus")
+    /// tvOS: scene left / returned to active. userInfo["active"]: Bool,
+    /// ["owed"]: Bool (a background stop owes the guide a refocus).
+    static let guideScenePhaseChanged = Notification.Name("guideScenePhaseChanged")
 
     /// Posted by `SearchView` when the user taps an EPG program search
     /// result. `MainTabView` switches to the Live TV tab,
