@@ -261,6 +261,11 @@ struct PlaybackChromeOverlay: View {
                 // duplicating that information.
                 Spacer(minLength: 0)
                 #if os(iOS)
+                // Stream readout (resolution, frame rate, pipeline), the
+                // tvOS band's two badges at the trailing end of the bar,
+                // left of the buttons. iPad both orientations, iPhone
+                // landscape only (Logan 2026-10-04).
+                streamReadout_iOS
                 // Issue #38: rotate-to-fullscreen, iPhone only (iPad already
                 // rotates with the device).
                 if UIDevice.current.userInterfaceIdiom == .phone {
@@ -364,15 +369,8 @@ struct PlaybackChromeOverlay: View {
             // single top-left HUD on every form factor.
 
             Spacer(minLength: 0)
-            // Dev engine badge sits bottom-left, above the progress band, so
-            // it never collides with the top-left ChannelInfoBanner (program
-            // info HUD). Only renders while an AVPlayer dev toggle is on.
-            HStack {
-                engineBadge_iOS
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 8)
+            // Engine badge moved into the trailing stream readout of the
+            // top bar (Logan 2026-10-04), next to resolution and frame rate.
             // Catch-up rides the VOD transport (Logan 2026-09-05: no seek
             // controls in catch-up): the pipeline pins durationMs to the
             // programme length and routes seekAction through the window
@@ -424,25 +422,42 @@ struct PlaybackChromeOverlay: View {
         #endif
     }
 
-    /// Dev-only engine badge in the iOS top bar so a tester can confirm at a
-    /// glance which pipeline is playing (AVPlayer Direct HLS / Remux TS / mpv).
-    /// Only shown while an AVPlayer engine toggle is on; normal users on the
-    /// default mpv engine never see it. Mirrors the tvOS badge.
+    #if os(iOS)
+    /// Phone landscape reports a compact vertical size class; iPad and
+    /// phone portrait report regular.
+    @Environment(\.verticalSizeClass) private var verticalSizeClass_iOS
+
+    /// Same sources and strings as the tvOS band: the engine label from
+    /// `store.tileEngines` (only while an AVPlayer engine toggle is on)
+    /// and `TVVideoFormatBadge` on the audio tile's progress store.
+    /// Hidden on iPhone portrait; scaled per device (iPad 16, phone 12).
     @ViewBuilder
-    private var engineBadge_iOS: some View {
-        if (PlaybackFeatureFlags.avPlayerForHLS || PlaybackFeatureFlags.avPlayerRemuxTS),
-           let audioID = store.audioTileID,
-           let engine = store.tileEngines[audioID] {
-            Text(engine)
-                .scaledFont(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(.ultraThinMaterial, in: Capsule())
-                .overlay(Capsule().strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
-                .fixedSize()
+    private var streamReadout_iOS: some View {
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        if isPad || verticalSizeClass_iOS == .compact {
+            let size: CGFloat = isPad ? 16 : 12
+            HStack(spacing: 12) {
+                if (PlaybackFeatureFlags.avPlayerForHLS || PlaybackFeatureFlags.avPlayerRemuxTS),
+                   let audioID = store.audioTileID,
+                   let engine = store.tileEngines[audioID] {
+                    Text(engine)
+                        .scaledFont(.system(size: size, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, size * 16 / 18)
+                        .padding(.vertical, size * 10 / 18)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .accessibilityLabel("Playback pipeline \(engine)")
+                }
+                if let audioStore = store.audioProgressStore {
+                    TVVideoFormatBadge(progress: audioStore, fontSize: size)
+                }
+            }
+            .allowsHitTesting(false)
         }
     }
+    #endif
 
     private var closeButton_iOS: some View {
         Button {
@@ -1659,7 +1674,8 @@ struct PlaybackBottomChrome_tvOS: View {
     }
 }
 
-#if os(tvOS)
+#endif
+
 /// Resolution + frame rate readout for the tvOS player band, e.g.
 /// "1080p \u{00B7} 59.94 fps" (Logan 2026-09-11). Mirrors the engine
 /// badge's capsule at the other edge, but it is NOT a dev aid: it shows
@@ -1677,6 +1693,9 @@ struct TVVideoFormatBadge: View {
     /// (resolution on the presentationSize callback, frame rate once
     /// frames render), so the badge has to re-render with it.
     @ObservedObject var progress: PlayerProgressStore
+    /// Text size. tvOS keeps 18; the iOS chrome passes a device-scaled
+    /// size (iPad near the TV size, iPhone landscape smaller).
+    var fontSize: CGFloat = 18
 
     private var info: StreamInfo? { progress.streamInfo }
 
@@ -1698,19 +1717,22 @@ struct TVVideoFormatBadge: View {
     var body: some View {
         if let text = Self.text(for: info) {
             Text(text)
-                .scaledFont(.system(size: 18, weight: .semibold))
+                .scaledFont(.system(size: fontSize, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.55))
                 .lineLimit(1)
                 .fixedSize()
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
+                .padding(.horizontal, fontSize * 16 / 18)
+                .padding(.vertical, fontSize * 10 / 18)
                 .background(.ultraThinMaterial, in: Capsule())
+                #if os(tvOS)
                 .focusable(false)
+                #endif
                 .accessibilityLabel("Video format \(text)")
         }
     }
 }
-#endif
+
+#if os(tvOS)
 
 #if os(tvOS)
 /// The circular tool cell's VISUAL, shared by the unified live chrome

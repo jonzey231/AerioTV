@@ -257,13 +257,34 @@ struct ChannelListView: View {
         #endif
         guard naturalTopAbsolute > 0 else { return 0 }
         #if os(iOS)
-        guard UIDevice.current.userInterfaceIdiom == .pad else { return 0 }
-        #endif
+        // iPad (2026-10-04): the top tab bar is gone (floating bottom pill,
+        // b990935) and Live TV uses the phone header row (6a1bf19). Pushing
+        // the whole pane below the corner mini used to be hidden behind the
+        // top bar; without it the push left an empty band the mini's height.
+        // The header now stays at the top and only its trailing controls
+        // yield (`iPadMiniHeaderTrailingClearance`), so no top push here.
+        return 0
+        #else
         let miniBottomAbs = nowPlaying.miniPlayerBottomAbs
         guard miniBottomAbs > 0 else { return 0 }  // not measured yet
         let gap: CGFloat = 12
         return max(0, miniBottomAbs + gap - naturalTopAbsolute)
+        #endif
     }
+
+    #if os(iOS)
+    /// iPad corner mini: trailing room the phone header row keeps free so
+    /// search, sort and List / Guide sit left of the mini instead of under
+    /// it. Mirrors HomeView's iPad mini geometry (400 pt wide, 24 pt
+    /// trailing inset) plus a 12 pt gap. 0 when no mini is on screen
+    /// (`miniPlayerBottomAbs` is only published while minimized).
+    private var iPadMiniHeaderTrailingClearance: CGFloat {
+        guard UIDevice.current.userInterfaceIdiom == .pad,
+              nowPlaying.isActive, nowPlaying.isMinimized,
+              nowPlaying.miniPlayerBottomAbs > 0 else { return 0 }
+        return 400 + 24 + 12
+    }
+    #endif
 
     #if os(tvOS)
     /// Mini-player push for the tvOS Live TV layouts.
@@ -1007,6 +1028,10 @@ struct ChannelListView: View {
             phoneHeaderActions
         }
         .padding(.horizontal, 16)
+        #if os(iOS)
+        .padding(.trailing, iPadMiniHeaderTrailingClearance)
+        .animation(.spring(response: 0.35), value: iPadMiniHeaderTrailingClearance)
+        #endif
         .padding(.vertical, 6)
         // Tapping anywhere else in the header collapses the overflow.
         .background(
