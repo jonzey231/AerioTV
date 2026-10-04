@@ -5113,6 +5113,12 @@ final class AVPlayerProgressDriver {
     private var minimizeStallsWaitTicks = 0
     private var minimizeStallsWaitBaseSegments = 0
     private var nudgedThisWaitStreak = false
+    /// When the first-join nudge started playback without waiting for a
+    /// fresh segment (2026-10-04, atv_hz.log 02:03:05-14). A stall inside
+    /// `earlyStartLearningQuiet` of that start is the cost of starting with
+    /// a smaller cushion, not evidence the channel needs a larger hold-back,
+    /// so the hold-back learner skips it.
+    private var earlyStartNudgeAt: Date?
     /// Stall resume gate (2026-09-13, atv_skip2.txt 13:02-13:06). A bursty
     /// feed stalled six times in two minutes because every resume went out
     /// with ~2 s buffered: the nudge below fired the moment ONE segment had
@@ -5633,6 +5639,29 @@ final class AVPlayerProgressDriver {
         }
         guard minimizeStallsWaitTicks >= 3, !nudgedThisWaitStreak else { return }
         let newSegments = TSHLSRemuxer.feedRateWindow.publishedCount() - minimizeStallsWaitBaseSegments
+        // First join on a bursty feed (2026-10-04, atv_hz.log 02:03:05-14,
+        // atv_stalls2.log 16:23). The Dispatcharr proxy delivers in bursts
+        // 8 to 9.5 s apart, so segments 0 to 3 were all published within a
+        // second of the tune and then nothing new arrived until the next
+        // burst; the "new segment" guard below held the first frame to 8 to
+        // 9 s. On a plain first join (no stall yet, gate not armed, playhead
+        // at the start) two target durations already loaded is enough to
+        // start at the 3 s floor. The post-stall gate below is untouched.
+        if newSegments < 1, stallGateSince == nil, lastStallAt == nil,
+           item.currentTime().seconds <= 1.0,
+           let loaded = item.loadedTimeRanges.last?.timeRangeValue {
+            let ahead = (loaded.end - item.currentTime()).seconds
+            let td = liveTargetDuration?() ?? 2.0
+            if ahead >= 2 * (td > 0 ? td : 2.0) {
+                nudgedThisWaitStreak = true
+                earlyStartNudgeAt = Date()
+                player.playImmediately(atRate: 1.0)
+                debugLog(String(format:
+                    "[AVP-NUDGE] first join: %d s waited, %.1f s loaded ahead, no new segment needed; playImmediately",
+                    minimizeStallsWaitTicks, ahead))
+                return
+            }
+        }
         guard newSegments >= 1 else { return }
         guard let loadedEnd = item.loadedTimeRanges.last?.timeRangeValue,
               (loadedEnd.end - item.currentTime()).seconds >= (liveTargetDuration?() ?? 2.0) else { return }
@@ -5674,6 +5703,12 @@ final class AVPlayerProgressDriver {
     /// Seconds after a Switch Stream source change during which stalls are
     /// not learned from (hold-back) and no backward rejoin is attempted.
     static let sourceSwitchLearningQuiet: TimeInterval = 60
+
+    /// Seconds after a first-join early-start nudge during which stalls are
+    /// not learned from (hold-back). Covers about three Dispatcharr burst
+    /// gaps (8 to 9.5 s), the span in which a 4 s starting cushion can run
+    /// dry once before the buffer settles at the burst depth.
+    static let earlyStartLearningQuiet: TimeInterval = 30
 
     private func learnedHoldback() -> Double {
         liveHoldbackKey.map { LiveEdgeHoldback.offset(for: $0) } ?? LiveEdgeHoldback.base
@@ -5851,6 +5886,11 @@ final class AVPlayerProgressDriver {
                 debugLog(String(format:
                     "[AVP-HOLDBACK] stall #%d ignored: source switch %.0fs ago, a switch gap is not feed jitter",
                     stalls, sinceSwitch))
+            } else if let early = earlyStartNudgeAt,
+                      Date().timeIntervalSince(early) < Self.earlyStartLearningQuiet {
+                debugLog(String(format:
+                    "[AVP-HOLDBACK] stall #%d ignored: first-join early start %.0fs ago, a thin starting cushion is not feed jitter",
+                    stalls, Date().timeIntervalSince(early)))
             } else if let rate, rate < 0.95 {
                 debugLog(String(format:
                     "[AVP-HOLDBACK] stall #%d ignored: upstream below real time (rate %.2f), a larger hold-back cannot fill a buffer the feed is not filling",
