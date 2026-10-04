@@ -5493,6 +5493,12 @@ struct MainTabView: View {
         let _ = TabProbe.body("MainTabView")
         ZStack {
             tabContentView
+                #if os(iOS)
+                // iPad (and the Mac iPad build): floating bottom pill in place
+                // of the system top tab bar (Logan 2026-10-04). Below the
+                // player layers in this ZStack, like the system bar was.
+                .overlay(alignment: .bottom) { padTabPillOverlay }
+                #endif
                 #if os(tvOS)
                 // While multiview is active, disable the entire tab
                 // hierarchy so tvOS's focus engine can't land on guide
@@ -6001,7 +6007,8 @@ struct MainTabView: View {
         .overlay(alignment: .bottomTrailing) {
             // The remote-session card above the tab bar owns re-entry now
             // (rule 2), so the old "Controlling <TV>" floating pill is gone.
-            if !companionClient.devices.isEmpty || castController.state != .unavailable,
+            if !PadTabPill.isActive,
+               !companionClient.devices.isEmpty || castController.state != .unavailable,
                !companionClient.isControlling,
                !castController.isCasting,
                !airPlay.hostsHeadless,
@@ -6739,6 +6746,41 @@ struct MainTabView: View {
     /// `.aerioTabReselected` post and decides for itself what its top is,
     /// scrolling only when it is at root - the pop wins this tap, the next tap
     /// scrolls. One write per tap, nothing during a scroll.
+    #if os(iOS)
+    /// Tabs in the pill, in the TabView's order.
+    private var padPillTabs: [AppTab] {
+        var tabs: [AppTab] = [.liveTV]
+        if showRecordingsTab { tabs.append(.dvr) }
+        if showMoviesTab { tabs.append(.movies) }
+        if showSeriesTab { tabs.append(.tvShows) }
+        tabs.append(.settings)
+        return tabs
+    }
+
+    /// Same gates as the phone's floating Control-a-TV button.
+    private var showsControlATVButton: Bool {
+        (!companionClient.devices.isEmpty || castController.state != .unavailable)
+            && !companionClient.isControlling
+            && !castController.isCasting
+            && !airPlay.hostsHeadless
+            && (nowPlaying.playingItem == nil || nowPlaying.isMinimized)
+            && (playerSession.mode == .idle || nowPlaying.isMinimized)
+    }
+
+    /// iPad bottom pill plus the Control-a-TV circle on the same row, so the
+    /// circle is vertically centered on the pill and never moves.
+    @ViewBuilder
+    private var padTabPillOverlay: some View {
+        if PadTabPill.isActive {
+            PadTabPillBar(tabs: padPillTabs,
+                          selected: selectedTab,
+                          select: { tabSelection.wrappedValue = $0 },
+                          showsControlATV: showsControlATVButton,
+                          controlATV: { showCompanionPickerGlobal = true })
+        }
+    }
+    #endif
+
     private var tabSelection: Binding<AppTab> {
         Binding(
             get: { selectedTab },
@@ -6764,6 +6806,7 @@ struct MainTabView: View {
     private var tabContentView: some View {
         TabView(selection: tabSelection) {
             ChannelListView()
+                .aerioPadHidesSystemTabBar()
                 .tabItem { Label(AppTab.liveTV.title, systemImage: AppTab.liveTV.icon) }
                 .tag(AppTab.liveTV)
 
@@ -6778,6 +6821,7 @@ struct MainTabView: View {
                 // Media-center DVR tab on every platform (iPhone 2026-09-05);
                 // the old My Recordings list stays reachable from Settings.
                 DVRView(isPlaying: $isPlaying, isSelected: selectedTab == .dvr)
+                    .aerioPadHidesSystemTabBar()
                     .tabItem { Label(AppTab.dvr.title, systemImage: AppTab.dvr.icon) }
                     .tag(AppTab.dvr)
             }
@@ -6801,6 +6845,7 @@ struct MainTabView: View {
                                isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested,
                                isSelected: selectedTab == .movies)
                 }
+                    .aerioPadHidesSystemTabBar()
                     .tabItem { Label(AppTab.movies.title, systemImage: AppTab.movies.icon) }
                     .tag(AppTab.movies)
             }
@@ -6813,6 +6858,7 @@ struct MainTabView: View {
                            isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested,
                            isSelected: selectedTab == .tvShows, kind: .series)
                 }
+                    .aerioPadHidesSystemTabBar()
                     .tabItem {
                         Label(AppTab.tvShows.title, systemImage: AppTab.tvShows.icon)
                             .symbolRenderingMode(.monochrome)
@@ -6828,6 +6874,7 @@ struct MainTabView: View {
                 .tag(AppTab.settings)
             #else
             SettingsView()
+                .aerioPadHidesSystemTabBar()
                 .tabItem { Label(AppTab.settings.title, systemImage: AppTab.settings.icon) }
                 .tag(AppTab.settings)
             #endif
@@ -9010,6 +9057,8 @@ final class TabBarCollapseState: ObservableObject {
     /// leaves the transform alone so a collapsed bar stays parked at the mini
     /// button's scale. Restore returns to whatever `collapsed` says.
     private func applyDetailVisibility() {
+        // iPad: the system bar stays hidden; the pill reads detailHidden.
+        if PadTabPill.isActive { return }
         let bars = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap { $0.windows }
@@ -9040,6 +9089,8 @@ final class TabBarCollapseState: ObservableObject {
     }
 
     func set(_ value: Bool) {
+        // iPad's bottom pill never collapses (Logan 2026-10-04).
+        if PadTabPill.isActive { return }
         guard collapsed != value else { return }
         collapsed = value
         // Off the caller's turn: the show arrives from the scroll geometry
@@ -9297,6 +9348,9 @@ private struct RemoteSessionCardDock<Content: View>: View {
             // the bottom safe area instead.
             let lift = collapse.detailHidden
                 ? RemoteSessionCardMetrics.windowSafeBottom + RemoteSessionCardMetrics.gap
+                : PadTabPill.isActive
+                ? RemoteSessionCardMetrics.windowSafeBottom + PadTabPill.bottomPadding
+                    + PadTabPill.height + RemoteSessionCardMetrics.gap
                 : barTop > 0 && measured <= fallback * 2
                 ? max(RemoteSessionCardMetrics.gap, measured)
                 : fallback
@@ -9377,6 +9431,122 @@ private struct MinimizedTabButton: View {
     }
 }
 
+/// iPad (and the macOS iPad build) bottom tab pill (Logan 2026-10-04): the
+/// system tab bar is hidden and this capsule, driven by the same selection
+/// binding, floats above the bottom safe area. It never collapses; it hides
+/// only while a VOD detail page is up (TabBarCollapseState.detailHidden).
+enum PadTabPill {
+    /// Read once; UIDevice is main-actor isolated and the idiom never changes.
+    nonisolated(unsafe) static let isActive: Bool = MainActor.assumeIsolated {
+        UIDevice.current.userInterfaceIdiom == .pad
+    }
+    static let height: CGFloat = 56
+    /// Gap between the pill and the bottom safe-area edge.
+    static let bottomPadding: CGFloat = 8
+    /// Scroll clearance for content that does NOT extend under the bottom
+    /// safe area (Settings): pill plus its padding plus a 12 pt margin.
+    static let clearanceAboveSafeArea: CGFloat = height + bottomPadding + 12
+    /// Scroll clearance for content that runs under the bottom safe area
+    /// (guide, DVR): the home indicator area as well.
+    static let clearanceUnderSafeArea: CGFloat = 104
+}
+
+extension View {
+    /// Hides the system tab bar on iPad, where PadTabPillBar replaces it.
+    /// No-op on iPhone and tvOS.
+    @ViewBuilder
+    func aerioPadHidesSystemTabBar() -> some View {
+        if PadTabPill.isActive {
+            self.toolbar(.hidden, for: .tabBar)
+        } else {
+            self
+        }
+    }
+}
+
+/// Shared surface for the pill and the Control-a-TV circle (contrast recipe,
+/// Logan 2026-10-04, mirrored on Android): theme card color at 92 percent over
+/// a thin blur, a 1 pt hairline in the text color at 12 percent, and a soft
+/// shadow, so it reads over the dark guide and bright poster art alike.
+private struct PadPillSurface<S: InsettableShape>: ViewModifier {
+    let shape: S
+    func body(content: Content) -> some View {
+        content
+            .background {
+                ZStack {
+                    shape.fill(.ultraThinMaterial)
+                    shape.fill(Color.cardBackground.opacity(0.92))
+                }
+            }
+            .overlay { shape.strokeBorder(Color.textPrimary.opacity(0.12), lineWidth: 1) }
+            .clipShape(shape)
+            .shadow(color: .black.opacity(0.35), radius: 18, y: 6)
+    }
+}
+
+private struct PadTabPillBar: View {
+    @ObservedObject private var collapse = TabBarCollapseState.shared
+    @ObservedObject private var theme: ThemeManager = .shared
+    let tabs: [AppTab]
+    let selected: AppTab
+    let select: (AppTab) -> Void
+    let showsControlATV: Bool
+    let controlATV: () -> Void
+
+    var body: some View {
+        ZStack {
+            HStack(spacing: 2) {
+                ForEach(tabs, id: \.self) { tab in
+                    Button { select(tab) } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: tab.icon)
+                                .font(.system(size: 17, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
+                            Text(tab.title)
+                                .font(.subheadline.weight(.semibold))
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(tab == selected ? theme.accent : Color.textPrimary)
+                        .padding(.horizontal, 18)
+                        .frame(height: PadTabPill.height - 12)
+                        .background {
+                            if tab == selected {
+                                Capsule().fill(theme.accent.opacity(0.18))
+                            }
+                        }
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(tab == selected ? .isSelected : [])
+                }
+            }
+            .padding(.horizontal, 6)
+            .frame(height: PadTabPill.height)
+            .modifier(PadPillSurface(shape: Capsule()))
+            .frame(maxWidth: .infinity)
+
+            if showsControlATV {
+                HStack {
+                    Spacer()
+                    Button(action: controlATV) {
+                        Image(systemName: "tv.and.mediabox")
+                            .font(.system(size: 19, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
+                            .foregroundStyle(theme.accent)
+                            .frame(width: 48, height: 48)
+                    }
+                    .buttonStyle(.plain)
+                    .modifier(PadPillSurface(shape: Circle()))
+                    .accessibilityLabel("Control a TV")
+                    .padding(.trailing, 20)
+                }
+            }
+        }
+        .padding(.bottom, PadTabPill.bottomPadding)
+        .opacity(collapse.detailHidden ? 0 : 1)
+        .allowsHitTesting(!collapse.detailHidden)
+        .animation(.easeInOut(duration: 0.2), value: collapse.detailHidden)
+    }
+}
+
 /// Hosts the Control-a-TV FAB above the right end of the full tab bar and,
 /// once the bar has minimized, level with the minimized pill on the left so
 /// the two corners match (Logan 2026-09-09).
@@ -9393,6 +9563,13 @@ private struct CompanionControlFABDock: View {
             .padding(.bottom, collapse.collapsed ? -6 : 52)
             .animation(.easeInOut(duration: 0.2), value: collapse.collapsed)
     }
+}
+#endif
+
+#if os(tvOS)
+extension View {
+    /// tvOS keeps its system top bar; see the iOS definition.
+    func aerioPadHidesSystemTabBar() -> some View { self }
 }
 #endif
 

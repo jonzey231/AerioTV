@@ -833,7 +833,11 @@ struct DVRView: View {
                     grid
                 }
             }
+            #if os(iOS)
+            .padding(.bottom, PadTabPill.isActive ? PadTabPill.clearanceUnderSafeArea : 80)
+            #else
             .padding(.bottom, 80)
+            #endif
             #if os(tvOS)
             // Clear the floating tab bar (the scroll ignores the top inset
             // so the hero art can run full bleed, like Movies).

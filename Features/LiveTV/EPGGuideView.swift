@@ -5698,6 +5698,12 @@ struct EPGGuideView: View {
                         ForEach(channels) { channel in
                             guideRow(for: channel, screenWidth: geo.size.width, focusTargetID: focusTargetID)
                         }
+                        #if os(iOS)
+                        // iPad bottom pill: the last row scrolls clear of it.
+                        if PadTabPill.isActive {
+                            Color.clear.frame(height: PadTabPill.clearanceUnderSafeArea)
+                        }
+                        #endif
                     }
                     .overlay(alignment: .topLeading) {
                         TimelineView(.periodic(from: .now, by: 60)) { context in

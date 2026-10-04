@@ -136,6 +136,11 @@ private struct SettingsPhoneTabBarChrome: ViewModifier {
                                 for: .scrollContent)
                 .ignoresSafeArea(.container, edges: .bottom)
                 .aerioContentUnderTabBar()
+        } else if PadTabPill.isActive {
+            // iPad bottom pill (Logan 2026-10-04): last row clears it.
+            content
+                .contentMargins(.bottom, PadTabPill.clearanceAboveSafeArea,
+                                for: .scrollContent)
         } else {
             content
         }
