@@ -592,6 +592,8 @@ final class GuideStore: ObservableObject {
         // back to back (history-bound-prune, catchup-reach-prune), 1.6 s of
         // main-thread render apiece on the Apple TV (atv log 2026-10-02
         // 16:16:26 to 16:16:29, three publishes of ~200k programs in 3 s).
+        var dict = dict
+        reapplyEnrichedCategories(&dict, serverID: serverID)
         if _isCoalescingPrunes {
             _pendingPrograms = dict
             debugLog("[PUBLISH] guide.programs \(source) staged for one publish")
@@ -1334,6 +1336,39 @@ final class GuideStore: ObservableObject {
     /// Signature of the currently published `programs`, so `commitPrograms` can
     /// drop a write whose content is identical.
     private var residentSignature: Int?
+    /// Categories learned from the per-program enrichment, by channel then
+    /// title, for the server they came from. The grid endpoint carries no
+    /// category, so every later grid-window publish (and any walk whose
+    /// staging copy was snapshotted before category-apply ran) used to write
+    /// the same programmes back with an empty category and the tint vanished
+    /// with no input (iPad log 2026-10-04 19:09:20 category-apply, then
+    /// dispatcharr-grid-window at 19:09:21). commitPrograms re-applies these.
+    private var enrichedCategories: [String: [String: String]] = [:]
+    private var enrichedCategoriesServerID: String?
+
+    /// Fill empty categories from `enrichedCategories`. Touches only the
+    /// enriched channels (a few hundred programmes), so it is cheap on main.
+    private func reapplyEnrichedCategories(_ dict: inout [String: [GuideProgram]], serverID: String) {
+        guard enrichedCategoriesServerID == serverID, !enrichedCategories.isEmpty else { return }
+        for (cid, byTitle) in enrichedCategories {
+            guard var progs = dict[cid] else { continue }
+            var changed = false
+            for j in progs.indices {
+                let p = progs[j]
+                guard p.category.isEmpty, let cat = byTitle[p.title] else { continue }
+                progs[j] = GuideProgram(channelID: p.channelID, title: p.title,
+                                        description: p.description, start: p.start, end: p.end,
+                                        category: cat, programID: p.programID,
+                                        subTitle: p.subTitle, season: p.season,
+                                        episode: p.episode, isNew: p.isNew,
+                                        isLiveBroadcast: p.isLiveBroadcast,
+                                        isPremiere: p.isPremiere, isFinale: p.isFinale,
+                                        isRepeat: p.isRepeat)
+                changed = true
+            }
+            if changed { dict[cid] = progs }
+        }
+    }
     /// Container captured by `loadFromCache`, so the coverage paths can prune
     /// or drop cached rows without threading a `ModelContext` through the
     /// background walk.
@@ -3516,6 +3551,13 @@ final class GuideStore: ObservableObject {
             // category and swap it in.
             let old = progs[idx]
             let nowTitle = old.title
+            if let cats, !nowTitle.isEmpty {
+                if enrichedCategoriesServerID != serverID {
+                    enrichedCategories = [:]
+                    enrichedCategoriesServerID = serverID
+                }
+                enrichedCategories[cid, default: [:]][nowTitle] = cats
+            }
             progs[idx] = GuideProgram(channelID: old.channelID,
                                        title: old.title,
                                        description: old.description,
@@ -5721,7 +5763,11 @@ struct EPGGuideView: View {
                 .onScrollGeometryChange(for: CGFloat.self) { scrollGeo in
                     scrollGeo.contentOffset.y
                 } action: { oldY, y in
-                    guard usesPhoneLiveTVLayout else { return }
+                    // iPad: the bottom pill never collapses and the system
+                    // bar is hidden, so a toggle here only re-rendered the
+                    // whole guide body inside an animated transaction on
+                    // every scroll direction change (iPad lag, 2026-10-04).
+                    guard usesPhoneLiveTVLayout, !PadTabPill.isActive else { return }
                     if let hidden = tabBarTracker.update(oldY: oldY, newY: y,
                                                          hidden: guideTabBarHidden) {
                         withAnimation(.easeInOut(duration: 0.2)) {

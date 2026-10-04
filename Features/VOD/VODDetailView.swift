@@ -488,6 +488,11 @@ struct VODDetailView: View {
         #if os(iOS)
         // Android parity (2026-10-03): no bottom tab bar on VOD detail pages.
         // Counted push/pop so a detail pushed from a detail stays bar-less.
+        // The alpha and mask hide left the bar's layout height reserved, an
+        // empty strip under the TMDB footer (Logan 2026-10-04). Hiding it
+        // through the toolbar API drops that bottom inset while pushed; the
+        // mask and collapse state above still own the pop restore.
+        .toolbar(.hidden, for: .tabBar)
         .onAppear { TabBarCollapseState.shared.enterDetail() }
         .onDisappear { TabBarCollapseState.shared.leaveDetail() }
         #endif

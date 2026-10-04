@@ -5934,10 +5934,10 @@ private enum PhoneDrawerMetrics {
     static let safety: CGFloat = 4
     /// Never narrower than this, however short the group names are.
     static let minWidth: CGFloat = 200
-    /// Fraction of the screen the drawer may never exceed.
-    static let maxScreenFraction: CGFloat = 0.85
-    /// iPad ceiling: the drawer never spans the tablet's width.
-    static let padMaxWidth: CGFloat = 360
+    /// Room always left between the drawer and the far screen edge. The
+    /// drawer otherwise fits the longest group name, like the tvOS
+    /// GuideGroupSidebarPane (fitted content plus padding, no fixed cap).
+    static let screenGutter: CGFloat = 16
 
     /// Everything a row reserves horizontally OUTSIDE the label text:
     /// list row insets, the gap before the pin, the pin square and the
@@ -6006,10 +6006,9 @@ func phoneGroupDrawerFittedWidth(tokens: [String],
     }
     let header = phoneDrawerHeaderWidth(scale: scale)
     let screenW = UIScreen.main.bounds.width
-    // iPad (Logan 2026-10-04): the phone's fraction would span most of a
-    // tablet, so the drawer is capped at the same 360 pt as Android tablets.
-    var ceiling = (screenW > 0 ? screenW : 390) * M.maxScreenFraction
-    if UIDevice.current.userInterfaceIdiom == .pad { ceiling = min(ceiling, M.padMaxWidth) }
+    // Logan 2026-10-04: the drawer always fits the longest group name on
+    // iPhone and iPad (tvOS parity), capped only by the screen less a gutter.
+    let ceiling = (screenW > 0 ? screenW : 390) - M.screenGutter
     let floor = max(M.minWidth, header)
     let final = min(max(widestRow, floor), max(floor, ceiling))
     let clamped = widestRow > ceiling ? "ceiling" : (widestRow < floor ? "floor" : "none")

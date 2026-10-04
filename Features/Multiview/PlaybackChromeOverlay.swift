@@ -261,11 +261,6 @@ struct PlaybackChromeOverlay: View {
                 // duplicating that information.
                 Spacer(minLength: 0)
                 #if os(iOS)
-                // Stream readout (resolution, frame rate, pipeline), the
-                // tvOS band's two badges at the trailing end of the bar,
-                // left of the buttons. iPad both orientations, iPhone
-                // landscape only (Logan 2026-10-04).
-                streamReadout_iOS
                 // Issue #38: rotate-to-fullscreen, iPhone only (iPad already
                 // rotates with the device).
                 if UIDevice.current.userInterfaceIdiom == .phone {
@@ -375,18 +370,26 @@ struct PlaybackChromeOverlay: View {
             // controls in catch-up): the pipeline pins durationMs to the
             // programme length and routes seekAction through the window
             // re-tune, so the drag-to-seek bar and skips work as they are.
+            // Stream readout on the transport row like the tvOS band
+            // (Logan 2026-10-04): pipeline bottom left, format bottom
+            // right, level with the 44 pt transport buttons.
             if store.vodSoloTile != nil || store.catchupTile != nil {
                 VODTransportBar_iOS(store: store)
+                    .overlay(alignment: .bottom) { streamReadout_iOS }
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
             } else if liveRewindIOS.buffering {
                 RewindTransportBar_iOS(store: store)
+                    .overlay(alignment: .bottom) { streamReadout_iOS }
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
             } else {
-                liveProgressBand
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 24)
+                VStack(spacing: 8) {
+                    liveProgressBand
+                    streamReadout_iOS
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 24)
             }
         }
         .background(
@@ -450,10 +453,12 @@ struct PlaybackChromeOverlay: View {
                         .background(.ultraThinMaterial, in: Capsule())
                         .accessibilityLabel("Playback pipeline \(engine)")
                 }
+                Spacer(minLength: 0)
                 if let audioStore = store.audioProgressStore {
                     TVVideoFormatBadge(progress: audioStore, fontSize: size)
                 }
             }
+            .frame(height: 44)
             .allowsHitTesting(false)
         }
     }
