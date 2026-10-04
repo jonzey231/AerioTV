@@ -4557,6 +4557,16 @@ struct MainTabView: View {
     /// Kept Live card (iOS/iPadOS only; tvOS uses the kept-count circle).
     @ObservedObject private var kept = KeptLiveChannels.shared
     #endif
+    #if os(iOS)
+    /// The scene's real horizontal size class. The TabView is forced to
+    /// `.compact` so iPad gets the phone's bottom bar (Logan 2026-10-04);
+    /// each tab's content gets this value back so its own layouts (Settings
+    /// split view, grid widths) still see the iPad width.
+    @Environment(\.horizontalSizeClass) private var hostSizeClass
+    #else
+    /// tvOS keeps its top bar; nothing to restore.
+    private let hostSizeClass: Void? = nil
+    #endif
     #if os(tvOS)
     /// Bottom edge of the Channel Preview banner's art slot: the corner mini
     /// player's bottom is locked to it while the banner is shown.
@@ -6764,6 +6774,7 @@ struct MainTabView: View {
     private var tabContentView: some View {
         TabView(selection: tabSelection) {
             ChannelListView()
+                .aerioTabContentSizeClass(hostSizeClass)
                 .tabItem { Label(AppTab.liveTV.title, systemImage: AppTab.liveTV.icon) }
                 .tag(AppTab.liveTV)
 
@@ -6778,6 +6789,7 @@ struct MainTabView: View {
                 // Media-center DVR tab on every platform (iPhone 2026-09-05);
                 // the old My Recordings list stays reachable from Settings.
                 DVRView(isPlaying: $isPlaying, isSelected: selectedTab == .dvr)
+                    .aerioTabContentSizeClass(hostSizeClass)
                     .tabItem { Label(AppTab.dvr.title, systemImage: AppTab.dvr.icon) }
                     .tag(AppTab.dvr)
             }
@@ -6801,6 +6813,7 @@ struct MainTabView: View {
                                isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested,
                                isSelected: selectedTab == .movies)
                 }
+                    .aerioTabContentSizeClass(hostSizeClass)
                     .tabItem { Label(AppTab.movies.title, systemImage: AppTab.movies.icon) }
                     .tag(AppTab.movies)
             }
@@ -6813,6 +6826,7 @@ struct MainTabView: View {
                            isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested,
                            isSelected: selectedTab == .tvShows, kind: .series)
                 }
+                    .aerioTabContentSizeClass(hostSizeClass)
                     .tabItem {
                         Label(AppTab.tvShows.title, systemImage: AppTab.tvShows.icon)
                             .symbolRenderingMode(.monochrome)
@@ -6828,6 +6842,7 @@ struct MainTabView: View {
                 .tag(AppTab.settings)
             #else
             SettingsView()
+                .aerioTabContentSizeClass(hostSizeClass)
                 .tabItem { Label(AppTab.settings.title, systemImage: AppTab.settings.icon) }
                 .tag(AppTab.settings)
             #endif
@@ -6841,6 +6856,9 @@ struct MainTabView: View {
         // was created to avoid.)
         .id(tvTabViewIdentity)
         #endif
+        // iPad and the Mac iPad app: the phone's bottom tab bar instead of
+        // the iPadOS top bar (Logan 2026-10-04). See aerioPhoneStyleTabBar.
+        .aerioPhoneStyleTabBar()
         .tint(theme.accent)
         // Cast card clearance: the tabs' scroll views get a bottom content
         // inset equal to the card's height while a session is live.
@@ -8781,6 +8799,37 @@ private struct MiniPlayerChromeModifier: ViewModifier {
 }
 
 #endif
+
+// MARK: - Bottom tab bar on iPad
+
+extension View {
+    /// iPadOS draws a TabView's bar at the TOP in a regular-width scene (and
+    /// in the Mac iPad app). AerioTV wants the phone's bottom bar on every
+    /// iOS-family device, so the TabView is handed a compact horizontal size
+    /// class, which makes UITabBarController lay out its classic bottom
+    /// UITabBar (the one TabBarCollapseState, the mini button and the remote
+    /// card dock already measure). The tabs get the real class back through
+    /// `aerioTabContentSizeClass`. No-op on tvOS (top bar stays) and a
+    /// no-op in effect on iPhone (already compact in portrait; landscape
+    /// Plus/Max phones were regular and drew a bottom bar there anyway).
+    @ViewBuilder
+    func aerioPhoneStyleTabBar() -> some View {
+        #if os(iOS)
+        self.environment(\.horizontalSizeClass, .compact)
+        #else
+        self
+        #endif
+    }
+
+    /// Restores the scene's real horizontal size class inside a tab.
+    #if os(iOS)
+    func aerioTabContentSizeClass(_ sizeClass: UserInterfaceSizeClass?) -> some View {
+        self.environment(\.horizontalSizeClass, sizeClass)
+    }
+    #else
+    func aerioTabContentSizeClass(_ sizeClass: Void?) -> some View { self }
+    #endif
+}
 
 // MARK: - Tab bar auto-hide (GH #20) platform split
 
