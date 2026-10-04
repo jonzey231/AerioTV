@@ -487,6 +487,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// Width/height are 0 from the TS arm (it never parses the SPS);
     /// the tile falls back to a nominal geometry there.
     var onVideoParameters: ((_ width: Int, _ height: Int, _ fps: Double, _ is10Bit: Bool) -> Void)?
+    /// Main-queue only. True once `onVideoParameters` fired from the
+    /// H.264 SPS VUI declaration (8-bit SDR H.264, rate from the stream
+    /// headers), set just before the callback runs. The tile uses it to
+    /// request the display mode at SPS time instead of after the first
+    /// frame, so the HDMI blank overlaps the join buffering
+    /// (atv_hz.log 2026-10-04: 8 s frozen start, then a 3 s blank).
+    private(set) var videoParamsDeclaredAtSPS = false
     /// Fires once, on the main queue, the moment the upstream delivers
     /// its FIRST byte. The live tile arms a first-byte deadline against
     /// it: a Dispatcharr connection can open and then stay silent for
@@ -1149,9 +1156,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                         let cb = onVideoParameters
                         let declaredFPS = info.fps
                         let interlaced = info.isInterlaced
-                        DispatchQueue.main.async {
+                        DispatchQueue.main.async { [weak self] in
                             RemuxMeasuredVideo.shared.note(fps: declaredFPS, declared: true,
                                                            interlaced: interlaced)
+                            self?.videoParamsDeclaredAtSPS = true
                             cb?(0, 0, declaredFPS, false)
                         }
                     }
@@ -5780,12 +5788,14 @@ struct AVPlayerMultiviewTile: View {
                         debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(channelName)")
                         failOrFallback("\(error)")
                     }
-                    mux.onVideoParameters = { w, h, fps, tenBit in
-                        applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
+                    mux.onVideoParameters = { [weak mux] w, h, fps, tenBit in
+                        applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit,
+                                             declaredAtSPS: mux?.videoParamsDeclaredAtSPS == true)
                     }
                     if let vp = entry.videoParams {
                         applyDisplayCriteria(width: vp.width, height: vp.height,
-                                             fps: vp.fps, is10Bit: vp.tenBit)
+                                             fps: vp.fps, is10Bit: vp.tenBit,
+                                         declaredAtSPS: mux.videoParamsDeclaredAtSPS)
                     }
                     // The retained entry pointed these at retention; the
                     // clean-close / silence signals belong to this tile again.
@@ -5822,13 +5832,15 @@ struct AVPlayerMultiviewTile: View {
                     debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(channelName)")
                     failOrFallback("\(error)")
                 }
-                mux.onVideoParameters = { w, h, fps, tenBit in
-                    applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
+                mux.onVideoParameters = { [weak mux] w, h, fps, tenBit in
+                    applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit,
+                                         declaredAtSPS: mux?.videoParamsDeclaredAtSPS == true)
                 }
                 remuxer = mux
                 if let vp = warm.videoParams {
                     applyDisplayCriteria(width: vp.width, height: vp.height,
-                                         fps: vp.fps, is10Bit: vp.tenBit)
+                                         fps: vp.fps, is10Bit: vp.tenBit,
+                                         declaredAtSPS: mux.videoParamsDeclaredAtSPS)
                 }
                 // A warm ingest can be silent too (s7_86.txt:353-395):
                 // it is the same upstream open, just started earlier.
@@ -5865,8 +5877,9 @@ struct AVPlayerMultiviewTile: View {
                 debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(channelName)")
                 failOrFallback("\(error)")
             }
-            mux.onVideoParameters = { w, h, fps, tenBit in
-                applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
+            mux.onVideoParameters = { [weak mux] w, h, fps, tenBit in
+                applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit,
+                                     declaredAtSPS: mux?.videoParamsDeclaredAtSPS == true)
             }
             // Connected-but-silent ingest guard (s7_86.txt:353-395).
             mux.onFirstByte = { noteFirstByte() }
@@ -5918,8 +5931,9 @@ struct AVPlayerMultiviewTile: View {
             debugLog("[AVP-CU] remux failed (\(reason)) title=\(channelName)")
             failOrFallback(reason)
         }
-        mux.onVideoParameters = { w, h, fps, tenBit in
-            applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
+        mux.onVideoParameters = { [weak mux] w, h, fps, tenBit in
+            applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit,
+                                 declaredAtSPS: mux?.videoParamsDeclaredAtSPS == true)
         }
         remuxer = mux
         mux.start()
@@ -6056,8 +6070,9 @@ struct AVPlayerMultiviewTile: View {
                 debugLog("[AVP-MV] TS-file remux failed (\(error)) title=\(channelName)")
                 failOrFallback("\(error)")
             }
-            mux.onVideoParameters = { w, h, fps, tenBit in
-                applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
+            mux.onVideoParameters = { [weak mux] w, h, fps, tenBit in
+                applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit,
+                                     declaredAtSPS: mux?.videoParamsDeclaredAtSPS == true)
             }
             remuxer = mux
             mux.start()
@@ -6508,8 +6523,9 @@ struct AVPlayerMultiviewTile: View {
             debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(newName)")
             failOrFallback("\(error)")
         }
-        mux.onVideoParameters = { w, h, fps, tenBit in
-            applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
+        mux.onVideoParameters = { [weak mux] w, h, fps, tenBit in
+            applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit,
+                                 declaredAtSPS: mux?.videoParamsDeclaredAtSPS == true)
         }
         mux.onFirstByte = { noteFirstByte() }
         mux.onNewSourceStarted = { seq, codec in
@@ -6621,8 +6637,16 @@ struct AVPlayerMultiviewTile: View {
     /// `force` skips the defer check: it is the deferred apply itself,
     /// running from the first-frame callback, and must not re-defer on a
     /// stale read of `firstFrameSeen`.
+    /// `declaredAtSPS`: the remuxer read the rate from the H.264 SPS VUI
+    /// (8-bit SDR, nothing left for the first frame to reveal), so the
+    /// switch is requested right away and the HDMI blank overlaps the
+    /// join buffering instead of following it (atv_hz.log 2026-10-04:
+    /// SPS at 02:03:05.408, first frame 02:03:13.778, criteria only at
+    /// 02:03:14.482, panel at 50 Hz 3 s later). HDR, measured rates and
+    /// anything from the fMP4/MKV arms still defer to the first frame.
     private func applyDisplayCriteria(width: Int, height: Int, fps: Double,
-                                      is10Bit: Bool, force: Bool = false) {
+                                      is10Bit: Bool, force: Bool = false,
+                                      declaredAtSPS: Bool = false) {
         #if os(tvOS)
         guard !tileStopped else {
             debugLog("[AVP-DISPLAY] criteria apply skipped: tile already stopped")
@@ -6643,7 +6667,13 @@ struct AVPlayerMultiviewTile: View {
             debugLog("[AVP-DISPLAY] display criteria unchanged (\(signature)); no mode switch")
             return
         }
-        if !force, !firstFrameSeen {
+        let early = !force && !firstFrameSeen && declaredAtSPS && !is10Bit
+        if early {
+            // Any criteria parked by an earlier report are superseded; a
+            // later different report before the first frame defers and
+            // applies once, an equal one hits the unchanged skip above.
+            pendingDisplayCriteria = nil
+        } else if !force, !firstFrameSeen {
             pendingDisplayCriteria = (width, height, fps, is10Bit)
             debugLog("[AVP-DISPLAY] display criteria deferred until first frame (\(signature))")
             return
@@ -6690,6 +6720,9 @@ struct AVPlayerMultiviewTile: View {
         DisplayCriteriaCoordinator.apply(
             AVDisplayCriteria(refreshRate: Float(fps), formatDescription: formatDesc), to: dm,
             signature: signature)
+        if early {
+            debugLog("[AVP-DISPLAY] display criteria applied early at SPS (\(signature))")
+        }
         debugLog("[AVP-DISPLAY] display criteria set: \(width)x\(height) " +
                  "\(is10Bit ? "bt.2020/PQ" : "SDR") @ \(String(format: "%.2f", fps))Hz " +
                  "(matchingEnabled=\(dm.isDisplayCriteriaMatchingEnabled))")
