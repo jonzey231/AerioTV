@@ -254,8 +254,9 @@ struct LiveTVSettingsView: View {
             //
             // Group Selection is the only row left, and it describes the
             // phone's header drawer vs pill row, so the whole section is
-            // phone only again and takes the row's name.
-            if UIDevice.current.userInterfaceIdiom == .phone {
+            // phone only again and takes the row's name. iPad shares the
+            // phone's bottom-bar layout and drawer (Logan 2026-10-04).
+            if usesPhoneLiveTVLayout {
                 Section {
                     SettingsChoicePicker(
                         "Group Selection",

@@ -379,8 +379,9 @@ struct ChannelListView: View {
         #else
         // Phone (Logan 2026-09-05): its own Group Selection setting, sidebar
         // by default (the pill row is crowded on a phone); the Apple TV
-        // keeps its own choice.
-        return UIDevice.current.userInterfaceIdiom == .phone && phoneGroupSelector != "pills"
+        // keeps its own choice. iPad shares the phone's bottom-bar layout
+        // (Logan 2026-10-04), so it shares the setting and the drawer too.
+        return usesPhoneLiveTVLayout && phoneGroupSelector != "pills"
         #endif
     }
 
@@ -946,7 +947,11 @@ struct ChannelListView: View {
     }
 
     #if os(iOS)
-    private var isPhoneIdiom: Bool { UIDevice.current.userInterfaceIdiom == .phone }
+    /// Phone Live TV chrome (header row, group drawer, no navigation bar,
+    /// collapse on scroll). iPad runs the same bottom-bar layout since
+    /// 2026-10-04, so it takes this chrome too; physical-size choices
+    /// (row heights, grids, sheets vs popovers) still read the real idiom.
+    private var isPhoneIdiom: Bool { usesPhoneLiveTVLayout }
     /// Header overflow (three-dot) state: see `phoneHeaderActions`.
     @State private var phoneHeaderActionsExpanded = false
 
@@ -1616,7 +1621,7 @@ struct ChannelListView: View {
             #if os(iOS)
             if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
                 && !compactChromeHidesFilterBar {
-                if UIDevice.current.userInterfaceIdiom != .phone {
+                if !usesPhoneLiveTVLayout {
                     groupFilterBar
                         .padding(.vertical, 10)
                 }
@@ -1994,7 +1999,7 @@ struct ChannelListView: View {
             .onScrollGeometryChange(for: CGFloat.self) { geo in
                 geo.contentOffset.y
             } action: { oldY, y in
-                guard UIDevice.current.userInterfaceIdiom == .phone else { return }
+                guard usesPhoneLiveTVLayout else { return }
                 // Writes land on the observable box, which only the two leaf
                 // views below observe: reading a property in THIS closure is
                 // not a body dependency, so the list is not invalidated.
@@ -2019,7 +2024,7 @@ struct ChannelListView: View {
                 }
             }
             .onScrollPhaseChange { _, phase in
-                guard UIDevice.current.userInterfaceIdiom == .phone else { return }
+                guard usesPhoneLiveTVLayout else { return }
                 switch phase {
                 case .decelerating, .animating:
                     chrome.isDecelerating = true
@@ -2119,7 +2124,7 @@ struct ChannelListView: View {
                 // search drawer that wouldn't actually hide. The
                 // TextField only renders when the toggle is on, so
                 // the chip row keeps its original height by default.
-                if UIDevice.current.userInterfaceIdiom == .pad {
+                if UIDevice.current.userInterfaceIdiom == .pad && !isPhoneIdiom {
                     // v1.6.23 (Codex UX P3): the search button used
                     // to clear `searchText` when the user collapsed
                     // the field, destroying their query along with
@@ -5543,7 +5548,7 @@ private struct PhoneChromeInset<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        if UIDevice.current.userInterfaceIdiom == .phone && !chrome.isCollapsed {
+        if usesPhoneLiveTVLayout && !chrome.isCollapsed {
             content()
         }
     }
@@ -5821,11 +5826,10 @@ private struct PerIdiomSearchableModifier: ViewModifier {
     let iPhoneDisplayMode: SearchFieldPlacement.NavigationBarDrawerDisplayMode
 
     func body(content: Content) -> some View {
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            // No-op on iPad — search is handled inline in the chip
-            // row via a magnifier button + TextField, which gives
-            // us a clean show/hide that the system's `.searchable`
-            // placement wouldn't honor.
+        if !usesPhoneLiveTVLayout {
+            // No-op off the phone layout. iPhone and iPad (since
+            // 2026-10-04) present the system field from the header's
+            // search circle through `presented`.
             content
         } else {
             content.searchable(
@@ -5907,6 +5911,8 @@ private enum PhoneDrawerMetrics {
     static let minWidth: CGFloat = 200
     /// Fraction of the screen the drawer may never exceed.
     static let maxScreenFraction: CGFloat = 0.85
+    /// iPad ceiling: the drawer never spans the tablet's width.
+    static let padMaxWidth: CGFloat = 360
 
     /// Everything a row reserves horizontally OUTSIDE the label text:
     /// list row insets, the gap before the pin, the pin square and the
@@ -5975,7 +5981,10 @@ func phoneGroupDrawerFittedWidth(tokens: [String],
     }
     let header = phoneDrawerHeaderWidth(scale: scale)
     let screenW = UIScreen.main.bounds.width
-    let ceiling = (screenW > 0 ? screenW : 390) * M.maxScreenFraction
+    // iPad (Logan 2026-10-04): the phone's fraction would span most of a
+    // tablet, so the drawer is capped at the same 360 pt as Android tablets.
+    var ceiling = (screenW > 0 ? screenW : 390) * M.maxScreenFraction
+    if UIDevice.current.userInterfaceIdiom == .pad { ceiling = min(ceiling, M.padMaxWidth) }
     let floor = max(M.minWidth, header)
     let final = min(max(widestRow, floor), max(floor, ceiling))
     let clamped = widestRow > ceiling ? "ceiling" : (widestRow < floor ? "floor" : "none")
@@ -6156,6 +6165,14 @@ private struct PhoneGroupDrawerRow: View {
 /// Phone Group Selection: "sidebar" (default) or "pills". Separate from the
 /// Apple TV's `useGroupSidebar` so each device keeps its own choice.
 let phoneGroupSelectorKey = "phoneGroupSelector"
+
+/// iPhone and iPad share the bottom-bar Live TV layout (Logan 2026-10-04):
+/// header row, group drawer, Group Selection setting, collapse on scroll.
+/// The iPad app on a Mac reports .pad and follows the iPad.
+var usesPhoneLiveTVLayout: Bool {
+    let idiom = UIDevice.current.userInterfaceIdiom
+    return idiom == .phone || idiom == .pad
+}
 #endif
 
 /// KEPT badge (Logan 2026-10-04): the channel is held open by "Keep Recent

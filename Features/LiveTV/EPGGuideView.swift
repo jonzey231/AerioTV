@@ -5715,7 +5715,7 @@ struct EPGGuideView: View {
                 .onScrollGeometryChange(for: CGFloat.self) { scrollGeo in
                     scrollGeo.contentOffset.y
                 } action: { oldY, y in
-                    guard UIDevice.current.userInterfaceIdiom == .phone else { return }
+                    guard usesPhoneLiveTVLayout else { return }
                     if let hidden = tabBarTracker.update(oldY: oldY, newY: y,
                                                          hidden: guideTabBarHidden) {
                         withAnimation(.easeInOut(duration: 0.2)) {
