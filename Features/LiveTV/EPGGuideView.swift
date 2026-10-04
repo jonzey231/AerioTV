@@ -8053,8 +8053,18 @@ private struct GuideChannelButton: View {
         // The favorite star is drawn by ChannelBadge in the LEADING column
         // now, not as a top-trailing overlay.
         channelLabel
+            .overlay(alignment: .bottomTrailing) {
+                KeptChannelBadge(channelID: channel.id)
+                    .padding(.trailing, 6)
+                    .padding(.bottom, 4)
+            }
         #else
         channelLabel
+            .overlay(alignment: .bottomTrailing) {
+                KeptChannelBadge(channelID: channel.id)
+                    .padding(.trailing, 3)
+                    .padding(.bottom, 2)
+            }
             .contentShape(Rectangle())
             .onTapGesture { onSelect(channel) }
             .overlay(alignment: .topTrailing) {

@@ -4123,7 +4123,7 @@ struct RemoteSessionCard: View {
     private static let hairline = Color.white.opacity(0.10)
 
     @ViewBuilder
-    private static var cardSurface: some View {
+    static var cardSurface: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         Group {
             if #available(iOS 26.0, *) {
@@ -4142,6 +4142,105 @@ struct RemoteSessionCard: View {
         .shadow(color: .black.opacity(0.25), radius: 10, y: 3)
     }
 
+}
+
+/// Kept Live card (Logan 2026-10-04): channels flipped away from that
+/// "Keep Recent Channels Live" is still ingesting. Same surface, margins and
+/// dock as RemoteSessionCard. One channel: logo, "Keeping <name> live",
+/// Stop. More: a header with Stop All and one row per channel, each with its
+/// own Stop. Tapping a channel tunes it (adopts the retained remuxer).
+struct KeptLiveCard: View {
+    let channels: [KeptLiveChannels.Channel]
+    let onTune: (KeptLiveChannels.Channel) -> Void
+    let onStop: (KeptLiveChannels.Channel) -> Void
+    let onStopAll: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if channels.count > 1 {
+                HStack(spacing: 12) {
+                    Image(systemName: "rectangle.stack.badge.play")
+                        .font(.system(size: 18))  // glyph in a fixed box: not text, stays fixed
+                        .foregroundStyle(ThemeManager.shared.accent)
+                        .frame(width: 44)
+                    Text("Keeping \(channels.count) channels live")
+                        .scaledFont(.subheadline.weight(.bold))
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    stopButton("Stop All", label: "Stop all kept channels", action: onStopAll)
+                }
+                ForEach(channels) { ch in
+                    row(ch, title: ch.name)
+                }
+            } else if let ch = channels.first {
+                row(ch, title: "Keeping \(ch.name) live")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background { RemoteSessionCard.cardSurface }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(.horizontal, 16)
+        .onAppear { debugLog("[AVP-RETAIN] kept card show (\(channels.count))") }
+        .onDisappear { debugLog("[AVP-RETAIN] kept card hide") }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func row(_ ch: KeptLiveChannels.Channel, title: String) -> some View {
+        HStack(spacing: 12) {
+            Button { onTune(ch) } label: {
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.black.opacity(0.25))
+                        if let url = ch.logoURL {
+                            AsyncImage(url: url) { image in
+                                image.resizable().scaledToFit()
+                            } placeholder: {
+                                Image(systemName: "tv")
+                                    .font(.system(size: 18))  // glyph in a fixed box: not text, stays fixed
+                                    .foregroundStyle(ThemeManager.shared.accent)
+                            }
+                            .frame(width: 38, height: 38)
+                        } else {
+                            Image(systemName: "tv")
+                                .font(.system(size: 18))  // glyph in a fixed box: not text, stays fixed
+                                .foregroundStyle(ThemeManager.shared.accent)
+                        }
+                    }
+                    .frame(width: 44, height: 44)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(title)
+                            .scaledFont(.subheadline.weight(.bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Text("Kept live since \(ch.since.formatted(date: .omitted, time: .shortened))")
+                            .scaledFont(.caption)
+                            .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Watch \(ch.name)")
+            stopButton("Stop", label: "Stop keeping \(ch.name) live") { onStop(ch) }
+        }
+    }
+
+    private func stopButton(_ title: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .scaledFont(.subheadline.weight(.semibold))
+                .foregroundStyle(ThemeManager.shared.accent)
+                .padding(.horizontal, 10)
+                .frame(minHeight: 40)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
 }
 
 #endif

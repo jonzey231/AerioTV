@@ -4553,6 +4553,8 @@ struct MainTabView: View {
     /// Channel-retention status circle (tvOS): observed so the count
     /// circle appears/disappears live as channels are kept or dropped.
     @ObservedObject private var retention = LiveChannelRetention.shared
+    /// Kept Live card (iOS) and card (tvOS): the UI view of the retained set.
+    @ObservedObject private var kept = KeptLiveChannels.shared
     #if os(tvOS)
     /// Bottom edge of the Channel Preview banner's art slot: the corner mini
     /// player's bottom is locked to it while the banner is shown.
@@ -5620,7 +5622,7 @@ struct MainTabView: View {
                     }
                     }
                     .confirmationDialog(
-                        "Channels Live in Background",
+                        "Kept Live",
                         isPresented: $retentionListPresented,
                         titleVisibility: .visible
                     ) {
@@ -5637,7 +5639,7 @@ struct MainTabView: View {
                             }
                         }
                         Button("Stop All", role: .destructive) {
-                            LiveChannelRetention.shared.stopAll(reason: "user (status circle)")
+                            LiveChannelRetention.shared.releaseAllByUser()
                         }
                         Button("Close", role: .cancel) {}
                     } message: {
@@ -5683,9 +5685,13 @@ struct MainTabView: View {
                             DebugLogger.shared.log(
                                 "[AVP-RETAIN] status circle: cancel retained channel",
                                 category: "Playback", level: .info)
-                            LiveChannelRetention.shared.drop(key: key)
+                            if let id = retention.entries.first(where: { $0.key == key })?.channelID {
+                                LiveChannelRetention.shared.releaseByUser(channelID: id)
+                            } else {
+                                LiveChannelRetention.shared.drop(key: key)
+                            }
                         } label: {
-                            Label("Stop Playback", systemImage: "xmark.circle")
+                            Label("Stop", systemImage: "xmark.circle")
                         }
 
                     }
@@ -5710,6 +5716,19 @@ struct MainTabView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
                 .zIndex(2)
+            }
+            // Kept Live card (Logan 2026-10-04), tvOS: display only, never
+            // focusable, so it cannot take focus from the guide or arm the
+            // chrome focus holds. Stop and Stop All live behind the kept
+            // count circle beside the tab bar and in the player's Options.
+            if !kept.channels.isEmpty, selectedTab != .settings, !isVODDetailPushed,
+               !nowPlaying.isActive || nowPlaying.isMinimized {
+                TVKeptLiveCard(channels: kept.channels)
+                    .allowsHitTesting(false)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .padding(.leading, 60)
+                    .padding(.bottom, 40)
+                    .zIndex(2)
             }
             #endif
 
@@ -6042,7 +6061,15 @@ struct MainTabView: View {
         // 12 pt in from both screen edges, and publishes its height so the tabs
         // can scroll their last row clear of it.
         .overlay(alignment: .bottom) {
-            RemoteSessionCardDock { remoteSessionCard }
+            // Kept Live card (Logan 2026-10-04) stacks above the remote
+            // session card in the same dock, so both clear the bar, the
+            // collapsed bar and the detail-page hide the same way.
+            RemoteSessionCardDock {
+                VStack(spacing: RemoteSessionCardMetrics.gap) {
+                    keptLiveCard
+                    remoteSessionCard
+                }
+            }
         }
         // Task #225 follow-up: the global pill used to open the companion-ONLY
         // CompanionPickerSheet, which has no Google Cast section and never
@@ -6177,6 +6204,25 @@ struct MainTabView: View {
     private var airPlayIsProbing: Bool {
         if case .probing = airPlay.phase { return true }
         return false
+    }
+
+    /// Kept Live card: only while a channel is kept and the player is not
+    /// fullscreen (the player's Options carry the same rows then).
+    @ViewBuilder
+    private var keptLiveCard: some View {
+        let playerFullscreen = !nowPlaying.isMinimized
+            && (nowPlaying.playingItem != nil || playerSession.mode != .idle)
+        if !kept.channels.isEmpty, !playerFullscreen {
+            KeptLiveCard(
+                channels: kept.channels,
+                onTune: { ch in
+                    selectedTab = .liveTV
+                    KeptLiveChannels.shared.tune(ch)
+                },
+                onStop: { ch in LiveChannelRetention.shared.releaseByUser(channelID: ch.id) },
+                onStopAll: { LiveChannelRetention.shared.releaseAllByUser() }
+            )
+        }
     }
 
     @ViewBuilder
@@ -9397,3 +9443,55 @@ struct MiniPlayerSettingsStash: ViewModifier {
             }
     }
 }
+
+#if os(tvOS)
+/// Kept Live card on tvOS (Logan 2026-10-04): what "Keep Recent Channels
+/// Live" is holding open. Display only: the guide keeps focus. One line per
+/// channel with its logo; Stop is behind the kept count circle beside the
+/// tab bar and in the player's Options.
+struct TVKeptLiveCard: View {
+    let channels: [KeptLiveChannels.Channel]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(channels) { ch in
+                HStack(spacing: 14) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.black.opacity(0.25))
+                        if let url = ch.logoURL {
+                            AsyncImage(url: url) { image in
+                                image.resizable().scaledToFit()
+                            } placeholder: {
+                                Image(systemName: "tv").foregroundStyle(ThemeManager.shared.accent)
+                            }
+                            .frame(width: 46, height: 46)
+                        } else {
+                            Image(systemName: "tv").foregroundStyle(ThemeManager.shared.accent)
+                        }
+                    }
+                    .frame(width: 54, height: 54)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Keeping \(ch.name) live")
+                            .scaledFont(.system(size: 24, weight: .bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Text("Kept live since \(ch.since.formatted(date: .omitted, time: .shortened))")
+                            .scaledFont(.system(size: 20))
+                            .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))
+                            .lineLimit(1)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .frame(maxWidth: 620, alignment: .leading)
+        .background(Color.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(Color.white.opacity(0.10), lineWidth: 1))
+        .focusable(false)
+        .accessibilityElement(children: .combine)
+    }
+}
+#endif

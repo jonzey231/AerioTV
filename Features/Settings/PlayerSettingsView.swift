@@ -256,7 +256,7 @@ struct PlayerSettingsView: View {
                                      summary: liveRewindSummary,
                                      icon: "gobackward.30",
                                      iconColor: theme.accent,
-                                     footer: "How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. Keeping recent channels live holds an extra stream connection per channel; opening a channel beyond the limit drops the oldest.") {
+                                     footer: "How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. Keeping recent channels live holds an extra stream connection per channel; opening a channel beyond the limit drops the oldest. Kept channels keep one connection to your server open until you stop them.") {
                         SettingsChoicePicker(
                             "Rewind Up To",
                             options: rewindDepthOptions,
@@ -610,7 +610,7 @@ struct PlayerSettingsView: View {
                                     segmentLabel: { "\($0)" }
                                 )
                             }
-                            tvFooter("Each kept channel holds an extra stream connection and uses bandwidth while it runs. Opening a channel beyond the limit drops the oldest.")
+                            tvFooter("Each kept channel holds an extra stream connection and uses bandwidth while it runs. Opening a channel beyond the limit drops the oldest. Kept channels keep one connection to your server open until you stop them.")
                         }
                     }
                 }

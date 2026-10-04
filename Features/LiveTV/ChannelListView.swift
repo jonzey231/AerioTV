@@ -3786,6 +3786,7 @@ struct ChannelRow: View {
                             .scaledFont(.system(size: (isWide ? 12 : 10) * s, weight: .semibold))
                             .foregroundColor(Color.contrastText(.textTertiary))
                     }
+                    KeptChannelBadge(channelID: item.id, compact: !isWide)
                 }
 
                 if let prog = liveProgram {
@@ -6156,3 +6157,21 @@ private struct PhoneGroupDrawerRow: View {
 /// Apple TV's `useGroupSidebar` so each device keeps its own choice.
 let phoneGroupSelectorKey = "phoneGroupSelector"
 #endif
+
+/// KEPT badge (Logan 2026-10-04): the channel is held open by "Keep Recent
+/// Channels Live". Same pill as the program badges (LIVE, NEW), in the app
+/// accent. Observes only the kept set, so it comes and goes with it.
+struct KeptChannelBadge: View {
+    let channelID: String
+    var compact: Bool = true
+    @ObservedObject private var kept = KeptLiveChannels.shared
+    @ObservedObject private var theme: ThemeManager = .shared
+
+    var body: some View {
+        if kept.ids.contains(channelID) {
+            EPGFlagBadge(flag: EPGFlag(label: "KEPT", color: theme.accent), compact: compact)
+                .accessibilityLabel("Kept live")
+                .allowsHitTesting(false)
+        }
+    }
+}

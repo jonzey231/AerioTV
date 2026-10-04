@@ -3838,6 +3838,42 @@ private struct PlayerRootView: View {
     #endif
 }
 
+/// Kept Live rows for the player's Options menu: one submenu per kept
+/// channel (Watch, Stop) plus Stop All when more than one is kept.
+struct KeptLiveMenuSection: View {
+    @ObservedObject private var kept = KeptLiveChannels.shared
+
+    var body: some View {
+        if !kept.channels.isEmpty {
+            Section("Kept Live") {
+                ForEach(kept.channels) { ch in
+                    Menu {
+                        Button {
+                            KeptLiveChannels.shared.tune(ch)
+                        } label: {
+                            Label("Watch \(ch.name)", systemImage: "play.tv")
+                        }
+                        Button(role: .destructive) {
+                            LiveChannelRetention.shared.releaseByUser(channelID: ch.id)
+                        } label: {
+                            Label("Stop", systemImage: "xmark.circle")
+                        }
+                    } label: {
+                        Label(ch.name, systemImage: "rectangle.stack.badge.play")
+                    }
+                }
+                if kept.channels.count > 1 {
+                    Button(role: .destructive) {
+                        LiveChannelRetention.shared.releaseAllByUser()
+                    } label: {
+                        Label("Stop All", systemImage: "xmark.circle")
+                    }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Player Overflow Menu (isolated from rapid progress updates)
 
 /// Extracted into its own Equatable view so that high-frequency
@@ -4129,6 +4165,11 @@ struct PlayerOverflowMenu: View, Equatable {
                     }
                 }
 
+                // Kept Live (Logan 2026-10-04): the Kept Live card's rows
+                // while the player is fullscreen. Its own observer, so the
+                // Equatable menu does not need the set as an input.
+                KeptLiveMenuSection()
+
                 // Stream info (toggle)
                 Button {
                     toggleStreamInfo?()
@@ -4248,6 +4289,8 @@ struct TVPlayerOptionsPanel: View {
     /// need, and gives us a sane "first pill focused on appear"
     /// behavior via `firstFocusableID`.
     @FocusState private var focusedID: String?
+    /// Kept Live rows (Logan 2026-10-04): the card's rows while fullscreen.
+    @ObservedObject private var kept = KeptLiveChannels.shared
 
     var body: some View {
         ScrollView {
@@ -4259,6 +4302,7 @@ struct TVPlayerOptionsPanel: View {
                 subtitleSection
                 if !isLive { speedSection }
                 sleepTimerSection
+                if !kept.channels.isEmpty { keptLiveSection }
                 if isLive, onEnterMultiview != nil {
                     multiviewSection
                 }
@@ -4397,6 +4441,26 @@ struct TVPlayerOptionsPanel: View {
                     isSelected: selected
                 ) {
                     setSpeed?(spd); onDismiss?()
+                }
+            }
+        }
+    }
+
+    /// Kept Live: select a channel to watch it, Stop to release it.
+    @ViewBuilder private var keptLiveSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("Kept Live")
+            ForEach(kept.channels) { ch in
+                optionPill(id: "kept-\(ch.id)", text: ch.name, isSelected: false) {
+                    KeptLiveChannels.shared.tune(ch); onDismiss?()
+                }
+                optionPill(id: "kept-stop-\(ch.id)", text: "Stop \(ch.name)", isSelected: false) {
+                    LiveChannelRetention.shared.releaseByUser(channelID: ch.id)
+                }
+            }
+            if kept.channels.count > 1 {
+                optionPill(id: "kept-stop-all", text: "Stop All", isSelected: false) {
+                    LiveChannelRetention.shared.releaseAllByUser()
                 }
             }
         }

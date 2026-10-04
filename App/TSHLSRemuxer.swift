@@ -3810,8 +3810,15 @@ final class LiveChannelRetention: ObservableObject {
         let localURL: URL          // loopback playlist URL (already READY)
         var lastActiveAt: Date
         var videoParams: (width: Int, height: Int, fps: Double, tenBit: Bool)?
+        /// When the channel went into the background (card "since" line).
+        var retainedAt: Date = Date()
     }
-    @Published private(set) var entries: [Entry] = []
+    @Published private(set) var entries: [Entry] = [] {
+        // The UI's view of the set (card, Kept Live rows, KEPT badges)
+        // lives in KeptLiveChannels and is written only on a real change:
+        // videoParams updates rewrite `entries` without changing it.
+        didSet { KeptLiveChannels.shared.sync(from: entries) }
+    }
 
     private init() {
         NotificationCenter.default.addObserver(
@@ -3926,6 +3933,26 @@ final class LiveChannelRetention: ObservableObject {
         }
     }
 
+    /// The user's Stop on the Kept Live card, Options rows or the tvOS
+    /// status circle. Same release path as the server-ended case.
+    func releaseByUser(channelID: String) {
+        guard let e = entries.first(where: { $0.channelID == channelID }) else { return }
+        DebugLogger.shared.log(
+            "[AVP-RETAIN] released by user '\(e.channelName)'",
+            category: "Playback", level: .info)
+        drop(key: e.key)
+    }
+
+    /// Stop All on the Kept Live card or Options rows.
+    func releaseAllByUser() {
+        for e in entries {
+            DebugLogger.shared.log(
+                "[AVP-RETAIN] released by user '\(e.channelName)'",
+                category: "Playback", level: .info)
+        }
+        stopAll(reason: "user (Stop All)")
+    }
+
     func drop(key: String) {
         guard let idx = entries.firstIndex(where: { $0.key == key }) else { return }
         entries[idx].remuxer.stop()
@@ -3943,6 +3970,51 @@ final class LiveChannelRetention: ObservableObject {
             LiveUpstreamReleases.note($0.key)
         }
         entries.removeAll()
+    }
+}
+
+/// What the UI shows of the retained set: the Kept Live card above the tab
+/// bar, the player's Kept Live options and the KEPT badges in the guide and
+/// the channel list. Separate from LiveChannelRetention so the badges do not
+/// re-render on its other publishes, and written only when the set changes
+/// (an equal-value @Published write still re-renders every observer).
+@MainActor
+final class KeptLiveChannels: ObservableObject {
+    static let shared = KeptLiveChannels()
+
+    struct Channel: Equatable, Identifiable {
+        let id: String          // guide channel id
+        let name: String
+        let logoURL: URL?
+        let since: Date
+    }
+
+    @Published private(set) var channels: [Channel] = []
+    @Published private(set) var ids: Set<String> = []
+
+    private init() {}
+
+    func sync(from entries: [LiveChannelRetention.Entry]) {
+        let next: [Channel] = entries.map { e in
+            // Reuse the logo already resolved for a channel that stays.
+            let logo = channels.first(where: { $0.id == e.channelID })?.logoURL
+                ?? ChannelStore.shared.channels.first(where: { $0.id == e.channelID })?.logoURL
+            return Channel(id: e.channelID, name: e.channelName, logoURL: logo, since: e.retainedAt)
+        }
+        if next != channels { channels = next }
+        let nextIDs = Set(next.map(\.id))
+        if nextIDs != ids { ids = nextIDs }
+    }
+
+    /// Tune a kept channel: the same path as a re-tune, so the tile adopts
+    /// the running remuxer with its window intact.
+    func tune(_ channel: Channel) {
+        DebugLogger.shared.log(
+            "[AVP-RETAIN] tune from Kept Live '\(channel.name)'",
+            category: "Playback", level: .info)
+        NotificationCenter.default.post(
+            name: .aerioOpenChannel, object: nil,
+            userInfo: ["channelID": channel.id])
     }
 }
 
