@@ -80,6 +80,8 @@ final class AirPlayTileDelivery {
     /// The resolved receiver for this session (nil until resolved).
     private var receiver: AirPlayReceiver?
     private var lanEndpoint: (ip: String, port: UInt16)?
+    /// The receiver's `/live.m3u8` (set with `lanEndpoint`).
+    private var lanURL: URL?
     private var keepaliveHeld = false
     private var externalObservation: NSKeyValueObservation?
     private var lanItemStatusObservation: NSKeyValueObservation?
@@ -281,6 +283,10 @@ final class AirPlayTileDelivery {
                         debugLog("[AVP-AIRPLAY] tile \(self.channelName): external playback off but the receiver is still fetching; holding")
                     }
                 }
+                // The receiver cannot fetch while this phone's own link is
+                // down: silence during an ingest retry is not a release
+                // (the hard cap still applies).
+                if self.ingestRetry != nil { silentSince = now }
                 let off = now.timeIntervalSince(offSince)
                 let silent = now.timeIntervalSince(silentSince)
                 if silent >= Self.receiverReleaseGrace {
@@ -560,6 +566,7 @@ final class AirPlayTileDelivery {
             await waitForPublishedSegments(remuxer: remuxer, timeout: readyTimeout, token: myToken)
             guard token == myToken else { return .unavailable }
             guard let url = URL(string: "http://\(ip):\(port)/live.m3u8") else { return .unavailable }
+            lanURL = url
             return .ready(url)
         case .noAddress:
             return .noAddress
@@ -946,6 +953,16 @@ final class AirPlayTileDelivery {
             parkLastSegmentAt = Date()
             return false
         }
+        // An ingest retry is pending and the reserve still holds segments:
+        // the receiver going quiet is the same outage, not a parked
+        // receiver. The clock restarts; the retry budget decides the end.
+        if ingestRetry != nil {
+            if Date().timeIntervalSince(parkLastSegmentAt) >= Self.parkTimeout {
+                debugLog("[AVP-AIRPLAY] park deferred: retry pending (no segment fetched in \(Int(Self.parkTimeout)) s, reserve=\(st.reservoirSegments) segs/\(String(format: "%.1f", st.reservoirSeconds)) s)")
+                parkLastSegmentAt = Date()
+            }
+            return false
+        }
         guard st.servedPlaylistRequests > parkBaselinePlaylists,
               Date().timeIntervalSince(parkLastSegmentAt) >= Self.parkTimeout else { return false }
         endReceiverSession("receiver parked: playlist fetched, no segment in \(Int(Self.parkTimeout)) s with \(st.reservoirSegments) segs available")
@@ -967,6 +984,8 @@ final class AirPlayTileDelivery {
         linkTicks += 1
         checkFlipCrossed(st)
         checkSpliceSeek()
+        checkIngestRetry(st)
+        guard state == .serving else { return }
         if checkParked(st) { return }
         guard linkTicks % 10 == 0 else { return }
         let samples = linkIngestKbps
@@ -1048,8 +1067,10 @@ final class AirPlayTileDelivery {
     }
 
     private func teardownLAN() {
+        cancelIngestRetry()
         remuxer?.stopLANDelivery()
         lanEndpoint = nil
+        lanURL = nil
     }
 
     /// Channel flip under AirPlay (device log 2026-09-25 16:28:17 / 16:28:27):
@@ -1122,6 +1143,197 @@ final class AirPlayTileDelivery {
         leaveServing(holdForFlip: wasServing && logEnd)
         if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
         routeObserver = nil
+    }
+
+    // MARK: Ingest retry in place (device log 2026-10-04 16:09:45)
+
+    /// A 4 s Wi-Fi blip killed the ingest while the app was backgrounded
+    /// and serving an LG TV; the tile deferred to a foreground rebuild,
+    /// nothing reconnected, and the parked watchdog ended the session 8 s
+    /// later with 9 segments (19.1 s) still in the reserve. While a
+    /// receiver is served, a dead ingest is reconnected in place on the
+    /// same remuxer (TSHLSRemuxer.reconnectIngestInPlace): immediately,
+    /// then on `ingestRetryBackoff`, and at once whenever the path comes
+    /// back on Wi-Fi or wired, for `ingestRetryBudget(reserve:)`.
+    private struct IngestRetry {
+        let startedAt: Date
+        let deadline: Date
+        var attempts = 0
+        var lastAttemptAt: Date?
+        /// Ingest byte counter when the last attempt started; any change
+        /// afterwards means the new connection delivers.
+        var bytesAtAttempt: Int64 = 0
+        var scheduled: Task<Void, Never>?
+        var pathObserver: UUID?
+        var lastReissueAt: Date?
+        let backgrounded: Bool
+    }
+    private var ingestRetry: IngestRetry?
+
+    static let ingestRetryBackoff: [TimeInterval] = [1, 2, 4, 8]
+    static let ingestRetryMinBudget: TimeInterval = 60
+    /// The receiver's own tolerance once the reserve is spent: the parked
+    /// watchdog's timeout.
+    static func ingestRetryBudget(reserveSeconds: Double) -> TimeInterval {
+        max(ingestRetryMinBudget, reserveSeconds + parkTimeout)
+    }
+
+    /// Transport failures start a retry episode; HTTP answers do not (the
+    /// tile's 503 / 404 / connection-limit handling owns those). Inside an
+    /// episode any ingest failure but a 4xx keeps it going (the server can
+    /// answer 503 "channel is stopping" while it drops the old socket).
+    nonisolated static func ingestFailureStartsRetry(_ reason: String) -> Bool {
+        reason.hasPrefix("ingest failed:") && !reason.contains("HTTP ")
+    }
+    nonisolated static func ingestFailureContinuesRetry(_ reason: String) -> Bool {
+        reason.hasPrefix("ingest failed:") && !reason.contains("HTTP 4")
+    }
+
+    /// The tile's failure path. True when the failure was taken over here
+    /// (the tile does nothing else); false leaves the tile's own handling.
+    func retryIngestInPlace(reason: String, remuxer mux: TSHLSRemuxer, backgrounded: Bool) -> Bool {
+        guard state == .serving, mux === remuxer else { return false }
+        if var retry = ingestRetry {
+            guard Self.ingestFailureContinuesRetry(reason) else {
+                cancelIngestRetry()
+                return false
+            }
+            // The attempt in flight failed: next one on the backoff.
+            guard retry.scheduled == nil else { return true }
+            let step = max(0, retry.attempts - 1)
+            let delay = Self.ingestRetryBackoff[min(step, Self.ingestRetryBackoff.count - 1)]
+            if Date().addingTimeInterval(delay) > retry.deadline {
+                ingestRetryExhausted(reason)
+                return true
+            }
+            let myToken = token
+            retry.scheduled = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled, let self, self.token == myToken else { return }
+                self.ingestRetry?.scheduled = nil
+                self.attemptIngestReconnect(reason)
+            }
+            ingestRetry = retry
+            return true
+        }
+        guard Self.ingestFailureStartsRetry(reason), mux.supportsInPlaceReconnect else { return false }
+        let st = mux.lanLinkStats
+        let budget = Self.ingestRetryBudget(reserveSeconds: st.reservoirSeconds)
+        let now = Date()
+        var retry = IngestRetry(startedAt: now, deadline: now.addingTimeInterval(budget), backgrounded: backgrounded)
+        let myToken = token
+        retry.pathObserver = NetworkPathLog.shared.addObserver { [weak self] text in
+            guard text.contains("via wifi") || text.contains("via wired") else { return }
+            Task { @MainActor in
+                guard let self, self.token == myToken else { return }
+                self.ingestPathRestored(text)
+            }
+        }
+        ingestRetry = retry
+        debugLog(String(format: "[AVP-AIRPLAY] ingest down %@ (%@): reconnecting in place, budget %.0f s, reserve=%d segs/%.1f s, LAN listener and playlist kept",
+                        backgrounded ? "while backgrounded" : "while serving the receiver",
+                        reason, budget, st.reservoirSegments, st.reservoirSeconds))
+        attemptIngestReconnect(reason)
+        return true
+    }
+
+    private func attemptIngestReconnect(_ reason: String) {
+        guard state == .serving, var retry = ingestRetry, let remuxer else { return }
+        if Date() > retry.deadline {
+            ingestRetryExhausted(reason)
+            return
+        }
+        retry.scheduled?.cancel()
+        retry.scheduled = nil
+        retry.attempts += 1
+        retry.lastAttemptAt = Date()
+        let st = remuxer.lanLinkStats
+        retry.bytesAtAttempt = st.ingestBytes
+        ingestRetry = retry
+        debugLog("[AVP-AIRPLAY] ingest retry #\(retry.attempts) \(retry.backgrounded ? "while backgrounded" : "while serving") (\(reason)) reserve=\(st.reservoirSegments) segs")
+        let myToken = token
+        remuxer.reconnectIngestInPlace { [weak self] result in
+            guard let self, self.token == myToken, self.ingestRetry != nil else { return }
+            if case .refused(let why) = result {
+                self.ingestRetryExhausted("in-place reconnect refused: \(why)")
+            }
+        }
+    }
+
+    /// The path came back on Wi-Fi / wired: retry now instead of waiting
+    /// out the backoff (an attempt opened on the dead path may hang until
+    /// its request timeout).
+    private func ingestPathRestored(_ text: String) {
+        guard state == .serving, let retry = ingestRetry else { return }
+        if let last = retry.lastAttemptAt, Date().timeIntervalSince(last) < 0.5 { return }
+        debugLog("[AVP-AIRPLAY] ingest path restored (\(text)); retrying now")
+        reissueLANItemIfEmpty("path restored")
+        attemptIngestReconnect("path restored")
+    }
+
+    /// 1 s link tick: success once the new connection delivers bytes.
+    private func checkIngestRetry(_ st: TSHLSRemuxer.LANLinkStats) {
+        guard let retry = ingestRetry else { return }
+        if retry.lastAttemptAt != nil, st.ingestBytes != retry.bytesAtAttempt, st.ingestBytes > 0 {
+            debugLog(String(format: "[AVP-AIRPLAY] ingest retry succeeded after %.1f s (%d attempts, reserve=%d segs/%.1f s)",
+                            Date().timeIntervalSince(retry.startedAt), retry.attempts,
+                            st.reservoirSegments, st.reservoirSeconds))
+            cancelIngestRetry()
+            // The outage is over: the receiver gets a full park window
+            // from here.
+            parkLastSegmentAt = Date()
+            parkLastSegments = st.servedSegmentRequests
+            reissueLANItemIfEmpty("ingest recovered")
+            return
+        }
+        if Date() > retry.deadline, retry.scheduled == nil {
+            ingestRetryExhausted("no bytes from the reconnected ingest")
+            return
+        }
+        // The player lost its item during the outage (16:09:49.200
+        // waiting:noItemToPlay): hand the receiver the LAN URL again once
+        // the phone is back on the LAN, so it drains the reserve.
+        let path = NetworkPathLog.shared.current
+        if path.contains("via wifi") || path.contains("via wired") {
+            reissueLANItemIfEmpty("ingest retry pending")
+        }
+    }
+
+    /// Reissue the LAN item when the player has none (at most every 10 s).
+    private func reissueLANItemIfEmpty(_ why: String) {
+        guard state == .serving, let player, let url = lanURL else { return }
+        let empty = player.currentItem == nil
+            || (player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+                && player.reasonForWaitingToPlay == .noItemToPlay)
+        guard empty else { return }
+        let now = Date()
+        if let last = ingestRetry?.lastReissueAt ?? lastEmptyReissueAt,
+           now.timeIntervalSince(last) < 10 { return }
+        ingestRetry?.lastReissueAt = now
+        lastEmptyReissueAt = now
+        let item = AVPlayerItem(url: url)
+        item.automaticallyPreservesTimeOffsetFromLive = true
+        debugLog("[AVP-AIRPLAY] player has no item (\(AirPlayMonitor.playerStatusText(player))) during \(why); reissuing the LAN item \(url.absoluteString)")
+        player.replaceCurrentItem(with: item)
+        observeLANItem(item)
+        player.play()
+    }
+    private var lastEmptyReissueAt: Date?
+
+    private func ingestRetryExhausted(_ why: String) {
+        guard let retry = ingestRetry else { return }
+        let st = remuxer?.lanLinkStats
+        let elapsed = Date().timeIntervalSince(retry.startedAt)
+        cancelIngestRetry()
+        endReceiverSession(String(format: "ingest retry budget exhausted after %.0f s, %d attempts (%@), reserve=%d segs",
+                                  elapsed, retry.attempts, why, st?.reservoirSegments ?? 0))
+    }
+
+    private func cancelIngestRetry() {
+        guard let retry = ingestRetry else { return }
+        retry.scheduled?.cancel()
+        NetworkPathLog.shared.removeObserver(retry.pathObserver)
+        ingestRetry = nil
     }
 
     /// Plan section 6: the background-entry lines. Returns true when the

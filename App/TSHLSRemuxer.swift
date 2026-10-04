@@ -376,13 +376,49 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// flip-back settle for a channel this app released moments ago).
     func retarget(to url: URL, headers newHeaders: [String: String], delay: TimeInterval,
                   completion: @escaping @MainActor (RetargetResult) -> Void) {
+        retargetIngest(to: url, headers: newHeaders, delay: delay, reconnect: false, completion: completion)
+    }
+
+    /// Ingest reconnect in place (device log 2026-10-04 16:09:45): the
+    /// ingest of the SAME channel died (a Wi-Fi blip) while an AirPlay
+    /// receiver is served from this remuxer. Same mechanics as a channel
+    /// flip in place, on the same URL: the LAN listener, the segment ring
+    /// (the receiver's reserve), the sequence numbering and every playlist
+    /// URL stay up, and the new connection's first IDR+SPS opens a segment
+    /// tagged EXT-X-DISCONTINUITY. Allowed after an ingest error: the error
+    /// latch is cleared so a failure of the new connection reports again.
+    func reconnectIngestInPlace(completion: @escaping @MainActor (RetargetResult) -> Void) {
+        queue.async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async { MainActor.assumeIsolated { completion(.refused("remuxer gone")) } }
+                return
+            }
+            self.retargetIngest(to: self.sourceURL, headers: self.headers, delay: 0,
+                                reconnect: true, completion: completion)
+        }
+    }
+
+    /// The in-place reconnect is possible on this remuxer right now (live
+    /// TS arm, socket delivery, READY, not stopped). Blocks on `queue`
+    /// briefly.
+    var supportsInPlaceReconnect: Bool {
+        queue.sync {
+            connLock.lock(); let abandoned = stopRequested; connLock.unlock()
+            return !stopped && !abandoned && fmp4 == nil && !inProcessDelivery
+                && !eventPlaylist && !playlistComplete && readySignaled
+        }
+    }
+
+    private func retargetIngest(to url: URL, headers newHeaders: [String: String], delay: TimeInterval,
+                                reconnect: Bool,
+                                completion: @escaping @MainActor (RetargetResult) -> Void) {
         queue.async { [weak self] in
             func finish(_ r: RetargetResult) {
                 DispatchQueue.main.async { MainActor.assumeIsolated { completion(r) } }
             }
             guard let self else { finish(.refused("remuxer gone")); return }
             self.connLock.lock(); let abandoned = self.stopRequested; self.connLock.unlock()
-            if self.stopped || abandoned || self.errorSignaled { finish(.refused("pipeline stopped")); return }
+            if self.stopped || abandoned || (self.errorSignaled && !reconnect) { finish(.refused("pipeline stopped")); return }
             if self.fmp4 != nil { finish(.refused("HEVC fMP4 arm")); return }
             if self.inProcessDelivery { finish(.refused("in-process delivery")); return }
             if self.eventPlaylist || self.playlistComplete { finish(.refused("event playlist")); return }
@@ -413,7 +449,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             // Switch Stream change). Then the program is forgotten outright:
             // two channels behind one Dispatcharr often share PIDs and even
             // the PMT bytes, so change detection alone could miss the flip.
-            self.beginSourceSwitch(reason: "channel flip in place")
+            // A reconnect clears the error latch only once it is certain
+            // to start: a refused reconnect leaves the failed state as is.
+            if reconnect { self.errorSignaled = false }
+            self.beginSourceSwitch(reason: reconnect ? "ingest reconnect in place" : "channel flip in place")
             self.resetProgramState()
             self.pmtPID = -1
             self.patPacket = nil
@@ -426,7 +465,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             self.sourceURL = url
             self.headers = newHeaders
             DispatchQueue.main.async { RemuxMeasuredVideo.shared.reset() }
-            debugLog("[TS-REMUX] retarget: ingest moved to a new channel in place (gen \(generation), next seg \(firstSeq) opens it), listeners and playlist URLs kept\(delay > 0 ? String(format: ", opening after a %.1f s settle", delay) : "")")
+            debugLog("[TS-REMUX] retarget: \(reconnect ? "ingest reconnected to the same channel" : "ingest moved to a new channel") in place (gen \(generation), next seg \(firstSeq) opens it), listeners and playlist URLs kept\(delay > 0 ? String(format: ", opening after a %.1f s settle", delay) : "")")
             let epoch = self.currentIngestEpoch
             if delay > 0 {
                 self.queue.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -5214,6 +5253,19 @@ struct AVPlayerMultiviewTile: View {
         // suspended-adjacent (state .background with PiP inactive) - the
         // resume handler owns recovery, not the card.
         if backgroundSuspended { return }
+        // An AirPlay receiver is served from this tile's remuxer (device
+        // log 2026-10-04 16:09:45): a dead ingest is retried IN PLACE, in
+        // the background as in the foreground, so the LAN listener and the
+        // published playlist stay up and the receiver keeps draining its
+        // reserve. Deferring to a foreground rebuild (background) or the
+        // fresh-pipeline retry (foreground, stop() tears LAN delivery
+        // down) both ended the receiver's session.
+        if !isVOD, !isDVR, catchup == nil, let mux = remuxer,
+           airPlayDelivery.retryIngestInPlace(
+               reason: reason, remuxer: mux,
+               backgrounded: UIApplication.shared.applicationState == .background) {
+            return
+        }
         if UIApplication.shared.applicationState == .background,
            !progressStore.isPiPActive {
             debugLog("[AVP-MV] failure while backgrounded (\(reason)); deferring to foreground rebuild channel=\(channelName)")
