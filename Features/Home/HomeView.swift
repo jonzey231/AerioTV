@@ -4692,6 +4692,8 @@ struct MainTabView: View {
     /// Presents the "Control a TV" picker from the floating pill (no channel
     /// needs to be playing on the phone -- act as a pure remote).
     @State private var showCompanionPickerGlobal = false
+    /// iPhone: per-channel Kept Live list opened from the compact pill.
+    @State private var showKeptLiveList = false
     /// Rule 3: the remote-controls sheet the session card opens.
     @State private var showRemoteControls = false
     #endif
@@ -6017,7 +6019,11 @@ struct MainTabView: View {
                // set nowPlaying.playingItem, so the FAB floated over the
                // fullscreen player (field find 2026-08-26, "rogue cast
                // button"). Gate on the session mode too.
-               playerSession.mode == .idle || nowPlaying.isMinimized {
+               playerSession.mode == .idle || nowPlaying.isMinimized,
+               // While the Kept Live pill shows, the button rides on the
+               // pill's row in the dock instead (Logan 2026-10-04): here the
+               // pill drew over it at the same height.
+               !keptLiveCardVisible {
                 CompanionControlFABDock { showCompanionPickerGlobal = true }
             }
         }
@@ -6062,9 +6068,49 @@ struct MainTabView: View {
             // collapsed bar and the detail-page hide the same way.
             RemoteSessionCardDock {
                 VStack(spacing: RemoteSessionCardMetrics.gap) {
-                    keptLiveCard
-                    remoteSessionCard
+                    if PadTabPill.isActive {
+                        keptLiveCard
+                        remoteSessionCard
+                    } else {
+                        // iPhone (Logan 2026-10-04): the remote-session card
+                        // stays full width on top; below it ONE row with the
+                        // compact Kept Live pill leading and the Control-a-TV
+                        // button trailing.
+                        remoteSessionCard
+                        if keptLiveCardVisible {
+                            HStack(spacing: 12) {
+                                keptLiveCard
+                                if showsControlATVButton {
+                                    CompanionControlFAB { showCompanionPickerGlobal = true }
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                        }
+                    }
                 }
+            }
+        }
+        .sheet(isPresented: $showKeptLiveList) {
+            ScrollView {
+                KeptLiveCard(
+                    channels: kept.channels,
+                    onTune: { ch in
+                        showKeptLiveList = false
+                        selectedTab = .liveTV
+                        KeptLiveChannels.shared.tune(ch)
+                    },
+                    onStop: { ch in LiveChannelRetention.shared.releaseByUser(channelID: ch.id) },
+                    onStopAll: {
+                        showKeptLiveList = false
+                        LiveChannelRetention.shared.releaseAllByUser()
+                    }
+                )
+                .padding(.top, 20)
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .onChange(of: kept.channels.isEmpty) { _, empty in
+                if empty { showKeptLiveList = false }
             }
         }
         // Task #225 follow-up: the global pill used to open the companion-ONLY
@@ -6204,11 +6250,15 @@ struct MainTabView: View {
 
     /// Kept Live card: only while a channel is kept and the player is not
     /// fullscreen (the player's Options carry the same rows then).
-    @ViewBuilder
-    private var keptLiveCard: some View {
+    private var keptLiveCardVisible: Bool {
         let playerFullscreen = !nowPlaying.isMinimized
             && (nowPlaying.playingItem != nil || playerSession.mode != .idle)
-        if !kept.channels.isEmpty, !playerFullscreen {
+        return !kept.channels.isEmpty && !playerFullscreen
+    }
+
+    @ViewBuilder
+    private var keptLiveCard: some View {
+        if keptLiveCardVisible {
             KeptLiveCard(
                 channels: kept.channels,
                 onTune: { ch in
@@ -6216,7 +6266,9 @@ struct MainTabView: View {
                     KeptLiveChannels.shared.tune(ch)
                 },
                 onStop: { ch in LiveChannelRetention.shared.releaseByUser(channelID: ch.id) },
-                onStopAll: { LiveChannelRetention.shared.releaseAllByUser() }
+                onStopAll: { LiveChannelRetention.shared.releaseAllByUser() },
+                compact: !PadTabPill.isActive,
+                onShowList: { showKeptLiveList = true }
             )
         }
     }

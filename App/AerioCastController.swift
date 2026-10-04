@@ -4154,8 +4154,86 @@ struct KeptLiveCard: View {
     let onTune: (KeptLiveChannels.Channel) -> Void
     let onStop: (KeptLiveChannels.Channel) -> Void
     let onStopAll: () -> Void
+    /// iPhone (Logan 2026-10-04): one-line pill sharing a row with the
+    /// Control-a-TV button. Two or more channels show a count with Stop All;
+    /// tapping the text calls `onShowList` for the per-channel list.
+    var compact: Bool = false
+    var onShowList: () -> Void = {}
 
     var body: some View {
+        if compact { compactBody } else { fullBody }
+    }
+
+    private var compactBody: some View {
+        HStack(spacing: 10) {
+            if channels.count > 1 {
+                Button(action: onShowList) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "rectangle.stack.badge.play")
+                            .font(.system(size: 16))  // glyph in a fixed box: not text, stays fixed
+                            .foregroundStyle(ThemeManager.shared.accent)
+                            .frame(width: 32, height: 32)
+                        Text("Keeping \(channels.count) channels live")
+                            .scaledFont(.subheadline.weight(.bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Show kept channels")
+                stopButton("Stop All", label: "Stop all kept channels", action: onStopAll)
+            } else if let ch = channels.first {
+                Button { onTune(ch) } label: {
+                    HStack(spacing: 10) {
+                        logo(ch, box: 32, image: 28)
+                        Text("Keeping \(ch.name) live")
+                            .scaledFont(.subheadline.weight(.bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Watch \(ch.name)")
+                stopButton("Stop", label: "Stop keeping \(ch.name) live") { onStop(ch) }
+            }
+        }
+        .padding(.leading, 8)
+        .padding(.trailing, 4)
+        .frame(height: 48)
+        .background { RemoteSessionCard.cardSurface }
+        .clipShape(Capsule())
+        .onAppear { debugLog("[AVP-RETAIN] kept pill show (\(channels.count))") }
+        .onDisappear { debugLog("[AVP-RETAIN] kept pill hide") }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func logo(_ ch: KeptLiveChannels.Channel, box: CGFloat, image: CGFloat) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: box / 5.5, style: .continuous)
+                .fill(Color.black.opacity(0.25))
+            if let url = ch.logoURL {
+                AsyncImage(url: url) { image in
+                    image.resizable().scaledToFit()
+                } placeholder: {
+                    Image(systemName: "tv")
+                        .font(.system(size: 16))  // glyph in a fixed box: not text, stays fixed
+                        .foregroundStyle(ThemeManager.shared.accent)
+                }
+                .frame(width: image, height: image)
+            } else {
+                Image(systemName: "tv")
+                    .font(.system(size: 16))  // glyph in a fixed box: not text, stays fixed
+                    .foregroundStyle(ThemeManager.shared.accent)
+            }
+        }
+        .frame(width: box, height: box)
+    }
+
+    private var fullBody: some View {
         VStack(alignment: .leading, spacing: 8) {
             if channels.count > 1 {
                 HStack(spacing: 12) {
