@@ -390,6 +390,18 @@ struct ChannelListView: View {
     /// what decides the pills alone: gone in sidebar mode, where the sidebar IS
     /// the group selector, and gone when the playlist has nothing to filter by.
     /// Always true elsewhere -- iOS gates the whole row at its call sites.
+    /// tvOS: guide chrome (group pills, Channel Preview description, the
+    /// guide's corner clock) refuses focus while the guide reclaims it after
+    /// the player leaves fullscreen, so the refocus lands on the grid cell
+    /// without a detour. Same hold as the nav circles (eae211a).
+    private var guideChromeFocusHold: Bool {
+        #if os(tvOS)
+        return nowPlaying.guideRefocusPending
+        #else
+        return false
+        #endif
+    }
+
     private var showsGroupPills: Bool {
         #if os(tvOS)
         return (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
@@ -1311,6 +1323,7 @@ struct ChannelListView: View {
                                 .transaction { $0.animation = nil }
                                 .sheet(item: $bannerInfoTarget) { ProgramInfoView(target: $0) }
                                 .focusSection()
+                                .disabled(guideChromeFocusHold)
                                 // Edge to edge like the guide: the banner's own 40pt
                                 // margins, not 80 + 40. Pulled up under the tab bar
                                 // so eight rows still fit (Logan 2026-09-05).
@@ -1341,6 +1354,10 @@ struct ChannelListView: View {
                             groupFilterBar
                                 .padding(.vertical, previewMode ? 4 : 10)
                                 .focusSection()
+                                // Not focusable while the guide reclaims focus
+                                // after the player closes (pill style ignores
+                                // isEnabled, so no visual change).
+                                .disabled(guideChromeFocusHold)
                         }
                         #else
                         // Compact-chrome honors the user's hide-filter preference even
@@ -1361,6 +1378,7 @@ struct ChannelListView: View {
                                 startPlayback(item)
                             },
                             sidebarOpen: guideSidebarOpen,
+                            chromeFocusHold: guideChromeFocusHold,
                             onPreviewProgramChange: previewProgramHandler,
                             onRequestGroupSidebar: { programID in
                                 guideSidebarReturnProgramID = programID

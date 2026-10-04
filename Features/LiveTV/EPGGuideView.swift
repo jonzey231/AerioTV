@@ -5030,6 +5030,9 @@ final class GuideFocusScratch {
     /// A remapped short Left/Right action waiting out the hold threshold;
     /// cancelled when the same press turns into a hold.
     var pendingArrowAction: Task<Void, Never>?
+    /// tvOS boundary refocus: the focused programme last seen airing, so only
+    /// a cell that was live while focused is moved when it ends.
+    var boundaryLiveProgramID: String?
     /// When a remapped arrow's focus move was last vetoed before the engine
     /// applied it, and for which key; the onMoveCommand that follows the
     /// same press skips so the action runs once.
@@ -5127,6 +5130,12 @@ struct EPGGuideView: View {
     /// sidebar owns focus and Right can't escape into the guide (tvOS analog of
     /// Android's onPreviewKeyEvent-consumes-Right). Default false = no change.
     var sidebarOpen: Bool = false
+    /// tvOS: true while NowPlayingManager.guideRefocusPending is set (the
+    /// player just left fullscreen and the guide is reclaiming focus). The
+    /// corner clock refuses focus meanwhile, so tvOS cannot park focus on it
+    /// before the guide's refocus lands (PressCatcherView @0,378 240x50 in
+    /// the 2026-10-03 20:23 trace). Always false on iOS.
+    var chromeFocusHold: Bool = false
     /// Called with the focused now-airing program id when a short-Left on the
     /// now column should open the group sidebar (sidebar mode only).
     /// Optional programme id = the cell to restore focus to when the sidebar
@@ -6328,6 +6337,41 @@ struct EPGGuideView: View {
         let now = Date()
         return (progs.first { $0.start <= now && now < $0.end } ?? progs.first)?.id
     }
+
+    /// Boundary refocus (Logan 2026-10-03, Android TV parity): when the guide
+    /// is idle and the focused cell's program ends, move focus to the cell now
+    /// airing on the same row. Runs on the corner clock's tick. Only a cell
+    /// that was seen live while focused qualifies, so a past program the user
+    /// browsed to on purpose is never moved. Same row, so the vertical snap in
+    /// the focusedProgramID handler ignores it, and the timeline does not pan
+    /// (the new cell starts at the old end, which is now, already on screen).
+    private func boundaryRefocusTick(now: Date) {
+        guard let pid = focusedProgramID, let chID = channelID(ofProgram: pid),
+              let current = guideStore.programs[chID]?.first(where: { $0.id == pid }) else {
+            focusScratch.boundaryLiveProgramID = nil
+            return
+        }
+        if current.start <= now && now < current.end {
+            focusScratch.boundaryLiveProgramID = pid
+            return
+        }
+        guard focusScratch.boundaryLiveProgramID == pid, now >= current.end else { return }
+        // Idle only: no press in the last few seconds, grid holds focus, no
+        // sheet, sidebar, search or fullscreen player over the guide.
+        let nowPlaying = NowPlayingManager.shared
+        guard now.timeIntervalSince(TVFocusTracer.lastPressAt) >= 4,
+              !sidebarOpen, !showJumpSheet, !clockFocused,
+              !(nowPlaying.isActive && !nowPlaying.isMinimized),
+              PlayerSession.shared.nativeHLSItem == nil,
+              !TVSearchOverlayState.shared.isUp,
+              !TVFocusTracer.focusIsOnTabBar() else { return }
+        guard let target = programID(forChannel: chID, containing: now), target != pid else { return }
+        let toTitle = guideStore.programs[chID]?.first(where: { $0.id == target })?.title ?? "nil"
+        let rowName = channels.first(where: { $0.id == chID })?.name ?? chID
+        debugLog("[FOCUS] boundary refocus row=\(rowName) from=\(current.title) to=\(toTitle)")
+        focusScratch.boundaryLiveProgramID = target
+        focusedProgramID = target
+    }
     #endif
 
     // MARK: - Task #185: viewport-anchored focus (the "guide gets away" fix)
@@ -6990,7 +7034,12 @@ struct EPGGuideView: View {
                 // locale-aware format so it honors the device's
                 // 12 or 24-hour setting.
                 .overlay {
+                    #if os(tvOS)
+                    GuideCornerClock(fontSize: timeHeaderHeight / max(1, textScale) * 0.4, target: jumpTarget,
+                                     onTick: { boundaryRefocusTick(now: $0) })
+                    #else
                     GuideCornerClock(fontSize: timeHeaderHeight / max(1, textScale) * 0.4, target: jumpTarget)
+                    #endif
                 }
                 // Tap: back to now. Long press: jump to a day and time
                 // (Roman via Discord; Logan 2026-09-06).
@@ -6998,6 +7047,7 @@ struct EPGGuideView: View {
                 .overlay {
                     TVPressOverlay(minimumPressDuration: 0.45,
                                    isFocused: $clockFocused,
+                                   canFocus: !chromeFocusHold,
                                    onTap: { snapToNow() },
                                    onLongPress: { showJumpSheet = true })
                 }
@@ -7637,8 +7687,10 @@ private struct GuideCornerClock: View {
     let fontSize: CGFloat
     /// Jump target while the guide is away from now; drawn in the accent.
     var target: Date? = nil
+    /// tvOS: the guide's boundary refocus rides this tick (every 15 s).
+    var onTick: ((Date) -> Void)? = nil
     @State private var now = Date()
-    private let tick = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+    private let tick = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
     /// Re-render when the Time Format setting changes.
     @AppStorage(ClockFormat.defaultsKey) private var timeFormatMode = "system"
 
@@ -7657,7 +7709,11 @@ private struct GuideCornerClock: View {
         .lineLimit(1)
         .minimumScaleFactor(0.5)
         .padding(.horizontal, 4)
-        .onReceive(tick) { now = $0 }
+        .onReceive(tick) { date in
+            // Re-render only when the shown minute changes.
+            if Int(date.timeIntervalSince1970 / 60) != Int(now.timeIntervalSince1970 / 60) { now = date }
+            onTick?(date)
+        }
     }
 }
 
