@@ -5272,6 +5272,12 @@ struct EPGGuideView: View {
     /// reason.
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
+    /// Cheap identity of the visible channel set (count plus first and last
+    /// id) so a group change is seen without hashing every row.
+    private var channelSetKey: String {
+        "\(channels.count)|\(channels.first?.id ?? "")|\(channels.last?.id ?? "")"
+    }
+
     /// Channel rows back to the first channel, timeline untouched. The scroll
     /// trackers treat a jump this large as programmatic and never report it,
     /// so the tab bar is expanded here instead of waiting for the scroll.
@@ -5776,6 +5782,17 @@ struct EPGGuideView: View {
                     }
                 }
                 .scrollAwayTabBar(collapsed: guideTabBarHidden)
+                // iPad blank guide after a group pick (Logan 2026-10-04,
+                // ipad_nfl.log 20:12:17): the rows WERE rebuilt (GuideChannelRow
+                // bodies ran) but the vertical offset kept from the previous,
+                // longer group sat past the end of the new, shorter one, so
+                // the LazyVStack had no row inside the viewport (live rows 0)
+                // until another group reset it. A changed channel set now
+                // always lands the rows at the top.
+                .onChange(of: channelSetKey) { _, _ in
+                    debugLog("[GUIDE] channel set changed: rows=\(channels.count) first=\(channels.first?.name ?? "none")")
+                    scrollChannelRowsToTop(proxy)
+                }
                 #endif
             .clipped()
             #if os(iOS)

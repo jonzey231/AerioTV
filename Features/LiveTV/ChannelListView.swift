@@ -2084,6 +2084,13 @@ struct ChannelListView: View {
             // an opaque platter over the rows in the bar region (the actual
             // "dead band" - see aerioContentUnderTabBar).
             .aerioContentUnderTabBar()
+            // Group change (Logan 2026-10-04): same guard as the guide. An
+            // offset kept from a longer group can sit past the end of a
+            // shorter one and leave the LazyVStack with no row on screen.
+            .onChange(of: selectedGroup) { _, group in
+                debugLog("[GUIDE] list group -> \(group): rows=\(filteredChannels.count)")
+                listProxy.scrollTo("list.top", anchor: .top)
+            }
             // Tapping the Live TV tab while already on the list view: the
             // channel list animates back to the top and the floating bar
             // comes back (the trackers ignore a programmatic jump, so the

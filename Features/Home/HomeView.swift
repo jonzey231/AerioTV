@@ -9365,28 +9365,65 @@ final class RemoteSessionCardMetrics: ObservableObject {
     @Published private(set) var barTrailingInset: CGFloat = 0
 
     /// The iOS 26+ UITabBar spans the window; the visible glass capsule is
-    /// its widest subview narrower than the bar. Measured from layer position
-    /// and bounds (untransformed), and only while the bar is expanded, since
-    /// the collapse transform shrinks it.
+    /// a descendant narrower than the bar. 7982553 took the widest DIRECT
+    /// subview narrower than the bar, which on iPhone 17 Pro Max was a 274 pt
+    /// centered content view (lead=trail=83) instead of the ~398 pt capsule.
+    /// Now: walk every descendant (a few levels), keep views as tall as most
+    /// of the bar and at least 60 percent of its width but narrower than it,
+    /// and take the WIDEST. If nothing qualifies, fall back to the bar's
+    /// layout margins. Measured from layer position and bounds
+    /// (untransformed), only while expanded, and logged once per change.
+    private var loggedBarFrame: CGRect = .null
+
     private func measureBarInsets(_ bar: UITabBar, superview: UIView, window: UIWindow) {
         guard !TabBarCollapseState.shared.collapsed else { return }
         let width = bar.bounds.width
-        guard width > 0 else { return }
-        let platter = bar.subviews
-            .filter { !$0.isHidden && $0.bounds.width < width - 1 && $0.bounds.width > width * 0.6 }
-            .max { $0.bounds.width < $1.bounds.width }
-        guard let platter else { return }
-        let layer = bar.layer
-        let barOriginX = layer.position.x - layer.anchorPoint.x * width
-        let pLayer = platter.layer
-        let pMinX = pLayer.position.x - pLayer.anchorPoint.x * platter.bounds.width
-        let minX = superview.convert(CGPoint(x: barOriginX + pMinX, y: 0), to: window).x
-        let maxX = minX + platter.bounds.width
+        let height = bar.bounds.height
+        guard width > 0, height > 0 else { return }
+
+        // Candidate frames in the bar's own (untransformed) bounds space.
+        var best: (rect: CGRect, view: UIView)?
+        func walk(_ view: UIView, origin: CGPoint, depth: Int) {
+            for sub in view.subviews where !sub.isHidden && sub.alpha > 0.01 {
+                let l = sub.layer
+                let o = CGPoint(
+                    x: origin.x + l.position.x - l.anchorPoint.x * sub.bounds.width - view.bounds.origin.x,
+                    y: origin.y + l.position.y - l.anchorPoint.y * sub.bounds.height - view.bounds.origin.y)
+                let r = CGRect(origin: o, size: sub.bounds.size)
+                if r.width < width - 1, r.width >= width * 0.6, r.height >= 40 {
+                    if best == nil || r.width > best!.rect.width { best = (r, sub) }
+                }
+                if depth < 4 { walk(sub, origin: o, depth: depth + 1) }
+            }
+        }
+        walk(bar, origin: .zero, depth: 0)
+
+        let barLayer = bar.layer
+        let barOriginX = barLayer.position.x - barLayer.anchorPoint.x * width
+        let localMinX: CGFloat
+        let localWidth: CGFloat
+        let source: String
+        if let best {
+            localMinX = best.rect.minX
+            localWidth = best.rect.width
+            source = String(describing: type(of: best.view))
+        } else {
+            let m = bar.layoutMargins
+            localMinX = m.left
+            localWidth = width - m.left - m.right
+            source = "layoutMargins"
+        }
+        let minX = superview.convert(CGPoint(x: barOriginX + localMinX, y: 0), to: window).x
+        let maxX = minX + localWidth
         let lead = max(0, minX)
         let trail = max(0, window.bounds.width - maxX)
         if abs(lead - barLeadingInset) > 0.5 { barLeadingInset = lead }
         if abs(trail - barTrailingInset) > 0.5 { barTrailingInset = trail }
-        debugLog("[TABBAR] capsule insets lead=\(lead) trail=\(trail) width=\(platter.bounds.width)")
+        let chosen = CGRect(x: minX, y: 0, width: localWidth, height: height)
+        if chosen != loggedBarFrame {
+            loggedBarFrame = chosen
+            debugLog("[TABBAR] capsule frame x=\(minX) w=\(localWidth) barW=\(width) window=\(window.bounds.width) lead=\(lead) trail=\(trail) src=\(source)")
+        }
     }
 
     /// Bottom safe-area inset of the key window (home indicator).
