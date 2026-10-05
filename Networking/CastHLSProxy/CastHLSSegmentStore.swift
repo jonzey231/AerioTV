@@ -62,8 +62,9 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         let durationTicks: Int64
         let discontinuity: Bool
         /// The two renditions of the same cut, one sequence number. The
-        /// audio one is nil for a video-only mux.
-        let videoData: Data
+        /// audio one is nil for a video-only mux, the video one for an
+        /// audio-only program (GH #90).
+        let videoData: Data?
         let audioData: Data?
         /// The audio rendition's own EXTINF; within one audio frame of
         /// `durationTicks`.
@@ -78,6 +79,9 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     /// Init segments per generation, one per rendition.
     private var videoInits: [Int: Data] = [:]
     private var audioInits: [Int: Data] = [:]
+    /// Generations served audio-only (GH #90): no video init, no video
+    /// rendition, and the master advertises a single audio variant.
+    private var audioOnlyGenerations: Set<Int> = []
     private var nextSeq = 0
     private var generation = 0
     /// First segment committed after `beginGeneration` gets the
@@ -118,6 +122,7 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         ring.removeAll()
         videoInits.removeAll()
         audioInits.removeAll()
+        audioOnlyGenerations.removeAll()
         segmentsInGeneration = 0
         mediaTicksInGeneration = 0
         storeOpen = false
@@ -164,9 +169,17 @@ final class CastHLSSegmentStore: @unchecked Sendable {
 
     /// Init segments for `gen`. `audio` is nil for a video-only
     /// mux, in which case the demuxed master carries no audio rendition.
-    func setDemuxedInitSegments(generation gen: Int, video: Data, audio: Data?) {
+    /// `video` is nil for an audio-only program (GH #90), in which case
+    /// the master carries a single audio-only variant.
+    func setDemuxedInitSegments(generation gen: Int, video: Data?, audio: Data?) {
         condition.lock()
-        videoInits[gen] = video
+        if let video {
+            videoInits[gen] = video
+            audioOnlyGenerations.remove(gen)
+        } else {
+            videoInits.removeValue(forKey: gen)
+            audioOnlyGenerations.insert(gen)
+        }
         if let audio { audioInits[gen] = audio } else { audioInits.removeValue(forKey: gen) }
         condition.unlock()
     }
@@ -178,7 +191,7 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     /// playlist can be lined up by seq instead of by guesswork.
     @discardableResult
     func addSegment(generation gen: Int, durationTicks: Int64,
-                    videoData: Data, audioData: Data?,
+                    videoData: Data?, audioData: Data?,
                     audioDurationTicks: Int64? = nil) -> Int? {
         condition.lock()
         defer { condition.unlock() }
@@ -200,6 +213,7 @@ final class CastHLSSegmentStore: @unchecked Sendable {
                evicted.generation != generation {
                 videoInits.removeValue(forKey: evicted.generation)
                 audioInits.removeValue(forKey: evicted.generation)
+                audioOnlyGenerations.remove(evicted.generation)
             }
         }
         segmentsInGeneration += 1
@@ -273,6 +287,13 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     /// (device-verified on a Google TV Streamer).
     func demuxedMasterPlaylistText() -> String {
         condition.lock()
+        if audioOnlyGenerations.contains(generation) {
+            let audioInit = audioInits[generation]
+            let attribute = audioCodecsAttribute
+            condition.unlock()
+            return Self.audioOnlyMasterPlaylistText(
+                audioCodec: audioInit.flatMap { Self.audioCodecString(from: $0) } ?? attribute ?? "mp4a.40.2")
+        }
         let videoInit = videoInits[generation]
         let audioInit = audioInits[generation]
         let attribute = audioCodecsAttribute
@@ -309,6 +330,19 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         text += ",CLOSED-CAPTIONS=NONE\n"
         text += "video.m3u8\n"
         return text
+    }
+
+    /// Audio-only master (GH #90): ONE variant whose CODECS names only the
+    /// audio codec, no RESOLUTION, no EXT-X-MEDIA group, pointing straight
+    /// at the audio media playlist (ainit / aseg). An HLS player reads a
+    /// variant whose codecs are all audio as an audio-only stream and
+    /// opens a single audio SourceBuffer for it. BANDWIDTH is a ceiling for
+    /// the codec (single variant, so it only has to be plausible).
+    static func audioOnlyMasterPlaylistText(audioCodec: String) -> String {
+        let bandwidth = audioCodec.hasPrefix("mp4a") ? 320_000 : 1_000_000
+        return "#EXTM3U\n"
+            + "#EXT-X-STREAM-INF:BANDWIDTH=\(bandwidth),CODECS=\"\(audioCodec)\"\n"
+            + "audio.m3u8\n"
     }
 
     /// RFC 6381 audio codec string from an init segment's audio sample
@@ -434,7 +468,23 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         case .video: initPrefix = "vinit"; segPrefix = "vseg"
         case .audio: initPrefix = "ainit"; segPrefix = "aseg"
         }
-        let window = Array(ring.suffix(Self.windowSize))
+        var window = Array(ring.suffix(Self.windowSize))
+        // A flip between an audio-only program and one with video (GH #90)
+        // changes which renditions exist. The sender re-loads the receiver
+        // with the new master on every flip, so each playlist lists only
+        // the trailing run of segments that match the CURRENT generation's
+        // shape: older segments without the rendition the new master names
+        // would 404. Both media playlists apply the same rule, so they stay
+        // aligned entry for entry; trimmed flagged segments are counted
+        // into DISCONTINUITY-SEQUENCE like evicted ones.
+        let currentAudioOnly = audioOnlyGenerations.contains(generation)
+        var trimmedDiscontinuities = 0
+        if let lastMismatch = window.lastIndex(where: {
+            currentAudioOnly ? $0.audioData == nil : $0.videoData == nil
+        }) {
+            trimmedDiscontinuities = window[...lastMismatch].filter(\.discontinuity).count
+            window.removeFirst(lastMismatch + 1)
+        }
         var text = "#EXTM3U\n#EXT-X-VERSION:7\n"
         // Deliberately the max over BOTH renditions' spans, so the two
         // demuxed playlists advertise the SAME target duration even though
@@ -454,8 +504,8 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         text += "#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,HOLD-BACK="
             + String(format: "%.3f", Double(targetSeconds * 3)) + "\n"
         text += "#EXT-X-MEDIA-SEQUENCE:\(window.first?.seq ?? nextSeq)\n"
-        if discontinuitySequence > 0 {
-            text += "#EXT-X-DISCONTINUITY-SEQUENCE:\(discontinuitySequence)\n"
+        if discontinuitySequence + trimmedDiscontinuities > 0 {
+            text += "#EXT-X-DISCONTINUITY-SEQUENCE:\(discontinuitySequence + trimmedDiscontinuities)\n"
         }
         var lastGen = -1
         for (index, seg) in window.enumerated() {

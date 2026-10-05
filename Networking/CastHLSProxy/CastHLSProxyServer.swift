@@ -7,7 +7,9 @@
 //  the Cast device's Chromium page on the same LAN, fetching the DEMUXED
 //  resource shapes:
 //
-//    /demuxed.m3u8   master: EXT-X-MEDIA audio rendition + EXT-X-STREAM-INF
+//    /demuxed.m3u8   master: EXT-X-MEDIA audio rendition + EXT-X-STREAM-INF;
+//                    for an audio-only program (GH #90) one STREAM-INF with
+//                    an audio CODECS value pointing at audio.m3u8
 //    /video.m3u8     video-only media playlist (vinit / vseg)
 //    /audio.m3u8     audio-only media playlist (ainit / aseg)
 //    /vinit<G>.mp4   video-only moov for ingest generation G
@@ -192,6 +194,10 @@ final class CastHLSProxyServer: @unchecked Sendable {
             let text = store.audioPlaylistText()
             body = Data(text.utf8)
             mime = Self.mimePlaylist
+            // An audio-only program's receiver fetches no video playlist.
+            if firstPlaylistServed.trySet() {
+                log("receiver fetched the playlist for the first time (\(Self.host(of: peer)))")
+            }
             if audioPlaylistTextLogged.trySet() { log("audio playlist: \(Self.escaped(text))") }
         case let p where p.hasPrefix("/vinit") && p.hasSuffix(".mp4"):
             let gen = Int(p.dropFirst(6).dropLast(4))
@@ -217,6 +223,11 @@ final class CastHLSProxyServer: @unchecked Sendable {
             let began = Date()
             body = seq.flatMap { store.awaitSegment(seq: $0, rendition: .audio) }
             waitMs = Int(Date().timeIntervalSince(began) * 1000)
+            // Both renditions share sequence numbers; an audio-only
+            // receiver (GH #90) only ever fetches these.
+            if let seq, body != nil {
+                linkLock.lock(); highestVideoSeq = max(highestVideoSeq, seq); linkLock.unlock()
+            }
             mime = Self.mimeSegment
         default:
             body = nil

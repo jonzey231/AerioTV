@@ -19,9 +19,9 @@ import Foundation
 struct CastUnsupportedCodecError: Error, CustomStringConvertible {
     /// Which elementary stream refused; the sender words a different
     /// message for each.
-    /// `.audioOnly`: the PMT carries audio and no video (GH #90, radio);
-    /// segments here cut on video keyframes, so there is nothing to serve.
-    enum Stream { case video, audio, audioOnly }
+    /// Audio-only programs (GH #90, radio) are served by the remuxer's
+    /// audio-only mode, not refused.
+    enum Stream { case video, audio }
     let codecName: String
     var stream: Stream = .audio
     var description: String { "cast HLS proxy cannot serve \(codecName)" }
@@ -161,7 +161,10 @@ final class CastFMP4Remuxer {
     /// ever declare an AAC codec string, which is what forces the
     /// server-side AAC output profile; two renditions let the audio
     /// declare what it really is.
-    var onDemuxedInitSegments: ((Data, Data?) -> Void)?
+    ///
+    /// Audio-only mode (GH #90): the first Data is nil and the second is
+    /// the audio moov; there is no video rendition at all.
+    var onDemuxedInitSegments: ((Data?, Data?) -> Void)?
 
     /// The two renditions of one cut, cut at exactly the same boundary and
     /// carrying the same moof sequence number: the first Data holds the
@@ -174,6 +177,10 @@ final class CastFMP4Remuxer {
     /// i.e. the audio rendition's own EXTINF. It may differ from the video
     /// span by less than one audio frame, which HLS allows, and falls back
     /// to the video span when the segment has no audio.
+    ///
+    /// Audio-only mode (GH #90): the video Data is EMPTY (there is no
+    /// video rendition; `isAudioOnly` says so), the audio Data carries the
+    /// segment, and both durations are the audio frames' own span.
     var onDemuxedMediaSegments: ((_ video: Data, _ audio: Data?,
                                   _ videoDurationTicks: Int64,
                                   _ audioDurationTicks: Int64) -> Void)?
@@ -262,6 +269,28 @@ final class CastFMP4Remuxer {
     private var audioPID = -1
     /// PMT parsed; `audioPID` < 0 after this means a video-only mux.
     private var pmtSeen = false
+
+    // MARK: audio-only mode (GH #90)
+
+    /// The program is served audio-only: one audio rendition, no video
+    /// track, segments cut on audio frame boundaries every
+    /// `audioOnlySegmentTicks` with no keyframe dependency, and no video
+    /// plan or transcoder ever built. Entered when the PMT declares audio
+    /// and no video, or by the no-video fallback below (mirrors
+    /// TSHLSRemuxer).
+    private(set) var isAudioOnly = false
+    /// Audio-only segment target. Audio frames are all random access
+    /// points, so every cut lands exactly on a frame boundary once the
+    /// queue spans this much.
+    static let audioOnlySegmentTicks: Int64 = 2 * CastFMP4Remuxer.ticksPerSecond
+    /// No-video fallback, same rule as TSHLSRemuxer: a PMT that declares a
+    /// video PID which never sends a packet is audio-only once the audio
+    /// PTS has advanced `audioOnlyVideoGraceTicks` past its first PES.
+    /// Media time, not wall time: Dispatcharr delivers in 8 to 9.5 s
+    /// bursts.
+    private static let audioOnlyVideoGraceTicks: Int64 = 3 * CastFMP4Remuxer.ticksPerSecond
+    private var videoPacketSeen = false
+    private var firstAudioPTSWithoutVideo: Int64 = -1
 
     private lazy var videoPES = PESAssembler { [weak self] payload, pts, dts in
         try self?.onVideoAccessUnit(payload, pts33: pts, dts33: dts)
@@ -563,6 +592,11 @@ final class CastFMP4Remuxer {
     /// the segment's EXTINF be that common end. The next generation then
     /// starts where this one really stopped.
     private func flushGenerationTail() {
+        if isAudioOnly {
+            // Audio-only: whatever is queued is one last, shorter segment.
+            if initSent { finalizeAudioOnlySegment() }
+            return
+        }
         // A pending cut takes effect first: the held samples belong to a
         // segment of their own, and the audio the cut was waiting for has
         // either arrived by now or never will.
@@ -617,6 +651,7 @@ final class CastFMP4Remuxer {
         case pmtPID where !pmtSeen:
             try parsePMT(buf, payloadStart, payloadLen, pusi)
         case videoPID:
+            videoPacketSeen = true
             try videoPES.feed(buf, payloadStart, payloadLen, pusi)
         case audioPID:
             try audioPES.feed(buf, payloadStart, payloadLen, pusi)
@@ -670,10 +705,6 @@ final class CastFMP4Remuxer {
         }
         // Refuse before any media flows: the ingest surfaces this as the
         // user-visible cast failure with the codec name.
-        if video < 0, audio >= 0 {
-            log("[AUDIO-ONLY] detected: no video track in PMT; the cast proxy cuts segments on video keyframes and cannot serve audio-only, refusing the cast")
-            throw CastUnsupportedCodecError(codecName: "audio-only program", stream: .audioOnly)
-        }
         if video >= 0, videoType != Self.streamTypeH264, videoType != Self.streamTypeHEVC {
             throw CastUnsupportedCodecError(
                 codecName: Self.streamTypeNames[videoType] ?? String(format: "video stream_type 0x%02X", videoType),
@@ -704,7 +735,18 @@ final class CastFMP4Remuxer {
                 throw CastUnsupportedCodecError(codecName: name, stream: .audio)
             }
         }
-        if video < 0 { throw CastUnsupportedCodecError(codecName: "no video stream in PMT", stream: .video) }
+        if video < 0, audio < 0 {
+            throw CastUnsupportedCodecError(codecName: "no video stream in PMT", stream: .video)
+        }
+        if video < 0 {
+            // GH #90: audio and no video (radio). Served audio-only; the
+            // audio path rules above (passthrough, transcode, refusal)
+            // still apply unchanged.
+            isAudioOnly = true
+            videoPathDescription = "none (audio only)"
+            log("[AUDIO-ONLY] detected: no video track in PMT; serving audio-only "
+                + String(format: "(audio PID %d type 0x%02X), 2 s segments on audio frame boundaries", audio, audioType))
+        }
         videoPID = video
         audioPID = audio // may stay -1: video-only mux is fine
         if audio < 0 {
@@ -1065,6 +1107,7 @@ final class CastFMP4Remuxer {
     // MARK: audio path
 
     private func onAudioPES(_ payload: [UInt8], pts33: Int64) throws {
+        checkNoVideoFallback(pts33: pts33)
         if let source = audioPassthrough {
             onAC3PassthroughPES(source, payload, pts33: pts33)
         } else if let source = audioSource {
@@ -1072,6 +1115,58 @@ final class CastFMP4Remuxer {
         } else {
             try onADTSAudioPES(payload, pts33: pts33)
         }
+    }
+
+    /// The 3 s no-video fallback (mirrors TSHLSRemuxer): only before the
+    /// first init, only while the declared video PID has sent nothing.
+    private func checkNoVideoFallback(pts33: Int64) {
+        guard !isAudioOnly, !initSent, videoPID >= 0, !videoPacketSeen else { return }
+        if firstAudioPTSWithoutVideo < 0 || pts33 < firstAudioPTSWithoutVideo
+            || pts33 - firstAudioPTSWithoutVideo > 30 * Self.ticksPerSecond {
+            // First audio, or a wrap/jump: (re)start the window.
+            firstAudioPTSWithoutVideo = pts33
+            return
+        }
+        guard pts33 - firstAudioPTSWithoutVideo >= Self.audioOnlyVideoGraceTicks else { return }
+        log("[AUDIO-ONLY] detected: no video packets in 3 s (PMT video PID \(videoPID) silent, "
+            + "audio PID \(audioPID)); serving audio-only")
+        isAudioOnly = true
+        videoPID = -1
+        videoPathDescription = "none (audio only)"
+        maybeEmitInit()
+    }
+
+    /// Audio-only mode: anchor the timeline on the first audio frame
+    /// queued after the init went out (there is no video to anchor it).
+    private func anchorAudioOnlyTimeline(_ pts: Int64) {
+        guard isAudioOnly, initSent, timelineBase < 0 else { return }
+        timelineBase = pts
+        timelineBasePTS = pts
+    }
+
+    /// Audio-only mode: cut once the queued frames span the target.
+    /// Frames are stamped by the running audio clock, so each segment
+    /// starts exactly where the previous one ended.
+    private func maybeCutAudioOnly() {
+        guard isAudioOnly, let first = audioQueue.first, let last = audioQueue.last else { return }
+        if last.pts + audioFrameTicks - first.pts >= Self.audioOnlySegmentTicks {
+            finalizeAudioOnlySegment()
+        }
+    }
+
+    private func finalizeAudioOnlySegment() {
+        guard !audioQueue.isEmpty else { return }
+        let segAudio = audioQueue
+        audioQueue.removeAll(keepingCapacity: true)
+        sequenceNumber += 1
+        let audioSegment = buildMediaSegment(video: [], videoDurations: [], audio: segAudio,
+                                             rendition: .audioOnly)
+        let durationTicks = Int64(segAudio.count) * max(1, audioFrameTicks)
+        let firstAudioPTSSeconds = Double(segAudio[0].pts - timelineBase) / Double(Self.ticksPerSecond)
+        let segmentStartSeconds = Double(emittedMediaTicks) / Double(Self.ticksPerSecond)
+        emittedMediaTicks += durationTicks
+        onSegmentComposition?(0, segAudio.count, -1.0, -1.0, firstAudioPTSSeconds, segmentStartSeconds)
+        onDemuxedMediaSegments?(Data(), audioSegment, durationTicks, durationTicks)
     }
 
     /// AC-3 / E-AC-3 passthrough: frame the elementary stream and queue the whole syncframes as audio
@@ -1119,8 +1214,10 @@ final class CastFMP4Remuxer {
             let frameTicks = Int64(info.samplesPerFrame) * Self.ticksPerSecond / Int64(info.sampleRate)
             let framePTS = stampAudioFrame(pesAnchor: pesAnchor, frameTicks: frameTicks)
             audioRunPTS = framePTS + frameTicks
+            anchorAudioOnlyTimeline(framePTS)
             if audioQueueOpen, framePTS >= timelineBasePTS {
                 audioQueue.append(AudioSample(data: Array(data[p..<next]), pts: framePTS))
+                maybeCutAudioOnly()
             }
             p = next
         }
@@ -1216,6 +1313,7 @@ final class CastFMP4Remuxer {
     /// are logged once per run so the field log shows how much audio the
     /// join cost.
     private func queueTranscodedAudio(_ frame: [UInt8], pts: Int64) {
+        anchorAudioOnlyTimeline(pts)
         guard audioQueueOpen, pts >= timelineBasePTS else {
             transcodeGatedUnits += 1
             if transcodeGatedUnits == 1 {
@@ -1231,6 +1329,7 @@ final class CastFMP4Remuxer {
             transcodeGatedUnits = 0
         }
         audioQueue.append(AudioSample(data: frame, pts: pts))
+        maybeCutAudioOnly()
     }
 
     private func onADTSAudioPES(_ payload: [UInt8], pts33: Int64) throws {
@@ -1348,8 +1447,10 @@ final class CastFMP4Remuxer {
                 // with the new PES PTS cost on the device.
                 let framePTS = stampAudioFrame(pesAnchor: pesAnchor, frameTicks: audioFrameTicks)
                 audioRunPTS = framePTS + audioFrameTicks
+                anchorAudioOnlyTimeline(framePTS)
                 if audioQueueOpen, framePTS >= timelineBasePTS {
                     audioQueue.append(AudioSample(data: Array(data[payloadStart..<(p + frameLen)]), pts: framePTS))
+                    maybeCutAudioOnly()
                 }
             }
             p += frameLen
@@ -1623,6 +1724,14 @@ final class CastFMP4Remuxer {
 
     private func maybeEmitInit() {
         guard !initSent, pmtSeen else { return }
+        if isAudioOnly {
+            // No video rendition: the audio moov alone, as soon as the
+            // audio config is known. No video plan, no transcoder.
+            guard audioPID >= 0, audioConfigReady else { return }
+            onDemuxedInitSegments?(nil, buildInitSegment(.audioOnly))
+            initSent = true
+            return
+        }
         switch videoMode {
         case .undecided: return
         case .passthrough:
@@ -1841,7 +1950,7 @@ final class CastFMP4Remuxer {
                 // audio frame to take it from, which is the only honest
                 // timestamp for an empty audio fragment.
                 Self.fullBox("tfdt", 1, 0,
-                             Self.u64(UInt64((audio.first?.pts ?? video[0].dts) - timelineBase))),
+                             Self.u64(UInt64(max(0, (audio.first?.pts ?? video.first?.dts ?? timelineBase) - timelineBase)))),
                 audioTrun(audio, dataOffset: audioDataOffset)))
         }
         return Self.box("moof", mfhd, Self.concat(trafs))

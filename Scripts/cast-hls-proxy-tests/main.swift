@@ -3163,5 +3163,251 @@ runHDRPlanChecks()
 
 runInPlaceFlipPlaylistChecks()
 
+// MARK: audio-only programs (GH #90)
+
+/// A TS whose PMT declares `streamType` audio on pid 0x101 and, when
+/// `declareVideo` is set, an H.264 entry on pid 0x100 that never sends a
+/// packet (the 3 s no-video fallback). `framesPerPES` frames per PES.
+func audioOnlyFixtureTS(declareVideo: Bool, streamType: UInt8, frame: [UInt8],
+                        frameTicks: Int64, frames: Int, framesPerPES: Int = 4) -> Data {
+    var writer = CensusTSWriter()
+    let base: Int64 = 10_000
+    let pat: [UInt8] = [0x00, 0xB0, 13, 0x00, 0x01, 0xC1, 0, 0, 0, 0x01, 0xF0, 0x00, 0, 0, 0, 0]
+    var pmtBody: [UInt8] = [0x00, 0x01, 0xC1, 0, 0, 0xE1, 0x01, 0xF0, 0x00]
+    if declareVideo { pmtBody += [0x1B, 0xE1, 0x00, 0xF0, 0x00] }
+    pmtBody += [streamType, 0xE1, 0x01, 0xF0, 0x00]
+    let pmt: [UInt8] = [0x02, 0xB0, UInt8(pmtBody.count + 4)] + pmtBody + [0, 0, 0, 0]
+    writer.psi(pid: 0, table: pat)
+    writer.psi(pid: 0x1000, table: pmt)
+    var n = 0
+    while n < frames {
+        let end = min(n + framesPerPES, frames)
+        var bytes: [UInt8] = []
+        for _ in n..<end { bytes += frame }
+        writer.pes(pid: 0x101, payload: censusPES(streamID: 0xC0, payload: bytes,
+                                                  pts: base + Int64(n) * frameTicks, dts: nil))
+        n = end
+    }
+    return writer.bytes
+}
+
+struct AudioOnlyRun {
+    var videoInit: Data?
+    var audioInit: Data?
+    var initCalls = 0
+    var videoParts: [Data] = []
+    var audioParts: [Data] = []
+    var durations: [Int64] = []
+    var audioDurations: [Int64] = []
+    var threw: Error?
+    var logs: [String] = []
+}
+
+@MainActor func runAudioOnly(_ ts: Data, remuxer: CastFMP4Remuxer, logs: @escaping () -> [String] = { [] }) -> AudioOnlyRun {
+    var run = AudioOnlyRun()
+    remuxer.onDemuxedInitSegments = { v, a in run.videoInit = v; run.audioInit = a; run.initCalls += 1 }
+    remuxer.onDemuxedMediaSegments = { v, a, ticks, aTicks in
+        run.videoParts.append(v)
+        if let a { run.audioParts.append(a) }
+        run.durations.append(ticks)
+        run.audioDurations.append(aTicks)
+    }
+    do { try remuxer.feed(ts) } catch { run.threw = error }
+    remuxer.release()
+    run.logs = logs()
+    return run
+}
+
+@MainActor func checkAudioOnlySegments(_ run: AudioOnlyRun, frameTicks: Int64, label: String) {
+    expect(run.threw == nil, "\(label): not refused (\(String(describing: run.threw)))")
+    expectEq(run.initCalls, 1, "\(label): one init")
+    expect(run.videoInit == nil, "\(label): no video init")
+    expect(run.videoParts.allSatisfy { $0.isEmpty }, "\(label): no video rendition bytes")
+    expectEq(run.audioParts.count, run.durations.count, "\(label): every cut has an audio segment")
+    expect(run.audioParts.count >= 3, "\(label): at least three segments (\(run.audioParts.count))")
+    // Whole frames, first cut at or past 2 s by less than one frame.
+    let perSegment = (CastFMP4Remuxer.audioOnlySegmentTicks + frameTicks - 1) / frameTicks
+    let full = run.durations.dropLast()
+    expect(full.allSatisfy { $0 == perSegment * frameTicks },
+           "\(label): full segments are \(perSegment) frames = \(perSegment * frameTicks) ticks (\(Array(full)))")
+    expect(run.durations.last.map { $0 > 0 && $0 <= perSegment * frameTicks } ?? false,
+           "\(label): the release tail is a shorter final segment")
+    expectEq(run.durations, run.audioDurations, "\(label): audio EXTINF equals the cut span")
+    var contiguous = true
+    var expectedStart: Int64 = 0
+    var seqOK = true
+    var tracksOK = true
+    var countsOK = true
+    for (i, seg) in run.audioParts.enumerated() {
+        let spans = segmentSpans(seg)
+        guard let span = spans[2] else { contiguous = false; continue }
+        if span.start != expectedStart || span.end - span.start != run.durations[i] { contiguous = false }
+        expectedStart = span.end
+        if moofSequenceNumber(seg) != Int64(i + 1) { seqOK = false }
+        if trafTrackIDs(seg) != [2] { tracksOK = false }
+        if trunSampleCounts(seg) != [run.durations[i] / frameTicks] { countsOK = false }
+    }
+    expect(contiguous, "\(label): tfdt starts at 0 and each segment starts where the previous ended")
+    expect(seqOK, "\(label): moof sequence numbers 1, 2, 3, ...")
+    expect(tracksOK, "\(label): every segment carries only the audio traf (track 2)")
+    expect(countsOK, "\(label): trun sample count matches the duration in frames")
+}
+
+@MainActor func runAudioOnlyChecks() {
+    // 1. AAC ADTS, PMT with no video PID.
+    let aacTicks: Int64 = 1920 // 1024 samples at 48 kHz
+    let aacTS = audioOnlyFixtureTS(declareVideo: false, streamType: 0x0F, frame: censusADTSFrame(200),
+                                   frameTicks: aacTicks, frames: 330)
+    var aacLogs: [String] = []
+    let aacRemuxer = CastFMP4Remuxer(log: { aacLogs.append($0) })
+    let aac = runAudioOnly(aacTS, remuxer: aacRemuxer, logs: { aacLogs })
+    checkAudioOnlySegments(aac, frameTicks: aacTicks, label: "audio-only AAC")
+    expect(aacRemuxer.isAudioOnly, "audio-only AAC: remuxer reports audio-only")
+    expectEq(aacRemuxer.videoPathDescription, "none (audio only)", "audio-only AAC: video path description")
+    expectEq(aacRemuxer.audioCodecsAttribute, "mp4a.40.2", "audio-only AAC: CODECS attribute")
+    if let ainit = aac.audioInit {
+        expect(dataContains(ainit, "mp4a") && dataContains(ainit, "esds") && dataContains(ainit, "soun"),
+               "audio-only AAC: init has the mp4a/esds audio track")
+        expect(!dataContains(ainit, "avc1") && !dataContains(ainit, "vide") && !dataContains(ainit, "hvc1"),
+               "audio-only AAC: init has no video track")
+        expectEq(CastHLSSegmentStore.audioCodecString(from: ainit), "mp4a.40.2", "audio-only AAC: init codec string")
+    } else {
+        expect(false, "audio-only AAC: audio init emitted")
+    }
+    expect(aac.logs.contains { $0.hasPrefix("[AUDIO-ONLY] detected: no video track in PMT; serving audio-only") },
+           "audio-only AAC: detection logged")
+    expect(!aac.logs.contains { $0.contains("[Cast] video plan") }, "audio-only AAC: no video plan runs")
+
+    // 2. PMT declares a video PID that never sends: the 3 s fallback.
+    let silentTS = audioOnlyFixtureTS(declareVideo: true, streamType: 0x0F, frame: censusADTSFrame(200),
+                                      frameTicks: aacTicks, frames: 400)
+    var silentLogs: [String] = []
+    let silentRemuxer = CastFMP4Remuxer(log: { silentLogs.append($0) })
+    let silent = runAudioOnly(silentTS, remuxer: silentRemuxer, logs: { silentLogs })
+    checkAudioOnlySegments(silent, frameTicks: aacTicks, label: "silent video PID fallback")
+    expect(silent.logs.contains { $0.hasPrefix("[AUDIO-ONLY] detected: no video packets in 3 s") },
+           "silent video PID fallback: detection logged")
+    // 3 s of grace (141 frames) plus the next PES is lost to detection.
+    let silentFrames = silent.durations.reduce(0, +) / aacTicks
+    expect(silentFrames >= 400 - 150 && silentFrames < 400 - 140,
+           "silent video PID fallback: only the 3 s detection window is dropped (\(silentFrames) frames)")
+
+    // 3. MPEG audio (MP2) still goes through the AAC transcode.
+    let mp2Ticks: Int64 = 1152 * CastFMP4Remuxer.ticksPerSecond / 48_000 // 2160
+    var fake: FakeCastAudioTranscoder?
+    let mp2Remuxer = CastFMP4Remuxer(transcoderFactory: { _, c, f in
+        let t = FakeCastAudioTranscoder(onConfig: c, onFrame: f)
+        fake = t
+        return t
+    })
+    let mp2TS = audioOnlyFixtureTS(declareVideo: false, streamType: 0x04, frame: mp2Frame(),
+                                   frameTicks: mp2Ticks, frames: 320, framesPerPES: 2)
+    let mp2 = runAudioOnly(mp2TS, remuxer: mp2Remuxer)
+    expect(mp2.threw == nil, "audio-only MP2: transcoded, not refused")
+    expect((fake?.fedLengths.count ?? 0) >= 300, "audio-only MP2: frames reach the transcoder")
+    expectEq(mp2Remuxer.audioPathDescription, "MP2 stereo -> AAC stereo", "audio-only MP2: audio path")
+    expectEq(mp2Remuxer.audioCodecsAttribute, "mp4a.40.2", "audio-only MP2: CODECS names AAC")
+    expect(mp2.audioInit.map { dataContains($0, "mp4a") && dataContains($0, "esds") } ?? false,
+           "audio-only MP2: init carries the encoder's AAC track")
+    expect(mp2.videoInit == nil && mp2.audioParts.count >= 3, "audio-only MP2: audio-only segments")
+    // The fake hands back one AAC unit per source frame at the source PTS,
+    // so the stamps step by the MP2 frame and the trun by audioFrameTicks.
+
+    // 4. AC-3 passthrough to a receiver that decodes it.
+    let ac3Ticks: Int64 = 2880
+    let ac3TS = audioOnlyFixtureTS(declareVideo: false, streamType: 0x81, frame: ac3Frame(),
+                                   frameTicks: ac3Ticks, frames: 250)
+    let ac3Remuxer = CastFMP4Remuxer(allowAC3Passthrough: true)
+    let ac3 = runAudioOnly(ac3TS, remuxer: ac3Remuxer)
+    checkAudioOnlySegments(ac3, frameTicks: ac3Ticks, label: "audio-only AC-3 passthrough")
+    expect(ac3.audioInit.map { dataContains($0, "ac-3") && dataContains($0, "dac3") } ?? false,
+           "audio-only AC-3 passthrough: init carries ac-3/dac3")
+    expectEq(ac3Remuxer.audioCodecsAttribute, "ac-3", "audio-only AC-3 passthrough: CODECS attribute")
+
+    // 5. AC-3 with no passthrough and no transcode plan still refuses by name.
+    var refused: CastUnsupportedCodecError?
+    do { try CastFMP4Remuxer().feed(ac3TS) } catch let e as CastUnsupportedCodecError { refused = e } catch {}
+    expectEq(refused?.codecName, "AC-3 audio", "audio-only AC-3 without a plan refuses by name")
+
+    // 6. Store: master and media playlists for an audio-only generation.
+    let store = CastHLSSegmentStore()
+    let gen = store.beginGeneration()
+    store.setAudioCodecsAttribute(aacRemuxer.audioCodecsAttribute)
+    store.setDemuxedInitSegments(generation: gen, video: nil, audio: aac.audioInit)
+    for i in aac.audioParts.indices {
+        store.addSegment(generation: gen, durationTicks: aac.durations[i],
+                         videoData: aac.videoParts[i].isEmpty ? nil : aac.videoParts[i],
+                         audioData: aac.audioParts[i], audioDurationTicks: aac.audioDurations[i])
+    }
+    let master = store.demuxedMasterPlaylistText()
+    expectEq(master, "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=320000,CODECS=\"mp4a.40.2\"\naudio.m3u8\n",
+             "audio-only master: one audio variant")
+    expect(!master.contains("RESOLUTION") && !master.contains("EXT-X-MEDIA") && !master.contains("video.m3u8"),
+           "audio-only master: no resolution, no media group, no video playlist")
+    print("[audio-only master]\n\(master)")
+    let audioPlaylist = store.audioPlaylistText()
+    print("[audio-only media]\n\(audioPlaylist)")
+    expect(audioPlaylist.contains("#EXT-X-MAP:URI=\"ainit\(gen).mp4\"") && audioPlaylist.contains("aseg0.m4s"),
+           "audio-only media playlist serves ainit + aseg")
+    expect(audioPlaylist.contains("#EXTINF:2.005,") && audioPlaylist.contains("#EXT-X-TARGETDURATION:3"),
+           "audio-only media playlist: 2.005 s segments, target 3")
+    expect(store.awaitSegment(seq: 0, rendition: .audio, timeout: 0) != nil, "audio-only: aseg0 served")
+    expect(store.awaitSegment(seq: 0, rendition: .video, timeout: 0) == nil, "audio-only: no vseg")
+    expectEq(CastHLSSegmentStore.audioOnlyMasterPlaylistText(audioCodec: "ac-3"),
+             "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"ac-3\"\naudio.m3u8\n",
+             "audio-only master: AC-3 variant")
+
+    // 7. Flip video -> audio-only -> video: each playlist lists only the
+    // trailing run matching the current generation's shape.
+    let flip = CastHLSSegmentStore()
+    let g1 = flip.beginGeneration()
+    flip.setDemuxedInitSegments(generation: g1, video: Data("v1".utf8), audio: Data("mp4a".utf8))
+    for _ in 0..<3 {
+        flip.addSegment(generation: g1, durationTicks: 270_000, videoData: Data([1]), audioData: Data([2]))
+    }
+    let g2 = flip.beginGeneration()
+    flip.setDemuxedInitSegments(generation: g2, video: nil, audio: Data("mp4a".utf8))
+    for _ in 0..<2 {
+        flip.addSegment(generation: g2, durationTicks: 180_480, videoData: nil, audioData: Data([3]))
+    }
+    let flipAudio = flip.audioPlaylistText()
+    expect(flipAudio.contains("#EXT-X-MEDIA-SEQUENCE:0") && flipAudio.contains("#EXT-X-DISCONTINUITY\n")
+           && flipAudio.contains("ainit\(g1).mp4") && flipAudio.contains("ainit\(g2).mp4"),
+           "flip to audio-only: audio playlist keeps the old audio, discontinuity into the new generation")
+    expect(flip.demuxedMasterPlaylistText().hasSuffix("audio.m3u8\n"), "flip to audio-only: master is audio-only")
+    let g3 = flip.beginGeneration()
+    flip.setDemuxedInitSegments(generation: g3, video: Data("v3".utf8), audio: Data("mp4a".utf8))
+    flip.addSegment(generation: g3, durationTicks: 270_000, videoData: Data([4]), audioData: Data([5]))
+    let backVideo = flip.videoPlaylistText()
+    let backAudio = flip.audioPlaylistText()
+    expect(backVideo.contains("#EXT-X-MEDIA-SEQUENCE:5") && !backVideo.contains("vinit\(g2)")
+           && backVideo.contains("vseg5.m4s") && !backVideo.contains("vseg4.m4s"),
+           "flip back to video: video playlist starts at the new generation")
+    expect(backAudio.contains("#EXT-X-MEDIA-SEQUENCE:5") && !backAudio.contains("aseg4.m4s"),
+           "flip back to video: audio playlist aligned with the video one")
+    expect(backVideo.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1") && backAudio.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1"),
+           "flip back to video: trimmed discontinuity counted")
+    expect(flip.demuxedMasterPlaylistText().contains("video.m3u8"), "flip back to video: master has video again")
+
+    // 8. A PMT with video still produces the old demuxed output.
+    var es: [UInt8] = []
+    for _ in 0..<120 { es += mp2Frame() }
+    var vInit: Data?
+    var vInitCalls = 0
+    var vParts: [Data] = []
+    let videoRemuxer = CastFMP4Remuxer(transcoderFactory: { _, c, f in FakeCastAudioTranscoder(onConfig: c, onFrame: f) })
+    videoRemuxer.onDemuxedInitSegments = { v, _ in vInit = v; vInitCalls += 1 }
+    videoRemuxer.onDemuxedMediaSegments = { v, _, _, _ in vParts.append(v) }
+    let videoTS = mpegAudioFixtureTS(audioStreamType: 0x04, audioES: es, audioFrameLen: 384,
+                                     audioFrameTicks: mp2Ticks, videoFrames: 150)
+    do { try videoRemuxer.feed(videoTS) } catch { expect(false, "video PMT: not refused (\(error))") }
+    expect(!videoRemuxer.isAudioOnly, "video PMT: not audio-only")
+    expect(vInitCalls == 1 && vInit.map { dataContains($0, "avc1") } == true, "video PMT: video init with avc1")
+    expect(!vParts.isEmpty && vParts.allSatisfy { !$0.isEmpty && trafTrackIDs($0) == [1] },
+           "video PMT: video segments carry the video traf")
+}
+
+runAudioOnlyChecks()
+
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

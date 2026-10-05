@@ -605,13 +605,16 @@ final class CastHLSProxySession: @unchecked Sendable {
             self.store?.setAudioCodecsAttribute(remuxer.audioCodecsAttribute)
             let from = remuxer.sourceVideoInfo.map { " from \($0.codec.displayName)" } ?? ""
             let transcoded = remuxer.videoIsTranscoded ? ", transcoded\(from)" : ""
-            if let hevc = CastHLSSegmentStore.hevcCodecString(from: video) {
+            if let video, let hevc = CastHLSSegmentStore.hevcCodecString(from: video) {
                 self.videoCodecDescription = "HEVC (\(hevc))\(transcoded)"
-            } else if let avc = CastHLSSegmentStore.avcCodecString(from: video) {
+            } else if let video, let avc = CastHLSSegmentStore.avcCodecString(from: video) {
                 self.videoCodecDescription = "H.264 (\(avc))\(transcoded)"
+            } else if video == nil {
+                self.videoCodecDescription = "none (audio only)"
             }
             self.log("demuxed init ready gen=\(gen) "
-                + "vinit=\(video.count) B ainit=\(audio?.count ?? 0) B")
+                + (video == nil ? "audio-only " : "")
+                + "vinit=\(video?.count ?? 0) B ainit=\(audio?.count ?? 0) B")
         }
         // Per-segment timeline snapshot, stashed by the composition
         // callback (which fires first) and logged below once the store has
@@ -632,7 +635,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             let segmentBytes = video.count + (audio?.count ?? 0)
             let publishedSeq = self.store?.addSegment(generation: gen,
                                                       durationTicks: durationTicks,
-                                                      videoData: video,
+                                                      videoData: video.isEmpty ? nil : video, // empty = audio-only (GH #90)
                                                       audioData: audio,
                                                       audioDurationTicks: audioDurationTicks)
             if let c = self.pendingComposition {
