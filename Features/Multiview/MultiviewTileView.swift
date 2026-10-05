@@ -2744,19 +2744,17 @@ struct MultiviewTileLogoOverlay: View {
             let videoAspect = store.tileVideoAspects[tileID] ?? (16.0 / 9.0)
             let video = Self.fittedSize(aspect: videoAspect, in: tile)
             let pct = CGFloat(min(max(sizePercent, 5), 25)) / 100
-            // Area rule (Android parity): h = pct of the video rect height;
-            // the logo gets the area a 3:1 logo would at height h (3 h^2),
-            // then is clamped to a 2h tall by 4h wide box and never wider
-            // than half the video rect. A 3:1 logo stays h tall, a square
-            // one is about 1.73h a side, a very wide one caps at 4h.
-            let h0 = max(video.height * pct, 1)
+            // Sized by the logo's OPAQUE box (image is pre-cropped to it):
+            // h = pct of the video rect height minus the backdrop padding;
+            // height = h * clamp(sqrt(3 / a), 1, 2), so 3:1 or wider stays h
+            // tall, square is about 1.73h, tall caps at 2h. Width follows the
+            // aspect, capped at 4h and half the video rect (Android parity).
+            let hBase = max(video.height * pct - pad * 2, 1)
             let aspect = image.size.width / image.size.height
-            let areaW = h0 * (3 * aspect).squareRoot()
-            let areaH = h0 * (3 / aspect).squareRoot()
-            let maxW = min(4 * h0, max(video.width * 0.5 - pad * 2, 1))
-            let fit = min(1, 2 * h0 / areaH, maxW / areaW)
-            let w = areaW * fit
-            let h = areaH * fit
+            let maxW = min(4 * hBase, max(video.width * 0.5 - pad * 2, 1))
+            let h0 = hBase * min(max((3 / aspect).squareRoot(), 1), 2)
+            let w = min(h0 * aspect, maxW)
+            let h = w / aspect
             let lift: CGFloat = (position == .bottomLeft && nameStripVisible) ? nameStripLift : 0
             Image(uiImage: image)
                 .resizable()
@@ -2797,19 +2795,71 @@ struct MultiviewTileLogoOverlay: View {
 
     private func load(_ url: URL) async {
         let key = url.absoluteString
-        if let cached = LogoCache.shared.image(for: key) {
-            image = cached
+        if let cropped = Self.opaqueCache.object(forKey: key as NSString) {
+            image = cropped
             return
         }
-        image = nil
-        do {
-            let data = try await LogoFetcher.fetch(url)
-            let decoded: UIImage? = await Task.detached(priority: .utility) {
+        var source = LogoCache.shared.image(for: key)
+        if source == nil {
+            image = nil
+            guard let data = try? await LogoFetcher.fetch(url) else { return }
+            source = await Task.detached(priority: .utility) {
                 AerioImageDecoding.decode(data)
             }.value
-            guard let img = decoded else { return }
+            guard let img = source else { return }
             LogoCache.shared.store(img, for: key)
-            image = img
-        } catch {}
+        }
+        guard let src = source else { return }
+        let cropped = await Task.detached(priority: .utility) {
+            Self.croppedToOpaque(src)
+        }.value
+        Self.opaqueCache.setObject(cropped, forKey: key as NSString)
+        image = cropped
+    }
+
+    /// Logos cropped to their opaque bounding box, keyed by URL (computed
+    /// once per decoded image; the guide's LogoCache entry stays uncropped).
+    private static let opaqueCache = NSCache<NSString, UIImage>()
+
+    /// Crops transparent padding: scans alpha on a downscaled copy (at most
+    /// 256 px on the long side, so a stride over the original) and crops
+    /// the original to the matching rect. Returns the input when it has
+    /// no transparent margin or no opaque pixels.
+    nonisolated static func croppedToOpaque(_ img: UIImage) -> UIImage {
+        guard let cg = img.cgImage else { return img }
+        let W = cg.width, H = cg.height
+        guard W > 0, H > 0 else { return img }
+        let scale = min(1, 256 / CGFloat(max(W, H)))
+        let sw = max(1, Int(CGFloat(W) * scale)), sh = max(1, Int(CGFloat(H) * scale))
+        var buf = [UInt8](repeating: 0, count: sw * sh)
+        let drew: Bool = buf.withUnsafeMutableBytes { raw in
+            guard let ctx = CGContext(data: raw.baseAddress, width: sw, height: sh,
+                                      bitsPerComponent: 8, bytesPerRow: sw,
+                                      space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue) else { return false }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: sw, height: sh))
+            return true
+        }
+        guard drew else { return img }
+        var minX = sw, minY = sh, maxX = -1, maxY = -1
+        for y in 0..<sh {
+            let row = y * sw
+            for x in 0..<sw where buf[row + x] > 12 {
+                if x < minX { minX = x }
+                if x > maxX { maxX = x }
+                if y < minY { minY = y }
+                if y > maxY { maxY = y }
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return img }
+        // Buffer rows run top-down (CGContext memory order), same as cg.
+        let fx = CGFloat(W) / CGFloat(sw), fy = CGFloat(H) / CGFloat(sh)
+        let rect = CGRect(x: floor(CGFloat(minX) * fx), y: floor(CGFloat(minY) * fy),
+                          width: ceil(CGFloat(maxX - minX + 1) * fx),
+                          height: ceil(CGFloat(maxY - minY + 1) * fy))
+            .intersection(CGRect(x: 0, y: 0, width: W, height: H))
+        if rect.width >= CGFloat(W) - 1, rect.height >= CGFloat(H) - 1 { return img }
+        guard let out = cg.cropping(to: rect) else { return img }
+        return UIImage(cgImage: out, scale: img.scale, orientation: img.imageOrientation)
     }
 }
