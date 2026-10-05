@@ -64,6 +64,34 @@ let multiviewTilePaddingKey = "multiviewTilePadding"
 /// look since multiview shipped; `true` rounds every tile to 12pt.
 let multiviewTileCornersRoundedKey = "multiviewTileCornersRounded"
 
+/// Settings > Multiview > Show Channel Logos (Discord request 2026-10-04,
+/// identical spec on Android). Off by default. When on, each tile with a
+/// channel logo draws it in the chosen corner so sports feeds read apart.
+let multiviewShowLogosKey = "multiview.showLogos"
+/// Raw `MultiviewLogoPosition` value. Default `topLeft`.
+let multiviewLogoPositionKey = "multiview.logoPosition"
+/// Logo height as an Int percent of the tile height, 10 to 40 step 5.
+/// Default 20.
+let multiviewLogoSizeKey = "multiview.logoSize"
+let multiviewLogoSizeDefault = 20
+let multiviewLogoSizeChoices = [10, 15, 20, 25, 30, 35, 40]
+
+/// Corner the per-tile channel logo sits in.
+enum MultiviewLogoPosition: String, CaseIterable, Identifiable {
+    case topLeft, topRight, bottomLeft, bottomRight
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .topLeft: return "Top Left"
+        case .topRight: return "Top Right"
+        case .bottomLeft: return "Bottom Left"
+        case .bottomRight: return "Bottom Right"
+        }
+    }
+    var isTop: Bool { self == .topLeft || self == .topRight }
+    var isLeading: Bool { self == .topLeft || self == .bottomLeft }
+}
+
 /// Source of truth for the multiview grid's dynamic state:
 /// the ordered tile list, which tile has audio, which tile (if any)
 /// is temporarily promoted to full-screen-within-grid, the relocate

@@ -179,6 +179,14 @@ struct PlayerSettingsView: View {
     private var paddingEnabled: Bool = true
     @AppStorage(multiviewTileCornersRoundedKey)
     private var cornersRounded: Bool = false
+    @AppStorage(multiviewShowLogosKey) private var showTileLogos: Bool = false
+    @AppStorage(multiviewLogoPositionKey)
+    private var tileLogoPositionRaw: String = MultiviewLogoPosition.topLeft.rawValue
+    @AppStorage(multiviewLogoSizeKey) private var tileLogoSize: Int = multiviewLogoSizeDefault
+
+    private var tileLogoPositionOptions: [SettingsChoice<String>] {
+        MultiviewLogoPosition.allCases.map { SettingsChoice($0.rawValue, $0.displayName) }
+    }
 
     var body: some View {
         ZStack {
@@ -474,6 +482,35 @@ struct PlayerSettingsView: View {
                     iconColor: theme.accent
                 )
                 .listRowBackground(Color.cardBackground)
+
+                Toggle(isOn: $showTileLogos) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show Channel Logos")
+                            .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                        Text("Show each channel's logo on its tile so similar streams are easy to tell apart.")
+                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                    }
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+
+                if showTileLogos {
+                    SettingsChoicePicker(
+                        "Logo Position",
+                        options: tileLogoPositionOptions,
+                        selection: $tileLogoPositionRaw,
+                        footer: "Which corner of each tile the channel logo sits in.",
+                        iconColor: theme.accent
+                    )
+                    .listRowBackground(Color.cardBackground)
+
+                    steppedSliderRow_iOS(
+                        title: "Logo Size",
+                        values: multiviewLogoSizeChoices,
+                        selection: $tileLogoSize,
+                        label: { "\($0)%" }
+                    )
+                }
             } header: {
                 // Phase 3: the audio focus and tile corner copy now lives
                 // on those pickers' own pages, so the section footer that
@@ -697,6 +734,31 @@ struct PlayerSettingsView: View {
                         selection: $cornersRounded,
                         footer: "Square keeps the cinema-grid look; rounded softens each tile with a 12pt radius."
                     )
+
+                    TVSettingsToggleRow(
+                        icon: "photo",
+                        iconColor: theme.accent,
+                        title: "Show Channel Logos",
+                        subtitle: "Show each channel's logo on its tile so similar streams are easy to tell apart.",
+                        isOn: $showTileLogos,
+                        onChange: { _ in }
+                    )
+
+                    if showTileLogos {
+                        SettingsChoicePicker(
+                            "Logo Position",
+                            options: tileLogoPositionOptions,
+                            selection: $tileLogoPositionRaw,
+                            footer: "Which corner of each tile the channel logo sits in."
+                        )
+
+                        tvSteppedSegmentsRow(
+                            title: "Logo Size",
+                            values: multiviewLogoSizeChoices,
+                            selection: $tileLogoSize,
+                            segmentLabel: { "\($0)%" }
+                        )
+                    }
                 }
             }
             .padding(.horizontal, 80)

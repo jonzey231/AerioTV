@@ -981,6 +981,10 @@ struct MultiviewTileView: View {
             // currently owns audio (solid) or would take audio on
             // the next Select press (outline).
             if !isSoleTile {
+                // Settings > Multiview > Show Channel Logos. Drawn under
+                // the name strip and audio icon; never focusable.
+                MultiviewTileLogoOverlay(logoURL: tile.item.logoURL,
+                                         nameStripVisible: chromeState.isVisible)
                 labelStrip
                 centerAudioIcon
                 // Accent border marking the focused tile during D-pad
@@ -1319,6 +1323,11 @@ struct MultiviewTileView: View {
             // at the very bottom of the display which shouldn't be
             // there since it's already listed inside the tile itself").
             if !isSoleTile {
+                // Settings > Multiview > Show Channel Logos. The audio
+                // tile shows the centered badge instead of the bottom
+                // name strip, so only non-audio tiles need the lift.
+                MultiviewTileLogoOverlay(logoURL: tile.item.logoURL,
+                                         nameStripVisible: chromeState.isVisible && !isAudioActive)
                 if isAudioActive {
                     audioBadge
                 } else {
@@ -2667,5 +2676,112 @@ final class PlayerTileStores: ObservableObject {
                 .sink { [weak self] in self?.menuRevision &+= 1 }
                 .store(in: &bag)
         }
+    }
+}
+
+
+// MARK: - Channel logo overlay (Settings > Multiview > Show Channel Logos)
+
+/// Per-tile channel logo in a user-chosen corner, sized as a percent of
+/// the tile height, on a subtle dark rounded backdrop so it reads on
+/// bright video. Reads its three settings through @AppStorage so changes
+/// apply live while Multiview is open. Draws nothing when the setting is
+/// off, when the tile has no logo URL, or until the logo has loaded.
+/// Never hit-testable and holds no focusable content, so it neither
+/// takes tvOS focus nor changes the tile's layout. Uses the same
+/// LogoCache / LogoFetcher / AerioImageDecoding path as the guide cells.
+struct MultiviewTileLogoOverlay: View {
+    let logoURL: URL?
+    /// True while the bottom-left channel name strip is showing. A
+    /// bottom-left logo lifts above it instead of covering it.
+    let nameStripVisible: Bool
+
+    @AppStorage(multiviewShowLogosKey) private var showLogos: Bool = false
+    @AppStorage(multiviewLogoPositionKey)
+    private var positionRaw: String = MultiviewLogoPosition.topLeft.rawValue
+    @AppStorage(multiviewLogoSizeKey) private var sizePercent: Int = multiviewLogoSizeDefault
+
+    @State private var image: UIImage?
+
+    private var position: MultiviewLogoPosition {
+        MultiviewLogoPosition(rawValue: positionRaw) ?? .topLeft
+    }
+
+    #if os(tvOS)
+    private let inset: CGFloat = 14
+    private let pad: CGFloat = 6
+    /// Name strip height (caption pill plus its 8pt padding) on tvOS.
+    private let nameStripLift: CGFloat = 48
+    #else
+    private let inset: CGFloat = 8
+    private let pad: CGFloat = 4
+    private let nameStripLift: CGFloat = 32
+    #endif
+
+    var body: some View {
+        if showLogos, let logoURL {
+            GeometryReader { geo in
+                content(in: geo.size)
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .task(id: logoURL.absoluteString) { await load(logoURL) }
+        }
+    }
+
+    @ViewBuilder
+    private func content(in tile: CGSize) -> some View {
+        if let image, image.size.width > 0, image.size.height > 0, tile.height > 0 {
+            let pct = CGFloat(min(max(sizePercent, 10), 40)) / 100
+            let maxH = max(tile.height * pct - pad * 2, 1)
+            // Aspect fit: height from the percent, width capped at half
+            // the tile so a very wide wordmark cannot span the tile.
+            let aspect = image.size.width / image.size.height
+            let maxW = max(tile.width * 0.5 - pad * 2, 1)
+            let w = min(maxH * aspect, maxW)
+            let h = w / aspect
+            let lift: CGFloat = (position == .bottomLeft && nameStripVisible) ? nameStripLift : 0
+            Image(uiImage: image)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: w, height: h)
+                .padding(pad)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.black.opacity(0.55))
+                )
+                .padding(position.isTop ? .top : .bottom, inset + lift)
+                .padding(position.isLeading ? .leading : .trailing, inset)
+                .frame(width: tile.width, height: tile.height,
+                       alignment: alignment)
+                .animation(.easeInOut(duration: 0.2), value: lift)
+        }
+    }
+
+    private var alignment: Alignment {
+        switch position {
+        case .topLeft: return .topLeading
+        case .topRight: return .topTrailing
+        case .bottomLeft: return .bottomLeading
+        case .bottomRight: return .bottomTrailing
+        }
+    }
+
+    private func load(_ url: URL) async {
+        let key = url.absoluteString
+        if let cached = LogoCache.shared.image(for: key) {
+            image = cached
+            return
+        }
+        image = nil
+        do {
+            let data = try await LogoFetcher.fetch(url)
+            let decoded: UIImage? = await Task.detached(priority: .utility) {
+                AerioImageDecoding.decode(data)
+            }.value
+            guard let img = decoded else { return }
+            LogoCache.shared.store(img, for: key)
+            image = img
+        } catch {}
     }
 }

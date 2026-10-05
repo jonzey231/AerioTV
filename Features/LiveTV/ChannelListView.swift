@@ -5230,7 +5230,7 @@ struct TVGroupPillButtonStyle: ButtonStyle {
 // MARK: - Cached Channel Logo Image
 
 /// In-memory logo cache — prevents AsyncImage from re-fetching on every scroll.
-private final class LogoCache: @unchecked Sendable {
+final class LogoCache: @unchecked Sendable {
     static let shared = LogoCache()
     private let cache = NSCache<NSString, UIImage>()
     private init() { cache.countLimit = 500 }
