@@ -4297,7 +4297,9 @@ extension UIApplication {
                     .compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
                 let focused = env.flatMap { UIFocusSystem.focusSystem(for: $0)?.focusedItem }
                 let f = focused.map { String(describing: type(of: $0)) } ?? "nil"
-                debugLog("[PRESS] \(name) \(press.phase == .began ? "began" : "ended") focused=\(f)")
+                let wins = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap { $0.windows }
+                let winDesc = wins.map { "\(type(of: $0))\($0.isKeyWindow ? "*" : "")@\(Int($0.windowLevel.rawValue))\($0.isHidden ? "h" : "")" }.joined(separator: ",")
+                debugLog("[PRESS] \(name) \(press.phase == .began ? "began" : "ended") focused=\(f) key=\(env.map { String(describing: type(of: $0)) } ?? "nil") windows=[\(winDesc)]")
                 // Start the input-to-frame clock on the DOWN edge only; the
                 // matching [INPUT] line lands on the first presented frame.
                 if press.phase == .began { InputProbe.begin(name) }

@@ -192,6 +192,10 @@ enum RemoteInputLogger {
         // Pad the event name to a fixed width so columns line up in
         // the log file. A narrower label widens `focus=`.
         print("[REMOTE] \(msg)")
+        // DIAG 2026-10-05 (Back does nothing): mirror into the log file so a
+        // GameController-level Menu press can be compared to the UIKit
+        // sendEvent [PRESS] line.
+        debugLog("[REMOTE] \(msg)")
     }
 }
 #else
