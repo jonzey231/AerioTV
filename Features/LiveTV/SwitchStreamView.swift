@@ -574,29 +574,40 @@ struct SwitchStreamView: View {
                                 .padding(.horizontal, 80)
                             }
                             ForEach(Array(streams.enumerated()), id: \.element.id) { index, stream in
-                                SwitchStreamRow(
-                                    title: titleLine(for: stream),
-                                    meta: metaLine(for: stream),
-                                    isSelected: selectedStreamID == stream.id,
-                                    action: { select(stream) }
-                                )
-                                .focused($focusedRow, equals: "stream-\(stream.id)")
-                                .disabled(isSwitching || isSavingOrder)
-                                // Admin reorder: long-press the row.
-                                .contextMenu {
-                                    if canReorder {
-                                        if index > 0 {
-                                            Button { moveStream(stream, by: -1) } label: {
-                                                Label("Move Up", systemImage: "arrow.up")
+                                HStack(spacing: 16) {
+                                    SwitchStreamRow(
+                                        title: titleLine(for: stream),
+                                        meta: metaLine(for: stream),
+                                        isSelected: selectedStreamID == stream.id,
+                                        action: { select(stream) }
+                                    )
+                                    .focused($focusedRow, equals: "stream-\(stream.id)")
+                                    .disabled(isSwitching || isSavingOrder)
+                                    // Admin reorder: trailing "more" button with a
+                                    // Move Up / Move Down menu (Android parity).
+                                    // Right from the row focuses it, Left returns.
+                                    if canReorder && streams.count > 1 {
+                                        Menu {
+                                            if index > 0 {
+                                                Button { moveStream(stream, by: -1) } label: {
+                                                    Label("Move Up", systemImage: "arrow.up")
+                                                }
                                             }
-                                        }
-                                        if index < streams.count - 1 {
-                                            Button { moveStream(stream, by: 1) } label: {
-                                                Label("Move Down", systemImage: "arrow.down")
+                                            if index < streams.count - 1 {
+                                                Button { moveStream(stream, by: 1) } label: {
+                                                    Label("Move Down", systemImage: "arrow.down")
+                                                }
                                             }
+                                        } label: {
+                                            SwitchStreamMoreLabel()
                                         }
+                                        .buttonStyle(SwitchStreamRowStyle())
+                                        .focusEffectDisabled()
+                                        .focused($focusedRow, equals: "more-\(stream.id)")
+                                        .disabled(isSwitching || isSavingOrder)
                                     }
                                 }
+                                .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                         .padding(.horizontal, 80)
@@ -717,6 +728,26 @@ private struct SwitchStreamRowLabel: View {
         )
         .scaleEffect(isFocused ? 1.02 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+/// Trailing "more" button for a stream row. Same height as the row
+/// (the HStack is vertically fixed and this fills it).
+private struct SwitchStreamMoreLabel: View {
+    @Environment(\.isFocused) private var isFocused
+
+    var body: some View {
+        Image(systemName: "ellipsis")
+            .scaledFont(.system(size: 28, weight: .semibold))
+            .foregroundColor(isFocused ? .white : .textSecondary)
+            .frame(width: 96)
+            .frame(maxHeight: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(isFocused ? Color.accentPrimary : Color.elevatedBackground)
+            )
+            .scaleEffect(isFocused ? 1.04 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
 }
 

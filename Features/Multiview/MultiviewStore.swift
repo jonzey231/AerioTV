@@ -70,11 +70,12 @@ let multiviewTileCornersRoundedKey = "multiviewTileCornersRounded"
 let multiviewShowLogosKey = "multiview.showLogos"
 /// Raw `MultiviewLogoPosition` value. Default `topLeft`.
 let multiviewLogoPositionKey = "multiview.logoPosition"
-/// Logo height as an Int percent of the tile height, 10 to 40 step 5.
-/// Default 20.
+/// Logo height as an Int percent of the tile's video rect height, 5 to
+/// 25 step 5. Default 10. A stored value above 25 (older 10 to 40 range)
+/// is clamped to 25 at read time.
 let multiviewLogoSizeKey = "multiview.logoSize"
-let multiviewLogoSizeDefault = 20
-let multiviewLogoSizeChoices = [10, 15, 20, 25, 30, 35, 40]
+let multiviewLogoSizeDefault = 10
+let multiviewLogoSizeChoices = [5, 10, 15, 20, 25]
 
 /// Corner the per-tile channel logo sits in.
 enum MultiviewLogoPosition: String, CaseIterable, Identifiable {

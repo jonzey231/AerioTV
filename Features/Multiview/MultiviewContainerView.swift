@@ -566,6 +566,10 @@ struct MultiviewContainerView: View {
                         }
                     )
                     .id(audioTile.id)
+                    // Hide the top-left ChannelInfoBanner while the
+                    // picker is up; it otherwise covers the title.
+                    .onAppear { nowPlaying.switchStreamIsVisible = true }
+                    .onDisappear { nowPlaying.switchStreamIsVisible = false }
                 } else {
                     containerOptionsPanel(audioStore: audioStore)
                     // v1.6.12 (GH #11 follow-up): trap D-pad navigation

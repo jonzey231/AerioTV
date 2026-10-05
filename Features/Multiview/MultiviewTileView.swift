@@ -983,7 +983,8 @@ struct MultiviewTileView: View {
             if !isSoleTile {
                 // Settings > Multiview > Show Channel Logos. Drawn under
                 // the name strip and audio icon; never focusable.
-                MultiviewTileLogoOverlay(logoURL: tile.item.logoURL,
+                MultiviewTileLogoOverlay(tileID: tile.id,
+                                         logoURL: tile.item.logoURL,
                                          nameStripVisible: chromeState.isVisible)
                 labelStrip
                 centerAudioIcon
@@ -1326,7 +1327,8 @@ struct MultiviewTileView: View {
                 // Settings > Multiview > Show Channel Logos. The audio
                 // tile shows the centered badge instead of the bottom
                 // name strip, so only non-audio tiles need the lift.
-                MultiviewTileLogoOverlay(logoURL: tile.item.logoURL,
+                MultiviewTileLogoOverlay(tileID: tile.id,
+                                         logoURL: tile.item.logoURL,
                                          nameStripVisible: chromeState.isVisible && !isAudioActive)
                 if isAudioActive {
                     audioBadge
@@ -2682,8 +2684,9 @@ final class PlayerTileStores: ObservableObject {
 
 // MARK: - Channel logo overlay (Settings > Multiview > Show Channel Logos)
 
-/// Per-tile channel logo in a user-chosen corner, sized as a percent of
-/// the tile height, on a subtle dark rounded backdrop so it reads on
+/// Per-tile channel logo in a user-chosen corner of the VIDEO rect (the
+/// aspect-fit picture inside the tile, so letterbox bars never hold the
+/// logo), sized as a percent of the video rect height, on a subtle dark rounded backdrop so it reads on
 /// bright video. Reads its three settings through @AppStorage so changes
 /// apply live while Multiview is open. Draws nothing when the setting is
 /// off, when the tile has no logo URL, or until the logo has loaded.
@@ -2691,6 +2694,7 @@ final class PlayerTileStores: ObservableObject {
 /// takes tvOS focus nor changes the tile's layout. Uses the same
 /// LogoCache / LogoFetcher / AerioImageDecoding path as the guide cells.
 struct MultiviewTileLogoOverlay: View {
+    let tileID: String
     let logoURL: URL?
     /// True while the bottom-left channel name strip is showing. A
     /// bottom-left logo lifts above it instead of covering it.
@@ -2701,19 +2705,20 @@ struct MultiviewTileLogoOverlay: View {
     private var positionRaw: String = MultiviewLogoPosition.topLeft.rawValue
     @AppStorage(multiviewLogoSizeKey) private var sizePercent: Int = multiviewLogoSizeDefault
 
+    @ObservedObject private var store = MultiviewStore.shared
     @State private var image: UIImage?
 
     private var position: MultiviewLogoPosition {
         MultiviewLogoPosition(rawValue: positionRaw) ?? .topLeft
     }
 
+    /// Inset from the video rect's corner.
+    private let inset: CGFloat = 8
     #if os(tvOS)
-    private let inset: CGFloat = 14
     private let pad: CGFloat = 6
     /// Name strip height (caption pill plus its 8pt padding) on tvOS.
     private let nameStripLift: CGFloat = 48
     #else
-    private let inset: CGFloat = 8
     private let pad: CGFloat = 4
     private let nameStripLift: CGFloat = 32
     #endif
@@ -2732,12 +2737,16 @@ struct MultiviewTileLogoOverlay: View {
     @ViewBuilder
     private func content(in tile: CGSize) -> some View {
         if let image, image.size.width > 0, image.size.height > 0, tile.height > 0 {
-            let pct = CGFloat(min(max(sizePercent, 10), 40)) / 100
-            let maxH = max(tile.height * pct - pad * 2, 1)
+            // Video rect: aspect fit of the tile's reported video aspect
+            // (AVPlayer presentationSize), else 16:9. Centered in the tile.
+            let videoAspect = store.tileVideoAspects[tileID] ?? (16.0 / 9.0)
+            let video = Self.fittedSize(aspect: videoAspect, in: tile)
+            let pct = CGFloat(min(max(sizePercent, 5), 25)) / 100
+            let maxH = max(video.height * pct - pad * 2, 1)
             // Aspect fit: height from the percent, width capped at half
-            // the tile so a very wide wordmark cannot span the tile.
+            // the video rect so a very wide wordmark cannot span it.
             let aspect = image.size.width / image.size.height
-            let maxW = max(tile.width * 0.5 - pad * 2, 1)
+            let maxW = max(video.width * 0.5 - pad * 2, 1)
             let w = min(maxH * aspect, maxW)
             let h = w / aspect
             let lift: CGFloat = (position == .bottomLeft && nameStripVisible) ? nameStripLift : 0
@@ -2752,10 +2761,21 @@ struct MultiviewTileLogoOverlay: View {
                 )
                 .padding(position.isTop ? .top : .bottom, inset + lift)
                 .padding(position.isLeading ? .leading : .trailing, inset)
-                .frame(width: tile.width, height: tile.height,
+                .frame(width: video.width, height: video.height,
                        alignment: alignment)
+                .position(x: tile.width / 2, y: tile.height / 2)
                 .animation(.easeInOut(duration: 0.2), value: lift)
         }
+    }
+
+    /// Aspect-fit size of `aspect` inside `bounds` (same math as the
+    /// focus border's video-rect trace).
+    static func fittedSize(aspect: CGFloat, in bounds: CGSize) -> CGSize {
+        guard bounds.width > 0, bounds.height > 0, aspect > 0 else { return bounds }
+        if bounds.width / bounds.height > aspect {
+            return CGSize(width: bounds.height * aspect, height: bounds.height)
+        }
+        return CGSize(width: bounds.width, height: bounds.width / aspect)
     }
 
     private var alignment: Alignment {

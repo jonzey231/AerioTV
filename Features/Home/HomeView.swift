@@ -3963,6 +3963,16 @@ final class NowPlayingManager: ObservableObject {
         set { if newValue != _streamInfoIsVisible { _streamInfoIsVisible = newValue } }
     }
 
+    /// Mirror of whether the tvOS Switch Stream overlay is open. Read by
+    /// `ChannelInfoBanner` so its top-left card does not cover the
+    /// overlay's title (the Options panel pins the chrome, which would
+    /// otherwise keep the banner up).
+    @Published private var _switchStreamIsVisible: Bool = false
+    var switchStreamIsVisible: Bool {
+        get { _switchStreamIsVisible }
+        set { if newValue != _switchStreamIsVisible { _switchStreamIsVisible = newValue } }
+    }
+
     /// v1.6.18: most recent channel id the user was actively
     /// watching/listening to. Set on every `startPlaying(...)` call
     /// (single-stream path) and captured from the multiview audio
@@ -8437,6 +8447,7 @@ private struct ChannelInfoBanner: View {
             && isSingleStream
             && isFullscreenActive
             && !nowPlaying.streamInfoIsVisible
+            && !nowPlaying.switchStreamIsVisible
     }
 
     /// 5-second budget for the post-stream-start banner window.
