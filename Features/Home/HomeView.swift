@@ -4556,6 +4556,8 @@ struct MainTabView: View {
     #if os(iOS)
     /// Kept Live card (iOS/iPadOS only; tvOS uses the kept-count circle).
     @ObservedObject private var kept = KeptLiveChannels.shared
+    /// Measured tab bar capsule insets for the iPhone Kept Live row.
+    @ObservedObject private var cardMetrics = RemoteSessionCardMetrics.shared
     #endif
     #if os(tvOS)
     /// Bottom edge of the Channel Preview banner's art slot: the corner mini
@@ -6078,13 +6080,16 @@ struct MainTabView: View {
                         // button trailing.
                         remoteSessionCard
                         if keptLiveCardVisible {
-                            HStack(spacing: 12) {
+                            // Outer edges line up with the measured tab bar
+                            // capsule (Logan 2026-10-04); 20 pt until measured.
+                            HStack(spacing: RemoteSessionCardMetrics.gap) {
                                 keptLiveCard
                                 if showsControlATVButton {
                                     CompanionControlFAB { showCompanionPickerGlobal = true }
                                 }
                             }
-                            .padding(.horizontal, 16)
+                            .padding(.leading, cardMetrics.barLeadingInset > 0 ? cardMetrics.barLeadingInset : 20)
+                            .padding(.trailing, cardMetrics.barTrailingInset > 0 ? cardMetrics.barTrailingInset : 20)
                         }
                     }
                 }
@@ -9350,6 +9355,38 @@ final class RemoteSessionCardMetrics: ObservableObject {
         let top = superview.convert(CGPoint(x: 0, y: originY), to: window).y
         guard top > 0 else { return }
         if abs(top - tabBarTopInWindow) > 0.5 { tabBarTopInWindow = top }
+        measureBarInsets(bar, superview: superview, window: window)
+    }
+
+    /// Leading and trailing insets of the visible tab bar capsule from the
+    /// window edges (Logan 2026-10-04): the iPhone Kept Live row lines its
+    /// outer edges up with the bar's. 0 until measured.
+    @Published private(set) var barLeadingInset: CGFloat = 0
+    @Published private(set) var barTrailingInset: CGFloat = 0
+
+    /// The iOS 26+ UITabBar spans the window; the visible glass capsule is
+    /// its widest subview narrower than the bar. Measured from layer position
+    /// and bounds (untransformed), and only while the bar is expanded, since
+    /// the collapse transform shrinks it.
+    private func measureBarInsets(_ bar: UITabBar, superview: UIView, window: UIWindow) {
+        guard !TabBarCollapseState.shared.collapsed else { return }
+        let width = bar.bounds.width
+        guard width > 0 else { return }
+        let platter = bar.subviews
+            .filter { !$0.isHidden && $0.bounds.width < width - 1 && $0.bounds.width > width * 0.6 }
+            .max { $0.bounds.width < $1.bounds.width }
+        guard let platter else { return }
+        let layer = bar.layer
+        let barOriginX = layer.position.x - layer.anchorPoint.x * width
+        let pLayer = platter.layer
+        let pMinX = pLayer.position.x - pLayer.anchorPoint.x * platter.bounds.width
+        let minX = superview.convert(CGPoint(x: barOriginX + pMinX, y: 0), to: window).x
+        let maxX = minX + platter.bounds.width
+        let lead = max(0, minX)
+        let trail = max(0, window.bounds.width - maxX)
+        if abs(lead - barLeadingInset) > 0.5 { barLeadingInset = lead }
+        if abs(trail - barTrailingInset) > 0.5 { barTrailingInset = trail }
+        debugLog("[TABBAR] capsule insets lead=\(lead) trail=\(trail) width=\(platter.bounds.width)")
     }
 
     /// Bottom safe-area inset of the key window (home indicator).

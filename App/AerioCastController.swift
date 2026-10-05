@@ -3632,6 +3632,18 @@ struct CompanionControlFAB: View {
     }
 }
 
+private struct KeptPillChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, tvOS 26.0, *) {
+            content.glassEffect(.regular, in: Capsule())
+        } else {
+            content
+                .background(.regularMaterial, in: Capsule())
+                .clipShape(Capsule())
+        }
+    }
+}
+
 private struct CompanionFABChrome: ViewModifier {
     @ObservedObject private var theme: ThemeManager = .shared
     func body(content: Content) -> some View {
@@ -4204,8 +4216,10 @@ struct KeptLiveCard: View {
         .padding(.leading, 8)
         .padding(.trailing, 4)
         .frame(height: 48)
-        .background { RemoteSessionCard.cardSurface }
-        .clipShape(Capsule())
+        // Same plain regular glass as the tab bar and the Control-a-TV
+        // circle beside it (Logan 2026-10-04), no dark tint, so the row reads
+        // as part of the bar's family.
+        .modifier(KeptPillChrome())
         .onAppear { debugLog("[AVP-RETAIN] kept pill show (\(channels.count))") }
         .onDisappear { debugLog("[AVP-RETAIN] kept pill hide") }
         .accessibilityElement(children: .contain)
