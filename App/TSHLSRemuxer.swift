@@ -4228,6 +4228,14 @@ enum LiveFirstByteLearner {
     }
 }
 
+#if os(iOS)
+/// Background grace window for live tiles (shade / Control Center pulls).
+/// Well under iOS's ~30 s background task allowance.
+enum AVPBackgroundGrace {
+    static let seconds: TimeInterval = 20
+}
+#endif
+
 struct AVPlayerMultiviewTile: View {
     /// The owning tile's id; mute state derives from comparing this to
     /// the store's audioTileID LIVE (never from a captured snapshot,
@@ -4365,6 +4373,20 @@ struct AVPlayerMultiviewTile: View {
     @State private var backgroundSuspended = false
     /// Position saved at quiesce for kinds that can resume in place.
     @State private var backgroundResumeMs: Int32 = 0
+    #if os(iOS)
+    /// Background grace (2026-10-04): a notification shade or Control
+    /// Center pull backgrounds the scene for a second or two. The tile
+    /// keeps its pipeline alive under a UIApplication background task
+    /// for AVPBackgroundGrace.seconds, so a quick return is a resume,
+    /// not a rebuild. Expiry quiesces exactly as before.
+    @State private var graceTaskID: UIBackgroundTaskIdentifier = .invalid
+    @State private var graceTimer: DispatchWorkItem?
+    @State private var graceStartedAt: Date?
+    /// True when the grace paused a playing player (resume plays it).
+    @State private var gracePausedPlayer = false
+    /// Live edge offset (seconds behind the seekable end) at pause.
+    @State private var graceEdgeOffset: Double = -1
+    #endif
     /// Previous isPiPActive, to catch "PiP closed while the app is
     /// still backgrounded" - the ONE path where suspension arrives with
     /// no didEnterBackground left to quiesce for it.
@@ -4534,6 +4556,10 @@ struct AVPlayerMultiviewTile: View {
             start()
         }
         .onDisappear {
+            #if os(iOS)
+            // A tile removed mid-grace must still release its background task.
+            endBackgroundGrace()
+            #endif
             // Cancels any standing slow retry in flight.
             teardownToken = UUID()
             stop()
@@ -4556,11 +4582,11 @@ struct AVPlayerMultiviewTile: View {
         // (iOS keeps the process running and the pipeline healthy).
         .onReceive(NotificationCenter.default.publisher(
             for: UIApplication.didEnterBackgroundNotification)) { _ in
-            quiesceForBackground()
+            beginBackgroundGrace()
         }
         .onReceive(NotificationCenter.default.publisher(
             for: UIApplication.willEnterForegroundNotification)) { _ in
-            resumeFromBackground()
+            if !resumeFromBackgroundGrace() { resumeFromBackground() }
         }
         // PiP closed while still backgrounded: suspension follows with no
         // further lifecycle callback, so quiesce right here.
@@ -5800,7 +5826,99 @@ struct AVPlayerMultiviewTile: View {
     /// wake-up delivered "ingest failed: The request timed out." plus a
     /// -12888 stale-playlist error and the terminal card (field log
     /// 2026-08-29, Clippers game).
+    /// didEnterBackground: start the grace window instead of quiescing
+    /// at once. Exemptions (AirPlay/Cast receiver, PiP) behave exactly as
+    /// in quiesceForBackground.
+    private func beginBackgroundGrace() {
+        if airPlayDelivery.handleBackgroundEntry() { return }
+        guard !progressStore.isPiPActive else { return }
+        guard tileError == nil, player != nil || statusText != nil else { return }
+        guard !backgroundSuspended, graceStartedAt == nil else { return }
+        let taskID = UIApplication.shared.beginBackgroundTask(withName: "aerio.tile.backgroundGrace") {
+            // iOS is about to expire the task: quiesce now (which ends it).
+            debugLog("[AVP-MV] background grace: task expiration handler fired; quiescing channel=\(channelName)")
+            quiesceForBackground()
+        }
+        if taskID == .invalid {
+            // No background time granted: behave exactly as before.
+            quiesceForBackground()
+            return
+        }
+        graceTaskID = taskID
+        graceStartedAt = Date()
+        // Pause (never tear down) so no audio plays from a backgrounded
+        // app without a keep-alive holder; ingest and remuxer keep running
+        // and the reserve keeps filling.
+        gracePausedPlayer = false
+        graceEdgeOffset = -1
+        if let p = player {
+            if let item = p.currentItem,
+               let range = item.seekableTimeRanges.last?.timeRangeValue {
+                let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+                let now = CMTimeGetSeconds(item.currentTime())
+                if end.isFinite, now.isFinite { graceEdgeOffset = max(0, end - now) }
+            }
+            if p.timeControlStatus != .paused || p.rate != 0 {
+                p.pause()
+                gracePausedPlayer = true
+            }
+        }
+        stallWatchdog?.setSuspended(true, item: nil)
+        let work = DispatchWorkItem {
+            guard let started = graceStartedAt else { return }
+            let secs = Int(Date().timeIntervalSince(started).rounded())
+            debugLog("[AVP-MV] background grace expired after \(secs) s: quiesced channel=\(channelName)")
+            quiesceForBackground()
+        }
+        graceTimer = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + AVPBackgroundGrace.seconds, execute: work)
+        debugLog("[AVP-MV] background grace: started (\(Int(AVPBackgroundGrace.seconds)) s) paused=\(gracePausedPlayer) edgeOffset=\(String(format: "%.1f", graceEdgeOffset))s channel=\(channelName)")
+    }
+
+    /// Cancels the grace timer and ends the background task. Safe to call
+    /// any number of times.
+    private func endBackgroundGrace() {
+        graceTimer?.cancel()
+        graceTimer = nil
+        graceStartedAt = nil
+        if graceTaskID != .invalid {
+            UIApplication.shared.endBackgroundTask(graceTaskID)
+            graceTaskID = .invalid
+        }
+    }
+
+    /// willEnterForeground inside the grace window: resume in place.
+    /// Returns false when no grace was pending (caller rebuilds if the
+    /// tile was quiesced).
+    private func resumeFromBackgroundGrace() -> Bool {
+        guard let started = graceStartedAt else { return false }
+        let secs = Date().timeIntervalSince(started)
+        endBackgroundGrace()
+        stallWatchdog?.setSuspended(false, item: player?.currentItem)
+        if let p = player, gracePausedPlayer {
+            let isLive = !isVOD && !isDVR && catchup == nil
+            if isLive, graceEdgeOffset >= 0, let item = p.currentItem,
+               let range = item.seekableTimeRanges.last?.timeRangeValue {
+                let start = CMTimeGetSeconds(range.start)
+                let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+                if start.isFinite, end.isFinite {
+                    let target = max(start, end - graceEdgeOffset)
+                    p.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                           toleranceBefore: .zero, toleranceAfter: .positiveInfinity)
+                }
+            }
+            if !shouldPause { p.play() }
+        }
+        gracePausedPlayer = false
+        debugLog("[AVP-MV] background grace: resumed after \(String(format: "%.1f", secs)) s, no rebuild channel=\(channelName)")
+        return true
+    }
+
     private func quiesceForBackground() {
+        // Any pending grace ends here (expiry, PiP close, failure, or a
+        // direct quiesce); the background task is always released.
+        endBackgroundGrace()
+        gracePausedPlayer = false
         // A receiver is being served from this phone (plan section 6):
         // the keepalive holds the process, and quiescing would starve it.
         if airPlayDelivery.handleBackgroundEntry() { return }
