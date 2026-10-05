@@ -7045,8 +7045,16 @@ struct EPGGuideView: View {
     /// Focus left the clock: if it landed on a programme cell that does not
     /// cover the anchor column, move it to the one that does on the same row.
     private func retargetAfterClockExit() {
+        let startedAt = Date()
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 80_000_000)
+            // A press since the clock exit means the user is already moving
+            // (rapid Down): rewriting focus here pulled it back a row
+            // (trace 2026-10-04 22:53:18, top-channel bounce).
+            guard TVFocusTracer.lastPressAt <= startedAt else {
+                debugLog("[GuideFocus] clock exit: retarget skipped, user pressed")
+                return
+            }
             guard let pid = focusedProgramID, let chID = channelID(ofProgram: pid) else { return }
             let anchor = viewportAnchorTime
             if let focused = guideStore.programs[chID]?.first(where: { $0.id == pid }),
@@ -7056,6 +7064,10 @@ struct EPGGuideView: View {
             guard let target = programID(forChannel: chID, containing: anchor), target != pid else { return }
             debugLog("[GuideFocus] clock exit: retarget \(pid) -> \(target)")
             for _ in 0..<4 {
+                if TVFocusTracer.lastPressAt > startedAt {
+                    debugLog("[GuideFocus] clock exit: retarget abandoned, user pressed")
+                    break
+                }
                 Slow.time("focus.clockExitWrite") { focusedProgramID = target }
                 try? await Task.sleep(nanoseconds: 60_000_000)
                 if focusedProgramID == target { break }

@@ -8253,6 +8253,41 @@ struct MainTabView: View {
             // Edit Server). SettingsView resets the flag.
             debugLog("🎮 Menu pressed: Settings subview pushed → popping")
             settingsPopRequested = true
+        } else if selectedTab != .liveTV && !(nowPlaying.isActive && !nowPlaying.isMinimized) {
+            // Two-step Back on DVR, Movies, TV Shows and Settings (parity with
+            // Android, 2026-10-04): Back from page content moves focus up to
+            // this tab's pill and the page stays; Back on a pill switches to
+            // Live TV with focus on the Live TV pill.
+            if TVFocusTracer.focusIsOnTabBar() {
+                // Lands on the guide's top channel (Logan 2026-10-04). One
+                // request after the tab settles, dropped if the user has
+                // pressed anything since, so it never fights a press.
+                debugLog("[FOCUS] Back on pill (" + selectedTab.rawValue + ") -> Live TV, guide top channel")
+                selectedTab = .liveTV
+                let pressedAt = TVFocusTracer.lastPressAt
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    guard selectedTab == .liveTV, TVFocusTracer.lastPressAt <= pressedAt else {
+                        debugLog("[FOCUS] Back on pill: top-channel focus skipped (user pressed or tab changed)")
+                        return
+                    }
+                    debugLog("[FOCUS] Back on pill: guide scroll to top channel")
+                    NotificationCenter.default.post(name: .guideScrollToTop, object: nil)
+                }
+            } else {
+                let tab = selectedTab
+                var delay = 0.05
+                if tabBarScrollState.isHidden {
+                    // Bring the bar back on screen first so the pill exists
+                    // in the window before focus is asked for it.
+                    NotificationCenter.default.post(name: .aerioTabScrollToTop, object: nil,
+                                                    userInfo: ["tab": tab.rawValue])
+                    delay = 0.6
+                }
+                debugLog("[FOCUS] Back from content (" + tab.rawValue + ") -> focus pill in \(delay)s")
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    TVTabPillFocuser.focusPill(title: tab.title, reason: "back-from-content")
+                }
+            }
         } else if nowPlaying.isActive && nowPlaying.isMinimized
                     && selectedTab != .liveTV {
             // Logan 2026-08-26: Back on another tab's ROOT (e.g. Settings)
@@ -9746,3 +9781,105 @@ struct MiniPlayerSettingsStash: ViewModifier {
             }
     }
 }
+
+// MARK: - Tab pill focus (two-step Back)
+#if os(tvOS)
+
+/// Moves tvOS focus onto a system tab bar pill on request (two-step Back).
+/// Attempt 1: a window-sized UIFocusGuide aimed at the pill, asked for focus.
+/// Attempt 2: the root view controller temporarily prefers the pill
+/// (swizzled preferredFocusEnvironments) and refreshes focus.
+/// Every attempt and its result is logged as [FOCUS].
+@MainActor
+enum TVTabPillFocuser {
+    nonisolated(unsafe) static var forcedOwner: UIViewController?
+    nonisolated(unsafe) static var forcedTarget: UIFocusEnvironment?
+    private static var swizzled = false
+
+    static func focusPill(title: String, reason: String) {
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first else {
+            debugLog("[FOCUS] pill focus (\(reason)): no key window"); return
+        }
+        guard let pill = findPill(in: window, title: title) else {
+            debugLog("[FOCUS] pill focus (\(reason)): pill '\(title)' not found"); return
+        }
+        let f = pill.convert(pill.bounds, to: nil)
+        debugLog("[FOCUS] pill focus (\(reason)): target '\(title)' @\(Int(f.minX)),\(Int(f.minY)) from \(TVFocusTracer.focusedItemDescription())")
+        if isFocused(pill) { debugLog("[FOCUS] pill focus: already on '\(title)'"); return }
+
+        // Attempt 1: focus guide aimed at the pill installed, then the focus system asked for the pill.
+        let guide = UIFocusGuide()
+        window.addLayoutGuide(guide)
+        NSLayoutConstraint.activate([
+            guide.leadingAnchor.constraint(equalTo: window.leadingAnchor),
+            guide.trailingAnchor.constraint(equalTo: window.trailingAnchor),
+            guide.topAnchor.constraint(equalTo: window.topAnchor),
+            guide.bottomAnchor.constraint(equalTo: window.bottomAnchor),
+        ])
+        guide.preferredFocusEnvironments = [pill]
+        window.layoutIfNeeded()
+        UIFocusSystem.focusSystem(for: window)?.requestFocusUpdate(to: pill)
+        UIFocusSystem.focusSystem(for: window)?.updateFocusIfNeeded()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            window.removeLayoutGuide(guide)
+            if isFocused(pill) {
+                debugLog("[FOCUS] pill focus attempt 1 (focus guide): OK on '\(title)'")
+                return
+            }
+            debugLog("[FOCUS] pill focus attempt 1 (focus guide): FAILED, focused=\(TVFocusTracer.focusedItemDescription())")
+            attemptRootPreference(window: window, pill: pill, title: title)
+        }
+    }
+
+    private static func attemptRootPreference(window: UIWindow, pill: UIView, title: String) {
+        guard let root = window.rootViewController else {
+            debugLog("[FOCUS] pill focus attempt 2: no root VC"); return
+        }
+        installSwizzle()
+        forcedOwner = root
+        forcedTarget = pill
+        root.setNeedsFocusUpdate()
+        root.updateFocusIfNeeded()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            forcedOwner = nil
+            forcedTarget = nil
+            if isFocused(pill) {
+                debugLog("[FOCUS] pill focus attempt 2 (root prefers pill): OK on '\(title)' root=\(type(of: root))")
+            } else {
+                debugLog("[FOCUS] pill focus attempt 2 (root prefers pill): FAILED root=\(type(of: root)) focused=\(TVFocusTracer.focusedItemDescription())")
+            }
+        }
+    }
+
+    private static func isFocused(_ pill: UIView) -> Bool {
+        pill.isFocused
+    }
+
+    private static func findPill(in root: UIView, title: String) -> UIView? {
+        if String(describing: type(of: root)) == "UITabBarButton",
+           (root.accessibilityLabel ?? "") == title { return root }
+        for s in root.subviews { if let p = findPill(in: s, title: title) { return p } }
+        return nil
+    }
+
+    private static func installSwizzle() {
+        guard !swizzled else { return }
+        swizzled = true
+        let cls: AnyClass = UIViewController.self
+        guard let orig = class_getInstanceMethod(cls, #selector(getter: UIViewController.preferredFocusEnvironments)),
+              let repl = class_getInstanceMethod(cls, #selector(UIViewController.aerio_preferredFocusEnvironments)) else { return }
+        method_exchangeImplementations(orig, repl)
+    }
+}
+
+extension UIViewController {
+    @objc func aerio_preferredFocusEnvironments() -> [UIFocusEnvironment] {
+        if let owner = TVTabPillFocuser.forcedOwner, owner === self,
+           let target = TVTabPillFocuser.forcedTarget {
+            return [target]
+        }
+        return aerio_preferredFocusEnvironments()
+    }
+}
+#endif
