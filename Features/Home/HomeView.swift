@@ -4715,6 +4715,9 @@ struct MainTabView: View {
     @State private var showCompanionPickerGlobal = false
     /// iPhone: per-channel Kept Live list opened from the compact pill.
     @State private var showKeptLiveList = false
+    /// Measured height of the iPhone Kept Live dock card; the Control-a-TV
+    /// circle beside it takes this diameter.
+    @State private var keptCardHeight: CGFloat = 0
     /// Rule 3: the remote-controls sheet the session card opens.
     @State private var showRemoteControls = false
     #endif
@@ -6114,14 +6117,18 @@ struct MainTabView: View {
                         if keptLiveCardVisible {
                             // Outer edges line up with the measured tab bar
                             // capsule (Logan 2026-10-04); 20 pt until measured.
-                            // With the Control-a-TV button on the row the
-                            // compact pill stays; otherwise the Kept Live
-                            // card takes the cast card's shape (Logan
-                            // 2026-10-05).
+                            // One Kept Live shape everywhere: the cast card's
+                            // (Logan 2026-10-05). With the Control-a-TV button
+                            // on the row the card only gets narrower, and the
+                            // button is a circle of the card's measured height.
                             HStack(spacing: RemoteSessionCardMetrics.gap) {
                                 keptLiveCard
+                                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                                        if abs(h - keptCardHeight) > 0.5 { keptCardHeight = h }
+                                    }
                                 if showsControlATVButton {
-                                    CompanionControlFAB { showCompanionPickerGlobal = true }
+                                    CompanionControlFAB(action: { showCompanionPickerGlobal = true },
+                                                        size: keptCardHeight > 0 ? keptCardHeight : 48)
                                 }
                             }
                             .padding(.leading, cardMetrics.barLeadingInset > 0 ? cardMetrics.barLeadingInset : 20)
@@ -6356,7 +6363,6 @@ struct MainTabView: View {
                 },
                 onStop: { ch in LiveChannelRetention.shared.releaseByUser(channelID: ch.id) },
                 onStopAll: { LiveChannelRetention.shared.releaseAllByUser() },
-                compact: !PadTabPill.isActive && showsControlATVButton,
                 onShowList: { showKeptLiveList = true },
                 dockCard: true
             )

@@ -3634,6 +3634,9 @@ private struct CastStreamInfoCard: View {
 struct CompanionControlFAB: View {
     @ObservedObject private var theme: ThemeManager = .shared
     var action: () -> Void
+    /// Circle diameter. 48 pt matches the minimized tab button; beside the
+    /// Kept Live card it takes the card's measured height (Logan 2026-10-05).
+    var size: CGFloat = 48
     var body: some View {
         // Same shape and material as the iOS 26 minimized tab-bar button it
         // sits opposite (measured on Logan's screenshot 2026-09-09: a 52 pt
@@ -3643,7 +3646,7 @@ struct CompanionControlFAB: View {
             Image(systemName: "tv.and.mediabox")
                 .font(.system(size: 19, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                 .foregroundStyle(theme.accent)
-                .frame(width: 48, height: 48)
+                .frame(width: size, height: size)
         }
         .modifier(CompanionFABChrome())
         .accessibilityLabel("Control a TV")
@@ -4193,10 +4196,7 @@ struct KeptLiveCard: View {
     let onTune: (KeptLiveChannels.Channel) -> Void
     let onStop: (KeptLiveChannels.Channel) -> Void
     let onStopAll: () -> Void
-    /// iPhone (Logan 2026-10-04): one-line pill sharing a row with the
-    /// Control-a-TV button. Two or more channels show a count with Stop All;
-    /// tapping the text calls `onShowList` for the per-channel list.
-    var compact: Bool = false
+    /// Opens the per-channel list when several channels are kept.
     var onShowList: () -> Void = {}
     /// Dock card (Logan 2026-10-05): the exact shape of RemoteSessionCard on
     /// iPhone and iPad: same 44 pt tile, title and subtitle lines, 18 pt side
@@ -4206,7 +4206,7 @@ struct KeptLiveCard: View {
     var dockCard: Bool = false
 
     var body: some View {
-        if compact { compactBody } else if dockCard { dockCardBody } else { fullBody }
+        if dockCard { dockCardBody } else { fullBody }
     }
 
     private var dockCardBody: some View {
@@ -4273,55 +4273,6 @@ struct KeptLiveCard: View {
                 content.modifier(KeptPillChrome())
             }
         }
-    }
-
-    private var compactBody: some View {
-        HStack(spacing: 10) {
-            if channels.count > 1 {
-                Button(action: onShowList) {
-                    HStack(spacing: 10) {
-                        Image(systemName: "rectangle.stack.badge.play")
-                            .font(.system(size: 16))  // glyph in a fixed box: not text, stays fixed
-                            .foregroundStyle(ThemeManager.shared.accent)
-                            .frame(width: 32, height: 32)
-                        Text("Keeping \(channels.count) channels live")
-                            .scaledFont(.subheadline.weight(.bold))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Show kept channels")
-                stopButton("Stop All", label: "Stop all kept channels", action: onStopAll)
-            } else if let ch = channels.first {
-                Button { onTune(ch) } label: {
-                    HStack(spacing: 10) {
-                        logo(ch, box: 32, image: 28)
-                        Text("Keeping \(ch.name) live")
-                            .scaledFont(.subheadline.weight(.bold))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Watch \(ch.name)")
-                stopButton("Stop", label: "Stop keeping \(ch.name) live") { onStop(ch) }
-            }
-        }
-        .padding(.leading, 8)
-        .padding(.trailing, 4)
-        .frame(height: 48)
-        // Same plain regular glass as the tab bar and the Control-a-TV
-        // circle beside it (Logan 2026-10-04), no dark tint, so the row reads
-        // as part of the bar's family.
-        .modifier(KeptPillChrome())
-        .onAppear { debugLog("[AVP-RETAIN] kept pill show (\(channels.count))") }
-        .onDisappear { debugLog("[AVP-RETAIN] kept pill hide") }
-        .accessibilityElement(children: .contain)
     }
 
     private func logo(_ ch: KeptLiveChannels.Channel, box: CGFloat, image: CGFloat, cornerRadius: CGFloat? = nil) -> some View {
