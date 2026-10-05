@@ -2744,13 +2744,19 @@ struct MultiviewTileLogoOverlay: View {
             let videoAspect = store.tileVideoAspects[tileID] ?? (16.0 / 9.0)
             let video = Self.fittedSize(aspect: videoAspect, in: tile)
             let pct = CGFloat(min(max(sizePercent, 5), 25)) / 100
-            let maxH = max(video.height * pct - pad * 2, 1)
-            // Aspect fit: height from the percent, width capped at half
-            // the video rect so a very wide wordmark cannot span it.
+            // Area rule (Android parity): h = pct of the video rect height;
+            // the logo gets the area a 3:1 logo would at height h (3 h^2),
+            // then is clamped to a 2h tall by 4h wide box and never wider
+            // than half the video rect. A 3:1 logo stays h tall, a square
+            // one is about 1.73h a side, a very wide one caps at 4h.
+            let h0 = max(video.height * pct, 1)
             let aspect = image.size.width / image.size.height
-            let maxW = max(video.width * 0.5 - pad * 2, 1)
-            let w = min(maxH * aspect, maxW)
-            let h = w / aspect
+            let areaW = h0 * (3 * aspect).squareRoot()
+            let areaH = h0 * (3 / aspect).squareRoot()
+            let maxW = min(4 * h0, max(video.width * 0.5 - pad * 2, 1))
+            let fit = min(1, 2 * h0 / areaH, maxW / areaW)
+            let w = areaW * fit
+            let h = areaH * fit
             let lift: CGFloat = (position == .bottomLeft && nameStripVisible) ? nameStripLift : 0
             Image(uiImage: image)
                 .resizable()
