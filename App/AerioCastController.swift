@@ -926,6 +926,8 @@ final class AerioCastController: NSObject, ObservableObject {
                 .replacingOccurrences(of: " video", with: "")
                 .replacingOccurrences(of: " audio", with: "")
             switch codec.stream {
+            case .audioOnly:
+                return "This channel is audio only, which cannot be cast yet."
             case .video:
                 return "This channel's video is \(name), which cannot be cast to this receiver."
             case .audio:

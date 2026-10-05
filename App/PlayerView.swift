@@ -1041,6 +1041,10 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// background handler can keep mpv's audio decoder running when the
     /// user has explicitly opted into background audio. Default false.
     @Published var isAudioOnly: Bool = false
+    /// The SOURCE is an audio-only program (GH #90, radio): no video
+    /// track exists. Distinct from `isAudioOnly` (the user's choice to
+    /// hide video). Set by the AVPlayer tile; drives the format badge.
+    @Published var isAudioOnlyProgram: Bool = false
     /// On-screen video sizing (issue #26). The Coordinator observes this and
     /// applies the matching `videoGravity` to the display layer. Self-seeds
     /// from UserDefaults so the user's choice survives across streams and

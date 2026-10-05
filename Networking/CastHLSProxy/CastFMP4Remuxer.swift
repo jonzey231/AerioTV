@@ -19,7 +19,9 @@ import Foundation
 struct CastUnsupportedCodecError: Error, CustomStringConvertible {
     /// Which elementary stream refused; the sender words a different
     /// message for each.
-    enum Stream { case video, audio }
+    /// `.audioOnly`: the PMT carries audio and no video (GH #90, radio);
+    /// segments here cut on video keyframes, so there is nothing to serve.
+    enum Stream { case video, audio, audioOnly }
     let codecName: String
     var stream: Stream = .audio
     var description: String { "cast HLS proxy cannot serve \(codecName)" }
@@ -668,6 +670,10 @@ final class CastFMP4Remuxer {
         }
         // Refuse before any media flows: the ingest surfaces this as the
         // user-visible cast failure with the codec name.
+        if video < 0, audio >= 0 {
+            log("[AUDIO-ONLY] detected: no video track in PMT; the cast proxy cuts segments on video keyframes and cannot serve audio-only, refusing the cast")
+            throw CastUnsupportedCodecError(codecName: "audio-only program", stream: .audioOnly)
+        }
         if video >= 0, videoType != Self.streamTypeH264, videoType != Self.streamTypeHEVC {
             throw CastUnsupportedCodecError(
                 codecName: Self.streamTypeNames[videoType] ?? String(format: "video stream_type 0x%02X", videoType),

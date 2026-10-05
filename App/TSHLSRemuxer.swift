@@ -686,6 +686,41 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// never lands INSIDE an audio PES (see heldAudio).
     private var audioPIDs = Set<Int>()
     private var audioStreamType: UInt8 = 0
+    /// Audio-only program (GH #90, radio channels: MPEG-TS with an audio
+    /// PES and no video). Either the PMT declares no video elementary
+    /// stream, or it declares one that carries no packets in the first
+    /// 3 s of audio PTS. Segments then open on the primary audio PID's
+    /// PES starts (each begins on a frame sync word) and cut on PTS
+    /// duration, since there is no keyframe to wait for. Before this the
+    /// codec gate never passed on such a PMT, nothing was segmented, and
+    /// the tile sat on "Preparing" while the ingest counter climbed.
+    private var audioOnly = false
+    /// The audio PID that drives audio-only cuts (first audio entry in
+    /// the PMT) and its stream type.
+    private var primaryAudioPID = -1
+    private var primaryAudioType: UInt8 = 0
+    /// Video-declared program, start of the session: any video packet
+    /// seen yet, and the PTS of the first audio PES, for the 3 s
+    /// no-video fallback. PTS rather than wall time: Dispatcharr delivers
+    /// in 8 to 9.5 s bursts, so wall time says nothing about media time.
+    private var videoPacketSeen = false
+    private var firstAudioPTSWithoutVideo: Double = -1
+    private let audioOnlyVideoGraceSeconds = 3.0
+    /// Audio-only by the 3 s fallback: the PMT still declares a video PID,
+    /// so segments lead with a rewritten PMT that drops it.
+    private var audioOnlyDroppedVideo = false
+    private let audioOnlyLock = NSLock()
+    private var audioOnlyShared = false
+    /// Thread-safe: the program is being segmented audio-only. Read by
+    /// the tile (logo presentation) and its stall watchdog (an
+    /// audio-only item legitimately reports presentationSize 0x0).
+    var isAudioOnlyProgram: Bool {
+        audioOnlyLock.lock(); defer { audioOnlyLock.unlock() }
+        return audioOnlyShared
+    }
+    /// Fires on the main queue when the program turns audio-only (true)
+    /// or a later source brings video back (false).
+    var onAudioOnlyChanged: ((Bool) -> Void)?
     /// Packets of the audio PES currently in flight, withheld from the
     /// open segment until the PES is complete.
     ///
@@ -1178,6 +1213,27 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
         guard codecGatePassed else { return }
 
+        if audioOnly {
+            handleAudioOnlyPacket(p, pid: pid, pusi: pusi)
+            return
+        }
+        if fmp4 == nil, videoPID >= 0, nextSeq == 0, !videoPacketSeen {
+            if pid == videoPID {
+                videoPacketSeen = true
+            } else if pid == primaryAudioPID, pusi, let apts = extractPTS(p) {
+                if firstAudioPTSWithoutVideo < 0 || apts < firstAudioPTSWithoutVideo
+                    || apts - firstAudioPTSWithoutVideo > 30 {
+                    // First audio, or a wrap/jump: (re)start the window.
+                    firstAudioPTSWithoutVideo = apts
+                } else if apts - firstAudioPTSWithoutVideo >= audioOnlyVideoGraceSeconds {
+                    debugLog("[TS-REMUX] audio-only program detected: no video packets in \(Int(audioOnlyVideoGraceSeconds)) s (PMT video PID \(videoPID) silent, audio PID \(primaryAudioPID) type \(String(format: "0x%02X", primaryAudioType)))")
+                    enterAudioOnly(dropVideoFromPMT: true)
+                    handleAudioOnlyPacket(p, pid: pid, pusi: pusi)
+                    return
+                }
+            }
+        }
+
         if pid == videoPID { noteVideoContinuity(p) }
 
         // Keyframe-aligned cuts: only video PES starts can open segments.
@@ -1558,6 +1614,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         audioPIDs.removeAll()
         audioStreamType = 0
         setSourceAudioStreamType(0)
+        primaryAudioPID = -1
+        primaryAudioType = 0
+        videoPacketSeen = false
+        firstAudioPTSWithoutVideo = -1
+        setAudioOnly(false)
+        audioOnlyDroppedVideo = false
         lastVideoCC = -1
         lastSPS = nil
         adtsLogged = false
@@ -1578,6 +1640,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         var audioTypes: [UInt8] = []
         var foundAudioPIDs = Set<Int>()
         var audioPairs: [String] = []
+        var firstAudio: (pid: Int, type: UInt8)?
 
         while offset + 4 < sectionEnd {
             let streamType = p[offset]
@@ -1589,6 +1652,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             case 0x81, 0x87, 0x0F, 0x03, 0x04, 0x11: // AC-3 / E-AC-3 / AAC / MP2 / LATM
                 audioTypes.append(streamType)
                 foundAudioPIDs.insert(esPID)
+                if firstAudio == nil { firstAudio = (esPID, streamType) }
                 audioPairs.append("\(esPID):\(streamType)")
             default:
                 break
@@ -1596,14 +1660,18 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             offset += 5 + esInfoLength
         }
 
-        guard let video = foundVideo else { return }
+        guard let video = foundVideo else {
+            gateAudioOnlyPMT(p, audioTypes: audioTypes, audioPIDs: foundAudioPIDs,
+                             audioPairs: audioPairs, firstAudio: firstAudio)
+            return
+        }
         let signature = "v\(video.pid):\(video.type) a" + audioPairs.sorted().joined(separator: ",")
 
-        if videoPID >= 0 {
+        if videoPID >= 0 || audioOnly {
             // Program already gated. Same content: just refresh the cached
             // PMT the segments lead with. Different content: a new source.
             if signature == pmtSignature {
-                pmtPacket = p
+                pmtPacket = audioOnlyDroppedVideo ? (pmtDroppingVideo(p) ?? pmtPacket) : p
                 return
             }
             // The HEVC arm owns its own demux; a mid-stream change there is
@@ -1642,9 +1710,208 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         codecGatePassed = true
         audioPIDs = foundAudioPIDs
         audioStreamType = audioTypes.first ?? 0
+        primaryAudioPID = firstAudio?.pid ?? -1
+        primaryAudioType = firstAudio?.type ?? 0
         setSourceAudioStreamType(audioStreamType)
         let audioDesc = audioTypes.map { String(format: "0x%02X", $0) }.joined(separator: ",")
         debugLog("[TS-REMUX] PMT: H.264 video PID \(videoPID), audio types [\(audioDesc)] -> codec gate PASSED")
+    }
+
+    // MARK: Audio-only programs (GH #90)
+
+    private func setAudioOnly(_ on: Bool) {
+        audioOnlyLock.lock()
+        let changed = audioOnlyShared != on
+        audioOnlyShared = on
+        audioOnlyLock.unlock()
+        audioOnly = on
+        guard changed else { return }
+        let cb = onAudioOnlyChanged
+        DispatchQueue.main.async { cb?(on) }
+    }
+
+    /// PMT with audio and no video elementary stream: gate it as an
+    /// audio-only program. Change detection mirrors the video path.
+    private func gateAudioOnlyPMT(_ p: Data, audioTypes: [UInt8], audioPIDs found: Set<Int>,
+                                  audioPairs: [String],
+                                  firstAudio: (pid: Int, type: UInt8)?) {
+        guard let firstAudio else { return }
+        let signature = "a" + audioPairs.sorted().joined(separator: ",")
+        if videoPID >= 0 || audioOnly {
+            if signature == pmtSignature {
+                pmtPacket = p
+                return
+            }
+            guard fmp4 == nil else { return }
+            debugLog("[TS-REMUX] switch: PMT changed [\(pmtSignature)] -> [\(signature)]; re-running the codec gate")
+            if codecGatePassed { beginSourceSwitch(reason: "PMT content changed") }
+            resetProgramState()
+        }
+        if fmp4 != nil {
+            // An fMP4 (HEVC) playlist cannot turn into an audio TS one.
+            debugLog("[TS-REMUX] switch: new source is audio-only on the fMP4 arm -> codec gate FAILED")
+            fail(.unsupportedCodec("audio-only after HEVC"))
+            return
+        }
+        pmtPacket = p
+        pmtSignature = signature
+        codecGatePassed = true
+        audioPIDs = found
+        audioStreamType = audioTypes.first ?? 0
+        primaryAudioPID = firstAudio.pid
+        primaryAudioType = firstAudio.type
+        setSourceAudioStreamType(audioStreamType)
+        let audioDesc = audioTypes.map { String(format: "0x%02X", $0) }.joined(separator: ",")
+        debugLog("[TS-REMUX] audio-only program detected: no video PID in PMT (audio types [\(audioDesc)], primary PID \(primaryAudioPID)) -> codec gate PASSED, cutting on audio PES boundaries every \(String(format: "%.1f", targetSegmentSeconds)) s")
+        enterAudioOnly(dropVideoFromPMT: false)
+    }
+
+    /// Switch the TS arm to audio-only cutting. With `dropVideoFromPMT`
+    /// (the 3 s fallback) the cached PMT is rewritten without the silent
+    /// video entry so AVPlayer does not wait on a track that never comes.
+    private func enterAudioOnly(dropVideoFromPMT: Bool) {
+        if dropVideoFromPMT, let pmt = pmtPacket {
+            if let rewritten = pmtDroppingVideo(pmt) {
+                pmtPacket = rewritten
+                audioOnlyDroppedVideo = true
+            } else {
+                debugLog("[TS-REMUX] audio-only: could not rewrite the PMT without its video entry; serving it as sent")
+            }
+        }
+        // Nothing has been segmented yet on this source: a video
+        // keyframe never arrived. Drop anything a video path buffered.
+        heldAudio.removeAll(keepingCapacity: true)
+        currentSegment = Data()
+        currentStartPTS = nil
+        awaitingFirstKeyframe = true
+        setAudioOnly(true)
+    }
+
+    /// Audio-only demux: the primary audio PID's PES starts (on a frame
+    /// sync word) open and cut segments; every packet still rides the
+    /// heldAudio buffer so a PES never splits across a cut.
+    private func handleAudioOnlyPacket(_ p: Data, pid: Int, pusi: Bool) {
+        // The silent video PID and in-stream PMT repeats (which may still
+        // declare it) stay out; each segment leads with the cached PMT.
+        if pid == videoPID || pid == pmtPID || pid == 0 { return }
+        if pid == primaryAudioPID, pusi, let pts = extractPTS(p), audioPESStartsOnSync(p) {
+            // Completes the previous PES into the segment it belongs to.
+            flushHeldAudio()
+            if awaitingFirstKeyframe {
+                awaitingFirstKeyframe = false
+                if awaitingSwitchKeyframe {
+                    awaitingSwitchKeyframe = false
+                    setRegatingShared(false)
+                    nextSegmentDiscontinuity = nextSeq > 0
+                }
+                beginSegment(at: pts)
+                currentSegmentLeadNALs = []
+                debugLog("[TS-REMUX] audio-only: first audio segment \(nextSeq) opened at pts \(String(format: "%.3f", pts)) (PID \(primaryAudioPID), type \(String(format: "0x%02X", primaryAudioType)))")
+            } else if let start = currentStartPTS {
+                var elapsed = pts - start
+                // 33-bit PTS wrap or a discontinuity: cut here.
+                if elapsed < 0 || elapsed > 30 { elapsed = targetSegmentSeconds }
+                if elapsed >= targetSegmentSeconds {
+                    closeSegment(endPTS: start + elapsed)
+                    beginSegment(at: pts)
+                }
+            }
+            heldAudio = [p]
+            return
+        }
+        guard !awaitingFirstKeyframe else { return }
+        if audioPIDs.contains(pid) {
+            if pusi {
+                flushHeldAudio()
+                heldAudio = [p]
+            } else if !heldAudio.isEmpty {
+                heldAudio.append(p)
+                if heldAudio.count >= heldAudioPacketCap { flushHeldAudio() }
+            } else {
+                currentSegment.append(p)
+            }
+            return
+        }
+        currentSegment.append(p)
+    }
+
+    /// Does this PES-start packet's payload begin on an audio frame sync
+    /// word for the primary stream type (ADTS, AC-3/E-AC-3, MPEG audio,
+    /// LATM)? Cuts only land there, so a segment never opens mid-frame.
+    /// An unknown type, or a header too long to see the payload in this
+    /// packet, is accepted (the PES start itself is the boundary).
+    private func audioPESStartsOnSync(_ p: Data) -> Bool {
+        guard let base = payloadStart(p), base + 9 < 188 else { return false }
+        let es = base + 9 + Int(p[base + 8])
+        guard es + 1 < 188 else { return true }
+        let b0 = p[es], b1 = p[es + 1]
+        switch primaryAudioType {
+        case 0x0F: return b0 == 0xFF && (b1 & 0xF0) == 0xF0          // ADTS
+        case 0x81, 0x87: return b0 == 0x0B && b1 == 0x77             // AC-3 / E-AC-3
+        case 0x03, 0x04: return b0 == 0xFF && (b1 & 0xE0) == 0xE0    // MPEG audio
+        case 0x11: return b0 == 0x56 && (b1 & 0xE0) == 0xE0          // LATM/LOAS
+        default: return true
+        }
+    }
+
+    /// The PMT packet with its video elementary-stream entry removed
+    /// (PCR_PID moved to the primary audio PID when it pointed at the
+    /// video) and the CRC recomputed. Nil when the section does not fit
+    /// the single packet this demux reads it from.
+    private func pmtDroppingVideo(_ p: Data) -> Data? {
+        guard let base = payloadStart(p), base + 1 < 188 else { return nil }
+        var b = [UInt8](p)
+        let section = base + 1 + Int(b[base])
+        guard section + 12 < 188, b[section] == 0x02 else { return nil }
+        let sectionLength = (Int(b[section + 1] & 0x0F) << 8) | Int(b[section + 2])
+        let end = section + 3 + sectionLength           // one past the CRC
+        guard end <= 188, sectionLength >= 13 else { return nil }
+        let programInfoLength = (Int(b[section + 10] & 0x0F) << 8) | Int(b[section + 11])
+        var offset = section + 12 + programInfoLength
+        var kept = [UInt8]()
+        var removed = false
+        while offset + 4 < end - 4 {
+            let type = b[offset]
+            let esPID = (Int(b[offset + 1] & 0x1F) << 8) | Int(b[offset + 2])
+            let infoLen = (Int(b[offset + 3] & 0x0F) << 8) | Int(b[offset + 4])
+            let next = offset + 5 + infoLen
+            guard next <= end - 4 else { return nil }
+            if esPID == videoPID, [0x1B, 0x24, 0x01, 0x02].contains(type) {
+                removed = true
+            } else {
+                kept.append(contentsOf: b[offset..<next])
+            }
+            offset = next
+        }
+        guard removed else { return nil }
+        let pcrPID = (Int(b[section + 8] & 0x1F) << 8) | Int(b[section + 9])
+        if pcrPID == videoPID, primaryAudioPID >= 0 {
+            b[section + 8] = (b[section + 8] & 0xE0) | UInt8((primaryAudioPID >> 8) & 0x1F)
+            b[section + 9] = UInt8(primaryAudioPID & 0xFF)
+        }
+        let esStart = section + 12 + programInfoLength
+        var out = Array(b[0..<esStart]) + kept
+        let newSectionLength = out.count - (section + 3) + 4
+        out[section + 1] = (out[section + 1] & 0xF0) | UInt8((newSectionLength >> 8) & 0x0F)
+        out[section + 2] = UInt8(newSectionLength & 0xFF)
+        let crc = Self.crc32MPEG2(out[section..<out.count])
+        out.append(UInt8((crc >> 24) & 0xFF)); out.append(UInt8((crc >> 16) & 0xFF))
+        out.append(UInt8((crc >> 8) & 0xFF)); out.append(UInt8(crc & 0xFF))
+        while out.count < 188 { out.append(0xFF) }
+        return Data(out)
+    }
+
+    /// CRC-32/MPEG-2 (poly 0x04C11DB7, init 0xFFFFFFFF, no reflection,
+    /// no final XOR), as PSI sections use.
+    static func crc32MPEG2<C: Collection>(_ bytes: C) -> UInt32 where C.Element == UInt8 {
+        var crc: UInt32 = 0xFFFF_FFFF
+        for byte in bytes {
+            crc ^= UInt32(byte) << 24
+            for _ in 0..<8 {
+                crc = (crc & 0x8000_0000) != 0 ? (crc << 1) ^ 0x04C1_1DB7 : crc << 1
+            }
+        }
+        return crc
     }
 
     // MARK: PES / NAL inspection
@@ -3497,6 +3764,10 @@ final class AVPStallWatchdog {
     /// build mid-flight). nil = no probe (live/direct), old behavior.
     private let mediaBytes: (() -> Int64)?
     private var lastMediaBytes: Int64 = -1
+    /// True when the source is a known audio-only program (GH #90): the
+    /// item legitimately reports presentationSize 0x0, so that is not a
+    /// death verdict there. The clock checks still apply.
+    var audioOnlyExpected: (() -> Bool)?
 
     init(player: AVPlayer, item: AVPlayerItem, label: String,
          interval: TimeInterval = 4.0,
@@ -3593,7 +3864,7 @@ final class AVPStallWatchdog {
         case .readyToPlay:
             unknownPolls = 0
             let size = item.presentationSize
-            if size.width == 0 && size.height == 0 {
+            if size.width == 0 && size.height == 0, audioOnlyExpected?() != true {
                 die("ready but no renderable video (audio-only / undecodable video)")
                 return
             }
@@ -4258,6 +4529,9 @@ struct AVPlayerMultiviewTile: View {
     /// Connect, which leaves the tile on its existing retry path.
     var dispatcharrChannelPK: Int? = nil
     var dispatcharrChannelUUID: String? = nil
+    /// Channel logo, shown in place of the video surface when the live
+    /// source turns out to be an audio-only program (GH #90, radio).
+    var channelLogoURL: URL? = nil
 
     /// VOD tile: route MP4 direct / MKV through MKVVODServer, apply the
     /// resume offset, and never treat the URL as a live TS stream.
@@ -4494,6 +4768,9 @@ struct AVPlayerMultiviewTile: View {
     /// tune (session.txt:3375-3380).
     @State private var pendingDisplayCriteria: (width: Int, height: Int, fps: Double, tenBit: Bool)?
     @State private var firstFrameSeen = false
+    /// The playing remuxed source is an audio-only program (GH #90):
+    /// the tile draws the channel logo instead of a black video layer.
+    @State private var audioOnlyProgram = false
     /// Video Scale: gravity for this tile's layer, kept in step with the
     /// shared store (Fill only when this tile owns the whole screen and
     /// PiP is not driving it).
@@ -4510,6 +4787,50 @@ struct AVPlayerMultiviewTile: View {
         debugLog("[VIDEO-SCALE] applied \(mode.rawValue) gravity=\(gravity.rawValue) tile=\(tileID) allowsFill=\(allowsFill) pip=\(pipActive)")
     }
 
+    /// Audio-only program (GH #90): the channel logo (music note when the
+    /// channel has none), the channel name and "Audio Only", sized to the
+    /// tile so a Multiview grid cell reads the same as fullscreen. Android
+    /// parity: gradient #1C2230 to #07080C, logo 40 percent of the shorter
+    /// side solo, 55 percent in a grid tile, captions from 160 pt tall.
+    private var audioOnlyPresentation: some View {
+        GeometryReader { geo in
+            let side = max(40, min(geo.size.width, geo.size.height) * (pipEnabled ? 0.40 : 0.55))
+            ZStack {
+                LinearGradient(colors: [Color(hex: "1C2230"), Color(hex: "07080C")],
+                               startPoint: .top, endPoint: .bottom)
+                VStack(spacing: side * 0.14) {
+                    if channelLogoURL != nil {
+                        CachedLogoImage(url: channelLogoURL, width: side, height: side,
+                                        containerRadius: 12)
+                    } else {
+                        ZStack {
+                            Circle()
+                                .fill(Color.accentPrimary.opacity(0.15))
+                                .frame(width: side, height: side)
+                            Image(systemName: "music.note")
+                                .font(.system(size: side * 0.4, weight: .light))
+                                .foregroundStyle(LinearGradient.accentGradient)
+                        }
+                    }
+                    if geo.size.height >= 160 {
+                        Text(channelName)
+                            .scaledFont(.headline)
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+                            .padding(.horizontal, 16)
+                        Text("Audio Only")
+                            .scaledFont(.subheadline)
+                            .foregroundColor(.gray)
+                    }
+                }
+                .frame(width: geo.size.width, height: geo.size.height)
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .combine)
+    }
+
     var body: some View {
         ZStack {
             Color.black
@@ -4523,6 +4844,9 @@ struct AVPlayerMultiviewTile: View {
                 }, videoAspect: { [tileID] in
                     MultiviewStore.shared.tileVideoAspects[tileID]
                 })
+            }
+            if audioOnlyProgram, tileError == nil {
+                audioOnlyPresentation
             }
             if let statusText, tileError == nil {
                 VStack(spacing: 8) {
@@ -6452,6 +6776,16 @@ struct AVPlayerMultiviewTile: View {
 
     /// No AirPlay LAN item gets a configured join offset.
     private func startPlayer(url: URL, requestHeaders: [String: String]) {
+        // Segments exist by now, so the remuxer has already decided
+        // whether this program is audio-only (GH #90).
+        let audioOnlyNow = remuxer?.isAudioOnlyProgram ?? false
+        if progressStore.isAudioOnlyProgram != audioOnlyNow {
+            progressStore.isAudioOnlyProgram = audioOnlyNow
+        }
+        if audioOnlyNow != audioOnlyProgram {
+            audioOnlyProgram = audioOnlyNow
+            if audioOnlyNow { debugLog("[AVP-MV] tile \(channelName): audio-only program, showing the channel logo") }
+        }
         var options: [String: Any] = [:]
         if !requestHeaders.isEmpty {
             options["AVURLAssetHTTPHeaderFieldsKey"] = requestHeaders
@@ -6791,6 +7125,9 @@ struct AVPlayerMultiviewTile: View {
             player: avPlayer, item: playerItem, label: "tile \(channelName)",
             mediaBytes: progressServer.map { s in { s.mediaBytesStreamed } },
             onDead: { failOrFallback($0) })
+        if let mux = remuxer {
+            watchdog.audioOnlyExpected = { [weak mux] in mux?.isAudioOnlyProgram ?? false }
+        }
         #if os(iOS)
         // Started on the LAN for an AirPlay receiver: the local clock is
         // the receiver's, not a render the phone can judge.
@@ -6878,6 +7215,8 @@ struct AVPlayerMultiviewTile: View {
 
     private func stop(allowRetain: Bool = true) {
         tileStopped = true
+        audioOnlyProgram = false
+        if progressStore.isAudioOnlyProgram { progressStore.isAudioOnlyProgram = false }
         if let session = forceHLSSession {
             forceHLSSession = nil
             if let token = session.token {

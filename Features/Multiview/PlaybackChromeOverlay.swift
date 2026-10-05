@@ -1704,6 +1704,33 @@ struct TVVideoFormatBadge: View {
 
     private var info: StreamInfo? { progress.streamInfo }
 
+    /// Audio-only program (GH #90): "AAC 48 kHz · 128 kbps", the bitrate
+    /// part omitted when unknown. Android parity wording.
+    static func audioText(for info: StreamInfo?) -> String? {
+        guard let info else { return nil }
+        let raw = info.audioCodec.trimmingCharacters(in: .whitespaces).lowercased()
+        let codec: String
+        switch raw {
+        case "": return nil
+        case "aac", "mp4a", "aach", "aacl": codec = "AAC"
+        case "ac-3", "ac3": codec = "AC-3"
+        case "ec-3", "eac3", "e-ac-3": codec = "E-AC-3"
+        case ".mp3", "mp3": codec = "MP3"
+        case ".mp2", "mp2", ".mp1", "mp1": codec = "MP2"
+        default: codec = raw.uppercased()
+        }
+        var out = codec
+        if info.sampleRate > 0 {
+            let khz = Double(info.sampleRate) / 1000
+            let isWhole = abs(khz - khz.rounded()) < 0.05
+            out += " " + (isWhole ? String(Int(khz.rounded())) : String(format: "%.1f", khz)) + " kHz"
+        }
+        if info.bitrate > 0 {
+            out += " \u{00B7} \(Int((info.bitrate * 8 / 1000).rounded())) kbps"
+        }
+        return out
+    }
+
     static func text(for info: StreamInfo?) -> String? {
         guard let info, info.height > 0 else { return nil }
         // "i" for an interlaced source (broadcast 1080i), "p" otherwise.
@@ -1720,7 +1747,7 @@ struct TVVideoFormatBadge: View {
     }
 
     var body: some View {
-        if let text = Self.text(for: info) {
+        if let text = progress.isAudioOnlyProgram ? Self.audioText(for: info) : Self.text(for: info) {
             Text(text)
                 .scaledFont(.system(size: fontSize, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.55))
@@ -1732,7 +1759,7 @@ struct TVVideoFormatBadge: View {
                 #if os(tvOS)
                 .focusable(false)
                 #endif
-                .accessibilityLabel("Video format \(text)")
+                .accessibilityLabel(progress.isAudioOnlyProgram ? "Audio format \(text)" : "Video format \(text)")
         }
     }
 }

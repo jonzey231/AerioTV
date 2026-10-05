@@ -860,6 +860,7 @@ struct MultiviewTileView: View {
                         // stream failover walk (s7_86.txt:353-395).
                         dispatcharrChannelPK: tile.item.dispatcharrChannelID,
                         dispatcharrChannelUUID: tile.item.uuid,
+                        channelLogoURL: tile.item.logoURL,
                         isVOD: tile.kind == .vod,
                         isDVR: tile.kind == .dvr,
                         resumePositionMs: tile.resumePositionMs,
@@ -1223,6 +1224,7 @@ struct MultiviewTileView: View {
                         // stream failover walk (s7_86.txt:353-395).
                         dispatcharrChannelPK: tile.item.dispatcharrChannelID,
                         dispatcharrChannelUUID: tile.item.uuid,
+                        channelLogoURL: tile.item.logoURL,
                         isVOD: tile.kind == .vod,
                         isDVR: tile.kind == .dvr,
                         resumePositionMs: tile.resumePositionMs,
