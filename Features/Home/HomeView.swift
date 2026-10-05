@@ -6096,9 +6096,8 @@ struct MainTabView: View {
                         keptLiveCard
                             .frame(width: padRemoteCardWidth)
                             .frame(maxWidth: .infinity)
-                        // iPad (Logan 2026-10-05): compact and centered, the
-                        // pill's width plus 120 pt, capped at 620 pt and at
-                        // the screen width minus 32 pt.
+                        // iPad (Logan 2026-10-05): exactly the measured tab
+                        // pill's width, centered with it.
                         remoteSessionCard
                             .frame(width: padRemoteCardWidth)
                             .frame(maxWidth: .infinity)
@@ -6126,6 +6125,18 @@ struct MainTabView: View {
                         }
                     }
                 }
+            }
+        }
+        // The bar capsule resizes when tabs come and go (Movies and TV Shows
+        // appear once VOD loads: 274 pt with 3 tabs, 398 pt with 5 on a
+        // 440 pt iPhone, 2026-10-05), and nothing else re-measures it then,
+        // so the dock cards kept the old width. Measure again on the change
+        // and once the bar has laid out.
+        .onChange(of: padPillTabs) { _, _ in
+            RemoteSessionCardMetrics.shared.measureTabBar()
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                RemoteSessionCardMetrics.shared.measureTabBar()
             }
         }
         .sheet(isPresented: $showKeptLiveList) {
@@ -6321,14 +6332,13 @@ struct MainTabView: View {
         return !keptChannels.isEmpty && !playerFullscreen
     }
 
-    /// iPad remote-session card width: pill width + 120, capped at 620 and
-    /// at the window width minus 32. Before the pill is measured, 620 within
-    /// the same screen cap.
+    /// iPad dock card width (Logan 2026-10-05): exactly the measured tab
+    /// pill's width, centered like the pill, so the edges line up whatever
+    /// the pill's size. Before the first measurement, screen-edge insets.
     private var padRemoteCardWidth: CGFloat {
-        let screenCap = max(0, cardMetrics.windowWidth - 32)
         let pill = cardMetrics.padPillWidth
-        let wanted = pill > 0 ? min(pill + 120, 620) : 620
-        return screenCap > 0 ? min(wanted, screenCap) : wanted
+        if pill > 0 { return pill }
+        return max(0, cardMetrics.windowWidth - 32)
     }
 
     @ViewBuilder
@@ -9440,8 +9450,23 @@ final class RemoteSessionCardMetrics: ObservableObject {
     @Published private(set) var padPillWidth: CGFloat = 0
     /// Width of the window hosting the dock, 0 until measured.
     @Published private(set) var windowWidth: CGFloat = 0
+    /// Settle guard, same idea as the iPhone bar measurement: a pill width
+    /// seen mid-animation is not published; the last settled width stays in
+    /// use until the new one holds for 250 ms. The first value applies at
+    /// once so the cards never wait on a missing measurement.
+    private var pendingPillWidth: CGFloat = 0
+    private var pillSettleTask: Task<Void, Never>?
     func setPadPillWidth(_ w: CGFloat) {
-        if abs(w - padPillWidth) > 0.5 { padPillWidth = w }
+        guard w > 0 else { return }
+        if padPillWidth == 0 { padPillWidth = w; return }
+        pendingPillWidth = w
+        pillSettleTask?.cancel()
+        pillSettleTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled, let self else { return }
+            let next = self.pendingPillWidth
+            if abs(next - self.padPillWidth) > 0.5 { self.padPillWidth = next }
+        }
     }
     func setWindowWidth(_ w: CGFloat) {
         if abs(w - windowWidth) > 0.5 { windowWidth = w }
@@ -9498,6 +9523,15 @@ final class RemoteSessionCardMetrics: ObservableObject {
 
     private func measureBarInsets(_ bar: UITabBar, superview: UIView, window: UIWindow) {
         guard !TabBarCollapseState.shared.collapsed else { return }
+        // A capsule mid-animation reports its interim size: keep the last
+        // measured insets and measure again once the bar settles.
+        // Capped so a layer that animates forever cannot block measuring.
+        if Self.isAnimating(bar, depth: 0), settleRetries < 12 {
+            settleRetries += 1
+            scheduleSettledRemeasure()
+            return
+        }
+        settleRetries = 0
         let width = bar.bounds.width
         let height = bar.bounds.height
         guard width > 0, height > 0 else { return }
@@ -9544,6 +9578,23 @@ final class RemoteSessionCardMetrics: ObservableObject {
         if chosen != loggedBarFrame {
             loggedBarFrame = chosen
             debugLog("[TABBAR] capsule frame x=\(minX) w=\(localWidth) barW=\(width) window=\(window.bounds.width) lead=\(lead) trail=\(trail) src=\(source)")
+        }
+    }
+
+    private static func isAnimating(_ view: UIView, depth: Int) -> Bool {
+        if !(view.layer.animationKeys() ?? []).isEmpty { return true }
+        guard depth < 4 else { return false }
+        return view.subviews.contains { isAnimating($0, depth: depth + 1) }
+    }
+
+    private var remeasureTask: Task<Void, Never>?
+    private var settleRetries = 0
+    private func scheduleSettledRemeasure() {
+        guard remeasureTask == nil else { return }
+        remeasureTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            self?.remeasureTask = nil
+            self?.measureTabBar()
         }
     }
 
