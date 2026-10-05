@@ -224,6 +224,7 @@ final class SyncManager: ObservableObject {
         // keeps receiving the List choice.
         LogoCorners.listKey,
         LogoCorners.guideKey,
+        LogoCorners.guideCellsKey,
         LogoCorners.legacyKey
     ] + PlayerInfoCardSettings.allKeys
     // Player Info Card row visibility (Settings > App Behaviors). All

@@ -8369,10 +8369,10 @@ private struct GuideProgramButton: View {
     #endif
 
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
-    /// GH #87: the Guide corner setting also rounds the program cells
-    /// (Android parity). Off keeps the flat Emby-style strip.
-    @AppStorage(LogoCorners.guideKey) private var roundedGuideCorners = LogoCorners.guideDefault
-    /// Cell outline: square when the Guide corner setting is off, else
+    /// GH #87: Settings > Live TV > Rounded Program Cells, separate from the
+    /// logo corner setting. Off keeps the flat Emby-style strip.
+    @AppStorage(LogoCorners.guideCellsKey) private var roundedGuideCorners = LogoCorners.guideCellsDefault
+    /// Cell outline: square when Rounded Program Cells is off, else
     /// `LogoCorners.guideRadius`, capped at a quarter of the shorter side so
     /// a one-minute sliver never turns into a pill.
     private var cellShape: RoundedRectangle {
@@ -8637,8 +8637,8 @@ private struct GuideProgramButton: View {
         .padding(.leading, 8 + leadingClip)
         .padding(.trailing, 8)
         .padding(.vertical, 6)
-        // Emby style: full row height, flat rectangle unless the Guide
-        // corner setting is on (GH #87).
+        // Emby style: full row height, flat rectangle unless Rounded
+        // Program Cells is on (GH #87).
         .frame(width: width, height: rowHeight, alignment: .topLeading)
         .background(cellBackground, in: cellShape)
         #if os(tvOS)

@@ -547,6 +547,12 @@ enum LogoCorners {
     /// Guide default OFF.
     static let guideDefault = false
 
+    /// Settings > Live TV > Rounded Program Cells (GH #87). Split from
+    /// `guideKey` so logos can stay rounded over flat program cells.
+    static let guideCellsKey = "guide.roundedProgramCells"
+    /// Program cells default OFF (flat strip).
+    static let guideCellsDefault = false
+
     /// Radius the guide surfaces use when the Guide toggle is on: small,
     /// because neither the channel column nor the preview banner has a card
     /// behind the art to be concentric with. Still subject to the shared

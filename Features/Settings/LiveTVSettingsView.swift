@@ -24,6 +24,7 @@ struct LiveTVSettingsView: View {
     @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
     @AppStorage(LogoCorners.listKey)  private var roundedLogoCorners = LogoCorners.listDefault
     @AppStorage(LogoCorners.guideKey) private var roundedGuideCorners = LogoCorners.guideDefault
+    @AppStorage(LogoCorners.guideCellsKey) private var roundedProgramCells = LogoCorners.guideCellsDefault
 
     // MARK: List view / layout
     @AppStorage("defaultLiveTVView") private var defaultLiveTVView = ""
@@ -194,15 +195,28 @@ struct LiveTVSettingsView: View {
                 }
                 Toggle(isOn: $roundedGuideCorners) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Rounded Corners in Guide View")
+                        Text("Rounded Guide Logos")
                             .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                        Text("Rounds channel logos and program cells in the Guide.")
+                        Text("Round the channel logos in the guide.")
                             .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
                 .tint(theme.accent)
                 .listRowBackground(Color.cardBackground)
                 .onChange(of: roundedGuideCorners) { _, _ in
+                    SyncManager.shared.pushPreferencesImmediate()
+                }
+                Toggle(isOn: $roundedProgramCells) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Rounded Program Cells")
+                            .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                        Text("Round the program cells in the guide to match the logos.")
+                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                    }
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+                .onChange(of: roundedProgramCells) { _, _ in
                     SyncManager.shared.pushPreferencesImmediate()
                 }
             } header: {
@@ -214,9 +228,9 @@ struct LiveTVSettingsView: View {
             Section {
                 Toggle(isOn: $roundedLogoCorners) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Rounded Corners in List View")
+                        Text("Rounded List Logos and Artwork")
                             .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                        Text("Rounds channel logos and program artwork in the Live TV list and on the app's cards.")
+                        Text("Round the channel logos and program artwork in the channel list and on the app's cards.")
                             .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
@@ -530,9 +544,17 @@ struct LiveTVSettingsView: View {
                     TVSettingsToggleRow(
                         icon: "square.grid.3x3",
                         iconColor: .accentPrimary,
-                        title: "Rounded Corners in Guide View",
-                        subtitle: "Rounds channel logos and program cells in the Guide.",
+                        title: "Rounded Guide Logos",
+                        subtitle: "Round the channel logos in the guide.",
                         isOn: $roundedGuideCorners,
+                        onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
+                    )
+                    TVSettingsToggleRow(
+                        icon: "square.grid.3x3",
+                        iconColor: .accentPrimary,
+                        title: "Rounded Program Cells",
+                        subtitle: "Round the program cells in the guide to match the logos.",
+                        isOn: $roundedProgramCells,
                         onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
                     )
                     tvFooter("Turn logos or numbers off to give long channel names more room in the Guide's channel column.")
@@ -548,8 +570,8 @@ struct LiveTVSettingsView: View {
                         TVSettingsToggleRow(
                             icon: "square.on.square",
                             iconColor: .accentPrimary,
-                            title: "Rounded Corners in List View",
-                            subtitle: "Rounds channel logos and program artwork in the Live TV list and on the app's cards.",
+                            title: "Rounded List Logos and Artwork",
+                            subtitle: "Round the channel logos and program artwork in the channel list and on the app's cards.",
                             isOn: $roundedLogoCorners,
                             onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
                         )
