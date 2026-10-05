@@ -2518,15 +2518,26 @@ let ultraCaps = CastReceiverVideoCaps(
 
     guard let src = info else { return }
 
-    // Plan: the Ultra and 1080p59.94 -> H.264 720p at the source rate.
+    // Plan: the Ultra (no 720p60 key, 1080p60=no) and 1080p59.94 ->
+    // H.264 1080 at half rate.
     let ultra = CastVideoPlan(caps: ultraCaps)
     let d = ultra.decide(src)
-    expectEq(d.output, CastVideoOutputSpec(codec: .h264, width: 1280, height: 720, frameStep: 1,
-                                           bitrateCap: 8_000_000), "plan: Ultra 1080p60 -> H.264 720p")
+    expectEq(d.output, CastVideoOutputSpec(codec: .h264, width: 1920, height: 1080, frameStep: 2,
+                                           bitrateCap: 8_000_000), "plan: Ultra 1080p60 -> H.264 1080p30")
+    expectEq(d.reason, "receiver does not display 60 fps H.264", "plan: 1080p60 half-rate reason")
     expectEq(ultra.logLine(source: src, decision: d),
              "[Cast] video plan: source=avc1.64002A 1920x1080@59.94 receiver display h264_1080p60=no "
-             + "h264_1080p30=yes hevc_1080p60=no hvc1=no -> transcode H.264 720p59.94 level 4.1 (8000 kbps)",
+             + "h264_1080p30=yes h264_720p60=n/a hevc_1080p60=no hvc1=no -> transcode H.264 1080p29.97 "
+             + "level 4.1 (8000 kbps)",
              "plan: log line format")
+    var caps720No = ultraCaps; caps720No.display?["h264_720p60"] = false
+    expectEq(CastVideoPlan(caps: caps720No).decide(src).output,
+             CastVideoOutputSpec(codec: .h264, width: 1920, height: 1080, frameStep: 2, bitrateCap: 8_000_000),
+             "plan: 1080p59.94, h264_720p60=no -> H.264 1080p29.97")
+    var caps720Yes = ultraCaps; caps720Yes.display?["h264_720p60"] = true
+    expectEq(CastVideoPlan(caps: caps720Yes).decide(src).output,
+             CastVideoOutputSpec(codec: .h264, width: 1280, height: 720, frameStep: 1, bitrateCap: 8_000_000),
+             "plan: 1080p59.94, h264_720p60=yes -> 720p60 profile")
 
     var ultra30 = ultra
     ultra30.downProfile = .p1080p30
@@ -2535,7 +2546,26 @@ let ultraCaps = CastReceiverVideoCaps(
              "plan: 1080p30 profile halves the frame rate, keeps the size")
 
     var s720 = src; s720.width = 1280; s720.height = 720; s720.levelIDC = 32
-    expectEq(ultra.decide(s720).output, nil, "plan: 720p60 fits the Ultra, passthrough")
+    // Ultra caps (page without h264_720p60): falls back to h264_1080p60=no.
+    let d720 = ultra.decide(s720)
+    expectEq(d720.output, CastVideoOutputSpec(codec: .h264, width: 1280, height: 720, frameStep: 2,
+                                              bitrateCap: 8_000_000),
+             "plan: 720p60 on the Ultra (no 720p60 key) -> H.264 720p at half rate")
+    expectEq(d720.reason, "receiver does not display 720p60", "plan: 720p60 transcode reason")
+    expectEq(d720.unsupported, ["720p60"], "plan: 720p60 named as unsupported")
+    expectEq(ultra.logLine(source: s720, decision: d720),
+             "[Cast] video plan: source=avc1.640020 1280x720@59.94 receiver display h264_1080p60=no "
+             + "h264_1080p30=yes h264_720p60=n/a hevc_1080p60=no hvc1=no -> transcode H.264 720p29.97 "
+             + "level 4.1 (8000 kbps)",
+             "plan: 720p60 log line")
+    var ultra720No = ultraCaps; ultra720No.display?["h264_720p60"] = false
+    expectEq(CastVideoPlan(caps: ultra720No).decide(s720).output?.frameStep, 2,
+             "plan: h264_720p60=no -> half rate")
+    var ultra720Yes = ultraCaps; ultra720Yes.display?["h264_720p60"] = true
+    expectEq(CastVideoPlan(caps: ultra720Yes).decide(s720).output, nil,
+             "plan: h264_720p60=yes overrides 1080p60=no, passthrough")
+    var s720p30 = s720; s720p30.fps = 29.97
+    expectEq(ultra.decide(s720p30).output, nil, "plan: 720p30 on the Ultra, passthrough")
     var s1080i = src; s1080i.fps = 29.97; s1080i.progressive = false; s1080i.levelIDC = 40
     expectEq(ultra.decide(s1080i).output, nil, "plan: 1080i29.97 fits the Ultra, passthrough")
     var s1080p30NoVUI = src; s1080p30NoVUI.fps = nil; s1080p30NoVUI.levelIDC = 40

@@ -207,7 +207,7 @@ final class AerioCastController: NSObject, ObservableObject {
     /// snapshot does not repeat the line.
     private var loggedCaps: [String: Bool]?
     /// The receiver's `display` map (cast.framework canDisplayType):
-    /// h264_1080p60, h264_1080p30, hevc_1080p60, hevc_4k60, h264_4k60.
+    /// h264_720p60, h264_1080p60, h264_1080p30, hevc_720p60, hevc_1080p60, hevc_4k60, h264_4k60.
     /// nil when the page sent none (an older receiver page). Measured
     /// 2026-09-26 on a Chromecast Ultra: h264_1080p60 false, h264_1080p30
     /// true, every HEVC key false; that is what drives the video plan.
@@ -291,9 +291,11 @@ final class AerioCastController: NSObject, ObservableObject {
             receiverDisplayCaps = display
             if loggedDisplayCaps != display {
                 loggedDisplayCaps = display
-                func cap(_ key: String) -> String { display[key] == true ? "yes" : "no" }
-                debugLog("[Cast] receiver display: h264_1080p60=\(cap("h264_1080p60")) "
-                    + "h264_1080p30=\(cap("h264_1080p30")) hevc_1080p60=\(cap("hevc_1080p60")) "
+                func cap(_ key: String) -> String { display[key].map { $0 ? "yes" : "no" } ?? "n/a" }
+                debugLog("[Cast] receiver display: h264_720p60=\(cap("h264_720p60")) "
+                    + "h264_1080p60=\(cap("h264_1080p60")) "
+                    + "h264_1080p30=\(cap("h264_1080p30")) hevc_720p60=\(cap("hevc_720p60")) "
+                    + "hevc_1080p60=\(cap("hevc_1080p60")) "
                     + "hevc_4k60=\(cap("hevc_4k60")) h264_4k60=\(cap("h264_4k60")) "
                     + "hevc_1080p60_hlg=\(cap("hevc_1080p60_hlg")) hevc_1080p60_pq=\(cap("hevc_1080p60_pq")) "
                     + "hevc_4k60_hlg=\(cap("hevc_4k60_hlg")) hevc_4k60_pq=\(cap("hevc_4k60_pq"))")

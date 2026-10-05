@@ -137,6 +137,14 @@ struct CastReceiverVideoCaps: Sendable, Equatable {
     func mse(_ key: String) -> Bool { mse[key] == true }
     func display(_ key: String) -> Bool { display?[key] == true }
 
+    /// H.264 at 720p60 is presentable. A receiver page that predates the
+    /// `h264_720p60` probe falls back to its `h264_1080p60` answer.
+    /// Measured 2026-10-05 on a Chromecast Ultra: a 720p59.94 passthrough
+    /// rendered at 30 to 42 fps and the media clock ran at about 0.63x.
+    var h264_720p60: Bool { display?["h264_720p60"] ?? display("h264_1080p60") }
+    /// HEVC at 720p60 is presentable (same fallback, to `hevc_1080p60`).
+    var hevc_720p60: Bool { display?["hevc_720p60"] ?? display("hevc_1080p60") }
+
     /// HEVC at 1080p60 is presentable.
     var hevc1080: Bool { display("hevc_1080p60") || mse("hvc1") }
     /// HEVC at 4K60 is presentable.
@@ -260,8 +268,9 @@ struct CastVideoPlan: Sendable, Equatable {
     /// The decision rule. Pure; unit-tested.
     ///
     /// 1. A source the receiver presents passes through.
-    ///    H.264: anything up to 1280x720 at any rate (a lower pixel rate
-    ///    than 1080p30), 1080 at up to 30 fps when `display.h264_1080p30`,
+    ///    H.264: up to 1280x720 at up to 30 fps, up to 1280x720 above
+    ///    30.5 fps when `display.h264_720p60` (or, from an older page
+    ///    without that key, `display.h264_1080p60`), 1080 at up to 30 fps when `display.h264_1080p30`,
     ///    1080 at any rate when `display.h264_1080p60`, 4K when
     ///    `display.h264_4k60`.
     ///    HEVC: 4K when `display.hevc_4k60`, 1080 when
@@ -301,7 +310,7 @@ struct CastVideoPlan: Sendable, Equatable {
             } else if is1080 {
                 fits = caps.display("h264_1080p60") || (!highRate && caps.display("h264_1080p30"))
             } else {
-                fits = true
+                fits = fps <= 30.5 || caps.h264_720p60
             }
         case .hevc:
             if is4K {
@@ -318,8 +327,15 @@ struct CastVideoPlan: Sendable, Equatable {
         if fits && hdrFits && !force {
             return CastVideoDecision(output: nil, reason: "receiver displays the source")
         }
+        let is720High = s.codec == .h264 && !is4K && !is1080 && !fits
+        // H.264 1080 above 30.5 fps that the receiver cannot present, on a
+        // receiver that cannot hold 60 fps H.264 even at 720 either: the
+        // 720p60 profile would play slow too, so halve the rate instead.
+        let is1080High = s.codec == .h264 && is1080 && !fits && fps > 30.5 && !caps.h264_720p60
         let trigger = force ? "Developer switch"
-            : (unmeasured ?? (fits ? "receiver does not display \(s.hdrTransfer?.label ?? "HDR") HDR"
+            : (unmeasured ?? (is1080High && !caps.hevc1080 ? "receiver does not display 60 fps H.264"
+                              : is720High ? "receiver does not display 720p60"
+                              : fits ? "receiver does not display \(s.hdrTransfer?.label ?? "HDR") HDR"
                               : "source above receiver display"))
         // The note's "doesn't support" list: only answers the receiver
         // actually gave (none when unmeasured or forced).
@@ -330,6 +346,7 @@ struct CastVideoPlan: Sendable, Equatable {
             if !fits && is1080 && s.codec == .h264 {
                 unsupported.append(caps.display("h264_1080p30") ? "1080p60" : "1080p")
             }
+            if is720High { unsupported.append("720p60") }
             // HDR is named when the receiver shows it at no size, or when
             // it is the only thing that stopped a passthrough.
             if !hdrFits, let t = s.hdrTransfer,
@@ -346,6 +363,14 @@ struct CastVideoPlan: Sendable, Equatable {
             guard let t = s.hdrTransfer, s.bitDepth > 8 else { return false }
             return caps.hdr(t, width: w, height: h)
         }
+        // H.264 up to 720 above 30.5 fps on a receiver that cannot present
+        // 720p60: H.264 at the source size and half the frame rate (the
+        // transcoder drops every other decoded frame; output PTS stay the
+        // source PTS, so the timeline is continuous).
+        if is720High && !force {
+            return out(CastVideoOutputSpec(codec: .h264, width: even(s.width), height: even(s.height),
+                                            frameStep: 2, bitrateCap: CastVideoOutputSpec.h264Cap))
+        }
         if is4K && caps.hevc4K && (s.codec == .h264 || force) {
             return out(CastVideoOutputSpec(codec: .hevc, width: even(s.width), height: even(s.height),
                                             frameStep: 1, bitrateCap: CastVideoOutputSpec.hevc4KCap,
@@ -356,6 +381,13 @@ struct CastVideoPlan: Sendable, Equatable {
             return out(CastVideoOutputSpec(codec: .hevc, width: size.width, height: size.height,
                                             frameStep: 1, bitrateCap: CastVideoOutputSpec.hevc1080Cap,
                                             hdr: keepsHDR(size.width, size.height)))
+        }
+        // No 60 fps H.264 at all: 1080 at half rate, whatever the
+        // Developer profile says.
+        if is1080High && !force {
+            let size = Self.fit(s.width, s.height, maxWidth: 1920, maxHeight: 1080)
+            return out(CastVideoOutputSpec(codec: .h264, width: size.width, height: size.height,
+                                            frameStep: 2, bitrateCap: CastVideoOutputSpec.h264Cap))
         }
         // 1080p30 needs the receiver to present 1080p30; otherwise 720p.
         let profile: CastTranscodeDownProfile =
@@ -400,7 +432,10 @@ struct CastVideoPlan: Sendable, Equatable {
         } else {
             line += " receiver display h264_1080p60=\(yn(caps.display("h264_1080p60")))"
                 + " h264_1080p30=\(yn(caps.display("h264_1080p30")))"
-                + " hevc_1080p60=\(yn(caps.display("hevc_1080p60")))"
+            if s.codec == .h264 && s.width <= 1920 && s.height <= 1088 {
+                line += " h264_720p60=" + (caps.display?["h264_720p60"].map(yn) ?? "n/a")
+            }
+            line += " hevc_1080p60=\(yn(caps.display("hevc_1080p60")))"
             if s.codec == .hevc { line += " hevc_4k60=\(yn(caps.display("hevc_4k60")))" }
             line += " hvc1=\(yn(caps.mse("hvc1")))"
             if let t = s.hdrTransfer {
