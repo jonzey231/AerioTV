@@ -2060,6 +2060,16 @@ final class ChannelStore: ObservableObject {
                 orderedGroups = groups
                 error = nil
                 debugLog("🔷 ChannelStore.load: published \(items.count) channels")
+                // Every channel load / playlist refresh re-reads the
+                // Dispatcharr user level and permission flags, so a change
+                // made on the server gates the UI without re-adding the
+                // playlist. Throttled (the launch probe usually just ran).
+                if type == .dispatcharrAPI, let live = activeServer, live.id == serverID {
+                    Task { @MainActor in
+                        await DispatcharrCapabilityProbe.refresh(live, reason: "channel refresh",
+                                                                 minInterval: 10)
+                    }
+                }
                 // Apply any cached categories RIGHT NOW so the tint
                 // stripe renders on the first frame channels appear,
                 // instead of fading in 5–10 seconds later when the
@@ -4938,7 +4948,12 @@ struct MainTabView: View {
                     guard DispatcharrCapabilityProbe.needsLaunchProbe(server) else { continue }
                     DispatcharrCapabilityProbe.noteLaunchProbed(server)
                 } else {
-                    guard server.dispatcharrCapabilities.isStale else { continue }
+                    // Foreground return: re-read the user level and
+                    // permission flags, throttled to once a minute per
+                    // server, so an admin's grant or revoke applies on the
+                    // next return to the app instead of after the 6 hour TTL.
+                    guard server.dispatcharrCapabilities.isStale
+                            || DispatcharrCapabilityProbe.secondsSinceLastProbe(server) >= 60 else { continue }
                 }
                 DispatcharrCapabilityProbe.noteActiveServerProbed(server)
                 var reached = false

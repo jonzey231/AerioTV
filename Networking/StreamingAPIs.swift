@@ -919,6 +919,16 @@ enum XtreamDateParser {
 }
 
 // MARK: - API Error
+/// A Dispatcharr non-2xx with the server's own error text, when it sent one.
+struct DispatcharrHTTPFailure: LocalizedError {
+    let status: Int
+    let reason: String?
+    var errorDescription: String? {
+        if let reason, !reason.isEmpty { return "HTTP \(status): \(reason)" }
+        return "HTTP \(status)"
+    }
+}
+
 enum APIError: LocalizedError {
     case invalidURL
     case unauthorized
@@ -4218,7 +4228,7 @@ struct DispatcharrAPI {
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         request.httpBody = try JSONSerialization.data(withJSONObject: ["stream_id": streamID])
         let (data, response) = try await loggedData(for: request)
-        try validate(response: response, data: data)
+        try validateKeepingReason(response: response, data: data)
         // The response carries the resolved upstream `url` Dispatcharr switched
         // to plus an `owner` flag. We confirm the switch by polling /status.url
         // against the url (the event-path bug leaves stream_id stale, so url is
@@ -4246,7 +4256,7 @@ struct DispatcharrAPI {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["streams": streamIDs])
         let (data, response) = try await loggedData(for: request)
-        try validate(response: response, data: data)
+        try validateKeepingReason(response: response, data: data)
     }
 
     /// Reads `/proxy/ts/status/<uuid>` for the channel's live upstream.
@@ -4432,6 +4442,23 @@ struct DispatcharrAPI {
             .trimmingCharacters(in: .whitespacesAndNewlines),
               !text.isEmpty, !text.hasPrefix("<") else { return nil }
         return text
+    }
+
+    /// Like `validate(response:data:)`, but every non-2xx that is not an
+    /// auth failure throws `DispatcharrHTTPFailure` carrying the status AND
+    /// the server's own error text (`detail` / `error`), so Switch Stream
+    /// and reorder can show both, worded identically to Android.
+    private func validateKeepingReason(response: URLResponse, data: Data?) throws {
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if (200...299).contains(http.statusCode) || http.statusCode == 401 {
+            try validate(response: response, data: data)
+            return
+        }
+        if http.statusCode == 404, let body = data,
+           String(data: body, encoding: .utf8)?.contains("No User matches") == true {
+            throw APIError.unauthorized
+        }
+        throw DispatcharrHTTPFailure(status: http.statusCode, reason: Self.forbiddenReason(from: data))
     }
 
     /// Body-aware validation: promotes Dispatcharr's auth-failure 404s

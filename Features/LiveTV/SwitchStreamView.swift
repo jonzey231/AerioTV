@@ -35,6 +35,45 @@ enum SwitchStreamFlow {
         let isCurrent: Bool
     }
 
+    /// User-facing failure line, worded identically on Android:
+    /// "Couldn't switch the stream (HTTP 403): <server text>", or
+    /// "Couldn't switch the stream (HTTP 500)." when the server sent none.
+    static func failureMessage(_ action: String, error: Error) -> String {
+        if let failure = error as? DispatcharrHTTPFailure {
+            if let reason = failure.reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty {
+                return "Couldn't \(action) (HTTP \(failure.status)): \(reason)"
+            }
+            return "Couldn't \(action) (HTTP \(failure.status))."
+        }
+        if let status = SwitchStreamView.httpStatus(of: error) {
+            if case APIError.forbidden(let reason?) = error, !reason.isEmpty {
+                return "Couldn't \(action) (HTTP \(status)): \(reason)"
+            }
+            return "Couldn't \(action) (HTTP \(status))."
+        }
+        return "Couldn't \(action): \(error.localizedDescription)"
+    }
+
+    /// Re-read the user level right before an admin-only action. Returns
+    /// whether the account may switch streams on the FRESH answer (fail
+    /// closed: unknown = no).
+    @MainActor
+    static func recheckAdmin(server: ServerConnection?, trigger: String) async -> Bool {
+        guard let server, server.type == .dispatcharrAPI else { return false }
+        await DispatcharrCapabilityProbe.refresh(server, reason: trigger, waitIfInFlight: true)
+        return server.dispatcharrCanSwitchStream
+    }
+
+    /// A 403 on an admin-only call: the server says the level changed, so
+    /// re-read it now and let every gate follow.
+    @MainActor
+    static func noteFailure(server: ServerConnection?, error: Error, trigger: String) {
+        guard let server, SwitchStreamView.httpStatus(of: error) == 403 else { return }
+        Task { @MainActor in
+            await DispatcharrCapabilityProbe.refresh(server, reason: trigger, waitIfInFlight: true)
+        }
+    }
+
     @MainActor
     static func makeAPI(server: ServerConnection?) -> DispatcharrAPI? {
         guard let server, server.type == .dispatcharrAPI else { return nil }
@@ -48,6 +87,10 @@ enum SwitchStreamFlow {
     static func loadOptions(server: ServerConnection?,
                             channelID: Int,
                             channelUUID: String) async -> [Option]? {
+        guard await recheckAdmin(server: server, trigger: "Switch Stream open") else {
+            debugLog("[SwitchStream] flow: account is not a Dispatcharr admin on a fresh read; not listing streams")
+            return nil
+        }
         guard let api = makeAPI(server: server) else { return nil }
         do {
             async let streamsTask = api.getChannelStreams(channelID: channelID)
@@ -100,6 +143,7 @@ enum SwitchStreamFlow {
             debugLog("[SwitchStream] flow: confirmed switch to stream id=\(streamID)")
             return true
         } catch {
+            noteFailure(server: server, error: error, trigger: "403 on change_stream")
             debugLog("[SwitchStream] flow: change_stream failed (stream=\(streamID)): \(error.localizedDescription)")
             return false
         }
@@ -201,6 +245,14 @@ struct SwitchStreamView: View {
     // MARK: - Load
 
     private func load() async {
+        // Re-read the user level before listing: an admin can demote (or
+        // promote) the account at any time, and the picker must follow the
+        // live answer, not the one cached at launch.
+        guard await SwitchStreamFlow.recheckAdmin(server: activeServer, trigger: "Switch Stream open") else {
+            loadError = DispatcharrCapability.switchStream.deniedMessage
+            isLoading = false
+            return
+        }
         guard let api = makeAPI() else {
             loadError = "Switch Stream is only available on a Dispatcharr Direct Connect playlist."
             isLoading = false
@@ -281,19 +333,18 @@ struct SwitchStreamView: View {
             } catch {
                 isSwitching = false
                 selectedStreamID = previousSelection
-                // #89: show the HTTP status instead of a generic guess.
-                if let status = Self.httpStatus(of: error) {
-                    switchError = "Couldn't switch the stream (HTTP \(status))."
-                } else {
-                    switchError = "Couldn't switch the stream: \(error.localizedDescription)"
-                }
+                // #89: show the HTTP status (and the server's own text)
+                // instead of a generic guess. Same wording as Android.
+                switchError = SwitchStreamFlow.failureMessage("switch the stream", error: error)
+                SwitchStreamFlow.noteFailure(server: activeServer, error: error, trigger: "403 on change_stream")
                 debugLog("[SwitchStream] change_stream failed for \(channelName) stream=\(stream.id) status=\(Self.httpStatus(of: error).map(String.init) ?? "none"): \(error.localizedDescription)")
             }
         }
     }
 
     /// HTTP status carried by a DispatcharrAPI error, when there is one.
-    static func httpStatus(of error: Error) -> Int? {
+    nonisolated static func httpStatus(of error: Error) -> Int? {
+        if let failure = error as? DispatcharrHTTPFailure { return failure.status }
         guard let api = error as? APIError else { return nil }
         switch api {
         case .unauthorized: return 401
@@ -303,6 +354,7 @@ struct SwitchStreamView: View {
         default: return nil
         }
     }
+
 
     // MARK: - Reorder (admin)
 
@@ -346,6 +398,14 @@ struct SwitchStreamView: View {
         isSavingOrder = true
         orderError = nil
         Task {
+            // Fresh user level before the write; a demoted account gets the
+            // permission message and the old order back, with no PATCH.
+            guard await SwitchStreamFlow.recheckAdmin(server: activeServer, trigger: "stream reorder save") else {
+                streams = previous
+                orderError = DispatcharrCapability.switchStream.deniedMessage
+                isSavingOrder = false
+                return
+            }
             do {
                 try await api.updateChannelStreamOrder(channelID: channelID, streamIDs: ids)
                 isSavingOrder = false
@@ -354,8 +414,8 @@ struct SwitchStreamView: View {
                 let status = Self.httpStatus(of: error)
                 debugLog("[SwitchStream] reorder failed status=\(status.map(String.init) ?? "none") channel=\(channelID): \(error.localizedDescription)")
                 streams = previous
-                orderError = status.map { "Couldn't save the stream order (HTTP \($0))." }
-                    ?? "Couldn't save the stream order: \(error.localizedDescription)"
+                orderError = SwitchStreamFlow.failureMessage("save the stream order", error: error)
+                SwitchStreamFlow.noteFailure(server: activeServer, error: error, trigger: "403 on stream reorder")
                 isSavingOrder = false
                 await load()
             }

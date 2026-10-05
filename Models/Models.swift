@@ -589,10 +589,20 @@ final class ServerConnection {
             // No usable blob in this response. Keep whatever we had and
             // mark the snapshot stale so the next opportunistic probe
             // tries again, rather than writing an empty grant.
-            debugLog("[PERMS] \(name): users/me carried no custom_properties; keeping the last good snapshot")
-            if dispatcharrPermissionsFetchedAt != nil {
-                set(\.dispatcharrPermissionsFetchedAt, Date(timeIntervalSince1970: 0))
+            if dispatcharrPermissionsFetchedAt == nil || !DispatcharrCustomProperties(json: dispatcharrCustomPropertiesJSON).isPresent {
+                // Nothing good to keep. Dispatcharr stores custom_properties
+                // as a nullable JSONField and a null means "no per-user
+                // overrides", so adopt an empty object: the level from this
+                // same successful users/me is then gated on instead of the
+                // row reading "unknown" forever.
+                debugLog("[PERMS] \(name): users/me carried no custom_properties; adopting {} (no overrides)")
+                set(\.dispatcharrCustomPropertiesJSON, "{}")
+                set(\.dispatcharrCapabilitiesSchema, DispatcharrCapabilitySet.currentSchema)
+                dispatcharrPermissionsFetchedAt = Date()
+                return true
             }
+            debugLog("[PERMS] \(name): users/me carried no custom_properties; keeping the last good snapshot")
+            set(\.dispatcharrPermissionsFetchedAt, Date(timeIntervalSince1970: 0))
             return changed
         }
 
@@ -646,7 +656,10 @@ final class ServerConnection {
     /// member streams or a change-stream endpoint), hiding the affordance
     /// there instead of showing an option that can't work.
     var dispatcharrCanSwitchStream: Bool {
-        dispatcharrCapabilities.canSwitchStream.isAllowed
+        // FAIL CLOSED: admin-only, so an unknown level (never probed, or
+        // the probe has not landed yet) hides the option rather than
+        // offering a picker that would 403.
+        dispatcharrCapabilities.canSwitchStream == .allowed
     }
 
     /// Parsed list of the connected Dispatcharr user's assigned Channel
@@ -1326,7 +1339,7 @@ enum DispatcharrCapability: String, Sendable, CaseIterable {
         case .manageDvr:
             return "Your Dispatcharr account can view recordings but not manage them. Ask your server administrator for DVR manage access."
         case .switchStream:
-            return "Switching the active stream needs a Dispatcharr administrator account."
+            return "Switching streams needs a Dispatcharr administrator account. Ask your server administrator for access."
         case .managePlaylists:
             return "Editing playlists on the server needs a Dispatcharr administrator account."
         case .readServerSettings:
@@ -1504,6 +1517,22 @@ enum DispatcharrCapabilityProbe {
 
     private static var inFlight: Set<UUID> = []
 
+    /// When each server was last probed in this process (attempt start,
+    /// success or not). Throttles the foreground and channel-refresh
+    /// triggers; nothing polls on its own.
+    private static var lastProbeAt: [UUID: Date] = [:]
+
+    static func secondsSinceLastProbe(_ server: ServerConnection) -> TimeInterval {
+        guard let at = lastProbeAt[server.id] else { return .infinity }
+        return Date().timeIntervalSince(at)
+    }
+
+    /// "10", "1" or "unknown" (no snapshot to gate on) for the [PERMS] log.
+    private static func levelDescription(_ server: ServerConnection) -> String {
+        let caps = server.dispatcharrCapabilities
+        return caps.hasSnapshot ? String(caps.effectiveUserLevel) : "unknown"
+    }
+
     /// Unified-logging channel for the probe. INFO level and always
     /// compiled in (unlike `debugLog`, whose console half is Debug only),
     /// so a Release / TestFlight build can be verified with
@@ -1527,11 +1556,26 @@ enum DispatcharrCapabilityProbe {
     /// successful probe that simply found nothing new is pure waste. A
     /// change additionally posts `.dispatcharrCapabilitiesDidChange`.
     @discardableResult
-    static func refresh(_ server: ServerConnection, reason: String) async -> Bool {
+    static func refresh(_ server: ServerConnection, reason: String,
+                        minInterval: TimeInterval = 0,
+                        waitIfInFlight: Bool = false) async -> Bool {
         guard server.type == .dispatcharrAPI else { return false }
-        guard !inFlight.contains(server.id) else { return false }
+        if inFlight.contains(server.id) {
+            // A pass is already running. Gate checks (Switch Stream open,
+            // reorder save) must see ITS answer, so they wait for it (time
+            // boxed) instead of reading the pre-probe snapshot.
+            guard waitIfInFlight else { return false }
+            let deadline = Date().addingTimeInterval(10)
+            while inFlight.contains(server.id), Date() < deadline {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            return server.dispatcharrCapabilities.hasSnapshot
+        }
+        if minInterval > 0, secondsSinceLastProbe(server) < minInterval { return true }
         inFlight.insert(server.id)
+        lastProbeAt[server.id] = Date()
         defer { inFlight.remove(server.id) }
+        let oldLevel = levelDescription(server)
 
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                  auth: .apiKey(server.effectiveApiKey),
@@ -1541,6 +1585,7 @@ enum DispatcharrCapabilityProbe {
                                  savedUsername: server.dispatcharrCredentialType == .usernamePassword
                                      ? server.username : nil)
         guard let user = try? await api.fetchCurrentUser() else {
+            logProbe("[PERMS] level \(oldLevel) -> \(oldLevel) (refresh failed, kept) trigger=\(reason) server=\(server.name)")
             logProbe("[PERMS] probe FAILED server=\(server.name) reason=\(reason) "
                      + "detail=users/me-unavailable; keeping the last good snapshot "
                      + "(\(server.dispatcharrCapabilities.probeSummary))")
@@ -1614,6 +1659,8 @@ enum DispatcharrCapabilityProbe {
         }
         DispatcharrAccountFactsStore.save(facts, for: server.id)
 
+        logProbe("[PERMS] level \(oldLevel) -> \(levelDescription(server)) trigger=\(reason) "
+                 + "changed=\(changed) server=\(server.name)")
         logProbe("[PERMS] probe OK \(server.dispatcharrCapabilities.probeSummary) "
                  + "changed=\(changed) server=\(server.name) reason=\(reason)")
         debugLog("[PERMS] detail \(server.name) (\(reason)): \(server.dispatcharrCapabilities.debugDescription)")
