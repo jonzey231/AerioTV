@@ -4138,17 +4138,15 @@ struct RemoteSessionCard: View {
     }
 
     /// iPhone (Logan 2026-10-05): the Kept Live pill's capsule and plain
-    /// glass, so the two stack as matching capsules; 16 pt side margins as
-    /// before. iPad (Logan 2026-10-05): the tab pill's capsule and surface;
+    /// glass, so the two stack as matching capsules; HomeView sets the side
+    /// insets from the measured tab bar capsule. iPad (Logan 2026-10-05): the tab pill's capsule and surface;
     /// the dock sets the width, so no side margins.
     private struct SurfaceStyle: ViewModifier {
         func body(content: Content) -> some View {
             if PadTabPill.isActive {
                 content.modifier(PadPillSurface(shape: Capsule()))
             } else {
-                content
-                    .modifier(KeptPillChrome())
-                    .padding(.horizontal, 16)
+                content.modifier(KeptPillChrome())
             }
         }
     }

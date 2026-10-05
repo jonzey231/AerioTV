@@ -6106,8 +6106,12 @@ struct MainTabView: View {
                         // iPhone (Logan 2026-10-04): the remote-session card
                         // stays full width on top; below it ONE row with the
                         // compact Kept Live pill leading and the Control-a-TV
-                        // button trailing.
+                        // button trailing. The card's edges line up with the
+                        // measured tab bar capsule, like the Kept Live row
+                        // (Logan 2026-10-05); 20 pt until measured.
                         remoteSessionCard
+                            .padding(.leading, cardMetrics.barLeadingInset > 0 ? cardMetrics.barLeadingInset : 20)
+                            .padding(.trailing, cardMetrics.barTrailingInset > 0 ? cardMetrics.barTrailingInset : 20)
                         if keptLiveCardVisible {
                             // Outer edges line up with the measured tab bar
                             // capsule (Logan 2026-10-04); 20 pt until measured.
