@@ -7779,13 +7779,13 @@ struct EPGGuideView: View {
         guard let server = ChannelStore.shared.activeServer else { return }
         Task { @MainActor in
             do {
-                let pb = try await CatchupSupport.resolve(
+                let pb = CatchupResumeStore.prepare(try await CatchupSupport.resolve(
                     server: server,
                     channel: channel,
                     programTitle: prog.title,
                     programStart: prog.start,
                     programEnd: prog.end
-                )
+                ), channelID: channel.id)
                 #if os(tvOS)
                 // Unified pipeline (task #147): catch-up plays in the
                 // SAME container/chrome as live via a session mode

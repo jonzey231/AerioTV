@@ -4366,6 +4366,8 @@ struct AVPlayerMultiviewTile: View {
     /// original programme-start URL.
     @State private var catchupBaseMs: Int32 = 0
     @State private var catchupURL: URL?
+    /// The stored catch-up resume offset is applied once per tile.
+    @State private var catchupResumeApplied = false
     @State private var catchupMintInFlight = false
     @State private var lastCatchupReportAt = Date.distantPast
     /// Position of the last dead-pipeline reconnect; a fresh reconnect
@@ -4567,6 +4569,11 @@ struct AVPlayerMultiviewTile: View {
             // A tile removed mid-grace must still release its background task.
             endBackgroundGrace()
             #endif
+            // Catch-up resume position (CatchupResumeStore): saved on exit,
+            // cleared when the program reached its last 2 minutes.
+            if let cu = catchup {
+                CatchupResumeStore.save(cu, positionMs: progressStore.currentMs)
+            }
             // Cancels any standing slow retry in flight.
             teardownToken = UUID()
             stop()
@@ -6182,6 +6189,16 @@ struct AVPlayerMultiviewTile: View {
     /// Seeks are window re-tunes (mpv parity): rebuild/re-mint the URL
     /// at the target offset and restart the pipeline.
     private func startCatchup(_ cu: CatchupPlayback) {
+        // Resume a previously exited catch-up program: the first window
+        // opens at the stored offset through the same re-tune a seek uses.
+        if !catchupResumeApplied {
+            catchupResumeApplied = true
+            if catchupURL == nil, catchupBaseMs == 0, let resume = cu.resumeOffsetMs {
+                debugLog("[AVP-CU] resume -> \(resume / 1000)s title=\(channelName)")
+                retuneCatchupWindow(resume, cu)
+                return
+            }
+        }
         statusText = "Loading..."
         progressStore.durationMs = cu.programDurationMs
         progressStore.currentMs = catchupBaseMs
@@ -6275,6 +6292,11 @@ struct AVPlayerMultiviewTile: View {
                     offsetSeconds: Double(clamped) / 1000.0) else {
                     debugLog("[AVP-CU] native re-mint failed; keeping current window")
                     statusText = nil
+                    // A resume re-tune runs before any window exists: fall
+                    // back to the session minted at the program start.
+                    if remuxer == nil, player == nil, catchupURL == nil {
+                        startCatchup(cu)
+                    }
                     return
                 }
                 CatchupSupport.revokeNative(playback: cu, currentURL: previous)

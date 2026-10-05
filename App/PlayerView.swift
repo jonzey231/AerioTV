@@ -5058,8 +5058,23 @@ enum LiveEdgeHoldback {
             forget(key)
             return base
         }
+        // Roll the TTL on use (2026-10-05): a successful read re-stamps the
+        // entry, so expiry is 30 minutes from the last tune that used it. A
+        // value still never persists forever. offset(for:) runs more than once
+        // per tune (player host, remuxer join floor), so only re-stamp when the
+        // stamp is older than the debounce window; that logs once per tune.
+        if age >= restampDebounce {
+            var fresh = stamps ?? [:]
+            fresh[key] = Date().timeIntervalSince1970
+            UserDefaults.standard.set(fresh, forKey: learnedAtKey)
+            debugLog("[AVP-HOLDBACK] learned value re-stamped on use")
+        }
         return learned
     }
+
+    /// Reads within this many seconds of the last stamp belong to the same
+    /// tune and do not re-stamp again.
+    private static let restampDebounce: TimeInterval = 20
 
     /// Drop one stale learned value with its stamp, so the expiry line above
     /// logs once instead of on every tune of that channel.

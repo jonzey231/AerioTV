@@ -4212,13 +4212,13 @@ struct ChannelRow: View {
               let start = entry.startTime, let end = entry.endTime else { return }
         Task { @MainActor in
             do {
-                let pb = try await CatchupSupport.resolve(
+                let pb = CatchupResumeStore.prepare(try await CatchupSupport.resolve(
                     server: server,
                     channel: item,
                     programTitle: entry.title,
                     programStart: start,
                     programEnd: end
-                )
+                ), channelID: item.id)
                 #if os(tvOS)
                 // Unified pipeline (task #147): catch-up plays in the
                 // SAME container/chrome as live via a session mode

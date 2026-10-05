@@ -170,6 +170,14 @@ struct AppearanceSettingsView: View {
                                          onChange: { _ in
                                              SyncManager.shared.pushPreferencesImmediate()
                                          })
+
+                    // True Black Background (OLED). Applied in ThemeManager.
+                    TVSettingsToggleRow(
+                        icon: "moon.fill", iconColor: theme.accent,
+                        title: "True Black Background",
+                        subtitle: "Use pure black for backgrounds, for OLED screens.",
+                        isOn: $theme.trueBlack
+                    ) { _ in SyncManager.shared.pushPreferencesImmediate() }
                 }
 
                 // Liquid Glass
@@ -450,6 +458,7 @@ struct AppearanceSettingsView: View {
                 // now states what it is, on both idioms.
                 Section {
                     appearanceModeRow
+                    trueBlackRow
                 } header: {
                     Text("Light and Dark Mode").sectionHeaderStyle()
                 } footer: {
@@ -605,6 +614,27 @@ struct AppearanceSettingsView: View {
                              })
             .listRowBackground(Color.cardBackground)
             .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
+    }
+
+    /// True Black Background (OLED): pure black page backgrounds and
+    /// #0A0A0A cards / sheets, resolved in ThemeManager. Synced bool
+    /// `appearance.trueBlack`.
+    private var trueBlackRow: some View {
+        Toggle(isOn: Binding(
+            get: { theme.trueBlack },
+            set: { theme.trueBlack = $0; SyncManager.shared.pushPreferencesImmediate() }
+        )) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("True Black Background")
+                    .scaledFont(.bodyMedium)
+                    .foregroundColor(.textPrimary)
+                Text("Use pure black for backgrounds, for OLED screens.")
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+            }
+        }
+        .tint(theme.accent)
+        .listRowBackground(Color.cardBackground)
     }
 
     /// Custom accent toggle, system color picker and hex field. Its own

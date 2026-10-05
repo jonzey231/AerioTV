@@ -6213,9 +6213,93 @@ struct CatchupPlayback: Identifiable, Equatable, Sendable {
     /// API auth headers for native session mint/revoke calls (the
     /// playback URL itself needs none). Empty on the XC paths.
     var nativeAuthHeaders: [String: String] = [:]
+    /// Channel id of the guide row this program aired on. Keys the
+    /// catch-up resume position (CatchupResumeStore) with programStart.
+    var channelID: String? = nil
+    /// Program-relative start offset (ms) restored from
+    /// CatchupResumeStore. nil = start at the beginning.
+    var resumeOffsetMs: Int32? = nil
 
     var programDurationMs: Int32 {
         Int32(max(0, programEnd.timeIntervalSince(programStart)) * 1000)
+    }
+}
+
+/// Catch-up resume positions (GH AerioTV-Android#116 parity). One
+/// UserDefaults dictionary keyed "channelID|programStartEpoch" holding
+/// [positionMs, savedAtEpoch]. Entries older than 7 days are pruned and
+/// the map is capped at 200 (oldest dropped first). Playback auto-resumes
+/// with no prompt, matching the VOD player (Continue Watching and the
+/// player itself resume silently; the Resume / Play from Beginning choice
+/// only exists as buttons on the VOD detail page, which catch-up has no
+/// equivalent of).
+enum CatchupResumeStore {
+    static let defaultsKey = "catchup.resumePositions"
+    static let maxAge: TimeInterval = 7 * 24 * 60 * 60
+    static let cap = 200
+    /// Resume only beyond the first 60 s and before the last 2 minutes.
+    static let minResumeMs: Int32 = 60_000
+    static let endGuardMs: Int32 = 120_000
+
+    private static func key(channelID: String, programStart: Date) -> String {
+        "\(channelID)|\(Int64(programStart.timeIntervalSince1970))"
+    }
+
+    private static func load() -> [String: [Double]] {
+        (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: [Double]]) ?? [:]
+    }
+
+    private static func store(_ map: [String: [Double]]) {
+        let now = Date().timeIntervalSince1970
+        var pruned = map.filter { $0.value.count == 2 && now - $0.value[1] < maxAge }
+        if pruned.count > cap {
+            let keep = pruned.sorted { $0.value[1] > $1.value[1] }.prefix(cap).map(\.key)
+            pruned = pruned.filter { keep.contains($0.key) }
+        }
+        UserDefaults.standard.set(pruned, forKey: defaultsKey)
+    }
+
+    /// Stored position when it is inside the resumable band, else nil.
+    static func position(for pb: CatchupPlayback) -> Int32? {
+        guard let cid = pb.channelID,
+              let entry = load()[key(channelID: cid, programStart: pb.programStart)],
+              entry.count == 2,
+              Date().timeIntervalSince1970 - entry[1] < maxAge else { return nil }
+        let ms = Int32(clamping: Int64(entry[0]))
+        let dur = pb.programDurationMs
+        guard ms > minResumeMs, dur <= 0 || ms < dur - endGuardMs else { return nil }
+        return ms
+    }
+
+    /// Save on exit. A position at or past the last 2 minutes counts as
+    /// reaching the end and clears the entry.
+    static func save(_ pb: CatchupPlayback, positionMs: Int32) {
+        guard let cid = pb.channelID else { return }
+        var map = load()
+        let k = key(channelID: cid, programStart: pb.programStart)
+        let dur = pb.programDurationMs
+        if dur > 0, positionMs >= dur - endGuardMs {
+            map.removeValue(forKey: k)
+            debugLog("[CATCHUP] resume cleared (reached end) \(pb.title)")
+        } else if positionMs > 0 {
+            map[k] = [Double(positionMs), Date().timeIntervalSince1970]
+            debugLog("[CATCHUP] resume saved at \(positionMs / 1000)s \(pb.title)")
+        } else {
+            return
+        }
+        store(map)
+    }
+
+    /// Stamps the channel id and the stored resume offset (if any) on a
+    /// freshly resolved playback.
+    static func prepare(_ pb: CatchupPlayback, channelID: String) -> CatchupPlayback {
+        var out = pb
+        out.channelID = channelID
+        out.resumeOffsetMs = position(for: out)
+        if let ms = out.resumeOffsetMs {
+            debugLog("[CATCHUP] resuming at \(ms / 1000)s \(pb.title)")
+        }
+        return out
     }
 }
 

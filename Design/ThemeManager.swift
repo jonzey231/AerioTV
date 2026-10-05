@@ -197,6 +197,17 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
     /// live, the same path a custom accent change takes.
     @Published var textContrast: Double = TextContrast.stored
 
+    /// Settings > Appearance > True Black Background. Synced bool key
+    /// `appearance.trueBlack`, default Off. Applied at theme resolution
+    /// (`background` / `card` below), never per view.
+    static let trueBlackKey = "appearance.trueBlack"
+    @Published var trueBlack: Bool = false {
+        didSet {
+            guard oldValue != trueBlack else { return }
+            UserDefaults.standard.set(trueBlack, forKey: ThemeManager.trueBlackKey)
+        }
+    }
+
     private init() {
         selectedTheme    = AppTheme(rawValue: storedTheme) ?? .aerio
         liquidGlassStyle = LiquidGlassStyle(rawValue: storedGlassStyle) ?? .tinted
@@ -205,6 +216,7 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
         appearanceMode   = AppearanceMode(rawValue: storedAppearanceMode) ?? .dark
         useCustomAccent  = UserDefaults.standard.bool(forKey: "useCustomAccent")
         customAccentHex  = UserDefaults.standard.string(forKey: "customAccentHex") ?? "1AC4D8"
+        trueBlack        = UserDefaults.standard.bool(forKey: ThemeManager.trueBlackKey)
 
         // Re-apply in-memory state whenever iCloud sync pushes new preferences.
         NotificationCenter.default.addObserver(
@@ -225,6 +237,8 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
         appearanceMode   = AppearanceMode(rawValue: storedAppearanceMode) ?? .dark
         useCustomAccent  = UserDefaults.standard.bool(forKey: "useCustomAccent")
         customAccentHex  = UserDefaults.standard.string(forKey: "customAccentHex") ?? "1AC4D8"
+        let black = UserDefaults.standard.bool(forKey: ThemeManager.trueBlackKey)
+        if black != trueBlack { trueBlack = black }
         let contrast = TextContrast.stored
         if abs(contrast - textContrast) > 0.0001 { textContrast = contrast }
     }
@@ -313,12 +327,23 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
         ThemeManager.resolve(dark: darkAccentSecondary, light: lightAccentSecondary)
     }
 
+    /// Dark-rendition page background: the theme's color, or pure black
+    /// when True Black Background is On (OLED). Light rendition untouched.
+    var darkBackground: Color {
+        trueBlack ? Color(hex: "000000") : selectedTheme.appBackground
+    }
+    /// Dark-rendition card / sheet surface: the theme's color, or a very dark
+    /// gray (#0A0A0A) under True Black so elevation still reads.
+    var darkCard: Color {
+        trueBlack ? Color(hex: "0A0A0A") : selectedTheme.cardBackground
+    }
+
     var background: Color {
-        ThemeManager.resolve(dark: selectedTheme.appBackground,
+        ThemeManager.resolve(dark: darkBackground,
                              light: selectedTheme.lightAppBackground)
     }
     var card: Color {
-        ThemeManager.resolve(dark: selectedTheme.cardBackground,
+        ThemeManager.resolve(dark: darkCard,
                              light: selectedTheme.lightCardBackground)
     }
 }

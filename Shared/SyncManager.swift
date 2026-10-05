@@ -191,6 +191,8 @@ final class SyncManager: ObservableObject {
     ]
     private let syncBoolKeys = [
         "useCustomAccent", "preferAVPlayer", "bgRefreshEnabled",
+        // Settings > Appearance > True Black Background.
+        "appearance.trueBlack",
         // EPG program badges visibility, PER DEVICE TYPE: both keys sync so a
         // TV's choice mirrors to the user's other Apple TVs and a phone/tablet's
         // to their iPhones/iPads, independently. Each device reads its own via
