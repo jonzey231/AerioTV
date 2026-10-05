@@ -6114,6 +6114,10 @@ struct MainTabView: View {
                         if keptLiveCardVisible {
                             // Outer edges line up with the measured tab bar
                             // capsule (Logan 2026-10-04); 20 pt until measured.
+                            // With the Control-a-TV button on the row the
+                            // compact pill stays; otherwise the Kept Live
+                            // card takes the cast card's shape (Logan
+                            // 2026-10-05).
                             HStack(spacing: RemoteSessionCardMetrics.gap) {
                                 keptLiveCard
                                 if showsControlATVButton {
@@ -6352,8 +6356,9 @@ struct MainTabView: View {
                 },
                 onStop: { ch in LiveChannelRetention.shared.releaseByUser(channelID: ch.id) },
                 onStopAll: { LiveChannelRetention.shared.releaseAllByUser() },
-                compact: !PadTabPill.isActive,
-                onShowList: { showKeptLiveList = true }
+                compact: !PadTabPill.isActive && showsControlATVButton,
+                onShowList: { showKeptLiveList = true },
+                dockCard: true
             )
         }
     }

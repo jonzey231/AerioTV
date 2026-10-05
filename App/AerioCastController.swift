@@ -4198,9 +4198,81 @@ struct KeptLiveCard: View {
     /// tapping the text calls `onShowList` for the per-channel list.
     var compact: Bool = false
     var onShowList: () -> Void = {}
+    /// Dock card (Logan 2026-10-05): the exact shape of RemoteSessionCard on
+    /// iPhone and iPad: same 44 pt tile, title and subtitle lines, 18 pt side
+    /// padding, 8 pt vertical padding and the same capsule surface, so both
+    /// cards come out the same height and radius. Several channels stay one
+    /// capsule; tapping it calls `onShowList`.
+    var dockCard: Bool = false
 
     var body: some View {
-        if compact { compactBody } else { fullBody }
+        if compact { compactBody } else if dockCard { dockCardBody } else { fullBody }
+    }
+
+    private var dockCardBody: some View {
+        let multi = channels.count > 1
+        let title = multi ? "Keeping \(channels.count) channels live"
+            : "Keeping \(channels.first?.name ?? "") live"
+        let subtitle = multi ? channels.map(\.name).joined(separator: ", ")
+            : "Tap to watch \(channels.first?.name ?? "")"
+        return HStack(spacing: 12) {
+            Button {
+                if multi { onShowList() } else if let ch = channels.first { onTune(ch) }
+            } label: {
+                HStack(spacing: 12) {
+                    if multi {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.black.opacity(0.25))
+                            Image(systemName: "rectangle.stack.badge.play")
+                                .font(.system(size: 20))  // glyph in a fixed box: not text, stays fixed
+                                .foregroundStyle(ThemeManager.shared.accent)
+                        }
+                        .frame(width: 44, height: 44)
+                    } else if let ch = channels.first {
+                        logo(ch, box: 44, image: 38, cornerRadius: 8)
+                    }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(title)
+                            .scaledFont(.subheadline.weight(.bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Text(subtitle)
+                            .scaledFont(.caption)
+                            .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(multi ? "Show kept channels" : "Watch \(channels.first?.name ?? "")")
+            if multi {
+                stopButton("Stop All", label: "Stop all kept channels", action: onStopAll)
+            } else if let ch = channels.first {
+                stopButton("Stop", label: "Stop keeping \(ch.name) live") { onStop(ch) }
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 8)
+        .modifier(KeptDockSurface())
+        .onAppear { debugLog("[AVP-RETAIN] kept dock card show (\(channels.count))") }
+        .onDisappear { debugLog("[AVP-RETAIN] kept dock card hide") }
+        .accessibilityElement(children: .contain)
+    }
+
+    /// Same as RemoteSessionCard.SurfaceStyle: iPad tab-pill capsule, iPhone
+    /// plain glass capsule.
+    private struct KeptDockSurface: ViewModifier {
+        func body(content: Content) -> some View {
+            if PadTabPill.isActive {
+                content.modifier(PadPillSurface(shape: Capsule()))
+            } else {
+                content.modifier(KeptPillChrome())
+            }
+        }
     }
 
     private var compactBody: some View {
@@ -4252,9 +4324,9 @@ struct KeptLiveCard: View {
         .accessibilityElement(children: .contain)
     }
 
-    private func logo(_ ch: KeptLiveChannels.Channel, box: CGFloat, image: CGFloat) -> some View {
+    private func logo(_ ch: KeptLiveChannels.Channel, box: CGFloat, image: CGFloat, cornerRadius: CGFloat? = nil) -> some View {
         ZStack {
-            RoundedRectangle(cornerRadius: box / 5.5, style: .continuous)
+            RoundedRectangle(cornerRadius: cornerRadius ?? box / 5.5, style: .continuous)
                 .fill(Color.black.opacity(0.25))
             if let url = ch.logoURL {
                 AsyncImage(url: url) { image in
