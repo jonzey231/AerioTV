@@ -7800,22 +7800,11 @@ struct EPGGuideView: View {
                     programStart: prog.start,
                     programEnd: prog.end
                 ), channelID: channel.id)
-                #if os(tvOS)
                 // Unified pipeline (task #147): catch-up plays in the
-                // SAME container/chrome as live via a session mode
-                // switch - no separate cover, no second player UI.
+                // SAME container/chrome as live on every platform (resume,
+                // pinch-to-mini, Options, readout). The legacy mpv cover is
+                // no longer reached, even with the dev mpv engine on.
                 PlayerSession.shared.beginCatchup(pb)
-                #else
-                // No-mpv regime: iOS rides the same unified container
-                // (AVPlayer catch-up); the legacy mpv cover remains the
-                // mpv-enabled path.
-                if !PlaybackFeatureFlags.mpvEngineEnabled {
-                    PlayerSession.shared.beginCatchup(pb)
-                } else {
-                    PlayerSession.shared.exit()
-                    playingCatchup = pb
-                }
-                #endif
             } catch {
                 catchupErrorMessage = error.localizedDescription
             }

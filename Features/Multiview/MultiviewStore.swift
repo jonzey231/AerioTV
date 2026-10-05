@@ -734,13 +734,13 @@ final class MultiviewStore: ObservableObject {
         // (archive TS through the live remux arm + window re-tune
         // seeks); with mpv enabled the legacy aeriocu relay path keeps
         // the tile via MultiviewTileView's engine guard.
-        if PlaybackFeatureFlags.avPlayerRemuxTS, !PlaybackFeatureFlags.mpvEngineEnabled {
-            lockEngine(ResolvedEngine(engine: .avPlayerRemuxTS,
-                                      routeURL: pb.url,
-                                      headers: pb.headers))
-        } else {
-            clearEngineLock()
-        }
+        // Always the AVPlayer remux arm, regardless of the dev mpv
+        // toggle: resume (CatchupResumeStore), the timeline band and
+        // pinch-to-mini live on this path. With mpv on, a hard AVPlayer
+        // failure still downgrades the session to mpv.
+        lockEngine(ResolvedEngine(engine: .avPlayerRemuxTS,
+                                  routeURL: pb.url,
+                                  headers: pb.headers))
         let syntheticItem = ChannelDisplayItem(
             id: "catchup-\(pb.id.uuidString)",
             name: pb.title,
