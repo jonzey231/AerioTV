@@ -604,8 +604,12 @@ final class MultiviewStore: ObservableObject {
         var tileURL = resolved.url
         if sessionEngine == .avPlayerDirectHLS,
            classifyStreamURL(resolved.url) == .mpegTS,
-           HLSCapabilityStore.shared.isCapable(resolved.url) {
+           HLSCapabilityStore.shared.isCapable(resolved.url)
+            || (PlaybackFeatureFlags.forceHLS && server?.type == .dispatcharrAPI) {
             tileURL = appendingHLSOutputFormat(resolved.url)
+            if PlaybackFeatureFlags.forceHLS, server?.type == .dispatcharrAPI {
+                debugLog("[FORCE-HLS] multiview tile channel=\(item.name) requested URL \(tileURL.absoluteString)")
+            }
         }
         // Commit. `resolved.url` + `resolved.headers` are
         // DELIBERATELY NOT LOGGED — they contain auth credentials.
@@ -681,8 +685,12 @@ final class MultiviewStore: ObservableObject {
         var tileURL = resolved.url
         if sessionEngine == .avPlayerDirectHLS,
            classifyStreamURL(resolved.url) == .mpegTS,
-           HLSCapabilityStore.shared.isCapable(resolved.url) {
+           HLSCapabilityStore.shared.isCapable(resolved.url)
+            || (PlaybackFeatureFlags.forceHLS && server?.type == .dispatcharrAPI) {
             tileURL = appendingHLSOutputFormat(resolved.url)
+            if PlaybackFeatureFlags.forceHLS, server?.type == .dispatcharrAPI {
+                debugLog("[FORCE-HLS] multiview tile channel=\(item.name) requested URL \(tileURL.absoluteString)")
+            }
         }
         let old = tiles[idx]
         let fresh = MultiviewTile(

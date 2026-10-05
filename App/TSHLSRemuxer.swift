@@ -4300,6 +4300,13 @@ struct AVPlayerMultiviewTile: View {
     /// TS, AVPlayer -11850): the same channel re-tuned once through the
     /// on-device TS remux, on the URL without the HLS upgrade.
     @State private var directHLSFallbackURL: URL?
+    /// Developer Force HLS: when the forced direct-HLS tile started, for
+    /// the [FORCE-HLS] first-frame time. Nil on every other path.
+    @State private var forceHLSStartedAt: Date?
+    /// Developer Force HLS: the server session behind the token playlist
+    /// AVPlayer is playing, ended with DELETE on stop so the client does not
+    /// linger for the ghost reaper (and count against stream_limit).
+    @State private var forceHLSSession: HLSSessionResolver.Resolved?
     private var liveSourceURL: URL { directHLSFallbackURL ?? streamURL }
     @State private var mkvServer: MKVVODServer?
     @State private var statusText: String?
@@ -5640,6 +5647,9 @@ struct AVPlayerMultiviewTile: View {
            (streamURL.query ?? "").contains("output_format=hls") {
             HLSCapabilityStore.shared.markNotCapable(streamURL)
             let plain = removingHLSOutputFormat(streamURL)
+            if PlaybackFeatureFlags.forceHLS {
+                debugLog("[FORCE-HLS] direct HLS FAILED channel=\(channelName) reason=\(reason); falling back to TS remux on \(plain.absoluteString)")
+            }
             debugLog("[AVP-MV] direct HLS failed (\(reason)); re-tuning via TS remux channel=\(channelName)")
             directHLSFallbackURL = plain
             stop()
@@ -5998,6 +6008,40 @@ struct AVPlayerMultiviewTile: View {
             // Full headers, not just UA: server-side HLS upgrades hit the
             // same Dispatcharr endpoints as the TS path and expect the
             // same auth.
+            if PlaybackFeatureFlags.forceHLS,
+               (sourceURL.query ?? "").contains("output_format=hls") {
+                forceHLSStartedAt = Date()
+                #if os(iOS)
+                debugLog("[FORCE-HLS] tile channel=\(channelName) AirPlay/Kept Live need the TS remuxer; on this tile AirPlay is AVPlayer's own HLS route and the channel cannot be Kept Live")
+                #endif
+                // Resolve the entry 302 ONCE: every GET of the entry URL
+                // mints a new server client, and AVPlayer refetches the
+                // asset URL several times while opening. Hand AVPlayer the
+                // token playlist instead.
+                let token = teardownToken
+                let entry = sourceURL
+                let hdrs = headers
+                statusText = "Preparing..."
+                Task { @MainActor in
+                    let t0 = Date()
+                    let resolved = await HLSSessionResolver.resolve(entry: entry, headers: hdrs)
+                    guard token == teardownToken else { return }
+                    let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                    if let resolved {
+                        forceHLSSession = resolved
+                        debugLog("[FORCE-HLS] tile channel=\(channelName) entry 302 -> \(resolved.playlistURL.absoluteString) token=\(resolved.token?.prefix(8) ?? "none") in \(ms)ms")
+                        debugLog("[FORCE-HLS] tile channel=\(channelName) AVPlayer opening token playlist (engine=AVPlayer direct HLS, no TS remuxer, no mpv)")
+                        startPlayer(url: resolved.playlistURL, requestHeaders: hdrs)
+                    } else {
+                        debugLog("[FORCE-HLS] tile channel=\(channelName) could not resolve the entry redirect in \(ms)ms; opening the entry URL directly")
+                        startPlayer(url: entry, requestHeaders: hdrs)
+                    }
+                    LivePrewarm.shared.cancel(reason: "tile playing direct HLS")
+                }
+                return
+            } else {
+                forceHLSStartedAt = nil
+            }
             startPlayer(url: sourceURL, requestHeaders: headers)
             // No remux ingest here to adopt a warm one; release it now.
             LivePrewarm.shared.cancel(reason: "tile playing direct HLS")
@@ -6504,6 +6548,12 @@ struct AVPlayerMultiviewTile: View {
         // starts a live remux stream; leave it alone.
         debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : "automatic") channel=\(channelName)")
         let avPlayer = AVPlayer(playerItem: playerItem)
+        // FORCE-HLS: automaticallyWaitsToMinimizeStalling stays ON for server
+        // HLS items. Turning it off (tested 2026-10-05, iPhone) started 2 ms
+        // after open but parked AVPlayer at the live edge with no buffer: the
+        // clock froze 4 to 9 s every cycle for the whole session while the
+        // stall counter stayed at zero. The default waits ~3 s and then
+        // holds 10 to 15 s behind the edge with no freezes.
         // Explicit readyToPlay marker (review 2026-09-11, marker
         // inventory): the log had no discrete line for it, only the
         // layer's isReadyForDisplay, so "how long did AVPlayer take to
@@ -6514,6 +6564,14 @@ struct AVPlayerMultiviewTile: View {
             if item.status == .readyToPlay {
                 TuneTimeline.shared.mark("ready")
                 debugLog("[AVP-ITEM] AVPlayerItem readyToPlay")
+                if PlaybackFeatureFlags.forceHLS,
+                   (url.query ?? "").contains("output_format=hls") {
+                    // AVPlayer follows the 302 internally; the access log
+                    // is the only record of where it actually landed.
+                    let events = item.accessLog()?.events ?? []
+                    let uris = events.compactMap { $0.uri }
+                    debugLog("[FORCE-HLS] readyToPlay channel=\(channelName) requested=\(url.absoluteString) accessLog uri=\(uris.isEmpty ? "-" : uris.joined(separator: " | ")) server=\(events.last?.serverAddress ?? "-") redirectedToHLS=\(uris.contains { HLSCapabilityStore.redirectLooksLikeHLS(URL(string: $0)) && !$0.contains("output_format=hls") })")
+                }
             } else {
                 debugLog("[AVP-ITEM] AVPlayerItem status=failed (\(item.error?.localizedDescription ?? "unknown")) \(TSHLSRemuxer.itemFailureDetail(item))")
             }
@@ -6615,6 +6673,10 @@ struct AVPlayerMultiviewTile: View {
             // the same moment (it owns the clock-advance detection).
             guard !firstFrameSeen else { return }
             firstFrameSeen = true
+            if let started = forceHLSStartedAt {
+                forceHLSStartedAt = nil
+                debugLog("[FORCE-HLS] first frame channel=\(channelName) in \(Int(Date().timeIntervalSince(started) * 1000))ms from AVPlayer open (direct HLS)")
+            }
             if let pending = pendingDisplayCriteria {
                 pendingDisplayCriteria = nil
                 debugLog("[AVP-DISPLAY] applying deferred display criteria now that the first frame is up")
@@ -6794,6 +6856,14 @@ struct AVPlayerMultiviewTile: View {
 
     private func stop(allowRetain: Bool = true) {
         tileStopped = true
+        if let session = forceHLSSession {
+            forceHLSSession = nil
+            if let token = session.token {
+                HLSSessionResolver.endSession(token: token, playlistURL: session.playlistURL, headers: headers)
+            } else {
+                debugLog("[FORCE-HLS] stop: no session token captured, server will ghost-reap this client")
+            }
+        }
         #if os(iOS)
         inPlaceFlipAwaitingSource = false
         #endif

@@ -576,6 +576,18 @@ final class PlayerSession: ObservableObject {
         // 2026-09-03). Only Dispatcharr sources take the upgrade; everything
         // else keeps its TS on the remux path.
         let isDispatcharr = server?.type == .dispatcharrAPI
+        if PlaybackFeatureFlags.forceHLS {
+            if isDispatcharr, format == .mpegTS, url.path.lowercased().contains("/proxy/ts/") {
+                // Developer Force HLS: skip the probe and the cached
+                // verdict, request the server's HLS output and play it
+                // direct on AVPlayer (no TS remuxer, no mpv).
+                routeURL = appendingHLSOutputFormat(url)
+                debugLog("[FORCE-HLS] channel=\(item.name) requested URL \(routeURL.absoluteString)")
+                debugLog("[FORCE-HLS] channel=\(item.name) engine=AVPlayer direct HLS (probe skipped, host treated as HLS capable)")
+                return ResolvedEngine(engine: .avPlayerDirectHLS, routeURL: routeURL, headers: headers)
+            }
+            debugLog("[FORCE-HLS] channel=\(item.name) not a Dispatcharr Direct Connect TS channel (server=\(server.map { "\($0.type)" } ?? "none")); toggle ignored")
+        }
         if format == .mpegTS, PlaybackFeatureFlags.avPlayerForHLS, isDispatcharr {
             // Tune time (Apple TV review 2026-09-11 section 1 proposal 1;
             // session.txt:259-261, 724-728, 1568-1570): this used to call
@@ -1007,6 +1019,13 @@ enum PlaybackFeatureFlags {
     /// Per-segment [MKV-TIMING] lines for every segment, not just the
     /// first five and the non-zero-slip ones (review 2026-09-11 section 6
     /// proposal 2). Off unless a diagnosis needs the full trace.
+    /// Developer "Force HLS" (2026-10-04): Dispatcharr Direct Connect
+    /// live channels request `output_format=hls` and route direct to
+    /// AVPlayer without waiting for the capability probe. Read per tune.
+    static var forceHLS: Bool {
+        UserDefaults.standard.bool(forKey: "developer.forceHLS")
+    }
+
     static var verbosePlaybackTiming: Bool {
         UserDefaults.standard.bool(forKey: "playback.verboseTiming")
     }

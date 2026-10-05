@@ -95,6 +95,11 @@ struct DeveloperSettingsView: View {
     /// See PlaybackFeatureFlags.mpvEngineEnabled - must default back ON
     /// before this branch ships beyond Logan's devices.
     @AppStorage("dev.mpvEngineEnabled") private var mpvEngineEnabled = false
+    /// Force HLS (developer test, 2026-10-04): every Dispatcharr Direct
+    /// Connect live channel requests the server's native HLS output and
+    /// plays direct on AVPlayer. Read at tune time by
+    /// PlaybackFeatureFlags.forceHLS, so a flip applies on the next tune.
+    @AppStorage("developer.forceHLS") private var forceHLS = false
 
     /// **Experimental** — iPhone-only. When on, the Live TV chrome is
     /// compacted: Manage Groups moves into the nav bar toolbar, and the
@@ -312,6 +317,7 @@ struct DeveloperSettingsView: View {
                                          selection: engineSelection,
                                          icon: "play.rectangle.on.rectangle")
                     engineAdvancedGroup
+                    forceHLSToggle
                 } header: {
                     Text("Playback Engine")
                         .sectionHeaderStyle()
@@ -677,6 +683,7 @@ struct DeveloperSettingsView: View {
                     }
 
                     engineAdvancedGroup
+                    forceHLSToggle
 
                     Text(Self.playbackEngineFooter)
                         .scaledFont(.system(size: SettingsMetrics.tvFootnoteSize).subtext())
@@ -929,6 +936,15 @@ struct DeveloperSettingsView: View {
                 icon: mpvEngineEnabled ? "shield.lefthalf.filled" : "shield.slash",
                 isOn: $mpvEngineEnabled)
         }
+    }
+
+    /// Developer test toggle for Dispatcharr's native HLS output.
+    private var forceHLSToggle: some View {
+        engineFlagToggle(
+            title: "Force HLS",
+            subtitle: "Request HLS output from Dispatcharr for every live channel instead of the TS stream. For testing.",
+            icon: forceHLS ? "dot.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right",
+            isOn: $forceHLS)
     }
 
     @ViewBuilder

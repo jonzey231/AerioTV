@@ -762,11 +762,12 @@ final class AerioCastController: NSObject, ObservableObject {
         case .webReceiver:
             break
         }
-        guard content.kind == .live, let rawTS = content.streamURL else {
+        guard content.kind == .live, let castURL = content.streamURL else {
             // No proxyable stream: nothing the web receiver could play.
             surfaceCastFailure("This channel has no castable stream")
             return
         }
+        let rawTS = Self.forceHLSCastIngestURL(castURL)
         // Channel flip on the web receiver (Logan 2026-09-13): a flip is a
         // FRESH LOAD, never a splice into the running HLS stream. A Chromecast
         // Ultra chokes on the splice for about 5 s (BUFFERING/PLAYING
@@ -1066,9 +1067,24 @@ final class AerioCastController: NSObject, ObservableObject {
     /// splice, and the receiver just keeps polling (the same seamless path
     /// channel flips use, device-verified). No loadMedia; the loaded media
     /// stays untouched.
+    /// Developer Force HLS: the Cast proxy ingests raw MPEG-TS only, so
+    /// Cast stays on the TS stream. Strips an `output_format=hls` request
+    /// if one reached here and logs the fallback either way.
+    nonisolated static func forceHLSCastIngestURL(_ url: URL) -> URL {
+        guard PlaybackFeatureFlags.forceHLS else { return url }
+        if (url.query ?? "").contains("output_format=hls") {
+            let ts = removingHLSOutputFormat(url)
+            debugLog("[FORCE-HLS] Cast fell back to TS: the cast proxy ingests MPEG-TS only (\(ts.absoluteString))")
+            return ts
+        }
+        debugLog("[FORCE-HLS] Cast fell back to TS: the cast proxy ingests MPEG-TS only")
+        return url
+    }
+
     private func handleSwitchStreamReprime(uuid: String?) {
         guard isCasting, let uuid, let content = castingContent,
-              let rawTS = content.streamURL,
+              let castURL = content.streamURL,
+              case let rawTS = Self.forceHLSCastIngestURL(castURL),
               let item = ChannelStore.shared.channels.first(where: { $0.id == content.mediaID }),
               item.uuid == uuid else { return }
         debugLog("[CAST-HLS] switch-stream reprime for \(item.name)")

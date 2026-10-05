@@ -60,6 +60,111 @@ func appendingHLSOutputFormat(_ url: URL) -> URL {
     return components.url ?? url
 }
 
+/// Dispatcharr native HLS session (PR 1344, hls-test): the entry GET
+/// `/proxy/ts/stream/<uuid>?output_format=hls` answers 302 to an opaque
+/// `/proxy/hls/<token>/index.m3u8` plus the header
+/// `X-Dispatcharr-Session-Token`. Every GET of the ENTRY URL mints a new
+/// client, and AVPlayer refetches the entry URL several times while it opens
+/// an asset, so the app resolves the redirect ONCE and hands AVPlayer the
+/// token playlist. `DELETE /api/proxy/hls/sessions/<token>/` stops the
+/// client at once instead of waiting ~55 s for the ghost reaper.
+enum HLSSessionResolver {
+    static let tokenHeader = "X-Dispatcharr-Session-Token"
+
+    struct Resolved {
+        let playlistURL: URL
+        let token: String?
+        let status: Int
+    }
+
+    /// The tile's headers may carry only the auth pair; without a User-Agent
+    /// URLSession sends the CFNetwork default, so the server would list this
+    /// client under a different identity than the player's requests.
+    static func withUserAgent(_ headers: [String: String]) -> [String: String] {
+        if headers.keys.contains(where: { $0.caseInsensitiveCompare("User-Agent") == .orderedSame }) { return headers }
+        var out = headers
+        out["User-Agent"] = DeviceInfo.defaultUserAgent
+        return out
+    }
+
+    static func resolve(entry: URL, headers: [String: String]) async -> Resolved? {
+        await withCheckedContinuation { (cont: CheckedContinuation<Resolved?, Never>) in
+            let box = ResolveBox(cont)
+            var request = URLRequest(url: entry)
+            request.timeoutInterval = 15
+            for (k, v) in withUserAgent(headers) { request.setValue(v, forHTTPHeaderField: k) }
+            let delegate = ResolveDelegate(entry: entry) { result in box.finish(result) }
+            let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+            session.dataTask(with: request).resume()
+            session.finishTasksAndInvalidate()
+        }
+    }
+
+    /// Best effort: stops the server-side client for `token`. Logs only.
+    static func endSession(token: String, playlistURL: URL, headers: [String: String]) {
+        guard var comps = URLComponents(url: playlistURL, resolvingAgainstBaseURL: false) else { return }
+        comps.path = "/api/proxy/hls/sessions/\(token)/"
+        comps.query = nil
+        guard let url = comps.url else { return }
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.httpMethod = "DELETE"
+        for (k, v) in withUserAgent(headers) { request.setValue(v, forHTTPHeaderField: k) }
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            debugLog("[FORCE-HLS] session end token=\(token.prefix(8))... status=\(status)\(error.map { " error=\($0.localizedDescription)" } ?? "")")
+        }.resume()
+    }
+
+    private final class ResolveBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cont: CheckedContinuation<Resolved?, Never>?
+        init(_ c: CheckedContinuation<Resolved?, Never>) { cont = c }
+        func finish(_ r: Resolved?) {
+            lock.lock(); let c = cont; cont = nil; lock.unlock()
+            c?.resume(returning: r)
+        }
+    }
+
+    private final class ResolveDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        private let entry: URL
+        private let done: @Sendable (Resolved?) -> Void
+        private var reported = false
+        init(entry: URL, done: @escaping @Sendable (Resolved?) -> Void) {
+            self.entry = entry; self.done = done
+        }
+        private func report(_ r: Resolved?) {
+            guard !reported else { return }
+            reported = true
+            done(r)
+        }
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            let token = response.value(forHTTPHeaderField: tokenHeader)
+            if let target = request.url, HLSCapabilityStore.redirectLooksLikeHLS(target) {
+                report(Resolved(playlistURL: target, token: token, status: response.statusCode))
+            } else {
+                debugLog("[FORCE-HLS] entry 302 went to a non-HLS target \(request.url?.absoluteString ?? "-")")
+                report(nil)
+            }
+            completionHandler(nil)
+        }
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                        didReceive response: URLResponse,
+                        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if !reported { debugLog("[FORCE-HLS] entry answered \(status) with no redirect") }
+            report(nil)
+            completionHandler(.cancel)
+        }
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            if let error, !reported { debugLog("[FORCE-HLS] entry request failed: \(error.localizedDescription)") }
+            report(nil)
+        }
+    }
+}
+
 /// Single-connection invariant for live channel URLs (stream_limit 1 field
 /// bug, 2026-09-15): Dispatcharr counts every concurrent GET to
 /// /proxy/ts/stream/<uuid> against the user's stream_limit and terminates
