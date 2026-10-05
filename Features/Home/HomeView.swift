@@ -6091,7 +6091,12 @@ struct MainTabView: View {
                 VStack(spacing: RemoteSessionCardMetrics.gap) {
                     if PadTabPill.isActive {
                         keptLiveCard
+                        // iPad (Logan 2026-10-05): compact and centered, the
+                        // pill's width plus 120 pt, capped at 620 pt and at
+                        // the screen width minus 32 pt.
                         remoteSessionCard
+                            .frame(width: padRemoteCardWidth)
+                            .frame(maxWidth: .infinity)
                     } else {
                         // iPhone (Logan 2026-10-04): the remote-session card
                         // stays full width on top; below it ONE row with the
@@ -6278,6 +6283,16 @@ struct MainTabView: View {
         let playerFullscreen = !nowPlaying.isMinimized
             && (nowPlaying.playingItem != nil || playerSession.mode != .idle)
         return !kept.channels.isEmpty && !playerFullscreen
+    }
+
+    /// iPad remote-session card width: pill width + 120, capped at 620 and
+    /// at the window width minus 32. Before the pill is measured, 620 within
+    /// the same screen cap.
+    private var padRemoteCardWidth: CGFloat {
+        let screenCap = max(0, cardMetrics.windowWidth - 32)
+        let pill = cardMetrics.padPillWidth
+        let wanted = pill > 0 ? min(pill + 120, 620) : 620
+        return screenCap > 0 ? min(wanted, screenCap) : wanted
     }
 
     @ViewBuilder
@@ -9381,6 +9396,21 @@ final class RemoteSessionCardMetrics: ObservableObject {
     /// 6 pt gap, matching the Android card, not a void.
     static let gap: CGFloat = 6
 
+    /// iPad gap between the remote-session card and the tab pill (Logan
+    /// 2026-10-05).
+    static let padGap: CGFloat = 12
+
+    /// Width of the iPad tab pill capsule, 0 until measured.
+    @Published private(set) var padPillWidth: CGFloat = 0
+    /// Width of the window hosting the dock, 0 until measured.
+    @Published private(set) var windowWidth: CGFloat = 0
+    func setPadPillWidth(_ w: CGFloat) {
+        if abs(w - padPillWidth) > 0.5 { padPillWidth = w }
+    }
+    func setWindowWidth(_ w: CGFloat) {
+        if abs(w - windowWidth) > 0.5 { windowWidth = w }
+    }
+
     /// Top edge of the system tab bar in WINDOW coordinates, 0 until measured.
     @Published private(set) var tabBarTopInWindow: CGFloat = 0
 
@@ -9531,7 +9561,7 @@ private struct RemoteSessionCardDock<Content: View>: View {
                 ? RemoteSessionCardMetrics.windowSafeBottom + RemoteSessionCardMetrics.gap
                 : PadTabPill.isActive
                 ? RemoteSessionCardMetrics.windowSafeBottom + PadTabPill.bottomPadding
-                    + PadTabPill.height + RemoteSessionCardMetrics.gap
+                    + PadTabPill.height + RemoteSessionCardMetrics.padGap
                 : barTop > 0 && measured <= fallback * 2
                 ? max(RemoteSessionCardMetrics.gap, measured)
                 : fallback
@@ -9544,8 +9574,12 @@ private struct RemoteSessionCardDock<Content: View>: View {
                     .padding(.bottom, lift)
             }
             .frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
-            .onAppear { metrics.measureTabBar() }
-            .onChange(of: geo.size) { _, _ in
+            .onAppear {
+                metrics.measureTabBar()
+                metrics.setWindowWidth(geo.size.width)
+            }
+            .onChange(of: geo.size) { _, size in
+                metrics.setWindowWidth(size.width)
                 // A rotation lands here before the bar has its new frame:
                 // measured once, the landscape top (about 380 pt) lifted the
                 // card to the top of the portrait screen (Logan 2026-09-27).
@@ -9649,7 +9683,7 @@ extension View {
 /// Logan 2026-10-04, mirrored on Android): theme card color at 92 percent over
 /// a thin blur, a 1 pt hairline in the text color at 12 percent, and a soft
 /// shadow, so it reads over the dark guide and bright poster art alike.
-private struct PadPillSurface<S: InsettableShape>: ViewModifier {
+struct PadPillSurface<S: InsettableShape>: ViewModifier {
     let shape: S
     func body(content: Content) -> some View {
         content
@@ -9703,6 +9737,9 @@ private struct PadTabPillBar: View {
             .padding(.horizontal, 6)
             .frame(height: PadTabPill.height)
             .modifier(PadPillSurface(shape: Capsule()))
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { w in
+                RemoteSessionCardMetrics.shared.setPadPillWidth(w)
+            }
             .frame(maxWidth: .infinity)
 
             if showsControlATV {

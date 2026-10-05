@@ -4120,16 +4120,9 @@ struct RemoteSessionCard: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Stop")
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, PadTabPill.isActive ? 18 : 12)
         .padding(.vertical, 8)
-        // The SAME material the tab bar below draws (Logan 2026-09-12: "the
-        // coloring should match the nav bar"): system Liquid Glass tinted
-        // near-black, 12 pt corners, subtle white hairline. No accent wash:
-        // the accent stays on the status line and the buttons.
-        .background { Self.cardSurface }
-        .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
-        // Same horizontal margin as the list cards.
-        .padding(.horizontal, 16)
+        .modifier(SurfaceStyle())
         .contentShape(Rectangle())
         .onTapGesture {
             debugLog("[Cast] card tap")
@@ -4140,9 +4133,27 @@ struct RemoteSessionCard: View {
         .accessibilityElement(children: .contain)
     }
 
+    /// iPhone: the SAME material the tab bar below draws (Logan 2026-09-12:
+    /// "the coloring should match the nav bar"), Liquid Glass tinted
+    /// near-black, 12 pt corners, subtle white hairline, 16 pt side margins
+    /// like the list cards. iPad (Logan 2026-10-05): the tab pill's capsule
+    /// and surface; the dock sets the width, so no side margins.
+    private struct SurfaceStyle: ViewModifier {
+        func body(content: Content) -> some View {
+            if PadTabPill.isActive {
+                content.modifier(PadPillSurface(shape: Capsule()))
+            } else {
+                content
+                    .background { RemoteSessionCard.cardSurface }
+                    .clipShape(RoundedRectangle(cornerRadius: RemoteSessionCard.radius, style: .continuous))
+                    .padding(.horizontal, 16)
+            }
+        }
+    }
+
     /// 12 pt: the channel list card's radius, kept here so the card still
     /// lines up with the lists it floats over.
-    private static let radius: CGFloat = 12
+    fileprivate static let radius: CGFloat = 12
 
     /// The tab bar's own tone: near-black over the glass backdrop, so the
     /// card and the bar read as one material instead of two tiles.
