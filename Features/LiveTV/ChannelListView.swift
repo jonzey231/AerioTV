@@ -3484,9 +3484,9 @@ struct ChannelRow: View {
                             .fill(
                                 LinearGradient(
                                     stops: [
-                                        .init(color: bucket.baseColor.opacity(0.30), location: 0.0),
-                                        .init(color: bucket.baseColor.opacity(0.18), location: 0.22),
-                                        .init(color: bucket.baseColor.opacity(0.06), location: 0.45),
+                                        .init(color: CategoryColor.tint(bucket.baseColor, 0.30), location: 0.0),
+                                        .init(color: CategoryColor.tint(bucket.baseColor, 0.18), location: 0.22),
+                                        .init(color: CategoryColor.tint(bucket.baseColor, 0.06), location: 0.45),
                                         .init(color: .clear,                          location: 0.65),
                                     ],
                                     startPoint: .leading,
@@ -4685,9 +4685,9 @@ struct ChannelRow: View {
                                        let bucket = CategoryColor.bucket(for: rowEntry.category) {
                                         LinearGradient(
                                             stops: [
-                                                .init(color: bucket.baseColor.opacity(0.30), location: 0.0),
-                                                .init(color: bucket.baseColor.opacity(0.18), location: 0.22),
-                                                .init(color: bucket.baseColor.opacity(0.06), location: 0.45),
+                                                .init(color: CategoryColor.tint(bucket.baseColor, 0.30), location: 0.0),
+                                                .init(color: CategoryColor.tint(bucket.baseColor, 0.18), location: 0.22),
+                                                .init(color: CategoryColor.tint(bucket.baseColor, 0.06), location: 0.45),
                                                 .init(color: .clear,                          location: 0.65),
                                             ],
                                             startPoint: .leading,

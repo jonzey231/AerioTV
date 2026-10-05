@@ -4297,14 +4297,35 @@ struct KeptLiveCard: View {
                 row(ch, title: "Keeping \(ch.name) live")
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, PadTabPill.isActive ? 18 : 12)
         .padding(.vertical, 8)
-        .background { RemoteSessionCard.cardSurface }
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .padding(.horizontal, 16)
+        .modifier(KeptCardSurface(multiRow: channels.count > 1))
         .onAppear { debugLog("[AVP-RETAIN] kept card show (\(channels.count))") }
         .onDisappear { debugLog("[AVP-RETAIN] kept card hide") }
         .accessibilityElement(children: .contain)
+    }
+
+    /// iPad (Logan 2026-10-05): the same capsule and PadPillSurface as the
+    /// remote-session card it stacks with; the dock sets the width, so no
+    /// side margins. Several kept channels stack rows, so that case keeps
+    /// the pill surface on a 24 pt rounded rectangle instead of a capsule
+    /// that would clip the row ends. iPhone and tvOS: unchanged.
+    private struct KeptCardSurface: ViewModifier {
+        let multiRow: Bool
+        func body(content: Content) -> some View {
+            if PadTabPill.isActive {
+                if multiRow {
+                    content.modifier(PadPillSurface(shape: RoundedRectangle(cornerRadius: 24, style: .continuous)))
+                } else {
+                    content.modifier(PadPillSurface(shape: Capsule()))
+                }
+            } else {
+                content
+                    .background { RemoteSessionCard.cardSurface }
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .padding(.horizontal, 16)
+            }
+        }
     }
 
     private func row(_ ch: KeptLiveChannels.Channel, title: String) -> some View {

@@ -295,6 +295,20 @@ enum CategoryColor {
     /// deliberately NOT changed — if the user had disabled
     /// category colouring entirely, this just resets the palette
     /// without suddenly turning colouring back on under them.
+    /// Multiplier on every category tint alpha. True Black Background
+    /// dims the tints to 60 percent so they sit quieter on pure black;
+    /// otherwise full strength. Read live from UserDefaults so the
+    /// flip repaints without a restart. Accent and text colors are
+    /// never routed through here.
+    static var tintStrength: Double {
+        UserDefaults.standard.bool(forKey: ThemeManager.trueBlackKey) ? 0.6 : 1.0
+    }
+
+    /// Category base color at `alpha`, scaled by `tintStrength`.
+    static func tint(_ base: Color, _ alpha: Double) -> Color {
+        base.opacity(alpha * tintStrength)
+    }
+
     static func resetPaletteToDefaults() {
         for category in ProgramCategory.allCases {
             UserDefaults.standard.removeObject(forKey: category.storageKey)
@@ -388,12 +402,12 @@ enum CategoryColor {
             return nil
         }
         #if os(tvOS)
-        if isFocused { return base.opacity(0.55) }
-        if isLive    { return base.opacity(0.35) }
-        return base.opacity(0.22)
+        if isFocused { return tint(base, 0.55) }
+        if isLive    { return tint(base, 0.35) }
+        return tint(base, 0.22)
         #else
-        if isLive { return base.opacity(0.45) }
-        return base.opacity(0.28)
+        if isLive { return tint(base, 0.45) }
+        return tint(base, 0.28)
         #endif
     }
 }

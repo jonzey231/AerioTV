@@ -6090,7 +6090,12 @@ struct MainTabView: View {
             RemoteSessionCardDock {
                 VStack(spacing: RemoteSessionCardMetrics.gap) {
                     if PadTabPill.isActive {
+                        // iPad (Logan 2026-10-05): Kept Live uses the same
+                        // width rule, capsule and surface as the remote card,
+                        // centered, so the two stack as matching capsules.
                         keptLiveCard
+                            .frame(width: padRemoteCardWidth)
+                            .frame(maxWidth: .infinity)
                         // iPad (Logan 2026-10-05): compact and centered, the
                         // pill's width plus 120 pt, capped at 620 pt and at
                         // the screen width minus 32 pt.
