@@ -6127,7 +6127,7 @@ struct MainTabView: View {
         .sheet(isPresented: $showKeptLiveList) {
             ScrollView {
                 KeptLiveCard(
-                    channels: kept.channels,
+                    channels: keptChannels,
                     onTune: { ch in
                         showKeptLiveList = false
                         selectedTab = .liveTV
@@ -6143,7 +6143,7 @@ struct MainTabView: View {
             }
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
-            .onChange(of: kept.channels.isEmpty) { _, empty in
+            .onChange(of: keptChannels.isEmpty) { _, empty in
                 if empty { showKeptLiveList = false }
             }
         }
@@ -6282,12 +6282,39 @@ struct MainTabView: View {
         return false
     }
 
+    /// Guide channel id the active remote session (Cast, AirPlay or AerioTV
+    /// Remote) is playing, if any. That channel is plainly alive on the TV,
+    /// so Kept Live does not list it (Logan 2026-10-05).
+    private var remoteSessionChannelID: String? {
+        switch activeRemoteTransport {
+        case .cast:
+            return castController.castingContent?.mediaID
+        case .airPlay:
+            return airPlayIsIdleRoute ? nil : nowPlaying.playingItem?.id
+        case .companion:
+            guard let cid = companionClient.controllingChannelID else { return nil }
+            return ChannelStore.shared.channels.first(where: {
+                CompanionClient.androidChannelID(for: $0) == cid
+            })?.id
+        case nil:
+            return nil
+        }
+    }
+
+    /// Kept channels the Kept Live card and list show: the retained set
+    /// minus the channel a remote session is playing. It reappears when the
+    /// session ends if it is still retained.
+    private var keptChannels: [KeptLiveChannels.Channel] {
+        guard let castID = remoteSessionChannelID else { return kept.channels }
+        return kept.channels.filter { $0.id != castID }
+    }
+
     /// Kept Live card: only while a channel is kept and the player is not
     /// fullscreen (the player's Options carry the same rows then).
     private var keptLiveCardVisible: Bool {
         let playerFullscreen = !nowPlaying.isMinimized
             && (nowPlaying.playingItem != nil || playerSession.mode != .idle)
-        return !kept.channels.isEmpty && !playerFullscreen
+        return !keptChannels.isEmpty && !playerFullscreen
     }
 
     /// iPad remote-session card width: pill width + 120, capped at 620 and
@@ -6304,7 +6331,7 @@ struct MainTabView: View {
     private var keptLiveCard: some View {
         if keptLiveCardVisible {
             KeptLiveCard(
-                channels: kept.channels,
+                channels: keptChannels,
                 onTune: { ch in
                     selectedTab = .liveTV
                     KeptLiveChannels.shared.tune(ch)

@@ -4122,7 +4122,9 @@ struct RemoteSessionCard: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Stop")
         }
-        .padding(.horizontal, PadTabPill.isActive ? 18 : 12)
+        // 18 pt on both: the iPhone card is a capsule now too, so the
+        // transport buttons need the same clearance from the rounded ends.
+        .padding(.horizontal, 18)
         .padding(.vertical, 8)
         .modifier(SurfaceStyle())
         .contentShape(Rectangle())
@@ -4135,19 +4137,17 @@ struct RemoteSessionCard: View {
         .accessibilityElement(children: .contain)
     }
 
-    /// iPhone: the SAME material the tab bar below draws (Logan 2026-09-12:
-    /// "the coloring should match the nav bar"), Liquid Glass tinted
-    /// near-black, 12 pt corners, subtle white hairline, 16 pt side margins
-    /// like the list cards. iPad (Logan 2026-10-05): the tab pill's capsule
-    /// and surface; the dock sets the width, so no side margins.
+    /// iPhone (Logan 2026-10-05): the Kept Live pill's capsule and plain
+    /// glass, so the two stack as matching capsules; 16 pt side margins as
+    /// before. iPad (Logan 2026-10-05): the tab pill's capsule and surface;
+    /// the dock sets the width, so no side margins.
     private struct SurfaceStyle: ViewModifier {
         func body(content: Content) -> some View {
             if PadTabPill.isActive {
                 content.modifier(PadPillSurface(shape: Capsule()))
             } else {
                 content
-                    .background { RemoteSessionCard.cardSurface }
-                    .clipShape(RoundedRectangle(cornerRadius: RemoteSessionCard.radius, style: .continuous))
+                    .modifier(KeptPillChrome())
                     .padding(.horizontal, 16)
             }
         }
