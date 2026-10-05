@@ -109,6 +109,10 @@ import UIKit
 private struct SettingsPhoneTabBarChrome: ViewModifier {
     @State private var tabBarHidden = false
     @State private var tracker = TabBarScrollTracker()
+    // This modifier sets its own bottom margin, which replaces the TabView
+    // level card inset, so it adds the remote-session card (and Kept Live)
+    // clearance itself (Logan 2026-10-05).
+    @ObservedObject private var cardMetrics = RemoteSessionCardMetrics.shared
 
     @ViewBuilder
     func body(content: Content) -> some View {
@@ -132,14 +136,14 @@ private struct SettingsPhoneTabBarChrome: ViewModifier {
                     }
                 }
                 .scrollAwayTabBar(collapsed: tabBarHidden)
-                .contentMargins(.bottom, SettingsMetrics.phoneTabBarClearance,
+                .contentMargins(.bottom, SettingsMetrics.phoneTabBarClearance + cardMetrics.scrollClearance,
                                 for: .scrollContent)
                 .ignoresSafeArea(.container, edges: .bottom)
                 .aerioContentUnderTabBar()
         } else if PadTabPill.isActive {
             // iPad bottom pill (Logan 2026-10-04): last row clears it.
             content
-                .contentMargins(.bottom, PadTabPill.clearanceAboveSafeArea,
+                .contentMargins(.bottom, PadTabPill.clearanceAboveSafeArea + cardMetrics.scrollClearance,
                                 for: .scrollContent)
         } else {
             content

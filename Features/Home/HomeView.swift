@@ -9519,6 +9519,15 @@ final class RemoteSessionCardMetrics: ObservableObject {
             .first { $0.isKeyWindow }?.safeAreaInsets.bottom ?? 0
     }
 
+    /// Extra bottom scroll clearance while the dock shows anything (the
+    /// remote-session card, the Kept Live card or row): its measured height
+    /// plus the gap to the bar or pill. 0 with nothing showing.
+    var scrollClearance: CGFloat {
+        contentInset > 0
+            ? contentInset + (PadTabPill.isActive ? Self.padGap : Self.gap)
+            : 0
+    }
+
     func setCardHeight(_ height: CGFloat) {
         let value = height > 1 ? height : 0
         if abs(value - contentInset) > 0.5 { contentInset = value }
@@ -9608,7 +9617,7 @@ private struct RemoteSessionCardDock<Content: View>: View {
 private struct RemoteCardContentInset: ViewModifier {
     @ObservedObject private var metrics = RemoteSessionCardMetrics.shared
     func body(content: Content) -> some View {
-        content.contentMargins(.bottom, metrics.contentInset, for: .scrollContent)
+        content.contentMargins(.bottom, metrics.scrollClearance, for: .scrollContent)
     }
 }
 
