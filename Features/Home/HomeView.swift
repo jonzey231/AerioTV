@@ -9609,7 +9609,7 @@ private struct MinimizedTabButton: View {
 /// only while a VOD detail page is up (TabBarCollapseState.detailHidden).
 enum PadTabPill {
     /// Read once; UIDevice is main-actor isolated and the idiom never changes.
-    nonisolated(unsafe) static let isActive: Bool = MainActor.assumeIsolated {
+    nonisolated static let isActive: Bool = MainActor.assumeIsolated {
         UIDevice.current.userInterfaceIdiom == .pad
     }
     static let height: CGFloat = 56
