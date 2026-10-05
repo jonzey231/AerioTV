@@ -6211,14 +6211,28 @@ struct EPGGuideView: View {
                     }
                     guideFocusTargetChannelID = valid
                     debugLog("🧭 [GuideFocus] forceGuideFocus(epg) → mvLast=\(mvLastID ?? "nil") single=\(singleID ?? "nil") valid=\(valid ?? "nil") count=\(channels.count)")
-                    guard let valid else { resetFocus(in: guideFocusNS); return }
+                    guard let valid else {
+                        NowPlayingManager.shared.catchupRefocusTarget = nil
+                        resetFocus(in: guideFocusNS); return
+                    }
                     // Focus the watched channel's PROGRAM cell (channel-column
                     // cells are non-focusable on tvOS). resolveFocusProgramID falls
                     // back to the nearest channel-with-guide-data if this one has
                     // none, so focus never bails to the List toggle. resetFocus
                     // first pulls focus off the minimized mini tile into the guide;
                     // then scroll the channel into view and re-assert focusedProgramID.
-                    guard let target = resolveFocusProgramID(preferringChannel: valid) else {
+                    // Catch-up exit: the exact program cell that was played
+                    // (same row, matching start) when it is still in the
+                    // loaded window; otherwise the row's now cell.
+                    let catchupTarget = NowPlayingManager.shared.catchupRefocusTarget
+                    NowPlayingManager.shared.catchupRefocusTarget = nil
+                    var catchupCellID: String?
+                    if let ct = catchupTarget, ct.channelID == valid {
+                        catchupCellID = guideStore.programs[valid]?
+                            .first(where: { abs($0.start.timeIntervalSince(ct.start)) < 1 })?.id
+                        debugLog("[FOCUS] guide refocus (epg): catch-up cell=\(catchupCellID ?? "nil, falling back to now cell")")
+                    }
+                    guard let target = catchupCellID ?? resolveFocusProgramID(preferringChannel: valid) else {
                         resetFocus(in: guideFocusNS); return
                     }
                     // Realize the target row BEFORE resetFocus: reset lands on

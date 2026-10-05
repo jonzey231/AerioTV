@@ -366,7 +366,13 @@ final class PlayerSession: ObservableObject {
         // single-stream entry, so this only matters on the
         // multiview-exit path.
         let store = MultiviewStore.shared
-        if let audioID = store.audioTileID,
+        // Catch-up: the tile's item id is synthetic ("catchup-<uuid>"), so
+        // the breadcrumb is the guide row the program aired on, and the
+        // guide is asked to refocus that exact program cell below.
+        let catchup = store.catchupTile?.catchup
+        if let cu = catchup, let cid = cu.channelID {
+            NowPlayingManager.shared.lastPlayedChannelID = cid
+        } else if let audioID = store.audioTileID,
            let audioTile = store.tiles.first(where: { $0.id == audioID }) {
             NowPlayingManager.shared.lastPlayedChannelID = audioTile.item.id
         }
@@ -401,6 +407,19 @@ final class PlayerSession: ObservableObject {
         // button says. Stopping NowPlayingManager lets HomeView fall
         // through to the Live-TV guide / empty state.
         NowPlayingManager.shared.stop()
+        #if os(tvOS)
+        // NowPlayingManager was already idle during catch-up (beginCatchup
+        // stops it), so HomeView's isActive "player closed" refocus does
+        // not fire on this exit. Hold the nav circles and ask the guide to
+        // refocus the played program's cell in the same turn.
+        if let cu = catchup, let cid = cu.channelID, NowPlayingManager.sceneIsActive {
+            NowPlayingManager.shared.catchupRefocusTarget = (cid, cu.programStart)
+            NowPlayingManager.shared.lastStopWasFullscreen = true
+            NowPlayingManager.shared.beginGuideRefocusHold()
+            debugLog("[FOCUS] catch-up closed: refocus channel=\(cid) start=\(cu.programStart.timeIntervalSinceReferenceDate)")
+            NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+        }
+        #endif
         DebugLogger.shared.log(
             "[MV-Mode] exit→idle (full teardown)",
             category: "Playback", level: .info

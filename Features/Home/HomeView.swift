@@ -4164,6 +4164,15 @@ final class NowPlayingManager: ObservableObject {
     @Published private(set) var guideRefocusPending = false
     private var guideRefocusHoldTimeout: DispatchWorkItem?
 
+    /// The catch-up program that was on screen when its session exited
+    /// (guide row + program start). The catch-up tile's item is synthetic
+    /// and NowPlayingManager is already idle while it plays, so the
+    /// isActive-driven "player closed" refocus never fired and focus fell
+    /// to the Search circle (trace 2026-10-05 16:38:43). PlayerSession.exit()
+    /// sets this and posts .forceGuideFocus; the guide consumes it to land
+    /// on that exact cell, falling back to the row's now cell.
+    var catchupRefocusTarget: (channelID: String, start: Date)?
+
     func beginGuideRefocusHold() {
         if !guideRefocusPending { guideRefocusPending = true }
         guideRefocusHoldTimeout?.cancel()

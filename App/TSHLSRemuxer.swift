@@ -4794,7 +4794,18 @@ struct AVPlayerMultiviewTile: View {
     /// side solo, 55 percent in a grid tile, captions from 160 pt tall.
     private var audioOnlyPresentation: some View {
         GeometryReader { geo in
-            let side = max(40, min(geo.size.width, geo.size.height) * (pipEnabled ? 0.40 : 0.55))
+            // The card occupies the 16:9 rect a video tile would (aspect fit,
+            // centered); the tile's black shows outside it like letterbox
+            // bars, so a 2-up grid reads as two pictures, not a half-screen
+            // card beside a letterboxed video.
+            let rect: CGSize = {
+                let w = geo.size.width, h = geo.size.height
+                guard w > 0, h > 0 else { return .zero }
+                return w / h > 16.0 / 9.0
+                    ? CGSize(width: h * 16.0 / 9.0, height: h)
+                    : CGSize(width: w, height: w * 9.0 / 16.0)
+            }()
+            let side = max(40, min(rect.width, rect.height) * (pipEnabled ? 0.40 : 0.55))
             ZStack {
                 LinearGradient(colors: [Color(hex: "1C2230"), Color(hex: "07080C")],
                                startPoint: .top, endPoint: .bottom)
@@ -4812,7 +4823,7 @@ struct AVPlayerMultiviewTile: View {
                                 .foregroundStyle(LinearGradient.accentGradient)
                         }
                     }
-                    if geo.size.height >= 160 {
+                    if rect.height >= 160 {
                         Text(channelName)
                             .scaledFont(.headline)
                             .foregroundColor(.white)
@@ -4824,8 +4835,11 @@ struct AVPlayerMultiviewTile: View {
                             .foregroundColor(.gray)
                     }
                 }
-                .frame(width: geo.size.width, height: geo.size.height)
+                .frame(width: rect.width, height: rect.height)
             }
+            .frame(width: rect.width, height: rect.height)
+            .clipped()
+            .position(x: geo.size.width / 2, y: geo.size.height / 2)
         }
         .allowsHitTesting(false)
         .accessibilityElement(children: .combine)
@@ -6786,6 +6800,10 @@ struct AVPlayerMultiviewTile: View {
             audioOnlyProgram = audioOnlyNow
             if audioOnlyNow { debugLog("[AVP-MV] tile \(channelName): audio-only program, showing the channel logo") }
         }
+        // Audio-only has no presentationSize; report the card's 16:9 rect
+        // like a video tile so the focus border and the Show Channel Logos
+        // corner overlay size against it.
+        if audioOnlyNow { MultiviewStore.shared.registerVideoAspect(16.0 / 9.0, for: tileID) }
         var options: [String: Any] = [:]
         if !requestHeaders.isEmpty {
             options["AVURLAssetHTTPHeaderFieldsKey"] = requestHeaders
