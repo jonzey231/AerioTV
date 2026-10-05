@@ -57,6 +57,21 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.41",
+            title: "What's new in 1.8.41",
+            bullets: [
+                "Multiview: Show Channel Logos, with corner position and size",
+                "Switch Stream: Dispatcharr Direct Connect admins can reorder a channel's streams",
+                "Apple TV: Skip Without Controls, and two-step Back on DVR, Movies, TV Shows and Settings",
+                "Kept Live: see the channels kept live and stop them",
+                "iPad: floating bottom tab bar and the phone-style Live TV layout",
+                "AirPlay reconnects in place after a network blip and flips channels without leaving the stream",
+                "Pulling down Control Center no longer restarts playback",
+                "Faster guide on Apple TV, and focus returns to the playing channel after the player closes"
+            ],
+            releaseURL: nil
+        ),
+        WhatsNewRelease(
             version: "1.8.40",
             title: "What's new in 1.8.40",
             bullets: [

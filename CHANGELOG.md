@@ -1,5 +1,106 @@
 # Changelog
 
+## v1.8.41 - 2026-10-04
+
+### Added
+
+- Multiview: Show Channel Logos (Settings > Player > Multiview), with Logo
+  Position (any tile corner) and Logo Size. The logo sits inside the video
+  picture. Requested on Discord by Glitzbr.
+- Switch Stream: Dispatcharr Direct Connect admins can reorder a channel's
+  streams (iPhone and iPad: drag handles; Apple TV: a per-row button with
+  Move Up / Move Down). The order is saved to Dispatcharr
+  (jonzey231/AerioTV#89).
+- Apple TV: Skip Without Controls. With the controls hidden, Left and Right
+  skip back and forward instead of opening the timeline (jonzey231/AerioTV#94,
+  parity with PR 101 by @ruckusvol on Android).
+- Kept Live: with Keep Recent Channels Live on, a Kept Live card lists the
+  channels held open with Stop and Stop All, guide cells and list rows show a
+  KEPT badge, and the player Options gain a Kept Live section. On iPhone it is
+  a compact pill beside the Control-a-TV button; on Apple TV the kept-count
+  circle is the only surface.
+- Multiview from a recording: a recording playing fullscreen offers Multiview
+  and seeds the first tile at the current position (jonzey231/AerioTV#76).
+- Player readout (pipeline, resolution and frame rate) on iPad and on iPhone
+  in landscape, at the transport row's corners.
+- Cast: on-phone hardware video transcode chosen from the receiver's own
+  capability answers, HEVC sources, HDR kept or tone mapped, AC-3 to AAC
+  stereo for receivers that cannot decode it.
+- Cast Options sheet: the same nine rows as Android, acting on the web
+  receiver too; Change Cast Device carries the channel to the new receiver.
+- AirPlay: full LAN delivery pipeline rebuilt, with AirPlay Audio mode
+  (Automatic, Passthrough, Stereo) for receivers that need stereo AAC, and
+  the same remote-session card and sheet as Cast. Now Playing names the
+  receiver.
+- Dispatcharr Direct Connect sign-in explains that the account needs an API
+  key, and a failure names the step and missing field.
+- Settings: deep links for each Settings page.
+
+### Changed
+
+- Settings redesign: new Live TV, Player, Movies & TV Shows, General, Sync and
+  About pages; condensed Apple TV Settings with pop-up option sheets; one
+  focus ring; Edit Playlist verifies before saving; Dispatcharr User
+  Permissions section; Title Case and US spelling throughout.
+- Settings parity with Android: Pull from iCloud replaces settings outright,
+  Push to iCloud asks first, Auto-Rotate off locks the current orientation,
+  Delete All Recordings deletes finished recordings and offers a second button
+  for in-progress ones; Keep Recent Channels Live, Resume Last Channel and
+  Movies & TV Shows Display Scale on every platform.
+- Record forms: Just this one or Series, with Every episode / New episodes only
+  and a Customize Matching row; compact record sheet shared with Android.
+- iPad: a floating bottom pill tab bar with the Control-a-TV button beside it,
+  and the phone Live TV layout (header row, group drawer, Group Selection
+  setting).
+- Apple TV: two-step Back on DVR, Movies, TV Shows and Settings. The first Back
+  moves focus to the tab pill; a second Back goes to Live TV.
+- Apple TV Switch Stream reorder uses a per-row button instead of a long press.
+- Guide: the Guide corner setting also rounds program cells
+  (jonzey231/AerioTV#87); Guide Days is a choice row.
+- iPhone: VOD detail pages hide the tab bar, matching Android; the tab bar
+  hides on the first scroll down and expands out of the mini button.
+- AirPlay: channel flips stay in the same stream (no Apple TV home screen
+  between channels).
+- Player: the first join starts at the 3 s floor once two target durations are
+  loaded, for faster tune times on bursty feeds.
+- Apple TV: the display mode is requested at SPS detection for SDR streams, so
+  the panel switch overlaps the join.
+- Internal: Dev scheme removed; debug log rotates at 4 MB; dead Cast developer
+  switches removed; Settings and focus tracing.
+
+### Fixed
+
+- Guide performance on Apple TV: far fewer whole-map publishes during the grid
+  walk (hangs 279 to 16, worst 4.1 s to 0.5 s), narrow observers of the program
+  map, the time strip builds labels for the visible range only, and VOD sweep
+  mapping runs off the main actor.
+- Guide rows fill after a stale-cache launch instead of staying blank.
+- Guide categories no longer vanish on the next grid publish.
+- Apple TV focus: returns to the playing channel after the player closes, the
+  guide claims focus before the header circles, no clock detour, focus follows
+  a program boundary, rows and focus restore after the TV button, and a fast
+  Down after leaving the clock is no longer pulled back.
+- AirPlay: a dead ingest reconnects in place while serving a receiver instead
+  of ending the session.
+- iPhone and iPad: a 20 s grace before quiescing playback on background, so
+  pulling down the notification shade or Control Center no longer forces a
+  rebuild.
+- Add to Multiview refreshes upcoming programs when it opens
+  (jonzey231/AerioTV#96).
+- Switch Stream errors show the HTTP status (jonzey231/AerioTV#89).
+- VOD decoding, from PR 92 by @OverSoft: category filters with + or & no longer
+  truncate, custom_properties decodes as object or string, numeric ratings are
+  accepted, and provider-info seasons fill the episode list.
+- iPhone Kept Live row matches the real tab bar capsule; the guide and list
+  scroll to the top on a group change (iPad blank grid).
+- iPad header is no longer pushed under the mini player.
+- About: Last Updated is tracked explicitly instead of reading Never.
+- Apple TV: Movies & TV Shows settings scroll past the TMDB buttons.
+- Settings: Edit Playlist opens on iPhone; the playlists deep link no longer
+  shows a blank page; one chevron on playlist rows.
+- Live TV pull to refresh survives task cancellation.
+- Cast: stall watch and stale-page reloads re-issue the load.
+
 ## v1.8.38 - 2026-09-14
 
 ### Added
