@@ -149,6 +149,13 @@ struct SwitchStreamView: View {
     @State private var selectedStreamID: Int?
     @State private var isSwitching = false
     @State private var switchError: String?
+    /// Reorder (admin only): a PATCH of the channel's `streams` order is
+    /// in flight, and the last save failure (with its HTTP status).
+    @State private var isSavingOrder = false
+    @State private var orderError: String?
+    #if os(iOS)
+    @State private var editMode: EditMode = .inactive
+    #endif
 
     #if os(tvOS)
     /// Drives initial focus on tvOS (where this is an inline overlay, not
@@ -159,6 +166,14 @@ struct SwitchStreamView: View {
 
     private var activeServer: ServerConnection? {
         servers.first(where: { $0.isActive }) ?? servers.first
+    }
+
+    /// Reordering is for Dispatcharr Direct Connect admins only (the same
+    /// `IsAdmin` gate that shows Switch Stream; the channel PATCH is
+    /// `IsAdmin` server side too). Non-admins see the sheet unchanged.
+    private var canReorder: Bool {
+        guard let server = activeServer, server.type == .dispatcharrAPI else { return false }
+        return server.dispatcharrCanSwitchStream && streams.count > 1
     }
 
     private func makeAPI() -> DispatcharrAPI? {
@@ -266,8 +281,83 @@ struct SwitchStreamView: View {
             } catch {
                 isSwitching = false
                 selectedStreamID = previousSelection
-                switchError = "Couldn't switch the stream. Your account may not have permission, or the server is unreachable."
-                debugLog("[SwitchStream] change_stream failed for \(channelName) stream=\(stream.id): \(error.localizedDescription)")
+                // #89: show the HTTP status instead of a generic guess.
+                if let status = Self.httpStatus(of: error) {
+                    switchError = "Couldn't switch the stream (HTTP \(status))."
+                } else {
+                    switchError = "Couldn't switch the stream: \(error.localizedDescription)"
+                }
+                debugLog("[SwitchStream] change_stream failed for \(channelName) stream=\(stream.id) status=\(Self.httpStatus(of: error).map(String.init) ?? "none"): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// HTTP status carried by a DispatcharrAPI error, when there is one.
+    static func httpStatus(of error: Error) -> Int? {
+        guard let api = error as? APIError else { return nil }
+        switch api {
+        case .unauthorized: return 401
+        case .forbidden: return 403
+        case .serverError(let code): return code
+        case .emptyResponse(let code): return code
+        default: return nil
+        }
+    }
+
+    // MARK: - Reorder (admin)
+
+    #if os(iOS)
+    private var moveHandler: ((IndexSet, Int) -> Void)? {
+        guard canReorder, !isSavingOrder else { return nil }
+        return { source, destination in move(from: source, to: destination) }
+    }
+
+    private func move(from source: IndexSet, to destination: Int) {
+        guard canReorder, !isSavingOrder else { return }
+        let previous = streams
+        streams.move(fromOffsets: source, toOffset: destination)
+        saveOrder(previous: previous)
+    }
+    #endif
+
+    /// tvOS Move Up / Move Down: shifts one row by `offset` (-1 or +1).
+    private func moveStream(_ stream: DispatcharrStream, by offset: Int) {
+        guard canReorder, !isSavingOrder,
+              let index = streams.firstIndex(where: { $0.id == stream.id }) else { return }
+        let target = index + offset
+        guard streams.indices.contains(target) else { return }
+        let previous = streams
+        streams.swapAt(index, target)
+        saveOrder(previous: previous)
+        #if os(tvOS)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            focusedRow = "stream-\(stream.id)"
+        }
+        #endif
+    }
+
+    /// PATCHes the full member-stream order (Dispatcharr deletes links
+    /// missing from the list, so every id goes). On failure the list is
+    /// restored, the HTTP status shown, and the server order refetched.
+    private func saveOrder(previous: [DispatcharrStream]) {
+        guard let api = makeAPI() else { streams = previous; return }
+        let ids = streams.map(\.id)
+        guard ids != previous.map(\.id) else { return }
+        isSavingOrder = true
+        orderError = nil
+        Task {
+            do {
+                try await api.updateChannelStreamOrder(channelID: channelID, streamIDs: ids)
+                isSavingOrder = false
+                debugLog("[SwitchStream] reorder saved channel=\(channelID) order=\(ids)")
+            } catch {
+                let status = Self.httpStatus(of: error)
+                debugLog("[SwitchStream] reorder failed status=\(status.map(String.init) ?? "none") channel=\(channelID): \(error.localizedDescription)")
+                streams = previous
+                orderError = status.map { "Couldn't save the stream order (HTTP \($0))." }
+                    ?? "Couldn't save the stream order: \(error.localizedDescription)"
+                isSavingOrder = false
+                await load()
             }
         }
     }
@@ -372,6 +462,9 @@ struct SwitchStreamView: View {
                 if let switchError {
                     Section { Text(switchError).foregroundColor(.orange) }
                 }
+                if let orderError {
+                    Section { Text(orderError).foregroundColor(.orange) }
+                }
                 Section {
                     ForEach(streams) { stream in
                         Button { select(stream) } label: {
@@ -393,12 +486,21 @@ struct SwitchStreamView: View {
                                 }
                             }
                         }
-                        .disabled(isSwitching)
+                        .disabled(isSwitching || isSavingOrder)
                     }
+                    .onMove(perform: moveHandler)
                 } header: {
-                    Text("Streams for \(channelName)")
+                    HStack(spacing: 8) {
+                        Text("Streams for \(channelName)")
+                        if isSavingOrder {
+                            ProgressView()
+                            Text("Saving Order")
+                        }
+                    }
                 } footer: {
-                    Text("Switches the active upstream for this channel. The picture follows in a few seconds.")
+                    Text(canReorder
+                         ? "Switches the active upstream for this channel. The picture follows in a few seconds. Tap Reorder to change the stream priority."
+                         : "Switches the active upstream for this channel. The picture follows in a few seconds.")
                 }
             }
         }
@@ -408,7 +510,16 @@ struct SwitchStreamView: View {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Done") { close() }
             }
+            if canReorder {
+                ToolbarItem(placement: .primaryAction) {
+                    Button(editMode.isEditing ? "Finish" : "Reorder") {
+                        withAnimation { editMode = editMode.isEditing ? .inactive : .active }
+                    }
+                    .disabled(isSavingOrder)
+                }
+            }
         }
+        .environment(\.editMode, $editMode)
     }
     #endif
 
@@ -450,7 +561,19 @@ struct SwitchStreamView: View {
                             if let switchError {
                                 messageCard(switchError, systemImage: "exclamationmark.triangle.fill", tint: .orange)
                             }
-                            ForEach(streams) { stream in
+                            if let orderError {
+                                messageCard(orderError, systemImage: "exclamationmark.triangle.fill", tint: .orange)
+                            }
+                            if isSavingOrder {
+                                HStack(spacing: 12) {
+                                    ProgressView()
+                                    Text("Saving Order")
+                                        .scaledFont(.system(size: 22))
+                                        .foregroundColor(Color.contrastText(.textSecondary))
+                                }
+                                .padding(.horizontal, 80)
+                            }
+                            ForEach(Array(streams.enumerated()), id: \.element.id) { index, stream in
                                 SwitchStreamRow(
                                     title: titleLine(for: stream),
                                     meta: metaLine(for: stream),
@@ -458,7 +581,22 @@ struct SwitchStreamView: View {
                                     action: { select(stream) }
                                 )
                                 .focused($focusedRow, equals: "stream-\(stream.id)")
-                                .disabled(isSwitching)
+                                .disabled(isSwitching || isSavingOrder)
+                                // Admin reorder: long-press the row.
+                                .contextMenu {
+                                    if canReorder {
+                                        if index > 0 {
+                                            Button { moveStream(stream, by: -1) } label: {
+                                                Label("Move Up", systemImage: "arrow.up")
+                                            }
+                                        }
+                                        if index < streams.count - 1 {
+                                            Button { moveStream(stream, by: 1) } label: {
+                                                Label("Move Down", systemImage: "arrow.down")
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         .padding(.horizontal, 80)

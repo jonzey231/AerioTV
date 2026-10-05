@@ -2182,8 +2182,33 @@ struct MultiviewContainerView: View {
         // remote map). Scrubbing now lives on the visible chrome's
         // timeline band and hold-to-scrub; catch-up keeps its
         // always-scrubs Android-parity behavior.
+        //
+        // GH #94 + PR 101 parity (same order as PlayerView): with the
+        // chrome hidden, Left/Right on VOD first honors a CUSTOM remote
+        // map that assigns the short slot a seek, then Player > Skip
+        // Without Controls (skip by the Skip Back / Forward intervals),
+        // then the default (summon chrome). Select still opens controls.
         if store.vodSoloTile != nil, !chromeState.isVisible,
            !dpadScrub.active, !dpadScrub.holdActive {
+            if direction == .left || direction == .right,
+               let ps = store.audioProgressStore, let seek = ps.seekAction {
+                let isLeft = direction == .left
+                let remote = RemoteControlStore.shared.map
+                let mapped: PlayerRemoteAction? = remote.preset == .custom
+                    ? remote.playerAction(isLeft ? .leftShort : .rightShort) : nil
+                let skipBack: Bool?
+                if mapped == .seekBackward { skipBack = true }
+                else if mapped == .seekForward { skipBack = false }
+                else if UserDefaults.standard.bool(forKey: RemoteControlStore.skipWithoutControlsKey) {
+                    skipBack = isLeft
+                } else { skipBack = nil }
+                if let skipBack {
+                    seek(skipBack
+                         ? max(0, ps.currentMs - SkipIntervals.backMs)
+                         : ps.currentMs + SkipIntervals.forwardMs)
+                    return
+                }
+            }
             chromeState.reportInteraction()
             return
         }

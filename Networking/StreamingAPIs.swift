@@ -3184,8 +3184,7 @@ struct DispatcharrAPI {
         // can exist for both a movie and a series category, unique only
         // on name+type), so pin the movie type. The `|`
         // percent-encodes to %7C inside the query value.
-        let typed = category.contains("|") ? category : "\(category)|movie"
-        let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
+        let encoded = Self.categoryQueryValue(category, type: "movie")
         return "/api/vod/movies/?page_size=100&category=\(encoded)"
     }
 
@@ -3194,9 +3193,20 @@ struct DispatcharrAPI {
             return "/api/vod/series/?page_size=100"
         }
         // Same name|type filter as movies; pin the series type.
-        let typed = category.contains("|") ? category : "\(category)|series"
-        let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
+        let encoded = Self.categoryQueryValue(category, type: "series")
         return "/api/vod/series/?page_size=100&category=\(encoded)"
+    }
+
+    /// The `category` filter value: `name|type`, percent-encoded as a query
+    /// value. The type is appended unless the value already ends in one, so a
+    /// category whose NAME contains a pipe ("|EN| COMEDY") is still pinned to
+    /// its type (Dispatcharr splits on the last pipe). `.urlQueryAllowed`
+    /// leaves "+" and "&" bare, which truncated names like "APPLE+ KIDS"
+    /// server-side (PR 92, OverSoft).
+    static func categoryQueryValue(_ category: String, type: String) -> String {
+        let typed = category.hasSuffix("|movie") || category.hasSuffix("|series")
+            ? category : "\(category)|\(type)"
+        return encodeQueryValue(typed)
     }
 
     /// Query-VALUE-safe percent encoding. `.urlQueryAllowed` describes the
@@ -4117,6 +4127,23 @@ struct DispatcharrAPI {
         return decoded?.url
     }
 
+    /// Saves a new member-stream order for a channel (Switch Stream reorder,
+    /// admin only). `PATCH /api/channels/channels/<id>/` with `streams`:
+    /// Dispatcharr's `ChannelSerializer.update` rewrites each
+    /// `ChannelStream.order` from the list index and DELETES any link not in
+    /// the list, so `streamIDs` must hold every member stream, not just the
+    /// moved ones. `partial_update` is `IsAdmin` server side.
+    func updateChannelStreamOrder(channelID: Int, streamIDs: [Int]) async throws {
+        let url = try buildURL(path: "/api/channels/channels/\(channelID)/")
+        var request = URLRequest(url: url, timeoutInterval: 30)
+        request.httpMethod = "PATCH"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["streams": streamIDs])
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+    }
+
     /// Reads `/proxy/ts/status/<uuid>` for the channel's live upstream.
     /// `url` is reliably updated on a stream switch; `streamID` is NOT (the
     /// owner:false event path never rewrites it, so it stays stale ~20s) —
@@ -4642,6 +4669,18 @@ struct DispatcharrServerInfo: Decodable {
         // Prefer explicit server_name, fall back to name.
         serverName = (try? c.decode(String.self, forKey: .serverName)) ?? (try? c.decode(String.self, forKey: .name))
         discoveredAuthMode = nil
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// The object, or the same object serialized into a JSON string: some
+    /// Dispatcharr listings return `custom_properties` that way, which a
+    /// plain `decode` dropped as nil (PR 92, OverSoft).
+    func decodeObjectOrJSONString<T: Decodable>(_ type: T.Type, forKey key: Key) -> T? {
+        if let value = try? decode(T.self, forKey: key) { return value }
+        guard let text = try? decode(String.self, forKey: key),
+              let data = text.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
     }
 }
 
@@ -5692,7 +5731,14 @@ struct DispatcharrVODMovie: Decodable, Identifiable {
         let p3 = try? c.decode(String.self, forKey: .description)
         plot   = p1 ?? p2 ?? p3
         genre  = try? c.decode(String.self, forKey: .genre)
-        rating = try? c.decode(String.self, forKey: .rating)
+        // String on the typed listings, a number on some listings (PR 92).
+        if let r = try? c.decode(String.self, forKey: .rating) {
+            rating = r
+        } else if let d = try? c.decode(Double.self, forKey: .rating), d > 0 {
+            rating = String(format: "%.1f", d)
+        } else {
+            rating = nil
+        }
         streams = try? c.decode([DispatcharrVODStreamOption].self, forKey: .streams)
 
         // v1.6.12 additions — defensive decode so a stale Dispatcharr
@@ -5701,8 +5747,8 @@ struct DispatcharrVODMovie: Decodable, Identifiable {
         durationSecs     = try? c.decode(Int.self, forKey: .durationSecs)
         tmdbID           = try? c.decode(String.self, forKey: .tmdbID)
         imdbID           = try? c.decode(String.self, forKey: .imdbID)
-        customProperties = try? c.decode(DispatcharrVODCustomProperties.self,
-                                         forKey: .customProperties)
+        customProperties = c.decodeObjectOrJSONString(DispatcharrVODCustomProperties.self,
+                                                      forKey: .customProperties)
     }
 }
 
@@ -5757,13 +5803,20 @@ struct DispatcharrVODSeries: Decodable, Identifiable {
         let p3 = try? c.decode(String.self, forKey: .description)
         plot   = p1 ?? p2 ?? p3
         genre  = try? c.decode(String.self, forKey: .genre)
-        rating = try? c.decode(String.self, forKey: .rating)
+        // String on the typed listings, a number on some listings (PR 92).
+        if let r = try? c.decode(String.self, forKey: .rating) {
+            rating = r
+        } else if let d = try? c.decode(Double.self, forKey: .rating), d > 0 {
+            rating = String(format: "%.1f", d)
+        } else {
+            rating = nil
+        }
 
         year             = try? c.decode(Int.self, forKey: .year)
         tmdbID           = try? c.decode(String.self, forKey: .tmdbID)
         imdbID           = try? c.decode(String.self, forKey: .imdbID)
-        customProperties = try? c.decode(DispatcharrVODCustomProperties.self,
-                                         forKey: .customProperties)
+        customProperties = c.decodeObjectOrJSONString(DispatcharrVODCustomProperties.self,
+                                                      forKey: .customProperties)
         createdAt = try? c.decode(String.self, forKey: .createdAt)
     }
 }
@@ -5885,6 +5938,10 @@ struct DispatcharrVODSeriesProviderInfo: Decodable {
     let imdbID: String?
     let cover: DispatcharrVODLogo?
     let customProperties: DispatcharrVODCustomProperties?
+    /// Episodes provider-info carries as `{"<season>": [...]}`, flattened in
+    /// season/episode order. Used when `/api/vod/episodes/` returns nothing
+    /// (PR 92, OverSoft). nil when absent.
+    let episodes: [DispatcharrVODEpisode]?
 
     enum CodingKeys: String, CodingKey {
         case name, description, year, genre, cover
@@ -5892,6 +5949,7 @@ struct DispatcharrVODSeriesProviderInfo: Decodable {
         case tmdbID = "tmdb_id"
         case imdbID = "imdb_id"
         case customProperties = "custom_properties"
+        case episodes
     }
 
     init(from decoder: Decoder) throws {
@@ -5911,8 +5969,15 @@ struct DispatcharrVODSeriesProviderInfo: Decodable {
         tmdbID           = try? c.decode(String.self, forKey: .tmdbID)
         imdbID           = try? c.decode(String.self, forKey: .imdbID)
         cover            = try? c.decode(DispatcharrVODLogo.self, forKey: .cover)
-        customProperties = try? c.decode(DispatcharrVODCustomProperties.self,
-                                         forKey: .customProperties)
+        customProperties = c.decodeObjectOrJSONString(DispatcharrVODCustomProperties.self,
+                                                      forKey: .customProperties)
+        if let bySeason = try? c.decode([String: [DispatcharrVODEpisode]].self, forKey: .episodes) {
+            episodes = bySeason.values.flatMap { $0 }.sorted {
+                ($0.seasonNumber ?? 0, $0.episodeNumber ?? 0) < ($1.seasonNumber ?? 0, $1.episodeNumber ?? 0)
+            }
+        } else {
+            episodes = nil
+        }
     }
 }
 
@@ -6001,8 +6066,8 @@ struct DispatcharrVODEpisode: Decodable, Identifiable {
         durationSecs     = try? c.decode(Int.self, forKey: .durationSecs)
         tmdbID           = try? c.decode(String.self, forKey: .tmdbID)
         imdbID           = try? c.decode(String.self, forKey: .imdbID)
-        customProperties = try? c.decode(DispatcharrVODCustomProperties.self,
-                                         forKey: .customProperties)
+        customProperties = c.decodeObjectOrJSONString(DispatcharrVODCustomProperties.self,
+                                                      forKey: .customProperties)
     }
 }
 
@@ -6657,8 +6722,7 @@ extension DispatcharrAPI {
                                      category: String?, page: Int) -> String {
         var path = "/api/vod/\(collection)/?page_size=100&page=\(max(1, page))"
         if let category, !category.isEmpty {
-            let typed = category.contains("|") ? category : "\(category)|\(type)"
-            let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
+            let encoded = Self.categoryQueryValue(category, type: type)
             path += "&category=\(encoded)"
         }
         return path
@@ -6685,15 +6749,13 @@ extension DispatcharrAPI {
     /// Dispatcharr's MovieFilter matches on.
     private static func backgroundMoviesPath(category: String?) -> String {
         guard let category, !category.isEmpty else { return "/api/vod/movies/?page_size=100" }
-        let typed = category.contains("|") ? category : "\(category)|movie"
-        let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
+        let encoded = Self.categoryQueryValue(category, type: "movie")
         return "/api/vod/movies/?page_size=100&category=\(encoded)"
     }
 
     private static func backgroundSeriesPath(category: String?) -> String {
         guard let category, !category.isEmpty else { return "/api/vod/series/?page_size=100" }
-        let typed = category.contains("|") ? category : "\(category)|series"
-        let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
+        let encoded = Self.categoryQueryValue(category, type: "series")
         return "/api/vod/series/?page_size=100&category=\(encoded)"
     }
 

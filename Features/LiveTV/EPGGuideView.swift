@@ -8357,6 +8357,18 @@ private struct GuideProgramButton: View {
     #endif
 
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+    /// GH #87: the Guide corner setting also rounds the program cells
+    /// (Android parity). Off keeps the flat Emby-style strip.
+    @AppStorage(LogoCorners.guideKey) private var roundedGuideCorners = LogoCorners.guideDefault
+    /// Cell outline: square when the Guide corner setting is off, else
+    /// `LogoCorners.guideRadius`, capped at a quarter of the shorter side so
+    /// a one-minute sliver never turns into a pill.
+    private var cellShape: RoundedRectangle {
+        let r = roundedGuideCorners
+            ? min(LogoCorners.guideRadius, min(width, rowHeight) * LogoCorners.maxRadiusFraction)
+            : 0
+        return RoundedRectangle(cornerRadius: max(0, r), style: .continuous)
+    }
     /// Settings > Appearance > Channel List > Show Program Subtitles.
     @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
 
@@ -8613,9 +8625,10 @@ private struct GuideProgramButton: View {
         .padding(.leading, 8 + leadingClip)
         .padding(.trailing, 8)
         .padding(.vertical, 6)
-        // Emby style: full row height, flat rectangle, no rounded corners
+        // Emby style: full row height, flat rectangle unless the Guide
+        // corner setting is on (GH #87).
         .frame(width: width, height: rowHeight, alignment: .topLeading)
-        .background(cellBackground)
+        .background(cellBackground, in: cellShape)
         #if os(tvOS)
         // The focus highlight is the brighter cellBackground, but on
         // category-tinted (and live) cells that is only a same-hue opacity
@@ -8630,12 +8643,12 @@ private struct GuideProgramButton: View {
             if isFocused {
                 ZStack {
                     Color.white.opacity(0.20)
-                    Rectangle().strokeBorder(Color.white, lineWidth: 4)
+                    cellShape.strokeBorder(Color.white, lineWidth: 4)
                 }
             }
         }
         #endif
-        .clipped()
+        .clipShape(cellShape)
         }
     }
 

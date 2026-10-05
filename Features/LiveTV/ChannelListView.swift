@@ -3162,7 +3162,10 @@ struct ChannelRow: View {
     private var liveProgram: (title: String, subTitle: String?, description: String?, start: Date, end: Date, flags: EPGFlags)? {
         if let title = item.currentProgram, !title.isEmpty,
            let start = item.currentProgramStart,
-           let end = item.currentProgramEnd {
+           let end = item.currentProgramEnd,
+           end > Date() {
+            // GH #96: an ended load-time snapshot falls through to the
+            // guide's live now/next cell below.
             // ChannelDisplayItem doesn't carry the feed badge flags or the
             // XMLTV <sub-title>; when GuideStore has the same now-airing
             // program, borrow both so the collapsed row can show LIVE/NEW and

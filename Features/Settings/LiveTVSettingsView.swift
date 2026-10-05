@@ -196,7 +196,7 @@ struct LiveTVSettingsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Rounded Corners in Guide View")
                             .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                        Text("Rounds channel logos in the Guide's channel column.")
+                        Text("Rounds channel logos and program cells in the Guide.")
                             .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
@@ -531,7 +531,7 @@ struct LiveTVSettingsView: View {
                         icon: "square.grid.3x3",
                         iconColor: .accentPrimary,
                         title: "Rounded Corners in Guide View",
-                        subtitle: "Rounds channel logos in the Guide's channel column.",
+                        subtitle: "Rounds channel logos and program cells in the Guide.",
                         isOn: $roundedGuideCorners,
                         onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
                     )

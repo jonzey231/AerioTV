@@ -758,7 +758,12 @@ final class VODService {
         } catch {
             info = nil
         }
-        let episodes = try await api.getVODSeriesEpisodes(seriesID: sid)
+        var episodes = try await api.getVODSeriesEpisodes(seriesID: sid)
+        // The dedicated listing can come back empty while provider-info
+        // already carries the seasons (PR 92, OverSoft); use those then.
+        if episodes.isEmpty, let embedded = info?.episodes, !embedded.isEmpty {
+            episodes = embedded
+        }
 
         // Build season map from episodes. v1.6.12 also surfaces
         // episode runtime via `duration_secs` (was always blank

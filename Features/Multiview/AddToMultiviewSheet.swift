@@ -174,6 +174,9 @@ struct AddToMultiviewSheet: View {
     /// hidden-groups edits happen in a separate sheet that's never
     /// presented over this one.
     @State private var hiddenGroups: Set<String> = []
+    /// GH #96: true while the open-time now-playing refresh runs; drives
+    /// the "Updating guide" spinner row above the channel list.
+    @State private var isRefreshingNowPlaying = false
 
     var body: some View {
         Group {
@@ -191,6 +194,12 @@ struct AddToMultiviewSheet: View {
         // VOD lists come from the paged catalog, rebuilt whenever it changes
         // or the query does.
         .task(id: vodListKey) { await refreshVODLists() }
+        // GH #96: rows read each channel's now-airing program from data
+        // loaded at launch. While a stream plays, the list's visible-row
+        // prefetch is skipped, so after a program boundary the picker showed
+        // ended or missing events until the user left multiview. Refresh
+        // through the guide's existing fetch when the sheet opens.
+        .task { await refreshNowPlayingForPicker() }
         .onAppear {
             if !availableSources.contains(pickerSource) {
                 selectSource(availableSources.first ?? .channels)
@@ -383,6 +392,9 @@ struct AddToMultiviewSheet: View {
         switch pickerSource {
         case .channels:
             List {
+                if isRefreshingNowPlaying {
+                    nowPlayingRefreshRow
+                }
                 if !favoriteChannels.isEmpty {
                     section(title: "Favorites", items: favoriteChannels)
                 }
@@ -664,6 +676,9 @@ struct AddToMultiviewSheet: View {
             // warnings + real rendering glitches when two siblings
             // share an `explicitID`. Composite keys keep each row's
             // identity unique within the flat list.
+            if isRefreshingNowPlaying {
+                nowPlayingRefreshRow
+            }
             if !favoriteChannels.isEmpty {
                 tvSectionHeader("Favorites")
                 ForEach(favoriteChannels, id: \.favSectionID) { item in
@@ -1084,6 +1099,38 @@ struct AddToMultiviewSheet: View {
         VODListKey(revision: vodStore.catalogRevision, movies: vodStore.moviesCount,
                    series: vodStore.seriesCount, catalogKey: vodStore.catalogKey,
                    search: searchText)
+    }
+
+    /// GH #96: spinner row shown while the now-playing refresh runs.
+    private var nowPlayingRefreshRow: some View {
+        HStack(spacing: 12) {
+            ProgressView()
+                #if os(tvOS)
+                .scaleEffect(1.4)
+                #endif
+            Text("Updating guide...")
+                #if os(tvOS)
+                .scaledFont(.system(size: 22))
+                .foregroundStyle(.white.opacity(0.6))
+                #else
+                .foregroundStyle(.secondary)
+                #endif
+        }
+        .padding(.vertical, 8)
+    }
+
+    /// GH #96: re-run the guide's own merge fetch (the same
+    /// `GuideStore.fetchUpcoming` the guide and pull-to-refresh use) so
+    /// the picker rows' now/next cells reflect what is airing now. A fetch
+    /// already in flight is left alone; its results land in the same cells.
+    private func refreshNowPlayingForPicker() async {
+        let channels = channelStore.channels
+        guard !channels.isEmpty, !servers.isEmpty,
+              !GuideStore.shared.isLoading else { return }
+        isRefreshingNowPlaying = true
+        defer { isRefreshingNowPlaying = false }
+        debugLog("[MV-Picker] now-playing refresh on open: channels=\(channels.count)")
+        await GuideStore.shared.fetchUpcoming(channels: channels, servers: servers)
     }
 
     private func refreshVODLists() async {

@@ -152,6 +152,62 @@ final class PlayerSession: ObservableObject {
         )
     }
 
+    /// GH #76: enter Multiview from a recording playing in the legacy
+    /// fullscreen cover. The recording becomes tile 0 through the same
+    /// `MultiviewStore.addVOD` tile creation the Add Stream picker's
+    /// Recordings source uses (1d4c712), resuming at the cover's current
+    /// position, then the container is asked to open its add sheet so the
+    /// user picks the second stream. The caller dismisses the cover.
+    @discardableResult
+    func enterMultiview(seedingRecording title: String,
+                        streamURL: URL,
+                        headers: [String: String],
+                        isDVR: Bool,
+                        vodID: String?,
+                        serverID: String?,
+                        positionMs: Int32?) -> Bool {
+        let store = MultiviewStore.shared
+        if !store.tiles.isEmpty { exit() }
+        // Same transition float as the channel seed above.
+        AudioSessionRefCount.increment()
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            AudioSessionRefCount.decrement()
+        }
+        var tileHeaders = headers
+        tileHeaders.removeValue(forKey: "X-Aerio-Start-From-Beginning")
+        store.lockEngine(ResolvedEngine(
+            engine: PlaybackFeatureFlags.mpvEngineEnabled ? .mpv : .avPlayerRemuxTS,
+            routeURL: streamURL, headers: tileHeaders))
+        let resume: Int32? = (positionMs ?? 0) > 2_000 ? positionMs : (isDVR ? 0 : nil)
+        let result = store.addVOD(title: title.isEmpty ? "Recording" : title,
+                                  streamURL: streamURL,
+                                  headers: tileHeaders,
+                                  posterURL: nil,
+                                  kind: isDVR ? .dvr : .vod,
+                                  vodID: vodID,
+                                  serverID: serverID,
+                                  vodType: "recording",
+                                  resumePositionMs: resume,
+                                  bypassWarning: true)
+        guard result == .added else {
+            DebugLogger.shared.log("[MV-Mode] enter multiview from recording failed: \(result)",
+                                   category: "Playback", level: .warning)
+            return false
+        }
+        mode = .multiview
+        NowPlayingManager.shared.configuredAsMultiviewAdapter = true
+        DebugLogger.shared.log(
+            "[MV-Mode] enter multiview; seeded recording kind=\(isDVR ? "dvr" : "vod") resume=\(resume.map(String.init) ?? "none")ms",
+            category: "Playback", level: .info)
+        // Give the container a beat to mount, then open its add sheet
+        // (same notification the native player's Add Stream uses).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            NotificationCenter.default.post(name: .multiviewRequestOpenAddSheet, object: nil)
+        }
+        return true
+    }
+
     /// Exit multiview and continue playing the audio tile's channel
     /// as a regular single-stream. This is what the "Exit" button
     /// in the transport bar calls — after a multiview session the

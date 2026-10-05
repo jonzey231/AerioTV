@@ -1740,6 +1740,33 @@ private struct PlayerRootView: View {
                                 )
                                 return
                             }
+                            // GH #94 + PR 101 parity: hidden-chrome
+                            // Left/Right on a seekable session. Order:
+                            // a CUSTOM remote map that assigns the short
+                            // Left/Right slot a seek wins; then Player >
+                            // Skip Without Controls; then the default
+                            // (summon chrome + scrub preview). Select
+                            // still summons the controls (onTapGesture).
+                            if !showControls, !isLive || isLiveRewindMode, isScrubberActive,
+                               direction == .left || direction == .right,
+                               let seek = progressStore.seekAction {
+                                let isLeft = direction == .left
+                                let remote = RemoteControlStore.shared.map
+                                let mapped: PlayerRemoteAction? = remote.preset == .custom
+                                    ? remote.playerAction(isLeft ? .leftShort : .rightShort) : nil
+                                let skipBack: Bool?
+                                if mapped == .seekBackward { skipBack = true }
+                                else if mapped == .seekForward { skipBack = false }
+                                else if UserDefaults.standard.bool(forKey: RemoteControlStore.skipWithoutControlsKey) {
+                                    skipBack = isLeft
+                                } else { skipBack = nil }
+                                if let skipBack {
+                                    seek(skipBack
+                                         ? max(0, progressStore.currentMs - SkipIntervals.backMs)
+                                         : progressStore.currentMs + SkipIntervals.forwardMs)
+                                    return
+                                }
+                            }
                             withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
                             scheduleControlsHide()
                             // VOD: a left/right press from the hidden-chrome
@@ -2714,13 +2741,18 @@ private struct PlayerRootView: View {
                                 // 1.5-6s UI stall during which the
                                 // sheet sometimes failed to present
                                 // at all.
-                                showAddStreamSheet = true
+                                if isRecordingPlayback {
+                                    enterMultiviewFromRecording()
+                                } else {
+                                    showAddStreamSheet = true
+                                }
                             },
                             versionOptions: progressStore.vodVersionOptions,
                             currentVersionOptionID: progressStore.currentVersionOptionID,
                             onSelectVersion: progressStore.switchVersionAction == nil
                                 ? nil
                                 : { [weak progressStore] in progressStore?.switchVersionAction?($0) },
+                            isRecording: isRecordingPlayback,
                             videoScaleMode: progressStore.aspectMode,
                             onSelectVideoScale: { [weak progressStore] in
                                 progressStore?.setVideoScale($0)
@@ -3383,6 +3415,21 @@ private struct PlayerRootView: View {
         }
     }
 
+    /// GH #76: a recording playing in this cover (DVR tab legacy path).
+    private var isRecordingPlayback: Bool { vodType == "recording" && !isLive }
+
+    /// GH #76: hand the recording to Multiview as tile 0 at the current
+    /// position, close this cover, and let the container open its add
+    /// sheet for the second stream.
+    private func enterMultiviewFromRecording() {
+        guard let url = urls.first else { return }
+        let entered = PlayerSession.shared.enterMultiview(
+            seedingRecording: title, streamURL: url, headers: headers,
+            isDVR: isDVR, vodID: vodID, serverID: vodServerID,
+            positionMs: progressStore.currentMs)
+        if entered { onDismiss() }
+    }
+
     // MARK: - Player Overflow Menu (ellipsis)
 
     /// iPad-only `+` button. Mirrors the AirPlay button's 52×52
@@ -3409,7 +3456,11 @@ private struct PlayerRootView: View {
     #if os(iOS)
     private var addStreamButton: some View {
         Button {
-            showAddStreamSheet = true
+            if isRecordingPlayback {
+                enterMultiviewFromRecording()
+            } else {
+                showAddStreamSheet = true
+            }
         } label: {
             ZStack {
                 Circle()
@@ -4275,6 +4326,9 @@ struct TVPlayerOptionsPanel: View {
     var layoutOptions: [MultiviewLayoutMode] = []
     var currentLayout: MultiviewLayoutMode = .auto
     var onSelectLayout: ((MultiviewLayoutMode) -> Void)?
+    /// GH #76: a recording in the legacy cover also offers Multiview
+    /// (the recording seeds tile 0).
+    var isRecording: Bool = false
     /// Video Scale (Fit / Fill). `onSelectVideoScale` nil hides the
     /// section, which is what a multiview grid of 2+ tiles does since
     /// Fill only applies to a solo player.
@@ -4303,7 +4357,7 @@ struct TVPlayerOptionsPanel: View {
                 if !isLive { speedSection }
                 sleepTimerSection
                 if !kept.channels.isEmpty { keptLiveSection }
-                if isLive, onEnterMultiview != nil {
+                if isLive || isRecording, onEnterMultiview != nil {
                     multiviewSection
                 }
                 if onSelectVideoScale != nil { videoScaleSection }

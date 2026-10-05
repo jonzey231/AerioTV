@@ -52,9 +52,13 @@ struct CompactChannelRow: View {
     private var liveProgram: (title: String, description: String?, start: Date, end: Date)? {
         if let title = item.currentProgram, !title.isEmpty,
            let start = item.currentProgramStart,
-           let end = item.currentProgramEnd {
+           let end = item.currentProgramEnd,
+           end > Date() {
             return (title, item.currentProgramDescription, start, end)
         }
+        // GH #96: the item-level snapshot is written at load and goes stale
+        // at the program boundary; an ended one falls through to the
+        // guide's live now/next cell instead of showing a finished event.
         if let p = nowNext.live(for: item.id) {
             return (p.title, p.description, p.start, p.end)
         }

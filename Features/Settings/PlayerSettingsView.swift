@@ -138,6 +138,8 @@ struct PlayerSettingsView: View {
     // MARK: - Playback
     @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
     @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
+    /// GH #94 (tvOS only; the phone has no hidden-controls D-pad path).
+    @AppStorage(RemoteControlStore.skipWithoutControlsKey) private var skipWithoutControls = false
     @AppStorage("appBehaviorsStreamBufferSeconds")
     private var streamBufferSeconds: Double = 0
     @AppStorage("streamBufferSize") private var streamBufferSize = "default"
@@ -660,6 +662,14 @@ struct PlayerSettingsView: View {
                     ) { _ in }
 
                     tvFooter("Turn off if accidental D-pad presses are flipping channels during playback. iPhone & iPad use the matching swipe-up / swipe-down gesture on the same toggle.")
+
+                    TVSettingsToggleRow(
+                        icon: "gobackward",
+                        iconColor: theme.accent,
+                        title: "Skip Without Controls",
+                        subtitle: "With the controls hidden, Left and Right skip right away instead of opening the timeline.",
+                        isOn: $skipWithoutControls
+                    ) { _ in }
                 }
 
                 SettingsSection("Multiview", style: .plain) {

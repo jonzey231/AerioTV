@@ -47,6 +47,11 @@ final class RemoteControlStore: ObservableObject {
     nonisolated static let groupSelectorKey = "guideGroupSelector.tv"
     nonisolated static let sidebarLayoutKey = "guideSidebarLayout.tv"
     nonisolated static let tuneInMiniKey = "guideTuneInMini.tv"
+    /// GH #94: Player > Skip Without Controls (tvOS, default Off). With the
+    /// chrome hidden, short Left/Right run the Skip Back / Skip Forward
+    /// intervals instead of opening the timeline. A custom remote map that
+    /// assigns those slots still wins.
+    nonisolated static let skipWithoutControlsKey = "player.skipWithoutControls"
 
     /// One-time seed of the tvOS group selector (Logan 2026-09-18): NEW
     /// installs default to Sidebar Menu, everyone who already had the app
