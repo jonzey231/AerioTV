@@ -4719,6 +4719,9 @@ struct MainTabView: View {
     /// card above the tab bar; on session end it just closes (no local
     /// resume, rule 4).
     @ObservedObject private var castController = AerioCastController.shared
+    /// Phone-side Multiview composite (2026-10-06): the remote card and
+    /// sheet read "Multiview" with the channel names while it runs.
+    @ObservedObject private var mvComposite = MultiviewCompositeSession.shared
     /// GH #33 companion remote: same card for a paired AerioTV TV.
     @ObservedObject private var companionClient = CompanionClient.shared
     /// AirPlay rides the same card (rule 2): the monitor reports when the
@@ -6468,9 +6471,11 @@ struct MainTabView: View {
                 // the invitation, not as a channel.
                 title: content?.title ?? "Casting to \(device)",
                 // A web-receiver channel flip replaces this with
-                // "Switching to <channel>" until the receiver plays.
+                // "Switching to <channel>" until the receiver plays. A
+                // Multiview composite lists its channels.
                 status: content == nil ? "Select a Channel"
-                    : castController.castStatusLine(deviceName: device),
+                    : (content?.mediaID == MultiviewCompositeSession.castMediaID && mvComposite.transport == .cast
+                        ? mvComposite.subtitle : castController.castStatusLine(deviceName: device)),
                 artURL: content?.artURL,
                 isPlaying: castController.remoteIsPlaying,
                 // Android parity: no transport button until something plays.
@@ -6527,12 +6532,13 @@ struct MainTabView: View {
                 )
             } else {
                 let probing = airPlayIsProbing
+                let composite = mvComposite.transport == .airPlay
                 RemoteSessionCard(
                     transport: .airPlay,
-                    title: item?.name ?? "AirPlay",
+                    title: composite ? "Multiview" : (item?.name ?? "AirPlay"),
                     status: probing ? "Connecting to AirPlay"
-                        : airPlay.statusLine(playing: airPlayPlayingStatus),
-                    artURL: item?.logoURL?.absoluteString,
+                        : (composite ? mvComposite.subtitle : airPlay.statusLine(playing: airPlayPlayingStatus)),
+                    artURL: composite ? nil : item?.logoURL?.absoluteString,
                     isPlaying: airPlay.isPlaying,
                     // Nothing to pause until the receiver has the video.
                     showTransport: !probing,
@@ -6564,6 +6570,7 @@ struct MainTabView: View {
             let item = content.flatMap { c in
                 ChannelStore.shared.channels.first(where: { $0.id == c.mediaID })
             }
+            let castComposite = content?.mediaID == MultiviewCompositeSession.castMediaID
             RemoteSessionSheet(
                 transport: .cast,
                 mode: content == nil ? .idle : .playing,
@@ -6591,8 +6598,9 @@ struct MainTabView: View {
                     }
                 },
                 footnoteLines: content == nil ? [] : castCardDetailLines,
-                seekWindow: { castController.remoteSeekWindow() },
-                onSeekTo: { castController.remoteSeek(to: $0) }
+                seekWindow: castComposite ? nil : { castController.remoteSeekWindow() },
+                onSeekTo: { castController.remoteSeek(to: $0) },
+                compositeMultiview: castComposite
             )
         case .companion:
             RemoteControlScreen(
@@ -6620,18 +6628,19 @@ struct MainTabView: View {
         case .airPlay:
             // Idle route -> the minimal idle sheet; probing = the playing
             // layout with controls disabled until the receiver has the video.
-            let item = nowPlaying.playingItem
+            let composite = mvComposite.transport == .airPlay
+            let item = composite ? nil : nowPlaying.playingItem
             let idle = airPlayIsIdleRoute
             RemoteSessionSheet(
                 transport: .airPlay,
                 mode: idle ? .idle : (airPlayIsProbing ? .connecting : .playing),
-                channelName: idle ? (airPlay.deviceName ?? "AirPlay") : (item?.name ?? "AirPlay"),
+                channelName: idle ? (airPlay.deviceName ?? "AirPlay") : (composite ? "Multiview" : (item?.name ?? "AirPlay")),
                 statusText: idle ? "Connected. Select a channel to start."
                     : (airPlayIsProbing ? "Connecting to AirPlay"
                         : airPlay.statusLine(playing: airPlayPlayingStatus)),
                 artURL: item?.logoURL?.absoluteString,
                 channelID: item?.id,
-                fallbackSubtitle: nil,
+                fallbackSubtitle: composite ? mvComposite.subtitle : nil,
                 isPlaying: airPlay.isPlaying,
                 item: item,
                 onTogglePlayPause: { airPlay.togglePlayPause() },
@@ -6654,8 +6663,9 @@ struct MainTabView: View {
                         }
                     }
                 },
-                seekWindow: { airPlay.remoteSeekWindow() },
-                onSeekTo: { airPlay.seek(to: $0) }
+                seekWindow: composite ? nil : { airPlay.remoteSeekWindow() },
+                onSeekTo: { airPlay.seek(to: $0) },
+                compositeMultiview: composite
             )
         case nil:
             EmptyView()

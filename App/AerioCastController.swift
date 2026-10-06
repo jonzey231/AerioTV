@@ -456,8 +456,8 @@ final class AerioCastController: NSObject, ObservableObject {
 
     /// True when "Play on <device>" can open Multiview on the Cast receiver:
     /// Cast Connect launched the AerioTV Android TV app and it advertised
-    /// Multiview. The web receiver never qualifies (phone-side composite is
-    /// part 2).
+    /// Multiview. The web receiver gets the phone-side composite instead
+    /// (MultiviewCompositeSession).
     var canOpenMultiviewOnReceiver: Bool {
         isCasting && receiverTarget == .androidTVApp && receiverMultiviewCapable
     }
@@ -624,6 +624,7 @@ final class AerioCastController: NSObject, ObservableObject {
         // a nil error for intentional ends, but our own stops are latched too
         // so a deliberate teardown can never masquerade as a drop.
         userRequestedStop = true
+        MultiviewCompositeSession.shared.stop(detail: "cast stopped")
         // Best effort and deliberately not awaited: the session teardown below
         // must happen even if the receiver never answers, and a wedged
         // receiver is exactly when the user reaches for the X.
@@ -2871,6 +2872,10 @@ struct RemoteSessionSheet: View {
     var seekWindow: (() -> RemoteSeekWindow?)? = nil
     /// Scrub release: one absolute seek, in the window's seconds.
     var onSeekTo: (Double) -> Void = { _ in }
+    /// Phone-side Multiview composite (2026-10-06): live only, one grid, so
+    /// Channel Up/Down and Back/Forward are hidden; Play/Pause, Options and
+    /// Stop stay.
+    var compositeMultiview: Bool = false
 
     @State private var contentHeight: CGFloat = 320
     @State private var liveWindow: RemoteSeekWindow?
@@ -2955,16 +2960,21 @@ struct RemoteSessionSheet: View {
         let enabled = mode == .playing
         return VStack(spacing: 14) {
             header
+            if compositeMultiview { MultiviewCompositePreviewGrid() }
             programBlock
             Group {
-                HStack(spacing: 24) {
-                    labeledButton("chevron.down", label: "Channel Down", action: onChannelDown)
-                    labeledButton("chevron.up", label: "Channel Up", action: onChannelUp)
+                if !compositeMultiview {
+                    HStack(spacing: 24) {
+                        labeledButton("chevron.down", label: "Channel Down", action: onChannelDown)
+                        labeledButton("chevron.up", label: "Channel Up", action: onChannelUp)
+                    }
                 }
                 HStack(alignment: .top, spacing: 0) {
-                    labeledButton(SkipIntervals.backSymbol(skipBackSeconds),
-                                  label: "Back \(skipBackSeconds)s") {
-                        onSeek(-Double(skipBackSeconds))
+                    if !compositeMultiview {
+                        labeledButton(SkipIntervals.backSymbol(skipBackSeconds),
+                                      label: "Back \(skipBackSeconds)s") {
+                            onSeek(-Double(skipBackSeconds))
+                        }
                     }
                     Button(action: onTogglePlayPause) {
                         VStack(spacing: 6) {
@@ -2981,9 +2991,11 @@ struct RemoteSessionSheet: View {
                         .frame(width: Self.buttonColumnWidth)
                     }
                     .accessibilityLabel(isPlaying ? "Pause" : "Play")
-                    labeledButton(SkipIntervals.forwardSymbol(skipForwardSeconds),
-                                  label: "Forward \(skipForwardSeconds)s") {
-                        onSeek(Double(skipForwardSeconds))
+                    if !compositeMultiview {
+                        labeledButton(SkipIntervals.forwardSymbol(skipForwardSeconds),
+                                      label: "Forward \(skipForwardSeconds)s") {
+                            onSeek(Double(skipForwardSeconds))
+                        }
                     }
                 }
                 wideButton {
@@ -3169,6 +3181,52 @@ struct RemoteSessionSheet: View {
             .compactMap { ($0 as? UIWindowScene)?.keyWindow?.safeAreaInsets.bottom }
             .first ?? 0
         return max(12, inset)
+    }
+}
+
+// MARK: - Multiview composite preview grid
+
+/// Top of the remote controls sheet while the phone sends a Multiview
+/// composite (Android parity, 2026-10-06): the composite's tiles in its own
+/// layout; tapping one moves the audio there (the receiver follows without
+/// a restart). Focused tile: 4 pt white border; others: 2 pt gray.
+struct MultiviewCompositePreviewGrid: View {
+    @ObservedObject private var store = MultiviewStore.shared
+
+    var body: some View {
+        let tiles = Array(store.tiles.prefix(MultiviewCompositeLayout.maxTiles))
+        let rects = MultiviewCompositeLayout.tileRects(count: tiles.count)
+        GeometryReader { geo in
+            let scale = geo.size.width / CGFloat(MultiviewCompositeLayout.width)
+            ZStack(alignment: .topLeading) {
+                Color.black
+                ForEach(Array(zip(tiles.indices, rects)), id: \.0) { i, r in
+                    let tile = tiles[i]
+                    let focused = tile.id == store.audioTileID
+                    Button {
+                        store.setAudio(to: tile.id)
+                    } label: {
+                        ZStack {
+                            Color.white.opacity(0.08)
+                            Text(tile.item.name)
+                                .scaledFont(.caption)
+                                .foregroundStyle(.white)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.center)
+                                .padding(4)
+                        }
+                        .overlay(Rectangle().strokeBorder(focused ? Color.white : Color.gray,
+                                                          lineWidth: focused ? 4 : 2))
+                    }
+                    .buttonStyle(.plain)
+                    .frame(width: r.width * scale, height: r.height * scale)
+                    .offset(x: r.minX * scale, y: r.minY * scale)
+                    .accessibilityLabel("\(tile.item.name)\(focused ? ", audio" : "")")
+                }
+            }
+        }
+        .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
@@ -4607,7 +4665,8 @@ struct MultiviewStagedSheet: View {
 
     private var playButtons: some View {
         // Re-read on every cast/companion publish (observed above).
-        let receiver = PlayWhereRouter.multiviewReceiverName()
+        let receiver = PlayWhereRouter.multiviewReceiverName(count: store.tiles.count)
+        let limitNote = PlayWhereRouter.multiviewLimitNote(count: store.tiles.count)
         return VStack(spacing: 10) {
             Button {
                 dismiss()
@@ -4633,6 +4692,13 @@ struct MultiviewStagedSheet: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(ThemeManager.shared.accent)
+            }
+            if let limitNote {
+                // The receiver only takes the phone composite (2 to 4).
+                Text(limitNote)
+                    .scaledFont(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
             }
         }
         .disabled(store.tiles.isEmpty)

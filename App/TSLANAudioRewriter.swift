@@ -768,10 +768,11 @@ enum TSCardVideoMuxer {
         return p
     }
 
-    /// One video PES (PTS only) in TS packets: the first carries the PCR and
-    /// random_access_indicator, the last is padded with adaptation stuffing.
+    /// One video PES (PTS only) in TS packets: the first carries the PCR and,
+    /// when `randomAccess` (a key frame), the random_access_indicator; the
+    /// last is padded with adaptation stuffing.
     static func packetizeVideo(accessUnit: [UInt8], pts: Int64, pcr: Int64, pid: Int,
-                               cc: inout UInt8) -> [UInt8] {
+                               cc: inout UInt8, randomAccess: Bool = true) -> [UInt8] {
         var pes: [UInt8] = [0x00, 0x00, 0x01, videoStreamID]
         let pesLength = 3 + 5 + accessUnit.count
         let lengthField = pesLength <= 0xFFFF ? pesLength : 0
@@ -785,7 +786,7 @@ enum TSCardVideoMuxer {
         while o < pes.count {
             var header: [UInt8] = [0x47, UInt8((first ? 0x40 : 0) | ((pid >> 8) & 0x1F)), UInt8(pid & 0xFF)]
             var af: [UInt8] = []
-            if first { af = [0x50] + encodePCR(pcr) }    // random_access + PCR
+            if first { af = [randomAccess ? 0x50 : 0x10] + encodePCR(pcr) }    // random_access + PCR
             let room = 184 - (af.isEmpty ? 0 : 1 + af.count)
             let remaining = pes.count - o
             if remaining < room {

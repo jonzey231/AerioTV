@@ -10,6 +10,10 @@
 		A1R198FCCDFCE30FD191BF69 /* RemoteSessionNowPlaying.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */; };
 		A1R865DEBFC0015BAB4F022B /* AirPlayTileDelivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */; };
 		A1R97E4D2C14EFFBDA110A4D /* TSLANAudioRewriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8231 /* TSLANAudioRewriter.swift */; };
+		5B11801E8D7B1330A0EA0F6E /* MultiviewCompositor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D76CB0DDDCB8645B547021D /* MultiviewCompositor.swift */; };
+		4EDBB7B772510A4904D83395 /* MultiviewCompositor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D76CB0DDDCB8645B547021D /* MultiviewCompositor.swift */; };
+		D6F5D33CC0725FD234B75C51 /* MultiviewCompositeTS.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB8D6F1ADC2B9051D70A97F7 /* MultiviewCompositeTS.swift */; };
+		35BDAE4FB1BC23EE075FD15E /* MultiviewCompositeTS.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB8D6F1ADC2B9051D70A97F7 /* MultiviewCompositeTS.swift */; };
 		A1R97E4D2C14EFFBDA110B5E /* TSHLSPlaylist.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8342 /* TSHLSPlaylist.swift */; };
 		A1R8CEDC79EEAEB1C433DB5F /* TSLANAudioRewriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8231 /* TSLANAudioRewriter.swift */; };
 		A1R8CEDC79EEAEB1C433DC6A /* TSHLSPlaylist.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8342 /* TSHLSPlaylist.swift */; };
@@ -358,6 +362,8 @@
 		A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionNowPlaying.swift; sourceTree = "<group>"; };
 		A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayTileDelivery.swift; sourceTree = "<group>"; };
 		A1R8ABB50566B8495C3C8231 /* TSLANAudioRewriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSLANAudioRewriter.swift; sourceTree = "<group>"; };
+		9D76CB0DDDCB8645B547021D /* MultiviewCompositor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiviewCompositor.swift; sourceTree = "<group>"; };
+		FB8D6F1ADC2B9051D70A97F7 /* MultiviewCompositeTS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiviewCompositeTS.swift; sourceTree = "<group>"; };
 		A1R8ABB50566B8495C3C8342 /* TSHLSPlaylist.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSHLSPlaylist.swift; sourceTree = "<group>"; };
 		A1R3EEB47325934697D79C89 /* AirPlayReceiverResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayReceiverResolver.swift; sourceTree = "<group>"; };
 		A1R11426AB13986BB21FB3FC /* AirPlayMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayMonitor.swift; sourceTree = "<group>"; };
@@ -1034,6 +1040,8 @@
 				A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */,
 				A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */,
 				A1R8ABB50566B8495C3C8231 /* TSLANAudioRewriter.swift */,
+				9D76CB0DDDCB8645B547021D /* MultiviewCompositor.swift */,
+				FB8D6F1ADC2B9051D70A97F7 /* MultiviewCompositeTS.swift */,
 				A1R8ABB50566B8495C3C8342 /* TSHLSPlaylist.swift */,
 				A1R3EEB47325934697D79C89 /* AirPlayReceiverResolver.swift */,
 				A1R11426AB13986BB21FB3FC /* AirPlayMonitor.swift */,
@@ -1342,6 +1350,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1R8CEDC79EEAEB1C433DB5F /* TSLANAudioRewriter.swift in Sources */,
+				5B11801E8D7B1330A0EA0F6E /* MultiviewCompositor.swift in Sources */,
+				D6F5D33CC0725FD234B75C51 /* MultiviewCompositeTS.swift in Sources */,
 				A1R8CEDC79EEAEB1C433DC6A /* TSHLSPlaylist.swift in Sources */,
 				A1R9EEF67E03A6539AE3DC4E /* AirPlayAudioMode.swift in Sources */,
 				81A5CE2643A02F7A26B2B5CF /* AddServerView.swift in Sources */,
@@ -1490,6 +1500,8 @@
 				A1R198FCCDFCE30FD191BF69 /* RemoteSessionNowPlaying.swift in Sources */,
 				A1R865DEBFC0015BAB4F022B /* AirPlayTileDelivery.swift in Sources */,
 				A1R97E4D2C14EFFBDA110A4D /* TSLANAudioRewriter.swift in Sources */,
+				4EDBB7B772510A4904D83395 /* MultiviewCompositor.swift in Sources */,
+				35BDAE4FB1BC23EE075FD15E /* MultiviewCompositeTS.swift in Sources */,
 				A1R97E4D2C14EFFBDA110B5E /* TSHLSPlaylist.swift in Sources */,
 				A1RF6A0E8715728C27F1F2FB /* AirPlayReceiverResolver.swift in Sources */,
 				A1R58F2EB6D2DBEFDAAB10ED /* AirPlayMonitor.swift in Sources */,

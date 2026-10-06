@@ -1422,9 +1422,8 @@ final class PlayWhereRouter: ObservableObject {
 
     /// The receiver name when the active remote session can open Multiview
     /// natively (AerioTV Remote host or Cast Connect TV app that advertised
-    /// it), else nil. AirPlay and the Cast web receiver never qualify until
-    /// the phone-side composite (part 2) lands.
-    static func multiviewReceiverName() -> String? {
+    /// it), else nil.
+    static func multiviewNativeReceiverName() -> String? {
         switch activeTransport() {
         case .cast:
             return AerioCastController.shared.canOpenMultiviewOnReceiver ? receiverName(.cast) : nil
@@ -1436,10 +1435,42 @@ final class PlayWhereRouter: ObservableObject {
         }
     }
 
-    /// Multiview dock card Play: with a capable receiver, the play-where
-    /// prompt; otherwise straight to Play Here.
+    /// The composite transport when the active receiver cannot run
+    /// Multiview itself and the phone can compose it (part 2, Logan
+    /// 2026-10-06): the Chromecast web receiver, or an AirPlay receiver
+    /// with a screen. nil otherwise.
+    static func multiviewCompositeTransport() -> MultiviewCompositeSession.Transport? {
+        guard multiviewNativeReceiverName() == nil else { return nil }
+        switch activeTransport() {
+        case .cast:
+            return AerioCastController.shared.receiverTarget == .webReceiver ? .cast : nil
+        case .airPlay:
+            return AirPlayMonitor.servableAirPlayOutput() != nil
+                && AirPlayMonitor.shared.receiver?.isAudioOnly != true ? .airPlay : nil
+        default:
+            return nil
+        }
+    }
+
+    /// The "Play on <receiver>" name for `count` staged channels: native
+    /// Multiview for any count, the phone composite for 2 to 4.
+    static func multiviewReceiverName(count: Int) -> String? {
+        if let native = multiviewNativeReceiverName() { return native }
+        guard let t = multiviewCompositeTransport(), MultiviewCompositeSession.eligible(count: count) else { return nil }
+        return receiverName(t == .cast ? .cast : .airPlay)
+    }
+
+    /// One-line note under the play buttons when the receiver can only take
+    /// the phone composite and more channels are staged than it carries.
+    static func multiviewLimitNote(count: Int) -> String? {
+        guard multiviewCompositeTransport() != nil, count > MultiviewCompositeLayout.maxTiles else { return nil }
+        return MultiviewCompositeSession.tileLimitNote
+    }
+
+    /// Multiview dock card Play: with a receiver that can take it, the
+    /// play-where prompt; otherwise straight to Play Here.
     func requestMultiview(channels: [ChannelDisplayItem], focus: Int, play: @escaping () -> Void) {
-        guard let receiver = Self.multiviewReceiverName() else {
+        guard let receiver = Self.multiviewReceiverName(count: channels.count) else {
             playMultiviewHere(play: play)
             return
         }
@@ -1464,8 +1495,14 @@ final class PlayWhereRouter: ObservableObject {
         }
     }
 
-    /// "Play on <receiver>": send multiview.open on the active transport.
+    /// "Play on <receiver>": send multiview.open on the active transport
+    /// when the receiver runs Multiview itself; otherwise the phone plays
+    /// the Multiview here and sends the composite (2 to 4 channels).
     func playMultiviewOnReceiver(channels: [ChannelDisplayItem], focus: Int) {
+        if Self.multiviewNativeReceiverName() == nil, let t = Self.multiviewCompositeTransport() {
+            playMultiviewComposite(transport: t, count: channels.count)
+            return
+        }
         let sent: Bool
         switch Self.activeTransport() {
         case .cast: sent = AerioCastController.shared.openMultiviewOnReceiver(channels, focus: focus)
@@ -1475,6 +1512,29 @@ final class PlayWhereRouter: ObservableObject {
         guard sent else { return }
         // The receiver took the set: nothing stays staged on the phone.
         MultiviewDockState.clearStaging(reason: "sent to \(Self.receiverName(Self.activeTransport() ?? .cast))")
+    }
+
+    /// Phone-side composite: the tiles play here (they are the sources) and
+    /// the composite goes to the receiver. AirPlay arms the composite first
+    /// so the real tiles mount pinned to this device and the hidden
+    /// composite tile takes the route; Cast pins local like Play Here.
+    private func playMultiviewComposite(transport t: MultiviewCompositeSession.Transport, count: Int) {
+        guard MultiviewCompositeSession.eligible(count: count) else {
+            debugLog("[MV-CAST] composite refused: \(count) channels (2 to \(MultiviewCompositeLayout.maxTiles))")
+            return
+        }
+        let enterLocal = {
+            if PlayerSession.shared.mode != .multiview { MultiviewDockState.playHereNow() }
+        }
+        switch t {
+        case .cast:
+            pinLocal()
+            enterLocal()
+            MultiviewCompositeSession.shared.start(transport: .cast)
+        case .airPlay:
+            MultiviewCompositeSession.shared.start(transport: .airPlay)
+            enterLocal()
+        }
     }
 
     enum Transport { case cast, companion, airPlay }

@@ -3572,5 +3572,159 @@ runAudioOnlyChecks()
 
 runCardVideoChecks()
 
+// MARK: Multiview composite (phone-side grid, 2026-10-06)
+
+@MainActor func runMultiviewCompositeChecks() {
+    // Layout at 1280x720.
+    let r2 = MultiviewCompositeLayout.tileRects(count: 2)
+    expectEq(r2, [CGRect(x: 0, y: 0, width: 638, height: 720), CGRect(x: 642, y: 0, width: 638, height: 720)],
+             "mv composite: 2-up rects")
+    let r4 = MultiviewCompositeLayout.tileRects(count: 4)
+    expectEq(r4, [CGRect(x: 0, y: 0, width: 638, height: 358), CGRect(x: 642, y: 0, width: 638, height: 358),
+                  CGRect(x: 0, y: 362, width: 638, height: 358), CGRect(x: 642, y: 362, width: 638, height: 358)],
+             "mv composite: 4-up rects")
+    let r3 = MultiviewCompositeLayout.tileRects(count: 3)
+    expectEq(r3.count, 3, "mv composite: 3-up count")
+    expect(r3[0].minX == 0 && r3[0].height == 720 && r3[0].width > r3[1].width,
+           "mv composite: 3-up big tile left, full height")
+    expect(r3[1].minX == r3[2].minX && r3[1].maxY < r3[2].minY && r3[2].maxY == 720 && r3[1].maxX == 1280,
+           "mv composite: 3-up two stacked on the right")
+    let bounds = CGRect(x: 0, y: 0, width: 1280, height: 720)
+    for (n, rects) in [(2, r2), (3, r3), (4, r4)] {
+        var ok = rects.allSatisfy { bounds.contains($0) && $0.width >= 300 && $0.height >= 300 }
+        for i in rects.indices { for j in rects.indices where i < j { if rects[i].intersects(rects[j]) { ok = false } } }
+        expect(ok, "mv composite: \(n)-up rects inside the frame, no overlap")
+    }
+    expectEq(MultiviewCompositeLayout.tileRects(count: 6).count, 4, "mv composite: capped at 4 tiles")
+    expectEq(MultiviewCompositeLayout.videoRect(in: r4[1], aspect: 16.0 / 9.0),
+             CGRect(x: 643, y: 0, width: 636, height: 358), "mv composite: 16:9 letterboxed in a 2x2 tile")
+    expectEq(MultiviewCompositeLayout.videoRect(in: r2[0], aspect: 16.0 / 9.0),
+             CGRect(x: 0, y: 181, width: 638, height: 359), "mv composite: 16:9 letterboxed in a 2-up tile")
+    expectEq(MultiviewCompositeLayout.videoRect(in: r2[0], aspect: 4.0 / 3.0).width, 638,
+             "mv composite: 4:3 fits the 2-up tile width")
+    expectEq(MultiviewCompositeLayout.borderStrips(r4[0], width: 2).count, 4, "mv composite: four border strips")
+
+    // Key-frame policy: 30 fps, IDR every 2 s.
+    var policy = MultiviewKeyframePolicy()
+    var keys: [Int] = []
+    for f in 0..<200 where policy.isKeyframe(pts: 900_000 + Int64(f) * 3000) { keys.append(f) }
+    expectEq(keys, [0, 60, 90, 150, 180], "mv composite: IDR at 2 s cadence plus every 3 s boundary")
+
+    // Live H.264 TS: 10 s at 30 fps plus AAC every 1920 ticks.
+    var mux = MultiviewCompositeTSMuxer()
+    policy = MultiviewKeyframePolicy()
+    var stream: [UInt8] = []
+    let base: Int64 = (1 << 33) - 5 * 90_000   // crosses the 33-bit wrap mid-run
+    var audioPTS = base
+    var expectedAudio: [Int64] = []
+    for f in 0..<300 {
+        let pts = base + Int64(f) * 3000
+        let key = policy.isKeyframe(pts: pts)
+        let au: [UInt8] = [0, 0, 0, 1, 0x09, 0xF0] + (key ? [0, 0, 0, 1, 0x65] : [0, 0, 0, 1, 0x41])
+            + [UInt8](repeating: UInt8(f & 0xFF), count: 300 + (f % 7) * 97)
+        stream += mux.video(accessUnit: au, pts: pts, keyframe: key)
+        // Audio runs a little ahead of the video, as the compositor muxes it.
+        while audioPTS <= pts + 9000 {
+            let adts = TSLANAudioRewriter.adtsHeader(payloadLength: 20, frequencyIndex: 3) + [UInt8](repeating: 0x11, count: 20)
+            stream += mux.audio(adtsFrame: adts, pts: audioPTS)
+            expectedAudio.append(audioPTS & TSLANAudioRewriter.pts33Mask)
+            audioPTS += 1920
+        }
+    }
+    expectEq(stream.count % 188, 0, "mv composite TS: whole packets")
+    let packets = stride(from: 0, to: stream.count, by: 188).map { Array(stream[$0..<($0 + 188)]) }
+    func pid(_ p: [UInt8]) -> Int { (Int(p[1] & 0x1F) << 8) | Int(p[2]) }
+    expect(packets.allSatisfy { $0[0] == 0x47 }, "mv composite TS: sync bytes")
+    let pmtPacket = packets.first { pid($0) == MultiviewCompositeTSMuxer.pmtPID }
+    let info = pmtPacket.flatMap { TSLANAudioRewriter.parsePMT($0) }
+    expectEq(info?.videoPID, 0x0100, "mv composite TS: PMT video PID")
+    expectEq(info?.pcrPID, 0x0100, "mv composite TS: PCR on video")
+    expectEq(info?.audio.first?.pid, 0x0101, "mv composite TS: PMT audio PID")
+    expectEq(info?.audio.first?.type, 0x0F, "mv composite TS: ADTS AAC stream type")
+    expectEq(packets.first.map(pid), 0, "mv composite TS: PAT first (first frame is a key frame)")
+    // Continuity counters per PID (payload-bearing packets only).
+    var lastCC: [Int: UInt8] = [:]
+    var ccOK = true
+    for p in packets where p[3] & 0x10 != 0 {
+        let cc = p[3] & 0x0F
+        if let prev = lastCC[pid(p)], (prev + 1) & 0x0F != cc { ccOK = false }
+        lastCC[pid(p)] = cc
+    }
+    expect(ccOK, "mv composite TS: continuity counters run without gaps")
+    // Video PES: PTS continuity, key frames with RAI led by PAT + PMT.
+    var videoPTS: [Int64] = []
+    var keyIndexes: [Int] = []
+    var raiLedByPSI = true
+    for (i, p) in packets.enumerated() where pid(p) == 0x0100 && p[1] & 0x40 != 0 {
+        if let v = TSLANAudioRewriter.pesPTS(p) { videoPTS.append(v) }
+        let rai = (p[3] >> 4) & 0x02 != 0 && p[4] > 0 && p[5] & 0x40 != 0
+        if rai {
+            keyIndexes.append(videoPTS.count - 1)
+            if i < 2 || pid(packets[i - 2]) != 0 || pid(packets[i - 1]) != MultiviewCompositeTSMuxer.pmtPID { raiLedByPSI = false }
+        }
+    }
+    expectEq(videoPTS.count, 300, "mv composite TS: one video PES per frame")
+    var steps = Set<Int64>()
+    for i in 1..<videoPTS.count { steps.insert((videoPTS[i] - videoPTS[i - 1]) & TSLANAudioRewriter.pts33Mask) }
+    expectEq(steps, [3000], "mv composite TS: video PTS continuous at 3000 ticks across the 33-bit wrap")
+    expectEq(keyIndexes, [0, 60, 90, 150, 180, 240, 270], "mv composite TS: RAI only on the policy's IDRs")
+    expect(raiLedByPSI, "mv composite TS: every IDR led by PAT + PMT")
+    // A segmenter cutting at the first key frame at or after 3 s (the
+    // remuxers' rule) cuts at exactly 3 s, on an IDR.
+    var segStart = 0
+    var segFrames: [Int] = []
+    for k in keyIndexes.dropFirst() where (Int64(k - segStart) * 3000) >= 3 * 90_000 {
+        segFrames.append(k - segStart)
+        segStart = k
+    }
+    expectEq(segFrames, [90, 90, 90], "mv composite TS: segment cuts at 3 s land on IDRs")
+    // The tile-tap demuxer reads the audio back in arbitrary chunks.
+    var demux = MultiviewTapDemuxer()
+    var tapped: [MultiviewTapAudioPES] = []
+    var o = 0
+    var chunk = 977
+    while o < stream.count {
+        let end = min(stream.count, o + chunk)
+        tapped += demux.feed(Array(stream[o..<end]))
+        o = end
+        chunk = chunk == 977 ? 5003 : 977
+    }
+    expectEq(demux.audioPID, 0x0101, "mv tap demux: audio PID from the PMT")
+    expectEq(Array(tapped.map(\.pts)), Array(expectedAudio.dropLast()), "mv tap demux: audio PTS in order (last PES pending)")
+    expect(tapped.allSatisfy { MultiviewADTS.parse($0.payload, 0)?.frameLength == 27 }, "mv tap demux: ADTS frames intact")
+    if let h = MultiviewADTS.parse(tapped.first?.payload ?? [], 0) {
+        expectEq(h.sampleRate, 48_000, "mv ADTS: 48 kHz")
+        expectEq(MultiviewADTS.audioSpecificConfig(h), [0x11, 0x90], "mv ADTS: ASC for AAC-LC 48 kHz stereo")
+    } else {
+        expect(false, "mv ADTS: header parses")
+    }
+
+    // Audio clock: anchored so the displayed source frame sounds now.
+    var clock = MultiviewAudioClock()
+    let now: Int64 = 50 * 90_000
+    let a = clock.map(sourcePTS: 1_000_000, compositeNow: now, displayedSourcePTS: { 1_000_000 - 4 * 90_000 }, floor: 0)
+    expectEq(a, now + 4 * 90_000, "mv audio clock: ahead-of-display audio lands in the future by the display lag")
+    let b = clock.map(sourcePTS: 1_001_920, compositeNow: 0, displayedSourcePTS: { 0 }, floor: a ?? 0)
+    expectEq(b, (a ?? 0) + 1920, "mv audio clock: continuous after the anchor")
+    let wrapped = clock.map(sourcePTS: (1_001_920 + 1920) & TSLANAudioRewriter.pts33Mask, compositeNow: 0,
+                            displayedSourcePTS: { 0 }, floor: b ?? 0)
+    expectEq(wrapped, (b ?? 0) + 1920, "mv audio clock: steady offset")
+    let late = clock.map(sourcePTS: 1_001_920, compositeNow: 0, displayedSourcePTS: { 0 }, floor: wrapped ?? 0)
+    expect(late == nil, "mv audio clock: audio already covered is dropped")
+    clock.reanchor()
+    // Focus switch: the new tile's replayed history from before what it
+    // shows is dropped; its audio from the displayed frame on sounds now.
+    let floorNow = (wrapped ?? 0) + 1920
+    let early = clock.map(sourcePTS: 7_000_000, compositeNow: floorNow, displayedSourcePTS: { 7_000_000 + 90_000 },
+                          floor: floorNow)
+    expect(early == nil, "mv audio clock: re-anchored history before the displayed frame is dropped")
+    let shown = clock.map(sourcePTS: 7_090_000, compositeNow: 0, displayedSourcePTS: { 0 }, floor: floorNow)
+    expectEq(shown, nil, "mv audio clock: the displayed frame itself is at the floor (already covered)")
+    let next = clock.map(sourcePTS: 7_091_920, compositeNow: 0, displayedSourcePTS: { 0 }, floor: floorNow)
+    expectEq(next, floorNow + 1920, "mv audio clock: re-anchored audio follows on the composite clock")
+}
+
+runMultiviewCompositeChecks()
+
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

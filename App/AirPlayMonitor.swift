@@ -471,6 +471,7 @@ final class AirPlayMonitor: ObservableObject {
         guard !stoppingSession else { return }
         stoppingSession = true
         defer { stoppingSession = false }
+        MultiviewCompositeSession.shared.stop(detail: "airplay session ended")
         hostsHeadless = false
         headlessTune = false
         detach(silently: true)

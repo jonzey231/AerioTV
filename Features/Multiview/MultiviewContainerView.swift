@@ -28,6 +28,12 @@ struct MultiviewContainerView: View {
     /// flows to the guide beneath. Without this observer the
     /// binding stays stale and focus stays trapped in the corner.
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
+    #if os(iOS)
+    /// Phone-side Multiview composite (2026-10-06): an AirPlay composite is
+    /// carried by a hidden tile playing the composite TS.
+    @ObservedObject private var mvComposite = MultiviewCompositeSession.shared
+    @StateObject private var compositeProgress = PlayerProgressStore()
+    #endif
 
     /// When `true`, the add-channel sheet is presented. Wired to the
     /// transport bar's "Add Tile" button.
@@ -255,6 +261,32 @@ struct MultiviewContainerView: View {
     @State private var topStripDragOffset: CGFloat = 0
     @State private var containerHeight: CGFloat = 0
 
+    /// The AirPlay composite's carrier: an ordinary live tile (its own
+    /// TSHLSRemuxer, AirPlayTileDelivery and LAN playlist) on the composite
+    /// loopback TS, invisible on the phone. It owns the AirPlay route
+    /// (MultiviewCompositeTaps.ownsAirPlay) while the real tiles stay local.
+    @ViewBuilder
+    private var compositeAirPlayTile: some View {
+        if let url = mvComposite.airPlayTileURL {
+            AVPlayerMultiviewTile(
+                tileID: MultiviewCompositeTaps.compositeTileID,
+                streamURL: url,
+                headers: [:],
+                shouldPause: false,
+                channelName: "Multiview",
+                progressStore: compositeProgress,
+                onEngineFallback: { reason in
+                    debugLog("[MV-CAST] composite AirPlay tile failed (\(reason))")
+                    MultiviewCompositeSession.shared.stop(detail: "airplay tile failed", endTransport: true)
+                }
+            )
+            .frame(width: 2, height: 2)
+            .opacity(0.01)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+
     private var topStripSwipeEligible: Bool {
         store.tiles.count == 1 && !nowPlaying.isMinimized
     }
@@ -284,6 +316,7 @@ struct MultiviewContainerView: View {
         containerBody
             #if os(iOS)
             .offset(y: topStripDragOffset)
+            .background(compositeAirPlayTile)
             #endif
             .channelNumberEntry(
                 scope: .player,

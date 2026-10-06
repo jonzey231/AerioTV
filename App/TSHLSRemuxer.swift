@@ -558,6 +558,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// later by the silence/stale-frame ladder; a closed connection is
     /// proof the upstream is gone, so the consumer re-tunes at once.
     var onIngestClosed: (() -> Void)?
+    /// Multiview composite (2026-10-06): the raw ingest bytes, on `queue`,
+    /// for the phone-side composite's audio. nil when no composite runs.
+    fileprivate var ingestTap: ((Data) -> Void)?
     /// Set by live consumers before start(); see onIngestSilence.
     var reportsIngestStall = false
     /// Seconds of dead air that count as a stall (Android parity: the
@@ -3670,6 +3673,10 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
         completionHandler(.allow)
     }
 
+    func setIngestTap(_ tap: (@Sendable (Data) -> Void)?) {
+        queue.async { [weak self] in self?.ingestTap = tap }
+    }
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         // Bytes still in flight from a flip's outgoing channel belong to
         // the old source; the new demux must never see them.
@@ -3713,6 +3720,7 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
             // A retarget that ran between the check above and this block
             // reset the demux for the new source: drop the old bytes.
             guard let self, self.currentIngestEpoch == epoch else { return }
+            self.ingestTap?(data)
             self.consume(data)
         }
     }
@@ -5065,7 +5073,7 @@ struct AVPlayerMultiviewTile: View {
             #if os(iOS)
             // AirPlay route already selected: resolve the receiver, plan
             // the audio and start on the LAN URL instead (plan 4c).
-            if MultiviewStore.shared.audioTileID == tileID, let mux = remuxer,
+            if MultiviewCompositeTaps.ownsAirPlay(tileID: tileID), let mux = remuxer,
                setLANCard(on: mux),
                airPlayDelivery.prepareStart(remuxer: mux, loopbackURL: url, channelName: channelName,
                                             start: { startURL in
@@ -5115,7 +5123,12 @@ struct AVPlayerMultiviewTile: View {
         // and uses the EMITTED value (the store property itself is
         // willSet-old inside this handler).
         .onReceive(MultiviewStore.shared.$audioTileID) { newAudioID in
+            #if os(iOS)
+            // A running Multiview composite keeps the phone silent.
+            player?.isMuted = MultiviewCompositeTaps.isMuted(tileID: tileID, audioID: newAudioID)
+            #else
             player?.isMuted = (newAudioID != tileID)
+            #endif
         }
         .onChange(of: shouldPause) { _, paused in
             if paused { player?.pause() } else { player?.play() }
@@ -7080,7 +7093,11 @@ struct AVPlayerMultiviewTile: View {
         // Remote-session card (2026-09-12): AirPlay state for the card comes
         // off whichever AVPlayer is currently feeding output. The audio tile
         // is the one that can own an external route.
-        if MultiviewStore.shared.audioTileID == tileID {
+        // Multiview composite (2026-10-06): every real tile is a source the
+        // compositor reads; while an AirPlay composite runs they stay on
+        // this device and the hidden composite tile owns the route.
+        MultiviewCompositeTaps.shared.register(tileID: tileID, player: avPlayer, item: playerItem, remuxer: remuxer)
+        if MultiviewCompositeTaps.ownsAirPlay(tileID: tileID) {
             AirPlayMonitor.shared.attach(avPlayer)
             if let mux = remuxer {
                 airPlayDelivery.onWatchdogs = { suspend, item in
@@ -7094,7 +7111,11 @@ struct AVPlayerMultiviewTile: View {
         }
         #endif
         // Live truth at this instant, never a captured snapshot.
+        #if os(iOS)
+        avPlayer.isMuted = MultiviewCompositeTaps.isMuted(tileID: tileID, audioID: MultiviewStore.shared.audioTileID)
+        #else
         avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)
+        #endif
         // VOD resume (Continue Watching): the store carries the offset
         // the container preloaded; AVPlayer queues the seek until the
         // item is ready, so firing it here is safe and race-free.
@@ -7408,6 +7429,7 @@ struct AVPlayerMultiviewTile: View {
         player?.pause()
         player = nil
         #if os(iOS)
+        MultiviewCompositeTaps.shared.unregister(tileID: tileID)
         airPlayDelivery.reset()
         AirPlayMonitor.shared.detach()
         #endif
