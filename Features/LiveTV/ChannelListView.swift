@@ -3226,6 +3226,12 @@ struct ChannelRow: View {
     /// can use the full row width (the logo eats space and crops long names,
     /// especially on iPhone). Cross-platform; defaults on.
     @AppStorage("ui.showChannelLogos") private var showChannelLogos = true
+    /// Settings > Live TV > Logo Size. Scales the logo part of the leading
+    /// column and the logo's height floor, so the row grows or shrinks with it.
+    @AppStorage(liveTVLogoSizeKey) private var logoSizePercent = liveTVLogoSizeDefault
+    private var logoFactor: CGFloat {
+        showChannelLogos ? LiveTVLogoSize.factor(logoSizePercent) : 1
+    }
     /// GH #19 (Android parity): when off, the channel-number column is
     /// hidden. Cross-platform; defaults on.
     @AppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
@@ -3312,9 +3318,9 @@ struct ChannelRow: View {
     /// number needs, so the number stays on one line even for a tiny logo.
     private func leadingColumnWidth(_ s: CGFloat) -> CGFloat {
         #if os(tvOS)
-        let base: CGFloat = 72 + numberColumnWidth(fontSize: 24) + 14
+        let base: CGFloat = 72 * logoFactor + numberColumnWidth(fontSize: 24) + 14
         #else
-        let base: CGFloat = (isWide ? 50 : 38) * s
+        let base: CGFloat = (isWide ? 50 : 38) * s * logoFactor
             + numberColumnWidth(fontSize: numberFontSize) + (isWide ? 14 : 10) * s
         #endif
         let width = logoFillsRow ? base * Self.bothHiddenWidthFactor : base
@@ -3656,7 +3662,7 @@ struct ChannelRow: View {
                                      width: leadingColumnWidth(1),
                                      // Row height stays driven by the text
                                      // column; the badge fills that height.
-                                     maxHeight: max(48, uniformTextHeight),
+                                     maxHeight: max(48 * logoFactor, uniformTextHeight),
                                      numberFontSize: 24,
                                      // Row card is a 12pt continuous rounded
                                      // rect; a logo that fills its slot takes
@@ -3664,7 +3670,7 @@ struct ChannelRow: View {
                                      // as a pill.
                                      containerRadius: 12,
                                      lineGap: Self.stackGap,
-                                     minimumLogoHeight: 48,
+                                     minimumLogoHeight: 48 * logoFactor,
                                      logoSizedByWidth: true)
                     }
 
@@ -3814,12 +3820,12 @@ struct ChannelRow: View {
                              width: leadingColumnWidth(s),
                              // Row height stays driven by the text column,
                              // measured below; the badge fills it.
-                             maxHeight: max((isWide ? 34 : 26) * s, uniformTextHeight),
+                             maxHeight: max((isWide ? 34 : 26) * s * logoFactor, uniformTextHeight),
                              numberFontSize: (isWide ? 17 : 13) * s,
                              // Same 12pt row card as the tvOS branch.
                              containerRadius: 12,
                              lineGap: Self.stackGap,
-                             minimumLogoHeight: (isWide ? 34 : 26) * s,
+                             minimumLogoHeight: (isWide ? 34 : 26) * s * logoFactor,
                              logoSizedByWidth: true)
             }
 
@@ -5607,6 +5613,28 @@ private struct PhoneChromeInset<Content: View>: View {
 }
 #endif
 
+// MARK: - Live TV Logo Size
+//
+// Settings > Live TV > Logo Size (Discord request 2026-10-06, identical spec
+// on Android). The SAME ladder, labels and default as Settings > Multiview >
+// Logo Size. Here the value is read relative to the default: 10% draws the
+// logo at exactly today's size, 5% at half, 25% at two and a half times.
+// The multiplier applies on top of the "logos grow when numbers or names are
+// hidden" rule. Surfaces with a fixed cell (the guide's channel column) cap
+// the grown logo at the room the cell has; the list rows grow with it.
+let liveTVLogoSizeKey = "ui.channelLogoSize"
+let liveTVLogoSizeDefault = multiviewLogoSizeDefault
+let liveTVLogoSizeChoices = multiviewLogoSizeChoices
+
+enum LiveTVLogoSize {
+    /// The multiplier for a stored percent, snapped to the nearest stop.
+    static func factor(_ percent: Int) -> CGFloat {
+        let snapped = liveTVLogoSizeChoices.min(by: { abs($0 - percent) < abs($1 - percent) })
+            ?? liveTVLogoSizeDefault
+        return CGFloat(snapped) / CGFloat(liveTVLogoSizeDefault)
+    }
+}
+
 // MARK: - ChannelBadge
 //
 // ONE shared leading column for every surface that draws a channel's
@@ -5680,6 +5708,14 @@ struct ChannelBadge: View {
     /// rather than the List one. See `CachedLogoImage.usesGuideCorners`.
     var usesGuideCorners: Bool = false
 
+    /// Settings > Live TV > Logo Size multiplier (see `LiveTVLogoSize`).
+    /// The logo box is scaled around its center; the slot is unchanged.
+    var logoScale: CGFloat = 1
+    /// The most room a GROWN logo may take: the full width and the full
+    /// height the lines share (the badge subtracts its own text lines).
+    /// Nil caps growth at the stock slot, so only shrinking shows.
+    var logoRoom: CGSize? = nil
+
     /// Characters the number must fit, published by the list / guide from
     /// the widest number on screen. See `ChannelNumberColumn`.
     @Environment(\.aerioChannelNumberChars) private var numberChars
@@ -5717,6 +5753,19 @@ struct ChannelBadge: View {
 
     /// The badge's actual width: never narrower than the number needs.
     private var slotWidth: CGFloat { max(width, numberWidth) }
+
+    /// The logo box after Logo Size: scaled, and when grown, capped at
+    /// `logoRoom` less the text lines (`textCost`).
+    private func scaledLogo(width w: CGFloat, height h: CGFloat, textCost: CGFloat) -> CGSize {
+        guard logoScale != 1 else { return CGSize(width: w, height: h) }
+        var out = CGSize(width: w * logoScale, height: h * logoScale)
+        if logoScale > 1 {
+            let capW = max(w, logoRoom?.width ?? w)
+            let capH = max(h, (logoRoom?.height ?? 0) - textCost)
+            out = CGSize(width: min(out.width, capW), height: min(out.height, capH))
+        }
+        return out
+    }
 
     /// The logo's slot: the badge's width by whatever height the number and
     /// name lines leave.
@@ -5780,9 +5829,11 @@ struct ChannelBadge: View {
             }
             VStack(spacing: 0) {
                 if showLogo {
+                    let box = scaledLogo(width: logoColumnWidth, height: tvLogoHeight,
+                                         textCost: nameBlock)
                     CachedLogoImage(url: logoURL,
-                                    width: logoColumnWidth,
-                                    height: tvLogoHeight,
+                                    width: box.width,
+                                    height: box.height,
                                     containerRadius: containerRadius,
                                     sizedByWidth: logoSizedByWidth,
                                     usesGuideCorners: usesGuideCorners)
@@ -5803,9 +5854,11 @@ struct ChannelBadge: View {
         #else
         VStack(spacing: 0) {
             if showLogo {
+                let box = scaledLogo(width: slotWidth, height: logoHeight,
+                                     textCost: numberBlock + nameBlock)
                 CachedLogoImage(url: logoURL,
-                                width: slotWidth,
-                                height: logoHeight,
+                                width: box.width,
+                                height: box.height,
                                 containerRadius: containerRadius,
                                 sizedByWidth: logoSizedByWidth,
                                 usesGuideCorners: usesGuideCorners)

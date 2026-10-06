@@ -8039,6 +8039,10 @@ private struct GuideChannelButton: View {
     /// GH #73 (ant462, filed on Android; applied here for parity): hide the
     /// channel NAME text in the guide rail, leaving logo and number.
     @AppStorage("ui.showChannelNames") private var showChannelNames = true
+    /// Settings > Live TV > Logo Size. Multiplies the logo box this row
+    /// would draw today; growth is capped at the room the cell has.
+    @AppStorage(liveTVLogoSizeKey) private var logoSizePercent = liveTVLogoSizeDefault
+    private var logoFactor: CGFloat { LiveTVLogoSize.factor(logoSizePercent) }
     /// Widest channel number on screen, and the app-wide Text Size: the
     /// tvOS number column is measured from both (see `ChannelNumberColumn`).
     @Environment(\.aerioChannelNumberChars) private var numberChars
@@ -8249,7 +8253,9 @@ private struct GuideChannelButton: View {
                             // between the number and the logo column goes to
                             // the channel name (Logan 2026-09-16).
                             minimumLogoHeight: LogoMetrics.stockHeight,
-                            usesGuideCorners: true)
+                            usesGuideCorners: true,
+                            logoScale: logoFactor,
+                            logoRoom: CGSize(width: boxWidth, height: boxHeight))
         // Centered: with the number in the band there is nothing pinned to
         // the cell's left edge any more, so the logo and the name sit in the
         // middle of the full width.
@@ -8269,6 +8275,11 @@ private struct GuideChannelButton: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         #else
         let grown = grownLogoSize
+        // Logo Size above 10% grows a stock box toward the cell, so the
+        // grown-box insets apply then too (clear of the corner icons).
+        let padded = grown != nil || logoFactor > 1
+        let room = CGSize(width: columnWidth - LogoMetrics.leadingPadding - LogoMetrics.horizontalPadding,
+                          height: rowHeight - logoTopInset - LogoMetrics.inset)
         // Same SHARED ChannelBadge as the tvOS branch and the Live TV list
         // rows (Logan 2026-09-16), phone point sizes.
         return ChannelBadge(logoURL: channel.logoURL,
@@ -8287,9 +8298,11 @@ private struct GuideChannelButton: View {
                             containerRadius: LogoCorners.guideRadius,
                             lineGap: 2,
                             minimumLogoHeight: LogoMetrics.stockHeight,
-                            usesGuideCorners: true)
-        .padding(.top, grown == nil ? 0 : logoTopInset)
-        .padding(.bottom, grown == nil ? 0 : LogoMetrics.inset)
+                            usesGuideCorners: true,
+                            logoScale: logoFactor,
+                            logoRoom: room)
+        .padding(.top, padded ? logoTopInset : 0)
+        .padding(.bottom, padded ? LogoMetrics.inset : 0)
         .padding(.leading, LogoMetrics.leadingPadding)
         .padding(.trailing, LogoMetrics.horizontalPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)

@@ -19,6 +19,9 @@ struct LiveTVSettingsView: View {
 
     // MARK: Guide presentation
     @AppStorage("ui.showChannelLogos")     private var showChannelLogos = true
+    /// Settings > Live TV > Logo Size (same ladder as Multiview's). Shown
+    /// only while Show Channel Logos is on.
+    @AppStorage(liveTVLogoSizeKey)         private var channelLogoSize = liveTVLogoSizeDefault
     @AppStorage("ui.showChannelNumbers")   private var showChannelNumbers = true
     @AppStorage("ui.showChannelNames")     private var showChannelNames = true
     @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
@@ -153,6 +156,9 @@ struct LiveTVSettingsView: View {
                 .listRowBackground(Color.cardBackground)
                 .onChange(of: showChannelLogos) { _, _ in
                     SyncManager.shared.pushPreferencesImmediate()
+                }
+                if showChannelLogos {
+                    logoSizeRow_iOS
                 }
                 Toggle(isOn: $showChannelNumbers) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -493,6 +499,46 @@ struct LiveTVSettingsView: View {
     }
     #endif
 
+    #if os(iOS)
+    /// Settings > Live TV > Logo Size: the same stepped slider as Settings >
+    /// Multiview > Logo Size (label left, value right, slider below), with
+    /// its footer under the slider.
+    private var logoSizeRow_iOS: some View {
+        let values = liveTVLogoSizeChoices
+        let idx = values.indices.min(by: {
+            abs(values[$0] - channelLogoSize) < abs(values[$1] - channelLogoSize)
+        }) ?? 0
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Logo Size")
+                    .scaledFont(.bodyMedium)
+                    .foregroundColor(.textPrimary)
+                Spacer()
+                Text("\(values[idx])%")
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+            }
+            Slider(
+                value: Binding(
+                    get: { Double(idx) },
+                    set: { raw in
+                        let i = min(max(Int(raw.rounded()), 0), values.count - 1)
+                        if values[i] != channelLogoSize { channelLogoSize = values[i] }
+                    }
+                ),
+                in: 0...Double(values.count - 1),
+                step: 1
+            )
+            .tint(theme.accent)
+            Text("Size of the channel logos in the guide, the channel list and the player's channel list.")
+                .scaledFont(.labelSmall.subtext())
+                .foregroundColor(Color.contrastText(.textTertiary))
+        }
+        .padding(.vertical, 4)
+        .listRowBackground(Color.cardBackground)
+    }
+    #endif
+
     // MARK: - tvOS Body
 
     #if os(tvOS)
@@ -511,6 +557,9 @@ struct LiveTVSettingsView: View {
                         isOn: $showChannelLogos,
                         onChange: { _ in }
                     )
+                    if showChannelLogos {
+                        tvLogoSizeRow
+                    }
                     TVSettingsToggleRow(
                         icon: "number",
                         iconColor: .accentPrimary,
@@ -692,6 +741,34 @@ struct LiveTVSettingsView: View {
                 }
             }
             .padding(48)
+        }
+    }
+
+    /// Settings > Live TV > Logo Size: the same one-pill-per-stop row as
+    /// Settings > Multiview > Logo Size, with its footer under it.
+    private var tvLogoSizeRow: some View {
+        let current = liveTVLogoSizeChoices.min(by: {
+            abs($0 - channelLogoSize) < abs($1 - channelLogoSize)
+        }) ?? liveTVLogoSizeDefault
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 24) {
+                Text("Logo Size")
+                    .scaledFont(.system(size: 26, weight: .medium))
+                    .foregroundColor(.textPrimary)
+                Spacer()
+                ForEach(liveTVLogoSizeChoices, id: \.self) { value in
+                    TVSettingsPill("\(value)%", isSelected: value == current) {
+                        channelLogoSize = value
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.cardBackground)
+            )
+            tvFooter("Size of the channel logos in the guide, the channel list and the player's channel list.")
         }
     }
 

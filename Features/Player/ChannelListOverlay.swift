@@ -47,6 +47,9 @@ struct ChannelPickRow: View {
     /// stays visually consistent with the guide/list.
     @AppStorage("ui.showChannelLogos") private var showChannelLogos = true
     @AppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
+    /// Settings > Live TV > Logo Size: scales the logo box (and with it the
+    /// row) relative to today's 68 x 44.
+    @AppStorage(liveTVLogoSizeKey) private var logoSizePercent = liveTVLogoSizeDefault
     /// Width a hidden number column frees for the logo (56 + 16 spacing).
     private static let numberColumn: CGFloat = 56 + 16
 
@@ -84,9 +87,10 @@ struct ChannelPickRow: View {
                 if showChannelLogos {
                     // Numbers off: the logo widens into the freed number
                     // column; height stays so the row height is unchanged.
+                    let f = LiveTVLogoSize.factor(logoSizePercent)
                     CachedLogoImage(url: item.logoURL,
-                                    width: showChannelNumbers ? 68 : 68 + Self.numberColumn,
-                                    height: 44,
+                                    width: (showChannelNumbers ? 68 : 68 + Self.numberColumn) * f,
+                                    height: 44 * f,
                                     // The picker row's card is a 12pt
                                     // continuous rounded rect; the radius is
                                     // capped at a quarter of the logo's
