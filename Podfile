@@ -4,10 +4,14 @@ use_frameworks!
 target 'Aerio_iOS' do
   platform :ios, '18.0'
   # Google Cast iOS sender (GH #33). iOS-only: casts to the same Android TV
-  # receiver app id (CFFD302F) that the Android sender uses. The -no-bluetooth
-  # variant drops Cast guest mode so no NSBluetoothAlwaysUsageDescription prompt
-  # is needed, matching AerioTV's minimal-permission posture.
-  pod 'google-cast-sdk-no-bluetooth'
+  # receiver app id (CFFD302F) that the Android sender uses. The regular pod
+  # (not -no-bluetooth) because from 4.8.1 on it ships an XCFramework with an
+  # ios-arm64_x86_64-simulator slice; the -no-bluetooth 4.8.0 pod is a fat
+  # framework that excludes arm64 for the simulator, and Xcode 27 has no
+  # Rosetta simulators. Since 4.8.1 the binary has no CoreBluetooth
+  # references, so no NSBluetoothAlwaysUsageDescription is needed (verified
+  # 2026-10-06).
+  pod 'google-cast-sdk', '~> 4.8.6'
 end
 
 target 'Aerio_tvOS' do

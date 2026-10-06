@@ -1,23 +1,24 @@
 PODS:
-  - google-cast-sdk-no-bluetooth (4.8.0):
-    - google-cast-sdk-no-bluetooth/Core (= 4.8.0)
-    - Protobuf (~> 3.13)
-  - google-cast-sdk-no-bluetooth/Core (4.8.0):
-    - Protobuf (~> 3.13)
-  - Protobuf (3.29.6)
+  - google-cast-sdk (4.8.6):
+    - GTMSessionFetcher
+  - GTMSessionFetcher (5.3.1):
+    - GTMSessionFetcher/Full (= 5.3.1)
+  - GTMSessionFetcher/Core (5.3.1)
+  - GTMSessionFetcher/Full (5.3.1):
+    - GTMSessionFetcher/Core
 
 DEPENDENCIES:
-  - google-cast-sdk-no-bluetooth
+  - google-cast-sdk (~> 4.8.6)
 
 SPEC REPOS:
   trunk:
-    - google-cast-sdk-no-bluetooth
-    - Protobuf
+    - google-cast-sdk
+    - GTMSessionFetcher
 
 SPEC CHECKSUMS:
-  google-cast-sdk-no-bluetooth: 23206cb79029beaeb610a93559f2ff4f65255797
-  Protobuf: 8d5596f7468be5400861a6bbfb2dfe9d0d1cde34
+  google-cast-sdk: e90a401e59b477644157fa782359b31b24448c9f
+  GTMSessionFetcher: a6d2b2aa203485893d4511ff64642dc811f7c09f
 
-PODFILE CHECKSUM: 8f73cac68fa89d3b179fa6b61947a106a65ee5cf
+PODFILE CHECKSUM: 892c50f5d473c527255aa8ec1954ccf6f2dea0f9
 
 COCOAPODS: 1.17.0
