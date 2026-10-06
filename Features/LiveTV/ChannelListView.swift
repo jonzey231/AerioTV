@@ -1425,6 +1425,14 @@ struct ChannelListView: View {
                         .padding(.leading, guideSidebarShiftInset)
                         .ignoresSafeArea(.container, edges: guideSidebarShiftInset > 0 ? .leading : [])
                         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { guideTopAbs = $0 }
+                        #else
+                        // iPad guide cut off after 8 rows (Logan 2026-10-05,
+                        // ipad 23:39-23:40): the keyboard from editing the
+                        // playlist in Settings left its bottom inset on this
+                        // off-screen tab, so the grid kept a frame ending at
+                        // the old keyboard top (about 340 pt short). The grid
+                        // has no text input, so it never yields to the keyboard.
+                        .ignoresSafeArea(.keyboard, edges: .bottom)
                         #endif
                         // GH #72: the guide itself stays mounted (it owns the
                         // hold-Left / sidebar receivers), the notice just
