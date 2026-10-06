@@ -1,5 +1,6 @@
 #if os(iOS)
 import AVFoundation
+import AVKit
 import Combine
 import Foundation
 
@@ -98,6 +99,71 @@ final class AirPlayMonitor: ObservableObject {
     /// detaches the player, which re-evaluates the route).
     private var stoppingSession = false
 
+    // MARK: User-ended latch (2026-10-05)
+
+    /// Route uid the user ended with the card's X / Stop AirPlay while the
+    /// system route stayed on that receiver. While it matches the current
+    /// AirPlay output the app does not use the route on its own: tunes play
+    /// on this device (fullscreen player, allowsExternalPlayback false, no
+    /// LAN serving, no card). Cleared by a route-picker selection, a
+    /// newDeviceAvailable route change, a different AirPlay output, or the
+    /// route leaving AirPlay.
+    ///
+    /// What iOS allows: AVPlayer.allowsExternalPlayback = false keeps the
+    /// VIDEO (and the player's external playback session) on the device.
+    /// There is no public API to deselect an AirPlay AUDIO route:
+    /// AVAudioSession exposes currentRoute (read only), setPreferredInput
+    /// (inputs only) and overrideOutputAudioPort(.speaker) (playAndRecord
+    /// category only, and it does not drop an AirPlay output); only the
+    /// system route picker (AVRoutePickerView / Control Center) changes the
+    /// output. So while the user leaves the receiver selected, the system
+    /// audio route still points at it, and an audio-only channel's sound
+    /// may still play there (the app no longer serves it video).
+    private(set) var userEndedRouteUID: String?
+
+    /// The AirPlay output the app may use on its own: the current output
+    /// unless the user ended AirPlay on it. Every "the route is AirPlay,
+    /// serve the receiver" decision reads this, never the raw route.
+    static func servableAirPlayOutput() -> (name: String?, uid: String)? {
+        guard let out = AirPlayReceiverResolver.currentAirPlayOutput() else { return nil }
+        if let ended = shared.userEndedRouteUID, ended == out.uid { return nil }
+        return out
+    }
+
+    /// A tune now would be served to a screen receiver (Force HLS bypass).
+    var willServeReceiver: Bool {
+        Self.servableAirPlayOutput() != nil && receiver?.isAudioOnly != true
+    }
+
+    private func clearUserEnded(_ why: String) {
+        guard userEndedRouteUID != nil else { return }
+        userEndedRouteUID = nil
+        debugLog("[AVP-AIRPLAY] user-ended latch cleared (\(why)): AirPlay route usable again")
+    }
+
+    /// Route change hook (monitor's own observer and the tile's, whichever
+    /// runs first): a newly available device is a fresh user choice.
+    func noteRouteChange(reasonRaw: UInt) {
+        guard userEndedRouteUID != nil else { return }
+        if AirPlayReceiverResolver.currentAirPlayOutput() == nil {
+            clearUserEnded("route left AirPlay")
+        } else if reasonRaw == AVAudioSession.RouteChangeReason.newDeviceAvailable.rawValue {
+            clearUserEnded("newDeviceAvailable")
+        }
+    }
+
+    /// The system route picker closed (AVRoutePickerViewDelegate). With an
+    /// AirPlay output selected that is the user picking AirPlay, including
+    /// the same receiver again (no route change fires for that). A picker
+    /// cancelled without a choice is indistinguishable and also counts.
+    func routePickerDismissed() {
+        guard userEndedRouteUID != nil,
+              AirPlayReceiverResolver.currentAirPlayOutput() != nil else { return }
+        clearUserEnded("route picked in the AirPlay picker")
+        evaluate()
+        NotificationCenter.default.post(name: .aerioAirPlayRoutePicked, object: nil)
+    }
+
     private init() {
         AirPlayReceiverResolver.shared.onReceiverChange = { [weak self] r in
             self?.setReceiver(r)
@@ -129,8 +195,12 @@ final class AirPlayMonitor: ObservableObject {
         guard routeObserver == nil else { return }
         routeObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
-        ) { _ in
-            Task { @MainActor in AirPlayMonitor.shared.evaluate() }
+        ) { note in
+            let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
+            Task { @MainActor in
+                AirPlayMonitor.shared.noteRouteChange(reasonRaw: reason)
+                AirPlayMonitor.shared.evaluate()
+            }
         }
         evaluate()
     }
@@ -147,7 +217,14 @@ final class AirPlayMonitor: ObservableObject {
         // No per-session opt-out (device log 2026-09-25): while the system
         // route is AirPlay a tune goes to the receiver, because that is
         // what the route means; only the user's route picker changes it.
-        Self.enableExternalPlayback(on: player)
+        if userEndedRouteUID != nil, Self.servableAirPlayOutput() == nil,
+           AirPlayReceiverResolver.currentAirPlayOutput() != nil {
+            // The user ended AirPlay on this route: the video stays here.
+            player.allowsExternalPlayback = false
+            debugLog("[AVP-AIRPLAY] player pinned local (user ended AirPlay on this route)")
+        } else {
+            Self.enableExternalPlayback(on: player)
+        }
         startObservingRoutes()
         externalObservation = player.observe(\.isExternalPlaybackActive,
                                             options: [.initial, .new]) { p, _ in
@@ -179,7 +256,8 @@ final class AirPlayMonitor: ObservableObject {
     /// was never pinned local). Also called by AirPlayTileDelivery before a mid-play
     /// handoff swaps the item.
     func reenableExternalPlaybackForRoute() {
-        guard let player, !player.allowsExternalPlayback else { return }
+        guard let player, !player.allowsExternalPlayback,
+              Self.servableAirPlayOutput() != nil else { return }
         Self.enableExternalPlayback(on: player)
         debugLog("[AVP-AIRPLAY] external playback re-enabled on the attached player (AirPlay route present)")
     }
@@ -215,7 +293,7 @@ final class AirPlayMonitor: ObservableObject {
     /// "Connecting to AirPlay…" at once. Returns true when the caller must
     /// start minimized.
     func beginHeadlessTune(channel: String) -> Bool {
-        guard let out = AirPlayReceiverResolver.currentAirPlayOutput(),
+        guard let out = Self.servableAirPlayOutput(),
               receiver?.isAudioOnly != true,
               !AerioCastController.shared.isCasting,
               !CompanionClient.shared.isControlling else { return false }
@@ -265,21 +343,24 @@ final class AirPlayMonitor: ObservableObject {
 
     /// The card's X / Stop AirPlay. Playback stops outright and must NOT
     /// fall back to the phone's screen (rule 4: "if I close it, it should
-    /// just close"). An app cannot deselect an AirPlay route, so when the
-    /// system route is still AirPlay the card returns to the idle-route
-    /// state (Disconnect opens the route picker) and the next channel goes
-    /// to the receiver (device log 2026-09-25: pinning later players local
-    /// left the TV with the audio route only).
+    /// just close"). An app cannot deselect an AirPlay route (see
+    /// userEndedRouteUID), so when the system route is still AirPlay the
+    /// user-ended latch is set (Logan 2026-10-05: the next channel must play
+    /// on this device, not reconnect to the receiver) and the card hides.
+    /// The idle-route card with Disconnect (route picker) remains for a
+    /// route the user did not end, e.g. a receiver still selected at launch.
     func stop() {
-        let routeStays = AirPlayReceiverResolver.currentAirPlayOutput() != nil
-        if routeStays {
-            debugLog("[Cast] stop: playback stopped, no local resume (AirPlay); system route still on AirPlay, card back to idle route (Disconnect opens the route picker)")
+        let route = AirPlayReceiverResolver.currentAirPlayOutput()
+        if let route {
+            userEndedRouteUID = route.uid
+            debugLog("[Cast] stop: playback stopped, no local resume (AirPlay); system route still on AirPlay, card hidden")
+            debugLog("[AVP-AIRPLAY] user ended AirPlay: local playback until a route is picked again")
         } else {
             debugLog("[Cast] stop: session ended, no local resume (AirPlay)")
         }
         setPhase(.ended)
         stopPlayback()
-        if routeStays {
+        if route != nil {
             setPhase(.none)
             evaluate()
         }
@@ -310,7 +391,7 @@ final class AirPlayMonitor: ObservableObject {
     func handOffToReceiver() {
         if hostsHeadless { AppOrientationLock.release() }
         guard !hostsHeadless, !stoppingSession,
-              AirPlayReceiverResolver.currentAirPlayOutput() != nil,
+              Self.servableAirPlayOutput() != nil,
               PlayerSession.shared.mode != .idle || NowPlayingManager.shared.playingItem != nil
         else { return }
         hostsHeadless = true
@@ -444,7 +525,18 @@ final class AirPlayMonitor: ObservableObject {
 
     /// Re-derive the phase from the route, the player and the tile.
     func evaluate() {
-        let out = AirPlayReceiverResolver.currentAirPlayOutput()
+        let rawOut = AirPlayReceiverResolver.currentAirPlayOutput()
+        if userEndedRouteUID != nil, rawOut == nil || rawOut?.uid != userEndedRouteUID {
+            clearUserEnded(rawOut == nil ? "route left AirPlay" : "a different AirPlay output")
+        }
+        if rawOut != nil, Self.servableAirPlayOutput() == nil,
+           !isExternal, !AirPlayTileDelivery.isServingReceiver {
+            // User-ended route: no card, no external playback, no browse.
+            headlessTune = false
+            if phase != .none, phase != .ended { setPhase(.none) }
+            return
+        }
+        let out = rawOut
         refreshName()
         if out != nil {
             reenableExternalPlaybackForRoute()
@@ -539,6 +631,22 @@ final class AirPlayMonitor: ObservableObject {
         let name = receiver?.displayName
             ?? (AirPlayReceiver.isGenericName(routeName) ? nil : routeName)
         if deviceName != name { deviceName = name }
+    }
+}
+
+extension Notification.Name {
+    /// The user re-picked an AirPlay route after ending AirPlay (the latch
+    /// cleared with no route change): a tile playing locally hands over.
+    static let aerioAirPlayRoutePicked = Notification.Name("aerioAirPlayRoutePicked")
+}
+
+/// Shared AVRoutePickerView delegate: a closed picker with an AirPlay output
+/// selected clears the user-ended latch.
+@MainActor
+final class AirPlayRoutePickerDelegate: NSObject, @MainActor AVRoutePickerViewDelegate {
+    static let shared = AirPlayRoutePickerDelegate()
+    func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+        AirPlayMonitor.shared.routePickerDismissed()
     }
 }
 #endif

@@ -86,6 +86,7 @@ final class AirPlayTileDelivery {
     private var externalObservation: NSKeyValueObservation?
     private var lanItemStatusObservation: NSKeyValueObservation?
     private var routeObserver: NSObjectProtocol?
+    private var pickedObserver: NSObjectProtocol?
     /// The tile's own view of `isExternalPlaybackActive` (for its lines).
     private var tileExternal = false
     private var releaseGraceTask: Task<Void, Never>?
@@ -103,8 +104,10 @@ final class AirPlayTileDelivery {
 
     // MARK: Route
 
+    /// An AirPlay output the app may serve: not one the user ended with
+    /// the card's X (AirPlayMonitor.userEndedRouteUID, 2026-10-05).
     static func routeHasAirPlay() -> Bool {
-        AirPlayReceiverResolver.currentAirPlayOutput() != nil
+        AirPlayMonitor.servableAirPlayOutput() != nil
     }
 
     // MARK: Start path ("AirPlay route already selected")
@@ -316,6 +319,17 @@ final class AirPlayTileDelivery {
             let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
             MainActor.assumeIsolated { self?.routeChanged(reasonRaw: reason) }
         }
+        // Same receiver re-picked after the user ended AirPlay: no route
+        // change fires, the picker delegate clears the latch and posts this.
+        pickedObserver = NotificationCenter.default.addObserver(
+            forName: .aerioAirPlayRoutePicked, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                debugLog("[AVP-AIRPLAY] route picked again after the user ended AirPlay: state=\(self.state)")
+                if self.state == .idle, self.player != nil, self.remuxer != nil { self.beginMidPlay() }
+            }
+        }
     }
 
     /// One diagnostic line per route change. The route only starts a
@@ -323,6 +337,7 @@ final class AirPlayTileDelivery {
     /// on loopback; an audio-only speaker is skipped once the receiver
     /// resolves); it never ends a session.
     private func routeChanged(reasonRaw: UInt) {
+        AirPlayMonitor.shared.noteRouteChange(reasonRaw: reasonRaw)
         let hasAirPlay = Self.routeHasAirPlay()
         let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
             .map { "\($0.portType.rawValue)(\($0.portName))" }.joined(separator: ",")
@@ -1143,6 +1158,8 @@ final class AirPlayTileDelivery {
         leaveServing(holdForFlip: wasServing && logEnd)
         if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
         routeObserver = nil
+        if let pickedObserver { NotificationCenter.default.removeObserver(pickedObserver) }
+        pickedObserver = nil
     }
 
     // MARK: Ingest retry in place (device log 2026-10-04 16:09:45)

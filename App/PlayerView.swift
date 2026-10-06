@@ -4752,6 +4752,8 @@ struct AirPlayButton: UIViewRepresentable {
         v.tintColor = .white
         v.activeTintColor = UIColor(Color.accentPrimary)
         v.backgroundColor = .clear
+        // A pick here clears the user-ended AirPlay latch (AirPlayMonitor).
+        v.delegate = AirPlayRoutePickerDelegate.shared
         return v
     }
     func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
@@ -4782,6 +4784,8 @@ enum AirPlayMenuTrigger {
         // Video receivers (Apple TV, Roku, AirPlay TVs) first: the sheet is
         // how a channel reaches a TV.
         v.prioritizesVideoDevices = true
+        // A pick here clears the user-ended AirPlay latch (AirPlayMonitor).
+        v.delegate = AirPlayRoutePickerDelegate.shared
         v.alpha = 0.01       // kept non-zero so the subview button stays touch-enabled
         v.isUserInteractionEnabled = true
         return v

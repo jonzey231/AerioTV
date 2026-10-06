@@ -6315,6 +6315,15 @@ struct AVPlayerMultiviewTile: View {
     }
     #endif
 
+    /// Why this tile must not take Force HLS's direct HLS path, or nil.
+    private var forceHLSBypassReason: String? {
+        #if os(iOS)
+        if AirPlayMonitor.shared.willServeReceiver { return "AirPlay needs the TS remuxer" }
+        #endif
+        if KeptLiveChannels.shared.ids.contains(channelID) { return "Kept Live needs the TS remuxer" }
+        return nil
+    }
+
     private func start() {
         // Exactly ONE pipeline per tile. A deferred start that raced a
         // fresh one left two remuxers ingesting the same tile on
@@ -6347,7 +6356,20 @@ struct AVPlayerMultiviewTile: View {
             startVOD()
             return
         }
-        let sourceURL = liveSourceURL
+        var sourceURL = liveSourceURL
+        if PlaybackFeatureFlags.forceHLS, directHLSFallbackURL == nil,
+           classifyStreamURL(sourceURL) == .hls,
+           (sourceURL.query ?? "").contains("output_format=hls"),
+           let why = forceHLSBypassReason {
+            // Device log 2026-10-05 22:54-22:55: an AirPlay tune still tried
+            // direct HLS first (15 s entry timeout, -11850) before the TS
+            // remux fallback; first frame 36 s. The receiver is served from
+            // the TS remuxer's LAN playlist, and Kept Live adopts a retained
+            // remuxer, so those tiles skip Force HLS up front.
+            debugLog("[FORCE-HLS] bypassed: \(why) channel=\(channelName)")
+            directHLSFallbackURL = removingHLSOutputFormat(sourceURL)
+            sourceURL = removingHLSOutputFormat(sourceURL)
+        }
         switch classifyStreamURL(sourceURL) {
         case .hls:
             // Full headers, not just UA: server-side HLS upgrades hit the
@@ -6356,9 +6378,6 @@ struct AVPlayerMultiviewTile: View {
             if PlaybackFeatureFlags.forceHLS,
                (sourceURL.query ?? "").contains("output_format=hls") {
                 forceHLSStartedAt = Date()
-                #if os(iOS)
-                debugLog("[FORCE-HLS] tile channel=\(channelName) AirPlay/Kept Live need the TS remuxer; on this tile AirPlay is AVPlayer's own HLS route and the channel cannot be Kept Live")
-                #endif
                 // Resolve the entry 302 ONCE: every GET of the entry URL
                 // mints a new server client, and AVPlayer refetches the
                 // asset URL several times while opening. Hand AVPlayer the
