@@ -2069,9 +2069,22 @@ struct VODDetailView: View {
     /// `serverID`: the resume key's server scope. Defaults to the item's
     /// own server so a movie keeps behaving as before; episodes pass
     /// their own so the lookup matches the row playEpisode stamped.
+    /// Every Play on this page: asks Play Here / Play on <receiver> while a
+    /// remote session is active (PlayWhereRouter, Logan 2026-10-06).
     private func resolveAndLaunch(url: URL, title: String, vodID: String? = nil,
                                   vodType: String = "movie", posterURL: String? = nil,
                                   serverID: String? = nil, fromStart: Bool = false) async {
+        PlayWhereRouter.shared.request(title: title, item: .nonLive) {
+            Task {
+                await launchPicked(url: url, title: title, vodID: vodID, vodType: vodType,
+                                   posterURL: posterURL, serverID: serverID, fromStart: fromStart)
+            }
+        }
+    }
+
+    private func launchPicked(url: URL, title: String, vodID: String? = nil,
+                              vodType: String = "movie", posterURL: String? = nil,
+                              serverID: String? = nil, fromStart: Bool = false) async {
         let resumeServerID = serverID ?? item.serverID.uuidString
         playingTitle = title
         playingHeaders = serverHeaders()

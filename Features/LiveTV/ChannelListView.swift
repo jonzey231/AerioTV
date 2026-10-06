@@ -762,7 +762,9 @@ struct ChannelListView: View {
                        !channel.streamURLs.isEmpty {
                         debugLog("🔗 ChannelListView: warm deep link → playing \(channel.name)")
                         UserDefaults.standard.removeObject(forKey: "launchChannelID")
-                        startPlayback(channel)
+                        // Also the Kept Live card's tune and Jump to Channel:
+                        // a pick, so it asks where during a remote session.
+                        pickChannel(channel)
                     } else {
                         // Channels not yet loaded — leave launchChannelID set so
                         // the cold-path handler picks it up when they arrive.
@@ -1405,7 +1407,7 @@ struct ChannelListView: View {
                             channels: filteredChannels,
                             servers: Array(servers),
                             onSelectChannel: { item in
-                                startPlayback(item)
+                                pickChannel(item)
                             },
                             sidebarOpen: guideSidebarOpen,
                             chromeFocusHold: guideChromeFocusHold,
@@ -1704,7 +1706,7 @@ struct ChannelListView: View {
                         ForEach(filteredChannels) { item in
                             ChannelRow(
                                 item: item,
-                                onTap: { startPlayback(item) },
+                                onTap: { pickChannel(item) },
                                 fetchUpcoming: makeFetchUpcoming(for: item)
                             )
                             .padding(.horizontal, 24)
@@ -1911,7 +1913,7 @@ struct ChannelListView: View {
                     ForEach(filteredChannels, id: \.rowKey) { item in
                         ChannelRow(
                             item: item,
-                            onTap: { startPlayback(item) },
+                            onTap: { pickChannel(item) },
                             fetchUpcoming: makeFetchUpcoming(for: item)
                         )
                         .padding(.vertical, sizeClass == .regular ? 5 : 3)
@@ -2766,6 +2768,15 @@ struct ChannelListView: View {
     ///
     /// Phase D deletes the flag-gate and this helper keeps calling
     /// `begin(...)` directly.
+    /// A channel PICK (row, guide, Kept Live): asks Play Here / Play on
+    /// <receiver> while a remote session is active (PlayWhereRouter).
+    private func pickChannel(_ item: ChannelDisplayItem) {
+        guard !item.streamURLs.isEmpty else { return }
+        PlayWhereRouter.shared.request(title: item.name, item: .live(item)) {
+            startPlayback(item)
+        }
+    }
+
     private func startPlayback(_ item: ChannelDisplayItem) {
         guard !item.streamURLs.isEmpty else { return }
         // "Play Channels In: Mini Player" (Remote Control settings, tvOS-only,
@@ -4217,6 +4228,14 @@ struct ChannelRow: View {
     /// Catch-up: resolve an aired programme and present the player,
     /// silencing any live session first (recordings-pattern teardown).
     private func watchCatchup(_ entry: EPGEntry) {
+        guard ChannelStore.shared.activeServer != nil,
+              entry.startTime != nil, entry.endTime != nil else { return }
+        PlayWhereRouter.shared.request(title: entry.title, item: .nonLive) {
+            resolveCatchup(entry)
+        }
+    }
+
+    private func resolveCatchup(_ entry: EPGEntry) {
         guard let server = ChannelStore.shared.activeServer,
               let start = entry.startTime, let end = entry.endTime else { return }
         Task { @MainActor in

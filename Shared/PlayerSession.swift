@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Combine
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -767,7 +768,7 @@ final class PlayerSession: ObservableObject {
         // spins the whole tile pipeline up before startPlaying runs -- the
         // 2026-07-17 Streamer test left ESPN2 playing silently BEHIND the
         // remote cover. Non-Dispatcharr channels fall through to local.
-        if isLive, CompanionClient.shared.isControlling,
+        if isLive, CompanionClient.shared.isControlling, !PlayWhereRouter.shared.localPinned,
            let androidID = CompanionClient.androidChannelID(for: item) {
             DebugLogger.shared.log(
                 "[Companion] begin: routing \(item.name) to controlled TV",
@@ -780,7 +781,8 @@ final class PlayerSession: ObservableObject {
         // for the same reason -- begin() spins the tile pipeline up before
         // startPlaying runs, so without this the phone would play the channel
         // locally behind the card.
-        if isLive, AerioCastController.shared.isCasting {
+        if isLive, AerioCastController.shared.isCasting,
+           !PlayWhereRouter.shared.localPinned {
             DebugLogger.shared.log(
                 "[Cast] begin: routing \(item.name) to the receiver",
                 category: "Playback", level: .info
@@ -1335,4 +1337,210 @@ final class LivePrewarm {
         if let channelID, !channelID.isEmpty, p.channelID == channelID { return }
         cancel(reason: reason)
     }
+}
+
+// MARK: - Play where (Logan 2026-10-06)
+
+/// "Play Here" or "Play on <receiver>": while a remote session is active
+/// (Google Cast, AirPlay or AerioTV Remote, i.e. whenever the
+/// remote-session card is showing) every pick from the list, the guide,
+/// the Kept Live card, catch-up, Movies, Series and DVR asks where to play.
+/// Every entry point calls `request`; with no session it plays at once.
+/// Channel up/down, Recently Watched and other flips inside a player are
+/// not entry points and never ask. Android twin: PlayWhereRouter in
+/// feature/main.
+@MainActor
+final class PlayWhereRouter: ObservableObject {
+    static let shared = PlayWhereRouter()
+
+    /// True while a player the user sent to THIS device with "Play Here"
+    /// is alive during a Cast or AerioTV Remote session. The live gates in
+    /// PlayerSession.begin and NowPlayingManager.startPlaying (which send a
+    /// live tune to the receiver while a session is up) stand aside, so
+    /// the local player and its own channel flips stay here while the
+    /// receiver keeps what it plays. Cleared when the local session ends
+    /// (the mode stays idle for 1.5 s) or the remote session ends.
+    /// AirPlay uses AirPlayMonitor's per-tune local latch instead.
+    private(set) var localPinned = false
+
+    #if os(iOS)
+    private var modeSubscription: AnyCancellable?
+    private var clearTask: Task<Void, Never>?
+    #endif
+
+    private init() {}
+
+    /// What the item is, so the router knows which receivers can take it.
+    enum Item {
+        /// A live channel. Every transport can take it (Cast through the
+        /// card's channel path, AerioTV Remote by its Dispatcharr channel
+        /// id, AirPlay through the normal headless tune).
+        case live(ChannelDisplayItem)
+        /// Catch-up, VOD movie or episode, or a DVR recording. Only AirPlay
+        /// can take these: the Cast web receiver and Cast Connect load path
+        /// is live only (AerioCastController.load refuses non-live content)
+        /// and the AerioTV Remote protocol has no command to open a
+        /// program, title or recording on the TV, so "Play on" is hidden
+        /// for those two transports.
+        case nonLive
+    }
+
+    /// Entry point for every pick. `title`: channel name for live, program
+    /// or title name otherwise. `play`: the existing local play path,
+    /// exactly as it runs with no session.
+    func request(title: String, item: Item, play: @escaping () -> Void) {
+        #if os(iOS)
+        guard let transport = Self.activeTransport() else {
+            play()
+            return
+        }
+        let receiver = Self.receiverName(transport)
+        let canSend: Bool = {
+            switch (transport, item) {
+            case (.cast, .live), (.airPlay, _): return true
+            case (.companion, .live(let ch)): return CompanionClient.androidChannelID(for: ch) != nil
+            case (.cast, .nonLive), (.companion, .nonLive): return false
+            }
+        }()
+        present(title: title, receiver: canSend ? receiver : nil,
+                onHere: { [weak self] in
+                    debugLog("[Cast] play-where prompt: here")
+                    self?.playHere(transport: transport, play: play)
+                },
+                onReceiver: { [weak self] in
+                    debugLog("[Cast] play-where prompt: receiver=\(receiver)")
+                    self?.playOnReceiver(transport: transport, item: item, play: play)
+                })
+        #else
+        // TV apps are not senders: no prompt.
+        play()
+        #endif
+    }
+
+    #if os(iOS)
+    enum Transport { case cast, companion, airPlay }
+
+    /// Same precedence as HomeView.activeRemoteTransport (the card).
+    static func activeTransport() -> Transport? {
+        if AerioCastController.shared.isCasting { return .cast }
+        if CompanionClient.shared.isControlling { return .companion }
+        let airPlay = AirPlayMonitor.shared
+        switch airPlay.phase {
+        case .probing, .idleRoute, .active: return .airPlay
+        default: return airPlay.isExternal ? .airPlay : nil
+        }
+    }
+
+    static func receiverName(_ t: Transport) -> String {
+        switch t {
+        case .cast: return AerioCastController.shared.connectedDeviceName ?? "TV"
+        case .companion: return CompanionClient.shared.connectedTVName ?? "TV"
+        case .airPlay: return AirPlayMonitor.shared.deviceName ?? "AirPlay"
+        }
+    }
+
+    private func playHere(transport: Transport, play: @escaping () -> Void) {
+        switch transport {
+        case .cast, .companion:
+            pinLocal()
+            play()
+        case .airPlay:
+            // See AirPlayMonitor.pinLocalForPlayHere: the receiver's stream
+            // belongs to the one player session, so it ends here.
+            if AirPlayMonitor.shared.pinLocalForPlayHere() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { play() }
+            } else {
+                play()
+            }
+        }
+    }
+
+    private func playOnReceiver(transport: Transport, item: Item, play: @escaping () -> Void) {
+        switch (transport, item) {
+        case (.cast, .live(let ch)):
+            // The card's channel path: no local player opens.
+            AerioCastController.shared.castPickedChannel(ch)
+        case (.companion, .live(let ch)):
+            if let id = CompanionClient.androidChannelID(for: ch) {
+                CompanionClient.shared.setChannel(id, title: ch.name)
+            }
+        case (.airPlay, _):
+            // The normal tune: with the route on AirPlay it runs headless
+            // and the receiver takes the player.
+            play()
+        default:
+            break
+        }
+    }
+
+    private func pinLocal() {
+        localPinned = true
+        clearTask?.cancel()
+        clearTask = nil
+        guard modeSubscription == nil else { return }
+        modeSubscription = PlayerSession.shared.$mode
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] mode in
+                guard let self else { return }
+                self.clearTask?.cancel()
+                guard mode == .idle else { return }
+                // A swap from the mini goes idle for an instant; only a
+                // session that stays idle has ended.
+                self.clearTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    guard !Task.isCancelled, let self,
+                          PlayerSession.shared.mode == .idle,
+                          NowPlayingManager.shared.playingItem == nil else { return }
+                    self.unpin("local player closed")
+                }
+            }
+    }
+
+    func unpin(_ why: String) {
+        guard localPinned else { return }
+        localPinned = false
+        clearTask?.cancel()
+        clearTask = nil
+        modeSubscription = nil
+        debugLog("[Cast] play-where: local pin cleared (\(why))")
+    }
+
+    /// Native action sheet from the top-most view controller, so it shows
+    /// over sheets, detail pages and covers alike.
+    private func present(title: String, receiver: String?,
+                         onHere: @escaping () -> Void,
+                         onReceiver: @escaping () -> Void) {
+        guard let top = Self.topViewController() else {
+            onHere()
+            return
+        }
+        let sheet = UIAlertController(title: title, message: nil, preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "Play Here", style: .default) { _ in onHere() })
+        if let receiver {
+            sheet.addAction(UIAlertAction(title: "Play on \(receiver)", style: .default) { _ in onReceiver() })
+        }
+        // An iPad popover drops a .cancel action (tapping outside cancels),
+        // so the button is a plain one there to stay visible (parity with
+        // the phone and the Android dialog).
+        let pad = UIDevice.current.userInterfaceIdiom == .pad
+        sheet.addAction(UIAlertAction(title: "Cancel", style: pad ? .default : .cancel) { _ in
+            debugLog("[Cast] play-where prompt: cancel")
+        })
+        if let pop = sheet.popoverPresentationController {
+            pop.sourceView = top.view
+            pop.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.midY, width: 0, height: 0)
+            pop.permittedArrowDirections = []
+        }
+        top.present(sheet, animated: true)
+    }
+
+    private static func topViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let window = scenes.flatMap(\.windows).first(where: \.isKeyWindow)
+            ?? scenes.flatMap(\.windows).first
+        var top = window?.rootViewController
+        while let next = top?.presentedViewController, !next.isBeingDismissed { top = next }
+        return top
+    }
+    #endif
 }

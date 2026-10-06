@@ -7807,6 +7807,13 @@ struct EPGGuideView: View {
     /// under the catch-up programme. Resolve failures (missing XC password,
     /// unsupported server type) surface as an alert.
     private func handleWatchCatchup(channel: ChannelDisplayItem, prog: GuideProgram) {
+        guard ChannelStore.shared.activeServer != nil else { return }
+        PlayWhereRouter.shared.request(title: prog.title, item: .nonLive) {
+            resolveCatchup(channel: channel, prog: prog)
+        }
+    }
+
+    private func resolveCatchup(channel: ChannelDisplayItem, prog: GuideProgram) {
         guard let server = ChannelStore.shared.activeServer else { return }
         Task { @MainActor in
             do {

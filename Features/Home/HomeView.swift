@@ -4010,7 +4010,7 @@ final class NowPlayingManager: ObservableObject {
         // RETUNES THE TV instead of starting local playback (the user browsed
         // the guide via the remote's Channels button). Non-Dispatcharr
         // channels can't be addressed on the TV and fall through to local.
-        if isLive, CompanionClient.shared.isControlling,
+        if isLive, CompanionClient.shared.isControlling, !PlayWhereRouter.shared.localPinned,
            let androidID = CompanionClient.androidChannelID(for: item) {
             debugLog("🎮 NowPlaying.startPlaying: routing \(item.name) to companion TV")
             CompanionClient.shared.setChannel(androidID, title: item.name)
@@ -4021,7 +4021,8 @@ final class NowPlayingManager: ObservableObject {
         // phone shows nothing locally but the card update) -- including the
         // session that connected with nothing playing, where the card says
         // "Select a Channel".
-        if isLive, AerioCastController.shared.isCasting {
+        if isLive, AerioCastController.shared.isCasting,
+           !PlayWhereRouter.shared.localPinned {
             debugLog("🎮 NowPlaying.startPlaying: routing \(item.name) to the cast receiver")
             AerioCastController.shared.castPickedChannel(item)
             return

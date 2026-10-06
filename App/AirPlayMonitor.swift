@@ -135,7 +135,69 @@ final class AirPlayMonitor: ObservableObject {
         Self.servableAirPlayOutput() != nil && receiver?.isAudioOnly != true
     }
 
+    /// Set with userEndedRouteUID by "Play Here" (PlayWhereRouter, Logan
+    /// 2026-10-06): the latch lasts for that one local player only. When the
+    /// player it pinned is gone (no player re-attaches within 1.5 s and the
+    /// session is idle) the latch clears and the route is offered again
+    /// (idle card, "Select a Channel"), without the user re-picking it.
+    private var latchIsPerTune = false
+    /// A player attached while the per-tune latch was set.
+    private var perTuneSawPlayer = false
+    private var perTuneClearTask: Task<Void, Never>?
+
+    /// "Play Here" while an AirPlay session is active. Pins the next player
+    /// to this device with the same latch the card's X uses (attach() sets
+    /// allowsExternalPlayback false; no LAN serving, no headless tune).
+    ///
+    /// What AirPlay cannot do: serve the receiver and play a second stream
+    /// here at the same time. The receiver's stream IS the one player
+    /// session's tile (its AVPlayer is the external-playback player and its
+    /// TSHLSRemuxer LAN session feeds the receiver), and a new tune replaces
+    /// that session (a live tune swaps or reseeds the sole tile; catch-up,
+    /// VOD and DVR call PlayerSession.exit() first). A second tile would
+    /// turn the pick into a multiview grid and a second attached player
+    /// would take over the route, so the closest safe behavior is: the
+    /// receiver's playback stops (same teardown as the card's X), the pick
+    /// plays here, and the route comes back as the idle card when that
+    /// local player closes. Returns true when a session was torn down (the
+    /// caller waits a beat before tuning).
+    func pinLocalForPlayHere() -> Bool {
+        guard let route = AirPlayReceiverResolver.currentAirPlayOutput() else { return false }
+        userEndedRouteUID = route.uid
+        latchIsPerTune = true
+        perTuneSawPlayer = false
+        perTuneClearTask?.cancel()
+        let playing = player != nil || PlayerSession.shared.mode != .idle
+            || NowPlayingManager.shared.playingItem != nil
+        debugLog("[AVP-AIRPLAY] play here: next player pinned local; \(playing ? "receiver playback stops (one player session serves AirPlay)" : "receiver idle")")
+        if playing {
+            stopPlayback()
+        }
+        setPhase(.none)
+        evaluate()
+        return playing
+    }
+
+    /// Player gone under the per-tune latch: clear it once nothing
+    /// re-attached (a channel flip re-attaches at once).
+    private func schedulePerTuneClear() {
+        guard latchIsPerTune, perTuneSawPlayer else { return }
+        perTuneClearTask?.cancel()
+        perTuneClearTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled, let self, self.latchIsPerTune,
+                  self.player == nil,
+                  PlayerSession.shared.mode == .idle else { return }
+            self.clearUserEnded("play-here player closed")
+            self.evaluate()
+        }
+    }
+
     private func clearUserEnded(_ why: String) {
+        latchIsPerTune = false
+        perTuneSawPlayer = false
+        perTuneClearTask?.cancel()
+        perTuneClearTask = nil
         guard userEndedRouteUID != nil else { return }
         userEndedRouteUID = nil
         debugLog("[AVP-AIRPLAY] user-ended latch cleared (\(why)): AirPlay route usable again")
@@ -221,7 +283,11 @@ final class AirPlayMonitor: ObservableObject {
            AirPlayReceiverResolver.currentAirPlayOutput() != nil {
             // The user ended AirPlay on this route: the video stays here.
             player.allowsExternalPlayback = false
-            debugLog("[AVP-AIRPLAY] player pinned local (user ended AirPlay on this route)")
+            if latchIsPerTune {
+                perTuneSawPlayer = true
+                perTuneClearTask?.cancel()
+            }
+            debugLog("[AVP-AIRPLAY] player pinned local (\(latchIsPerTune ? "Play Here" : "user ended AirPlay on this route"))")
         } else {
             Self.enableExternalPlayback(on: player)
         }
@@ -274,6 +340,7 @@ final class AirPlayMonitor: ObservableObject {
         } else {
             apply(false, fromPlayer: false)
         }
+        if !silently { schedulePerTuneClear() }
     }
 
     /// The tile is starting a channel with the route already on AirPlay
@@ -381,6 +448,7 @@ final class AirPlayMonitor: ObservableObject {
         let route = AirPlayReceiverResolver.currentAirPlayOutput()
         if let route {
             userEndedRouteUID = route.uid
+            latchIsPerTune = false
             debugLog("[Cast] stop: playback stopped, no local resume (AirPlay); system route still on AirPlay, card hidden")
             debugLog("[AVP-AIRPLAY] user ended AirPlay: local playback until a route is picked again")
         } else {

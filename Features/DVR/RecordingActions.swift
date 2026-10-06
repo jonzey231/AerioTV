@@ -113,8 +113,22 @@ struct RecordingActions {
         }
     }
 
-    /// v1.6.8 (B1 Phase 1): plays a completed local recording from disk.
+    /// A recording pick asks Play Here / Play on <receiver> while a remote
+    /// session is active (PlayWhereRouter, Logan 2026-10-06).
     func playLocal(_ rec: Recording, path: String) {
+        PlayWhereRouter.shared.request(title: rec.programTitle, item: .nonLive) {
+            startLocal(rec, path: path)
+        }
+    }
+
+    func playServer(_ rec: Recording, fromStart: Bool = false, liveEdge: Bool = false) {
+        PlayWhereRouter.shared.request(title: rec.programTitle, item: .nonLive) {
+            startServer(rec, fromStart: fromStart, liveEdge: liveEdge)
+        }
+    }
+
+    /// v1.6.8 (B1 Phase 1): plays a completed local recording from disk.
+    private func startLocal(_ rec: Recording, path: String) {
         let url = URL(fileURLWithPath: path)
         guard FileManager.default.fileExists(atPath: path) else {
             debugLog("⚠️ Local recording file missing on disk: \(path) — id=\(rec.id)")
@@ -154,7 +168,7 @@ struct RecordingActions {
     ///
     /// resumePositionMs for a growing (DVR) window: 0 = from the
     /// beginning, nil = live edge, >2 s = saved resume.
-    func playServer(_ rec: Recording, fromStart: Bool = false, liveEdge: Bool = false) {
+    private func startServer(_ rec: Recording, fromStart: Bool = false, liveEdge: Bool = false) {
         guard let server = servers.first(where: { $0.id.uuidString == rec.serverID }),
               server.type == .dispatcharrAPI,
               let api = api(for: rec),

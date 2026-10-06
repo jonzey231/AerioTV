@@ -317,7 +317,19 @@ struct TVShowsView: View {
     }
     #endif
 
+    /// Continue Watching resume: asks Play Here / Play on <receiver> while a
+    /// remote session is active (PlayWhereRouter).
     private func resumeFromContinueWatching(_ progress: WatchProgress) {
+        guard progress.streamURL.flatMap(URL.init(string:)) != nil else {
+            resumePicked(progress)
+            return
+        }
+        PlayWhereRouter.shared.request(title: progress.title, item: .nonLive) {
+            resumePicked(progress)
+        }
+    }
+
+    private func resumePicked(_ progress: WatchProgress) {
         if let urlStr = progress.streamURL, let url = URL(string: urlStr) {
             resumePlayingTitle = progress.title
             resumeVodID = progress.vodID

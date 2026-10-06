@@ -814,7 +814,20 @@ struct MoviesView: View {
     #endif
 
     /// `startAt`: override the saved position (Play from Beginning).
+    /// Continue Watching resume: asks Play Here / Play on <receiver> while a
+    /// remote session is active (PlayWhereRouter). Without a stored URL it
+    /// opens the detail page, whose Play asks instead.
     private func resumeFromContinueWatching(_ progress: WatchProgress, startAt: Int32? = nil) {
+        guard progress.streamURL.flatMap(URL.init(string:)) != nil else {
+            resumePicked(progress, startAt: startAt)
+            return
+        }
+        PlayWhereRouter.shared.request(title: progress.title, item: .nonLive) {
+            resumePicked(progress, startAt: startAt)
+        }
+    }
+
+    private func resumePicked(_ progress: WatchProgress, startAt: Int32? = nil) {
         // If we have a stored stream URL, launch playback directly with the saved position
         if let urlStr = progress.streamURL, let url = URL(string: urlStr) {
             resumePlayingTitle = progress.title
@@ -1332,10 +1345,17 @@ struct MoviesView: View {
     /// the session lives off-host, tear down live playback, then the
     /// unified container first and the legacy cover as fallback.
     private func playMovie(_ item: VODDisplayItem, resumePositionMs startAt: Int32) {
-        guard let movie = item.movie, let url = movie.streamURL else {
+        guard item.movie?.streamURL != nil else {
             navPath.append(item)
             return
         }
+        PlayWhereRouter.shared.request(title: item.name, item: .nonLive) {
+            playMoviePicked(item, resumePositionMs: startAt)
+        }
+    }
+
+    private func playMoviePicked(_ item: VODDisplayItem, resumePositionMs startAt: Int32) {
+        guard let movie = item.movie, let url = movie.streamURL else { return }
         let server = servers.first(where: { $0.id == item.serverID })
         var headers = server?.authHeaders ?? [:]
         let key = VODVersionSelectionStore.storageKey(serverID: item.serverID,
