@@ -254,6 +254,16 @@ struct ServerDetailView: View {
         }
         .sheet(item: $editingServer) { EditServerSheet(server: $0) }
         #endif
+        // Opening the ACTIVE playlist re-reads its permissions, throttled
+        // to once a minute like a return to foreground, so the User
+        // Permissions block is never minutes stale. The section reads the
+        // SwiftData row, so the probe's writes re-render it directly.
+        // Android parity: PlaylistDetailScreen, trigger "playlist detail".
+        .task(id: server.isActive) {
+            guard server.isActive, server.type == .dispatcharrAPI else { return }
+            await DispatcharrCapabilityProbe.refresh(server, reason: "playlist detail",
+                                                     minInterval: 60)
+        }
         .alert("Delete Playlist?", isPresented: $showDeleteConfirm) {
             Button("Delete", role: .destructive) {
                 performServerCascadeDelete(server, servers: Array(servers), modelContext: modelContext)
@@ -853,7 +863,7 @@ struct ServerDetailView: View {
                         }
                     }
                 }
-                tvFooter("Set by your Dispatcharr admin. Use Refresh Session after your admin changes them.")
+                tvFooter("Set by your Dispatcharr admin. Permissions refresh when you open the app or use Refresh Playlist.")
             }
         }
     }
@@ -988,10 +998,11 @@ struct ServerDetailView: View {
 
     // MARK: - Dispatcharr User Permissions (read-only)
     //
-    // Facts only, no probing: everything here is read from the persisted
+    // Facts only: everything here is read from the persisted
     // per-user capability snapshot on this playlist's row
     // (`/api/accounts/users/me/`, refreshed at connect / launch / foreground
-    // by `DispatcharrCapabilityProbe`) plus the two display-only strings in
+    // by `DispatcharrCapabilityProbe`, plus a throttled re-read when the
+    // active playlist's page opens) plus the two display-only strings in
     // `DispatcharrAccountFactsStore`. Shown for Dispatcharr Direct Connect
     // playlists only (`.dispatcharrAPI`, i.e. API key OR username+password
     // against the Dispatcharr API). Xtream Codes rows -- including
@@ -1088,7 +1099,7 @@ struct ServerDetailView: View {
             } header: {
                 Text("Dispatcharr User Permissions").sectionHeaderStyle()
             } footer: {
-                Text("Set by your Dispatcharr admin. Use Refresh Session after your admin changes them.")
+                Text("Set by your Dispatcharr admin. Permissions refresh when you open the app or use Refresh Playlist.")
                     .scaledFont(.labelSmall.subtext())
                     .foregroundColor(Color.contrastText(.textTertiary))
             }
