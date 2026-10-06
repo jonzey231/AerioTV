@@ -309,8 +309,9 @@ struct RecordProgramSheet: View {
                     .padding(.horizontal, 16)
                 }
 
-                // Comskip: shown for Dispatcharr, disabled for local.
-                if isDispatcharr && !isSeriesRule {
+                // Comskip: shown for Dispatcharr, disabled for local; hidden entirely
+                // when the account cannot record to the server (Android parity).
+                if isDispatcharr && canRecordToServer && !isSeriesRule {
                     Toggle(isOn: $comskip) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Remove Commercials (Comskip)")
@@ -678,7 +679,9 @@ struct RecordProgramSheet: View {
                 if isDispatcharr && isLive && canRecordToServer && !isSeriesRule {
                     destinationRow
                 }
-                if isDispatcharr && !isSeriesRule {
+                // Comskip is server-side only: hidden entirely when the
+                // account cannot record to the server (iOS and Android parity).
+                if isDispatcharr && canRecordToServer && !isSeriesRule {
                     comskipRow
                 }
                 if destination == .local && !isSeriesRule {
@@ -927,7 +930,11 @@ struct RecordProgramSheet: View {
             // cannot tell it did not go to the Dispatcharr server DVR.
             if isDispatcharr && !canRecordToServer {
                 Label {
-                    Text("Recording to the Dispatcharr server needs DVR manage access on your account. Contact your server administrator for more information.")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Saving to this device")
+                            .fontWeight(.bold)
+                        Text("Recording to the Dispatcharr server needs DVR manage access on your account. Contact your server administrator for more information.")
+                    }
                 } icon: {
                     Image(systemName: "internaldrive.fill")
                         .foregroundColor(.orange)
