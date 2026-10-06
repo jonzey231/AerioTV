@@ -1,3 +1,4 @@
+import CoreGraphics
 // CLI test harness for the cast HLS proxy's pure logic. The repo has no
 // unit-test target (AerioTVUITests is UI-only), so these run via swiftc
 // on macOS against the shipping source files.
@@ -3438,6 +3439,138 @@ struct AudioOnlyRun {
 }
 
 runAudioOnlyChecks()
+
+// MARK: AirPlay LAN card video (audio-only programs)
+
+@MainActor func cardPSIPacket(pid: Int, section: [UInt8]) -> [UInt8] {
+    var sec = section
+    let crc = TSLANAudioRewriter.crc32MPEG(sec)
+    sec += [UInt8(crc >> 24), UInt8((crc >> 16) & 0xFF), UInt8((crc >> 8) & 0xFF), UInt8(crc & 0xFF)]
+    var p: [UInt8] = [0x47, 0x40 | UInt8(pid >> 8), UInt8(pid & 0xFF), 0x10, 0x00] + sec
+    p += [UInt8](repeating: 0xFF, count: 188 - p.count)
+    return p
+}
+
+@MainActor func cardFixtureSegment(startPTS: Int64, seconds: Double) -> [UInt8] {
+    // PAT: program 1 -> PMT PID 0x1000. PMT: PCR on 0x101, AC-3 on 0x101.
+    let pat: [UInt8] = [0x00, 0xB0, 13, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x01, 0xF0, 0x00]
+    let pmt: [UInt8] = [0x02, 0xB0, 18, 0x00, 0x01, 0xC1, 0x00, 0x00, 0xE1, 0x01, 0xF0, 0x00,
+                        0x81, 0xE1, 0x01, 0xF0, 0x00]
+    var seg = cardPSIPacket(pid: 0, section: pat) + cardPSIPacket(pid: 0x1000, section: pmt)
+    var cc: UInt8 = 0
+    var pts = startPTS
+    let frameTicks: Int64 = 2880                    // AC-3 1536 samples at 48 kHz
+    let frames = Int(seconds * 90_000) / Int(frameTicks)
+    for _ in 0..<frames {
+        var frame: [UInt8] = [0x0B, 0x77]
+        frame += [UInt8](repeating: 0x5A, count: 380)
+        seg += TSLANAudioRewriter.packetizePES(payload: frame, pts: pts, pid: 0x101, cc: &cc)
+        pts += frameTicks
+    }
+    return seg
+}
+
+@MainActor func runCardVideoChecks() {
+    // Synthetic access unit: AUD, SPS, PPS, IDR (NAL 5), large enough to span packets.
+    var au: [UInt8] = [0, 0, 0, 1, 0x09, 0xF0, 0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1F, 0xAC,
+                       0, 0, 0, 1, 0x68, 0xEE, 0x3C, 0x80, 0, 0, 0, 1, 0x65, 0x88, 0x84]
+    au += [UInt8](repeating: 0x42, count: 3000)
+    var cc: UInt8 = 0
+    for (index, start) in [Int64(900_000), TSLANAudioRewriter.pts33Mask - 45_000].enumerated() {
+        let label = index == 0 ? "card" : "card (PTS wrap)"
+        let seg = cardFixtureSegment(startPTS: start, seconds: 2.0)
+        let ccBefore = cc
+        guard let out = TSCardVideoMuxer.inject(segment: seg, accessUnit: au, fps: 1, cc: &cc) else {
+            expect(false, "\(label): injected"); continue
+        }
+        expect(out.count % 188 == 0 && out.count > seg.count, "\(label): whole packets, larger than the source")
+        let packets = stride(from: 0, to: out.count, by: 188).map { Array(out[$0..<($0 + 188)]) }
+        func pid(_ p: [UInt8]) -> Int { (Int(p[1] & 0x1F) << 8) | Int(p[2]) }
+        guard let pmtPacket = packets.first(where: { pid($0) == 0x1000 }),
+              let info = TSLANAudioRewriter.parsePMT(pmtPacket) else { expect(false, "\(label): PMT parses"); continue }
+        expect(info.videoPID == 0x0100, "\(label): PMT lists the H.264 card PID")
+        expect(info.audio.map(\.pid) == [0x101], "\(label): PMT keeps the audio PID")
+        expectEq(info.pcrPID, 0x0100, "\(label): PCR_PID is the video PID")
+        // CRC over the rewritten section is valid.
+        let s = 5
+        let secLen = (Int(pmtPacket[s + 1] & 0x0F) << 8) | Int(pmtPacket[s + 2])
+        let body = Array(pmtPacket[s..<(s + 3 + secLen - 4)])
+        let crcBytes = Array(pmtPacket[(s + 3 + secLen - 4)..<(s + 3 + secLen)])
+        let crc = TSLANAudioRewriter.crc32MPEG(body)
+        expect(crcBytes == [UInt8(crc >> 24), UInt8((crc >> 16) & 0xFF), UInt8((crc >> 8) & 0xFF), UInt8(crc & 0xFF)],
+               "\(label): PMT CRC valid")
+        // The first non-PSI packet opens a video PES with RAI + PCR and an IDR.
+        guard let firstES = packets.first(where: { pid($0) != 0 && pid($0) != 0x1000 }) else {
+            expect(false, "\(label): has ES packets"); continue
+        }
+        expect(pid(firstES) == 0x0100 && firstES[1] & 0x40 != 0, "\(label): segment starts with a video PES")
+        expect(firstES[5] & 0x40 != 0, "\(label): first video packet sets random_access_indicator")
+        expectEq(TSCardVideoMuxer.decodePCR(firstES), (start - TSCardVideoMuxer.pcrLeadTicks) & TSLANAudioRewriter.pts33Mask,
+                 "\(label): first PCR leads the first audio PTS by 100 ms")
+        expectEq(TSLANAudioRewriter.pesPTS(firstES), start, "\(label): first video PTS equals the first audio PTS")
+        // Reassemble the video PES payloads; each must contain an IDR NAL.
+        var pesList: [[UInt8]] = []
+        var ccs: [UInt8] = []
+        for p in packets where pid(p) == 0x0100 && p[3] & 0x10 != 0 {
+            ccs.append(p[3] & 0x0F)
+            guard let off = TSLANAudioRewriter.payloadOffset(p) else { continue }
+            if p[1] & 0x40 != 0 { pesList.append([]) }
+            pesList[pesList.count - 1] += p[off...]
+        }
+        expectEq(pesList.count, 2, "\(label): 1 fps over 2 s = 2 card pictures")
+        let idrOK = pesList.allSatisfy { pes in
+            let es = Array(pes[(9 + Int(pes[8]))...])
+            return es == au
+        }
+        expect(idrOK, "\(label): every video PES carries the full access unit (IDR)")
+        let ccOK = ccs.enumerated().allSatisfy { i, c in c == (ccBefore &+ UInt8(i)) & 0x0F }
+        expect(ccOK, "\(label): video continuity counters run on from the previous segment")
+        // Audio packets survive untouched.
+        let audioIn = stride(from: 0, to: seg.count, by: 188).filter { (Int(seg[$0 + 1] & 0x1F) << 8 | Int(seg[$0 + 2])) == 0x101 }.count
+        expectEq(packets.filter { pid($0) == 0x101 }.count, audioIn, "\(label): every audio packet kept")
+        // PCR at least every 100 ms of media.
+        let pcrs = packets.compactMap { pid($0) == 0x0100 ? TSCardVideoMuxer.decodePCR($0) : nil }
+        let gaps = zip(pcrs.dropFirst(), pcrs).map { ($0 - $1) & TSLANAudioRewriter.pts33Mask }
+        expect(!gaps.isEmpty && gaps.allSatisfy { $0 > 0 && $0 <= 9_000 + 2_880 }, "\(label): PCR interval <= ~100 ms and monotonic")
+    }
+    // A PMT that already lists video is left alone.
+    var c: UInt8 = 0
+    let pat: [UInt8] = [0x00, 0xB0, 13, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x01, 0xF0, 0x00]
+    let vpmt: [UInt8] = [0x02, 0xB0, 23, 0x00, 0x01, 0xC1, 0x00, 0x00, 0xE1, 0x00, 0xF0, 0x00,
+                         0x1B, 0xE1, 0x00, 0xF0, 0x00, 0x81, 0xE1, 0x01, 0xF0, 0x00]
+    let videoSeg = cardPSIPacket(pid: 0, section: pat) + cardPSIPacket(pid: 0x1000, section: vpmt)
+        + TSLANAudioRewriter.packetizePES(payload: [0x0B, 0x77, 1, 2], pts: 1000, pid: 0x101, cc: &c)
+    expect(TSCardVideoMuxer.inject(segment: videoSeg, accessUnit: au, fps: 1, cc: &c) == nil,
+           "card: a program with video is not touched")
+    // Stage: cached per seq, CC carried in order.
+    let stage = TSLANCardStage(accessUnit: au, fps: 1)
+    let s0 = stage.produce(seq: 0, segment: Data(cardFixtureSegment(startPTS: 0, seconds: 2)), oldestSeq: 0)
+    let s0again = stage.produce(seq: 0, segment: Data(), oldestSeq: 0)
+    expect(s0 != nil && s0 == s0again, "card stage: cached per segment")
+    // Encoder smoke check (informational: VideoToolbox may be absent where
+    // the tests run, and the muxing checks above need no encoder).
+    let ctx = CGContext(data: nil, width: 1280, height: 720, bitsPerComponent: 8, bytesPerRow: 0,
+                        space: CGColorSpaceCreateDeviceRGB(),
+                        bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue)
+    ctx?.setFillColor(CGColor(red: 0.1, green: 0.13, blue: 0.19, alpha: 1))
+    ctx?.fill(CGRect(x: 0, y: 0, width: 1280, height: 720))
+    if let img = ctx?.makeImage(), let encoded = TSCardFrameEncoder.encodeIDR(img) {
+        var types: [UInt8] = []
+        var i = 0
+        while i + 4 < encoded.count {
+            if encoded[i] == 0, encoded[i + 1] == 0, encoded[i + 2] == 0, encoded[i + 3] == 1 {
+                types.append(encoded[i + 4] & 0x1F); i += 4
+            } else { i += 1 }
+        }
+        print("INFO card encoder: \(encoded.count) B, NAL types \(types)")
+        expect(types.first == 9 && types.contains(7) && types.contains(8) && types.contains(5),
+               "card encoder: AUD + SPS + PPS + IDR")
+    } else {
+        print("INFO card encoder: VideoToolbox H.264 unavailable here; skipped")
+    }
+}
+
+runCardVideoChecks()
 
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

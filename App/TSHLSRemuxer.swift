@@ -1725,6 +1725,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         audioOnlyShared = on
         audioOnlyLock.unlock()
         audioOnly = on
+        if on { prepareLANCardIfNeeded() } else { lanCardStage = nil; lanCardAU = nil }
         guard changed else { return }
         let cb = onAudioOnlyChanged
         DispatchQueue.main.async { cb?(on) }
@@ -2615,6 +2616,26 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// `queue`; the stage itself is thread-safe.
     private var lanAudioStage: TSLANAudioStage?
 
+    // MARK: AirPlay LAN card video (audio-only programs)
+    //
+    // An AirPlay receiver (Roku, Apple TV) shows black for a TS with no
+    // video track. While the program is audio-only, the LAN copy of each
+    // segment carries the app's audio-only card as a static H.264 picture
+    // (TSCardVideoMuxer), rendered by the app (`setLANCardRenderer`) and
+    // encoded once per card with VideoToolbox. Loopback is never touched:
+    // the local player keeps the in-app card. All touched only on `queue`.
+
+    /// Renders the card picture (1280x720); injected by the tile.
+    typealias LANCardRenderer = @Sendable () async -> CGImage?
+    static let lanCardFPS = 1
+    private var lanCardKey: String?
+    private var lanCardRenderer: LANCardRenderer?
+    private var lanCardAU: [UInt8]?
+    private var lanCardStage: TSLANCardStage?
+    private var lanCardPending = false
+    private var lanCardFailedKey: String?
+    private var lanCardLogged = false
+
     // MARK: AirPlay LAN runway (device log 2026-09-25 17:04)
     //
     // The receiver played a bursty feed (11-13 stalls a minute, 4.5-6 s
@@ -3042,6 +3063,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         lanUALogged.removeAll()
         lanPlaylistLogged.removeAll()
         lanAudioStage = nil
+        resetLANCardStage()
+        lanCardLogged = false
         lanHoldBackSeconds = 0
         lastHoldBackRaiseAt = nil
         lanHoldBack.set(0)
@@ -3142,7 +3165,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 DispatchQueue.main.async { MainActor.assumeIsolated { completion(ok) } }
             }
             guard let self, !self.stopped else { finish(false); return }
-            guard on else { self.lanAudioStage = nil; finish(false); return }
+            guard on else {
+                if self.lanAudioStage != nil { self.lanAudioStage = nil; self.resetLANCardStage() }
+                finish(false)
+                return
+            }
             if self.lanAudioStage != nil { finish(true); return }
             let source: CastAudioSourceCodec?
             switch self.audioStreamType {
@@ -3159,8 +3186,57 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
             self.lanAudioStage = TSLANAudioStage(rewriter: TSLANAudioRewriter(
                 log: { debugLog("[TS-REMUX] \($0)") }))
+            self.resetLANCardStage()
             finish(true)
         }
+    }
+
+    /// The card the LAN shows while the program is audio-only. `key` names
+    /// the card (channel name and logo): a new key drops the old picture.
+    /// Rendering and encoding start only once the program is audio-only.
+    func setLANCardRenderer(key: String, _ render: @escaping LANCardRenderer) {
+        queue.async { [weak self] in
+            guard let self, !self.stopped, key != self.lanCardKey else { return }
+            self.lanCardKey = key
+            self.lanCardRenderer = render
+            self.lanCardAU = nil
+            self.lanCardStage = nil
+            self.lanCardPending = false
+            self.prepareLANCardIfNeeded()
+        }
+    }
+
+    /// On `queue`: render and encode the card when an audio-only program
+    /// has a renderer and no picture yet.
+    private func prepareLANCardIfNeeded() {
+        guard audioOnly, let render = lanCardRenderer, let key = lanCardKey,
+              lanCardAU == nil, !lanCardPending, lanCardFailedKey != key else { return }
+        lanCardPending = true
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let image = await render()
+            let au = image.flatMap { TSCardFrameEncoder.encodeIDR($0) }
+            self?.queue.async { [weak self] in
+                guard let self, self.lanCardKey == key else { return }
+                self.lanCardPending = false
+                guard let au else {
+                    self.lanCardFailedKey = key
+                    debugLog("[AUDIO-ONLY] card frame encode failed\(image == nil ? " (no card image)" : ""); AirPlay LAN stays audio-only TS")
+                    return
+                }
+                self.lanCardAU = au
+                self.lanCardStage = TSLANCardStage(accessUnit: au, fps: Self.lanCardFPS)
+                if !self.lanCardLogged {
+                    self.lanCardLogged = true
+                    debugLog("[AUDIO-ONLY] AirPlay card video: \(TSCardFrameEncoder.width)x\(TSCardFrameEncoder.height) H.264 \(Self.lanCardFPS) fps (IDR \(au.count) B)")
+                }
+            }
+        }
+    }
+
+    /// A fresh card stage (empty cache, CC from 0) for the current picture:
+    /// the LAN copies it cached were built on the old audio output.
+    private func resetLANCardStage() {
+        lanCardStage = lanCardAU.map { TSLANCardStage(accessUnit: $0, fps: Self.lanCardFPS) }
     }
 
     // MARK: HTTP/1.1 keep-alive server (shared by loopback and LAN)
@@ -3468,6 +3544,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 // (loopback only: the LAN copy is unpaced).
                 if lan { self.lanHighestRequestedSeq = max(self.lanHighestRequestedSeq, seq) }
                 else { self.pacedHighestRequestedSeq = max(self.pacedHighestRequestedSeq, seq) }
+                // Audio-only program: the LAN copy also carries the card
+                // picture as H.264 (after any AAC rewrite).
+                let card = (lan && self.audioOnly) ? self.lanCardStage : nil
                 if lan, let stage = self.lanAudioStage {
                     // AAC LAN copy, produced off the remux queue so the
                     // transcode never stalls the ingest.
@@ -3477,8 +3556,18 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                     let oldest = self.segments.first?.seq ?? seq
                     let discontinuities = self.discontinuitySeqs
                     DispatchQueue.global(qos: .userInitiated).async {
-                        let body = stage.produce(seq: seq, sources: sources, oldestSeq: oldest,
+                        var body = stage.produce(seq: seq, sources: sources, oldestSeq: oldest,
                                                  discontinuities: discontinuities) ?? data
+                        if let card { body = card.produce(seq: seq, segment: body, oldestSeq: oldest) ?? body }
+                        completion(ServedResource(status: 200, body: body, contentType: "video/mp2t",
+                                                  uti: "public.mpeg-2-transport-stream"))
+                    }
+                    return
+                }
+                if let card {
+                    let oldest = self.segments.first?.seq ?? seq
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        let body = card.produce(seq: seq, segment: data, oldestSeq: oldest) ?? data
                         completion(ServedResource(status: 200, body: body, contentType: "video/mp2t",
                                                   uti: "public.mpeg-2-transport-stream"))
                     }
@@ -4792,6 +4881,21 @@ struct AVPlayerMultiviewTile: View {
     /// tile so a Multiview grid cell reads the same as fullscreen. Android
     /// parity: gradient #1C2230 to #07080C, logo 40 percent of the shorter
     /// side solo, 55 percent in a grid tile, captions from 160 pt tall.
+    #if os(iOS)
+    /// Hands the remuxer this channel's audio-only card for the AirPlay LAN
+    /// copy (used only once the program turns out audio-only). Always true,
+    /// so it can sit in a condition list.
+    @discardableResult
+    private func setLANCard(on mux: TSHLSRemuxer) -> Bool {
+        let name = channelName
+        let logo = channelLogoURL
+        mux.setLANCardRenderer(key: "\(name)|\(logo?.absoluteString ?? "")") {
+            await AudioOnlyCardRenderer.render(channelName: name, logoURL: logo)
+        }
+        return true
+    }
+    #endif
+
     private var audioOnlyPresentation: some View {
         GeometryReader { geo in
             // The card occupies the 16:9 rect a video tile would (aspect fit,
@@ -4962,6 +5066,7 @@ struct AVPlayerMultiviewTile: View {
             // AirPlay route already selected: resolve the receiver, plan
             // the audio and start on the LAN URL instead (plan 4c).
             if MultiviewStore.shared.audioTileID == tileID, let mux = remuxer,
+               setLANCard(on: mux),
                airPlayDelivery.prepareStart(remuxer: mux, loopbackURL: url, channelName: channelName,
                                             start: { startURL in
                                                 // The tile moved on while the receiver resolved.
@@ -6981,6 +7086,7 @@ struct AVPlayerMultiviewTile: View {
                 airPlayDelivery.onWatchdogs = { suspend, item in
                     stallWatchdog?.setSuspended(suspend, item: item)
                 }
+                setLANCard(on: mux)
                 airPlayDelivery.attach(player: avPlayer, remuxer: mux,
                                        loopbackURL: readyLocalURL, channelName: channelName)
                 airPlayDelivery.noteStartItem(playerItem)
@@ -7232,6 +7338,7 @@ struct AVPlayerMultiviewTile: View {
             inPlaceFlipAwaitingSource = false
             airPlayDelivery.newSourceStarted(seq: seq, audioCodec: codec)
         }
+        setLANCard(on: mux)
         airPlayDelivery.beginInPlaceFlip(to: newName)
         mux.retarget(to: newURL, headers: headers, delay: settle) { result in
             guard token == teardownToken else { return }
@@ -7786,3 +7893,79 @@ enum H264SPSTiming {
     }
 }
 
+
+
+// MARK: - Audio-only card picture (AirPlay LAN video)
+
+/// The tile's audio-only card (GH #90) drawn at 1280x720 for the AirPlay
+/// LAN copy of an audio-only program: same gradient, logo (music note
+/// fallback), channel name and "Audio Only" as `audioOnlyPresentation` in
+/// a full-screen tile (logo 40 percent of the height), scaled for 720 px.
+enum AudioOnlyCardRenderer {
+    @MainActor
+    static func render(channelName: String, logoURL: URL?) async -> CGImage? {
+        var logo: UIImage?
+        if let logoURL {
+            let key = logoURL.absoluteString
+            if let cached = LogoCache.shared.image(for: key) {
+                logo = cached
+            } else if let data = try? await LogoFetcher.fetch(logoURL) {
+                let decoded: UIImage? = await Task.detached(priority: .utility) {
+                    AerioImageDecoding.decode(data)
+                }.value
+                if let decoded { LogoCache.shared.store(decoded, for: key) }
+                logo = decoded
+            }
+        }
+        let size = CGSize(width: TSCardFrameEncoder.width, height: TSCardFrameEncoder.height)
+        let renderer = ImageRenderer(content: Card(channelName: channelName, logo: logo, size: size))
+        renderer.scale = 1
+        renderer.proposedSize = ProposedViewSize(size)
+        return renderer.cgImage
+    }
+
+    private struct Card: View {
+        let channelName: String
+        let logo: UIImage?
+        let size: CGSize
+
+        var body: some View {
+            let side = size.height * 0.40
+            // The in-app card's headline / subheadline at a ~390 pt tall
+            // full-screen tile, scaled to 720 px.
+            let scale = size.height / 390
+            ZStack {
+                LinearGradient(colors: [Color(hex: "1C2230"), Color(hex: "07080C")],
+                               startPoint: .top, endPoint: .bottom)
+                VStack(spacing: side * 0.14) {
+                    if let logo {
+                        Image(uiImage: logo)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: side, height: side)
+                    } else {
+                        ZStack {
+                            Circle()
+                                .fill(Color.accentPrimary.opacity(0.15))
+                                .frame(width: side, height: side)
+                            Image(systemName: "music.note")
+                                .font(.system(size: side * 0.4, weight: .light))
+                                .foregroundStyle(LinearGradient.accentGradient)
+                        }
+                    }
+                    Text(channelName)
+                        .font(.system(size: 17 * scale, weight: .semibold))
+                        .foregroundColor(.white)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .padding(.horizontal, 16 * scale)
+                    Text("Audio Only")
+                        .font(.system(size: 15 * scale))
+                        .foregroundColor(.gray)
+                }
+            }
+            .frame(width: size.width, height: size.height)
+            .environment(\.colorScheme, .dark)
+        }
+    }
+}

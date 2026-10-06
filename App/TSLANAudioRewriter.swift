@@ -14,6 +14,10 @@
 //
 
 import Foundation
+import CoreGraphics
+import CoreMedia
+import CoreVideo
+import VideoToolbox
 
 /// Rewrites one TS segment at a time, in sequence order, for LAN delivery:
 /// - the PMT names the rewritten audio PID as stream_type 0x0F (ADTS AAC),
@@ -602,5 +606,352 @@ final class TSLANAudioStage: @unchecked Sendable {
     var cachedCount: Int {
         lock.lock(); defer { lock.unlock() }
         return cache.count
+    }
+}
+
+// MARK: - Audio-only card video (AirPlay LAN)
+
+/// AirPlay LAN copy of an audio-only program (GH #90 follow-up): the
+/// receiver (Roku, Apple TV) shows black for a TS with no video track, so
+/// the LAN segments get a static picture, the app's audio-only logo card,
+/// as an H.264 elementary stream muxed into the SAME TS segment:
+/// - the PMT gains a stream_type 0x1B entry on an unused PID, which also
+///   becomes the PCR_PID; section_length and CRC32 are recomputed;
+/// - each segment carries the card access unit (AUD + SPS + PPS + IDR, one
+///   pre-encoded picture) right after its PAT/PMT, so every segment opens
+///   on an IDR and decodes on its own, then again every `1 / fps` s of
+///   audio PTS, each time with PTS equal to the audio PES it precedes;
+/// - a PCR rides the video PID on every IDR and in adaptation-only packets
+///   at least every 100 ms of audio PTS, a fixed lead behind the audio;
+/// - every original packet is copied untouched.
+///
+/// Pure logic, no encoder: the caller supplies the encoded access unit.
+enum TSCardVideoMuxer {
+
+    static let videoStreamType: UInt8 = 0x1B
+    static let videoStreamID: UInt8 = 0xE0
+    /// PCR lead behind the PTS it is stamped against (100 ms).
+    static let pcrLeadTicks: Int64 = 9_000
+    static let pcrIntervalTicks: Int64 = 9_000
+    static let candidatePIDs = [0x0100, 0x01E0, 0x1011, 0x0200, 0x0300, 0x1FF0]
+    private static let packetSize = TSLANAudioRewriter.packetSize
+    private static let mask = TSLANAudioRewriter.pts33Mask
+
+    /// The segment with the card video muxed in, or nil when it cannot be
+    /// (no PAT/PMT, the PMT already lists video, no audio PES with a PTS,
+    /// or the PMT section does not fit one packet). `cc` is the video
+    /// PID's continuity counter, carried across segments by the caller.
+    static func inject(segment: [UInt8], accessUnit: [UInt8], fps: Int,
+                       cc: inout UInt8) -> [UInt8]? {
+        let n = segment.count / packetSize
+        guard n > 0, !accessUnit.isEmpty, fps > 0 else { return nil }
+        func packet(_ i: Int) -> [UInt8] { Array(segment[(i * packetSize)..<((i + 1) * packetSize)]) }
+        func pid(_ i: Int) -> Int {
+            (Int(segment[i * packetSize + 1] & 0x1F) << 8) | Int(segment[i * packetSize + 2])
+        }
+        // Program layout from the segment's own PAT / PMT.
+        var pmtPID = -1
+        var usedPIDs = Set<Int>([0, 0x1FFF])
+        for i in 0..<n {
+            guard segment[i * packetSize] == 0x47 else { return nil }
+            usedPIDs.insert(pid(i))
+            if pmtPID < 0, pid(i) == 0, segment[i * packetSize + 1] & 0x40 != 0 {
+                pmtPID = TSLANAudioRewriter.firstPMTPID(packet(i)) ?? -1
+            }
+        }
+        guard pmtPID >= 0 else { return nil }
+        var info: TSLANAudioRewriter.PMTInfo?
+        for i in 0..<n where pid(i) == pmtPID {
+            if let pi = TSLANAudioRewriter.parsePMT(packet(i)) { info = pi; break }
+        }
+        guard let info, info.videoPID < 0, let audioPID = info.audio.first?.pid else { return nil }
+        for a in info.audio { usedPIDs.insert(a.pid) }
+        guard let videoPID = candidatePIDs.first(where: { !usedPIDs.contains($0) }) else { return nil }
+        // First audio PTS: the first card picture is stamped with it.
+        var firstPTS: Int64?
+        for i in 0..<n where pid(i) == audioPID && segment[i * packetSize + 1] & 0x40 != 0 {
+            if let p = TSLANAudioRewriter.pesPTS(packet(i)) { firstPTS = p; break }
+        }
+        guard let firstPTS else { return nil }
+
+        let interval = Int64(90_000 / fps)
+        var out = [UInt8]()
+        out.reserveCapacity(segment.count + (accessUnit.count + 400) * (fps * 4))
+        var lastVideoPTS: Int64 = -1
+        var lastPCR: Int64 = -1
+        func delta(_ a: Int64, _ b: Int64) -> Int64 { (a - b) & mask }
+        func emitFrame(pts: Int64) {
+            let pcr = (pts - pcrLeadTicks) & mask
+            out += packetizeVideo(accessUnit: accessUnit, pts: pts, pcr: pcr, pid: videoPID, cc: &cc)
+            lastVideoPTS = pts
+            lastPCR = pcr
+        }
+        for i in 0..<n {
+            var p = packet(i)
+            let id = pid(i)
+            if id == pmtPID {
+                if p[1] & 0x40 != 0 {
+                    guard let rewritten = addVideoToPMT(p, videoPID: videoPID) else { return nil }
+                    p = rewritten
+                }
+                out += p
+                continue
+            }
+            if id == 0 || id == 0x1FFF { out += p; continue }
+            if lastVideoPTS < 0 { emitFrame(pts: firstPTS) }
+            if id == audioPID, p[1] & 0x40 != 0, let apts = TSLANAudioRewriter.pesPTS(p) {
+                let sinceVideo = delta(apts, lastVideoPTS)
+                if sinceVideo >= interval, sinceVideo < (1 << 32) {
+                    emitFrame(pts: apts)
+                } else {
+                    let pcr = (apts - pcrLeadTicks) & mask
+                    let sincePCR = delta(pcr, lastPCR)
+                    if sincePCR >= pcrIntervalTicks, sincePCR < (1 << 32) {
+                        out += pcrPacket(pid: videoPID, pcr: pcr, cc: cc)
+                        lastPCR = pcr
+                    }
+                }
+            }
+            out += p
+        }
+        if lastVideoPTS < 0 { return nil }
+        return out
+    }
+
+    /// The PMT packet with an H.264 entry for `videoPID` first in the ES
+    /// loop and PCR_PID moved to it. Nil when malformed or too long.
+    static func addVideoToPMT(_ p: [UInt8], videoPID: Int) -> [UInt8]? {
+        guard let base = TSLANAudioRewriter.payloadOffset(p) else { return nil }
+        let s = base + 1 + Int(p[base])
+        guard s + 12 < packetSize, p[s] == 0x02 else { return nil }
+        let sectionLength = (Int(p[s + 1] & 0x0F) << 8) | Int(p[s + 2])
+        let end = s + 3 + sectionLength - 4             // start of the CRC
+        guard end <= packetSize - 4, end > s + 12 else { return nil }
+        let pil = (Int(p[s + 10] & 0x0F) << 8) | Int(p[s + 11])
+        let esStart = s + 12 + pil
+        guard esStart <= end else { return nil }
+        var section = Array(p[s..<esStart])
+        section[8] = (section[8] & 0xE0) | UInt8((videoPID >> 8) & 0x1F)
+        section[9] = UInt8(videoPID & 0xFF)
+        section += [videoStreamType, 0xE0 | UInt8((videoPID >> 8) & 0x1F), UInt8(videoPID & 0xFF), 0xF0, 0x00]
+        section += p[esStart..<end]
+        let newLength = section.count - 3 + 4
+        section[1] = (section[1] & 0xF0) | UInt8((newLength >> 8) & 0x0F)
+        section[2] = UInt8(newLength & 0xFF)
+        let crc = TSLANAudioRewriter.crc32MPEG(section)
+        section += [UInt8(crc >> 24), UInt8((crc >> 16) & 0xFF), UInt8((crc >> 8) & 0xFF), UInt8(crc & 0xFF)]
+        var out = Array(p[0..<s]) + section
+        guard out.count <= packetSize else { return nil }
+        out += [UInt8](repeating: 0xFF, count: packetSize - out.count)
+        return out
+    }
+
+    static func encodePCR(_ base: Int64) -> [UInt8] {
+        let b = base & mask
+        return [UInt8((b >> 25) & 0xFF), UInt8((b >> 17) & 0xFF), UInt8((b >> 9) & 0xFF),
+                UInt8((b >> 1) & 0xFF), UInt8(((b & 1) << 7) | 0x7E), 0x00]
+    }
+
+    static func decodePCR(_ p: [UInt8]) -> Int64? {
+        guard p.count == packetSize, (p[3] >> 4) & 0x02 != 0, p[4] >= 7, p[5] & 0x10 != 0 else { return nil }
+        return (Int64(p[6]) << 25) | (Int64(p[7]) << 17) | (Int64(p[8]) << 9)
+            | (Int64(p[9]) << 1) | (Int64(p[10]) >> 7)
+    }
+
+    /// Adaptation-field-only packet carrying a PCR (continuity counter not
+    /// advanced: no payload).
+    static func pcrPacket(pid: Int, pcr: Int64, cc: UInt8) -> [UInt8] {
+        var p: [UInt8] = [0x47, UInt8((pid >> 8) & 0x1F), UInt8(pid & 0xFF),
+                          0x20 | ((cc &- 1) & 0x0F), 183, 0x10]
+        p += encodePCR(pcr)
+        p += [UInt8](repeating: 0xFF, count: packetSize - p.count)
+        return p
+    }
+
+    /// One video PES (PTS only) in TS packets: the first carries the PCR and
+    /// random_access_indicator, the last is padded with adaptation stuffing.
+    static func packetizeVideo(accessUnit: [UInt8], pts: Int64, pcr: Int64, pid: Int,
+                               cc: inout UInt8) -> [UInt8] {
+        var pes: [UInt8] = [0x00, 0x00, 0x01, videoStreamID]
+        let pesLength = 3 + 5 + accessUnit.count
+        let lengthField = pesLength <= 0xFFFF ? pesLength : 0
+        pes += [UInt8(lengthField >> 8), UInt8(lengthField & 0xFF), 0x80, 0x80, 0x05]
+        pes += TSLANAudioRewriter.encodePTS(pts & mask)
+        pes += accessUnit
+        var out = [UInt8]()
+        out.reserveCapacity((pes.count / 176 + 2) * packetSize)
+        var o = 0
+        var first = true
+        while o < pes.count {
+            var header: [UInt8] = [0x47, UInt8((first ? 0x40 : 0) | ((pid >> 8) & 0x1F)), UInt8(pid & 0xFF)]
+            var af: [UInt8] = []
+            if first { af = [0x50] + encodePCR(pcr) }    // random_access + PCR
+            let room = 184 - (af.isEmpty ? 0 : 1 + af.count)
+            let remaining = pes.count - o
+            if remaining < room {
+                // Stuff the adaptation field so the payload ends the packet.
+                let stuffing = room - remaining - (af.isEmpty ? 1 : 0)
+                if af.isEmpty {
+                    af = stuffing > 0 ? [0x00] + [UInt8](repeating: 0xFF, count: stuffing - 1) : []
+                    // An empty AF with length 0 takes one byte; handled below.
+                    header.append(0x30 | (cc & 0x0F))
+                    out += header
+                    out.append(UInt8(af.count))
+                    out += af
+                } else {
+                    af += [UInt8](repeating: 0xFF, count: stuffing)
+                    header.append(0x30 | (cc & 0x0F))
+                    out += header
+                    out.append(UInt8(af.count))
+                    out += af
+                }
+                out += pes[o...]
+                o = pes.count
+            } else {
+                header.append((af.isEmpty ? 0x10 : 0x30) | (cc & 0x0F))
+                out += header
+                if !af.isEmpty { out.append(UInt8(af.count)); out += af }
+                out += pes[o..<(o + room)]
+                o += room
+            }
+            cc = (cc + 1) & 0x0F
+            first = false
+        }
+        return out
+    }
+}
+
+/// Thread-safe front of `TSCardVideoMuxer` for the LAN server: caches each
+/// segment's card copy and carries the video continuity counter from one
+/// segment to the next when they are produced in order.
+final class TSLANCardStage: @unchecked Sendable {
+    let accessUnit: [UInt8]
+    let fps: Int
+    private let lock = NSLock()
+    private var cache: [Int: Data] = [:]
+    private var ccAfter: [Int: UInt8] = [:]
+
+    init(accessUnit: [UInt8], fps: Int) {
+        self.accessUnit = accessUnit
+        self.fps = fps
+    }
+
+    /// The card copy of `segment` (seq `seq`), or nil when it cannot carry
+    /// the card (the caller serves the segment as it is).
+    func produce(seq: Int, segment: Data, oldestSeq: Int) -> Data? {
+        lock.lock(); defer { lock.unlock() }
+        if let hit = cache[seq] { return hit }
+        var cc = ccAfter[seq - 1] ?? 0
+        guard let out = TSCardVideoMuxer.inject(segment: [UInt8](segment), accessUnit: accessUnit,
+                                                fps: fps, cc: &cc) else { return nil }
+        let data = Data(out)
+        cache[seq] = data
+        ccAfter[seq] = cc
+        for k in cache.keys where k < oldestSeq { cache[k] = nil; ccAfter[k] = nil }
+        return data
+    }
+}
+
+/// One still picture to one H.264 IDR access unit in Annex B form (AUD,
+/// SPS, PPS, IDR slices) with VideoToolbox, the platform encoder. Used once
+/// per card (channel), not per segment: the same bytes are re-stamped.
+enum TSCardFrameEncoder {
+    static let width = 1280
+    static let height = 720
+
+    /// Nil on any encoder failure (the caller keeps the audio-only TS).
+    static func encodeIDR(_ image: CGImage) -> [UInt8]? {
+        guard let pixels = pixelBuffer(image) else { return nil }
+        var sessionOut: VTCompressionSession?
+        let created = VTCompressionSessionCreate(
+            allocator: kCFAllocatorDefault, width: Int32(width), height: Int32(height),
+            codecType: kCMVideoCodecType_H264, encoderSpecification: nil,
+            imageBufferAttributes: nil, compressedDataAllocator: nil,
+            outputCallback: nil, refcon: nil, compressionSessionOut: &sessionOut)
+        guard created == noErr, let session = sessionOut else { return nil }
+        defer { VTCompressionSessionInvalidate(session) }
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanFalse)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
+                             value: kVTProfileLevel_H264_Main_AutoLevel)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: 1))
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: 1_500_000))
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: 1))
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ColorPrimaries, value: kCVImageBufferColorPrimaries_ITU_R_709_2)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_TransferFunction, value: kCVImageBufferTransferFunction_ITU_R_709_2)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_YCbCrMatrix, value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
+        guard VTCompressionSessionPrepareToEncodeFrames(session) == noErr else { return nil }
+        final class Box: @unchecked Sendable { var au: [UInt8]? }
+        let box = Box()
+        let props = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
+        let status = VTCompressionSessionEncodeFrame(
+            session, imageBuffer: pixels, presentationTimeStamp: CMTime(value: 0, timescale: 90_000),
+            duration: CMTime(value: 90_000, timescale: 90_000), frameProperties: props,
+            infoFlagsOut: nil) { st, _, sample in
+                guard st == noErr, let sample else { return }
+                box.au = annexB(sample)
+            }
+        guard status == noErr else { return nil }
+        VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        return box.au
+    }
+
+    private static func pixelBuffer(_ image: CGImage) -> CVPixelBuffer? {
+        var pb: CVPixelBuffer?
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+                                      kCVPixelBufferCGImageCompatibilityKey: true,
+                                      kCVPixelBufferCGBitmapContextCompatibilityKey: true]
+        guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA,
+                                  attrs as CFDictionary, &pb) == kCVReturnSuccess, let pb else { return nil }
+        CVPixelBufferLockBaseAddress(pb, [])
+        defer { CVPixelBufferUnlockBaseAddress(pb, []) }
+        guard let ctx = CGContext(data: CVPixelBufferGetBaseAddress(pb), width: width, height: height,
+                                  bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(pb),
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
+                                      | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return pb
+    }
+
+    /// AVCC sample (4-byte lengths) plus the format's SPS / PPS to Annex B,
+    /// led by an access unit delimiter.
+    private static func annexB(_ sample: CMSampleBuffer) -> [UInt8]? {
+        guard let format = CMSampleBufferGetFormatDescription(sample),
+              let block = CMSampleBufferGetDataBuffer(sample) else { return nil }
+        let start: [UInt8] = [0, 0, 0, 1]
+        var out: [UInt8] = start + [0x09, 0x10]
+        var count = 0
+        var headerLength: Int32 = 4
+        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, parameterSetIndex: 0, parameterSetPointerOut: nil,
+                                                           parameterSetSizeOut: nil, parameterSetCountOut: &count,
+                                                           nalUnitHeaderLengthOut: &headerLength)
+        guard count >= 2, headerLength == 4 else { return nil }
+        for i in 0..<count {
+            var ptr: UnsafePointer<UInt8>?
+            var size = 0
+            guard CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                format, parameterSetIndex: i, parameterSetPointerOut: &ptr, parameterSetSizeOut: &size,
+                parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil) == noErr, let ptr else { return nil }
+            out += start
+            out += UnsafeBufferPointer(start: ptr, count: size)
+        }
+        let length = CMBlockBufferGetDataLength(block)
+        var data = [UInt8](repeating: 0, count: length)
+        guard CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: &data) == noErr else { return nil }
+        var o = 0
+        var sawIDR = false
+        while o + 4 <= length {
+            let n = Int(data[o]) << 24 | Int(data[o + 1]) << 16 | Int(data[o + 2]) << 8 | Int(data[o + 3])
+            o += 4
+            guard n > 0, o + n <= length else { return nil }
+            let type = data[o] & 0x1F
+            if type == 5 { sawIDR = true }
+            if type != 9 { out += start; out += data[o..<(o + n)] }   // AUD already leads
+            o += n
+        }
+        return sawIDR ? out : nil
     }
 }
