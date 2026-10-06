@@ -1418,6 +1418,65 @@ final class PlayWhereRouter: ObservableObject {
     }
 
     #if os(iOS)
+    // MARK: Multiview (Logan 2026-10-06)
+
+    /// The receiver name when the active remote session can open Multiview
+    /// natively (AerioTV Remote host or Cast Connect TV app that advertised
+    /// it), else nil. AirPlay and the Cast web receiver never qualify until
+    /// the phone-side composite (part 2) lands.
+    static func multiviewReceiverName() -> String? {
+        switch activeTransport() {
+        case .cast:
+            return AerioCastController.shared.canOpenMultiviewOnReceiver ? receiverName(.cast) : nil
+        case .companion:
+            let c = CompanionClient.shared
+            return c.isControlling && c.hostMultiviewCapable ? receiverName(.companion) : nil
+        default:
+            return nil
+        }
+    }
+
+    /// Multiview dock card Play: with a capable receiver, the play-where
+    /// prompt; otherwise straight to Play Here.
+    func requestMultiview(channels: [ChannelDisplayItem], focus: Int, play: @escaping () -> Void) {
+        guard let receiver = Self.multiviewReceiverName() else {
+            playMultiviewHere(play: play)
+            return
+        }
+        present(title: "Multiview", receiver: receiver,
+                onHere: { [weak self] in
+                    debugLog("[Cast] play-where prompt: here (multiview)")
+                    self?.playMultiviewHere(play: play)
+                },
+                onReceiver: { [weak self] in
+                    debugLog("[Cast] play-where prompt: receiver=\(receiver) (multiview)")
+                    self?.playMultiviewOnReceiver(channels: channels, focus: focus)
+                })
+    }
+
+    /// "Play Here": the local Multiview, pinned like any other Play Here
+    /// while a session is up so the receiver keeps what it plays.
+    func playMultiviewHere(play: @escaping () -> Void) {
+        if let transport = Self.activeTransport() {
+            playHere(transport: transport, play: play)
+        } else {
+            play()
+        }
+    }
+
+    /// "Play on <receiver>": send multiview.open on the active transport.
+    func playMultiviewOnReceiver(channels: [ChannelDisplayItem], focus: Int) {
+        let sent: Bool
+        switch Self.activeTransport() {
+        case .cast: sent = AerioCastController.shared.openMultiviewOnReceiver(channels, focus: focus)
+        case .companion: sent = CompanionClient.shared.openMultiview(channels, focus: focus)
+        default: sent = false
+        }
+        guard sent else { return }
+        // The receiver took the set: nothing stays staged on the phone.
+        MultiviewDockState.clearStaging(reason: "sent to \(Self.receiverName(Self.activeTransport() ?? .cast))")
+    }
+
     enum Transport { case cast, companion, airPlay }
 
     /// Same precedence as HomeView.activeRemoteTransport (the card).

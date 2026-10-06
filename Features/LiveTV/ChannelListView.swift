@@ -1985,14 +1985,8 @@ struct ChannelListView: View {
                         }
                     }
             )
-            // Multiview staging banner, same placement rule as the guide:
-            // pinned below the header / pills, above the rows. Attached
-            // INSIDE the header inset so it stacks under it and does not
-            // collapse with it. Staging from a row's long-press menu used to
-            // show nothing in List view (Logan 2026-10-06).
-            .safeAreaInset(edge: .top, spacing: 0) {
-                MultiviewStagingBannerSlot(activeServer: servers.first(where: { $0.isActive }) ?? servers.first)
-            }
+            // Multiview staging: the dock card above the tab bar (HomeView,
+            // Logan 2026-10-06) replaced the strip that was inset here.
             // v1.6.18 — iPhone pills moved here from the VStack
             // sibling above. When the user scrolls past 80pt the
             // pills tuck away to reclaim ~40% of vertical chrome;

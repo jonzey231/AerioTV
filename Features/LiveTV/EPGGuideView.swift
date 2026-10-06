@@ -5632,15 +5632,12 @@ struct EPGGuideView: View {
             stagingToastOverlay
         }
         #else
+        // iPhone and iPad: the staging strip became the Multiview dock card
+        // above the tab bar (HomeView, Logan 2026-10-06).
         ZStack {
             Color.appBackground.ignoresSafeArea()
             guideContent
             stagingToastOverlay
-        }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            if multiviewStore.isStagingFromGuide {
-                stagingBanner
-            }
         }
         #endif
     }

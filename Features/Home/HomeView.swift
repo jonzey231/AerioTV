@@ -4586,6 +4586,9 @@ struct MainTabView: View {
     #if os(iOS)
     /// Kept Live card (iOS/iPadOS only; tvOS uses the kept-count circle).
     @ObservedObject private var kept = KeptLiveChannels.shared
+    /// Multiview staging dock card (Logan 2026-10-06): one derived Bool.
+    @ObservedObject private var multiviewDock = MultiviewDockState.shared
+    @State private var showMultiviewSheet = false
     /// Measured tab bar capsule insets for the iPhone Kept Live row.
     @ObservedObject private var cardMetrics = RemoteSessionCardMetrics.shared
     #endif
@@ -4729,6 +4732,9 @@ struct MainTabView: View {
     /// Measured height of the iPhone Kept Live dock card; the Control-a-TV
     /// circle beside it takes this diameter.
     @State private var keptCardHeight: CGFloat = 0
+    #if os(iOS)
+    @State private var multiviewCardHeight: CGFloat = 0
+    #endif
     /// Rule 3: the remote-controls sheet the session card opens.
     @State private var showRemoteControls = false
     #endif
@@ -6062,8 +6068,9 @@ struct MainTabView: View {
                playerSession.mode == .idle || nowPlaying.isMinimized,
                // While the Kept Live pill shows, the button rides on the
                // pill's row in the dock instead (Logan 2026-10-04): here the
-               // pill drew over it at the same height.
-               !keptLiveCardVisible {
+               // pill drew over it at the same height. Same for the
+               // Multiview card (Logan 2026-10-06).
+               !keptLiveCardVisible, !multiviewCardVisible {
                 CompanionControlFABDock { showCompanionPickerGlobal = true }
             }
         }
@@ -6109,6 +6116,11 @@ struct MainTabView: View {
             RemoteSessionCardDock {
                 VStack(spacing: RemoteSessionCardMetrics.gap) {
                     if PadTabPill.isActive {
+                        // iPad (Logan 2026-10-06): the Multiview staging
+                        // card takes the same width rule and capsule.
+                        multiviewCard
+                            .frame(width: padRemoteCardWidth)
+                            .frame(maxWidth: .infinity)
                         // iPad (Logan 2026-10-05): Kept Live uses the same
                         // width rule, capsule and surface as the remote card,
                         // centered, so the two stack as matching capsules.
@@ -6130,6 +6142,24 @@ struct MainTabView: View {
                         remoteSessionCard
                             .padding(.leading, cardMetrics.barLeadingInset > 0 ? cardMetrics.barLeadingInset : 20)
                             .padding(.trailing, cardMetrics.barTrailingInset > 0 ? cardMetrics.barTrailingInset : 20)
+                        // Multiview staging card (Logan 2026-10-06): the
+                        // Kept Live row's rules. The Control-a-TV circle
+                        // rides the LOWEST card row, so it sits here only
+                        // when no Kept Live row is below.
+                        if multiviewCardVisible {
+                            HStack(spacing: RemoteSessionCardMetrics.gap) {
+                                multiviewCard
+                                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                                        if abs(h - multiviewCardHeight) > 0.5 { multiviewCardHeight = h }
+                                    }
+                                if showsControlATVButton && !keptLiveCardVisible {
+                                    CompanionControlFAB(action: { showCompanionPickerGlobal = true },
+                                                        size: multiviewCardHeight > 0 ? multiviewCardHeight : 48)
+                                }
+                            }
+                            .padding(.leading, cardMetrics.barLeadingInset > 0 ? cardMetrics.barLeadingInset : 20)
+                            .padding(.trailing, cardMetrics.barTrailingInset > 0 ? cardMetrics.barTrailingInset : 20)
+                        }
                         if keptLiveCardVisible {
                             // Outer edges line up with the measured tab bar
                             // capsule (Logan 2026-10-04); 20 pt until measured.
@@ -6173,6 +6203,12 @@ struct MainTabView: View {
                 try? await Task.sleep(nanoseconds: 400_000_000)
                 RemoteSessionCardMetrics.shared.measureTabBar()
             }
+        }
+        .sheet(isPresented: $showMultiviewSheet) {
+            MultiviewStagedSheet()
+        }
+        .onChange(of: multiviewCardVisible) { _, visible in
+            if !visible { showMultiviewSheet = false }
         }
         .sheet(isPresented: $showKeptLiveList) {
             ScrollView {
@@ -6381,6 +6417,19 @@ struct MainTabView: View {
         let pill = cardMetrics.padPillWidth
         if pill > 0 { return pill }
         return max(0, cardMetrics.windowWidth - 32)
+    }
+
+    /// Multiview staging card (Logan 2026-10-06): channels are staged and
+    /// the player is not fullscreen, like the other dock cards.
+    private var multiviewCardVisible: Bool {
+        multiviewDock.visible && !playerFullscreen
+    }
+
+    @ViewBuilder
+    private var multiviewCard: some View {
+        if multiviewCardVisible {
+            MultiviewDockCard(onShowSheet: { showMultiviewSheet = true })
+        }
     }
 
     @ViewBuilder

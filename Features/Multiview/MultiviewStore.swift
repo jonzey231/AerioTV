@@ -1138,6 +1138,19 @@ final class MultiviewStore: ObservableObject {
         )
     }
 
+    /// Reorder staged tiles (the dock card's Multiview sheet, Reorder mode).
+    /// Grid position follows list order; audio stays with its tile.
+    func move(fromOffsets source: IndexSet, toOffset destination: Int) {
+        var next = tiles
+        next.move(fromOffsets: source, toOffset: destination)
+        guard next.map(\.id) != tiles.map(\.id) else { return }
+        tiles = next
+        DebugLogger.shared.log(
+            "[MV-Tile] reorder staged tiles count=\(tiles.count)",
+            category: "Playback", level: .info
+        )
+    }
+
     // MARK: - Reset
 
     /// Clear the entire store. Called by `PlayerSession.exit()` when
@@ -1196,4 +1209,50 @@ extension Notification.Name {
     /// runaway line during playback; the live coordinator answers with ONE
     /// relay reload (drops the old mpv stream thread + its pinned buffers).
     static let aerioMemorySeatbeltReload = Notification.Name("aerioMemorySeatbeltReload")
+}
+
+// MARK: - Remote "open Multiview" command (Logan 2026-10-06)
+
+/// The `multiview.open` frame a phone sends to a TV app (AerioTV Remote to
+/// an Apple TV or Android TV host, and Cast Connect to the AerioTV Android
+/// TV app on the control namespace). One wire shape for both transports:
+///
+///   {"cmd":"multiview.open","type":"multiview.open",
+///    "channels":[{"channelId":"disp:<uuid>","playlistId":"<id>"}],
+///    "focus":0}
+///
+/// "cmd" and "type" carry the same value: the companion and Cast Connect
+/// frames key on "cmd", the web receiver on "type". channelId is the
+/// cross-platform Dispatcharr identity setChannel already uses; playlistId
+/// is the sender's active playlist id (informational: the TV resolves the
+/// channel in its own active playlist). focus = index of the tile that
+/// takes audio. Replies: {"cmd":"multiview.opened","type":"multiview.opened",
+/// "count":n} or {"cmd":"multiview.error","type":"multiview.error",
+/// "error":"<reason>"}.
+enum MultiviewRemoteCommand {
+    static let open = "multiview.open"
+    static let opened = "multiview.opened"
+    static let error = "multiview.error"
+    static let maxChannels = 9
+
+    @MainActor
+    static func openFrame(_ channels: [ChannelDisplayItem], focus: Int) -> [String: Any] {
+        let playlistID = ChannelStore.shared.activeServer?.id.uuidString ?? ""
+        var list: [[String: Any]] = []
+        for ch in channels {
+            guard let uuid = ch.uuid, !uuid.isEmpty else { continue }
+            list.append(["channelId": "disp:\(uuid)", "playlistId": playlistID])
+            if list.count == maxChannels { break }
+        }
+        return ["cmd": open, "type": open, "channels": list,
+                "focus": max(0, min(focus, max(0, list.count - 1)))]
+    }
+
+    static func reply(count: Int) -> [String: Any] {
+        ["cmd": opened, "type": opened, "count": count]
+    }
+
+    static func reply(error message: String) -> [String: Any] {
+        ["cmd": error, "type": error, "error": message]
+    }
 }

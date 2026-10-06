@@ -24,6 +24,7 @@
 
 #if os(iOS)
 import AVFoundation
+import Combine
 import Foundation
 import GoogleCast
 import Network
@@ -342,6 +343,11 @@ final class AerioCastController: NSObject, ObservableObject {
     @Published private(set) var remoteState = CompanionClient.RemoteState()
     private var controlChannel: GCKGenericChannel?
     private var targetProbeTask: Task<Void, Never>?
+    /// The AerioTV Android TV receiver said `"multiview": true` in its
+    /// receiverInfo answer: it handles `multiview.open` (Logan 2026-10-06).
+    /// The web receiver cannot run Multiview, and an older TV app does not
+    /// say it, so both leave this false and the sheet offers Play Here only.
+    @Published private(set) var receiverMultiviewCapable = false
     /// A live load held until the receiver type is known. Guessing is not an
     /// option in either direction: guessing web starts a proxy plus a server
     /// transcode for a TV that can play the raw TS natively, and guessing native
@@ -362,6 +368,7 @@ final class AerioCastController: NSObject, ObservableObject {
     /// Send `hello` (repeatedly) until a receiver names itself, or the window ends.
     private func probeReceiverTarget() {
         receiverTarget = .unknown
+        receiverMultiviewCapable = false
         targetProbeTask?.cancel()
         targetProbeTask = Task { @MainActor [weak self] in
             var waited: Double = 0
@@ -388,6 +395,12 @@ final class AerioCastController: NSObject, ObservableObject {
         // reply is the one message always read before the plan, so the
         // measurement now rides along with it.
         noteReceiverCaps(json)
+        let mv = (json["platform"] as? String) == "android-tv-app"
+            && (json["multiview"] as? Bool ?? false)
+        if mv != receiverMultiviewCapable {
+            receiverMultiviewCapable = mv
+            debugLog("[MV-CAST] receiver multiview capable=\(mv)")
+        }
         switch json["platform"] as? String {
         case "android-tv-app": resolveReceiverTarget(.androidTVApp)
         case "web-receiver": resolveReceiverTarget(.webReceiver)
@@ -440,6 +453,34 @@ final class AerioCastController: NSObject, ObservableObject {
     func setRemoteSpeed(_ speed: Double) { sendControl(["cmd": "setSpeed", "speed": speed]) }
     func setRemoteAspect(_ key: String) { sendControl(["cmd": "setAspect", "aspect": key]) }
     func setRemoteAudioOnly(_ on: Bool) { sendControl(["cmd": "setAudioOnly", "audioOnly": on]) }
+
+    /// True when "Play on <device>" can open Multiview on the Cast receiver:
+    /// Cast Connect launched the AerioTV Android TV app and it advertised
+    /// Multiview. The web receiver never qualifies (phone-side composite is
+    /// part 2).
+    var canOpenMultiviewOnReceiver: Bool {
+        isCasting && receiverTarget == .androidTVApp && receiverMultiviewCapable
+    }
+
+    /// Open Multiview on the AerioTV Android TV app with these channels, in
+    /// order (Logan 2026-10-06). Same frame as the AerioTV Remote one:
+    /// {"cmd":"multiview.open","type":"multiview.open","channels":[{"channelId":
+    /// "disp:<uuid>","playlistId":"<id>"}],"focus":0}. Channels with no
+    /// Dispatcharr id are skipped (the TV cannot resolve them). Capped at 9.
+    @discardableResult
+    func openMultiviewOnReceiver(_ channels: [ChannelDisplayItem], focus: Int) -> Bool {
+        let frame = MultiviewRemoteCommand.openFrame(channels, focus: focus)
+        let n = (frame["channels"] as? [Any])?.count ?? 0
+        guard n > 0 else {
+            surfaceCastFailure("The AerioTV app on this TV cannot look up these channels. "
+                + "Only Dispatcharr channels can open in Multiview there.")
+            debugLog("[MV-CAST] multiview.open not sent: no Dispatcharr ids")
+            return false
+        }
+        sendControl(frame)
+        debugLog("[MV-CAST] sent multiview.open to \(connectedDeviceName ?? "TV") channels=\(n)")
+        return true
+    }
 
     /// Fire-and-forget JSON on the control namespace. No-op with no channel.
     private func sendControl(_ dict: [String: Any]) {
@@ -1679,6 +1720,15 @@ extension AerioCastController: GCKGenericChannelDelegate {
             if decoded != remoteState { remoteState = decoded }
             return
         }
+        if kind == "multiview.opened" || kind == "multiview.error" {
+            let detail = (json["error"] as? String).map { " error=\($0)" }
+                ?? " count=\((json["count"] as? NSNumber)?.intValue ?? -1)"
+            debugLog("[MV-CAST] reply from \(connectedDeviceName ?? "TV"): \(kind ?? "")\(detail)")
+            if kind == "multiview.error" {
+                surfaceCastFailure("The TV could not open Multiview: \(json["error"] as? String ?? "unknown error")")
+            }
+            return
+        }
         guard kind == "receiverInfo" else { return }
         noteReceiverInfo(json)
     }
@@ -2194,6 +2244,9 @@ final class CompanionClient: NSObject, ObservableObject {
             switch t {
             case "hello":
                 if let np = json["nowPlaying"] as? String, !np.isEmpty { nowPlaying = np }
+                // Hosts that handle multiview.open say so (Logan 2026-10-06).
+                hostMultiviewCapable = json["multiview"] as? Bool ?? false
+                Self.clog("host multiview capable=\(hostMultiviewCapable)")
             case "authOk":
                 let remembered = (json["token"] as? String)?.isEmpty == false
                 if let token = json["token"] as? String, !token.isEmpty { storeToken(token) }
@@ -2211,6 +2264,10 @@ final class CompanionClient: NSObject, ObservableObject {
             return
         }
         switch json["cmd"] as? String {
+        case "multiview.opened":
+            debugLog("[MV-CAST] reply from \(connectedTVName ?? "TV"): multiview.opened count=\((json["count"] as? NSNumber)?.intValue ?? -1)")
+        case "multiview.error":
+            debugLog("[MV-CAST] reply from \(connectedTVName ?? "TV"): multiview.error error=\(json["error"] as? String ?? "?")")
         case "state":
             remoteState = Self.decodeState(json)
             if let playing = json["isPlaying"] as? Bool { remoteIsPlaying = playing }
@@ -2352,6 +2409,25 @@ final class CompanionClient: NSObject, ObservableObject {
     }
 
     func togglePlayPause() { sendJSON(["cmd": "toggle"]); Self.clog("-> TV toggle") }
+
+    /// The connected host's hello carried `"multiview": true`.
+    @Published private(set) var hostMultiviewCapable = false
+
+    /// Open Multiview on the controlled TV with these channels, in order
+    /// (Logan 2026-10-06). Frame shared with the Cast path:
+    /// MultiviewRemoteCommand.openFrame.
+    @discardableResult
+    func openMultiview(_ channels: [ChannelDisplayItem], focus: Int) -> Bool {
+        let frame = MultiviewRemoteCommand.openFrame(channels, focus: focus)
+        let n = (frame["channels"] as? [Any])?.count ?? 0
+        guard n > 0 else {
+            debugLog("[MV-CAST] multiview.open not sent: no Dispatcharr ids")
+            return false
+        }
+        sendJSON(frame)
+        debugLog("[MV-CAST] sent multiview.open to \(connectedTVName ?? "TV") channels=\(n)")
+        return true
+    }
 
     // Full options surface (parity with the Android companion overlay).
     func requestState() { sendJSON(["cmd": "getState"]) }
@@ -4331,6 +4407,241 @@ struct RemoteSessionCard: View {
 
 }
 
+// MARK: - Multiview dock card + sheet (Logan 2026-10-06)
+
+/// Derived visibility for the Multiview dock card, so HomeView observes one
+/// Bool instead of MultiviewStore (which publishes constantly in a session).
+/// Visible while channels are staged from Live TV and no Multiview session
+/// is up.
+@MainActor
+final class MultiviewDockState: ObservableObject {
+    static let shared = MultiviewDockState()
+    @Published private(set) var visible = false
+    private var bag: AnyCancellable?
+
+    private init() {
+        let store = MultiviewStore.shared
+        bag = Publishers.CombineLatest3(store.$isStagingFromGuide,
+                                        store.$tiles.map(\.isEmpty),
+                                        PlayerSession.shared.$mode.map { $0 == .multiview })
+            .map { staging, empty, inMV in staging && !empty && !inMV }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] v in
+                self?.visible = v
+                debugLog("[MV-Tile] dock card \(v ? "show" : "hide")")
+            }
+    }
+
+    /// Card Play: the default behavior (Play Here; with a session whose
+    /// receiver can run Multiview, the play-where prompt).
+    static func play() {
+        let store = MultiviewStore.shared
+        let items = store.tiles.map(\.item)
+        let focus = store.tiles.firstIndex(where: { $0.id == store.audioTileID }) ?? 0
+        DebugLogger.shared.log("[MV-Tile] staging mode: user tapped Play (count=\(items.count))",
+                               category: "Playback", level: .info)
+        PlayWhereRouter.shared.requestMultiview(channels: items, focus: focus, play: playHereNow)
+    }
+
+    /// Enter Multiview on this device over the staged tiles.
+    static func playHereNow() {
+        MultiviewStore.shared.isStagingFromGuide = false
+        PlayerSession.shared.enterMultiview(seeding: nil, server: ChannelStore.shared.activeServer)
+    }
+
+    /// After the receiver took the set, the phone has nothing staged.
+    static func clearStaging(reason: String) {
+        let store = MultiviewStore.shared
+        guard PlayerSession.shared.mode != .multiview else { return }
+        let n = store.tiles.count
+        store.reset()
+        store.isStagingFromGuide = false
+        DebugLogger.shared.log("[MV-Tile] staging mode: \(reason) (count=\(n))",
+                               category: "Playback", level: .info)
+    }
+}
+
+/// The Multiview staging dock card: the exact shape of KeptLiveCard's dock
+/// body (44 pt tile, title and subtitle, 18/8 pt padding, same capsule
+/// surface). Tapping the body opens the Multiview sheet; Play plays.
+struct MultiviewDockCard: View {
+    @ObservedObject private var store = MultiviewStore.shared
+    let onShowSheet: () -> Void
+
+    var body: some View {
+        let names = store.tiles.map(\.item.name)
+        let title = names.count == 1 ? "1 channel staged for Multiview"
+            : "\(names.count) channels staged for Multiview"
+        return HStack(spacing: 12) {
+            Button(action: onShowSheet) {
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.black.opacity(0.25))
+                        Image(systemName: "rectangle.split.2x2")
+                            .font(.system(size: 20))  // glyph in a fixed box: not text, stays fixed
+                            .foregroundStyle(ThemeManager.shared.accent)
+                    }
+                    .frame(width: 44, height: 44)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(title)
+                            .scaledFont(.subheadline.weight(.bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Text(names.joined(separator: ", "))
+                            .scaledFont(.caption)
+                            .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Show channels staged for Multiview")
+            Button { MultiviewDockState.play() } label: {
+                Text("Play")
+                    .scaledFont(.subheadline.weight(.semibold))
+                    .foregroundStyle(ThemeManager.shared.accent)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .frame(minHeight: 40)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Play Multiview")
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 8)
+        .modifier(MultiviewDockSurface())
+        .accessibilityElement(children: .contain)
+    }
+
+    /// Same as KeptLiveCard's dock surface: iPad tab-pill capsule, iPhone
+    /// plain glass capsule.
+    private struct MultiviewDockSurface: ViewModifier {
+        func body(content: Content) -> some View {
+            if PadTabPill.isActive {
+                content.modifier(PadPillSurface(shape: Capsule()))
+            } else {
+                content.modifier(KeptPillChrome())
+            }
+        }
+    }
+}
+
+/// "Multiview" sheet from the dock card: staged channels with logo and name,
+/// swipe to remove, Reorder/Finish (the Switch Stream pattern), Clear, and
+/// the play buttons with the play-where sheet's wording.
+struct MultiviewStagedSheet: View {
+    @ObservedObject private var store = MultiviewStore.shared
+    @ObservedObject private var cast = AerioCastController.shared
+    @ObservedObject private var companion = CompanionClient.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var editMode: EditMode = .inactive
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(store.tiles) { tile in
+                        HStack(spacing: 12) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(Color.black.opacity(0.25))
+                                if let url = tile.item.logoURL {
+                                    AsyncImage(url: url) { image in
+                                        image.resizable().scaledToFit()
+                                    } placeholder: {
+                                        Image(systemName: "tv")
+                                            .font(.system(size: 16))  // glyph in a fixed box: not text, stays fixed
+                                            .foregroundStyle(ThemeManager.shared.accent)
+                                    }
+                                    .frame(width: 38, height: 38)
+                                } else {
+                                    Image(systemName: "tv")
+                                        .font(.system(size: 16))  // glyph in a fixed box: not text, stays fixed
+                                        .foregroundStyle(ThemeManager.shared.accent)
+                                }
+                            }
+                            .frame(width: 44, height: 44)
+                            Text(tile.item.name)
+                                .lineLimit(1)
+                        }
+                    }
+                    .onDelete { offsets in
+                        for id in offsets.map({ store.tiles[$0].id }) { store.remove(id: id) }
+                        if store.tiles.isEmpty { store.isStagingFromGuide = false }
+                    }
+                    .onMove { store.move(fromOffsets: $0, toOffset: $1) }
+                }
+                Section {
+                    Button("Clear", role: .destructive) {
+                        MultiviewDockState.clearStaging(reason: "user tapped Clear")
+                        dismiss()
+                    }
+                }
+            }
+            .navigationTitle("Multiview")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button(editMode.isEditing ? "Finish" : "Reorder") {
+                        withAnimation { editMode = editMode.isEditing ? .inactive : .active }
+                    }
+                    .disabled(store.tiles.count < 2 && !editMode.isEditing)
+                }
+            }
+            .environment(\.editMode, $editMode)
+            .safeAreaInset(edge: .bottom, spacing: 0) { playButtons }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .onChange(of: store.tiles.isEmpty) { _, empty in if empty { dismiss() } }
+    }
+
+    private var playButtons: some View {
+        // Re-read on every cast/companion publish (observed above).
+        let receiver = PlayWhereRouter.multiviewReceiverName()
+        return VStack(spacing: 10) {
+            Button {
+                dismiss()
+                PlayWhereRouter.shared.playMultiviewHere(play: MultiviewDockState.playHereNow)
+            } label: {
+                Text("Play Here")
+                    .scaledFont(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(ThemeManager.shared.accent)
+            if let receiver {
+                Button {
+                    let items = store.tiles.map(\.item)
+                    let focus = store.tiles.firstIndex(where: { $0.id == store.audioTileID }) ?? 0
+                    dismiss()
+                    PlayWhereRouter.shared.playMultiviewOnReceiver(channels: items, focus: focus)
+                } label: {
+                    Text("Play on \(receiver)")
+                        .scaledFont(.body.weight(.semibold))
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.bordered)
+                .tint(ThemeManager.shared.accent)
+            }
+        }
+        .disabled(store.tiles.isEmpty)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.bar)
+    }
+}
+
 /// Kept Live card (Logan 2026-10-04): channels flipped away from that
 /// "Keep Recent Channels Live" is still ingesting. Same surface, margins and
 /// dock as RemoteSessionCard. One channel: logo, "Keeping <name> live",
@@ -4797,6 +5108,15 @@ final class CompanionHost: NSObject, ObservableObject {
         switch cmd {
         case "setChannel":
             if let id = json["channelId"] as? String { openChannel(id) }
+        case MultiviewRemoteCommand.open:
+            // Phone's Multiview sheet / card "Play on <TV>" (Logan 2026-10-06).
+            let result = openMultiview(json)
+            let reply: [String: Any] = result.error.map { MultiviewRemoteCommand.reply(error: $0) }
+                ?? MultiviewRemoteCommand.reply(count: result.count)
+            if let data = try? JSONSerialization.data(withJSONObject: reply),
+               let text = String(data: data, encoding: .utf8) {
+                send(text, to: conn)
+            }
         case "toggle":
             ps?.togglePauseAction?()
         case "play":
@@ -4914,6 +5234,45 @@ final class CompanionHost: NSObject, ObservableObject {
             PlayerSession.shared.exit()
         }
         _ = PlayerSession.shared.begin(item: item, server: ChannelStore.shared.activeServer)
+    }
+
+    /// `multiview.open`: stage the listed channels in MultiviewStore, in
+    /// order, and enter Multiview exactly as the TV's own Play does
+    /// (MultiviewStagingBanner Play: enterMultiview with no seed over the
+    /// staged tiles). Capped at the TV's Multiview max of 9. Channels the TV
+    /// cannot find in its active playlist are skipped; none found = error.
+    private func openMultiview(_ json: [String: Any]) -> (count: Int, error: String?) {
+        let entries = (json["channels"] as? [[String: Any]]) ?? []
+        let ids = entries.compactMap { $0["channelId"] as? String }
+        let channels = ChannelStore.shared.channels
+        var items: [ChannelDisplayItem] = []
+        for id in ids {
+            let uuid = id.hasPrefix("disp:") ? String(id.dropFirst(5)) : id
+            guard let item = channels.first(where: { $0.uuid == uuid }),
+                  !items.contains(where: { $0.id == item.id }) else { continue }
+            items.append(item)
+            if items.count == MultiviewRemoteCommand.maxChannels { break }
+        }
+        DebugLogger.shared.log("[MV-CAST] host multiview.open requested=\(ids.count) resolved=\(items.count)",
+                               category: "Companion")
+        guard !items.isEmpty else { return (0, "No matching channels on this TV") }
+        let server = ChannelStore.shared.activeServer
+        let store = MultiviewStore.shared
+        if PlayerSession.shared.mode != .idle || !store.tiles.isEmpty {
+            PlayerSession.shared.exit()
+        }
+        store.reset()
+        var added: [String] = []
+        for item in items where store.add(item, server: server, bypassWarning: true) == .added {
+            if let tile = store.tiles.last { added.append(tile.id) }
+        }
+        guard !added.isEmpty else { return (0, "These channels cannot play on this TV") }
+        let focus = (json["focus"] as? NSNumber)?.intValue ?? 0
+        store.setAudio(to: added[max(0, min(focus, added.count - 1))])
+        store.isStagingFromGuide = false
+        PlayerSession.shared.enterMultiview(seeding: nil, server: server)
+        DebugLogger.shared.log("[MV-CAST] host multiview.opened count=\(added.count)", category: "Companion")
+        return (added.count, nil)
     }
 
     private func tryAuth(token: String, code: String) -> String? {
@@ -5038,7 +5397,7 @@ final class CompanionHost: NSObject, ObservableObject {
     private func hello() -> String {
         let name = Self.jsonEscape(advertisedName ?? Self.deviceName())
         let np = Self.jsonEscape(NowPlayingManager.shared.playingItem?.name ?? "")
-        return #"{"t":"hello","v":1,"device":"\#(name)","needsPairing":true,"nowPlaying":"\#(np)"}"#
+        return #"{"t":"hello","v":1,"device":"\#(name)","needsPairing":true,"nowPlaying":"\#(np)","multiview":true}"#
     }
     private func authOk(token: String) -> String {
         #"{"t":"authOk","token":"\#(Self.jsonEscape(token))"}"#
