@@ -6158,6 +6158,14 @@ struct MainTabView: View {
         // 440 pt iPhone, 2026-10-05), and nothing else re-measures it then,
         // so the dock cards kept the old width. Measure again on the change
         // and once the bar has laid out.
+        // Logged once per transition while a remote session is live.
+        .onChange(of: playerFullscreen) { _, full in
+            guard activeRemoteTransport != nil else { return }
+            DebugLogger.shared.log(full
+                ? "[Cast] card hidden (fullscreen player)"
+                : "[Cast] card shown (player closed)",
+                category: "Cast", level: .info)
+        }
         .onChange(of: padPillTabs) { _, _ in
             RemoteSessionCardMetrics.shared.measureTabBar()
             Task { @MainActor in
@@ -6353,9 +6361,16 @@ struct MainTabView: View {
     /// Kept Live card: only while a channel is kept and the player is not
     /// fullscreen (the player's Options carry the same rows then).
     private var keptLiveCardVisible: Bool {
-        let playerFullscreen = !nowPlaying.isMinimized
+        !keptChannels.isEmpty && !playerFullscreen
+    }
+
+    /// A fullscreen player (live, catch-up, VOD in the container player) is
+    /// on screen. The dock cards and the Control-a-TV button belong above
+    /// the tab bar on browse screens, never over the video (Logan
+    /// 2026-10-05: the cast card drew over a fullscreen catch-up on iPad).
+    private var playerFullscreen: Bool {
+        !nowPlaying.isMinimized
             && (nowPlaying.playingItem != nil || playerSession.mode != .idle)
-        return !keptChannels.isEmpty && !playerFullscreen
     }
 
     /// iPad dock card width (Logan 2026-10-05): exactly the measured tab
@@ -6386,6 +6401,13 @@ struct MainTabView: View {
 
     @ViewBuilder
     private var remoteSessionCard: some View {
+        if !playerFullscreen {
+            remoteSessionCardContent
+        }
+    }
+
+    @ViewBuilder
+    private var remoteSessionCardContent: some View {
         switch activeRemoteTransport {
         case .cast:
             let device = castController.connectedDeviceName ?? "TV"
