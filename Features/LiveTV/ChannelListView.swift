@@ -5617,21 +5617,29 @@ private struct PhoneChromeInset<Content: View>: View {
 //
 // Settings > Live TV > Logo Size (Discord request 2026-10-06, identical spec
 // on Android). The SAME ladder, labels and default as Settings > Multiview >
-// Logo Size. Here the value is read relative to the default: 10% draws the
-// logo at exactly today's size, 5% at half, 25% at two and a half times.
+// Logo Size, plus a 2.5% stop below 5% (Live TV only, Multiview keeps its
+// ladder). Here the value is read relative to the default: 10% draws the
+// logo at exactly today's size, 5% at half, 2.5% at a quarter, 25% at two and
+// a half times. Stored as a Double under the same key: an Int written by the
+// first build of this setting reads back as the same Double, no migration.
 // The multiplier applies on top of the "logos grow when numbers or names are
 // hidden" rule. Surfaces with a fixed cell (the guide's channel column) cap
 // the grown logo at the room the cell has; the list rows grow with it.
 let liveTVLogoSizeKey = "ui.channelLogoSize"
-let liveTVLogoSizeDefault = multiviewLogoSizeDefault
-let liveTVLogoSizeChoices = multiviewLogoSizeChoices
+let liveTVLogoSizeDefault: Double = Double(multiviewLogoSizeDefault)
+let liveTVLogoSizeChoices: [Double] = [2.5] + multiviewLogoSizeChoices.map(Double.init)
 
 enum LiveTVLogoSize {
     /// The multiplier for a stored percent, snapped to the nearest stop.
-    static func factor(_ percent: Int) -> CGFloat {
+    static func factor(_ percent: Double) -> CGFloat {
         let snapped = liveTVLogoSizeChoices.min(by: { abs($0 - percent) < abs($1 - percent) })
             ?? liveTVLogoSizeDefault
         return CGFloat(snapped) / CGFloat(liveTVLogoSizeDefault)
+    }
+
+    /// Settings label for a stop: "2.5%", "10%".
+    static func label(_ value: Double) -> String {
+        value == value.rounded() ? "\(Int(value))%" : "\(value)%"
     }
 }
 
@@ -5763,6 +5771,11 @@ struct ChannelBadge: View {
             let capW = max(w, logoRoom?.width ?? w)
             let capH = max(h, (logoRoom?.height ?? 0) - textCost)
             out = CGSize(width: min(out.width, capW), height: min(out.height, capH))
+        } else {
+            // Below 10% (down to 2.5%): never smaller than a legible floor,
+            // and never larger than the stock box.
+            let floor: CGFloat = 8
+            out = CGSize(width: min(w, max(out.width, floor)), height: min(h, max(out.height, floor)))
         }
         return out
     }

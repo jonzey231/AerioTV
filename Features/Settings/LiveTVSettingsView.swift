@@ -514,7 +514,7 @@ struct LiveTVSettingsView: View {
                     .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                 Spacer()
-                Text("\(values[idx])%")
+                Text(LiveTVLogoSize.label(values[idx]))
                     .scaledFont(.labelSmall.subtext())
                     .foregroundColor(Color.contrastText(.textTertiary))
             }
@@ -757,7 +757,7 @@ struct LiveTVSettingsView: View {
                     .foregroundColor(.textPrimary)
                 Spacer()
                 ForEach(liveTVLogoSizeChoices, id: \.self) { value in
-                    TVSettingsPill("\(value)%", isSelected: value == current) {
+                    TVSettingsPill(LiveTVLogoSize.label(value), isSelected: value == current) {
                         channelLogoSize = value
                     }
                 }
