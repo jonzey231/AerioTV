@@ -618,6 +618,39 @@ final class AerioCastController: NSObject, ObservableObject {
         client.seek(with: options)
     }
 
+    /// Timeline scrub release on the remote session sheet: the same
+    /// RemoteMediaClient seek the Back / Forward buttons send, to an
+    /// ABSOLUTE stream position (seconds).
+    func remoteSeek(to seconds: Double) {
+        guard let client = GCKCastContext.sharedInstance()
+            .sessionManager.currentCastSession?.remoteMediaClient else { return }
+        let options = GCKMediaSeekOptions()
+        options.interval = max(0, seconds)
+        options.relative = false
+        debugLog("[Cast] scrub seek to \(Int(max(0, seconds)))s")
+        client.seek(with: options)
+    }
+
+    /// Seekable window for the remote sheet's timeline scrub, in receiver
+    /// stream-position seconds. Live: the reported live seekable range.
+    /// Buffered (VOD, catch-up, DVR): 0 to the stream duration. nil when
+    /// the receiver reports neither (plain live): the bar stays read-only.
+    func remoteSeekWindow() -> RemoteSeekWindow? {
+        guard let client = GCKCastContext.sharedInstance()
+            .sessionManager.currentCastSession?.remoteMediaClient,
+              let status = client.mediaStatus else { return nil }
+        let pos = client.approximateStreamPosition()
+        if let range = status.liveSeekableRange {
+            let lo = min(range.startTime, range.endTime)
+            let hi = max(range.startTime, range.endTime)
+            guard lo.isFinite, hi.isFinite, hi - lo >= 1 else { return nil }
+            return RemoteSeekWindow(start: lo, end: hi, position: min(max(pos, lo), hi), isLive: true)
+        }
+        let dur = status.mediaInformation?.streamDuration ?? 0
+        guard dur.isFinite, dur > 0, status.mediaInformation?.streamType != .live else { return nil }
+        return RemoteSeekWindow(start: 0, end: dur, position: min(max(pos, 0), dur), isLive: false)
+    }
+
     /// Friendly name of the connected cast device, for the cover header.
     var connectedDeviceName: String? {
         if case .connected(let name) = state { return name }
@@ -2673,36 +2706,25 @@ struct RemoteControlScreen: View {
     @ViewBuilder
     private func rewindBar(_ companion: CompanionClient) -> some View {
         let s = companion.remoteState
-        let span = max(1, Double(s.windowEndMs - s.windowStartMs))
-        let frac = min(1, max(0, Double(s.positionWallMs - s.windowStartMs) / span))
-        VStack(spacing: 8) {
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.2)).frame(height: 4)
-                    Capsule().fill(ThemeManager.shared.accent)
-                        .frame(width: geo.size.width * frac, height: 4)
-                }
-                .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0).onEnded { g in
-                    let f = min(1, max(0, g.location.x / geo.size.width))
-                    let target = s.windowStartMs + Int64(f * span)
-                    companion.seekToWall(target)
-                })
+        // The shared remote-session scrubber (identical on Cast and
+        // AirPlay), in wall-clock seconds; release seeks the TV's buffer.
+        let window = RemoteSeekWindow(start: Double(s.windowStartMs) / 1000,
+                                      end: Double(s.windowEndMs) / 1000,
+                                      position: Double(s.positionWallMs) / 1000,
+                                      isLive: true)
+        VStack(spacing: 4) {
+            RemoteTimelineScrubber(window: window) { target in
+                debugLog("[Cast] scrub seek to \(Int(target))s (companion wall clock)")
+                companion.seekToWall(Int64(target * 1000))
             }
-            .frame(height: 16)
-            // The skip buttons live in the sheet's own skip row now, so
-            // this line keeps just the LIVE state and Go Live.
-            HStack {
-                Text(s.isLive ? "LIVE" : "REWOUND")
-                    .scaledFont(.caption.weight(.semibold))
-                    .foregroundStyle(s.isLive ? Color.contrastText(ThemeManager.shared.accent) : .white.opacity(0.6))
-                Spacer()
-                if !s.isLive {
+            if !s.isLive {
+                HStack {
+                    Spacer()
                     Button("Go Live") { companion.goLive() }
                         .foregroundStyle(ThemeManager.shared.accent)
                 }
+                .scaledFont(.caption)
             }
-            .scaledFont(.caption)
         }
     }
 
@@ -2767,8 +2789,15 @@ struct RemoteSessionSheet: View {
     /// in the expanded sheet, not the collapsed card): the "Receiver:" stat
     /// and, while the phone transcodes, the two-line note.
     var footnoteLines: [String] = []
+    /// The session's seekable window, polled about once a second while
+    /// the sheet is open. Non-nil turns the timeline into a scrubber; nil
+    /// (plain live) keeps the read-only programme bar.
+    var seekWindow: (() -> RemoteSeekWindow?)? = nil
+    /// Scrub release: one absolute seek, in the window's seconds.
+    var onSeekTo: (Double) -> Void = { _ in }
 
     @State private var contentHeight: CGFloat = 320
+    @State private var liveWindow: RemoteSeekWindow?
     @State private var showOptions = false
     /// Observes only this channel's now/next cell (the programme block
     /// reads the store directly at its TimelineView tick).
@@ -2801,6 +2830,14 @@ struct RemoteSessionSheet: View {
         .presentationDetents([.height(contentHeight + Self.bottomInset), .large])
         .presentationDragIndicator(.visible)
         .presentationBackground(Color.sheetBackground)
+        .task {
+            guard let seekWindow else { return }
+            while !Task.isCancelled {
+                let w = seekWindow()
+                if w != liveWindow { liveWindow = w }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
         .sheet(isPresented: $showOptions) {
             if transport == .cast {
                 CastOptionsSheet(cast: AerioCastController.shared)
@@ -3006,7 +3043,11 @@ struct RemoteSessionSheet: View {
                     .padding(.vertical, 3)
                     .background(Color.red.opacity(0.15), in: Capsule())
                 }
-                if let prog, prog.end > prog.start {
+                if let window = liveWindow, mode == .playing {
+                    // Seekable session (VOD, catch-up, DVR, live with a
+                    // rewind window): the timeline is a scrubber.
+                    RemoteTimelineScrubber(window: window, onCommit: onSeekTo)
+                } else if let prog, prog.end > prog.start {
                     Text("\(prog.start.formatted(date: .omitted, time: .shortened)) - \(prog.end.formatted(date: .omitted, time: .shortened))")
                         .scaledFont(.caption)
                         .foregroundStyle(.white.opacity(0.7))
@@ -3052,6 +3093,110 @@ struct RemoteSessionSheet: View {
             .compactMap { ($0 as? UIWindowScene)?.keyWindow?.safeAreaInsets.bottom }
             .first ?? 0
         return max(12, inset)
+    }
+}
+
+// MARK: - Remote timeline scrubber (Cast, AirPlay, AerioTV Remote)
+
+/// Seekable window for the remote-session timeline scrub, in the session's
+/// own seconds (Cast stream position, AirPlay player time, companion
+/// wall clock).
+struct RemoteSeekWindow: Equatable {
+    var start: Double
+    var end: Double
+    var position: Double
+    var isLive: Bool
+}
+
+/// The remote-session timeline scrubber, styled like the player's scrubber
+/// bar. Dragging moves only the thumb and the time label; release seeks
+/// once, then the thumb holds at the target until the receiver reports a
+/// position within 4 s of it, or 6 s pass.
+struct RemoteTimelineScrubber: View {
+    let window: RemoteSeekWindow
+    let onCommit: (Double) -> Void
+
+    @State private var isDragging = false
+    @State private var dragFraction: CGFloat = 0
+    @State private var pendingTarget: Double?
+    @State private var settleTask: Task<Void, Never>?
+
+    private var span: Double { max(window.end - window.start, 1) }
+
+    var body: some View {
+        let liveFraction = CGFloat(min(max((window.position - window.start) / span, 0), 1))
+        let shown = (isDragging || pendingTarget != nil) ? dragFraction : liveFraction
+        let shownSeconds = window.start + Double(shown) * span
+        VStack(spacing: 4) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.white.opacity(0.25))
+                        .frame(height: isDragging ? 5 : 3)
+                    Capsule()
+                        .fill(Color.accentPrimary)
+                        .frame(width: geo.size.width * shown, height: isDragging ? 5 : 3)
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: isDragging ? 18 : 13, height: isDragging ? 18 : 13)
+                        .shadow(color: .black.opacity(0.4), radius: 3)
+                        .offset(x: geo.size.width * shown - (isDragging ? 9 : 6.5))
+                }
+                .frame(height: 22)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            settleTask?.cancel()
+                            pendingTarget = nil
+                            isDragging = true
+                            dragFraction = max(0, min(1, value.location.x / max(geo.size.width, 1)))
+                        }
+                        .onEnded { value in
+                            let f = max(0, min(1, value.location.x / max(geo.size.width, 1)))
+                            dragFraction = f
+                            let target = window.start + Double(f) * span
+                            pendingTarget = target
+                            withAnimation(.easeOut(duration: 0.15)) { isDragging = false }
+                            onCommit(target)
+                            settleTask?.cancel()
+                            settleTask = Task { @MainActor in
+                                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                                guard !Task.isCancelled else { return }
+                                pendingTarget = nil
+                            }
+                        }
+                )
+            }
+            .frame(height: 22)
+            .animation(.easeInOut(duration: 0.12), value: isDragging)
+            Text(label(shownSeconds: shownSeconds))
+                .scaledFont(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.white.opacity(0.7))
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .onChange(of: window.position) { _, position in
+            if let t = pendingTarget, abs(position - t) < 4 {
+                settleTask?.cancel()
+                pendingTarget = nil
+            }
+        }
+    }
+
+    private func label(shownSeconds: Double) -> String {
+        if window.isLive {
+            let behind = max(0, window.end - shownSeconds)
+            if behind < 5 && !isDragging && pendingTarget == nil { return "LIVE" }
+            return "-\(Self.clock(behind)) behind live"
+        }
+        return "\(Self.clock(shownSeconds - window.start)) / \(Self.clock(span))"
+    }
+
+    static func clock(_ seconds: Double) -> String {
+        let t = Int(max(0, seconds.isFinite ? seconds : 0))
+        let h = t / 3600, m = (t % 3600) / 60, s = t % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 }
 

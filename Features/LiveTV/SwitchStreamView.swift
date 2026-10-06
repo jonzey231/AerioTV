@@ -41,6 +41,40 @@ enum SwitchStreamFlow {
     static let switchNotConfirmedMessage = "The switch didn't take effect. The server may be busy; the current stream is unchanged."
     static let reorderDeniedMessage = "Your Dispatcharr account can't reorder streams. Reordering needs an administrator account."
 
+    /// The app's own confirmed picks, keyed by channel UUID, with the time
+    /// of the pick. `/status.stream_id` stays stale for 20+ s after an
+    /// event-path switch, so a fresh pick wins over the server for that
+    /// window; after it the server's stream_id is the truth (an external
+    /// switch from the Dispatcharr UI or failover then moves the radio).
+    @MainActor
+    private static var recentPicks: [String: (id: Int, at: Date)] = [:]
+    private static let pickTrustWindow: TimeInterval = 30
+
+    @MainActor
+    static func notePick(channelUUID: String, streamID: Int) {
+        recentPicks[channelUUID] = (streamID, Date())
+    }
+
+    /// The stream the radio marks: the server's current stream_id, unless
+    /// the app switched this channel within the stale window (or the
+    /// server read failed), in which case the app's pick (or `fallback`).
+    @MainActor
+    static func markedStreamID(channelUUID: String, serverID: Int?, fallback: Int?) -> Int? {
+        let pick = recentPicks[channelUUID]
+        let local: Int? = {
+            if let pick, Date().timeIntervalSince(pick.at) < pickTrustWindow { return pick.id }
+            return nil
+        }()
+        if let local { return local }
+        if let serverID {
+            if let prior = fallback ?? pick?.id, prior != serverID {
+                debugLog("[SWITCH] radio follows server stream_id=\(serverID)")
+            }
+            return serverID
+        }
+        return fallback ?? pick?.id
+    }
+
     /// User-facing failure line, worded identically on Android: a 403
     /// returns `deniedMessage`; otherwise "Couldn't switch the stream
     /// (HTTP 500): <server text>", or "Couldn't switch the stream
@@ -104,7 +138,9 @@ enum SwitchStreamFlow {
             async let statusTask = api.getChannelStatus(channelUUID: channelUUID)
             let fetched = try await streamsTask
             let accounts = (try? await accountsTask) ?? []
-            let currentID = (try? await statusTask)?.streamID
+            let currentID = markedStreamID(channelUUID: channelUUID,
+                                           serverID: (try? await statusTask)?.streamID,
+                                           fallback: nil)
             var names: [Int: String] = [:]
             for a in accounts { if let n = a.name, !n.isEmpty { names[a.id] = n } }
             return fetched.map { st in
@@ -146,6 +182,7 @@ enum SwitchStreamFlow {
                     return switchNotConfirmedMessage
                 }
             }
+            notePick(channelUUID: channelUUID, streamID: streamID)
             NotificationCenter.default.post(name: .switchStreamReprime, object: nil,
                                             userInfo: ["uuid": channelUUID])
             debugLog("[SwitchStream] flow: confirmed switch to stream id=\(streamID)")
@@ -207,6 +244,10 @@ struct SwitchStreamView: View {
     @State private var orderError: String?
     #if os(iOS)
     @State private var editMode: EditMode = .inactive
+    /// The order when Reorder mode began. Drags only rearrange the local
+    /// list; the order is saved ONCE when Reorder mode ends (Finish, or
+    /// the sheet closing mid-reorder), and only if it changed.
+    @State private var orderBeforeReorder: [DispatcharrStream]?
     #endif
 
     #if os(tvOS)
@@ -281,8 +322,12 @@ struct SwitchStreamView: View {
             for a in accounts { if let n = a.name, !n.isEmpty { map[a.id] = n } }
             sourceNames = map
             streams = fetched
+            // The radio follows the server: the server's current stream_id
+            // read on open wins, except within the stale window after this
+            // app's own switch (see SwitchStreamFlow.markedStreamID).
             if selectedStreamID == nil {
-                selectedStreamID = initialStreamID ?? status?.streamID
+                selectedStreamID = SwitchStreamFlow.markedStreamID(
+                    channelUUID: channelUUID, serverID: status?.streamID, fallback: initialStreamID)
             }
             isLoading = false
             if fetched.isEmpty {
@@ -296,6 +341,10 @@ struct SwitchStreamView: View {
     }
 
     private func select(_ stream: DispatcharrStream) {
+        #if os(iOS)
+        // Row taps do not switch while Reorder mode is on.
+        if editMode.isEditing { return }
+        #endif
         guard !isSwitching, let api = makeAPI() else { return }
         let previousSelection = selectedStreamID
         // Optimistic: mark the chosen row immediately.
@@ -319,6 +368,7 @@ struct SwitchStreamView: View {
                 let confirmed = await confirmSwitch(api: api, targetURL: targetURL, streamID: stream.id)
                 if confirmed {
                     debugLog("[SwitchStream] \(channelName): confirmed switch to stream id=\(stream.id) \"\(titleLine(for: stream))\"")
+                    SwitchStreamFlow.notePick(channelUUID: channelUUID, streamID: stream.id)
                     onSwitched?(stream.id)
                     // Tell the live player the switch landed. It keeps its
                     // connection and only reloads once (no overlap) if
@@ -367,16 +417,34 @@ struct SwitchStreamView: View {
     // MARK: - Reorder (admin)
 
     #if os(iOS)
+    /// Drag only in Reorder mode (iOS otherwise allows a long-press drag
+    /// whenever onMove has a handler).
     private var moveHandler: ((IndexSet, Int) -> Void)? {
-        guard canReorder, !isSavingOrder else { return nil }
+        guard canReorder, !isSavingOrder, editMode.isEditing else { return nil }
         return { source, destination in move(from: source, to: destination) }
     }
 
     private func move(from source: IndexSet, to destination: Int) {
-        guard canReorder, !isSavingOrder else { return }
-        let previous = streams
+        guard canReorder, !isSavingOrder, editMode.isEditing else { return }
         streams.move(fromOffsets: source, toOffset: destination)
-        saveOrder(previous: previous)
+    }
+
+    private func beginReorder() {
+        orderBeforeReorder = streams
+        orderError = nil
+        withAnimation { editMode = .active }
+    }
+
+    /// Leaves Reorder mode and saves the order once if it changed.
+    private func endReorder(trigger: String) {
+        let previous = orderBeforeReorder
+        orderBeforeReorder = nil
+        withAnimation { editMode = .inactive }
+        guard let previous else { return }
+        if previous.map(\.id) != streams.map(\.id) {
+            debugLog("[SwitchStream] reorder ended (\(trigger)); saving channel=\(channelID)")
+            saveOrder(previous: previous)
+        }
     }
     #endif
 
@@ -581,13 +649,17 @@ struct SwitchStreamView: View {
             if canReorder {
                 ToolbarItem(placement: .primaryAction) {
                     Button(editMode.isEditing ? "Finish" : "Reorder") {
-                        withAnimation { editMode = editMode.isEditing ? .inactive : .active }
+                        if editMode.isEditing { endReorder(trigger: "Finish") } else { beginReorder() }
                     }
                     .disabled(isSavingOrder)
                 }
             }
         }
         .environment(\.editMode, $editMode)
+        // Closing the sheet while reordering saves the pending order.
+        .onDisappear {
+            if editMode.isEditing { endReorder(trigger: "dismiss") }
+        }
     }
     #endif
 
@@ -656,14 +728,19 @@ struct SwitchStreamView: View {
                                     // Right from the row focuses it, Left returns.
                                     if canReorder && streams.count > 1 {
                                         Menu {
-                                            if index > 0 {
-                                                Button { moveStream(stream, by: -1) } label: {
-                                                    Label("Move Up", systemImage: "arrow.up")
+                                            // Disabled header so the entry reads
+                                            // "Reorder" like the phone and tablet
+                                            // button (Android TV parity).
+                                            Section("Reorder") {
+                                                if index > 0 {
+                                                    Button { moveStream(stream, by: -1) } label: {
+                                                        Label("Move Up", systemImage: "arrow.up")
+                                                    }
                                                 }
-                                            }
-                                            if index < streams.count - 1 {
-                                                Button { moveStream(stream, by: 1) } label: {
-                                                    Label("Move Down", systemImage: "arrow.down")
+                                                if index < streams.count - 1 {
+                                                    Button { moveStream(stream, by: 1) } label: {
+                                                        Label("Move Down", systemImage: "arrow.down")
+                                                    }
                                                 }
                                             }
                                         } label: {

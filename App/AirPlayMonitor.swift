@@ -341,6 +341,34 @@ final class AirPlayMonitor: ObservableObject {
                     toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
+    /// Seekable window for the AirPlay sheet's timeline scrub, in player
+    /// seconds. nil when the item has no seekable range of at least 1 s
+    /// (plain live): the bar stays read-only.
+    func remoteSeekWindow() -> RemoteSeekWindow? {
+        guard let player, let item = player.currentItem,
+              let range = item.seekableTimeRanges.last?.timeRangeValue else { return nil }
+        let lo = range.start.seconds, hi = range.end.seconds
+        let pos = player.currentTime().seconds
+        guard lo.isFinite, hi.isFinite, pos.isFinite, hi - lo >= 1 else { return nil }
+        let isLive = !item.duration.seconds.isFinite
+        return RemoteSeekWindow(start: lo, end: hi, position: min(max(pos, lo), hi), isLive: isLive)
+    }
+
+    /// Timeline scrub release: the same player seek the skip buttons use,
+    /// to an absolute player time clamped to the seekable range.
+    func seek(to seconds: Double) {
+        guard let player, let item = player.currentItem else { return }
+        var target = seconds
+        if let range = item.seekableTimeRanges.last?.timeRangeValue {
+            let lo = range.start.seconds, hi = range.end.seconds
+            if lo.isFinite, hi.isFinite { target = min(max(target, lo), hi) }
+        }
+        guard target.isFinite else { return }
+        debugLog("[Cast] scrub seek to \(Int(target))s (AirPlay)")
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
     /// The card's X / Stop AirPlay. Playback stops outright and must NOT
     /// fall back to the phone's screen (rule 4: "if I close it, it should
     /// just close"). An app cannot deselect an AirPlay route (see

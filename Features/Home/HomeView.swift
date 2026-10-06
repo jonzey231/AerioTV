@@ -6518,7 +6518,9 @@ struct MainTabView: View {
                         showCompanionPickerGlobal = true
                     }
                 },
-                footnoteLines: content == nil ? [] : castCardDetailLines
+                footnoteLines: content == nil ? [] : castCardDetailLines,
+                seekWindow: { castController.remoteSeekWindow() },
+                onSeekTo: { castController.remoteSeek(to: $0) }
             )
         case .companion:
             RemoteControlScreen(
@@ -6579,7 +6581,9 @@ struct MainTabView: View {
                             AirPlayMenuTrigger.present()
                         }
                     }
-                }
+                },
+                seekWindow: { airPlay.remoteSeekWindow() },
+                onSeekTo: { airPlay.seek(to: $0) }
             )
         case nil:
             EmptyView()
