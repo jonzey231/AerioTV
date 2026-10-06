@@ -6309,8 +6309,13 @@ enum CatchupResumeStore {
             map.removeValue(forKey: k)
             debugLog("[CATCHUP] resume cleared (reached end) \(pb.title)")
         } else if positionMs > 0 {
+            if positionMs <= minResumeMs {
+                // Stored, but position(for:) never resumes under the floor.
+                debugLog("[CATCHUP] resume save dropped: pos=\(positionMs / 1000)s floor=\(minResumeMs / 1000)s id=\(k)")
+            } else {
+                debugLog("[CATCHUP] resume saved at \(positionMs / 1000)s \(pb.title)")
+            }
             map[k] = [Double(positionMs), Date().timeIntervalSince1970]
-            debugLog("[CATCHUP] resume saved at \(positionMs / 1000)s \(pb.title)")
         } else {
             return
         }
