@@ -175,6 +175,8 @@ struct ServerDetailView: View {
     @State private var editingServer: ServerConnection? = nil
     @State private var showDeleteConfirm = false
     @State private var isRefreshingPlaylist = false
+    /// "Refresh Permissions" row: an unthrottled capability probe.
+    @State private var isRefreshingPermissions = false
     @State private var playlistRefreshDone = false
     @Environment(\.dismiss) private var dismiss
     #if os(iOS)
@@ -863,7 +865,22 @@ struct ServerDetailView: View {
                         }
                     }
                 }
-                tvFooter("Set by your Dispatcharr admin. Permissions refresh when you open the app or use Refresh Playlist.")
+                // Unthrottled re-read of the user level (Android parity:
+                // PlaylistDetailScreen). Active playlist only (hidden otherwise); the rows
+                // above read the SwiftData row, so they update live.
+                if server.isActive {
+                    TVSettingsTileActionRow(
+                        icon: "arrow.clockwise",
+                        iconColor: .accentPrimary,
+                        title: isRefreshingPermissions ? "Refreshing..." : "Refresh Permissions",
+                        titleColor: isRefreshingPermissions ? Color.contrastText(.textSecondary) : .accentPrimary,
+                        isBusy: isRefreshingPermissions
+                    ) {
+                        refreshPermissions()
+                    }
+                    .disabled(isRefreshingPermissions)
+                }
+                tvFooter("Set by your Dispatcharr admin. Permissions also refresh when you open the app or use Refresh Playlist.")
             }
         }
     }
@@ -996,6 +1013,17 @@ struct ServerDetailView: View {
         }
     }
 
+    /// "Refresh Permissions": run the capability probe now, no throttle.
+    private func refreshPermissions() {
+        guard server.isActive, server.type == .dispatcharrAPI, !isRefreshingPermissions else { return }
+        isRefreshingPermissions = true
+        Task {
+            _ = await DispatcharrCapabilityProbe.refresh(server, reason: "manual refresh",
+                                                     waitIfInFlight: true)
+            isRefreshingPermissions = false
+        }
+    }
+
     // MARK: - Dispatcharr User Permissions (read-only)
     //
     // Facts only: everything here is read from the persisted
@@ -1096,10 +1124,31 @@ struct ServerDetailView: View {
                                 value: fetched.formatted(.relative(presentation: .named)))
                     }
                 }
+                // Unthrottled re-read of the user level (Android parity:
+                // PlaylistDetailScreen). Active playlist only (hidden otherwise); the rows
+                // above read the SwiftData row, so they update live.
+                if server.isActive {
+                    Button {
+                        refreshPermissions()
+                    } label: {
+                        HStack {
+                            if isRefreshingPermissions {
+                                ProgressView().tint(.accentPrimary)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                                    .foregroundColor(.accentPrimary)
+                            }
+                            Text(isRefreshingPermissions ? "Refreshing..." : "Refresh Permissions")
+                                .foregroundColor(isRefreshingPermissions ? .textSecondary : .accentPrimary)
+                        }
+                    }
+                    .disabled(isRefreshingPermissions)
+                    .tvActionRowChrome()
+                }
             } header: {
                 Text("Dispatcharr User Permissions").sectionHeaderStyle()
             } footer: {
-                Text("Set by your Dispatcharr admin. Permissions refresh when you open the app or use Refresh Playlist.")
+                Text("Set by your Dispatcharr admin. Permissions also refresh when you open the app or use Refresh Playlist.")
                     .scaledFont(.labelSmall.subtext())
                     .foregroundColor(Color.contrastText(.textTertiary))
             }

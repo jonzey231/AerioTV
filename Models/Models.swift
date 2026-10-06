@@ -1339,7 +1339,7 @@ enum DispatcharrCapability: String, Sendable, CaseIterable {
         case .manageDvr:
             return "Your Dispatcharr account can view recordings but not manage them. Ask your server administrator for DVR manage access."
         case .switchStream:
-            return "Switching streams needs a Dispatcharr administrator account. Ask your server administrator for access."
+            return "Your Dispatcharr account can't switch streams. Switching needs an administrator account."
         case .managePlaylists:
             return "Editing playlists on the server needs a Dispatcharr administrator account."
         case .readServerSettings:

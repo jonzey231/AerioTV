@@ -38,6 +38,9 @@ struct MultiviewContainerView: View {
     @State private var switchDialogChannelName = ""
     @State private var switchDialogUUID = ""
     @State private var switchDialogError = false
+    /// The failure line for the "Stream Not Switched" alert (denial, HTTP
+    /// failure, or unconfirmed), worded like the player path.
+    @State private var switchDialogErrorMessage = SwitchStreamFlow.switchNotConfirmedMessage
 
     /// Presentation for the Swap Stream picker. There is no separate
     /// Bool: the store's `pendingSwapTileID` IS the state, so the tile
@@ -1238,6 +1241,17 @@ struct MultiviewContainerView: View {
             switchDialogChannelName = tile.item.name
             switchDialogUUID = uuid
             Task { @MainActor in
+                // Fresh user level before opening, same as the player:
+                // a denial shows the plain message instead of the list.
+                guard await SwitchStreamFlow.recheckAdmin(
+                    server: ChannelStore.shared.activeServer,
+                    trigger: "Switch Stream open") else {
+                    debugLog("[SwitchStream] multiview: account is not a Dispatcharr admin on a fresh read; not listing streams")
+                    store.pendingStreamSwitchTileID = nil
+                    switchDialogErrorMessage = SwitchStreamFlow.switchDeniedMessage
+                    switchDialogError = true
+                    return
+                }
                 switchDialogOptions = await SwitchStreamFlow.loadOptions(
                     server: ChannelStore.shared.activeServer,
                     channelID: chID, channelUUID: uuid) ?? []
@@ -1254,10 +1268,10 @@ struct MultiviewContainerView: View {
                     let uuid = switchDialogUUID
                     store.pendingStreamSwitchTileID = nil
                     Task { @MainActor in
-                        let ok = await SwitchStreamFlow.performSwitch(
+                        if let message = await SwitchStreamFlow.performSwitch(
                             server: ChannelStore.shared.activeServer,
-                            channelUUID: uuid, streamID: option.id)
-                        if !ok {
+                            channelUUID: uuid, streamID: option.id) {
+                            switchDialogErrorMessage = message
                             switchDialogError = true
                         }
                     }
@@ -1276,7 +1290,7 @@ struct MultiviewContainerView: View {
         .alert("Stream Not Switched", isPresented: $switchDialogError) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("The switch didn't take effect. The server may be busy; the current stream is unchanged.")
+            Text(switchDialogErrorMessage)
         }
         #endif
         // Exit-confirmation dialog. Presented when the user presses
