@@ -7599,116 +7599,7 @@ struct EPGGuideView: View {
     /// inside `safeAreaInset(edge: .top)` on iOS (so the banner stays
     /// pinned during scroll).
     private var stagingBanner: some View {
-        let count = multiviewStore.tiles.count
-        let label = count == 1
-            ? "1 tile staged for Multiview"
-            : "\(count) tiles staged for Multiview"
-        let banner = HStack(spacing: 12) {
-            Image(systemName: "rectangle.3.group.fill")
-                .scaledFont(.system(size: 16, weight: .semibold))
-                .foregroundColor(.accentPrimary)
-            Text(label)
-                .scaledFont(.system(size: 15, weight: .semibold))
-                .foregroundColor(.textPrimary)
-            Spacer()
-            // Clear (Android parity P2): one-press way to abandon a
-            // staged set without launching it. The banner persists
-            // across tabs, so without this the only outs were Play or
-            // unstaging channels one by one.
-            Button {
-                let staged = multiviewStore.tiles.count
-                multiviewStore.reset()
-                multiviewStore.isStagingFromGuide = false
-                DebugLogger.shared.log(
-                    "[MV-Tile] staging mode: user tapped Clear (count=\(staged))",
-                    category: "Playback", level: .info
-                )
-            } label: {
-                Text("Clear")
-                    .scaledFont(.system(size: 15, weight: .semibold))
-                    .foregroundColor(Color.contrastText(.textSecondary))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-            }
-            #if os(tvOS)
-            .buttonStyle(TVNoHighlightButtonStyle())
-            #else
-            .buttonStyle(.plain)
-            #endif
-            .disabled(count == 0)
-            .opacity(count == 0 ? 0.5 : 1.0)
-            // Play (primary action). Disabled when no tiles are
-            // staged so the user doesn't fire `enterMultiview` with
-            // an empty store.
-            Button {
-                let staged = multiviewStore.tiles.count
-                multiviewStore.isStagingFromGuide = false
-                let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
-                PlayerSession.shared.enterMultiview(seeding: nil, server: activeServer)
-                DebugLogger.shared.log(
-                    "[MV-Tile] staging mode: user tapped Play (count=\(staged))",
-                    category: "Playback", level: .info
-                )
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "play.fill")
-                        .scaledFont(.system(size: 13, weight: .semibold))
-                    Text("Play")
-                        .scaledFont(.system(size: 15, weight: .semibold))
-                }
-                .foregroundColor(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
-                .background(Capsule().fill(Color.accentPrimary))
-            }
-            // tvOS: use the app's themed focus style (accent stroke ring)
-            // instead of leaving .plain, which lets the default white system
-            // focus glow blob through and clashes with the capsule pill.
-            #if os(tvOS)
-            .buttonStyle(TVNoHighlightButtonStyle())
-            #else
-            .buttonStyle(.plain)
-            #endif
-            .disabled(count == 0)
-            .opacity(count == 0 ? 0.5 : 1.0)
-            // Done (secondary action). Outlined rather than filled so
-            // the visual hierarchy reads Play-then-Done.
-            Button {
-                multiviewStore.isStagingFromGuide = false
-                DebugLogger.shared.log(
-                    "[MV-Tile] staging mode: user tapped Done (count=\(multiviewStore.tiles.count))",
-                    category: "Playback", level: .info
-                )
-            } label: {
-                Text("Done")
-                    .scaledFont(.system(size: 15, weight: .semibold))
-                    .foregroundColor(Color.contrastText(.accentPrimary))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(
-                        Capsule().stroke(Color.accentPrimary, lineWidth: 1)
-                    )
-            }
-            #if os(tvOS)
-            .buttonStyle(TVNoHighlightButtonStyle())
-            #else
-            .buttonStyle(.plain)
-            #endif
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.accentPrimary.opacity(0.4))
-                .frame(height: 1)
-        }
-        #if os(tvOS)
-        return banner.focusSection()
-        #else
-        return banner
-        #endif
+        MultiviewStagingBanner(activeServer: servers.first(where: { $0.isActive }) ?? servers.first)
     }
 
     /// Toast bubble for staging-mode add / remove confirmations.
@@ -9542,3 +9433,167 @@ struct SystemMenuAnchor: UIViewRepresentable {
     }
 }
 #endif
+
+// MARK: - Multiview staging banner (shared)
+
+/// The "N tiles staged for Multiview" banner with Clear, Play and Done.
+/// Shared by the Guide and the List so staging from either Live TV view
+/// shows the same banner in the same top-edge placement.
+struct MultiviewStagingBanner: View {
+    @ObservedObject private var multiviewStore = MultiviewStore.shared
+    let activeServer: ServerConnection?
+
+    var body: some View {
+        let count = multiviewStore.tiles.count
+        let label = count == 1
+            ? "1 tile staged for Multiview"
+            : "\(count) tiles staged for Multiview"
+        #if os(tvOS)
+        let spacing: CGFloat = 12
+        #else
+        let spacing: CGFloat = 8
+        #endif
+        let banner = HStack(spacing: spacing) {
+            Image(systemName: "rectangle.3.group.fill")
+                .scaledFont(.system(size: 16, weight: .semibold))
+                .foregroundColor(.accentPrimary)
+            // Narrow phones at large text sizes cannot fit the full label
+            // beside three pills: fall back to the short form before
+            // truncating, and never let the pills wrap.
+            ViewThatFits(in: .horizontal) {
+                Text(label)
+                Text("\(count) staged")
+            }
+            .scaledFont(.system(size: 15, weight: .semibold))
+            .foregroundColor(.textPrimary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .layoutPriority(1)
+            Spacer()
+            // Clear (Android parity P2): one-press way to abandon a
+            // staged set without launching it. The banner persists
+            // across tabs, so without this the only outs were Play or
+            // unstaging channels one by one.
+            Button {
+                let staged = multiviewStore.tiles.count
+                multiviewStore.reset()
+                multiviewStore.isStagingFromGuide = false
+                DebugLogger.shared.log(
+                    "[MV-Tile] staging mode: user tapped Clear (count=\(staged))",
+                    category: "Playback", level: .info
+                )
+            } label: {
+                Text("Clear")
+                    .scaledFont(.system(size: 15, weight: .semibold))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .foregroundColor(Color.contrastText(.textSecondary))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+            }
+            #if os(tvOS)
+            .buttonStyle(TVNoHighlightButtonStyle())
+            #else
+            .buttonStyle(.plain)
+            #endif
+            .disabled(count == 0)
+            .opacity(count == 0 ? 0.5 : 1.0)
+            // Play (primary action). Disabled when no tiles are
+            // staged so the user doesn't fire `enterMultiview` with
+            // an empty store.
+            Button {
+                let staged = multiviewStore.tiles.count
+                multiviewStore.isStagingFromGuide = false
+                                PlayerSession.shared.enterMultiview(seeding: nil, server: activeServer)
+                DebugLogger.shared.log(
+                    "[MV-Tile] staging mode: user tapped Play (count=\(staged))",
+                    category: "Playback", level: .info
+                )
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "play.fill")
+                        .scaledFont(.system(size: 13, weight: .semibold))
+                    Text("Play")
+                        .scaledFont(.system(size: 15, weight: .semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                // Never wrap ("Pla / y" at 402 pt, Logan 2026-10-06): the
+                // pill keeps its ideal width and the count label shrinks.
+                .fixedSize()
+                .foregroundColor(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(Color.accentPrimary))
+            }
+            // tvOS: use the app's themed focus style (accent stroke ring)
+            // instead of leaving .plain, which lets the default white system
+            // focus glow blob through and clashes with the capsule pill.
+            #if os(tvOS)
+            .buttonStyle(TVNoHighlightButtonStyle())
+            #else
+            .buttonStyle(.plain)
+            #endif
+            .disabled(count == 0)
+            .opacity(count == 0 ? 0.5 : 1.0)
+            // Done (secondary action). Outlined rather than filled so
+            // the visual hierarchy reads Play-then-Done.
+            Button {
+                multiviewStore.isStagingFromGuide = false
+                DebugLogger.shared.log(
+                    "[MV-Tile] staging mode: user tapped Done (count=\(multiviewStore.tiles.count))",
+                    category: "Playback", level: .info
+                )
+            } label: {
+                Text("Done")
+                    .scaledFont(.system(size: 15, weight: .semibold))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .foregroundColor(Color.contrastText(.accentPrimary))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule().stroke(Color.accentPrimary, lineWidth: 1)
+                    )
+            }
+            #if os(tvOS)
+            .buttonStyle(TVNoHighlightButtonStyle())
+            #else
+            .buttonStyle(.plain)
+            #endif
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.accentPrimary.opacity(0.4))
+                .frame(height: 1)
+        }
+        #if os(tvOS)
+        return banner.focusSection()
+        #else
+        return banner
+        #endif
+    }
+
+
+}
+
+/// Leaf wrapper that observes the store itself, so the List's body does not
+/// re-render on every Multiview store publish; only this slot does.
+struct MultiviewStagingBannerSlot: View {
+    @ObservedObject private var multiviewStore = MultiviewStore.shared
+    let activeServer: ServerConnection?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if multiviewStore.isStagingFromGuide {
+                MultiviewStagingBanner(activeServer: activeServer)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: multiviewStore.isStagingFromGuide)
+    }
+}
