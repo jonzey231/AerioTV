@@ -5272,12 +5272,6 @@ struct EPGGuideView: View {
     /// reason.
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
-    /// Cheap identity of the visible channel set (count plus first and last
-    /// id) so a group change is seen without hashing every row.
-    private var channelSetKey: String {
-        "\(channels.count)|\(channels.first?.id ?? "")|\(channels.last?.id ?? "")"
-    }
-
     /// Channel rows back to the first channel, timeline untouched. The scroll
     /// trackers treat a jump this large as programmatic and never report it,
     /// so the tab bar is expanded here instead of waiting for the scroll.
@@ -5288,6 +5282,13 @@ struct EPGGuideView: View {
         }
     }
     #endif
+    /// Cheap identity of the visible channel set (count plus first and last
+    /// id) so a group change is seen without hashing every row. All
+    /// platforms: tvOS needs it for the same scroll reset as iPad.
+    private var channelSetKey: String {
+        "\(channels.count)|\(channels.first?.id ?? "")|\(channels.last?.id ?? "")"
+    }
+
     #if os(tvOS)
     /// Programmatic focus target for a channel row's left-hand cell.
     /// Normally nil (focus engine drives navigation).
@@ -5792,6 +5793,18 @@ struct EPGGuideView: View {
                 .onChange(of: channelSetKey) { _, _ in
                     debugLog("[GUIDE] channel set changed: rows=\(channels.count) first=\(channels.first?.name ?? "none")")
                     scrollChannelRowsToTop(proxy)
+                }
+                #elseif os(tvOS)
+                // Apple TV blank guide after a group pick (Logan 2026-10-05,
+                // atv 20:14:24 NFL): same defect as the iPad fix above. The
+                // vertical offset from the longer previous group sat past the
+                // end of the new one (rows evaluated, live rows 0), so focus
+                // fell to the clock cell and the hero kept the old channel.
+                // A changed channel set lands the rows at the top; the
+                // sidebar-dismiss handler then focuses the first row.
+                .onChange(of: channelSetKey) { _, _ in
+                    debugLog("[GUIDE] channel set changed: rows=\(channels.count) first=\(channels.first?.name ?? "none")")
+                    proxy.scrollTo("guide.top", anchor: .top)
                 }
                 #endif
             .clipped()
@@ -6313,6 +6326,10 @@ struct EPGGuideView: View {
                 Task { @MainActor in
                     // Let the pane tear down + the grid cells become focusable.
                     try? await Task.sleep(nanoseconds: 40_000_000)
+                    // Group changed: make sure the first rows are realized in
+                    // the LazyVStack before focusing one (an offset left past
+                    // the end of a shorter group realizes no rows at all).
+                    if rebind { proxy.scrollTo("guide.top", anchor: .top) }
                     // Unchanged group → restore the exact origin cell. Group
                     // changed → the origin cell is likely gone, so land on a
                     // fresh now-cell of the newly-filtered list (never the List

@@ -2686,6 +2686,7 @@ struct ChannelListView: View {
                 return lhs.offset < rhs.offset
             }.map { $0.element }
         }
+        debugLog("[GROUP] filter group=\(Self.groupTitle(selectedGroup)) raw=\(channelStore.channels.count) rows=\(result.count) first=\(result.first?.name ?? "none")")
         filteredChannels = result
         prefetchEPGForVisibleChannels(result)
     }
