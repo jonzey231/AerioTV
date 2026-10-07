@@ -327,6 +327,13 @@ struct DeveloperSettingsView: View {
                         .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.top, 4)
                 }
+                // The picker and Advanced Engine Flags rows set no row
+                // background, so they sat on the system cell color while
+                // the Force HLS toggle set cardBackground and read as a
+                // separate, lighter card (Logan screenshot 2026-10-07).
+                // One background for the whole section, like every other
+                // Settings card.
+                .listRowBackground(Color.cardBackground)
                 #if os(iOS)
                 .listSectionSeparator(.hidden)
                 #endif

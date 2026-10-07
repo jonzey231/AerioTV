@@ -4678,6 +4678,11 @@ struct AVPlayerMultiviewTile: View {
     /// AVPlayer is playing, ended with DELETE on stop so the client does not
     /// linger for the ghost reaper (and count against stream_limit).
     @State private var forceHLSSession: HLSSessionResolver.Resolved?
+    /// Developer Force HLS: the channel the direct-HLS AVPlayer is playing,
+    /// snapshotted at start() (a flip's onChange has already advanced
+    /// streamURL by the time stop() runs). `key` is the plain TS URL, the
+    /// same key a later re-tune of a Kept Live channel adopts under.
+    @State private var forceHLSKeep: (key: String, channelID: String, name: String)?
     private var liveSourceURL: URL { directHLSFallbackURL ?? streamURL }
     @State private var mkvServer: MKVVODServer?
     @State private var statusText: String?
@@ -5026,7 +5031,7 @@ struct AVPlayerMultiviewTile: View {
             }
             // Cancels any standing slow retry in flight.
             teardownToken = UUID()
-            stop()
+            stop(keepForceHLS: true)
             progressStore.liveStopNotice = nil
             progressStore.liveStopRetryAction = nil
             // Tile teardown clears the stream-failover walk
@@ -5136,6 +5141,11 @@ struct AVPlayerMultiviewTile: View {
         // In-place channel swap on the same tile id (the container
         // swaps `tile.streamURL` without changing tile identity).
         .onChange(of: streamURL) { oldURL, newURL in
+            // A previous channel's TS fallback / Force HLS bypass URL must
+            // not follow the flip: liveSourceURL prefers it over streamURL,
+            // so the flip would re-open the OLD channel.
+            directHLSFallbackURL = nil
+            forceHLSStartedAt = nil
             mismatchAutoRetries = 0
             serverBusyRetries = 0
             channelStoppingRetries = 0
@@ -5167,7 +5177,7 @@ struct AVPlayerMultiviewTile: View {
             let classicFlip = {
                 guard token == teardownToken else { return }
                 let outgoing = remuxer
-                stop()
+                stop(keepForceHLS: true)
                 statusText = "Tuning..."
                 let resume = {
                     let go = {
@@ -5309,6 +5319,10 @@ struct AVPlayerMultiviewTile: View {
     /// Status copy this tile owns for a mid-stream stall. Compared by
     /// value so the clear never wipes a status some other path put up.
     private static let reconnectingStatus = "Reconnecting..."
+    /// Developer Force HLS: join distance from the live edge (about three
+    /// of the server's 4 s segments) and forward buffer (about two).
+    private static let forceHLSLiveOffset: Double = 12
+    private static let forceHLSForwardBuffer: Double = 8
 
     /// Live tunes only: arm the remuxer's 2 s silence signal and its
     /// clean-close signal.
@@ -6496,6 +6510,7 @@ struct AVPlayerMultiviewTile: View {
             if PlaybackFeatureFlags.forceHLS,
                (sourceURL.query ?? "").contains("output_format=hls") {
                 forceHLSStartedAt = Date()
+                forceHLSKeep = (removingHLSOutputFormat(sourceURL).absoluteString, channelID, channelName)
                 // Resolve the entry 302 ONCE: every GET of the entry URL
                 // mints a new server client, and AVPlayer refetches the
                 // asset URL several times while opening. Hand AVPlayer the
@@ -6999,8 +7014,46 @@ struct AVPlayerMultiviewTile: View {
         // real edge.
         let isLANItem = url.scheme == "http" && url.host != "127.0.0.1"
             && (remuxer?.lanHoldBack.get() ?? 0) > 0
+        // Developer Force HLS (device log 2026-10-07 09:47-10:01, ESPN2 HD):
+        // the server's token playlist joined 6 s back (no remuxer, so no
+        // advertised target duration) with 4 s segments, TARGETDURATION 6
+        // and a proxy that publishes in 5 to 6 s bursts. AVP-PERF edge
+        // swung between -0.9 and -12.9 s, CoreMedia logged -12888
+        // (playlist unchanged > 1.5x target duration) seven times, and the
+        // buffer ran empty at +28 s and +71 s for 7 to 8 s each. Sit about
+        // three segments back and ask for two segments of forward buffer;
+        // the content behind the edge already exists on the server, so the
+        // buffer fills at link speed and does not gate the start.
+        let isForceHLSDirect = isLiveTune && !isLANItem && PlaybackFeatureFlags.forceHLS
+            && (forceHLSSession != nil || (url.query ?? "").contains("output_format=hls"))
         if isLiveTune, isLANItem {
             debugLog("[AVP-AIRPLAY] LAN item: no configured join offset (default start point; the LAN publication delay holds it back) channel=\(channelName)")
+        } else if isForceHLSDirect {
+            let offset = min(18.0, max(Self.forceHLSLiveOffset, learned) + streamBufferSeconds)
+            playerItem.configuredTimeOffsetFromLive = CMTime(seconds: offset, preferredTimescale: 600)
+            playerItem.preferredForwardBufferDuration = Self.forceHLSForwardBuffer
+            debugLog(String(format:
+                "[FORCE-HLS] join offset %.1fs (floor %.1f, learned %.1f, stream buffer %.1f), fwdBuf %.0fs channel=%@",
+                offset, Self.forceHLSLiveOffset, learned, streamBufferSeconds,
+                Self.forceHLSForwardBuffer, channelName))
+            // The recommended offset is known only once the playlist has
+            // loaded; honor it when it asks for more distance.
+            var offsetObs: NSKeyValueObservation?
+            offsetObs = playerItem.observe(\.status, options: [.new]) { item, _ in
+                guard item.status != .unknown else { return }
+                offsetObs?.invalidate()
+                offsetObs = nil
+                guard item.status == .readyToPlay else { return }
+                let recommended = item.recommendedTimeOffsetFromLive.seconds
+                var chosen = offset
+                if recommended.isFinite, recommended > offset, recommended <= 30 {
+                    chosen = recommended
+                    item.configuredTimeOffsetFromLive = CMTime(seconds: chosen, preferredTimescale: 600)
+                }
+                debugLog(String(format: "[FORCE-HLS] live offset %.1fs (recommended %@s) channel=%@",
+                                chosen, recommended.isFinite ? String(format: "%.1f", recommended) : "-",
+                                channelName))
+            }
         } else if isLiveTune {
             let floor = max(3 * joinTargetDuration, learned, LiveEdgeHoldback.base)
             let offset = min(18.0, floor + streamBufferSeconds)
@@ -7057,7 +7110,7 @@ struct AVPlayerMultiviewTile: View {
         // that played that session was the one whose second remuxer ran
         // under the automatic policy. Automatic waiting is what actually
         // starts a live remux stream; leave it alone.
-        debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : "automatic") channel=\(channelName)")
+        debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : (isForceHLSDirect ? "\(Int(Self.forceHLSForwardBuffer))s (Force HLS)" : "automatic")) channel=\(channelName)")
         let avPlayer = AVPlayer(playerItem: playerItem)
         // FORCE-HLS: automaticallyWaitsToMinimizeStalling stays ON for server
         // HLS items. Turning it off (tested 2026-10-05, iPhone) started 2 ms
@@ -7196,6 +7249,14 @@ struct AVPlayerMultiviewTile: View {
             if let started = forceHLSStartedAt {
                 forceHLSStartedAt = nil
                 debugLog("[FORCE-HLS] first frame channel=\(channelName) in \(Int(Date().timeIntervalSince(started) * 1000))ms from AVPlayer open (direct HLS)")
+            }
+            // The direct-HLS paths never set readyLocalURL (no remuxer), so
+            // the handler that clears the loading overlay for remux tiles
+            // never runs; "Preparing..." with its byte counter stayed over
+            // live video for a whole Force HLS session (2026-10-07).
+            if remuxer == nil, mkvServer == nil,
+               statusText == "Preparing..." || statusText == "Tuning..." {
+                statusText = nil
             }
             if let pending = pendingDisplayCriteria {
                 pendingDisplayCriteria = nil
@@ -7378,10 +7439,62 @@ struct AVPlayerMultiviewTile: View {
     }
     #endif
 
-    private func stop(allowRetain: Bool = true) {
+    /// Kept Live under Developer Force HLS (2026-10-07: closing the player
+    /// with X kept nothing). Retention holds a running TS remuxer and a
+    /// re-tune adopts it, and a Kept Live channel already bypasses Force
+    /// HLS onto the TS remuxer, so the kept channel is re-tuned headless
+    /// through the TS remuxer and handed to retention once READY. The
+    /// direct-HLS AVPlayer itself is torn down as before (its server
+    /// session is ended with DELETE below).
+    private func keepForceHLSChannelLive(_ keep: (key: String, channelID: String, name: String)) {
+        guard LiveChannelRetention.isEnabled, !isVOD, !isDVR, catchup == nil,
+              let url = URL(string: keep.key) else { return }
+        // A Kept Live channel already takes the TS path; nothing to do.
+        guard !KeptLiveChannels.shared.ids.contains(keep.channelID) else { return }
+        let mins = UserDefaults.standard.integer(forKey: "liveRewindDepthMinutes")
+        let rewindSeconds = Double(mins > 0 ? mins : 30) * 60
+        let mux = TSHLSRemuxer(sourceURL: url, headers: headers, rewindWindowSeconds: rewindSeconds)
+        let name = keep.name
+        mux.onReady = { [mux] localURL in
+            Task { @MainActor in
+                // The user re-tuned this channel while the headless ingest
+                // was opening: the new tile owns the channel now.
+                if MultiviewStore.shared.tiles.contains(where: { $0.item.id == keep.channelID }) {
+                    debugLog("[FORCE-HLS] kept live dropped: '\(name)' is playing again")
+                    mux.onReady = nil
+                    mux.onError = nil
+                    mux.stop()
+                    return
+                }
+                LiveChannelRetention.shared.retain(key: keep.key, channelID: keep.channelID,
+                                                   channelName: name, remuxer: mux, localURL: localURL)
+                debugLog("[FORCE-HLS] kept live via TS remuxer channel=\(name)")
+            }
+        }
+        mux.onError = { [mux] error in
+            Task { @MainActor in
+                debugLog("[FORCE-HLS] kept live failed channel=\(name): \(error)")
+                mux.onReady = nil
+                mux.onError = nil
+                mux.stop()
+            }
+        }
+        debugLog("[FORCE-HLS] keeping live: re-tuning headless through the TS remuxer channel=\(name) url=\(url.absoluteString)")
+        mux.start()
+    }
+
+    /// `keepForceHLS`: the tile is going away or flipping (not an internal
+    /// retry), so a healthy Force HLS channel may be Kept Live.
+    private func stop(allowRetain: Bool = true, keepForceHLS: Bool = false) {
         tileStopped = true
         audioOnlyProgram = false
         if progressStore.isAudioOnlyProgram { progressStore.isAudioOnlyProgram = false }
+        if let keep = forceHLSKeep {
+            forceHLSKeep = nil
+            if keepForceHLS, allowRetain, firstFrameSeen, tileError == nil, player != nil {
+                keepForceHLSChannelLive(keep)
+            }
+        }
         if let session = forceHLSSession {
             forceHLSSession = nil
             if let token = session.token {
