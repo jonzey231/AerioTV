@@ -4071,7 +4071,15 @@ final class NowPlayingManager: ObservableObject {
         // the default `true` so chrome + banner come up together.
         if isLive {
             streamStartedToken = UUID()
+            #if os(iOS)
+            // iPhone/iPad (Logan 2026-10-07): the info card and the controls
+            // are ONE visibility state. A channel change (swipe flip, last-
+            // channel zap) always wakes the chrome so the card never shows
+            // over hidden controls, where swipe-to-flip does nothing.
+            chromeWakeToken = UUID()
+            #else
             if wakeChrome { chromeWakeToken = UUID() }
+            #endif
         }
         // Track watch count for Top Shelf "most watched" ranking
         if isLive { TopShelfDataManager.incrementWatchCount(for: item) }
@@ -8665,7 +8673,18 @@ private struct ChannelInfoBanner: View {
         // #42 Part 4: also show the card + hints whenever the chrome is summoned
         // via Select (not just the tune-in window). chromeIsVisible mirrors the
         // chrome's own 5s auto-fade, so the banner fades out together with it.
-        return (bannerWindowFresh || nowPlaying.chromeIsVisible)
+        #if os(iOS)
+        // iPhone/iPad: the card rides ONLY on the chrome's visibility (same
+        // timer, same tap toggle). Channel changes wake the chrome instead of
+        // opening a card-only window.
+        _ = bannerWindowFresh
+        let visible = nowPlaying.chromeIsVisible
+        #else
+        // tvOS keeps the card-only tune-in window: Siri Remote up/down flips
+        // need the chrome hidden so the next press keeps flipping.
+        let visible = bannerWindowFresh || nowPlaying.chromeIsVisible
+        #endif
+        return visible
             && isSingleStream
             && isFullscreenActive
             && !nowPlaying.streamInfoIsVisible

@@ -713,6 +713,7 @@ struct MultiviewContainerView: View {
         // the re-coupled ChannelInfoBanner — the v1.7.3 regression.
         .onChange(of: chromeState.isVisible, initial: true) { _, visible in
             nowPlaying.chromeIsVisible = visible
+            debugLog("[MV-Chrome] chrome+info visible=\(visible) reason=\(chromeState.lastReason)")
         }
         // v1.6.15: wake chrome only on stream starts that explicitly
         // requested it (cold-launch auto-resume, channel-row tap).
@@ -735,7 +736,7 @@ struct MultiviewContainerView: View {
             guard newToken != nil else { return }
             nowPlaying.chromeWakeToken = nil
             guard !nowPlaying.isMinimized else { return }
-            chromeState.reportInteraction()
+            chromeState.reportInteraction(reason: "channel change")
         }
         // Connection issue (2026-07-12, Android parity): when the sole live
         // tile's stream drops, summon + PIN the chrome so the Retry cell is
@@ -2656,8 +2657,13 @@ final class MultiviewChromeState: ObservableObject {
     /// the dismiss could instantly re-show.
     private var lastHideNowAt: ContinuousClock.Instant?
 
+    /// Why the chrome (and the info card that rides on it) last changed
+    /// visibility; read by the `[MV-Chrome] chrome+info` log line.
+    private(set) var lastReason: String = "tap"
+
     func hideNow() {
         guard !isPinned else { return }
+        lastReason = "tap"
         hideTask?.cancel()
         hideTask = nil
         lastRescheduleAt = nil
@@ -2671,7 +2677,7 @@ final class MultiviewChromeState: ObservableObject {
     /// wanted — the cancel+reschedule loop is the whole point, but
     /// the 500ms coalesce guard stops D-pad/focus bursts from
     /// churning `Task` allocations.
-    func reportInteraction() {
+    func reportInteraction(reason: String = "tap") {
         let now = ContinuousClock.now
         // See lastHideNowAt: the dismissing tap must not re-show.
         if let hid = lastHideNowAt, hid.duration(to: now) < .milliseconds(300) {
@@ -2685,6 +2691,7 @@ final class MultiviewChromeState: ObservableObject {
         // action is cheap next to the alternative being wrong.
 
         if !isVisible {
+            lastReason = reason
             withAnimation(.easeInOut(duration: 0.25)) {
                 isVisible = true
             }
@@ -2749,6 +2756,7 @@ final class MultiviewChromeState: ObservableObject {
                 return
             }
             debugLog("[MV-Chrome] hideTask FIRED -> isVisible=false")
+            self.lastReason = "timer"
             withAnimation(.easeInOut(duration: 0.4)) {
                 self.isVisible = false
             }
