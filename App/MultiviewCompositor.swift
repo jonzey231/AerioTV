@@ -274,6 +274,18 @@ final class MultiviewCompositeSession: ObservableObject {
     /// Scaled-down live frames of the composite (about 5 fps) for the
     /// remote controls sheet's preview grid.
     @Published fileprivate(set) var previewImage: UIImage?
+    /// The composite's grid layout for this session (Layout row in the
+    /// remote controls sheet). Seeded from the stored preference at start.
+    @Published private(set) var layoutMode: MultiviewLayoutMode = .auto
+
+    /// Layout row pick: the composite re-lays out live (Cast and AirPlay
+    /// share this compositor), the preview follows `layoutMode`.
+    func setLayout(_ m: MultiviewLayoutMode) {
+        guard m != layoutMode else { return }
+        debugLog("[MV-CAST] layout \(layoutMode.rawValue) -> \(m.rawValue) tiles=\(tileIDs.count) transport=\(transport.map { "\($0)" } ?? "none")")
+        layoutMode = m
+        compositor?.setMode(m)
+    }
     var isActive: Bool { transport != nil }
     var subtitle: String { channelNames.joined(separator: ", ") }
 
@@ -293,7 +305,12 @@ final class MultiviewCompositeSession: ObservableObject {
         tileIDs = tiles.map(\.id)
         channelNames = tiles.map(\.item.name)
         let focus = store.audioTileID.flatMap { id in tileIDs.contains(id) ? id : nil } ?? tileIDs[0]
+        // Initial layout: the app's stored Multiview layout preference
+        // (Settings > Player > Multiview); the sheet's Layout row then
+        // changes it for this composite session only.
         let mode = MultiviewLayoutMode(rawValue: UserDefaults.standard.string(forKey: MultiviewLayoutMode.storageKey) ?? "") ?? .auto
+        layoutMode = mode
+        debugLog("[MV-CAST] layout initial=\(mode.rawValue) tiles=\(tiles.count)")
         let accent = UIColor(ThemeManager.shared.accent)
         var r: CGFloat = 1, g: CGFloat = 1, b: CGFloat = 1, a: CGFloat = 1
         accent.getRed(&r, green: &g, blue: &b, alpha: &a)
@@ -1324,7 +1341,9 @@ final class MultiviewCompositor: @unchecked Sendable {
     private var normalizerDelayTicks: Int64 { lock.lock(); defer { lock.unlock() }; return normalizerDelayShared }
 
     // Compose queue
-    private let mode: MultiviewLayoutMode
+    /// Composite grid layout (lock): the sheet's Layout row changes it
+    /// live (2026-10-07), so it is read under the lock each frame.
+    private var mode: MultiviewLayoutMode
     private let accent: (Double, Double, Double)
     private var timer: DispatchSourceTimer?
     private var ciContext: CIContext?
@@ -1441,6 +1460,12 @@ final class MultiviewCompositor: @unchecked Sendable {
     /// Settings > Multiview changed while the composite runs (polled).
     func setStyle(_ st: MultiviewCompositeStyle) {
         lock.lock(); style = st; lock.unlock()
+    }
+
+    /// Re-lays out the composite from the next frame on; a layout change
+    /// is an interaction, so the focus indicator shows again.
+    func setMode(_ m: MultiviewLayoutMode) {
+        lock.lock(); mode = m; focusChangedHost = CACurrentMediaTime(); lock.unlock()
     }
 
     func setNames(_ n: [String: String]) {
@@ -1748,6 +1773,7 @@ final class MultiviewCompositor: @unchecked Sendable {
         let nameMap = names
         let logoMap = logos
         let focusAt = focusChangedHost
+        let mode = self.mode
         lock.unlock()
         // Round 3 (Logan 2026-10-07): the composite draws what the local
         // Multiview draws for the user's settings: tile padding, square or

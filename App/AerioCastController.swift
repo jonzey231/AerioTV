@@ -3063,7 +3063,10 @@ struct RemoteSessionSheet: View {
         let enabled = mode == .playing
         return VStack(spacing: 14) {
             header
-            if compositeMultiview { MultiviewCompositePreviewGrid() }
+            if compositeMultiview {
+                MultiviewCompositePreviewGrid()
+                MultiviewCompositeLayoutRow()
+            }
             programBlock
             Group {
                 if !compositeMultiview {
@@ -3318,10 +3321,15 @@ struct MultiviewCompositePreviewGrid: View {
     @State private var touchDown: CGPoint?
     /// The tile whose long-press menu is open.
     @State private var menuTileID: String?
+    /// The tile whose Switch Stream sheet is open (menu > Switch Stream).
+    @State private var switchStreamTileID: String?
 
     var body: some View {
         let tiles = Array(store.tiles.prefix(MultiviewCompositeLayout.maxTiles))
-        let mode = MultiviewLayoutMode(rawValue: UserDefaults.standard.string(forKey: MultiviewLayoutMode.storageKey) ?? "") ?? .auto
+        // The composite session's layout (Layout row), so the hit rects
+        // follow a live re-layout; the stored preference until it runs.
+        let mode = composite.isActive ? composite.layoutMode
+            : (MultiviewLayoutMode(rawValue: UserDefaults.standard.string(forKey: MultiviewLayoutMode.storageKey) ?? "") ?? .auto)
         // Same spacing the composite draws with (Settings > Multiview >
         // Padding Between Tiles), so the hit rects match the frame.
         let rects = MultiviewCompositeLayout.tileRects(count: tiles.count, mode: mode,
@@ -3452,6 +3460,12 @@ struct MultiviewCompositePreviewGrid: View {
                         store.setAudio(to: id)
                     }
                 }
+                if switchStreamTarget(id) != nil {
+                    Button("Switch Stream") {
+                        debugLog("[MV-CAST] switch stream tile=\(id): picker opened")
+                        switchStreamTileID = id
+                    }
+                }
                 if store.tiles.count > 1 {
                     Button("Move Tile") {
                         debugLog("[MV-CAST] preview menu: Move Tile tile=\(id)")
@@ -3466,12 +3480,47 @@ struct MultiviewCompositePreviewGrid: View {
                 Button("Cancel", role: .cancel) {}
             }
         }
+        // Switch Stream for the tile's channel: the same SwitchStreamView
+        // the Multiview tile menu opens. A confirmed switch posts
+        // .switchStreamReprime; Dispatcharr swaps the upstream on the
+        // tile's existing socket, the tile's remuxer re-gates, and the
+        // composite keeps decoding from that remuxer's ingest tap, so the
+        // other tiles never restart.
+        .sheet(isPresented: Binding(
+            get: { switchStreamTileID != nil },
+            set: { if !$0 { switchStreamTileID = nil } }
+        )) {
+            if let id = switchStreamTileID, let t = switchStreamTarget(id) {
+                SwitchStreamView(
+                    channelID: t.channelID,
+                    channelUUID: t.uuid,
+                    channelName: t.name,
+                    onClose: { switchStreamTileID = nil },
+                    onSwitched: { streamID in
+                        debugLog("[MV-CAST] switch stream tile=\(id) channel=\(t.name) stream=\(streamID) confirmed; tile keeps its connection, composite unchanged")
+                    }
+                )
+            } else {
+                EmptyView()
+            }
+        }
         .onAppear { debugLog("[MV-CAST] preview grid shown (remote controls sheet)") }
         .onDisappear { debugLog("[MV-CAST] preview grid hidden") }
     }
 
     private var menuTitle: String {
         menuTileID.flatMap { id in store.tiles.first { $0.id == id }?.item.name } ?? "Multiview"
+    }
+
+    /// Dispatcharr only, same fail-closed admin gate as the player's
+    /// Switch Stream row; nil hides the menu item.
+    private func switchStreamTarget(_ id: String) -> (channelID: Int, uuid: String, name: String)? {
+        guard let server = ChannelStore.shared.activeServer,
+              server.type == .dispatcharrAPI, server.dispatcharrCanSwitchStream,
+              let tile = store.tiles.first(where: { $0.id == id }),
+              let channelID = tile.item.dispatcharrChannelID,
+              let uuid = tile.item.uuid, !uuid.isEmpty else { return nil }
+        return (channelID, uuid, tile.item.name)
     }
 
     private func openMenu(_ id: String, haptic: Bool = true) {
@@ -3484,6 +3533,51 @@ struct MultiviewCompositePreviewGrid: View {
         lifted = nil
         debugLog("[MV-CAST] composite swap \(a) <-> \(b)")
         store.swap(a, b)
+    }
+}
+
+// MARK: - Multiview composite layout row
+
+/// Below the composite preview: the composite's grid layout, from the same
+/// options Settings > Player > Multiview offers for the current tile count
+/// (Android parity, 2026-10-07). Changes the composite live for this
+/// session (Cast and AirPlay share the compositor); the preview follows.
+struct MultiviewCompositeLayoutRow: View {
+    @ObservedObject private var store = MultiviewStore.shared
+    @ObservedObject private var composite = MultiviewCompositeSession.shared
+
+    var body: some View {
+        let count = min(store.tiles.count, MultiviewCompositeLayout.maxTiles)
+        let options = MultiviewLayoutMode.available(forTileCount: count)
+        // A pick that does not apply to this count draws as Default.
+        let current = options.contains(composite.layoutMode) ? composite.layoutMode : .auto
+        if !options.isEmpty {
+            HStack {
+                Text("Layout")
+                    .scaledFont(.subheadline)
+                    .foregroundStyle(.white)
+                Spacer()
+                Menu {
+                    Picker("Layout", selection: Binding(
+                        get: { current },
+                        set: { composite.setLayout($0) }
+                    )) {
+                        ForEach(options) { m in
+                            Label(m.displayName, systemImage: m.symbolName).tag(m)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(current.displayName)
+                        Image(systemName: "chevron.up.chevron.down")
+                    }
+                    .scaledFont(.subheadline)
+                    .foregroundStyle(.white.opacity(0.8))
+                }
+                .accessibilityLabel("Layout, \(current.displayName)")
+            }
+            .padding(.horizontal, 4)
+        }
     }
 }
 
