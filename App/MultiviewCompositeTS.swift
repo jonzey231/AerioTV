@@ -81,26 +81,38 @@ enum MultiviewCompositeLayout {
 
 // MARK: - Key frames
 
-/// Forced IDR policy: the first frame, the first frame at or after 2 s
-/// since the last IDR, and (Android parity, 2026-10-06) segment key frames
-/// for the downstream segmenters (the Cast remuxer and TSHLSRemuxer), which
-/// cut at the first key frame at or after 3 s from the segment's first
-/// DTS.
+/// Forced IDR policy: the first frame, then a segment key frame every
+/// second for the downstream segmenters. The Cast remuxer cuts the
+/// composite at the first key frame at or after 1 s (CastSegmentProfile
+/// .composite), so every segment key frame is a cut and the GOP equals the
+/// segment; TSHLSRemuxer (AirPlay) cuts at the first key frame at or after
+/// its own 2 s target, which 1 s key frames give it exactly.
 ///
-/// Segment key frames are spaced at least 3 s from the previous SEGMENT key
-/// frame, not placed on a fixed 3 s grid (device log 2026-10-07 13:28:52 to
+/// 1 s, not 3 s (2026-10-07 round 6): the receiver's distance behind the
+/// composite is made of whole segments (the publication delay of the cut
+/// being built, the target the receiver's live edge subtracts and the
+/// HOLD-BACK three targets deep). With 3.03 s cuts the device log measured
+/// the receiver 13.6 s behind the composite at a focus change (15:11:37)
+/// and Logan saw about 20 s before the TV followed a tap.
+///
+/// Segment key frames are spaced at least one target from the previous SEGMENT key
+/// frame, not placed on a fixed grid (device log 2026-10-07 13:28:52 to
 /// 13:30:15). The composite's PTS come from the host clock, so the first
 /// frame after a grid boundary lands up to a frame either side of it; when
 /// the next boundary frame was a few ticks less than 3 s after the
 /// segment's first DTS the remuxer skipped it and cut at the following 2 s
 /// IDR: segments of 5.00 s and 3.97 s, EXT-X-TARGETDURATION 5 and a 15 s
 /// HOLD-BACK on the receiver. Measured from the last segment key frame the
-/// spacing is never under 3 s, so every segment key frame is a cut.
+/// spacing is never under the segment target, so every segment key frame is
+/// a cut.
 struct MultiviewKeyframePolicy {
+    /// Upper bound between any two IDRs (unreached while segment key
+    /// frames come every second; kept as the rule for a reset clock).
     static let intervalTicks: Int64 = 2 * 90_000
-    static let segmentTicks: Int64 = 3 * 90_000
+    /// Must equal CastSegmentProfile.composite.targetSegmentTicks.
+    static let segmentTicks: Int64 = 1 * 90_000
     private(set) var lastKeyPTS: Int64 = -1
-    /// PTS of the last segment key frame (the first frame or a 3 s one).
+    /// PTS of the last segment key frame (the first frame or a 1 s one).
     private(set) var lastSegmentKeyPTS: Int64 = -1
     private var lastPTS: Int64 = -1
 

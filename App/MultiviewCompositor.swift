@@ -457,7 +457,13 @@ final class MultiviewCompositeSession: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] id in
                 guard let self, let id, self.tileIDs.contains(id) else { return }
+                let changed = self.compositor?.currentFocusID != id
                 self.compositor?.setFocus(id)
+                // Round 6: measure the receiver's lag behind the composite
+                // at every focus change and nudge it to the live edge.
+                if changed, self.transport == .cast {
+                    Task { @MainActor in AerioCastController.shared.compositeFocusChanged(tileID: id) }
+                }
             }
             .store(in: &cancellables)
         store.$tiles
@@ -1289,6 +1295,8 @@ final class MultiviewCompositor: @unchecked Sendable {
     // Shared (lock)
     private var tileIDs: [String]
     private var focusID: String
+    /// The focused tile (read under the lock).
+    var currentFocusID: String { lock.lock(); defer { lock.unlock() }; return focusID }
     private var lagSeconds: [String: Double] = [:]
     private var stopped = false
     private var lastComposeHost: CFTimeInterval = 0

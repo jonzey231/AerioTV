@@ -9407,6 +9407,9 @@ struct SystemMenuAnchor: UIViewRepresentable {
         func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
                                     configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
             let items = self.items()
+            // Which long-press menu opened, with its rows (round 6: a "no
+            // long press options" report had no line to place it).
+            debugLog("[MENU] long-press menu: \(items.map(\.title).joined(separator: " | "))")
             return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
                 UIMenu(children: items.map { item in
                     UIAction(title: item.title, image: UIImage(systemName: item.systemImage),

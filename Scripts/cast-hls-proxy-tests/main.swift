@@ -2175,6 +2175,62 @@ do {
     expect(Date().timeIntervalSince(t) < 1, "splice: close wakes the waiter promptly")
 }
 
+// MARK: composite segment profile (round 6, 2026-10-07)
+
+do {
+    let tps = CastFMP4Remuxer.ticksPerSecond
+    // Standard rounding is unchanged: 3.03 s rounds UP to 4.
+    expectEq(CastHLSSegmentStore.targetDurationSeconds(spans: [tps * 303 / 100], nearest: false), 4,
+             "profile: standard TARGETDURATION rounds up")
+    expectEq(CastHLSSegmentStore.targetDurationSeconds(spans: [tps * 1033 / 1000, tps], nearest: true), 1,
+             "profile: composite TARGETDURATION rounds to the nearest second")
+    expectEq(CastHLSSegmentStore.targetDurationSeconds(spans: [tps * 49 / 100], nearest: true), 1,
+             "profile: composite TARGETDURATION never below 1")
+    expectEq(CastSegmentProfile.standard.targetSegmentTicks, 3 * tps, "profile: standard cut target stays 3 s")
+    expectEq(CastSegmentProfile.composite.targetSegmentTicks, tps, "profile: composite cut target 1 s")
+
+    // A single-channel cast (4.004 s seg) then the composite (1.033 s cuts),
+    // the device log 2026-10-07 15:10:27 shape.
+    let store = CastHLSSegmentStore()
+    let gen1 = store.beginGeneration()
+    store.setDemuxedInitSegments(generation: gen1, video: Data([0x76]), audio: Data([0x61]))
+    store.addSegment(generation: gen1, durationTicks: 360_360, videoData: Data([1]), audioData: Data([1]))
+    let standardText = store.videoPlaylistText()
+    expect(standardText.contains("#EXT-X-TARGETDURATION:5\n") && standardText.contains("HOLD-BACK=15.000"),
+           "profile: a standard generation keeps ceil rounding (4.004 s -> 5, HOLD-BACK 15)")
+    let gen2 = store.beginGeneration()
+    store.setProfile(generation: gen2, .composite)
+    store.setDemuxedInitSegments(generation: gen2, video: Data([0x76]), audio: Data([0x61]))
+    for i in 0..<40 {
+        store.addSegment(generation: gen2, durationTicks: i % 2 == 0 ? 92_970 : 90_000,
+                         videoData: Data([2]), audioData: Data([3]), audioDurationTicks: 91_000)
+    }
+    for text in [store.videoPlaylistText(), store.audioPlaylistText()] {
+        expect(text.contains("#EXT-X-TARGETDURATION:1\n#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,HOLD-BACK=3.000\n"),
+               "profile: composite playlist states TARGETDURATION 1, HOLD-BACK 3")
+        expect(!text.contains("seg0.m4s") && !text.contains("init1.mp4"),
+               "profile: the leftover channel segment is not listed while the composite runs")
+        expectEq(text.components(separatedBy: "#EXTINF:").count - 1, CastHLSSegmentStore.compositeWindowSize,
+                 "profile: composite window lists 30 one-second segments")
+        expect(text.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1\n"),
+               "profile: the trimmed splice is counted in DISCONTINUITY-SEQUENCE")
+    }
+    // Composite ring keeps 33 segments; the oldest is gone.
+    expectEq(store.awaitSegment(seq: 40 - 32, rendition: .video, timeout: 0), Data([2]),
+             "profile: composite ring retains 33 segments")
+    expectEq(store.awaitSegment(seq: 1, rendition: .video, timeout: 0), nil,
+             "profile: composite ring evicts past 33 segments")
+    // Back to a channel: standard rounding and window again.
+    let gen3 = store.beginGeneration()
+    store.setDemuxedInitSegments(generation: gen3, video: Data([0x76]), audio: Data([0x61]))
+    store.addSegment(generation: gen3, durationTicks: 3 * tps, videoData: Data([4]), audioData: Data([4]))
+    let back = store.videoPlaylistText()
+    expect(back.contains("#EXT-X-TARGETDURATION:3\n") && back.contains("HOLD-BACK=9.000"),
+           "profile: a channel after the composite advertises its own ceil target")
+    expectEq(back.components(separatedBy: "#EXTINF:").count - 1, CastHLSSegmentStore.windowSize,
+             "profile: standard window size after the composite")
+}
+
 // MARK: 16. AirPlay LAN audio rewrite (2026-09-26)
 //
 // AirPlay always serves the TS LAN playlist; for an AAC receiver the LAN
@@ -3604,16 +3660,18 @@ runCardVideoChecks()
              "mv composite: 4:3 fits the 2-up tile width")
     expectEq(MultiviewCompositeLayout.borderStrips(r4[0], width: 2).count, 4, "mv composite: four border strips")
 
-    // Key-frame policy: 30 fps, IDR every 2 s.
+    // Key-frame policy: 30 fps, a segment IDR every 1 s (round 6).
     var policy = MultiviewKeyframePolicy()
     var keys: [Int] = []
     for f in 0..<200 where policy.isKeyframe(pts: 900_000 + Int64(f) * 3000) { keys.append(f) }
-    expectEq(keys, [0, 60, 90, 150, 180], "mv composite: IDR at 2 s cadence plus every 3 s boundary")
+    expectEq(keys, [0, 30, 60, 90, 120, 150, 180], "mv composite: IDR every 1 s")
+    expectEq(MultiviewKeyframePolicy.segmentTicks, CastSegmentProfile.composite.targetSegmentTicks,
+             "mv composite: key frame spacing equals the proxy's composite cut target")
 
     // Host-clock jitter (device log 2026-10-07): frame times wander a few
     // ticks either side of the 3000-tick grid. The remuxer cuts at the
-    // first key frame at or after 3 s from the segment's first DTS; every
-    // segment must stay under 3 s plus one frame (no 5 s or 4 s segments).
+    // first key frame at or after 1 s from the segment's first DTS; every
+    // segment must stay under 1 s plus one frame (no 2 s segments).
     policy = MultiviewKeyframePolicy()
     var jitterSegStart: Int64 = -1
     var longest: Int64 = 0
@@ -3631,7 +3689,7 @@ runCardVideoChecks()
     }
     expect(segCount >= 8, "mv composite jitter: segments cut (\(segCount))")
     expect(longest < MultiviewKeyframePolicy.segmentTicks + 3000 + 100,
-           "mv composite jitter: longest segment \(Double(longest) / 90_000) s stays under 3 s plus a frame")
+           "mv composite jitter: longest segment \(Double(longest) / 90_000) s stays under 1 s plus a frame")
 
     // Live H.264 TS: 10 s at 30 fps plus AAC every 1920 ticks.
     var mux = MultiviewCompositeTSMuxer()
@@ -3690,17 +3748,21 @@ runCardVideoChecks()
     var steps = Set<Int64>()
     for i in 1..<videoPTS.count { steps.insert((videoPTS[i] - videoPTS[i - 1]) & TSLANAudioRewriter.pts33Mask) }
     expectEq(steps, [3000], "mv composite TS: video PTS continuous at 3000 ticks across the 33-bit wrap")
-    expectEq(keyIndexes, [0, 60, 90, 150, 180, 240, 270], "mv composite TS: RAI only on the policy's IDRs")
+    expectEq(keyIndexes, Array(stride(from: 0, to: 300, by: 30)), "mv composite TS: RAI only on the policy's IDRs")
     expect(raiLedByPSI, "mv composite TS: every IDR led by PAT + PMT")
-    // A segmenter cutting at the first key frame at or after 3 s (the
-    // remuxers' rule) cuts at exactly 3 s, on an IDR.
-    var segStart = 0
-    var segFrames: [Int] = []
-    for k in keyIndexes.dropFirst() where (Int64(k - segStart) * 3000) >= 3 * 90_000 {
-        segFrames.append(k - segStart)
-        segStart = k
+    // The Cast remuxer (first key frame at or after 1 s) cuts every IDR;
+    // TSHLSRemuxer (AirPlay, first key frame at or after 2 s) every second
+    // IDR. Both land on IDRs.
+    for (target, expected) in [(Int64(90_000), 30), (Int64(180_000), 60)] {
+        var segStart = 0
+        var segFrames: [Int] = []
+        for k in keyIndexes.dropFirst() where (Int64(k - segStart) * 3000) >= target {
+            segFrames.append(k - segStart)
+            segStart = k
+        }
+        expect(!segFrames.isEmpty && segFrames.allSatisfy { $0 == expected },
+               "mv composite TS: segment cuts at \(target / 90_000) s land on IDRs (\(segFrames))")
     }
-    expectEq(segFrames, [90, 90, 90], "mv composite TS: segment cuts at 3 s land on IDRs")
     // The tile-tap demuxer reads the audio back in arbitrary chunks.
     var demux = MultiviewTapDemuxer()
     var tapped: [MultiviewTapAudioPES] = []

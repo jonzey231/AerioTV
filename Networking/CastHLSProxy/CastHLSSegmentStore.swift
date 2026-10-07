@@ -9,6 +9,35 @@
 
 import Foundation
 
+/// Segment cadence of a proxy generation.
+///
+/// `.standard` is every single-channel cast: cuts at the first key frame at
+/// or after 3 s, TARGETDURATION rounded UP, HOLD-BACK three targets. Unchanged.
+///
+/// `.composite` is the phone-composited Multiview (2026-10-07 round 6). The
+/// composite's encoder is on the phone, so its key frames are wherever we
+/// put them: one every second, and the remuxer cuts on each. Its playlists
+/// round TARGETDURATION to the NEAREST second (RFC 8216 4.3.3.1 only
+/// requires each EXTINF, rounded to the nearest integer, to be at most the
+/// target), so 1.033 s segments advertise 1 instead of 2, and list only the
+/// trailing run of composite segments (the sender always re-loads the
+/// receiver when the composite starts), so one leftover 4 s channel segment
+/// cannot hold the target at 5 and the HOLD-BACK at 15 (device log
+/// 2026-10-07 15:10:42: TARGETDURATION 5 and HOLD-BACK 15 over 3.03 s
+/// composite segments, the receiver 13.6 s behind the composite).
+enum CastSegmentProfile: Sendable, Equatable {
+    case standard
+    case composite
+
+    /// The remuxer's cut target.
+    var targetSegmentTicks: Int64 {
+        switch self {
+        case .standard: return 3 * CastFMP4Remuxer.ticksPerSecond
+        case .composite: return CastFMP4Remuxer.ticksPerSecond
+        }
+    }
+}
+
 /// Thread-safe store of the last few CMAF segments plus their playlists.
 ///
 /// Generations exist because a reconnect or channel change restarts the
@@ -35,6 +64,13 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     /// a receiver that is a poll behind still fetch what the previous
     /// playlist advertised.
     static let ringSize = 18
+
+    /// The composite's window and ring in SEGMENTS (1 s each): the same
+    /// 30 s of media the standard window lists at its usual 2 to 3 s cuts,
+    /// so a receiver parked 10 to 13 s behind the edge (the receiver page's
+    /// own start offset) stays well inside the seekable window.
+    static let compositeWindowSize = 30
+    static let compositeRingSize = 33
 
     /// Bound on holding a segment GET that names a sequence the ingest
     /// has not published yet (the receiver racing the live edge);
@@ -69,6 +105,8 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         /// The audio rendition's own EXTINF; within one audio frame of
         /// `durationTicks`.
         let audioDurationTicks: Int64
+        /// Cut by a `.composite` generation.
+        let composite: Bool
     }
 
     /// Guards the store; also what held segment fetches wait on.
@@ -82,6 +120,8 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     /// Generations served audio-only (GH #90): no video init, no video
     /// rendition, and the master advertises a single audio variant.
     private var audioOnlyGenerations: Set<Int> = []
+    /// Generations cut with the `.composite` profile.
+    private var compositeGenerations: Set<Int> = []
     private var nextSeq = 0
     private var generation = 0
     /// First segment committed after `beginGeneration` gets the
@@ -123,6 +163,7 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         videoInits.removeAll()
         audioInits.removeAll()
         audioOnlyGenerations.removeAll()
+        compositeGenerations.removeAll()
         segmentsInGeneration = 0
         mediaTicksInGeneration = 0
         storeOpen = false
@@ -167,6 +208,14 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         return newGen
     }
 
+    /// Marks `gen` as cut with `profile` (set by the session before the
+    /// generation's first segment).
+    func setProfile(generation gen: Int, _ profile: CastSegmentProfile) {
+        condition.lock()
+        if profile == .composite { compositeGenerations.insert(gen) } else { compositeGenerations.remove(gen) }
+        condition.unlock()
+    }
+
     /// Init segments for `gen`. `audio` is nil for a video-only
     /// mux, in which case the demuxed master carries no audio rendition.
     /// `video` is nil for an audio-only program (GH #90), in which case
@@ -200,12 +249,14 @@ final class CastHLSSegmentStore: @unchecked Sendable {
                                  durationTicks: durationTicks,
                                  discontinuity: pendingDiscontinuity,
                                  videoData: videoData, audioData: audioData,
-                                 audioDurationTicks: audioDurationTicks ?? durationTicks)
+                                 audioDurationTicks: audioDurationTicks ?? durationTicks,
+                                 composite: compositeGenerations.contains(gen))
         let publishedSeq = nextSeq
         nextSeq += 1
         pendingDiscontinuity = false
         ring.append(entry)
-        while ring.count > Self.ringSize {
+        let ringLimit = compositeGenerations.contains(generation) ? Self.compositeRingSize : Self.ringSize
+        while ring.count > ringLimit {
             let evicted = ring.removeFirst()
             if evicted.discontinuity { discontinuitySequence += 1 }
             // Drop init segments no ring entry references any more.
@@ -214,6 +265,7 @@ final class CastHLSSegmentStore: @unchecked Sendable {
                 videoInits.removeValue(forKey: evicted.generation)
                 audioInits.removeValue(forKey: evicted.generation)
                 audioOnlyGenerations.remove(evicted.generation)
+                compositeGenerations.remove(evicted.generation)
             }
         }
         segmentsInGeneration += 1
@@ -459,6 +511,18 @@ final class CastHLSSegmentStore: @unchecked Sendable {
     /// differ, by less than one audio frame.
     func audioPlaylistText() -> String { mediaPlaylistText(.audio) }
 
+    /// EXT-X-TARGETDURATION for segment spans in 90 kHz ticks: rounded UP
+    /// (standard), or to the NEAREST second (composite), at least 1; 4 for
+    /// an empty window.
+    static func targetDurationSeconds(spans: [Int64], nearest: Bool) -> Int {
+        spans
+            .map {
+                let seconds = Double($0) / Double(CastFMP4Remuxer.ticksPerSecond)
+                return Int(seconds.rounded(nearest ? .toNearestOrAwayFromZero : .up))
+            }
+            .max().map { max(1, $0) } ?? 4
+    }
+
     private func mediaPlaylistText(_ rendition: Rendition) -> String {
         condition.lock()
         defer { condition.unlock() }
@@ -468,7 +532,8 @@ final class CastHLSSegmentStore: @unchecked Sendable {
         case .video: initPrefix = "vinit"; segPrefix = "vseg"
         case .audio: initPrefix = "ainit"; segPrefix = "aseg"
         }
-        var window = Array(ring.suffix(Self.windowSize))
+        var window = Array(ring.suffix(compositeGenerations.contains(generation)
+                                       ? Self.compositeWindowSize : Self.windowSize))
         // A flip between an audio-only program and one with video (GH #90)
         // changes which renditions exist. The sender re-loads the receiver
         // with the new master on every flip, so each playlist lists only
@@ -485,16 +550,21 @@ final class CastHLSSegmentStore: @unchecked Sendable {
             trimmedDiscontinuities = window[...lastMismatch].filter(\.discontinuity).count
             window.removeFirst(lastMismatch + 1)
         }
+        // Composite (see CastSegmentProfile): only the trailing run of
+        // composite segments is listed, by the same rule and the same
+        // discontinuity accounting as the audio-only trim above.
+        let currentComposite = compositeGenerations.contains(generation)
+        if currentComposite, let lastStandard = window.lastIndex(where: { !$0.composite }) {
+            trimmedDiscontinuities += window[...lastStandard].filter(\.discontinuity).count
+            window.removeFirst(lastStandard + 1)
+        }
         var text = "#EXTM3U\n#EXT-X-VERSION:7\n"
         // Deliberately the max over BOTH renditions' spans, so the two
         // demuxed playlists advertise the SAME target duration even though
         // their EXTINF values differ by up to an audio frame.
-        let targetSeconds = window
-            .map {
-                Int((Double(max($0.durationTicks, $0.audioDurationTicks))
-                    / Double(CastFMP4Remuxer.ticksPerSecond)).rounded(.up))
-            }
-            .max().map { max(1, $0) } ?? 4
+        let targetSeconds = Self.targetDurationSeconds(
+            spans: window.map { max($0.durationTicks, $0.audioDurationTicks) },
+            nearest: currentComposite)
         text += "#EXT-X-TARGETDURATION:\(targetSeconds)\n"
         // Explicit HOLD-BACK (2026-09-21) at the RFC 8216bis minimum of three
         // target durations, identical on both renditions, so the receiver's

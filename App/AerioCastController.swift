@@ -693,6 +693,99 @@ final class AerioCastController: NSObject, ObservableObject {
         return RemoteSeekWindow(start: 0, end: dur, position: min(max(pos, 0), dur), isLive: false)
     }
 
+    // MARK: - Composite focus: receiver lag and live-edge nudge (round 6)
+
+    /// A Multiview focus change is on the composite within a frame, but the
+    /// TV shows it only when the receiver's playhead reaches the frames drawn
+    /// after it. Device log 2026-10-07 15:11:37: the receiver played 13.6 s
+    /// behind the composite (t=53.96 against a composite at 67.5), and Logan
+    /// timed about 20 s from tap to TV. The receiver page never moves its
+    /// playhead forward on its own, so a focus change with the receiver more
+    /// than this far behind its live seekable end seeks it to that end,
+    /// accepting one short rebuffer.
+    static let compositeNudgeThresholdSeconds: Double = 2.0
+    /// Where the nudge aims: just inside the live seekable end.
+    static let compositeNudgeMarginSeconds: Double = 0.25
+    private var compositeNudgeCheck: Task<Void, Never>?
+
+    /// Called by MultiviewCompositeSession on every composite focus change
+    /// while the composite is cast. Logs the receiver's lag behind the
+    /// composite live point, then nudges a web receiver that is behind.
+    func compositeFocusChanged(tileID: String) {
+        guard isCasting, castingContent?.mediaID == MultiviewCompositeSession.castMediaID,
+              let client = GCKCastContext.sharedInstance().sessionManager.currentCastSession?.remoteMediaClient
+        else { return }
+        // Receiver state as of the tap, before the proxy hop.
+        let pos = client.approximateStreamPosition()
+        let end = client.mediaStatus?.liveSeekableRange.map { max($0.startTime, $0.endTime) }
+        let target = receiverTarget
+        Task { @MainActor [weak self] in
+            let proxy = await Self.proxyLiveEdge()
+            guard let self, self.isCasting,
+                  let client = GCKCastContext.sharedInstance().sessionManager.currentCastSession?.remoteMediaClient
+            else { return }
+            let lag = Self.compositeLagLine(position: pos, edge: proxy.edge, loadedGeneration: proxy.loadedGeneration)
+            let behindEnd = end.map { $0 - pos }
+            debugLog("[Cast] composite focus \(tileID): receiver t=\(String(format: "%.3f", pos)) "
+                + "seekable end=\(end.map { String(format: "%.3f", $0) } ?? "none") "
+                + "behind seekable end=\(behindEnd.map { String(format: "%.1f s", $0) } ?? "n/a"); \(lag)")
+            guard target == .webReceiver, let end, let behindEnd, end.isFinite,
+                  behindEnd > Self.compositeNudgeThresholdSeconds else { return }
+            let aim = max(pos, end - Self.compositeNudgeMarginSeconds)
+            let options = GCKMediaSeekOptions()
+            options.interval = aim
+            options.relative = false
+            debugLog(String(format: "[Cast] composite nudge: seek t=%.3f -> %.3f (live seekable end %.3f, %.1f s behind > %.1f s)",
+                            pos, aim, end, behindEnd, Self.compositeNudgeThresholdSeconds))
+            client.seek(with: options)
+            self.compositeNudgeCheck?.cancel()
+            self.compositeNudgeCheck = Task { @MainActor [weak self] in
+                // The result as hard data: where the receiver is 4 s later.
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard !Task.isCancelled, let self, self.isCasting,
+                      let c = GCKCastContext.sharedInstance().sessionManager.currentCastSession?.remoteMediaClient
+                else { return }
+                let p = c.approximateStreamPosition()
+                let e = c.mediaStatus?.liveSeekableRange.map { max($0.startTime, $0.endTime) }
+                let state = c.mediaStatus?.playerState.rawValue ?? -1
+                let after = await Self.proxyLiveEdge()
+                let lagAfter = Self.compositeLagLine(position: p, edge: after.edge,
+                                                     loadedGeneration: after.loadedGeneration)
+                debugLog("[Cast] composite nudge result: receiver t=\(String(format: "%.3f", p)) "
+                    + "playerState=\(state) seekable end=\(e.map { String(format: "%.3f", $0) } ?? "none") "
+                    + "(moved \(String(format: "%+.1f", p - pos)) s in 4 s wall); \(lagAfter)")
+            }
+        }
+    }
+
+    /// The proxy's composite live point and the generation the receiver was
+    /// loaded on, read off the main actor (both are bounded queue hops).
+    nonisolated private static func proxyLiveEdge() async
+        -> (edge: (generation: Int, seconds: Double, sinceLastSegment: Double)?, loadedGeneration: Int?) {
+        let task = Task<((generation: Int, seconds: Double, sinceLastSegment: Double)?, Int?), Never>
+            .detached(priority: .userInitiated) {
+                (CastHLSProxySession.shared.liveEdgeEstimate(),
+                 CastHLSProxySession.shared.receiverRequestCounts()?.generation)
+            }
+        let (edge, gen) = await task.value
+        return (edge, gen)
+    }
+
+    /// "lag behind the composite live point" for a receiver position, or
+    /// why it cannot be stated (the receiver's t is on the media timeline
+    /// of the generation it was loaded on).
+    nonisolated private static func compositeLagLine(position: Double,
+                                                     edge: (generation: Int, seconds: Double, sinceLastSegment: Double)?,
+                                                     loadedGeneration: Int?) -> String {
+        guard let edge else { return "composite live point unknown" }
+        guard edge.generation == loadedGeneration else {
+            return "composite live point t=\(String(format: "%.3f", edge.seconds)) on gen \(edge.generation), "
+                + "receiver loaded gen \(loadedGeneration.map(String.init) ?? "?"): lag n/a"
+        }
+        return String(format: "composite live point t=%.3f (last cut %.1f s ago): receiver lag %.1f s",
+                      edge.seconds, edge.sinceLastSegment, edge.seconds - position)
+    }
+
     /// Friendly name of the connected cast device, for the cover header.
     var connectedDeviceName: String? {
         if case .connected(let name) = state { return name }
@@ -950,7 +1043,11 @@ final class AerioCastController: NSObject, ObservableObject {
                     rawTSURL: rawTS, headers: headers, allowAC3Passthrough: allowAC3,
                     transcodeAC3: transcodeAC3,
                     receiverDecodesAVCLevel42: caps?["avc1.64002A"],
-                    videoPlan: videoPlan)
+                    videoPlan: videoPlan,
+                    // The phone-composited Multiview cuts every second and
+                    // advertises a nearest-second target (round 6).
+                    segmentProfile: content.mediaID == MultiviewCompositeSession.castMediaID
+                        ? .composite : .standard)
             } catch is CancellationError {
                 return
             } catch {
@@ -3191,8 +3288,11 @@ struct RemoteSessionSheet: View {
 /// layout. Tap a tile: the audio moves there (the receiver follows without
 /// a restart). Long-press and drag a tile onto another: the two swap
 /// places and the composite re-lays out live (Logan 2026-10-07, round 2).
-/// A long-press released on the same tile is the local Multiview's "Move
-/// Tile": the next tap on another tile swaps, a tap on it again cancels.
+/// A long-press released on the same tile opens the tile menu (round 6:
+/// Logan long-pressed the preview tiles to remove channels and nothing
+/// appeared, because the release only armed Move Tile): Make Audio, Move
+/// Tile (the next tap on another tile swaps, a tap on it again cancels)
+/// and Remove from Multiview.
 /// Focused tile: 4 pt accent border; others: 2 pt gray.
 struct MultiviewCompositePreviewGrid: View {
     @ObservedObject private var store = MultiviewStore.shared
@@ -3207,6 +3307,11 @@ struct MultiviewCompositePreviewGrid: View {
     @State private var dragging = false
     /// A long-press release also ends as a tap; that tap is ignored.
     @State private var pressEndedAt: Date = .distantPast
+    /// Where the current touch went down: a long-press released without
+    /// moving can end before its drag reports a location.
+    @State private var touchDown: CGPoint?
+    /// The tile whose long-press menu is open.
+    @State private var menuTileID: String?
 
     var body: some View {
         let tiles = Array(store.tiles.prefix(MultiviewCompositeLayout.maxTiles))
@@ -3292,12 +3397,28 @@ struct MultiviewCompositePreviewGrid: View {
                     }
                     .onEnded { value in
                         defer { dragging = false; dragPoint = nil; pressEndedAt = Date() }
-                        guard case .second(true, let drag) = value, let drag, let from = lifted else { return }
+                        guard case .second(true, let drag) = value else { return }
+                        guard let drag, let from = lifted, dragging else {
+                            // Long-press released before the drag reported:
+                            // the menu for the tile under the finger.
+                            if let p = touchDown, let id = hit(p) { openMenu(id) }
+                            return
+                        }
                         if let to = hit(drag.location), to != from {
                             swapTiles(from, to)
+                        } else if hit(drag.location) == from {
+                            // Released on the same tile: the tile menu.
+                            lifted = nil
+                            openMenu(from, haptic: false) // the lift already buzzed
+                        } else {
+                            lifted = nil
                         }
-                        // Released on the same tile: stay lifted (Move Tile).
-                        else if hit(drag.location) != from { lifted = nil }
+                    }
+            )
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                    .onChanged { value in
+                        if touchDown != value.startLocation { touchDown = value.startLocation }
                     }
             )
             .simultaneousGesture(
@@ -3314,6 +3435,43 @@ struct MultiviewCompositePreviewGrid: View {
         }
         .aspectRatio(16.0 / 9.0, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .confirmationDialog(menuTitle, isPresented: Binding(
+            get: { menuTileID != nil },
+            set: { if !$0 { menuTileID = nil } }
+        ), titleVisibility: .visible) {
+            if let id = menuTileID {
+                if id != store.audioTileID {
+                    Button("Make Audio") {
+                        debugLog("[MV-CAST] preview menu: Make Audio tile=\(id)")
+                        store.setAudio(to: id)
+                    }
+                }
+                if store.tiles.count > 1 {
+                    Button("Move Tile") {
+                        debugLog("[MV-CAST] preview menu: Move Tile tile=\(id)")
+                        lifted = id
+                    }
+                }
+                Button("Remove from Multiview", role: .destructive) {
+                    debugLog("[MV-CAST] preview menu: Remove from Multiview tile=\(id) (\(store.tiles.count - 1) left)")
+                    if lifted == id { lifted = nil }
+                    store.remove(id: id)
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+        }
+        .onAppear { debugLog("[MV-CAST] preview grid shown (remote controls sheet)") }
+        .onDisappear { debugLog("[MV-CAST] preview grid hidden") }
+    }
+
+    private var menuTitle: String {
+        menuTileID.flatMap { id in store.tiles.first { $0.id == id }?.item.name } ?? "Multiview"
+    }
+
+    private func openMenu(_ id: String, haptic: Bool = true) {
+        if haptic { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
+        debugLog("[MV-CAST] preview long-press tile=\(id): tile menu")
+        menuTileID = id
     }
 
     private func swapTiles(_ a: String, _ b: String) {

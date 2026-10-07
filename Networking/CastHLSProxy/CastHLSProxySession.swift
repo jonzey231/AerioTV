@@ -156,6 +156,13 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// `transcode-aac`: the remuxer decodes AC-3 / E-AC-3 on the phone and
     /// serves AAC-LC stereo in the audio rendition instead of refusing.
     private var transcodeAC3 = false
+    /// Segment cadence of the current channel (`.composite` for the
+    /// phone-composited Multiview).
+    private var segmentProfile = CastSegmentProfile.standard
+    /// Newest published segment: its generation, its end on the
+    /// generation's media timeline (seconds, the receiver's `t` for a
+    /// receiver loaded on that generation) and when it was published.
+    private var lastPublished: (generation: Int, endSeconds: Double, at: CFAbsoluteTime)?
     /// The sender's video plan for the current channel (receiver caps plus
     /// the Developer switches); the remuxer applies it at the source SPS.
     private var videoPlan = CastVideoPlan.passthrough
@@ -197,6 +204,20 @@ final class CastHLSProxySession: @unchecked Sendable {
         let audioPath: String?
         let lastRollupKbps: Int?
         let lastRollupAvgSegmentSeconds: Double?
+    }
+
+    /// The live point of what the proxy is producing, on the current
+    /// generation's media timeline: the newest published segment's end plus
+    /// the wall time since it was published (the ingest keeps producing
+    /// while the next cut builds). With the generation the receiver was
+    /// loaded on (`receiverRequestCounts().generation`) the sender turns the
+    /// receiver's reported position into "seconds behind the live point".
+    func liveEdgeEstimate() -> (generation: Int, seconds: Double, sinceLastSegment: Double)? {
+        onQueueBounded(timeout: 0.3, what: "liveEdge") { () -> (Int, Double, Double)? in
+            guard let p = self.lastPublished, p.generation == self.currentGeneration else { return nil }
+            let since = max(0, CFAbsoluteTimeGetCurrent() - p.at)
+            return (p.generation, p.endSeconds + since, since)
+        } ?? nil
     }
 
     /// Audio codec + mode for the sender's one-line cast log. nil when no
@@ -389,7 +410,8 @@ final class CastHLSProxySession: @unchecked Sendable {
                       allowAC3Passthrough: Bool = false,
                       transcodeAC3: Bool = false,
                       receiverDecodesAVCLevel42: Bool? = nil,
-                      videoPlan: CastVideoPlan = .passthrough) async throws -> URL {
+                      videoPlan: CastVideoPlan = .passthrough,
+                      segmentProfile: CastSegmentProfile = .standard) async throws -> URL {
         // The Chromecast fetches over the LAN; 127.0.0.1 would only ever
         // work for the phone itself.
         guard let lanIP = Self.wifiLANAddress() else {
@@ -418,6 +440,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             self.allowAC3Passthrough = allowAC3Passthrough
             self.transcodeAC3 = transcodeAC3
             self.videoPlan = videoPlan
+            self.segmentProfile = segmentProfile
             store.setReceiverDecodesAVCLevel42(receiverDecodesAVCLevel42)
             self.stopIngestLocked()
             self.activeURL = rawTSURL
@@ -434,9 +457,11 @@ final class CastHLSProxySession: @unchecked Sendable {
             self.lastRollupAvgSegmentSeconds = nil
             self.videoCodecDescription = nil
             self.audioPathCache = nil
+            self.lastPublished = nil
             self.log("server on \(lanIP):\(server.boundPort); "
                 + "\(isChannelChange ? "channel change" : "session start") "
-                + "gen=\(self.currentGeneration) ingest=\(Self.sanitize(rawTSURL))")
+                + "gen=\(self.currentGeneration) ingest=\(Self.sanitize(rawTSURL))"
+                + (segmentProfile == .composite ? " profile=composite (1 s cuts, nearest TARGETDURATION)" : ""))
             self.beginBackgroundKeepaliveIfNeeded()
             self.startLinkLogLocked()
             self.startIngestLocked(url: rawTSURL, headers: headers)
@@ -582,7 +607,9 @@ final class CastHLSProxySession: @unchecked Sendable {
                 block()
             }
         }
-        let remuxer = CastFMP4Remuxer(allowAC3Passthrough: allowAC3Passthrough,
+        store?.setProfile(generation: gen, segmentProfile)
+        let remuxer = CastFMP4Remuxer(targetSegmentTicks: segmentProfile.targetSegmentTicks,
+                                      allowAC3Passthrough: allowAC3Passthrough,
                                       transcodeAC3: transcodeAC3,
                                       videoPlan: plan,
                                       videoDelivery: delivery,
@@ -641,6 +668,9 @@ final class CastHLSProxySession: @unchecked Sendable {
             if let c = self.pendingComposition {
                 self.pendingComposition = nil
                 let dur = Double(durationTicks) / Double(CastFMP4Remuxer.ticksPerSecond)
+                if publishedSeq != nil {
+                    self.lastPublished = (gen, c.start + dur, CFAbsoluteTimeGetCurrent())
+                }
                 // buffStart is max(vpts, apts): Chromium reports a
                 // two-track SourceBuffer's buffered range as the
                 // INTERSECTION of the tracks, so the later of the two
