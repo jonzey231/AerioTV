@@ -376,6 +376,29 @@ final class MultiviewCompositeSession: ObservableObject {
                 debugLog("[MV-CAST] composite stopped: headless tiles torn down")
                 PlayerSession.shared.stop()
             }
+        } else {
+            // Never silent headless playback (device log 2026-10-07
+            // 13:30:15): the composite hid the phone player
+            // (NowPlayingManager minimized) and a stop that keeps the tiles
+            // left them playing hidden, with no card, no Now Playing and no
+            // way back. Play Here expands before this runs and a restart is
+            // active again, so both pass through. Anything else still
+            // hidden afterward is surfaced full screen, or ended when no
+            // tile is left.
+            DispatchQueue.main.async {
+                guard !MultiviewCompositeSession.shared.isActive,
+                      PlayerSession.shared.mode == .multiview,
+                      NowPlayingManager.shared.isMinimized,
+                      !MultiviewBackgroundSession.shared.isActive else { return }
+                let count = MultiviewStore.shared.tiles.count
+                if count == 0 {
+                    debugLog("[MV-CAST] composite stopped (\(detail)): no tiles left; Multiview ended")
+                    PlayerSession.shared.stop()
+                } else {
+                    debugLog("[MV-CAST] composite stopped (\(detail)): \(count) hidden tile(s) surfaced full screen")
+                    NowPlayingManager.shared.expand()
+                }
+            }
         }
         guard endTransport else { return }
         switch t {
@@ -761,8 +784,25 @@ final class MultiviewTileVideoDecoder: @unchecked Sendable {
     private var anchor: (src: Int64, host: CFTimeInterval)?
     private var frames: [(pts: Int64, pb: CVPixelBuffer)] = []
     private var lastShownPTS: Int64 = .min
+    /// Compose ticks that found no decoded picture at or before the clock
+    /// (the composite then repeats the tile's previous picture).
+    private var misses = 0
+    /// Largest PTS minus DTS seen since the last stats line (B-frame
+    /// reorder depth), 90 kHz.
+    private var maxReorderTicks: Int64 = 0
 
     static let maxBufferedBytes = 48 * 1024 * 1024
+    /// Decoded pictures kept for the clock. Was 6 (device log 2026-10-07
+    /// 13:28:56 to 13:30:11): ESPNU decoded 600 pictures per 10 s but
+    /// showed 0.0 to 2.0 fps for the whole session while the other tiles
+    /// showed 25 to 30. Decode runs 100 ms of DTS ahead of the clock, so at
+    /// 59.94 fps the 6 newest pictures by PTS were all still in the future
+    /// as soon as the stream reorders (PTS ahead of DTS); the one due now
+    /// was evicted and the tile froze on an old picture while its audio
+    /// followed the clock (video behind audio). Decode now also stops once
+    /// `maxFuturePictures` wait ahead of the clock.
+    static let maxFrames = 12
+    static let maxFuturePictures = 9
     static let resumeAheadTicks: Int64 = 2 * 90_000
     static let maxOutput = CGSize(width: 960, height: 540)
 
@@ -772,6 +812,13 @@ final class MultiviewTileVideoDecoder: @unchecked Sendable {
     }
 
     var isAnchored: Bool { lock.lock(); defer { lock.unlock() }; return anchor != nil }
+
+    /// Source PTS (unwrapped, 90 kHz) of the picture last handed to the
+    /// composite, nil before the first one.
+    var lastShownSourcePTS: Int64? {
+        lock.lock(); defer { lock.unlock() }
+        return lastShownPTS == .min ? nil : lastShownPTS
+    }
 
     /// Source PTS (33-bit) the picture clock shows at `host`, nil until anchored.
     func displayedPTS(host: CFTimeInterval) -> Int64? {
@@ -1012,6 +1059,11 @@ final class MultiviewTileVideoDecoder: @unchecked Sendable {
         if next < aus.count, aus[next].dts < target - 90_000 { seek(to: target) }
         var budget = 40
         while next < aus.count, aus[next].dts <= target + 9_000, budget > 0 {
+            lock.lock()
+            let waiting = frames.reduce(0) { $0 + ($1.pts > target ? 1 : 0) }
+            lock.unlock()
+            if waiting >= Self.maxFuturePictures { break }
+            maxReorderTicks = max(maxReorderTicks, aus[next].pts - aus[next].dts)
             decode(aus[next])
             next += 1
             budget -= 1
@@ -1024,12 +1076,15 @@ final class MultiviewTileVideoDecoder: @unchecked Sendable {
             let span = lastStatsAt > 0 ? host - lastStatsAt : 10
             lastStatsAt = host
             let newest = aus[aus.count - 1].pts
-            debugLog(String(format: "[MV-CAST] tile decode %@ bg=%@ shown=%.1f fps decoded=%d behind=%.1f s buffered=%.1f s stalls=%d session=%@ rebuilds=%d invalidated=%d",
-                            tileID, background ? "yes" : "no", Double(shown) / span, decoded,
-                            Double(newest - target) / 90_000, Double(newest - aus[0].dts) / 90_000,
+            lock.lock(); let missed = misses; misses = 0; let held = frames.count; lock.unlock()
+            debugLog(String(format: "[MV-CAST] tile decode %@ bg=%@ shown=%.1f fps decoded=%d missed=%d held=%d reorder=%.0f ms behind=%.1f s buffered=%.1f s stalls=%d session=%@ rebuilds=%d invalidated=%d",
+                            tileID, background ? "yes" : "no", Double(shown) / span, decoded, missed, held,
+                            Double(maxReorderTicks) / 90, Double(newest - target) / 90_000,
+                            Double(newest - aus[0].dts) / 90_000,
                             stalls, session == nil ? "none" : "live", rebuilds, invalidations))
             shown = 0
             decoded = 0
+            maxReorderTicks = 0
         }
     }
 
@@ -1083,7 +1138,7 @@ final class MultiviewTileVideoDecoder: @unchecked Sendable {
             self.lock.lock()
             self.frames.append((pts.value, image))
             self.frames.sort { $0.pts < $1.pts }
-            if self.frames.count > 6 { self.frames.removeFirst(self.frames.count - 6) }
+            if self.frames.count > Self.maxFrames { self.frames.removeFirst(self.frames.count - Self.maxFrames) }
             self.lock.unlock()
         }
         if st == noErr {
@@ -1173,7 +1228,10 @@ final class MultiviewTileVideoDecoder: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard let a = anchor else { return nil }
         let target = a.src + Int64((host - a.host) * 90_000)
-        guard let idx = frames.lastIndex(where: { $0.pts <= target }) else { return nil }
+        guard let idx = frames.lastIndex(where: { $0.pts <= target }) else {
+            if !frames.isEmpty || lastShownPTS != .min { misses += 1 }
+            return nil
+        }
         let f = frames[idx]
         frames.removeFirst(idx)
         guard f.pts != lastShownPTS else { return nil }
@@ -1196,8 +1254,19 @@ final class MultiviewCompositor: @unchecked Sendable {
     static let maxBehindSeconds: Double = 3
     static let maxInFlight = 6
     static let bitrate = 4_500_000
-    /// Audio is muxed this far ahead of the video it plays with.
-    static let audioLeadTicks: Int64 = 27_000
+    /// Audio is muxed this far ahead of the video it plays with. Zero
+    /// (device log 2026-10-07): with 300 ms, a reader that joins at a key
+    /// frame (the Cast proxy, the AirPlay remuxer) gets that GOP's video
+    /// from the key frame but its audio only from key + 300 ms, because the
+    /// first 300 ms went out with the previous GOP. Every composite cast
+    /// logged `seg=0 vpts=0.000 apts=0.299` (11:21:27, 11:52:39, 13:28:52).
+    /// The receiver appends the demuxed renditions in MSE sequence mode
+    /// (see CastFMP4Remuxer.timelineBasePTS), which places each rendition's
+    /// first frame at 0, so the whole session played its audio 299 ms
+    /// early. Muxed at the video's own time the joining reader gets audio
+    /// from the key frame on; it also leaves late tile audio 300 ms more
+    /// time to arrive before the mux fills the slot with silence.
+    static let audioLeadTicks: Int64 = 0
     /// Per-tile audio history kept for a focus switch.
     static let audioRingTicks: Int64 = 25 * 90_000
     static let aacFrameTicks: Int64 = 1920   // 1024 samples at 48 kHz
@@ -1236,6 +1305,15 @@ final class MultiviewCompositor: @unchecked Sendable {
     /// Last measured player position per tile (33-bit source PTS and host),
     /// the decoder's first anchor.
     private var measuredShared: [String: (pts: Int64, host: CFTimeInterval, playing: Bool)] = [:]
+    /// The focused tile's audio mapping (lock): composite PTS = source PTS
+    /// + offset, for the A/V offset log on the compose queue.
+    private var audioOffsetShared: (tileID: String, offset: Int64)?
+    /// Compose queue: when the A/V offset was last logged, and whether
+    /// the next tick should log it (set by a re-anchor or a focus change).
+    private var avLoggedAt: CFTimeInterval = 0
+    /// The current normalizer's measured codec delay (lock), for that log.
+    private var normalizerDelayShared: Int64 = 0
+    private var normalizerDelayTicks: Int64 { lock.lock(); defer { lock.unlock() }; return normalizerDelayShared }
 
     // Compose queue
     private let mode: MultiviewLayoutMode
@@ -1477,6 +1555,8 @@ final class MultiviewCompositor: @unchecked Sendable {
             if self.normalizer == nil || self.normalizerKey != key {
                 self.normalizer = MultiviewAudioNormalizer(pcmSampleRate: sampleRate)
                 self.normalizerKey = key
+                let d = self.normalizer?.codecDelayTicks ?? 0
+                self.lock.lock(); self.normalizerDelayShared = d; self.lock.unlock()
             }
             // The tap delivers just ahead of output; the frame's start time
             // is its arrival minus its own duration.
@@ -1576,6 +1656,7 @@ final class MultiviewCompositor: @unchecked Sendable {
                 }
             }
         }
+        logAVOffset(focus: focus, compositePTS: pts, host: host)
         if gotPixels {
             lastAnyPixelsHost = host
             if noPictureLogged {
@@ -1617,13 +1698,39 @@ final class MultiviewCompositor: @unchecked Sendable {
             presentationTimeStamp: CMTime(value: pts, timescale: 90_000),
             duration: CMTime(value: 3000, timescale: 90_000),
             frameProperties: props, infoFlagsOut: nil) { [weak self] st, _, sample in
-                self?.encoded(status: st, sample: sample, pts: pts, submittedAt: submittedAt, gen: gen)
+                self?.encoded(status: st, sample: sample, pts: pts, submittedAt: submittedAt, gen: gen,
+                              requestedKey: key)
             }
         if status != noErr {
             inFlight -= 1
             dropped += 1
             if status == kVTInvalidSessionErr { encoderInvalidated(host: host) }
         }
+    }
+
+    /// Compose queue. The composite's own audio to video offset for the
+    /// focused tile, in ms: the source time its audio carries at this
+    /// frame's composite PTS minus the source time of the picture this
+    /// frame shows for it. Positive = audio ahead of the picture. Logged
+    /// after every audio anchor or focus change and every 10 s. It covers
+    /// the phone side only (anchoring, decoded picture choice, held
+    /// pictures); the codec delay is already inside the audio PTS, and the
+    /// join lead is the `seg=0 vpts apts` line of the Cast proxy.
+    private func logAVOffset(focus: String, compositePTS: Int64, host: CFTimeInterval) {
+        lock.lock()
+        let audio = audioOffsetShared
+        let due = avLoggedAt == 0 || host - avLoggedAt >= 10
+        lock.unlock()
+        guard due, let audio, audio.tileID == focus,
+              let shown = decoder(focus)?.lastShownSourcePTS else { return }
+        let mask = TSLANAudioRewriter.pts33Mask
+        let audioSource = (compositePTS - audio.offset) & mask
+        var diff = (audioSource - (shown & mask)) & mask
+        if diff > mask / 2 { diff -= mask + 1 }
+        lock.lock(); avLoggedAt = host; lock.unlock()
+        let codecDelay = normalizerDelayTicks
+        debugLog(String(format: "[MV-CAST] composite A/V offset tile=%@ audio-video=%+.0f ms (+ = audio ahead of the picture; codec delay %.1f ms compensated, mux audio lead %.0f ms)",
+                        focus, Double(diff) / 90, Double(codecDelay) / 90, Double(Self.audioLeadTicks) / 90))
     }
 
     private func compose(tiles: [String], focus: String, host: CFTimeInterval) -> CIImage {
@@ -1773,8 +1880,17 @@ final class MultiviewCompositor: @unchecked Sendable {
     }
 
     /// VideoToolbox output (its own thread).
-    private func encoded(status: OSStatus, sample: CMSampleBuffer?, pts: Int64, submittedAt: CFTimeInterval, gen: Int) {
+    private func encoded(status: OSStatus, sample: CMSampleBuffer?, pts: Int64, submittedAt: CFTimeInterval, gen: Int,
+                         requestedKey: Bool) {
         let now = CACurrentMediaTime()
+        let parsed = status == noErr ? sample.flatMap { Self.annexB($0) } : nil
+        if requestedKey, parsed?.1 != true {
+            // A forced key frame that did not come out as one (dropped by
+            // the real-time encoder): the segmenters would cut 2 s later.
+            // The next frame is forced instead, and the log shows it.
+            debugLog("[MV-CAST] composite key frame requested at pts \(pts) not produced (\(parsed == nil ? "frame dropped" : "not a key frame")); forcing the next frame")
+            composeQueue.async { [weak self] in self?.forceKeyframe = true }
+        }
         composeQueue.async { [weak self] in
             guard let self else { return }
             self.inFlight = max(0, self.inFlight - 1)
@@ -1789,7 +1905,7 @@ final class MultiviewCompositor: @unchecked Sendable {
             self.encodedSinceStats += 1
             self.encodeMsSum += (now - submittedAt) * 1000
         }
-        guard status == noErr, let sample, let (au, key) = Self.annexB(sample) else { return }
+        guard let (au, key) = parsed else { return }
         muxQueue.async { [weak self] in self?.muxVideo(au, pts: pts, keyframe: key) }
     }
 
@@ -2022,6 +2138,7 @@ final class MultiviewCompositor: @unchecked Sendable {
     }
 
     private func refocusAudio() {
+        lock.lock(); audioOffsetShared = nil; lock.unlock()
         clock.reanchor()
         bumpAudioEpoch()
         driftStrikes = 0
@@ -2102,6 +2219,14 @@ final class MultiviewCompositor: @unchecked Sendable {
                                     tileID, codec.name, anchorReason, method, lag, o, Double(src + o - now) / 90_000))
                     anchorReason = "source jump"
                 }
+                if let o = clock.offset {
+                    lock.lock()
+                    if audioOffsetShared?.tileID != tileID || audioOffsetShared?.offset != o {
+                        audioOffsetShared = (tileID, o)
+                        avLoggedAt = 0
+                    }
+                    lock.unlock()
+                }
                 guard let mapped = mappedOpt else { continue }
                 let key = "\(codec.name)-\(frame.sampleRate)-\(frame.channels)"
                 if normalizer == nil || key != normalizerKey {
@@ -2109,6 +2234,7 @@ final class MultiviewCompositor: @unchecked Sendable {
                                                           channels: frame.channels, samplesPerFrame: frame.samples,
                                                           asc: frame.asc)
                     normalizerKey = key
+                    lock.lock(); normalizerDelayShared = normalizer?.codecDelayTicks ?? 0; lock.unlock()
                     if let n = normalizer {
                         debugLog("[MV-CAST] composite audio: \(key) codec delay compensated (\(n.codecDelayDescription))")
                     } else {

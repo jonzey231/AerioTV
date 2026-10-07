@@ -82,27 +82,41 @@ enum MultiviewCompositeLayout {
 // MARK: - Key frames
 
 /// Forced IDR policy: the first frame, the first frame at or after 2 s
-/// since the last IDR, and (Android parity, 2026-10-06) the first frame at
-/// or after every 3 s boundary of the stream. The downstream segmenters
-/// (the Cast remuxer and TSHLSRemuxer) cut at the first key frame at or
-/// after their 3 s target; with only the 2 s cadence they cut at 4 s, the
-/// 3 s IDRs make them cut at 3 s.
+/// since the last IDR, and (Android parity, 2026-10-06) segment key frames
+/// for the downstream segmenters (the Cast remuxer and TSHLSRemuxer), which
+/// cut at the first key frame at or after 3 s from the segment's first
+/// DTS.
+///
+/// Segment key frames are spaced at least 3 s from the previous SEGMENT key
+/// frame, not placed on a fixed 3 s grid (device log 2026-10-07 13:28:52 to
+/// 13:30:15). The composite's PTS come from the host clock, so the first
+/// frame after a grid boundary lands up to a frame either side of it; when
+/// the next boundary frame was a few ticks less than 3 s after the
+/// segment's first DTS the remuxer skipped it and cut at the following 2 s
+/// IDR: segments of 5.00 s and 3.97 s, EXT-X-TARGETDURATION 5 and a 15 s
+/// HOLD-BACK on the receiver. Measured from the last segment key frame the
+/// spacing is never under 3 s, so every segment key frame is a cut.
 struct MultiviewKeyframePolicy {
     static let intervalTicks: Int64 = 2 * 90_000
     static let segmentTicks: Int64 = 3 * 90_000
     private(set) var lastKeyPTS: Int64 = -1
-    private var firstPTS: Int64 = -1
+    /// PTS of the last segment key frame (the first frame or a 3 s one).
+    private(set) var lastSegmentKeyPTS: Int64 = -1
     private var lastPTS: Int64 = -1
 
     mutating func isKeyframe(pts: Int64) -> Bool {
         defer { lastPTS = pts }
-        if firstPTS < 0 || pts < lastPTS {
-            firstPTS = pts
+        if lastSegmentKeyPTS < 0 || pts < lastPTS {
+            lastSegmentKeyPTS = pts
             lastKeyPTS = pts
             return true
         }
-        let crossedSegment = (pts - firstPTS) / Self.segmentTicks > (lastPTS - firstPTS) / Self.segmentTicks
-        if crossedSegment || pts - lastKeyPTS >= Self.intervalTicks {
+        if pts - lastSegmentKeyPTS >= Self.segmentTicks {
+            lastSegmentKeyPTS = pts
+            lastKeyPTS = pts
+            return true
+        }
+        if pts - lastKeyPTS >= Self.intervalTicks {
             lastKeyPTS = pts
             return true
         }

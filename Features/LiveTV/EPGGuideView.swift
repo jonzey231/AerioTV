@@ -7644,7 +7644,11 @@ struct EPGGuideView: View {
         // First entry: wipe and flip the flag. Subsequent calls just
         // toggle (the flag is already true and the pile is whatever
         // the user has built so far).
-        if !multiviewStore.isStagingFromGuide {
+        // A running Multiview (on the phone, or feeding a receiver as the
+        // composite) takes the channel as one more tile instead of a fresh
+        // pile (device log 2026-10-07 13:30:15: the wipe stopped the
+        // composite cast and left the new tile playing hidden).
+        if PlayerSession.shared.mode != .multiview, !multiviewStore.isStagingFromGuide {
             multiviewStore.clearAll()
             multiviewStore.isStagingFromGuide = true
             DebugLogger.shared.log(

@@ -3986,7 +3986,13 @@ struct ChannelRow: View {
     /// menu starts a fresh pile and flags staging; later taps toggle.
     private func toggleMultiview() {
         let store = MultiviewStore.shared
-        if !store.isStagingFromGuide {
+        // A running Multiview (on the phone, or feeding a receiver as the
+        // composite) takes the channel as one more tile. Starting a fresh
+        // pile here wiped the running tiles (device log 2026-10-07
+        // 13:30:15: clearAll, the composite cast stopped, the new tile
+        // played hidden on the phone).
+        let running = PlayerSession.shared.mode == .multiview
+        if !running, !store.isStagingFromGuide {
             store.clearAll()
             store.isStagingFromGuide = true
         }

@@ -3610,6 +3610,29 @@ runCardVideoChecks()
     for f in 0..<200 where policy.isKeyframe(pts: 900_000 + Int64(f) * 3000) { keys.append(f) }
     expectEq(keys, [0, 60, 90, 150, 180], "mv composite: IDR at 2 s cadence plus every 3 s boundary")
 
+    // Host-clock jitter (device log 2026-10-07): frame times wander a few
+    // ticks either side of the 3000-tick grid. The remuxer cuts at the
+    // first key frame at or after 3 s from the segment's first DTS; every
+    // segment must stay under 3 s plus one frame (no 5 s or 4 s segments).
+    policy = MultiviewKeyframePolicy()
+    var jitterSegStart: Int64 = -1
+    var longest: Int64 = 0
+    var segCount = 0
+    for f in 0..<900 {
+        let jitter: Int64 = [0, -40, 25, -12, 37, -29, 8][f % 7]
+        let pts = 900_000 + Int64(f) * 3000 + jitter
+        guard policy.isKeyframe(pts: pts) else { continue }
+        if jitterSegStart < 0 { jitterSegStart = pts; continue }
+        if pts - jitterSegStart >= MultiviewKeyframePolicy.segmentTicks {
+            longest = max(longest, pts - jitterSegStart)
+            jitterSegStart = pts
+            segCount += 1
+        }
+    }
+    expect(segCount >= 8, "mv composite jitter: segments cut (\(segCount))")
+    expect(longest < MultiviewKeyframePolicy.segmentTicks + 3000 + 100,
+           "mv composite jitter: longest segment \(Double(longest) / 90_000) s stays under 3 s plus a frame")
+
     // Live H.264 TS: 10 s at 30 fps plus AAC every 1920 ticks.
     var mux = MultiviewCompositeTSMuxer()
     policy = MultiviewKeyframePolicy()
