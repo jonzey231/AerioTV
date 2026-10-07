@@ -1214,10 +1214,16 @@ final class AerioCastController: NSObject, ObservableObject {
         builder.hlsSegmentFormat = .FMP4
         builder.hlsVideoSegmentFormat = .FMP4
         builder.metadata = metadata
-        builder.customData = [
+        var custom: [String: Any] = [
             AerioCast.keyMediaID: content.mediaID,
             AerioCast.keyKind: AerioCast.kindLive,
         ]
+        // The web receiver applies its composite live profile (about 3 s
+        // behind the edge, SEEK kept for the focus-change nudge) on this flag.
+        if content.mediaID == MultiviewCompositeSession.castMediaID {
+            custom["aerio"] = ["composite": true]
+        }
+        builder.customData = custom
         let mediaInfo = builder.build()
 
         let requestBuilder = GCKMediaLoadRequestDataBuilder()
