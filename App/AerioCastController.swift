@@ -693,67 +693,129 @@ final class AerioCastController: NSObject, ObservableObject {
         return RemoteSeekWindow(start: 0, end: dur, position: min(max(pos, 0), dur), isLive: false)
     }
 
-    // MARK: - Composite focus: receiver lag and live-edge nudge (round 6)
+    // MARK: - Composite catch-up: receiver lag and live-edge nudge (rounds 6 and 7)
 
-    /// A Multiview focus change is on the composite within a frame, but the
-    /// TV shows it only when the receiver's playhead reaches the frames drawn
-    /// after it. Device log 2026-10-07 15:11:37: the receiver played 13.6 s
-    /// behind the composite (t=53.96 against a composite at 67.5), and Logan
-    /// timed about 20 s from tap to TV. The receiver page never moves its
-    /// playhead forward on its own, so a focus change with the receiver more
-    /// than this far behind its live seekable end seeks it to that end,
-    /// accepting one short rebuffer.
-    static let compositeNudgeThresholdSeconds: Double = 2.0
-    /// Where the nudge aims: just inside the live seekable end.
+    /// A Multiview focus or layout change is on the composite within a
+    /// frame, but the TV shows it only when the receiver's playhead reaches
+    /// the frames drawn after it.
+    ///
+    /// Device log 2026-10-07 round 7 (15:43 to 15:47, Travel Chromecast):
+    /// the web receiver took the composite profile (profile=composite,
+    /// seekWhy "profile composite behind3", TARGETDURATION 1, HOLD-BACK 3)
+    /// and joined at t=7.549, but then buffered for 9.2 s (bufTime=9.21)
+    /// before it played at 15:43:37.9. It never moved forward again, so it
+    /// played 12.3 to 12.4 s behind the composite live point for the whole
+    /// session (every `composite focus` line), which is the 11 to 12 s
+    /// Logan timed. The round 6 nudge never fired on the first two focus
+    /// changes because it judged the lag by the SDK's cached
+    /// liveSeekableRange, which was stale (seekable end 7.363 at t=30.4
+    /// and t=58.0, from the load-time status): "behind" came out negative.
+    ///
+    /// Now the receiver's live seek end is computed from the proxy itself:
+    /// the newest published composite segment's end minus the composite
+    /// HOLD-BACK, the same point the receiver's player clamps to (receiver
+    /// seek=[..-22.384] against a newest segment ending at 25.36, 15:43:43).
+    /// The nudge runs once when the receiver first plays after a composite
+    /// load (the startup buffering is where the 9 s were lost), and on
+    /// every focus and layout change.
+    ///
+    /// The threshold is deliberately above the receiver's measured settle
+    /// point after a seek: the round 7 nudge (15:46:38) landed at 196.6
+    /// against a seek end of 201.0, 4.4 s behind, because the receiver
+    /// re-buffers about 3.5 s after any seek (seeking 15:46:38.9, playing
+    /// 15:46:42.4 with 5.5 s buffered ahead). A lower threshold would seek
+    /// again on every tap and re-buffer back to the same place.
+    static let compositeNudgeThresholdSeconds: Double = 6.0
+    /// Where the nudge aims: just inside the live seek end.
     static let compositeNudgeMarginSeconds: Double = 0.25
+    /// The composite playlists' HOLD-BACK: three targets of the composite
+    /// profile's nearest-second TARGETDURATION of 1 (CastSegmentProfile).
+    static let compositeHoldBackSeconds: Double = 3.0
     private var compositeNudgeCheck: Task<Void, Never>?
+    /// Set at each composite load; the first playing tick clears it and
+    /// runs the startup catch-up.
+    private var compositeStartupCatchUpPending = false
 
     /// Called by MultiviewCompositeSession on every composite focus change
-    /// while the composite is cast. Logs the receiver's lag behind the
-    /// composite live point, then nudges a web receiver that is behind.
+    /// while the composite is cast.
     func compositeFocusChanged(tileID: String) {
+        compositeCatchUp(reason: "focus \(tileID)")
+    }
+
+    /// Called by MultiviewCompositeSession on a Layout row change while the
+    /// composite is cast: the new layout reaches the TV after the same lag.
+    func compositeLayoutChanged(_ mode: String) {
+        compositeCatchUp(reason: "layout \(mode)")
+    }
+
+    /// Receiver status tick (custom channel): the first playing tick after
+    /// a composite load runs the startup catch-up.
+    private func noteCompositeReceiverTick(_ json: [String: Any]) {
+        guard compositeStartupCatchUpPending,
+              castingContent?.mediaID == MultiviewCompositeSession.castMediaID,
+              json["state"] as? String == "PLAYING",
+              (json["rate"] as? NSNumber)?.doubleValue == 1,
+              (json["elPaused"] as? NSNumber)?.intValue ?? 0 == 0 else { return }
+        compositeStartupCatchUpPending = false
+        Task { @MainActor [weak self] in
+            // Let the SDK's media status catch up with the play.
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            self?.compositeCatchUp(reason: "startup")
+        }
+    }
+
+    /// Logs the receiver's lag behind the composite live point and seeks a
+    /// web receiver that is more than the threshold behind its live seek end.
+    private func compositeCatchUp(reason: String) {
         guard isCasting, castingContent?.mediaID == MultiviewCompositeSession.castMediaID,
               let client = GCKCastContext.sharedInstance().sessionManager.currentCastSession?.remoteMediaClient
         else { return }
         // Receiver state as of the tap, before the proxy hop.
         let pos = client.approximateStreamPosition()
-        let end = client.mediaStatus?.liveSeekableRange.map { max($0.startTime, $0.endTime) }
+        let cachedEnd = client.mediaStatus?.liveSeekableRange.map { max($0.startTime, $0.endTime) }
         let target = receiverTarget
         Task { @MainActor [weak self] in
             let proxy = await Self.proxyLiveEdge()
             guard let self, self.isCasting,
+                  self.castingContent?.mediaID == MultiviewCompositeSession.castMediaID,
                   let client = GCKCastContext.sharedInstance().sessionManager.currentCastSession?.remoteMediaClient
             else { return }
             let lag = Self.compositeLagLine(position: pos, edge: proxy.edge, loadedGeneration: proxy.loadedGeneration)
-            let behindEnd = end.map { $0 - pos }
-            debugLog("[Cast] composite focus \(tileID): receiver t=\(String(format: "%.3f", pos)) "
-                + "seekable end=\(end.map { String(format: "%.3f", $0) } ?? "none") "
-                + "behind seekable end=\(behindEnd.map { String(format: "%.1f s", $0) } ?? "n/a"); \(lag)")
-            guard target == .webReceiver, let end, let behindEnd, end.isFinite,
-                  behindEnd > Self.compositeNudgeThresholdSeconds else { return }
-            let aim = max(pos, end - Self.compositeNudgeMarginSeconds)
+            // The receiver's live seek end on its own timeline: only stated
+            // when the receiver plays the proxy's current generation.
+            let seekEnd: Double? = proxy.edge.flatMap { e in
+                e.generation == proxy.loadedGeneration
+                    ? e.seconds - e.sinceLastSegment - Self.compositeHoldBackSeconds : nil
+            }
+            let behind = seekEnd.map { $0 - pos }
+            debugLog("[Cast] composite \(reason): receiver t=\(String(format: "%.3f", pos)) "
+                + "live seek end=\(seekEnd.map { String(format: "%.3f", $0) } ?? "n/a") (newest segment end - HOLD-BACK \(Self.compositeHoldBackSeconds) s; "
+                + "SDK cached \(cachedEnd.map { String(format: "%.3f", $0) } ?? "none")) "
+                + "behind=\(behind.map { String(format: "%.1f s", $0) } ?? "n/a"); \(lag)")
+            guard target == .webReceiver, let seekEnd, let behind, seekEnd.isFinite,
+                  behind > Self.compositeNudgeThresholdSeconds else { return }
+            let aim = max(pos, seekEnd - Self.compositeNudgeMarginSeconds)
             let options = GCKMediaSeekOptions()
             options.interval = aim
             options.relative = false
-            debugLog(String(format: "[Cast] composite nudge: seek t=%.3f -> %.3f (live seekable end %.3f, %.1f s behind > %.1f s)",
-                            pos, aim, end, behindEnd, Self.compositeNudgeThresholdSeconds))
+            debugLog(String(format: "[Cast] composite nudge (%@): seek t=%.3f -> %.3f (live seek end %.3f, %.1f s behind > %.1f s)",
+                            reason, pos, aim, seekEnd, behind, Self.compositeNudgeThresholdSeconds))
             client.seek(with: options)
             self.compositeNudgeCheck?.cancel()
             self.compositeNudgeCheck = Task { @MainActor [weak self] in
-                // The result as hard data: where the receiver is 4 s later.
-                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                // The result as hard data: where the receiver is 6 s later
+                // (the round 7 nudge re-buffered for 3.5 s).
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
                 guard !Task.isCancelled, let self, self.isCasting,
                       let c = GCKCastContext.sharedInstance().sessionManager.currentCastSession?.remoteMediaClient
                 else { return }
                 let p = c.approximateStreamPosition()
-                let e = c.mediaStatus?.liveSeekableRange.map { max($0.startTime, $0.endTime) }
                 let state = c.mediaStatus?.playerState.rawValue ?? -1
                 let after = await Self.proxyLiveEdge()
                 let lagAfter = Self.compositeLagLine(position: p, edge: after.edge,
                                                      loadedGeneration: after.loadedGeneration)
-                debugLog("[Cast] composite nudge result: receiver t=\(String(format: "%.3f", p)) "
-                    + "playerState=\(state) seekable end=\(e.map { String(format: "%.3f", $0) } ?? "none") "
-                    + "(moved \(String(format: "%+.1f", p - pos)) s in 4 s wall); \(lagAfter)")
+                debugLog("[Cast] composite nudge result (\(reason)): receiver t=\(String(format: "%.3f", p)) "
+                    + "playerState=\(state) (moved \(String(format: "%+.1f", p - pos)) s in 6 s wall); \(lagAfter)")
             }
         }
     }
@@ -1222,6 +1284,12 @@ final class AerioCastController: NSObject, ObservableObject {
         // behind the edge, SEEK kept for the focus-change nudge) on this flag.
         if content.mediaID == MultiviewCompositeSession.castMediaID {
             custom["aerio"] = ["composite": true]
+            // Round 7: the first playing tick after this load runs the
+            // startup catch-up (the receiver's startup buffering is where
+            // it fell 9 s behind).
+            compositeStartupCatchUpPending = true
+        } else {
+            compositeStartupCatchUpPending = false
         }
         builder.customData = custom
         let mediaInfo = builder.build()
@@ -1943,6 +2011,7 @@ extension AerioCastController: GCKGenericChannelDelegate {
             extras += " \(key)=\(text)"
         }
         if let st = json["state"] as? String { receiverPlayerState = st }
+        noteCompositeReceiverTick(json)
         if let r = json["rate"] as? NSNumber { receiverPlaybackRate = r.doubleValue }
         noteReceiverVideo(json)
         var line = "[Cast] receiver: ev=\(string("ev")) t=\(decimals("t", 3)) "
@@ -3319,6 +3388,13 @@ struct MultiviewCompositePreviewGrid: View {
     /// Where the current touch went down: a long-press released without
     /// moving can end before its drag reports a location.
     @State private var touchDown: CGPoint?
+    /// The current touch already became a long-press (round 7, device log
+    /// 2026-10-07 15:45:36.311: the release of the long-press that opened
+    /// the tile menu also ended as a tap, which moved the audio focus to
+    /// that tile in the same millisecond, before Remove was picked). The
+    /// tap fires before the sequenced gesture's onEnded sets
+    /// `pressEndedAt`, so this flag is what stops it.
+    @State private var longPressFired = false
     /// The tile whose long-press menu is open.
     @State private var menuTileID: String?
     /// The tile whose Switch Stream sheet is open (menu > Switch Stream).
@@ -3394,7 +3470,7 @@ struct MultiviewCompositePreviewGrid: View {
                     .onChanged { value in
                         switch value {
                         case .first(true):
-                            break
+                            longPressFired = true
                         case .second(true, let drag):
                             guard let drag else { return }
                             if lifted == nil || !dragging {
@@ -3410,7 +3486,8 @@ struct MultiviewCompositePreviewGrid: View {
                         }
                     }
                     .onEnded { value in
-                        defer { dragging = false; dragPoint = nil; pressEndedAt = Date() }
+                        // A tap still to come is covered by `pressEndedAt`.
+                        defer { dragging = false; dragPoint = nil; pressEndedAt = Date(); longPressFired = false }
                         guard case .second(true, let drag) = value else { return }
                         guard let drag, let from = lifted, dragging else {
                             // Long-press released before the drag reported:
@@ -3432,11 +3509,19 @@ struct MultiviewCompositePreviewGrid: View {
             .simultaneousGesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .local)
                     .onChanged { value in
-                        if touchDown != value.startLocation { touchDown = value.startLocation }
+                        if touchDown != value.startLocation {
+                            // A new touch.
+                            touchDown = value.startLocation
+                            longPressFired = false
+                        }
                     }
             )
             .simultaneousGesture(
                 SpatialTapGesture().onEnded { value in
+                    if longPressFired {
+                        longPressFired = false
+                        return
+                    }
                     guard !dragging, Date().timeIntervalSince(pressEndedAt) > 0.25,
                           let id = hit(value.location) else { return }
                     if let from = lifted {

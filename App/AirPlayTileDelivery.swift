@@ -197,6 +197,28 @@ final class AirPlayTileDelivery {
         mutedForTake = false
         player?.isMuted = false
         debugLog("[AVP-AIRPLAY] tile \(channelName): receiver took the LAN item, player unmuted")
+        reassertUnmuteAfterTake(token: token)
+    }
+
+    /// Device log 2026-10-07 round 7 (AirPlay composite to the Apple TV):
+    /// the take-mute was released at 15:50:51.903, 27 ms BEFORE the Apple
+    /// TV opened its first connection (15:50:51.930), and the TV played
+    /// with no audio although the composite carried AAC throughout (A/V
+    /// offset lines every 10 s). Audio started only when Logan tapped a
+    /// tile at 15:51:32.78; the one thing a tile tap does to this player is
+    /// the audio-owner handler writing `isMuted = false` again. The mute
+    /// sent during the handover evidently stuck on the receiver, so the
+    /// unmute is written again once the receiver is fetching.
+    private func reassertUnmuteAfterTake(token myToken: UUID) {
+        Task { @MainActor [weak self] in
+            for delay in [1.5, 4.0] {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard let self, self.token == myToken, self.state == .serving, !self.mutedForTake,
+                      let player = self.player, player.isExternalPlaybackActive, !player.isMuted else { return }
+                player.isMuted = false
+                debugLog(String(format: "[AVP-AIRPLAY] tile %@: unmute re-sent to the receiver %.1f s after the take", self.channelName, delay))
+            }
+        }
     }
 
     /// Fresh-tune handover: the player has the LAN URL; stop the session

@@ -57,6 +57,17 @@ final class MultiviewCompositeTaps: @unchecked Sendable {
     private var sink: (@Sendable (String, Data) -> Void)?
     /// Which transport the running composite uses (read by the tile gates).
     private var transport: MultiviewCompositeSession.Transport?
+    /// The remuxer each tile last registered with, kept across unregister
+    /// (a sole-tile re-mount unregisters before the new player registers),
+    /// so a tile's new ingest connection is recognized.
+    private var lastRemuxer: [String: ObjectIdentifier] = [:]
+    /// Set while a composite runs: a tile's ingest restarted on a new
+    /// connection (watchdog retry, standing retry, re-mount).
+    private var sourceRestartSink: (@Sendable (String) -> Void)?
+
+    func setSourceRestartSink(_ s: (@Sendable (String) -> Void)?) {
+        lock.lock(); sourceRestartSink = s; lock.unlock()
+    }
 
     // MARK: Gates the tile reads (main thread)
 
@@ -94,7 +105,12 @@ final class MultiviewCompositeTaps: @unchecked Sendable {
         if active, old?.item === item { entry.output = old?.output }
         entries[tileID] = entry
         if old?.item !== item { audioTapped.remove(tileID) }
+        let newID = remuxer.map(ObjectIdentifier.init)
+        let previousID = lastRemuxer[tileID]
+        if let newID { lastRemuxer[tileID] = newID }
+        let restartSink = active && previousID != nil && newID != nil && previousID != newID ? sourceRestartSink : nil
         lock.unlock()
+        restartSink?(tileID)
         if let o = old?.output, old?.item !== item { old?.item.remove(o) }
         if old?.item !== item, old?.remuxer === remuxer { remuxer?.resetLocalTimeBase() }
         guard active else { return }
@@ -126,6 +142,7 @@ final class MultiviewCompositeTaps: @unchecked Sendable {
         transport = t
         sink = s
         let snapshot = entries
+        for (id, e) in entries { if let r = e.remuxer { lastRemuxer[id] = ObjectIdentifier(r) } }
         lock.unlock()
         for (id, e) in snapshot {
             if e.output == nil { attachOutput(tileID: id) }
@@ -135,10 +152,15 @@ final class MultiviewCompositeTaps: @unchecked Sendable {
         }
     }
 
-    @MainActor func deactivate() {
+    /// `restoreMute`: false when the one tile left is handed to the AirPlay
+    /// receiver as a single channel; it re-mounts as the sole tile with a
+    /// fresh player, and the old one must not play on the phone meanwhile.
+    @MainActor func deactivate(restoreMute: Bool = true) {
         lock.lock()
         transport = nil
         sink = nil
+        sourceRestartSink = nil
+        lastRemuxer.removeAll()
         let snapshot = entries
         for k in entries.keys { entries[k]?.output = nil }
         lock.unlock()
@@ -148,7 +170,7 @@ final class MultiviewCompositeTaps: @unchecked Sendable {
         for (id, e) in snapshot {
             if let o = e.output { e.item.remove(o) }
             e.remuxer?.setIngestTap(nil)
-            e.player?.isMuted = audioID != id
+            if restoreMute { e.player?.isMuted = audioID != id }
         }
     }
 
@@ -285,6 +307,12 @@ final class MultiviewCompositeSession: ObservableObject {
         debugLog("[MV-CAST] layout \(layoutMode.rawValue) -> \(m.rawValue) tiles=\(tileIDs.count) transport=\(transport.map { "\($0)" } ?? "none")")
         layoutMode = m
         compositor?.setMode(m)
+        // Round 7: the new layout reaches the TV only when the receiver's
+        // playhead does, so a Cast receiver far behind is caught up here
+        // too (Logan timed about 9 s for Stacked).
+        if transport == .cast {
+            AerioCastController.shared.compositeLayoutChanged(m.rawValue)
+        }
     }
     var isActive: Bool { transport != nil }
     var subtitle: String { channelNames.joined(separator: ", ") }
@@ -337,6 +365,9 @@ final class MultiviewCompositeSession: ObservableObject {
         MultiviewCompositeTaps.shared.setPCMSink { [weak comp] id, pcm, rate in
             comp?.tilePCM(tileID: id, samples: pcm, sampleRate: rate)
         }
+        MultiviewCompositeTaps.shared.setSourceRestartSink { [weak comp] id in
+            comp?.tileSourceRestarted(tileID: id)
+        }
         MultiviewCompositeTaps.shared.activate(transport: t) { [weak comp] id, data in
             comp?.tileBytes(tileID: id, data: data)
         }
@@ -366,8 +397,11 @@ final class MultiviewCompositeSession: ObservableObject {
     /// why would they continue on my phone?"). False on a restart, when
     /// the local Multiview itself closed, and for Play Here (the tiles
     /// become the local fullscreen player).
+    /// `surfaceHidden`: false when the one tile left becomes the receiver's
+    /// single-channel session (`handOffSingleTile`): it stays headless behind
+    /// the remote card, exactly like a single channel played on AirPlay.
     func stop(_ reason: StopReason = .stopped, detail: String, endTransport: Bool = false,
-              teardownTiles: Bool = true) {
+              teardownTiles: Bool = true, surfaceHidden: Bool = true) {
         guard let t = transport else { return }
         // Cleared first: the teardowns below re-enter stop() through the
         // tile list and cast-content observers.
@@ -385,7 +419,7 @@ final class MultiviewCompositeSession: ObservableObject {
         logoTask?.cancel()
         logoTask = nil
         playingState.removeAll()
-        MultiviewCompositeTaps.shared.deactivate()
+        MultiviewCompositeTaps.shared.deactivate(restoreMute: surfaceHidden)
         if teardownTiles {
             DispatchQueue.main.async {
                 guard !MultiviewCompositeSession.shared.isActive,
@@ -408,6 +442,10 @@ final class MultiviewCompositeSession: ObservableObject {
                       NowPlayingManager.shared.isMinimized,
                       !MultiviewBackgroundSession.shared.isActive else { return }
                 let count = MultiviewStore.shared.tiles.count
+                if !surfaceHidden, count > 0 {
+                    debugLog("[MV-CAST] composite stopped (\(detail)): \(count) tile(s) stay headless for the receiver")
+                    return
+                }
                 if count == 0 {
                     debugLog("[MV-CAST] composite stopped (\(detail)): no tiles left; Multiview ended")
                     PlayerSession.shared.stop()
@@ -425,6 +463,37 @@ final class MultiviewCompositeSession: ObservableObject {
             }
         case .airPlay:
             AirPlayMonitor.shared.stop()
+        }
+    }
+
+    /// One tile left (round 7, device log 2026-10-07 15:47:22 Cast and
+    /// 15:53:31 AirPlay: "composite tiles changed: 1", the composite kept
+    /// running as a one-tile picture). The remaining channel goes to the
+    /// receiver as a single-channel session:
+    /// - Cast: the card's channel path (castPickedChannel). The new cast
+    ///   content stops this composite through the castingContent observer,
+    ///   which also ends the headless local Multiview: the receiver plays
+    ///   the channel from its own proxy ingest.
+    /// - AirPlay: the composite stops here, before the remaining tile
+    ///   re-mounts as the sole tile (it does on 2 to 1, 15:53:31.370
+    ///   "MV-Tile onAppear"). With no composite running, that tile is the
+    ///   AirPlay route owner again (ownsAirPlay: the audio tile), so its
+    ///   fresh tune takes the normal "route already selected: starting on
+    ///   LAN" handover, and it stays headless behind the card.
+    private func handOffSingleTile(_ tile: MultiviewTile) {
+        guard let t = transport else { return }
+        debugLog("[MV-CAST] composite: one tile left (\(tile.item.name)); the receiver plays it as a single channel (\(t == .cast ? "cast" : "airplay"))")
+        switch t {
+        case .cast:
+            AerioCastController.shared.castPickedChannel(tile.item)
+            // No castable stream: castPickedChannel surfaced it and the
+            // composite is still the cast content; end it like Stop.
+            if isActive {
+                stop(detail: "one tile left, not castable", endTransport: true)
+            }
+        case .airPlay:
+            stop(detail: "one tile left: \(tile.item.name) as a single channel on AirPlay",
+                 teardownTiles: false, surfaceHidden: false)
         }
     }
 
@@ -492,6 +561,13 @@ final class MultiviewCompositeSession: ObservableObject {
                     return
                 }
                 let ids = Array(tiles.prefix(MultiviewCompositeLayout.maxTiles)).map(\.id)
+                // Round 7: the composite takes 2 to 4 tiles. With one left
+                // the receiver plays that channel as a normal single-channel
+                // session instead of a one-tile composite.
+                if ids.count == 1, ids != self.tileIDs, let last = tiles.first {
+                    self.handOffSingleTile(last)
+                    return
+                }
                 if ids != self.tileIDs {
                     let shown = Array(tiles.prefix(MultiviewCompositeLayout.maxTiles))
                     let added = shown.filter { !self.tileIDs.contains($0.id) }
@@ -996,6 +1072,20 @@ final class MultiviewTileVideoDecoder: @unchecked Sendable {
         next = max(0, next - count)
     }
 
+    /// The tile's ingest restarted on a new connection: forget the old
+    /// connection's demux state and buffer (see
+    /// MultiviewCompositor.tileSourceRestarted).
+    func restartSource() {
+        queue.async { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.carry.removeAll()
+            self.pes.removeAll()
+            self.lastRaw = -1
+            self.wrapBase = 0
+            self.reset(reason: "tile ingest restarted on a new connection")
+        }
+    }
+
     private func reset(reason: String) {
         aus.removeAll()
         bufferedBytes = 0
@@ -1462,10 +1552,12 @@ final class MultiviewCompositor: @unchecked Sendable {
         lock.lock(); style = st; lock.unlock()
     }
 
-    /// Re-lays out the composite from the next frame on; a layout change
-    /// is an interaction, so the focus indicator shows again.
+    /// Re-lays out the composite from the next frame on. The audio-focus
+    /// indicator does NOT show again (Logan, round 7: picking Default in the
+    /// Layout row flashed the indicator on the audio tile, then it faded);
+    /// it shows on a focus change and on a tile rearrange only.
     func setMode(_ m: MultiviewLayoutMode) {
-        lock.lock(); mode = m; focusChangedHost = CACurrentMediaTime(); lock.unlock()
+        lock.lock(); mode = m; lock.unlock()
     }
 
     func setNames(_ n: [String: String]) {
@@ -2065,6 +2157,28 @@ final class MultiviewCompositor: @unchecked Sendable {
     }
 
     // MARK: Audio (audio queue)
+
+    /// A tile's ingest restarted on a new connection (round 7, device log
+    /// 2026-10-07 15:52:00 to 15:53:58). ESPNU HD's player was torn down
+    /// by its watchdog (15:52:00, 15:52:37) and re-mounted (15:53:31); each
+    /// new connection started BEHIND the newest picture the decoder already
+    /// held (Dispatcharr starts a new client back in its buffer; the
+    /// earlier 15:51:08 retry took 19 s to pass the old point, "ingest
+    /// back" at 15:51:27). The decoder drops anything not newer than its
+    /// last access unit (within 60 s), the feed ran slower than real time,
+    /// so it dropped every new byte: "decoded=0 held=1 buffered=1.6 s" from
+    /// 15:52:20 until Switch Stream's -62 s jump reset it at 15:54:05. The
+    /// tile was frozen on the TV and stayed frozen at 1 tile. A new
+    /// connection now resets the tile's decoder and its audio demux, and
+    /// the picture clock re-anchors on the new source.
+    func tileSourceRestarted(tileID: String) {
+        decoder(tileID)?.restartSource()
+        audioQueue.async { [weak self] in
+            guard let self, !self.isStopped else { return }
+            self.tileAudio[tileID] = nil
+            self.fallbackLogged.remove(tileID)
+        }
+    }
 
     /// A tile's raw ingest bytes (its remuxer queue).
     func tileBytes(tileID: String, data: Data) {
