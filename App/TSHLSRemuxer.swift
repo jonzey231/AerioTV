@@ -636,6 +636,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     }
     private var sourceURLStorage: URL
     private let sourceLock = NSLock()
+    /// Upstream host of the ingest (Stream Info SOURCE row); host only,
+    /// never the path (XC URLs carry credentials in the path).
+    var sourceHost: String? { sourceURL.host }
     /// Touched only on `queue` (startIngest, retarget).
     private var headers: [String: String]
     /// The URLSession of the ingest that is current, and a counter bumped
@@ -966,6 +969,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             self.currentSegment.removeAll()
             self.segmentCloseWall.removeAll()
             self.segmentTimelineStart.removeAll()
+            self.segmentSourceStart.removeAll()
+            self.localTimeBase = nil
             // Assign a fresh Data rather than removeAll(): the latter keeps
             // the backing allocation, so a stopped-but-still-retained remuxer
             // would hold its whole dead buffer (Apple #74).
@@ -2172,6 +2177,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         segmentCloseWall[nextSeq] = nowWall
         // Playlist timeline: the EXTINF value as written (3 decimals), summed.
         segmentTimelineStart[nextSeq] = timelineEnd
+        // TS arm only: the segment's first source PTS (closeSegment stores
+        // before the next segment begins, so currentStartPTS is still it).
+        if fmp4 == nil, let start = currentStartPTS { segmentSourceStart[nextSeq] = start }
         timelineEnd += (duration * 1000).rounded() / 1000
         pruneTimeline()
         if duration > Double(lanTargetDuration) + 0.5, !overTargetLogged {
@@ -2317,6 +2325,49 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var segmentTimelineStart: [Int: Double] = [:]
     /// End of the newest closed segment on the same timeline.
     private var timelineEnd = 0.0
+    /// Seq -> the segment's first source PTS in seconds (TS arm only).
+    /// Pruned with the timeline. Touched only on `queue`.
+    private var segmentSourceStart: [Int: Double] = [:]
+    /// The phone's own (loopback) player item time base, recorded from the
+    /// first non-empty loopback playlist served: item time 0 is the start
+    /// of that playlist's first segment (the same rule the LAN receiver
+    /// time base uses). Touched only on `queue`.
+    private var localTimeBase: (seq: Int, start: Double)?
+
+    /// Runs on `queue`. Records the loopback time base.
+    private func noteLocalPlaylist(_ text: String) {
+        guard localTimeBase == nil, text.contains("#EXTINF"),
+              let r = text.range(of: #"#EXT-X-MEDIA-SEQUENCE:(\d+)"#, options: .regularExpression),
+              let seq = Int(text[r].dropFirst("#EXT-X-MEDIA-SEQUENCE:".count)),
+              let start = segmentTimelineStart[seq] else { return }
+        localTimeBase = (seq, start)
+    }
+
+    /// A new local player item reads a new first playlist.
+    func resetLocalTimeBase() {
+        queue.async { self.localTimeBase = nil }
+    }
+
+    /// The source PTS (seconds, 33-bit clock) the phone's player shows at
+    /// item time `itemTime`, from the loopback time base and the per-
+    /// segment source starts. Nil until the time base is known, for the
+    /// fMP4 arm, or when the position falls outside the stored window.
+    /// Blocks on `queue` briefly; call off the main thread.
+    func localSourcePTS(itemTime: Double) -> Double? {
+        guard itemTime.isFinite else { return nil }
+        return queue.sync {
+            guard fmp4 == nil, let base = localTimeBase else { return nil }
+            let pos = base.start + itemTime
+            var best: (seq: Int, start: Double)?
+            for (seq, start) in segmentTimelineStart where start <= pos + 0.0005 {
+                if best == nil || seq > best!.seq { best = (seq, start) }
+            }
+            guard let best, let src = segmentSourceStart[best.seq] else { return nil }
+            let end = segmentTimelineStart[best.seq + 1] ?? timelineEnd
+            guard pos <= end + 0.5 else { return nil }
+            return src + (pos - best.start)
+        }
+    }
     /// Entries below this seq are already pruned.
     private var timelinePrunedBelow = 0
 
@@ -2324,7 +2375,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private func pruneTimeline() {
         let floor = min(spilled.first?.seq ?? Int.max, segments.first?.seq ?? Int.max)
         guard floor != Int.max, floor > timelinePrunedBelow else { return }
-        for seq in timelinePrunedBelow..<floor { segmentTimelineStart[seq] = nil }
+        for seq in timelinePrunedBelow..<floor {
+            segmentTimelineStart[seq] = nil
+            segmentSourceStart[seq] = nil
+        }
         timelinePrunedBelow = floor
     }
 
@@ -3552,7 +3606,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
             let r: ServedResource
             if path.hasSuffix("live.m3u8") {
-                r = ServedResource(status: 200, body: Data(self.playlistText(lan: lan).utf8),
+                let text = self.playlistText(lan: lan)
+                if !lan { self.noteLocalPlaylist(text) }
+                r = ServedResource(status: 200, body: Data(text.utf8),
                                    contentType: "application/vnd.apple.mpegurl", uti: "public.m3u-playlist")
             } else if path.hasSuffix("init.mp4"), let initSeg = self.fmp4InitSegment {
                 r = ServedResource(status: 200, body: initSeg, contentType: "video/mp4", uti: "public.mpeg-4")
@@ -7563,11 +7619,17 @@ struct AVPlayerMultiviewTile: View {
         driver?.teardown()
         driver = nil
         player?.pause()
+        let releasedPlayer = player
         player = nil
         #if os(iOS)
         MultiviewCompositeTaps.shared.unregister(tileID: tileID)
-        airPlayDelivery.reset()
-        AirPlayMonitor.shared.detach()
+        // Only the route owner releases AirPlay state (device log
+        // 2026-10-07 11:32:35): during an AirPlay composite that is the
+        // composite tile; a real tile's retry must leave the session alone.
+        if MultiviewCompositeTaps.ownsAirPlay(tileID: tileID) || airPlayDelivery.isEngaged {
+            airPlayDelivery.reset()
+        }
+        AirPlayMonitor.shared.detach(ifAttached: releasedPlayer)
         #endif
         if remuxer != nil, !isVOD, !isDVR, catchup == nil, let releasedKey = sessionRetainKey {
             // This upstream is now in the provider's asynchronous

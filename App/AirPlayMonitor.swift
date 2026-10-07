@@ -107,9 +107,12 @@ final class AirPlayMonitor: ObservableObject {
     /// system route stayed on that receiver. While it matches the current
     /// AirPlay output the app does not use the route on its own: tunes play
     /// on this device (fullscreen player, allowsExternalPlayback false, no
-    /// LAN serving, no card). Cleared by a route-picker selection, a
-    /// newDeviceAvailable route change, a different AirPlay output, or the
-    /// route leaving AirPlay.
+    /// LAN serving, no card). Set by the card's X (active or idle card) and
+    /// Stop AirPlay. Cleared ONLY by an explicit pick of a receiver in the
+    /// AirPlay picker (Logan 2026-10-07: a route leaving AirPlay,
+    /// newDeviceAvailable or foregrounding must not clear it; device log
+    /// 11:31:36 / 11:35:01 "route left AirPlay" re-enabled serving). The
+    /// latch is per receiver uid, so a different receiver is servable.
     ///
     /// What iOS allows: AVPlayer.allowsExternalPlayback = false keeps the
     /// VIDEO (and the player's external playback session) on the device.
@@ -207,13 +210,13 @@ final class AirPlayMonitor: ObservableObject {
 
     /// Route change hook (monitor's own observer and the tile's, whichever
     /// runs first): a newly available device is a fresh user choice.
+    /// The X latch is no longer cleared here (Logan 2026-10-07): only an
+    /// explicit pick re-enables serving. The per-tune Play Here latch still
+    /// clears when the route leaves AirPlay (nothing left to pin against).
     func noteRouteChange(reasonRaw: UInt) {
-        guard userEndedRouteUID != nil else { return }
-        if AirPlayReceiverResolver.currentAirPlayOutput() == nil {
-            clearUserEnded("route left AirPlay")
-        } else if reasonRaw == AVAudioSession.RouteChangeReason.newDeviceAvailable.rawValue {
-            clearUserEnded("newDeviceAvailable")
-        }
+        guard userEndedRouteUID != nil, latchIsPerTune,
+              AirPlayReceiverResolver.currentAirPlayOutput() == nil else { return }
+        clearUserEnded("route left AirPlay (Play Here)")
     }
 
     /// The system route picker closed (AVRoutePickerViewDelegate). With an
@@ -309,6 +312,16 @@ final class AirPlayMonitor: ObservableObject {
     }
 
     func detach() { detach(silently: false) }
+
+    /// Detach only when `p` is the attached player. A Multiview tile that
+    /// does not own the route (device log 2026-10-07 11:32:35: ESPN2 HD
+    /// retried a frozen pipeline during a 2-up AirPlay composite) must not
+    /// detach the composite tile's player; that dropped the card to the
+    /// idle route ("Select a Channel") while the receiver kept playing.
+    func detach(ifAttached p: AVPlayer?) {
+        guard let p, player === p else { return }
+        detach(silently: false)
+    }
 
     /// Video external playback on: the receiver takes the item, not just
     /// the audio route.
@@ -534,9 +547,25 @@ final class AirPlayMonitor: ObservableObject {
     private(set) var dismissedRouteUID: String?
 
     /// Idle card X (2026-09-25 production recording): hide the card only.
+    /// Device log 2026-10-07 11:34:27.572: the idle card's X only hid the
+    /// card, so the next tap (11:34:28.622) tuned headless onto the Apple
+    /// TV. The X now ends the app's use of the route exactly like the
+    /// active card's X: it sets the user-ended latch and stops anything
+    /// still serving the receiver.
     func dismissIdleCard() {
-        dismissedRouteUID = AirPlayReceiverResolver.currentAirPlayOutput()?.uid
+        let route = AirPlayReceiverResolver.currentAirPlayOutput()
+        dismissedRouteUID = route?.uid
         debugLog("[Cast] card hide (AirPlay, dismissed by user)")
+        if let route {
+            userEndedRouteUID = route.uid
+            latchIsPerTune = false
+            perTuneClearTask?.cancel()
+            debugLog("[AVP-AIRPLAY] user ended AirPlay (idle card X): local playback until a route is picked again")
+        }
+        if MultiviewCompositeSession.shared.transport == .airPlay
+            || AirPlayTileDelivery.isServingReceiver {
+            stopPlayback()
+        }
         setPhase(.none)
     }
 
@@ -625,8 +654,12 @@ final class AirPlayMonitor: ObservableObject {
     /// Re-derive the phase from the route, the player and the tile.
     func evaluate() {
         let rawOut = AirPlayReceiverResolver.currentAirPlayOutput()
-        if userEndedRouteUID != nil, rawOut == nil || rawOut?.uid != userEndedRouteUID {
-            clearUserEnded(rawOut == nil ? "route left AirPlay" : "a different AirPlay output")
+        // The X latch survives the route leaving AirPlay or moving to a
+        // different output (Logan 2026-10-07); it is uid-scoped, so another
+        // receiver is servable anyway. Only Play Here's per-tune latch
+        // clears with the route.
+        if userEndedRouteUID != nil, latchIsPerTune, rawOut == nil {
+            clearUserEnded("route left AirPlay (Play Here)")
         }
         if rawOut != nil, Self.servableAirPlayOutput() == nil,
            !isExternal, !AirPlayTileDelivery.isServingReceiver {

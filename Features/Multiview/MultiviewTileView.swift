@@ -2807,22 +2807,32 @@ struct MultiviewTileLogoOverlay: View {
             image = cropped
             return
         }
+        if LogoCache.shared.image(for: key) == nil { image = nil }
+        guard let cropped = await Self.croppedLogo(url) else { return }
+        image = cropped
+    }
+
+    /// The logo this overlay draws for `url` (fetched, decoded and cropped
+    /// to its opaque box, cached). Shared with the phone-side Multiview
+    /// composite so the cast grid draws the same logo.
+    static func croppedLogo(_ url: URL) async -> UIImage? {
+        let key = url.absoluteString
+        if let cropped = opaqueCache.object(forKey: key as NSString) { return cropped }
         var source = LogoCache.shared.image(for: key)
         if source == nil {
-            image = nil
-            guard let data = try? await LogoFetcher.fetch(url) else { return }
+            guard let data = try? await LogoFetcher.fetch(url) else { return nil }
             source = await Task.detached(priority: .utility) {
                 AerioImageDecoding.decode(data)
             }.value
-            guard let img = source else { return }
+            guard let img = source else { return nil }
             LogoCache.shared.store(img, for: key)
         }
-        guard let src = source else { return }
+        guard let src = source else { return nil }
         let cropped = await Task.detached(priority: .utility) {
-            Self.croppedToOpaque(src)
+            croppedToOpaque(src)
         }.value
-        Self.opaqueCache.setObject(cropped, forKey: key as NSString)
-        image = cropped
+        opaqueCache.setObject(cropped, forKey: key as NSString)
+        return cropped
     }
 
     /// Logos cropped to their opaque bounding box, keyed by URL (computed

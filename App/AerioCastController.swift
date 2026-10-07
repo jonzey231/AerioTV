@@ -2923,7 +2923,7 @@ struct RemoteSessionSheet: View {
             if transport == .cast {
                 CastOptionsSheet(cast: AerioCastController.shared)
             } else {
-                CastOptionsSheet(cast: AerioCastController.shared, airPlayItem: item)
+                CastOptionsSheet(cast: AerioCastController.shared, airPlayItem: item, airPlay: true)
             }
         }
     }
@@ -3211,7 +3211,10 @@ struct MultiviewCompositePreviewGrid: View {
     var body: some View {
         let tiles = Array(store.tiles.prefix(MultiviewCompositeLayout.maxTiles))
         let mode = MultiviewLayoutMode(rawValue: UserDefaults.standard.string(forKey: MultiviewLayoutMode.storageKey) ?? "") ?? .auto
-        let rects = MultiviewCompositeLayout.tileRects(count: tiles.count, mode: mode)
+        // Same spacing the composite draws with (Settings > Multiview >
+        // Padding Between Tiles), so the hit rects match the frame.
+        let rects = MultiviewCompositeLayout.tileRects(count: tiles.count, mode: mode,
+                                                       spacing: MultiviewCompositeStyle.current().spacingPx)
         let live = composite.previewImage
         GeometryReader { geo in
             let scale = geo.size.width / CGFloat(MultiviewCompositeLayout.width)
@@ -3246,7 +3249,7 @@ struct MultiviewCompositePreviewGrid: View {
                                 .multilineTextAlignment(.center)
                                 .padding(4)
                         } else {
-                            // The frame already carries the borders.
+                            // The frame already carries the indicator.
                             Color.clear
                         }
                         if isLifted || isTarget { Color.white.opacity(0.18) }
@@ -3767,7 +3770,11 @@ struct CastOptionsSheet: View {
     /// the local session, and the Cast-only rows (Sleep Timer, proxy Stream
     /// Info) are hidden.
     var airPlayItem: ChannelDisplayItem? = nil
-    private var isAirPlay: Bool { airPlayItem != nil }
+    /// AirPlay without a channel item (a Multiview composite: device log
+    /// 2026-10-07, the AirPlay composite sheet showed the Cast proxy's
+    /// "Waiting for the cast proxy to report.").
+    var airPlay: Bool = false
+    private var isAirPlay: Bool { airPlay || airPlayItem != nil }
     @Environment(\.dismiss) private var dismiss
     @State private var showSwitchStream = false
     @State private var showRecord = false
@@ -3878,6 +3885,9 @@ struct CastOptionsSheet: View {
                                 .scaledFont(.footnote)
                                 .foregroundStyle(.secondary)
                         }
+                        if let lines = MultiviewCompositeStreamInfo.lines(for: .airPlay) {
+                            MultiviewCompositeStreamInfo.LinesView(lines: lines)
+                        }
                     }
                 }
                 if !isAirPlay {
@@ -3892,6 +3902,11 @@ struct CastOptionsSheet: View {
                         Text("Waiting for the cast proxy to report.")
                             .scaledFont(.footnote)
                             .foregroundStyle(.secondary)
+                    }
+                    // A composite cast: the composite lines (Android
+                    // MultiviewCompositeLayout.streamInfoLines wording).
+                    if let lines = MultiviewCompositeStreamInfo.lines(for: .cast) {
+                        MultiviewCompositeStreamInfo.LinesView(lines: lines)
                     }
                     // Same three lines as the cast card.
                     if let note = cast.transcodeNote {
@@ -3960,6 +3975,46 @@ struct CastOptionsSheet: View {
 
 }
 
+/// Composite Stream Info lines (Android parity,
+/// MultiviewCompositeLayout.STREAM_INFO_LINES): the tiles' upstream host,
+/// then the composite's video, container and audio. Shown under the Cast
+/// proxy card for a composite cast and under the AirPlay card for an
+/// AirPlay composite, so both sheets keep one structure.
+enum MultiviewCompositeStreamInfo {
+    @MainActor static func lines(for transport: MultiviewCompositeSession.Transport) -> [String]? {
+        guard MultiviewCompositeSession.shared.transport == transport else { return nil }
+        var out: [String] = []
+        if let host = sourceHost() { out.append("Source: \(host)") }
+        out.append("Multiview composite \(MultiviewCompositeLayout.width)x\(MultiviewCompositeLayout.height)@\(MultiviewCompositeLayout.fps)")
+        // Cast: the proxy remuxes the composite TS to fMP4 for the
+        // receiver. AirPlay: the TS is served as is.
+        out.append(transport == .cast ? "Container: MPEG-TS to fMP4" : "Container: MPEG-TS")
+        out.append("Audio: AAC-LC stereo 48 kHz")
+        return out
+    }
+
+    /// Distinct upstream hosts of the Multiview tiles, comma separated
+    /// (host only: XC URLs carry credentials in the path).
+    @MainActor static func sourceHost() -> String? {
+        var hosts: [String] = []
+        for tile in MultiviewStore.shared.tiles {
+            if let h = tile.streamURL.host, !h.isEmpty, !hosts.contains(h) { hosts.append(h) }
+        }
+        return hosts.isEmpty ? nil : hosts.joined(separator: ", ")
+    }
+
+    struct LinesView: View {
+        let lines: [String]
+        var body: some View {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(lines, id: \.self) { Text($0) }
+            }
+            .scaledFont(.footnote)
+            .foregroundStyle(.secondary)
+        }
+    }
+}
+
 /// AirPlay Stream Info (Logan 2026-10-07, round 2): the Cast sheet's facts
 /// for the AirPlay session. Video facts come from the serving tile's own
 /// source (its remuxer's H.264 SPS: size and declared rate), then from the
@@ -3967,6 +4022,9 @@ struct CastOptionsSheet: View {
 /// (no LAN serving) reads the player alone.
 struct AirPlayStreamInfo: Equatable {
     var receiver: String
+    /// Upstream host of the playing stream (the server the phone ingests
+    /// from), e.g. the Dispatcharr host; Multiview: the tiles' hosts.
+    var source: String
     var delivery: String
     var container: String
     var video: String
@@ -3987,7 +4045,7 @@ struct AirPlayStreamInfo: Equatable {
         let delivery: String
         let container: String
         if facts != nil {
-            delivery = "phone LAN playlist (HLS)"
+            delivery = "phone serves HLS to the TV over Wi-Fi"
             let audioForm = facts?.aacRewrite == true ? "audio AAC rewrite" : "audio passthrough"
             container = MultiviewCompositeSession.shared.transport == .airPlay
                 ? "MPEG-TS muxed" : "MPEG-TS muxed, \(audioForm)"
@@ -4063,9 +4121,18 @@ struct AirPlayStreamInfo: Equatable {
         if let link = facts?.link, link.reservoirSegments > 0 {
             buffer += String(format: "  LAN %d segs (%.1fs)", link.reservoirSegments, link.reservoirSeconds)
         }
+        // SOURCE: the upstream host, never loopback (a composite tile's
+        // remuxer ingests the phone's own composite stream).
+        var source = composite ? MultiviewCompositeStreamInfo.sourceHost() : nil
+        if source == nil, let h = facts?.remuxer?.sourceHost, !isLoopback(h) { source = h }
+        if source == nil, let h = (item?.asset as? AVURLAsset)?.url.host, !isLoopback(h) { source = h }
         let health = "drops \(max(0, event?.numberOfDroppedVideoFrames ?? 0))  stalls \(max(0, event?.numberOfStalls ?? 0))"
-        return AirPlayStreamInfo(receiver: monitor.deviceName ?? "AirPlay", delivery: delivery, container: container,
+        return AirPlayStreamInfo(receiver: monitor.deviceName ?? "AirPlay", source: source ?? "-", delivery: delivery, container: container,
                                  video: video, audio: audio, bitrate: bitrate, buffer: buffer, health: health)
+    }
+
+    private static func isLoopback(_ host: String) -> Bool {
+        host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]"
     }
 
     private static func fourCCName(_ sub: FourCharCode) -> String {
@@ -4093,6 +4160,7 @@ struct AirPlayStreamInfoCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             row(label: "TV", value: info.receiver)
+            row(label: "SOURCE", value: info.source)
             row(label: "VIA", value: info.delivery)
             row(label: "FORMAT", value: info.container)
             row(label: "VIDEO", value: info.video)

@@ -9699,8 +9699,41 @@ final class RemoteSessionCardMetrics: ObservableObject {
         let originY = layer.position.y - layer.anchorPoint.y * bar.bounds.height
         let top = superview.convert(CGPoint(x: 0, y: originY), to: window).y
         guard top > 0 else { return }
+        // The bar can also arrive minimized by the system itself, with its
+        // UNTRANSFORMED bounds shrunk to the 48 pt pill (Settings tab, log
+        // 2026-10-07: `collapse=false frame=46,886 48x48` with our collapse
+        // flag false). Measuring that pill as the bar squeezed the dock
+        // cards into the pill's width at the leading edge, over the pill.
+        // Rule: while minimized, the cards keep the last EXPANDED frame for
+        // width and horizontal position, and sit above the pill: the top
+        // used is the expanded top or the pill's top, whichever is higher.
+        if Self.isMinimizedPill(bar, superview: superview) {
+            let pillTop = top
+            let useTop = lastExpandedTop > 0 ? min(lastExpandedTop, pillTop) : pillTop
+            if abs(useTop - tabBarTopInWindow) > 0.5 { tabBarTopInWindow = useTop }
+            if !loggedMinimized {
+                loggedMinimized = true
+                debugLog("[TABBAR] minimized pill measured top=\(pillTop) w=\(bar.bounds.width); keeping expanded top=\(lastExpandedTop) lead=\(barLeadingInset) trail=\(barTrailingInset)")
+            }
+            return
+        }
+        loggedMinimized = false
+        lastExpandedTop = top
         if abs(top - tabBarTopInWindow) > 0.5 { tabBarTopInWindow = top }
         measureBarInsets(bar, superview: superview, window: window)
+    }
+
+    /// Top edge of the bar the last time it was measured EXPANDED, 0 until then.
+    private var lastExpandedTop: CGFloat = 0
+    private var loggedMinimized = false
+
+    /// True when the bar's own (untransformed) bounds are the minimized pill
+    /// rather than a full-width bar. Our own collapse keeps full bounds and
+    /// only transforms the layer, so it never matches here.
+    private static func isMinimizedPill(_ bar: UITabBar, superview: UIView) -> Bool {
+        let full = superview.bounds.width
+        guard full > 0 else { return false }
+        return bar.bounds.width < full * 0.5
     }
 
     /// Leading and trailing insets of the visible tab bar capsule from the

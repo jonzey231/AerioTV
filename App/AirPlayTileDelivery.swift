@@ -99,6 +99,10 @@ final class AirPlayTileDelivery {
     var onWatchdogs: ((_ suspend: Bool, _ item: AVPlayerItem?) -> Void)?
 
     var isServing: Bool { state == .serving }
+    /// This delivery holds a player or a LAN state (it was attached as the
+    /// route owner). A tile that never owned the route has nothing to
+    /// release and must not touch the shared AirPlay state on teardown.
+    var isEngaged: Bool { state != .idle || player != nil }
     /// The receiver gets transcoded audio (background-entry line).
     var servesAAC: Bool { state == .serving && plan == .aacStereo }
 

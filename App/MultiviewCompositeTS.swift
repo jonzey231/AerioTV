@@ -39,7 +39,7 @@ enum MultiviewCompositeLayout {
 
     /// Tile rects in tile order for `count` tiles (2 to 4), in the
     /// composite's top-left-origin pixel space, snapped to whole pixels.
-    static func tileRects(count: Int, mode: MultiviewLayoutMode = .auto) -> [CGRect] {
+    static func tileRects(count: Int, mode: MultiviewLayoutMode = .auto, spacing: CGFloat = spacing) -> [CGRect] {
         let n = max(0, min(count, maxTiles))
         let container = CGSize(width: width, height: height)
         return MultiviewGridMath.rects(for: mode, count: n, in: container, spacing: spacing)
@@ -303,6 +303,15 @@ struct MultiviewAudioClock {
         lastSourcePTS = src
         let mapped = src + (offset ?? 0)
         return mapped > floor ? mapped : nil
+    }
+
+    /// How far the anchored offset sits from the offset a fresh anchor
+    /// would choose now (ticks; positive = the audio runs ahead of the
+    /// picture, e.g. after the tile's player stalled while its ingest kept
+    /// arriving). Nil before the first anchor.
+    func drift(compositeNow: Int64, displayedSourcePTS: Int64) -> Int64? {
+        guard let offset, lastSourcePTS >= 0 else { return nil }
+        return (compositeNow - unwrap(displayedSourcePTS, near: lastSourcePTS)) - offset
     }
 
     /// 33-bit PTS unwrapped against the last one seen.

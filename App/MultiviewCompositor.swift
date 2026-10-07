@@ -96,6 +96,7 @@ final class MultiviewCompositeTaps: @unchecked Sendable {
         if old?.item !== item { audioTapped.remove(tileID) }
         lock.unlock()
         if let o = old?.output, old?.item !== item { old?.item.remove(o) }
+        if old?.item !== item, old?.remuxer === remuxer { remuxer?.resetLocalTimeBase() }
         guard active else { return }
         if entry.output == nil { attachOutput(tileID: tileID) }
         if let remuxer, let sink { remuxer.setIngestTap { data in sink(tileID, data) } }
@@ -226,6 +227,16 @@ final class MultiviewCompositeTaps: @unchecked Sendable {
         return output.copyPixelBuffer(forItemTime: t, itemTimeForDisplay: nil)
     }
 
+    /// The tile player's item time, whether it is playing, and its remuxer
+    /// (which maps item time to the source PTS on screen), main thread.
+    @MainActor func playbackSample(tileID: String) -> (itemTime: Double, playing: Bool, remuxer: TSHLSRemuxer?)? {
+        lock.lock()
+        let e = entries[tileID]
+        lock.unlock()
+        guard let e, let player = e.player, player.currentItem === e.item else { return nil }
+        return (player.currentTime().seconds, player.timeControlStatus == .playing, e.remuxer)
+    }
+
     /// Seconds the tile's player sits behind its playlist's live edge plus
     /// half a target duration (the remuxer's unpublished tail), main thread.
     @MainActor func displayLagSeconds(tileID: String) -> Double? {
@@ -263,9 +274,18 @@ final class MultiviewCompositeSession: ObservableObject {
     /// Scaled-down live frames of the composite (about 5 fps) for the
     /// remote controls sheet's preview grid.
     @Published fileprivate(set) var previewImage: UIImage?
+    /// The app is in the background and the tiles stopped delivering
+    /// pictures (iOS gives a background app no video decode): the
+    /// composite holds its last frame with a Paused label and silence
+    /// until the app returns (Logan 2026-10-07 lock-screen freeze).
+    @Published private(set) var pausedInBackground = false
+
+    static let pausedInBackgroundLine = "Paused in background"
 
     var isActive: Bool { transport != nil }
-    var subtitle: String { channelNames.joined(separator: ", ") }
+    var subtitle: String {
+        pausedInBackground ? Self.pausedInBackgroundLine : channelNames.joined(separator: ", ")
+    }
 
     private var compositor: MultiviewCompositor?
     private var cancellables: Set<AnyCancellable> = []
@@ -288,7 +308,16 @@ final class MultiviewCompositeSession: ObservableObject {
         var r: CGFloat = 1, g: CGFloat = 1, b: CGFloat = 1, a: CGFloat = 1
         accent.getRed(&r, green: &g, blue: &b, alpha: &a)
         let comp = MultiviewCompositor(tileIDs: tileIDs, focusID: focus, mode: mode,
-                                       accent: (Double(r), Double(g), Double(b)))
+                                       accent: (Double(r), Double(g), Double(b)),
+                                       style: MultiviewCompositeStyle.current())
+        comp.setNames(Dictionary(tiles.map { ($0.id, $0.item.name) }, uniquingKeysWith: { a, _ in a }))
+        pausedInBackground = false
+        comp.onPauseChange = { [weak self] paused in
+            Task { @MainActor in
+                guard let self, self.compositor === comp else { return }
+                self.pausedInBackground = paused
+            }
+        }
         comp.onPreview = { [weak self] image in
             Task { @MainActor in
                 guard let self, self.compositor === comp else { return }
@@ -304,6 +333,7 @@ final class MultiviewCompositeSession: ObservableObject {
         }
         compositor = comp
         transport = t
+        loadLogos(tiles.map { ($0.id, $0.item.logoURL) })
         MultiviewCompositeTaps.shared.setPCMSink { [weak comp] id, pcm, rate in
             comp?.tilePCM(tileID: id, samples: pcm, sampleRate: rate)
         }
@@ -352,6 +382,10 @@ final class MultiviewCompositeSession: ObservableObject {
         airPlayTileURL = nil
         channelNames = []
         previewImage = nil
+        pausedInBackground = false
+        logoTask?.cancel()
+        logoTask = nil
+        playingState.removeAll()
         MultiviewCompositeTaps.shared.deactivate()
         if teardownTiles {
             DispatchQueue.main.async {
@@ -388,6 +422,24 @@ final class MultiviewCompositeSession: ObservableObject {
         if on { BackgroundKeepalive.acquire(Self.keepaliveHolder) } else { BackgroundKeepalive.release(Self.keepaliveHolder) }
     }
 
+    /// Channel logos for the composite (Settings > Multiview > Show
+    /// Channel Logos), the same cropped images the local tiles draw.
+    private var logoTask: Task<Void, Never>?
+
+    private func loadLogos(_ tiles: [(id: String, url: URL?)]) {
+        logoTask?.cancel()
+        logoTask = Task { @MainActor [weak self] in
+            for (id, url) in tiles {
+                guard let url, let img = await MultiviewTileLogoOverlay.croppedLogo(url),
+                      !Task.isCancelled, let cg = img.cgImage else { continue }
+                self?.compositor?.setLogo(tileID: id, image: cg)
+            }
+        }
+    }
+
+    /// Last sampled playing state per tile (stall recovery detection).
+    private var playingState: [String: Bool] = [:]
+
     private func failed(_ reason: StopReason, detail: String) {
         guard transport != nil else { return }
         stop(reason, detail: detail, endTransport: true)
@@ -413,9 +465,13 @@ final class MultiviewCompositeSession: ObservableObject {
                 }
                 let ids = Array(tiles.prefix(MultiviewCompositeLayout.maxTiles)).map(\.id)
                 if ids != self.tileIDs {
+                    let shown = Array(tiles.prefix(MultiviewCompositeLayout.maxTiles))
+                    let added = shown.filter { !self.tileIDs.contains($0.id) }
                     self.tileIDs = ids
-                    self.channelNames = Array(tiles.prefix(MultiviewCompositeLayout.maxTiles)).map(\.item.name)
+                    self.channelNames = shown.map(\.item.name)
+                    self.compositor?.setNames(Dictionary(shown.map { ($0.id, $0.item.name) }, uniquingKeysWith: { a, _ in a }))
                     self.compositor?.setTiles(ids)
+                    if !added.isEmpty { self.loadLogos(added.map { ($0.id, $0.item.logoURL) }) }
                     debugLog("[MV-CAST] composite tiles changed: \(ids.count)")
                 }
             }
@@ -444,9 +500,16 @@ final class MultiviewCompositeSession: ObservableObject {
         lagTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let comp = self.compositor else { return }
+                comp.setStyle(MultiviewCompositeStyle.current())
                 for id in self.tileIDs {
                     if let lag = MultiviewCompositeTaps.shared.displayLagSeconds(tileID: id) {
                         comp.setDisplayLag(tileID: id, seconds: lag)
+                    }
+                    if let p = MultiviewCompositeTaps.shared.playbackSample(tileID: id) {
+                        let was = self.playingState[id]
+                        self.playingState[id] = p.playing
+                        comp.setPlayback(tileID: id, itemTime: p.itemTime, playing: p.playing,
+                                         resumed: was == false && p.playing, remuxer: p.remuxer)
                     }
                 }
                 MultiviewCompositeTaps.shared.attachAudioTaps()
@@ -472,6 +535,187 @@ final class MultiviewCompositeSession: ObservableObject {
     }
 }
 
+// MARK: - Style (Settings > Player > Multiview)
+
+/// The local Multiview's appearance settings, read for the composite so the
+/// cast grid and the sheet preview draw what the phone's own Multiview
+/// draws (Logan 2026-10-07). Lengths are the local view's points; `scale`
+/// maps them to composite pixels as if the phone's fullscreen Multiview
+/// (landscape, the screen's short side tall) were the 720-line canvas.
+struct MultiviewCompositeStyle: Equatable, Sendable {
+    var focusStyle: MultiviewAudioFocusStyle = .centerIcon
+    var padding = true
+    var rounded = false
+    var showLogos = false
+    var logoPosition: MultiviewLogoPosition = .topLeft
+    var logoSizePercent = multiviewLogoSizeDefault
+    var scale: CGFloat = 1
+
+    /// Local tile spacing with padding on (MultiviewContainerView.tileSpacing).
+    static let paddingPoints: CGFloat = 8
+    /// Local rounded tile radius (MultiviewTileView.tileCornerRadius).
+    static let cornerPoints: CGFloat = 12
+    /// Local audio-focus stroke width (audioFocusStrokeOverlay).
+    static let strokePoints: CGFloat = 3
+    /// Focus indicator after a focus change: fully shown this long, then
+    /// faded out over `indicatorFadeSeconds` (Center Icon and the fading
+    /// accent outline; the gray outline stays on).
+    static let indicatorHoldSeconds: Double = 2
+    static let indicatorFadeSeconds: Double = 0.5
+
+    var spacingPx: CGFloat { padding ? (Self.paddingPoints * scale).rounded() : 0 }
+    var cornerPx: CGFloat { rounded ? Self.cornerPoints * scale : 0 }
+
+    @MainActor static func current() -> MultiviewCompositeStyle {
+        let d = UserDefaults.standard
+        var st = MultiviewCompositeStyle()
+        st.focusStyle = MultiviewAudioFocusStyle(rawValue: d.string(forKey: MultiviewAudioFocusStyle.storageKey) ?? "") ?? .centerIcon
+        st.padding = d.object(forKey: multiviewTilePaddingKey) as? Bool ?? true
+        st.rounded = d.bool(forKey: multiviewTileCornersRoundedKey)
+        st.showLogos = d.bool(forKey: multiviewShowLogosKey)
+        st.logoPosition = MultiviewLogoPosition(rawValue: d.string(forKey: multiviewLogoPositionKey) ?? "") ?? .topLeft
+        st.logoSizePercent = d.object(forKey: multiviewLogoSizeKey) as? Int ?? multiviewLogoSizeDefault
+        let b = UIScreen.main.bounds
+        let short = max(1, min(b.width, b.height))
+        st.scale = CGFloat(MultiviewCompositeLayout.height) / short
+        return st
+    }
+}
+
+// MARK: - Overlays (drawn on the compose queue, CoreGraphics)
+
+/// Full-canvas transparent overlays in composite pixels (top-left origin),
+/// mirroring the local tile chrome for the current settings. Rebuilt only
+/// when what they depend on changes.
+enum MultiviewCompositeOverlay {
+    static var canvas: CGSize { CGSize(width: MultiviewCompositeLayout.width, height: MultiviewCompositeLayout.height) }
+
+    private static func render(_ draw: (CGContext) -> Void) -> CIImage? {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let img = UIGraphicsImageRenderer(size: canvas, format: format).image { draw($0.cgContext) }
+        return img.cgImage.map { CIImage(cgImage: $0) }
+    }
+
+    /// White where each tile's rounded shape is (the clip mask).
+    static func clipMask(rects: [CGRect], radius: CGFloat) -> CIImage? {
+        render { ctx in
+            ctx.setFillColor(UIColor.white.cgColor)
+            for r in rects {
+                ctx.addPath(UIBezierPath(roundedRect: r, cornerRadius: radius).cgPath)
+            }
+            ctx.fillPath()
+        }
+    }
+
+    /// Channel logos (MultiviewTileLogoOverlay geometry, name strip hidden).
+    static func logos(rects: [CGRect], tiles: [String], aspects: [String: CGFloat],
+                      logos: [String: CGImage], style: MultiviewCompositeStyle) -> CIImage? {
+        render { ctx in
+            let k = style.scale
+            let inset = 8 * k, pad = 4 * k
+            let pct = CGFloat(min(max(style.logoSizePercent, 5), 25)) / 100
+            for (i, rect) in rects.enumerated() where i < tiles.count {
+                guard let cg = logos[tiles[i]], cg.width > 0, cg.height > 0 else { continue }
+                let video = MultiviewCompositeLayout.videoRect(in: rect, aspect: aspects[tiles[i]] ?? 16.0 / 9.0)
+                let hBase = max(video.height * pct - pad * 2, 1)
+                let aspect = CGFloat(cg.width) / CGFloat(cg.height)
+                let maxW = min(4 * hBase, max(video.width * 0.5 - pad * 2, 1))
+                let h0 = hBase * min(max((3 / aspect).squareRoot(), 1), 2)
+                let w = min(h0 * aspect, maxW)
+                let h = w / aspect
+                let bw = w + pad * 2, bh = h + pad * 2
+                let x = style.logoPosition.isLeading ? video.minX + inset : video.maxX - inset - bw
+                let y = style.logoPosition.isTop ? video.minY + inset : video.maxY - inset - bh
+                let box = CGRect(x: x, y: y, width: bw, height: bh)
+                ctx.saveGState()
+                ctx.clip(to: rect)
+                ctx.setFillColor(UIColor.black.withAlphaComponent(0.55).cgColor)
+                ctx.addPath(UIBezierPath(roundedRect: box, cornerRadius: 6 * k).cgPath)
+                ctx.fillPath()
+                UIImage(cgImage: cg).draw(in: box.insetBy(dx: pad, dy: pad))
+                ctx.restoreGState()
+            }
+        }
+    }
+
+    /// The audio-focus indicator for `style` on the focused tile: the
+    /// Center Icon badge (accent speaker capsule over the channel name
+    /// pill) or a 3 pt stroke on the tile shape (gray or accent).
+    static func indicator(rect: CGRect, name: String, style: MultiviewCompositeStyle,
+                          accent: UIColor) -> CIImage? {
+        let k = style.scale
+        return render { ctx in
+            switch style.focusStyle {
+            case .grayPersistent, .themeFading:
+                let color = style.focusStyle == .grayPersistent ? UIColor(white: 0.55, alpha: 1) : accent
+                ctx.setStrokeColor(color.cgColor)
+                ctx.setLineWidth(MultiviewCompositeStyle.strokePoints * k)
+                ctx.addPath(UIBezierPath(roundedRect: rect, cornerRadius: style.cornerPx).cgPath)
+                ctx.strokePath()
+            case .centerIcon:
+                let symbolConfig = UIImage.SymbolConfiguration(pointSize: 22 * k, weight: .semibold)
+                let symbol = UIImage(systemName: "speaker.wave.2.fill", withConfiguration: symbolConfig)?
+                    .withTintColor(.white, renderingMode: .alwaysOriginal)
+                let sSize = symbol?.size ?? CGSize(width: 22 * k, height: 22 * k)
+                let cap = CGSize(width: sSize.width + 28 * k, height: sSize.height + 20 * k)
+                let font = UIFont.systemFont(ofSize: 12 * k, weight: .semibold)
+                let para = NSMutableParagraphStyle()
+                para.lineBreakMode = .byTruncatingTail
+                let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.white, .paragraphStyle: para]
+                let maxW = min(220 * k, rect.width)
+                let textW = min((name as NSString).size(withAttributes: attrs).width, maxW - 20 * k)
+                let pill = CGSize(width: max(0, textW) + 20 * k, height: font.lineHeight + 8 * k)
+                let total = cap.height + 8 * k + pill.height
+                let top = rect.midY - total / 2
+                let capRect = CGRect(x: rect.midX - cap.width / 2, y: top, width: cap.width, height: cap.height)
+                let pillRect = CGRect(x: rect.midX - pill.width / 2, y: capRect.maxY + 8 * k,
+                                      width: pill.width, height: pill.height)
+                ctx.saveGState()
+                ctx.setShadow(offset: CGSize(width: 0, height: 2 * k), blur: 6 * k,
+                              color: UIColor.black.withAlphaComponent(0.45).cgColor)
+                ctx.setFillColor(accent.cgColor)
+                ctx.addPath(UIBezierPath(roundedRect: capRect, cornerRadius: cap.height / 2).cgPath)
+                ctx.fillPath()
+                ctx.restoreGState()
+                symbol?.draw(in: CGRect(x: capRect.midX - sSize.width / 2, y: capRect.midY - sSize.height / 2,
+                                        width: sSize.width, height: sSize.height))
+                ctx.saveGState()
+                ctx.setShadow(offset: CGSize(width: 0, height: 1 * k), blur: 4 * k,
+                              color: UIColor.black.withAlphaComponent(0.4).cgColor)
+                ctx.setFillColor(UIColor.black.withAlphaComponent(0.65).cgColor)
+                ctx.addPath(UIBezierPath(roundedRect: pillRect, cornerRadius: pill.height / 2).cgPath)
+                ctx.fillPath()
+                ctx.restoreGState()
+                ctx.setStrokeColor(UIColor.white.withAlphaComponent(0.22).cgColor)
+                ctx.setLineWidth(0.5 * k)
+                ctx.addPath(UIBezierPath(roundedRect: pillRect.insetBy(dx: 0.25 * k, dy: 0.25 * k),
+                                         cornerRadius: pill.height / 2).cgPath)
+                ctx.strokePath()
+                (name as NSString).draw(with: CGRect(x: pillRect.minX + 10 * k, y: pillRect.minY + 4 * k,
+                                                     width: max(0, textW), height: font.lineHeight),
+                                        options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+                                        attributes: attrs, context: nil)
+            }
+        }
+    }
+
+    /// Dim plus a centered "Paused" label (background pause).
+    static func paused(scale k: CGFloat) -> CIImage? {
+        render { ctx in
+            ctx.setFillColor(UIColor.black.withAlphaComponent(0.5).cgColor)
+            ctx.fill(CGRect(origin: .zero, size: canvas))
+            let font = UIFont.systemFont(ofSize: 20 * k, weight: .semibold)
+            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.white]
+            let text = "Paused" as NSString
+            let size = text.size(withAttributes: attrs)
+            text.draw(at: CGPoint(x: (canvas.width - size.width) / 2, y: (canvas.height - size.height) / 2),
+                      withAttributes: attrs)
+        }
+    }
+}
+
 // MARK: - Compositor
 
 /// Compose, encode, mux, serve. Three serial queues: compose (30 fps tick,
@@ -492,6 +736,11 @@ final class MultiviewCompositor: @unchecked Sendable {
     static let aacFrameTicks: Int64 = 1920   // 1024 samples at 48 kHz
 
     var onFailure: (((MultiviewCompositeSession.StopReason, String)) -> Void)?
+    /// Background pause entered (true) or left (false), compose queue.
+    var onPauseChange: ((Bool) -> Void)?
+    /// No new picture from any tile for this long while backgrounded is
+    /// the background pause.
+    static let backgroundPauseSeconds: Double = 1.5
     /// A scaled-down composed frame every `previewEvery` ticks.
     var onPreview: ((CGImage) -> Void)?
     static let previewEvery = 6
@@ -511,6 +760,11 @@ final class MultiviewCompositor: @unchecked Sendable {
     private var lastComposeHost: CFTimeInterval = 0
     /// Focused-tile PCM from the player's audio tap, newest arrival.
     private var tapPCMAt: [String: CFTimeInterval] = [:]
+    private var style: MultiviewCompositeStyle
+    private var names: [String: String] = [:]
+    private var logos: [String: CGImage] = [:]
+    /// Host time of the last focus change (indicator fade, latency log).
+    private var focusChangedHost: CFTimeInterval = 0
 
     // Compose queue
     private let mode: MultiviewLayoutMode
@@ -544,6 +798,15 @@ final class MultiviewCompositor: @unchecked Sendable {
     private var lastStatsAt: CFTimeInterval = 0
     private var lastOutputAt: CFTimeInterval = 0
     private var lastPTS: Int64 = -1
+    /// Overlay cache (compose queue).
+    private var overlayKey = ""
+    private var clipMaskImage: CIImage?
+    private var logoOverlay: CIImage?
+    private var indicatorOverlay: CIImage?
+    private var pausedOverlay: CIImage?
+    /// Background pause (compose queue).
+    private var lastAnyPixelsHost: CFTimeInterval = 0
+    private var pausedInBackground = false
 
     // Audio queue
     private struct TileAudio {
@@ -558,20 +821,54 @@ final class MultiviewCompositor: @unchecked Sendable {
     private var audioFloor: Int64 = 0   // mirrors mux's last emitted audio PTS
     private var unsupportedLogged: Set<String> = []
     private var fallbackLogged: Set<String> = []
+    /// Bumped on every re-anchor / refocus / pause: the mux drops queued
+    /// frames of older epochs, so a switched-away tile's audio (queued up
+    /// to its display lag ahead) never plays after the switch.
+    private var audioEpoch = 0
+    private var audioPaused = false
+    /// The tile player's on-screen source PTS (90 kHz, 33-bit), measured
+    /// from its item time and its remuxer's segment map, and when.
+    private var measured: [String: (pts: Int64, host: CFTimeInterval, playing: Bool)] = [:]
+    /// Why the next anchor happens (logged with it).
+    private var anchorReason = "start"
+    /// True when the current anchor used neither a measured position nor
+    /// a known lag (the 6 s guess): re-anchor once either is known.
+    private var anchorGuessed = false
+    private var driftStrikes = 0
+    /// Pending focus-latency log: set on refocus, logged at the first
+    /// enqueued audio of the new tile.
+    private var focusLatencyFrom: CFTimeInterval?
+    private var measuredRejectedLogged: Set<String> = []
 
     // Mux queue
     private var muxer = MultiviewCompositeTSMuxer()
     private var server: MultiviewCompositeTSServer?
     private var pendingAudio: [(pts: Int64, adts: [UInt8])] = []
+    private var muxEpoch = 0
     private var lastAudioPTS: Int64 = -1
     private var silentFrame: [UInt8]?
     private var sawKeyframe = false
 
-    init(tileIDs: [String], focusID: String, mode: MultiviewLayoutMode, accent: (Double, Double, Double)) {
+    init(tileIDs: [String], focusID: String, mode: MultiviewLayoutMode, accent: (Double, Double, Double),
+         style: MultiviewCompositeStyle) {
         self.tileIDs = tileIDs
         self.focusID = focusID
         self.mode = mode
         self.accent = accent
+        self.style = style
+    }
+
+    /// Settings > Multiview changed while the composite runs (polled).
+    func setStyle(_ st: MultiviewCompositeStyle) {
+        lock.lock(); style = st; lock.unlock()
+    }
+
+    func setNames(_ n: [String: String]) {
+        lock.lock(); names.merge(n) { _, new in new }; lock.unlock()
+    }
+
+    func setLogo(tileID: String, image: CGImage) {
+        lock.lock(); logos[tileID] = image; lock.unlock()
     }
 
     /// Starts the loopback server and the clock; returns the TS URL.
@@ -592,7 +889,8 @@ final class MultiviewCompositor: @unchecked Sendable {
             CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attrs as CFDictionary, &pool)
             makeEncoder()
             t0 = CACurrentMediaTime()
-            lock.lock(); lastComposeHost = t0; lock.unlock()
+            lastAnyPixelsHost = t0
+            lock.lock(); lastComposeHost = t0; focusChangedHost = t0; lock.unlock()
             lastStatsAt = t0
             lastOutputAt = t0
             let timer = DispatchSource.makeTimerSource(queue: composeQueue)
@@ -630,17 +928,24 @@ final class MultiviewCompositor: @unchecked Sendable {
     private var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
 
     func setFocus(_ id: String) {
+        let at = CACurrentMediaTime()
         lock.lock()
         let changed = focusID != id
         focusID = id
+        if changed { focusChangedHost = at }
         lock.unlock()
         guard changed else { return }
         debugLog("[MV-CAST] composite focus -> \(id)")
-        audioQueue.async { [weak self] in self?.refocusAudio() }
+        audioQueue.async { [weak self] in
+            self?.focusLatencyFrom = at
+            self?.anchorReason = "focus change"
+            self?.refocusAudio()
+        }
     }
 
     func setTiles(_ ids: [String]) {
-        lock.lock(); tileIDs = ids; lock.unlock()
+        // A rearrange is an interaction: the indicator shows again.
+        lock.lock(); tileIDs = ids; focusChangedHost = CACurrentMediaTime(); lock.unlock()
     }
 
     /// Wall seconds since the compose tick last ran (render-stall rule).
@@ -658,7 +963,7 @@ final class MultiviewCompositor: @unchecked Sendable {
     func tilePCM(tileID: String, samples: [Int16], sampleRate: Int) {
         let now = compositeNow()
         audioQueue.async { [weak self] in
-            guard let self, !self.isStopped, tileID == self.snapshot().focus else { return }
+            guard let self, !self.isStopped, !self.audioPaused, tileID == self.snapshot().focus else { return }
             let first = self.tapPCMAt[tileID] == nil
             self.tapPCMAt[tileID] = CACurrentMediaTime()
             if first {
@@ -673,7 +978,7 @@ final class MultiviewCompositor: @unchecked Sendable {
             // is its arrival minus its own duration.
             let start = now - Int64(samples.count / 2) * 90_000 / Int64(max(1, sampleRate))
             guard let produced = self.normalizer?.feedPCM(samples, mappedPTS: start) else { return }
-            self.enqueueAudio(produced.filter { $0.pts > self.audioFloor })
+            self.enqueueAudio(produced.filter { $0.pts > self.audioFloor }, tileID: tileID)
         }
     }
 
@@ -743,8 +1048,10 @@ final class MultiviewCompositor: @unchecked Sendable {
         guard inFlight < Self.maxInFlight, pts > lastPTS else { dropped += 1; return }
         let (tiles, focus) = snapshot()
         lock.lock(); lastComposeHost = host; lock.unlock()
+        var gotPixels = false
         for (n, id) in tiles.enumerated() {
             if let pb = MultiviewCompositeTaps.shared.newPixelBuffer(tileID: id, hostTime: host) {
+                gotPixels = true
                 if latest[id] == nil, firstPixelLogged.insert(id).inserted {
                     debugLog("[MV-CAST] composite frame source tile=\(n) first pixel buffer \(CVPixelBufferGetWidth(pb))x\(CVPixelBufferGetHeight(pb)) id=\(id) after \(String(format: "%.1f", host - (tileSince[id] ?? host))) s")
                 }
@@ -758,10 +1065,25 @@ final class MultiviewCompositor: @unchecked Sendable {
                 }
             }
         }
+        if gotPixels { lastAnyPixelsHost = host }
+        // Background pause (field log 2026-10-07 11:27: locked phone, the
+        // encoder rebuilt and kept 30 fps on the CPU renderer, yet the TV
+        // froze with audio running: a background app gets no video decode,
+        // so the tiles stop delivering pictures). Hold the last frame with
+        // a Paused label and silence; resume when pictures return.
+        let wantPause = backgrounded && host - lastAnyPixelsHost > Self.backgroundPauseSeconds
+        if wantPause != pausedInBackground {
+            pausedInBackground = wantPause
+            debugLog(wantPause
+                ? String(format: "[MV-CAST] composite paused in background: no tile picture for %.1f s", host - lastAnyPixelsHost)
+                : "[MV-CAST] composite resumed: tile pictures flowing again\(backgrounded ? " (still background)" : "")")
+            onPauseChange?(wantPause)
+            audioQueue.async { [weak self] in self?.setAudioPaused(wantPause) }
+        }
         var out: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &out) == kCVReturnSuccess,
               let out else { dropped += 1; return }
-        let image = compose(tiles: tiles, focus: focus)
+        let image = compose(tiles: tiles, focus: focus, host: host)
         previewTick += 1
         if previewTick >= Self.previewEvery, let onPreview {
             previewTick = 0
@@ -796,41 +1118,93 @@ final class MultiviewCompositor: @unchecked Sendable {
         }
     }
 
-    private func compose(tiles: [String], focus: String) -> CIImage {
+    private func compose(tiles: [String], focus: String, host: CFTimeInterval) -> CIImage {
         let full = CGRect(x: 0, y: 0, width: MultiviewCompositeLayout.width, height: MultiviewCompositeLayout.height)
-        var image = CIImage(color: .black).cropped(to: full)
-        let rects = MultiviewCompositeLayout.tileRects(count: tiles.count, mode: mode)
-        // Round 2 (Logan 2026-10-07, shared with Android): thin borders,
-        // 2 px gray on every tile, 4 px theme accent on the focused tile
-        // only, 4 px black gaps. White read as a thick frame on the TV.
-        let border = CIColor(red: 0.5, green: 0.5, blue: 0.5)
-        let highlight = CIColor(red: CGFloat(accent.0), green: CGFloat(accent.1), blue: CGFloat(accent.2))
+        lock.lock()
+        let st = style
+        let nameMap = names
+        let logoMap = logos
+        let focusAt = focusChangedHost
+        lock.unlock()
+        // Round 3 (Logan 2026-10-07): the composite draws what the local
+        // Multiview draws for the user's settings: tile padding, square or
+        // rounded tiles, the audio-focus indicator style, channel logos. No
+        // borders on the other tiles (the local grid has none).
+        let rects = MultiviewCompositeLayout.tileRects(count: tiles.count, mode: mode, spacing: st.spacingPx)
+        var aspects: [String: CGFloat] = [:]
+        for id in tiles {
+            if let pb = latest[id], CVPixelBufferGetHeight(pb) > 0 {
+                let a = CGFloat(CVPixelBufferGetWidth(pb)) / CGFloat(CVPixelBufferGetHeight(pb))
+                aspects[id] = (a * 100).rounded() / 100
+            }
+        }
+        let focusIndex = tiles.firstIndex(of: focus)
+        let key = "\(rects)|\(tiles)|\(focus)|\(st)|\(aspects.sorted { $0.key < $1.key })|\(logoMap.keys.sorted())|\(focusIndex.map { nameMap[tiles[$0]] ?? "" } ?? "")"
+        if key != overlayKey {
+            overlayKey = key
+            clipMaskImage = st.cornerPx > 0 ? MultiviewCompositeOverlay.clipMask(rects: rects, radius: st.cornerPx) : nil
+            logoOverlay = st.showLogos && !logoMap.isEmpty
+                ? MultiviewCompositeOverlay.logos(rects: rects, tiles: tiles, aspects: aspects, logos: logoMap, style: st)
+                : nil
+            let accentColor = UIColor(red: CGFloat(accent.0), green: CGFloat(accent.1), blue: CGFloat(accent.2), alpha: 1)
+            indicatorOverlay = focusIndex.flatMap { i in
+                i < rects.count ? MultiviewCompositeOverlay.indicator(rect: rects[i], name: nameMap[focus] ?? "",
+                                                                       style: st, accent: accentColor) : nil
+            }
+            if pausedOverlay == nil, pausedInBackground { pausedOverlay = MultiviewCompositeOverlay.paused(scale: st.scale) }
+        }
+        var videos = CIImage(color: .black).cropped(to: full)
         for (i, rect) in rects.enumerated() where i < tiles.count {
             let id = tiles[i]
             let tileArea = MultiviewCompositeLayout.flipped(rect)
-            if let pb = latest[id] {
-                let src = CIImage(cvPixelBuffer: pb)
-                let w = src.extent.width, h = src.extent.height
-                if w > 0, h > 0 {
-                    let fit = MultiviewCompositeLayout.flipped(MultiviewCompositeLayout.videoRect(in: rect, aspect: w / h))
-                    let placed = src
-                        .transformed(by: CGAffineTransform(scaleX: fit.width / w, y: fit.height / h))
-                        .transformed(by: CGAffineTransform(translationX: fit.minX - src.extent.minX * fit.width / w,
-                                                           y: fit.minY - src.extent.minY * fit.height / h))
-                        .cropped(to: tileArea)
-                    image = placed.composited(over: image)
-                }
-            }
-            let focused = id == focus
-            let strips = MultiviewCompositeLayout.borderStrips(
-                rect, width: focused ? MultiviewCompositeLayout.focusBorderWidth : MultiviewCompositeLayout.borderWidth)
-            for s in strips {
-                image = CIImage(color: focused ? highlight : border)
-                    .cropped(to: MultiviewCompositeLayout.flipped(s))
-                    .composited(over: image)
+            guard let pb = latest[id] else { continue }
+            let src = CIImage(cvPixelBuffer: pb)
+            let w = src.extent.width, h = src.extent.height
+            guard w > 0, h > 0 else { continue }
+            let fit = MultiviewCompositeLayout.flipped(MultiviewCompositeLayout.videoRect(in: rect, aspect: w / h))
+            let placed = src
+                .transformed(by: CGAffineTransform(scaleX: fit.width / w, y: fit.height / h))
+                .transformed(by: CGAffineTransform(translationX: fit.minX - src.extent.minX * fit.width / w,
+                                                   y: fit.minY - src.extent.minY * fit.height / h))
+                .cropped(to: tileArea)
+            videos = placed.composited(over: videos)
+        }
+        var image = videos
+        if let mask = clipMaskImage {
+            image = videos.applyingFilter("CIBlendWithMask", parameters: [
+                kCIInputBackgroundImageKey: CIImage(color: .black).cropped(to: full),
+                kCIInputMaskImageKey: mask,
+            ])
+        }
+        if let logoOverlay { image = logoOverlay.composited(over: image) }
+        if let indicator = indicatorOverlay {
+            let alpha = Self.indicatorAlpha(style: st.focusStyle, since: host - focusAt)
+            if alpha >= 0.999 {
+                image = indicator.composited(over: image)
+            } else if alpha > 0.001 {
+                image = indicator.applyingFilter("CIColorMatrix", parameters: [
+                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: alpha),
+                ]).composited(over: image)
             }
         }
-        return image
+        if pausedInBackground {
+            if pausedOverlay == nil { pausedOverlay = MultiviewCompositeOverlay.paused(scale: st.scale) }
+            if let pausedOverlay { image = pausedOverlay.composited(over: image) }
+        }
+        return image.cropped(to: full)
+    }
+
+    /// Indicator opacity `since` seconds after the last focus change: the
+    /// gray outline stays on; Center Icon and the accent outline hold for
+    /// 2 s, then fade out over 0.5 s (ease in out).
+    static func indicatorAlpha(style: MultiviewAudioFocusStyle, since: Double) -> CGFloat {
+        if style == .grayPersistent { return 1 }
+        let hold = MultiviewCompositeStyle.indicatorHoldSeconds
+        let fade = MultiviewCompositeStyle.indicatorFadeSeconds
+        if since <= hold { return 1 }
+        let t = min(1, (since - hold) / fade)
+        let eased = t * t * (3 - 2 * t)
+        return CGFloat(1 - eased)
     }
 
     /// kVTInvalidSessionErr (iOS invalidates the hardware encoder when
@@ -1019,10 +1393,18 @@ final class MultiviewCompositor: @unchecked Sendable {
         return out
     }
 
-    private func enqueueAudio(_ frames: [(pts: Int64, adts: [UInt8])]) {
+    /// Audio queue. Frames of an older epoch than the mux's are dropped.
+    private func enqueueAudio(_ frames: [(pts: Int64, adts: [UInt8])], tileID: String) {
         guard !frames.isEmpty else { return }
+        if let from = focusLatencyFrom, let first = frames.first {
+            focusLatencyFrom = nil
+            let now = compositeNow()
+            debugLog(String(format: "[MV-CAST] focus applied in %.0f ms (tile %@ audio on the stream from composite +%.0f ms; the receiver's own buffer adds its delay on top)",
+                            (CACurrentMediaTime() - from) * 1000, tileID, Double(first.pts - now) / 90))
+        }
+        let epoch = audioEpoch
         muxQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self, epoch >= self.muxEpoch else { return }
             self.pendingAudio += frames
             // Bound memory if the video stalls.
             if self.pendingAudio.count > 2000 { self.pendingAudio.removeFirst(self.pendingAudio.count - 2000) }
@@ -1051,7 +1433,7 @@ final class MultiviewCompositor: @unchecked Sendable {
         // Fallback only: the player's audio tap is the source when it runs
         // (Apple documents no audio tap for HLS items, so the ingest path
         // stays for tiles whose tap never delivers).
-        if id == snapshot().focus, !tapLive(id) {
+        if id == snapshot().focus, !tapLive(id), !audioPaused {
             if fallbackLogged.insert(id).inserted {
                 debugLog("[MV-CAST] composite audio: tile \(id) via ingest tap (no player audio tap PCM)")
             }
@@ -1059,8 +1441,92 @@ final class MultiviewCompositor: @unchecked Sendable {
         }
     }
 
+    /// Audio queue. New epoch: the mux forgets every queued frame.
+    private func bumpAudioEpoch() {
+        audioEpoch += 1
+        let e = audioEpoch
+        muxQueue.async { [weak self] in
+            guard let self else { return }
+            self.muxEpoch = e
+            self.pendingAudio.removeAll()
+        }
+    }
+
+    /// Audio queue. Background pause: silence while paused (the queued
+    /// future audio is dropped), a fresh anchor on resume.
+    private func setAudioPaused(_ paused: Bool) {
+        guard paused != audioPaused else { return }
+        audioPaused = paused
+        bumpAudioEpoch()
+        if !paused {
+            anchorReason = "resume from background pause"
+            refocusAudio()
+        }
+    }
+
+    /// The tile player's position (main thread sample, 2 Hz). Maps it to
+    /// the on-screen source PTS through the remuxer, re-anchors the audio
+    /// when the focused tile resumes after a stall or drifts off the
+    /// anchor (Logan 2026-10-07: audio drifted out of sync after tile
+    /// stalls; the ingest kept arriving while the picture froze, and the
+    /// fixed offset never noticed).
+    func setPlayback(tileID: String, itemTime: Double, playing: Bool, resumed: Bool, remuxer: TSHLSRemuxer?) {
+        let host = CACurrentMediaTime()
+        audioQueue.async { [weak self] in
+            guard let self, !self.isStopped else { return }
+            if let src = remuxer?.localSourcePTS(itemTime: itemTime) {
+                self.measured[tileID] = (Int64(src * 90_000) & TSLANAudioRewriter.pts33Mask, host, playing)
+            } else {
+                self.measured[tileID] = nil
+            }
+            guard tileID == self.snapshot().focus, !self.audioPaused, !self.tapLive(tileID) else { return }
+            if resumed {
+                self.anchorReason = "stall recovery"
+                debugLog("[MV-CAST] composite audio: focused tile \(tileID) resumed after a stall; re-anchoring")
+                self.reanchorFocused()
+                return
+            }
+            guard playing, self.clock.offset != nil else { return }
+            let (displayed, method) = self.displayedSource(tileID)
+            if self.anchorGuessed, method != "guess" {
+                self.anchorReason = "lag now known (\(method))"
+                self.reanchorFocused()
+                return
+            }
+            guard method == "measured",
+                  let d = self.clock.drift(compositeNow: self.compositeNow(), displayedSourcePTS: displayed) else {
+                self.driftStrikes = 0
+                return
+            }
+            if abs(d) > Self.driftReanchorTicks {
+                self.driftStrikes += 1
+                if self.driftStrikes >= 2 {
+                    self.anchorReason = String(format: "drift %+.2f s", Double(d) / 90_000)
+                    self.reanchorFocused()
+                }
+            } else {
+                self.driftStrikes = 0
+            }
+        }
+    }
+
+    /// Audio vs picture drift that re-anchors (two samples in a row).
+    static let driftReanchorTicks: Int64 = 18_000   // 200 ms
+
+    /// Audio queue. Drop the queued audio and anchor again on the focused
+    /// tile's recent ingest (same tile, so the decoder stays).
+    private func reanchorFocused() {
+        driftStrikes = 0
+        clock.reanchor()
+        bumpAudioEpoch()
+        let focus = snapshot().focus
+        if let ring = tileAudio[focus]?.ring, !ring.isEmpty { process(ring, tileID: focus) }
+    }
+
     private func refocusAudio() {
         clock.reanchor()
+        bumpAudioEpoch()
+        driftStrikes = 0
         normalizer = nil
         normalizerKey = ""
         let focus = snapshot().focus
@@ -1071,17 +1537,39 @@ final class MultiviewCompositor: @unchecked Sendable {
         if let ring = tileAudio[focus]?.ring, !ring.isEmpty { process(ring, tileID: focus) }
     }
 
-    /// The source PTS the focused tile is showing now (estimate: newest
-    /// ingested audio minus the player's distance behind it).
-    private func displayedSourcePTS(_ id: String) -> Int64 {
+    /// The source PTS the focused tile is showing now: measured (the
+    /// player's item time through its remuxer's segment map, advanced by
+    /// the wall time since the sample) when fresh and sane, else the
+    /// estimate (newest ingested audio minus the player's distance behind
+    /// the live edge), else that estimate with a 6 s guess.
+    private func displayedSource(_ id: String) -> (pts: Int64, method: String) {
+        let mask = TSLANAudioRewriter.pts33Mask
         let last = tileAudio[id]?.lastPTS ?? 0
         lock.lock()
-        let lag = lagSeconds[id] ?? 6
+        let lag = lagSeconds[id]
         lock.unlock()
-        return (last - Int64(lag * 90_000)) & TSLANAudioRewriter.pts33Mask
+        let estimate = (last - Int64((lag ?? 6) * 90_000)) & mask
+        if let m = measured[id] {
+            let age = CACurrentMediaTime() - m.host
+            if age < 1.5 {
+                let pts = (m.pts + (m.playing ? Int64(age * 90_000) : 0)) & mask
+                // Sanity: within 10 s of the estimate (a wrong time base,
+                // e.g. a reused remuxer, must not throw the audio off).
+                var diff = (pts - estimate) & mask
+                if diff > mask / 2 { diff -= mask + 1 }
+                if lag == nil || abs(diff) < 10 * 90_000 { return (pts, "measured") }
+                if measuredRejectedLogged.insert(id).inserted {
+                    debugLog(String(format: "[MV-CAST] composite audio: measured position %.2f s off the estimate for tile %@; using the estimate", Double(diff) / 90_000, id))
+                }
+            }
+        }
+        return (estimate, lag == nil ? "guess" : "estimate")
     }
 
+    private func displayedSourcePTS(_ id: String) -> Int64 { displayedSource(id).pts }
+
     private func process(_ pes: [MultiviewTapAudioPES], tileID: String) {
+        guard !audioPaused else { return }
         var produced: [(pts: Int64, adts: [UInt8])] = []
         let now = compositeNow()
         for p in pes {
@@ -1098,14 +1586,25 @@ final class MultiviewCompositor: @unchecked Sendable {
                 let srcPTS = p.pts + Int64(sampleOffset) * 90_000 / Int64(max(1, frame.sampleRate))
                 sampleOffset += frame.samples
                 let wasAnchored = clock.offset != nil
-                guard let mapped = clock.map(sourcePTS: srcPTS & TSLANAudioRewriter.pts33Mask, compositeNow: now,
-                                             displayedSourcePTS: { self.displayedSourcePTS(tileID) },
-                                             floor: audioFloor) else { continue }
+                var method = ""
+                let mappedOpt = clock.map(sourcePTS: srcPTS & TSLANAudioRewriter.pts33Mask, compositeNow: now,
+                                          displayedSourcePTS: {
+                                              let d = self.displayedSource(tileID)
+                                              method = d.method
+                                              return d.pts
+                                          },
+                                          floor: audioFloor)
+                // Logged even when this first frame lands below the floor
+                // (a ring replay anchors on an already-covered frame).
                 if !wasAnchored, let o = clock.offset {
                     lock.lock(); let lag = lagSeconds[tileID] ?? -1; lock.unlock()
-                    debugLog(String(format: "[MV-CAST] composite audio anchor tile=%@ codec=%@ lag=%.2fs offset=%lld lead=%.2fs",
-                                    tileID, codec.name, lag, o, Double(mapped - now) / 90_000))
+                    anchorGuessed = method == "guess"
+                    let src = srcPTS & TSLANAudioRewriter.pts33Mask
+                    debugLog(String(format: "[MV-CAST] composite audio anchor tile=%@ codec=%@ reason=%@ position=%@ lag=%.2fs offset=%lld lead=%.2fs",
+                                    tileID, codec.name, anchorReason, method, lag, o, Double(src + o - now) / 90_000))
+                    anchorReason = "source jump"
                 }
+                guard let mapped = mappedOpt else { continue }
                 let key = "\(codec.name)-\(frame.sampleRate)-\(frame.channels)"
                 if normalizer == nil || key != normalizerKey {
                     normalizer = MultiviewAudioNormalizer(codec: codec, sampleRate: frame.sampleRate,
@@ -1120,7 +1619,7 @@ final class MultiviewCompositor: @unchecked Sendable {
                 produced += normalizer.feed(frame.bytes, mappedPTS: mapped)
             }
         }
-        enqueueAudio(produced)
+        enqueueAudio(produced, tileID: tileID)
     }
 }
 
