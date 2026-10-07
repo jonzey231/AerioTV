@@ -595,6 +595,21 @@ final class MultiviewStore: ObservableObject {
             )
             return .needsWarning
         }
+        // First tile of a session that no seed locked (the Multiview dock
+        // card's staging adds from an empty grid, then Play): lock the
+        // engine from this channel the way enterMultiview(seeding:) locks
+        // it from the seed. Without it the session kept the .mpv default,
+        // every tile mounted mpv, and the phone composite (which reads
+        // AVPlayerItemVideoOutput on AVPlayer tiles) drew black tiles
+        // (iphone2.txt 09:33:23: "enter multiview; seeded=false", then
+        // [MPV-PHASE] for all three tiles, no [Engine] lock line).
+        if tiles.isEmpty, !sessionEngine.isAVPlayer {
+            let engine = PlayerSession.resolveEngine(item: item, server: server, isLive: true)
+            lockEngine(engine)
+            DebugLogger.shared.log(
+                "[Engine] session locked to \(engine.engine) (first staged tile=\(item.name))",
+                category: "Playback", level: .info)
+        }
         // Under a direct-HLS session lock, a raw-TS channel added to the
         // grid must request the server-side HLS upgrade so it plays
         // DIRECT on AVPlayer (the locked engine) instead of feeding raw

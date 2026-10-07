@@ -8169,8 +8169,10 @@ struct MainTabView: View {
             // AirPlay handoff: the receiver shows the picture, the mini
             // would only be a black box; hidden in place, still mounted
             // because its tile feeds the receiver.
-            .opacity(airPlay.hostsHeadless ? 0 : 1)
-            .allowsHitTesting(!airPlay.hostsHeadless)
+            // Multiview composite (Logan 2026-10-07): the tiles feed the
+            // receiver headless; the phone shows no player.
+            .opacity(airPlay.hostsHeadless || mvComposite.isActive ? 0 : 1)
+            .allowsHitTesting(!airPlay.hostsHeadless && !mvComposite.isActive)
             .zIndex(2)
         } else {
             // v1.6.17 — iPhone branch. NO outer `.ignoresSafeArea()`.
@@ -8193,7 +8195,10 @@ struct MainTabView: View {
             // before isMinimized and the close teardown after it.
             // AirPlay handoff (device test 2026-09-25): same hide-in-place
             // while the receiver plays, the tile keeps serving it.
+            // Multiview composite (Logan 2026-10-07): same hide in place
+            // while the tiles feed the receiver headless.
             let hidden = nowPlaying.isMinimized || foregroundPiP.hidesHost || airPlay.hostsHeadless
+                || mvComposite.isActive
             MultiviewContainerView()
                 .opacity(hidden ? 0 : 1)
                 .allowsHitTesting(!hidden)

@@ -3192,14 +3192,25 @@ struct RemoteSessionSheet: View {
 /// a restart). Focused tile: 4 pt white border; others: 2 pt gray.
 struct MultiviewCompositePreviewGrid: View {
     @ObservedObject private var store = MultiviewStore.shared
+    /// Live frames (Logan 2026-10-07): the composite itself, scaled down,
+    /// so the sheet shows what the receiver shows.
+    @ObservedObject private var composite = MultiviewCompositeSession.shared
 
     var body: some View {
         let tiles = Array(store.tiles.prefix(MultiviewCompositeLayout.maxTiles))
-        let rects = MultiviewCompositeLayout.tileRects(count: tiles.count)
+        let mode = MultiviewLayoutMode(rawValue: UserDefaults.standard.string(forKey: MultiviewLayoutMode.storageKey) ?? "") ?? .auto
+        let rects = MultiviewCompositeLayout.tileRects(count: tiles.count, mode: mode)
+        let live = composite.previewImage
         GeometryReader { geo in
             let scale = geo.size.width / CGFloat(MultiviewCompositeLayout.width)
             ZStack(alignment: .topLeading) {
                 Color.black
+                if let live {
+                    Image(uiImage: live)
+                        .resizable()
+                        .interpolation(.medium)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                }
                 ForEach(Array(zip(tiles.indices, rects)), id: \.0) { i, r in
                     let tile = tiles[i]
                     let focused = tile.id == store.audioTileID
@@ -3207,16 +3218,24 @@ struct MultiviewCompositePreviewGrid: View {
                         store.setAudio(to: tile.id)
                     } label: {
                         ZStack {
-                            Color.white.opacity(0.08)
-                            Text(tile.item.name)
-                                .scaledFont(.caption)
-                                .foregroundStyle(.white)
-                                .lineLimit(2)
-                                .multilineTextAlignment(.center)
-                                .padding(4)
+                            if live == nil {
+                                // Until the first composed frame: the names.
+                                Color.white.opacity(0.08)
+                                Text(tile.item.name)
+                                    .scaledFont(.caption)
+                                    .foregroundStyle(.white)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.center)
+                                    .padding(4)
+                            } else {
+                                // The frame already carries the borders.
+                                Color.clear
+                            }
                         }
+                        .contentShape(Rectangle())
                         .overlay(Rectangle().strokeBorder(focused ? Color.white : Color.gray,
-                                                          lineWidth: focused ? 4 : 2))
+                                                          lineWidth: focused ? 4 : 2)
+                            .opacity(live == nil ? 1 : 0))
                     }
                     .buttonStyle(.plain)
                     .frame(width: r.width * scale, height: r.height * scale)
@@ -3682,6 +3701,7 @@ struct CastOptionsSheet: View {
     @State private var showSwitchStream = false
     @State private var showRecord = false
     @State private var stats: CastHLSProxySession.Stats?
+    @State private var airPlayInfo: AirPlayStreamInfo?
 
     @StateObject private var airPlayOptions = AirPlayMediaOptions()
 
@@ -3773,6 +3793,22 @@ struct CastOptionsSheet: View {
                         .disabled(!receiverControls)
                     }
                 }
+                if isAirPlay {
+                    // Logan 2026-10-07: the AirPlay sheet had no Stream Info.
+                    // Same last section as Cast (and Android's Cast sheet),
+                    // read from the player the receiver is showing.
+                    Section("Stream Info") {
+                        if let airPlayInfo {
+                            AirPlayStreamInfoCard(info: airPlayInfo)
+                                .listRowInsets(EdgeInsets())
+                                .listRowBackground(Color.clear)
+                        } else {
+                            Text("Waiting for the AirPlay player to report.")
+                                .scaledFont(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 if !isAirPlay {
                 Section("Stream Info") {
                     if let stats {
@@ -3835,6 +3871,10 @@ struct CastOptionsSheet: View {
         .task {
             if isAirPlay {
                 await airPlayOptions.load()
+                while !Task.isCancelled {
+                    airPlayInfo = AirPlayStreamInfo.snapshot()
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
                 return
             }
             // The receiver pushes a snapshot after every change; this asks
@@ -3847,6 +3887,78 @@ struct CastOptionsSheet: View {
         }
     }
 
+}
+
+/// AirPlay Stream Info (Logan 2026-10-07): what the player feeding the
+/// receiver reports, in the Cast card's row treatment.
+struct AirPlayStreamInfo: Equatable {
+    var receiver: String
+    var delivery: String
+    var video: String
+    var bitrate: String
+    var buffer: String
+    var health: String
+
+    @MainActor static func snapshot() -> AirPlayStreamInfo? {
+        let monitor = AirPlayMonitor.shared
+        guard let player = monitor.attachedPlayer, let item = player.currentItem else { return nil }
+        let size = item.presentationSize
+        var video = size.width > 0 ? "\(Int(size.width))x\(Int(size.height))" : "size unknown"
+        if let track = item.tracks.compactMap(\.assetTrack).first(where: { $0.mediaType == .video }) {
+            if track.nominalFrameRate > 0 { video += String(format: " at %.0ffps", track.nominalFrameRate) }
+            if let desc = track.formatDescriptions.first {
+                let sub = CMFormatDescriptionGetMediaSubType(desc as! CMFormatDescription)
+                let cc = [24, 16, 8, 0].map { Character(UnicodeScalar(UInt8((sub >> $0) & 0xFF))) }
+                video = String(cc).trimmingCharacters(in: .whitespaces) + "  " + video
+            }
+        }
+        let event = item.accessLog()?.events.last
+        var bitrate = "measuring"
+        if let e = event, e.indicatedBitrate > 0 || e.observedBitrate > 0 {
+            bitrate = "\(Int(max(e.indicatedBitrate, 0) / 1000)) kbps indicated"
+            if e.observedBitrate > 0 { bitrate += "  \(Int(e.observedBitrate / 1000)) kbps observed" }
+        }
+        let now = player.currentTime().seconds
+        let ahead = item.loadedTimeRanges.map(\.timeRangeValue)
+            .first(where: { $0.start.seconds <= now + 0.5 && $0.end.seconds >= now })
+            .map { $0.end.seconds - now } ?? 0
+        let buffer = String(format: "%.1fs ahead", max(0, ahead))
+        let health = "drops: \(max(0, event?.numberOfDroppedVideoFrames ?? 0))  stalls: \(max(0, event?.numberOfStalls ?? 0))"
+        let delivery = AirPlayTileDelivery.isServingReceiver ? "phone LAN playlist (TS)" : "AVPlayer external playback"
+        return AirPlayStreamInfo(receiver: monitor.deviceName ?? "AirPlay", delivery: delivery, video: video,
+                                 bitrate: bitrate, buffer: buffer, health: health)
+    }
+}
+
+struct AirPlayStreamInfoCard: View {
+    @Environment(\.aerioTextScale) private var textScale
+    let info: AirPlayStreamInfo
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            row(label: "TO", value: info.receiver)
+            row(label: "VIA", value: info.delivery)
+            row(label: "VIDEO", value: info.video)
+            row(label: "RATE", value: info.bitrate)
+            row(label: "BUFFER", value: info.buffer)
+            row(label: "", value: info.health)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func row(label: String, value: String) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .scaledFont(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(Color.contrastText(Color.accentPrimary))
+                .frame(width: TextScale.grow(46, textScale), alignment: .trailing)
+            Text(value)
+                .scaledFont(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundColor(.primary.opacity(0.9))
+        }
+    }
 }
 
 /// The proxy's own numbers in the app's Stream Info card treatment

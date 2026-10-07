@@ -279,6 +279,14 @@ struct MultiviewTileView: View {
            tile.id == store.tiles.first?.id {
             return routeURL
         }
+        // A composite session relocked from direct HLS to the remux path
+        // (PlayerSession.playMultiviewComposite): tiles staged under the
+        // direct-HLS lock carry the HLS upgrade, the remux arm wants TS.
+        if store.sessionEngine == .avPlayerRemuxTS, tile.kind == .live,
+           URLComponents(url: tile.streamURL, resolvingAgainstBaseURL: false)?
+               .queryItems?.contains(where: { $0.name == "output_format" && $0.value == "hls" }) == true {
+            return removingHLSOutputFormat(tile.streamURL)
+        }
         return tile.streamURL
     }
 

@@ -1488,6 +1488,13 @@ final class PlayWhereRouter: ObservableObject {
     /// "Play Here": the local Multiview, pinned like any other Play Here
     /// while a session is up so the receiver keeps what it plays.
     func playMultiviewHere(play: @escaping () -> Void) {
+        // A composite feeding the receiver from headless tiles: Play Here
+        // ends the composite (the receiver goes idle) and the same tiles
+        // become the local fullscreen player.
+        if MultiviewCompositeSession.shared.isActive {
+            MultiviewCompositeSession.shared.stop(detail: "play here", endTransport: true, teardownTiles: false)
+            NowPlayingManager.shared.expand()
+        }
         if let transport = Self.activeTransport() {
             playHere(transport: transport, play: play)
         } else {
@@ -1523,6 +1530,19 @@ final class PlayWhereRouter: ObservableObject {
             debugLog("[MV-CAST] composite refused: \(count) channels (2 to \(MultiviewCompositeLayout.maxTiles))")
             return
         }
+        let store = MultiviewStore.shared
+        let fresh = PlayerSession.shared.mode != .multiview
+        // Composite audio (Logan 2026-10-07: no audio line logged at all):
+        // the focused tile's audio comes from its TSHLSRemuxer ingest tap
+        // (Apple documents no audio tap for HLS items, so the player tap
+        // rarely delivers). A direct-HLS lock has no remuxer, so a fresh
+        // composite session plays its tiles on the remux path instead.
+        if fresh, store.sessionEngine == .avPlayerDirectHLS, let first = store.tiles.first {
+            store.lockEngine(ResolvedEngine(engine: .avPlayerRemuxTS,
+                                            routeURL: removingHLSOutputFormat(first.streamURL),
+                                            headers: store.sessionHeaders))
+            debugLog("[MV-CAST] composite: tiles on the remux path (ingest audio tap) instead of direct HLS")
+        }
         let enterLocal = {
             if PlayerSession.shared.mode != .multiview { MultiviewDockState.playHereNow() }
         }
@@ -1535,6 +1555,19 @@ final class PlayWhereRouter: ObservableObject {
             MultiviewCompositeSession.shared.start(transport: .airPlay)
             enterLocal()
         }
+        // Logan 2026-10-07: while the composite goes to the receiver the
+        // phone shows no player and stays silent. The tiles decode headless
+        // (HomeView hides the container in place while the composite runs;
+        // the composite mutes every tile), the remote controls sheet shows
+        // the live preview grid, and Stop tears the tiles down.
+        guard MultiviewCompositeSession.shared.isActive else { return }
+        #if os(iOS)
+        AppOrientationLock.release()
+        #endif
+        if !NowPlayingManager.shared.isMinimized {
+            NowPlayingManager.shared.applyMinimized()
+        }
+        debugLog("[MV-CAST] composite: phone player hidden, tiles decode headless and muted")
     }
 
     enum Transport { case cast, companion, airPlay }

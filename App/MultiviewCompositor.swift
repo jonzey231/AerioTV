@@ -205,6 +205,16 @@ final class MultiviewCompositeTaps: @unchecked Sendable {
         for (id, e) in snapshot where tapped.contains(id) { e.item.audioMix = nil }
     }
 
+    /// Why a tile has no pixels (the no-pixels diagnostic line).
+    func sourceDescription(tileID: String) -> String {
+        lock.lock()
+        let e = entries[tileID]
+        lock.unlock()
+        guard let e else { return "not registered (no AVPlayer tile; mpv or not mounted)" }
+        let attached = e.output.map { o in e.item.outputs.contains { $0 === o } } ?? false
+        return "registered output=\(e.output != nil) attachedToItem=\(attached) item=\(e.item.status.rawValue) playerItemMatches=\(e.player?.currentItem === e.item) rate=\(e.player?.rate ?? -1)"
+    }
+
     /// The tile's newest decoded picture, if it has a new one now.
     func newPixelBuffer(tileID: String, hostTime: CFTimeInterval) -> CVPixelBuffer? {
         lock.lock()
@@ -250,6 +260,9 @@ final class MultiviewCompositeSession: ObservableObject {
     @Published private(set) var channelNames: [String] = []
     /// AirPlay: the loopback TS the hidden composite tile plays.
     @Published private(set) var airPlayTileURL: URL?
+    /// Scaled-down live frames of the composite (about 5 fps) for the
+    /// remote controls sheet's preview grid.
+    @Published fileprivate(set) var previewImage: UIImage?
 
     var isActive: Bool { transport != nil }
     var subtitle: String { channelNames.joined(separator: ", ") }
@@ -263,7 +276,7 @@ final class MultiviewCompositeSession: ObservableObject {
 
     @discardableResult
     func start(transport t: Transport) -> Bool {
-        if transport != nil { stop(detail: "restarted") }
+        if transport != nil { stop(detail: "restarted", teardownTiles: false) }
         let store = MultiviewStore.shared
         let tiles = Array(store.tiles.prefix(MultiviewCompositeLayout.maxTiles))
         guard Self.eligible(count: tiles.count) else { return false }
@@ -276,6 +289,12 @@ final class MultiviewCompositeSession: ObservableObject {
         accent.getRed(&r, green: &g, blue: &b, alpha: &a)
         let comp = MultiviewCompositor(tileIDs: tileIDs, focusID: focus, mode: mode,
                                        accent: (Double(r), Double(g), Double(b)))
+        comp.onPreview = { [weak self] image in
+            Task { @MainActor in
+                guard let self, self.compositor === comp else { return }
+                self.previewImage = UIImage(cgImage: image)
+            }
+        }
         comp.onFailure = { [weak self] reason in
             Task { @MainActor in self?.failed(reason.0, detail: reason.1) }
         }
@@ -310,18 +329,35 @@ final class MultiviewCompositeSession: ObservableObject {
 
     /// `endTransport`: also end the receiver's playback (Stop, failure, the
     /// local Multiview closing). False when the transport ended first.
-    func stop(_ reason: StopReason = .stopped, detail: String, endTransport: Bool = false) {
+    /// `teardownTiles`: also end the headless local Multiview whose tiles
+    /// fed the composite (Logan 2026-10-07: "if I stop casting multiview,
+    /// why would they continue on my phone?"). False on a restart, when
+    /// the local Multiview itself closed, and for Play Here (the tiles
+    /// become the local fullscreen player).
+    func stop(_ reason: StopReason = .stopped, detail: String, endTransport: Bool = false,
+              teardownTiles: Bool = true) {
         guard let t = transport else { return }
-        debugLog("[MV-CAST] composite stop reason=\(reason.rawValue) detail=\(detail)")
+        // Cleared first: the teardowns below re-enter stop() through the
+        // tile list and cast-content observers.
+        transport = nil
+        debugLog("[MV-CAST] composite stop reason=\(reason.rawValue) detail=\(detail) teardownTiles=\(teardownTiles)")
         cancellables.removeAll()
         lagTimer?.invalidate()
         lagTimer = nil
         compositor?.stop()
         compositor = nil
-        transport = nil
         airPlayTileURL = nil
         channelNames = []
+        previewImage = nil
         MultiviewCompositeTaps.shared.deactivate()
+        if teardownTiles {
+            DispatchQueue.main.async {
+                guard !MultiviewCompositeSession.shared.isActive,
+                      PlayerSession.shared.mode == .multiview else { return }
+                debugLog("[MV-CAST] composite stopped: headless tiles torn down")
+                PlayerSession.shared.stop()
+            }
+        }
         guard endTransport else { return }
         switch t {
         case .cast:
@@ -353,7 +389,7 @@ final class MultiviewCompositeSession: ObservableObject {
             .sink { [weak self] tiles in
                 guard let self else { return }
                 if tiles.isEmpty {
-                    self.stop(detail: "multiview closed", endTransport: true)
+                    self.stop(detail: "multiview closed", endTransport: true, teardownTiles: false)
                     return
                 }
                 let ids = Array(tiles.prefix(MultiviewCompositeLayout.maxTiles)).map(\.id)
@@ -425,6 +461,11 @@ final class MultiviewCompositor: @unchecked Sendable {
     static let aacFrameTicks: Int64 = 1920   // 1024 samples at 48 kHz
 
     var onFailure: (((MultiviewCompositeSession.StopReason, String)) -> Void)?
+    /// A scaled-down composed frame every `previewEvery` ticks.
+    var onPreview: ((CGImage) -> Void)?
+    static let previewEvery = 6
+    static let previewSize = CGSize(width: 480, height: 270)
+    private var previewTick = 0
 
     private let composeQueue = DispatchQueue(label: "aerio.mv-composite.compose", qos: .userInteractive)
     private let audioQueue = DispatchQueue(label: "aerio.mv-composite.audio", qos: .userInitiated)
@@ -449,6 +490,10 @@ final class MultiviewCompositor: @unchecked Sendable {
     private var session: VTCompressionSession?
     private var keyPolicy = MultiviewKeyframePolicy()
     private var latest: [String: CVPixelBuffer] = [:]
+    /// Per-tile frame-source diagnostics (Logan 2026-10-07 black grid).
+    private var tileSince: [String: CFTimeInterval] = [:]
+    private var firstPixelLogged: Set<String> = []
+    private var noPixelsLogged: Set<String> = []
     private var t0: CFTimeInterval = 0
     private var inFlight = 0
     private var submitted = 0
@@ -630,13 +675,34 @@ final class MultiviewCompositor: @unchecked Sendable {
         guard inFlight < Self.maxInFlight, pts > lastPTS else { dropped += 1; return }
         let (tiles, focus) = snapshot()
         lock.lock(); lastComposeHost = host; lock.unlock()
-        for id in tiles {
-            if let pb = MultiviewCompositeTaps.shared.newPixelBuffer(tileID: id, hostTime: host) { latest[id] = pb }
+        for (n, id) in tiles.enumerated() {
+            if let pb = MultiviewCompositeTaps.shared.newPixelBuffer(tileID: id, hostTime: host) {
+                if latest[id] == nil, firstPixelLogged.insert(id).inserted {
+                    debugLog("[MV-CAST] composite frame source tile=\(n) first pixel buffer \(CVPixelBufferGetWidth(pb))x\(CVPixelBufferGetHeight(pb)) id=\(id) after \(String(format: "%.1f", host - (tileSince[id] ?? host))) s")
+                }
+                latest[id] = pb
+                noPixelsLogged.remove(id)
+            } else {
+                let since = tileSince[id] ?? host
+                if tileSince[id] == nil { tileSince[id] = host }
+                if latest[id] == nil, host - since >= 5, noPixelsLogged.insert(id).inserted {
+                    debugLog("[MV-CAST] composite tile \(n) no pixels for 5 s id=\(id) \(MultiviewCompositeTaps.shared.sourceDescription(tileID: id))")
+                }
+            }
         }
         var out: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &out) == kCVReturnSuccess,
               let out else { dropped += 1; return }
         let image = compose(tiles: tiles, focus: focus)
+        previewTick += 1
+        if previewTick >= Self.previewEvery, let onPreview {
+            previewTick = 0
+            let sx = Self.previewSize.width / CGFloat(MultiviewCompositeLayout.width)
+            let small = image.transformed(by: CGAffineTransform(scaleX: sx, y: sx))
+            if let cg = ciContext.createCGImage(small, from: CGRect(origin: .zero, size: Self.previewSize)) {
+                onPreview(cg)
+            }
+        }
         ciContext.render(image, to: out, bounds: CGRect(x: 0, y: 0, width: MultiviewCompositeLayout.width,
                                                        height: MultiviewCompositeLayout.height),
                          colorSpace: CGColorSpace(name: CGColorSpace.sRGB))

@@ -466,7 +466,24 @@ struct MultiviewContainerView: View {
                         // same tester on 1.8.34. The "Exit Multiview"
                         // collapse verb still lives on the Menu press, with
                         // its confirmation dialog.
-                        onExit: { session.closeAudioTile() }
+                        //
+                        // iPhone / iPad (Logan 2026-10-07): the red X closes
+                        // Multiview completely; a single stream leaves from
+                        // its tile's long-press menu. tvOS keeps the
+                        // selected-stream close (Back exits there).
+                        onExit: {
+                            #if os(tvOS)
+                            session.closeAudioTile()
+                            #else
+                            DebugLogger.shared.log(
+                                "[MV-Mode] X: close Multiview (tiles=\(store.tiles.count))",
+                                category: "Playback", level: .info)
+                            #if os(iOS)
+                            AppOrientationLock.release()
+                            #endif
+                            session.stop()
+                            #endif
+                        }
                     )
                     .frame(height: chromeState.isVisible ? nil : 0)
                     .opacity(chromeState.isVisible ? 1 : 0)
