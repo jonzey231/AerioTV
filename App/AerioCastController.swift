@@ -3188,13 +3188,25 @@ struct RemoteSessionSheet: View {
 
 /// Top of the remote controls sheet while the phone sends a Multiview
 /// composite (Android parity, 2026-10-06): the composite's tiles in its own
-/// layout; tapping one moves the audio there (the receiver follows without
-/// a restart). Focused tile: 4 pt white border; others: 2 pt gray.
+/// layout. Tap a tile: the audio moves there (the receiver follows without
+/// a restart). Long-press and drag a tile onto another: the two swap
+/// places and the composite re-lays out live (Logan 2026-10-07, round 2).
+/// A long-press released on the same tile is the local Multiview's "Move
+/// Tile": the next tap on another tile swaps, a tap on it again cancels.
+/// Focused tile: 4 pt accent border; others: 2 pt gray.
 struct MultiviewCompositePreviewGrid: View {
     @ObservedObject private var store = MultiviewStore.shared
     /// Live frames (Logan 2026-10-07): the composite itself, scaled down,
     /// so the sheet shows what the receiver shows.
     @ObservedObject private var composite = MultiviewCompositeSession.shared
+    @ObservedObject private var theme = ThemeManager.shared
+
+    /// The tile picked up by the long-press (drag source or Move Tile).
+    @State private var lifted: String?
+    @State private var dragPoint: CGPoint?
+    @State private var dragging = false
+    /// A long-press release also ends as a tap; that tap is ignored.
+    @State private var pressEndedAt: Date = .distantPast
 
     var body: some View {
         let tiles = Array(store.tiles.prefix(MultiviewCompositeLayout.maxTiles))
@@ -3203,6 +3215,13 @@ struct MultiviewCompositePreviewGrid: View {
         let live = composite.previewImage
         GeometryReader { geo in
             let scale = geo.size.width / CGFloat(MultiviewCompositeLayout.width)
+            let scaled = rects.map { CGRect(x: $0.minX * scale, y: $0.minY * scale,
+                                            width: $0.width * scale, height: $0.height * scale) }
+            let hit: (CGPoint) -> String? = { p in
+                guard let i = scaled.firstIndex(where: { $0.contains(p) }), i < tiles.count else { return nil }
+                return tiles[i].id
+            }
+            let target = dragPoint.flatMap(hit)
             ZStack(alignment: .topLeading) {
                 Color.black
                 if let live {
@@ -3211,41 +3230,93 @@ struct MultiviewCompositePreviewGrid: View {
                         .interpolation(.medium)
                         .frame(width: geo.size.width, height: geo.size.height)
                 }
-                ForEach(Array(zip(tiles.indices, rects)), id: \.0) { i, r in
+                ForEach(Array(zip(tiles.indices, scaled)), id: \.0) { i, r in
                     let tile = tiles[i]
                     let focused = tile.id == store.audioTileID
-                    Button {
-                        store.setAudio(to: tile.id)
-                    } label: {
-                        ZStack {
-                            if live == nil {
-                                // Until the first composed frame: the names.
-                                Color.white.opacity(0.08)
-                                Text(tile.item.name)
-                                    .scaledFont(.caption)
-                                    .foregroundStyle(.white)
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.center)
-                                    .padding(4)
-                            } else {
-                                // The frame already carries the borders.
-                                Color.clear
-                            }
+                    let isLifted = tile.id == lifted
+                    let isTarget = dragging && target == tile.id && target != lifted
+                    ZStack {
+                        if live == nil {
+                            // Until the first composed frame: the names.
+                            Color.white.opacity(0.08)
+                            Text(tile.item.name)
+                                .scaledFont(.caption)
+                                .foregroundStyle(.white)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.center)
+                                .padding(4)
+                        } else {
+                            // The frame already carries the borders.
+                            Color.clear
                         }
-                        .contentShape(Rectangle())
-                        .overlay(Rectangle().strokeBorder(focused ? Color.white : Color.gray,
-                                                          lineWidth: focused ? 4 : 2)
-                            .opacity(live == nil ? 1 : 0))
+                        if isLifted || isTarget { Color.white.opacity(0.18) }
                     }
-                    .buttonStyle(.plain)
-                    .frame(width: r.width * scale, height: r.height * scale)
-                    .offset(x: r.minX * scale, y: r.minY * scale)
+                    .overlay(Rectangle().strokeBorder(focused ? theme.accent : Color.gray,
+                                                      lineWidth: focused ? 4 : 2)
+                        .opacity(live == nil ? 1 : 0))
+                    .overlay(Rectangle().strokeBorder(Color.white, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                        .opacity(isLifted || isTarget ? 1 : 0))
+                    .frame(width: r.width, height: r.height)
+                    .offset(x: r.minX, y: r.minY)
+                    .allowsHitTesting(false)
+                    .accessibilityElement()
                     .accessibilityLabel("\(tile.item.name)\(focused ? ", audio" : "")")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { store.setAudio(to: tile.id) }
                 }
             }
+            .contentShape(Rectangle())
+            .gesture(
+                LongPressGesture(minimumDuration: 0.35)
+                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
+                    .onChanged { value in
+                        switch value {
+                        case .first(true):
+                            break
+                        case .second(true, let drag):
+                            guard let drag else { return }
+                            if lifted == nil || !dragging {
+                                if let id = hit(drag.startLocation) {
+                                    if lifted != id { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
+                                    lifted = id
+                                    dragging = true
+                                }
+                            }
+                            dragPoint = drag.location
+                        default:
+                            break
+                        }
+                    }
+                    .onEnded { value in
+                        defer { dragging = false; dragPoint = nil; pressEndedAt = Date() }
+                        guard case .second(true, let drag) = value, let drag, let from = lifted else { return }
+                        if let to = hit(drag.location), to != from {
+                            swapTiles(from, to)
+                        }
+                        // Released on the same tile: stay lifted (Move Tile).
+                        else if hit(drag.location) != from { lifted = nil }
+                    }
+            )
+            .simultaneousGesture(
+                SpatialTapGesture().onEnded { value in
+                    guard !dragging, Date().timeIntervalSince(pressEndedAt) > 0.25,
+                          let id = hit(value.location) else { return }
+                    if let from = lifted {
+                        if id != from { swapTiles(from, id) } else { lifted = nil }
+                        return
+                    }
+                    store.setAudio(to: id)
+                }
+            )
         }
         .aspectRatio(16.0 / 9.0, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func swapTiles(_ a: String, _ b: String) {
+        lifted = nil
+        debugLog("[MV-CAST] composite swap \(a) <-> \(b)")
+        store.swap(a, b)
     }
 }
 
@@ -3889,44 +3960,129 @@ struct CastOptionsSheet: View {
 
 }
 
-/// AirPlay Stream Info (Logan 2026-10-07): what the player feeding the
-/// receiver reports, in the Cast card's row treatment.
+/// AirPlay Stream Info (Logan 2026-10-07, round 2): the Cast sheet's facts
+/// for the AirPlay session. Video facts come from the serving tile's own
+/// source (its remuxer's H.264 SPS: size and declared rate), then from the
+/// tile's AVPlayerItem tracks and access log; the external-playback path
+/// (no LAN serving) reads the player alone.
 struct AirPlayStreamInfo: Equatable {
     var receiver: String
     var delivery: String
+    var container: String
     var video: String
+    var audio: String
     var bitrate: String
     var buffer: String
     var health: String
 
     @MainActor static func snapshot() -> AirPlayStreamInfo? {
         let monitor = AirPlayMonitor.shared
-        guard let player = monitor.attachedPlayer, let item = player.currentItem else { return nil }
-        let size = item.presentationSize
-        var video = size.width > 0 ? "\(Int(size.width))x\(Int(size.height))" : "size unknown"
-        if let track = item.tracks.compactMap(\.assetTrack).first(where: { $0.mediaType == .video }) {
-            if track.nominalFrameRate > 0 { video += String(format: " at %.0ffps", track.nominalFrameRate) }
-            if let desc = track.formatDescriptions.first {
-                let sub = CMFormatDescriptionGetMediaSubType(desc as! CMFormatDescription)
-                let cc = [24, 16, 8, 0].map { Character(UnicodeScalar(UInt8((sub >> $0) & 0xFF))) }
-                video = String(cc).trimmingCharacters(in: .whitespaces) + "  " + video
-            }
+        let facts = AirPlayTileDelivery.servingFacts
+        guard let player = facts?.player ?? monitor.attachedPlayer else { return nil }
+        let item = player.currentItem
+        let composite = MultiviewCompositeSession.shared.transport == .airPlay
+        let assetTracks = item?.tracks.compactMap(\.assetTrack) ?? []
+
+        // Delivery path and container.
+        let delivery: String
+        let container: String
+        if facts != nil {
+            delivery = "phone LAN playlist (HLS)"
+            let audioForm = facts?.aacRewrite == true ? "audio AAC rewrite" : "audio passthrough"
+            container = MultiviewCompositeSession.shared.transport == .airPlay
+                ? "MPEG-TS muxed" : "MPEG-TS muxed, \(audioForm)"
+        } else {
+            delivery = "AVPlayer external playback"
+            container = "as the source sends it"
         }
-        let event = item.accessLog()?.events.last
+
+        // Video: codec, resolution, fps.
+        var video: String
+        if composite {
+            video = "Multiview composite \(MultiviewCompositeLayout.width)x\(MultiviewCompositeLayout.height)@\(MultiviewCompositeLayout.fps)"
+        } else {
+            var codec = "H.264"
+            var size = ""
+            var fps: Double = 0
+            var interlaced = false
+            if let pic = facts?.remuxer?.sourceVideoPicture {
+                size = "\(pic.width)x\(pic.height)"
+                fps = pic.fps ?? 0
+                interlaced = pic.isInterlaced
+            }
+            if let track = assetTracks.first(where: { $0.mediaType == .video }) {
+                if let desc = track.formatDescriptions.first {
+                    codec = fourCCName(CMFormatDescriptionGetMediaSubType(desc as! CMFormatDescription))
+                }
+                if fps <= 0, track.nominalFrameRate > 0 { fps = Double(track.nominalFrameRate) }
+                if size.isEmpty, track.naturalSize.width > 0 {
+                    size = "\(Int(track.naturalSize.width))x\(Int(track.naturalSize.height))"
+                }
+            }
+            if size.isEmpty, let ps = item?.presentationSize, ps.width > 0 {
+                size = "\(Int(ps.width))x\(Int(ps.height))"
+            }
+            video = codec + "  " + (size.isEmpty ? "size detecting" : size + (interlaced ? "i" : ""))
+            if fps > 0 { video += String(format: " at %@fps", fpsText(fps)) }
+        }
+
+        // Audio: codec and channels.
+        var audio: String
+        if facts?.aacRewrite == true {
+            audio = "AAC-LC stereo (2 ch, rewritten from \(facts?.remuxer?.sourceAudioCodec ?? "source"))"
+        } else {
+            var codec = facts?.remuxer?.sourceAudioCodec ?? "detecting"
+            var channels = 0
+            if let track = assetTracks.first(where: { $0.mediaType == .audio }),
+               let desc = track.formatDescriptions.first {
+                let fd = desc as! CMAudioFormatDescription
+                if codec == "detecting" || codec == "unknown" {
+                    codec = fourCCName(CMFormatDescriptionGetMediaSubType(fd))
+                }
+                if let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fd)?.pointee {
+                    channels = Int(asbd.mChannelsPerFrame)
+                }
+            }
+            audio = codec + (channels > 0 ? "  \(channels) ch" : "  channels from the source")
+            if facts != nil { audio += "  passthrough" }
+            // Android parity wording for the composite.
+            if composite { audio = "AAC-LC stereo 48 kHz" }
+        }
+
+        let event = item?.accessLog()?.events.last
         var bitrate = "measuring"
         if let e = event, e.indicatedBitrate > 0 || e.observedBitrate > 0 {
-            bitrate = "\(Int(max(e.indicatedBitrate, 0) / 1000)) kbps indicated"
-            if e.observedBitrate > 0 { bitrate += "  \(Int(e.observedBitrate / 1000)) kbps observed" }
+            bitrate = e.indicatedBitrate > 0 ? "\(Int(e.indicatedBitrate / 1000)) kbps indicated" : "indicated n/a"
+            bitrate += e.observedBitrate > 0 ? "  \(Int(e.observedBitrate / 1000)) kbps observed" : "  observed n/a"
         }
         let now = player.currentTime().seconds
-        let ahead = item.loadedTimeRanges.map(\.timeRangeValue)
+        let ahead = (item?.loadedTimeRanges ?? []).map(\.timeRangeValue)
             .first(where: { $0.start.seconds <= now + 0.5 && $0.end.seconds >= now })
             .map { $0.end.seconds - now } ?? 0
-        let buffer = String(format: "%.1fs ahead", max(0, ahead))
-        let health = "drops: \(max(0, event?.numberOfDroppedVideoFrames ?? 0))  stalls: \(max(0, event?.numberOfStalls ?? 0))"
-        let delivery = AirPlayTileDelivery.isServingReceiver ? "phone LAN playlist (TS)" : "AVPlayer external playback"
-        return AirPlayStreamInfo(receiver: monitor.deviceName ?? "AirPlay", delivery: delivery, video: video,
-                                 bitrate: bitrate, buffer: buffer, health: health)
+        var buffer = String(format: "%.1fs ahead", max(0, ahead))
+        if let link = facts?.link, link.reservoirSegments > 0 {
+            buffer += String(format: "  LAN %d segs (%.1fs)", link.reservoirSegments, link.reservoirSeconds)
+        }
+        let health = "drops \(max(0, event?.numberOfDroppedVideoFrames ?? 0))  stalls \(max(0, event?.numberOfStalls ?? 0))"
+        return AirPlayStreamInfo(receiver: monitor.deviceName ?? "AirPlay", delivery: delivery, container: container,
+                                 video: video, audio: audio, bitrate: bitrate, buffer: buffer, health: health)
+    }
+
+    private static func fourCCName(_ sub: FourCharCode) -> String {
+        switch sub {
+        case kCMVideoCodecType_H264: return "H.264"
+        case kCMVideoCodecType_HEVC: return "HEVC"
+        case kAudioFormatMPEG4AAC: return "AAC-LC"
+        case kAudioFormatAC3: return "AC-3"
+        case kAudioFormatEnhancedAC3: return "E-AC-3"
+        default:
+            let cc = [24, 16, 8, 0].map { Character(UnicodeScalar(UInt8((sub >> $0) & 0xFF))) }
+            return String(cc).trimmingCharacters(in: .whitespaces)
+        }
+    }
+
+    private static func fpsText(_ fps: Double) -> String {
+        abs(fps.rounded() - fps) < 0.01 ? String(format: "%.0f", fps) : String(format: "%.2f", fps)
     }
 }
 
@@ -3936,15 +4092,23 @@ struct AirPlayStreamInfoCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            row(label: "TO", value: info.receiver)
+            row(label: "TV", value: info.receiver)
             row(label: "VIA", value: info.delivery)
+            row(label: "FORMAT", value: info.container)
             row(label: "VIDEO", value: info.video)
+            row(label: "AUDIO", value: info.audio)
             row(label: "RATE", value: info.bitrate)
             row(label: "BUFFER", value: info.buffer)
-            row(label: "", value: info.health)
+            row(label: "HEALTH", value: info.health)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
     }
 
     @ViewBuilder
@@ -4692,6 +4856,149 @@ struct MultiviewDockCard: View {
     /// Same as KeptLiveCard's dock surface: iPad tab-pill capsule, iPhone
     /// plain glass capsule.
     private struct MultiviewDockSurface: ViewModifier {
+        func body(content: Content) -> some View {
+            if PadTabPill.isActive {
+                content.modifier(PadPillSurface(shape: Capsule()))
+            } else {
+                content.modifier(KeptPillChrome())
+            }
+        }
+    }
+}
+
+/// Multiview in the background (Logan 2026-10-07, round 2): a pinch-in on
+/// the local Multiview (2 or more tiles, iPhone and iPad) leaves it for the
+/// browse screens with NO mini player. The tiles keep playing headless in
+/// place (HomeView hides the container like the composite does): muted
+/// except the focused tile, which keeps its audio. A dock card returns to
+/// the fullscreen Multiview exactly as it was; Stop ends the tiles.
+@MainActor
+final class MultiviewBackgroundSession: ObservableObject {
+    static let shared = MultiviewBackgroundSession()
+    @Published private(set) var isActive = false
+    private var bag: Set<AnyCancellable> = []
+
+    private init() {
+        // Anything else that ends or takes over the Multiview ends the
+        // background state (a single-channel tune, the session closing, a
+        // composite cast, an expand from elsewhere).
+        PlayerSession.shared.$mode
+            .sink { [weak self] mode in
+                guard let self, self.isActive, mode != .multiview else { return }
+                self.clear(reason: "multiview ended")
+            }
+            .store(in: &bag)
+        MultiviewCompositeSession.shared.$transport
+            .sink { [weak self] t in
+                guard let self, self.isActive, t != nil else { return }
+                self.clear(reason: "composite cast took the tiles")
+            }
+            .store(in: &bag)
+        NowPlayingManager.shared.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, self.isActive, !NowPlayingManager.shared.isMinimized else { return }
+                self.clear(reason: "expanded")
+            }
+            .store(in: &bag)
+    }
+
+    /// True when a pinch-in may send the Multiview to the background.
+    static var canEnter: Bool {
+        PlayerSession.shared.mode == .multiview
+            && MultiviewStore.shared.tiles.count >= 2
+            && !MultiviewCompositeSession.shared.isActive
+            && !AirPlayMonitor.shared.hostsHeadless
+            && !shared.isActive
+    }
+
+    func enter() {
+        guard Self.canEnter else { return }
+        isActive = true
+        debugLog("[MV-BG] background enter tiles=\(MultiviewStore.shared.tiles.count)")
+        AppOrientationLock.release()
+        NowPlayingManager.shared.applyMinimized()
+    }
+
+    /// Card tap: back to the fullscreen Multiview as it was (the tiles
+    /// never stopped, so nothing restarts).
+    func returnToFullscreen() {
+        guard isActive else { return }
+        isActive = false
+        debugLog("[MV-BG] return")
+        NowPlayingManager.shared.expand()
+    }
+
+    /// Card Stop: end the tiles.
+    func stop() {
+        guard isActive else { return }
+        isActive = false
+        debugLog("[MV-BG] stop")
+        PlayerSession.shared.stop()
+    }
+
+    private func clear(reason: String) {
+        isActive = false
+        debugLog("[MV-BG] background cleared (\(reason))")
+    }
+}
+
+/// The Multiview-in-the-background dock card: the staging card's shape
+/// (44 pt icon tile, title and subtitle, 18/8 pt padding, the dock
+/// capsule). Tap returns to the fullscreen Multiview; Stop ends it.
+struct MultiviewBackgroundCard: View {
+    @ObservedObject private var store = MultiviewStore.shared
+    @ObservedObject private var session = MultiviewBackgroundSession.shared
+
+    var body: some View {
+        let names = store.tiles.map(\.item.name)
+        return HStack(spacing: 12) {
+            Button { session.returnToFullscreen() } label: {
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.black.opacity(0.25))
+                        Image(systemName: "rectangle.split.2x2")
+                            .font(.system(size: 20))  // glyph in a fixed box: not text, stays fixed
+                            .foregroundStyle(ThemeManager.shared.accent)
+                    }
+                    .frame(width: 44, height: 44)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Multiview playing in background")
+                            .scaledFont(.subheadline.weight(.bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Text(names.joined(separator: ", "))
+                            .scaledFont(.caption)
+                            .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Return to Multiview")
+            Button { session.stop() } label: {
+                Text("Stop")
+                    .scaledFont(.subheadline.weight(.semibold))
+                    .foregroundStyle(ThemeManager.shared.accent)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .frame(minHeight: 40)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Stop Multiview")
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 8)
+        .modifier(Surface())
+        .accessibilityElement(children: .contain)
+    }
+
+    private struct Surface: ViewModifier {
         func body(content: Content) -> some View {
             if PadTabPill.isActive {
                 content.modifier(PadPillSurface(shape: Capsule()))

@@ -632,6 +632,21 @@ final class AirPlayTileDelivery {
 
     /// The tile currently serving a receiver (one at a time).
     private static weak var servingTile: AirPlayTileDelivery?
+
+    /// What the serving tile sends (AirPlay Stream Info, Logan 2026-10-07).
+    struct ServingFacts {
+        var player: AVPlayer?
+        var remuxer: TSHLSRemuxer?
+        var aacRewrite: Bool
+        var receiverClass: String?
+        var link: TSHLSRemuxer.LANLinkStats?
+    }
+
+    static var servingFacts: ServingFacts? {
+        guard let t = servingTile, t.state == .serving else { return nil }
+        return ServingFacts(player: t.player, remuxer: t.remuxer, aacRewrite: t.plan == .aacStereo,
+                            receiverClass: t.receiver.map { "\($0)" }, link: t.remuxer?.lanLinkStats)
+    }
     private var replanning = false
 
     /// The resolver named the receiver after the plan was decided. An

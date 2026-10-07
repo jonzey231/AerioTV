@@ -4730,6 +4730,9 @@ struct MainTabView: View {
     /// Phone-side Multiview composite (2026-10-06): the remote card and
     /// sheet read "Multiview" with the channel names while it runs.
     @ObservedObject private var mvComposite = MultiviewCompositeSession.shared
+    /// Multiview in the background (Logan 2026-10-07): the tiles play
+    /// headless behind the browse screens with a dock card.
+    @ObservedObject private var mvBackground = MultiviewBackgroundSession.shared
     /// GH #33 companion remote: same card for a paired AerioTV TV.
     @ObservedObject private var companionClient = CompanionClient.shared
     /// AirPlay rides the same card (rule 2): the monitor reports when the
@@ -6081,7 +6084,7 @@ struct MainTabView: View {
                // pill's row in the dock instead (Logan 2026-10-04): here the
                // pill drew over it at the same height. Same for the
                // Multiview card (Logan 2026-10-06).
-               !keptLiveCardVisible, !multiviewCardVisible {
+               !keptLiveCardVisible, !multiviewCardVisible, !mvBackgroundCardVisible {
                 CompanionControlFABDock { showCompanionPickerGlobal = true }
             }
         }
@@ -6132,6 +6135,9 @@ struct MainTabView: View {
                         multiviewCard
                             .frame(width: padRemoteCardWidth)
                             .frame(maxWidth: .infinity)
+                        mvBackgroundCard
+                            .frame(width: padRemoteCardWidth)
+                            .frame(maxWidth: .infinity)
                         // iPad (Logan 2026-10-05): Kept Live uses the same
                         // width rule, capsule and surface as the remote card,
                         // centered, so the two stack as matching capsules.
@@ -6157,6 +6163,20 @@ struct MainTabView: View {
                         // Kept Live row's rules. The Control-a-TV circle
                         // rides the LOWEST card row, so it sits here only
                         // when no Kept Live row is below.
+                        if mvBackgroundCardVisible {
+                            HStack(spacing: RemoteSessionCardMetrics.gap) {
+                                mvBackgroundCard
+                                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                                        if abs(h - multiviewCardHeight) > 0.5 { multiviewCardHeight = h }
+                                    }
+                                if showsControlATVButton && !keptLiveCardVisible && !multiviewCardVisible {
+                                    CompanionControlFAB(action: { showCompanionPickerGlobal = true },
+                                                        size: multiviewCardHeight > 0 ? multiviewCardHeight : 48)
+                                }
+                            }
+                            .padding(.leading, cardMetrics.barLeadingInset > 0 ? cardMetrics.barLeadingInset : 20)
+                            .padding(.trailing, cardMetrics.barTrailingInset > 0 ? cardMetrics.barTrailingInset : 20)
+                        }
                         if multiviewCardVisible {
                             HStack(spacing: RemoteSessionCardMetrics.gap) {
                                 multiviewCard
@@ -6440,6 +6460,19 @@ struct MainTabView: View {
     private var multiviewCard: some View {
         if multiviewCardVisible {
             MultiviewDockCard(onShowSheet: { showMultiviewSheet = true })
+        }
+    }
+
+    /// Multiview in the background (Logan 2026-10-07): stacks with the
+    /// other dock cards and hides under a fullscreen player like them.
+    private var mvBackgroundCardVisible: Bool {
+        mvBackground.isActive && !playerFullscreen
+    }
+
+    @ViewBuilder
+    private var mvBackgroundCard: some View {
+        if mvBackgroundCardVisible {
+            MultiviewBackgroundCard()
         }
     }
 
@@ -8074,6 +8107,12 @@ struct MainTabView: View {
                 let miniH: CGFloat = 225
                 ZStack(alignment: .topTrailing) {
                     MultiviewContainerView()
+                        // Audio route chip (Logan 2026-10-07): full screen only.
+                        .overlay(alignment: .top) {
+                            if !minimized && !mvComposite.isActive && !mvBackground.isActive && !airPlay.hostsHeadless {
+                                AirPlayAudioRouteChip()
+                            }
+                        }
                         .frame(
                             width: minimized ? miniW : geo.size.width,
                             height: minimized ? miniH : geo.size.height
@@ -8127,6 +8166,13 @@ struct MainTabView: View {
                         .simultaneousGesture(
                             MagnificationGesture()
                                 .onEnded { scale in
+                                    // 2 or more tiles (Logan 2026-10-07):
+                                    // pinch-in sends the Multiview to the
+                                    // background, no mini player.
+                                    if !isSoleStream, scale < 0.85, MultiviewBackgroundSession.canEnter {
+                                        MultiviewBackgroundSession.shared.enter()
+                                        return
+                                    }
                                     guard isSoleStream,
                                           !nowPlaying.isMinimized,
                                           scale < 0.85 else { return }
@@ -8179,8 +8225,9 @@ struct MainTabView: View {
             // because its tile feeds the receiver.
             // Multiview composite (Logan 2026-10-07): the tiles feed the
             // receiver headless; the phone shows no player.
-            .opacity(airPlay.hostsHeadless || mvComposite.isActive ? 0 : 1)
-            .allowsHitTesting(!airPlay.hostsHeadless && !mvComposite.isActive)
+            // Multiview in the background: the same hide in place.
+            .opacity(airPlay.hostsHeadless || mvComposite.isActive || mvBackground.isActive ? 0 : 1)
+            .allowsHitTesting(!airPlay.hostsHeadless && !mvComposite.isActive && !mvBackground.isActive)
             .zIndex(2)
         } else {
             // v1.6.17 — iPhone branch. NO outer `.ignoresSafeArea()`.
@@ -8206,8 +8253,24 @@ struct MainTabView: View {
             // Multiview composite (Logan 2026-10-07): same hide in place
             // while the tiles feed the receiver headless.
             let hidden = nowPlaying.isMinimized || foregroundPiP.hidesHost || airPlay.hostsHeadless
-                || mvComposite.isActive
+                || mvComposite.isActive || mvBackground.isActive
             MultiviewContainerView()
+                // After the user ended AirPlay, audio may still go to the
+                // receiver (Logan 2026-10-07): the chip offers the picker.
+                .overlay(alignment: .top) {
+                    if !hidden { AirPlayAudioRouteChip() }
+                }
+                // Pinch-in with 2 or more tiles (Logan 2026-10-07): the
+                // Multiview goes to the background, no mini player (the
+                // single player's pinch-in minimize; one tile keeps the
+                // player's own Fit pinch).
+                .simultaneousGesture(
+                    MagnificationGesture()
+                        .onEnded { scale in
+                            guard scale < 0.85, MultiviewBackgroundSession.canEnter else { return }
+                            MultiviewBackgroundSession.shared.enter()
+                        }
+                )
                 .opacity(hidden ? 0 : 1)
                 .allowsHitTesting(!hidden)
                 .accessibilityHidden(hidden)

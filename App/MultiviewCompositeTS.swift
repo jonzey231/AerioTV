@@ -33,7 +33,7 @@ enum MultiviewCompositeLayout {
     /// Black gutter between tiles, in composite pixels.
     static let spacing: CGFloat = 4
     /// Thin border on every tile, and the focused tile's highlight.
-    /// Android parity: 2 px gray on every tile, 4 px white on the focused one.
+    /// 2 px gray on every tile, 4 px theme accent on the focused one only.
     static let borderWidth: CGFloat = 2
     static let focusBorderWidth: CGFloat = 4
 

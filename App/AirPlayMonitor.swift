@@ -3,6 +3,8 @@ import AVFoundation
 import AVKit
 import Combine
 import Foundation
+import SwiftUI
+import UIKit
 
 // MARK: - AirPlay session monitor (remote-session card parity, 2026-09-12; phases 2026-09-21)
 
@@ -744,6 +746,91 @@ final class AirPlayRoutePickerDelegate: NSObject, @MainActor AVRoutePickerViewDe
     static let shared = AirPlayRoutePickerDelegate()
     func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) {
         AirPlayMonitor.shared.routePickerDismissed()
+    }
+}
+
+/// Audio route chip (Logan 2026-10-07, round 2). iOS cannot deselect an
+/// AirPlay audio output, so after the user ended AirPlay (the card's X
+/// latch, 0d61b58) a channel playing here still sends its audio to the
+/// receiver. While the latch is set and the route's output is still
+/// AirPlay, the local fullscreen player shows this chip at the top; a tap
+/// opens the system route picker, the X hides it for that receiver, and it
+/// goes away once the route leaves AirPlay.
+struct AirPlayAudioRouteChip: View {
+    @State private var device: (name: String, uid: String)?
+    @State private var dismissedUID: String?
+    @State private var loggedUID: String?
+    private let tick = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Group {
+            if let device, device.uid != dismissedUID {
+                HStack(spacing: 10) {
+                    Button {
+                        debugLog("[AVP-AIRPLAY] audio route chip tapped: presenting the route picker")
+                        AirPlayMenuTrigger.present()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "airplayaudio")
+                                .font(.system(size: 14, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
+                                .foregroundStyle(ThemeManager.shared.accent)
+                            Text("Audio is on \(device.name). Switch to \(Self.deviceWord)")
+                                .scaledFont(.footnote.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    Button {
+                        dismissedUID = device.uid
+                        debugLog("[AVP-AIRPLAY] audio route chip dismissed device=\(device.name)")
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .bold))  // glyph in a fixed box: not text, stays fixed
+                            .foregroundStyle(.white.opacity(0.8))
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Dismiss")
+                }
+                .padding(.leading, 14)
+                .padding(.trailing, 6)
+                .padding(.vertical, 6)
+                .background(Color.black.opacity(0.7), in: Capsule())
+                .overlay(Capsule().stroke(Color.white.opacity(0.15), lineWidth: 1))
+                .padding(.top, 12)
+                .padding(.horizontal, 16)
+                .transition(.opacity)
+                .onAppear {
+                    guard loggedUID != device.uid else { return }
+                    loggedUID = device.uid
+                    debugLog("[AVP-AIRPLAY] audio route chip shown device=\(device.name)")
+                }
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: device?.uid)
+        .onAppear(perform: refresh)
+        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)
+            .receive(on: DispatchQueue.main)) { _ in refresh() }
+        .onReceive(tick) { _ in refresh() }
+    }
+
+    private static var deviceWord: String {
+        UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
+    }
+
+    private func refresh() {
+        let latched = AirPlayMonitor.shared.userEndedRouteUID != nil
+        guard latched, let out = AirPlayReceiverResolver.currentAirPlayOutput() else {
+            if device != nil { device = nil }
+            loggedUID = nil
+            return
+        }
+        let name = (out.name ?? "AirPlay").trimmingCharacters(in: .whitespaces)
+        if device?.uid != out.uid || device?.name != name { device = (name, out.uid) }
     }
 }
 #endif

@@ -310,6 +310,8 @@ final class MultiviewCompositeSession: ObservableObject {
         MultiviewCompositeTaps.shared.activate(transport: t) { [weak comp] id, data in
             comp?.tileBytes(tileID: id, data: data)
         }
+        comp.setBackgrounded(UIApplication.shared.applicationState == .background)
+        setKeepalive(true)
         debugLog("[MV-CAST] composite start tiles=\(tileIDs.count) \(MultiviewCompositeLayout.width)x\(MultiviewCompositeLayout.height)@\(MultiviewCompositeLayout.fps) transport=\(t == .cast ? "cast" : "airplay") focus=\(focus) url=\(url.absoluteString)")
         observe()
         switch t {
@@ -346,6 +348,7 @@ final class MultiviewCompositeSession: ObservableObject {
         lagTimer = nil
         compositor?.stop()
         compositor = nil
+        setKeepalive(false)
         airPlayTileURL = nil
         channelNames = []
         previewImage = nil
@@ -367,6 +370,22 @@ final class MultiviewCompositeSession: ObservableObject {
         case .airPlay:
             AirPlayMonitor.shared.stop()
         }
+    }
+
+    /// Background keepalive (Logan 2026-10-07: backgrounding during a
+    /// 4-up composite stopped everything). The composite holds the same
+    /// shared silent-render keepalive the single-channel cast proxy holds,
+    /// under its own name, so the encoder, the tile taps and the loopback
+    /// server keep running with the app in the background. The thermal,
+    /// render-stall and encoder-behind stop rules still apply.
+    static let keepaliveHolder = "mv-composite"
+    private var keepaliveHeld = false
+
+    private func setKeepalive(_ on: Bool) {
+        guard on != keepaliveHeld else { return }
+        keepaliveHeld = on
+        debugLog("[MV-CAST] background keepalive \(on ? "on" : "off")")
+        if on { BackgroundKeepalive.acquire(Self.keepaliveHolder) } else { BackgroundKeepalive.release(Self.keepaliveHolder) }
     }
 
     private func failed(_ reason: StopReason, detail: String) {
@@ -399,6 +418,18 @@ final class MultiviewCompositeSession: ObservableObject {
                     self.compositor?.setTiles(ids)
                     debugLog("[MV-CAST] composite tiles changed: \(ids.count)")
                 }
+            }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)
+            .sink { [weak self] _ in
+                debugLog("[MV-CAST] composite app background (keepalive held=\(self?.keepaliveHeld ?? false))")
+                self?.compositor?.setBackgrounded(true)
+            }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
+            .sink { [weak self] _ in
+                debugLog("[MV-CAST] composite app foreground")
+                self?.compositor?.setBackgrounded(false)
             }
             .store(in: &cancellables)
         AerioCastController.shared.$castingContent
@@ -488,6 +519,16 @@ final class MultiviewCompositor: @unchecked Sendable {
     private var ciContext: CIContext?
     private var pool: CVPixelBufferPool?
     private var session: VTCompressionSession?
+    private var forceKeyframe = false
+    /// Bumped per encoder session so a late callback from a dropped
+    /// session never invalidates its replacement.
+    private var sessionGen = 0
+    private var lastRebuildAttempt: CFTimeInterval = 0
+    private var rebuildTimes: [CFTimeInterval] = []
+    private var encoderRebuilds = 0
+    private var renderingInBackground = false
+    /// Shared (lock): the app is in the background.
+    private var backgroundedFlag = false
     private var keyPolicy = MultiviewKeyframePolicy()
     private var latest: [String: CVPixelBuffer] = [:]
     /// Per-tile frame-source diagnostics (Logan 2026-10-07 black grid).
@@ -540,11 +581,8 @@ final class MultiviewCompositor: @unchecked Sendable {
         self.server = server
         silentFrame = MultiviewAudioNormalizer.silentADTSFrame()
         composeQueue.sync {
-            if let device = MTLCreateSystemDefaultDevice() {
-                ciContext = CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
-            } else {
-                ciContext = CIContext(options: [.cacheIntermediates: false])
-            }
+            renderingInBackground = isBackgrounded
+            ciContext = Self.makeContext(software: renderingInBackground)
             let attrs: [String: Any] = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
                 kCVPixelBufferWidthKey as String: MultiviewCompositeLayout.width,
@@ -663,8 +701,38 @@ final class MultiviewCompositor: @unchecked Sendable {
     // MARK: Compose + encode (compose queue)
 
     private func tick() {
-        guard !isStopped, let session, let pool, let ciContext else { return }
+        guard !isStopped, let pool else { return }
         let host = CACurrentMediaTime()
+        if session == nil {
+            // Encoder lost (invalidated on app background or a media
+            // services reset): rebuild at most once a second; the
+            // encoder-behind rule below still ends the composite if it
+            // cannot come back within 3 s.
+            if host - lastRebuildAttempt >= 1 {
+                lastRebuildAttempt = host
+                makeEncoder()
+                if session != nil {
+                    forceKeyframe = true
+                    debugLog("[MV-CAST] composite encoder rebuilt (\(encoderRebuilds))")
+                }
+            }
+            if session == nil {
+                if host - lastOutputAt > Self.maxBehindSeconds {
+                    fail(.encoderBehind, "encoder could not be rebuilt for \(String(format: "%.1f", host - lastOutputAt)) s")
+                }
+                return
+            }
+        }
+        guard let session else { return }
+        let backgrounded = isBackgrounded
+        if backgrounded != renderingInBackground || ciContext == nil {
+            // iOS refuses GPU work from a background app: CoreImage runs
+            // on the CPU renderer while backgrounded, Metal otherwise.
+            renderingInBackground = backgrounded
+            ciContext = Self.makeContext(software: backgrounded)
+            debugLog("[MV-CAST] composite renderer \(backgrounded ? "cpu (background)" : "metal (foreground)")")
+        }
+        guard let ciContext else { return }
         let pts = Self.baseTicks + Int64((host - t0) * 90_000)
         maybeLogStats(now: host)
         // Resource rule: the encoder may not trail the clock by > 3 s.
@@ -706,23 +774,25 @@ final class MultiviewCompositor: @unchecked Sendable {
         ciContext.render(image, to: out, bounds: CGRect(x: 0, y: 0, width: MultiviewCompositeLayout.width,
                                                        height: MultiviewCompositeLayout.height),
                          colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
-        let key = keyPolicy.isKeyframe(pts: pts)
+        var key = keyPolicy.isKeyframe(pts: pts)
+        if forceKeyframe { key = true; forceKeyframe = false }
         let props: CFDictionary? = key ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil
         inFlight += 1
         submitted += 1
         lastPTS = pts
         let submittedAt = host
+        let gen = sessionGen
         let status = VTCompressionSessionEncodeFrame(
             session, imageBuffer: out,
             presentationTimeStamp: CMTime(value: pts, timescale: 90_000),
             duration: CMTime(value: 3000, timescale: 90_000),
             frameProperties: props, infoFlagsOut: nil) { [weak self] st, _, sample in
-                self?.encoded(status: st, sample: sample, pts: pts, submittedAt: submittedAt)
+                self?.encoded(status: st, sample: sample, pts: pts, submittedAt: submittedAt, gen: gen)
             }
         if status != noErr {
             inFlight -= 1
             dropped += 1
-            if status == kVTInvalidSessionErr { fail(.encoderBehind, "encoder session invalid") }
+            if status == kVTInvalidSessionErr { encoderInvalidated(host: host) }
         }
     }
 
@@ -730,9 +800,11 @@ final class MultiviewCompositor: @unchecked Sendable {
         let full = CGRect(x: 0, y: 0, width: MultiviewCompositeLayout.width, height: MultiviewCompositeLayout.height)
         var image = CIImage(color: .black).cropped(to: full)
         let rects = MultiviewCompositeLayout.tileRects(count: tiles.count, mode: mode)
-        // Android parity: 2 px gray on every tile, 4 px white on the focused one.
+        // Round 2 (Logan 2026-10-07, shared with Android): thin borders,
+        // 2 px gray on every tile, 4 px theme accent on the focused tile
+        // only, 4 px black gaps. White read as a thick frame on the TV.
         let border = CIColor(red: 0.5, green: 0.5, blue: 0.5)
-        let highlight = CIColor(red: 1, green: 1, blue: 1)
+        let highlight = CIColor(red: CGFloat(accent.0), green: CGFloat(accent.1), blue: CGFloat(accent.2))
         for (i, rect) in rects.enumerated() where i < tiles.count {
             let id = tiles[i]
             let tileArea = MultiviewCompositeLayout.flipped(rect)
@@ -761,6 +833,39 @@ final class MultiviewCompositor: @unchecked Sendable {
         return image
     }
 
+    /// kVTInvalidSessionErr (iOS invalidates the hardware encoder when
+    /// the app backgrounds, field log 2026-10-07 10:39:47): drop the
+    /// session and let the next tick rebuild it. More than 3 rebuilds in
+    /// 30 s is the encoder-behind stop.
+    private func encoderInvalidated(host: CFTimeInterval) {
+        if let session { VTCompressionSessionInvalidate(session) }
+        session = nil
+        inFlight = 0
+        rebuildTimes = rebuildTimes.filter { host - $0 < 30 } + [host]
+        encoderRebuilds += 1
+        debugLog("[MV-CAST] composite encoder session invalid; rebuilding (\(rebuildTimes.count) in 30 s)")
+        if rebuildTimes.count > 3 {
+            fail(.encoderBehind, "encoder session invalid \(rebuildTimes.count) times in 30 s")
+            return
+        }
+        lastRebuildAttempt = 0
+        lastOutputAt = max(lastOutputAt, host)
+    }
+
+    static func makeContext(software: Bool) -> CIContext {
+        if !software, let device = MTLCreateSystemDefaultDevice() {
+            return CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
+        }
+        return CIContext(options: [.cacheIntermediates: false, .useSoftwareRenderer: software])
+    }
+
+    /// Set from the main thread on app background / foreground.
+    func setBackgrounded(_ value: Bool) {
+        lock.lock(); backgroundedFlag = value; lock.unlock()
+    }
+
+    private var isBackgrounded: Bool { lock.lock(); defer { lock.unlock() }; return backgroundedFlag }
+
     private func makeEncoder() {
         var s: VTCompressionSession?
         let spec: [String: Any] = [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: true]
@@ -786,16 +891,23 @@ final class MultiviewCompositor: @unchecked Sendable {
         set(kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2)
         set(kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2)
         VTCompressionSessionPrepareToEncodeFrames(s)
+        sessionGen += 1
         session = s
     }
 
     /// VideoToolbox output (its own thread).
-    private func encoded(status: OSStatus, sample: CMSampleBuffer?, pts: Int64, submittedAt: CFTimeInterval) {
+    private func encoded(status: OSStatus, sample: CMSampleBuffer?, pts: Int64, submittedAt: CFTimeInterval, gen: Int) {
         let now = CACurrentMediaTime()
         composeQueue.async { [weak self] in
             guard let self else { return }
             self.inFlight = max(0, self.inFlight - 1)
-            guard status == noErr, sample != nil else { self.dropped += 1; return }
+            guard status == noErr, sample != nil else {
+                self.dropped += 1
+                if status == kVTInvalidSessionErr, self.session != nil, gen == self.sessionGen {
+                    self.encoderInvalidated(host: now)
+                }
+                return
+            }
             self.lastOutputAt = now
             self.encodedSinceStats += 1
             self.encodeMsSum += (now - submittedAt) * 1000

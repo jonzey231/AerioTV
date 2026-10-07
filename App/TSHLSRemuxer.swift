@@ -1297,7 +1297,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                    let reason = sourceChangeReason(pts: pts, sps: sps) {
                     beginSourceSwitch(reason: reason)
                 }
-                if let sps { lastSPS = sps }
+                if let sps {
+                    if sps != lastSPS, let pic = H264SPSTiming.picture(sps) { setSourceVideoPicture(pic) }
+                    lastSPS = sps
+                }
                 lastSeenVideoPTS = pts
                 if awaitingSwitchKeyframe {
                     // Only an IDR access unit that carries its own SPS (and
@@ -2962,6 +2965,19 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     private func setSourceAudioStreamType(_ type: UInt8) {
         airPlayLock.lock(); sourceAudioStreamTypeShared = type; airPlayLock.unlock()
+    }
+
+    private var sourceVideoPictureShared: H264SPSTiming.Picture?
+
+    private func setSourceVideoPicture(_ p: H264SPSTiming.Picture) {
+        airPlayLock.lock(); sourceVideoPictureShared = p; airPlayLock.unlock()
+    }
+
+    /// The source's H.264 picture (size, declared rate) from its latest
+    /// SPS, for the AirPlay Stream Info card; nil before the first SPS.
+    var sourceVideoPicture: H264SPSTiming.Picture? {
+        airPlayLock.lock(); defer { airPlayLock.unlock() }
+        return sourceVideoPictureShared
     }
 
     /// The PMT's first audio stream as the AirPlay log names it:
@@ -6318,6 +6334,12 @@ struct AVPlayerMultiviewTile: View {
     /// in quiesceForBackground.
     private func beginBackgroundGrace() {
         if airPlayDelivery.handleBackgroundEntry() { return }
+        // A Multiview composite reads this tile's frames and audio; the
+        // composite's keepalive holds the process (Logan 2026-10-07).
+        if MultiviewCompositeTaps.shared.currentTransport != nil {
+            debugLog("[MV-CAST] background: tile keeps playing for the composite channel=\(channelName)")
+            return
+        }
         guard !progressStore.isPiPActive else { return }
         guard tileError == nil, player != nil || statusText != nil else { return }
         guard !backgroundSuspended, graceStartedAt == nil else { return }
@@ -6409,6 +6431,7 @@ struct AVPlayerMultiviewTile: View {
         // A receiver is being served from this phone (plan section 6):
         // the keepalive holds the process, and quiescing would starve it.
         if airPlayDelivery.handleBackgroundEntry() { return }
+        if MultiviewCompositeTaps.shared.currentTransport != nil { return }
         guard !progressStore.isPiPActive else { return }
         guard tileError == nil, player != nil || statusText != nil else { return }
         backgroundResumeMs = progressStore.currentMs
@@ -7907,10 +7930,26 @@ enum H264SPSTiming {
         var isInterlaced: Bool
     }
 
+    /// Coded picture size (frame cropping applied, 4:2:0 assumed for the
+    /// crop units) and the timing when the SPS carries it.
+    struct Picture {
+        var width: Int
+        var height: Int
+        var fps: Double?
+        var isInterlaced: Bool
+    }
+
     /// `nal` is one SPS NAL unit WITHOUT its start code, first byte the
     /// NAL header. Returns nil when the SPS carries no timing info or
     /// cannot be parsed.
     static func parse(_ nal: [UInt8]) -> Info? {
+        guard let p = picture(nal), let fps = p.fps else { return nil }
+        return Info(fps: fps, isInterlaced: p.isInterlaced)
+    }
+
+    /// The SPS's picture size and (optional) timing; nil when it cannot
+    /// be parsed.
+    static func picture(_ nal: [UInt8]) -> Picture? {
         guard nal.count > 4, (nal[0] & 0x1F) == 7 else { return nil }
         // Strip emulation prevention bytes.
         var rbsp: [UInt8] = []
@@ -7953,15 +7992,21 @@ enum H264SPSTiming {
             }
             _ = try r.ue()               // max_num_ref_frames
             _ = try r.bit()              // gaps_in_frame_num_value_allowed_flag
-            _ = try r.ue()               // pic_width_in_mbs_minus1
-            _ = try r.ue()               // pic_height_in_map_units_minus1
+            let widthMbs = try r.ue() + 1    // pic_width_in_mbs_minus1
+            let heightUnits = try r.ue() + 1 // pic_height_in_map_units_minus1
             let frameMbsOnly = try r.bit()
             if frameMbsOnly == 0 { _ = try r.bit() }   // mb_adaptive_frame_field_flag
             _ = try r.bit()              // direct_8x8_inference_flag
+            var width = widthMbs * 16
+            var height = heightUnits * 16 * (frameMbsOnly == 0 ? 2 : 1)
             if try r.bit() == 1 {        // frame_cropping_flag
-                _ = try r.ue(); _ = try r.ue(); _ = try r.ue(); _ = try r.ue()
+                let l = try r.ue(), rt = try r.ue(), t = try r.ue(), b = try r.ue()
+                width -= 2 * (l + rt)
+                height -= 2 * (frameMbsOnly == 0 ? 2 : 1) * (t + b)
             }
-            guard try r.bit() == 1 else { return nil }  // vui_parameters_present_flag
+            let interlaced = frameMbsOnly == 0
+            let noTiming = Picture(width: width, height: height, fps: nil, isInterlaced: interlaced)
+            guard try r.bit() == 1 else { return noTiming }  // vui_parameters_present_flag
             if try r.bit() == 1 {        // aspect_ratio_info_present_flag
                 let idc = try r.bits(8)
                 if idc == 255 { _ = try r.bits(16); _ = try r.bits(16) }
@@ -7973,13 +8018,13 @@ enum H264SPSTiming {
                 if try r.bit() == 1 { _ = try r.bits(24) }  // colour description
             }
             if try r.bit() == 1 { _ = try r.ue(); _ = try r.ue() }  // chroma_loc
-            guard try r.bit() == 1 else { return nil }  // timing_info_present_flag
+            guard try r.bit() == 1 else { return noTiming }  // timing_info_present_flag
             let numUnitsInTick = try r.bits(32)
             let timeScale = try r.bits(32)
-            guard numUnitsInTick > 0, timeScale > 0 else { return nil }
+            guard numUnitsInTick > 0, timeScale > 0 else { return noTiming }
             let fps = Double(timeScale) / (2.0 * Double(numUnitsInTick))
-            guard fps >= 1, fps <= 480 else { return nil }
-            return Info(fps: VideoRateStandards.snap(fps), isInterlaced: frameMbsOnly == 0)
+            guard fps >= 1, fps <= 480 else { return noTiming }
+            return Picture(width: width, height: height, fps: VideoRateStandards.snap(fps), isInterlaced: interlaced)
         } catch {
             return nil
         }
