@@ -28,7 +28,9 @@ func debugLog(_ message: @autoclosure () -> String) {
     // expression is not evaluated until we are sure we want it (Release
     // builds still pay the line build, but that is the same cost the
     // file-write needs anyway).
-    let line = message()
+    // Bounded first (data: URIs collapsed, 2 KB cap) so neither the
+    // console hop nor the logger's regex sanitize ever sees a megabyte line.
+    let line = DebugLogger.bounded(message())
     #if DEBUG
     // stdout only matters in Debug (Xcode console attached). Stays
     // inside the DEBUG guard so Release builds do not pay the queue
@@ -244,8 +246,69 @@ final class DebugLogger: @unchecked Sendable {
         pattern: #"([?&](?:token|auth|authkey|sig|signature|secret|pass|pwd|hash|key)=)[^&\s]+"#,
         options: .caseInsensitive)
 
-    static func sanitize(_ message: String) -> String {
+    /// Longest line the log keeps, in UTF-8 bytes (the cut lands on a
+    /// character boundary just under it).
+    static let maxLineBytes = 2048
+
+    /// Collapses every `data:` URI to its scheme, MIME and decoded byte
+    /// length, then caps the line at `maxLineBytes`. Device log 2026-10-07
+    /// 16:55:36: three [AVP-WATCHDOG] errorLog lines carried an in-process
+    /// segment as `data:video/mp2t;base64,...` (1.77 MB each), rotated the
+    /// whole log (the Cast half of the test was lost) and, run through the
+    /// regex sanitize on the main thread, blocked it 382 ms (profile: 65 %
+    /// in icu RegexMatcher under AVPStallWatchdog.poll). Cheap on normal
+    /// lines: one substring search and a byte count.
+    static func bounded(_ message: String) -> String {
         var result = message
+        if result.contains("data:") { result = collapsingDataURIs(result) }
+        if result.utf8.count > maxLineBytes {
+            let total = result.utf8.count
+            // A cut inside a multi-byte character decodes as U+FFFD.
+            let head = String(decoding: result.utf8.prefix(maxLineBytes - 64), as: UTF8.self)
+            result = head + " ... [line truncated, \(total) B]"
+        }
+        return result
+    }
+
+    /// A URI for a log line: `data:` URIs as scheme, MIME and byte length
+    /// only (in-process HLS delivery inlines whole segments), others as is,
+    /// nil as "-".
+    static func loggableURI(_ uri: String?) -> String {
+        guard let uri else { return "-" }
+        return uri.hasPrefix("data:") ? collapsingDataURIs(uri) : uri
+    }
+
+    /// `data:<mime>[;base64],<payload>` -> `data:<mime>;base64 (<n> B)`.
+    /// The payload ends at whitespace, a quote, `)` `>` `|` or the end.
+    static func collapsingDataURIs(_ s: String) -> String {
+        var out = ""
+        var rest = s[...]
+        while let r = rest.range(of: "data:") {
+            out += rest[..<r.lowerBound]
+            let after = rest[r.upperBound...]
+            guard let comma = after.firstIndex(of: ","),
+                  after.distance(from: after.startIndex, to: comma) <= 128 else {
+                out += "data:"
+                rest = after
+                continue
+            }
+            let header = after[..<comma]
+            let isBase64 = header.hasSuffix(";base64")
+            let mime = isBase64 ? header.dropLast(7) : header
+            let payloadStart = after.index(after: comma)
+            let stops: Set<Character> = [" ", "\n", "\t", "\"", "'", ")", ">", "|"]
+            let payloadEnd = after[payloadStart...].firstIndex(where: { stops.contains($0) }) ?? after.endIndex
+            let chars = after.utf8.distance(from: payloadStart, to: payloadEnd)
+            let bytes = isBase64 ? chars * 3 / 4 : chars
+            out += "data:\(mime)\(isBase64 ? ";base64" : "") (\(bytes) B)"
+            rest = after[payloadEnd...]
+        }
+        out += rest
+        return out
+    }
+
+    static func sanitize(_ message: String) -> String {
+        var result = bounded(message)
         func apply(_ regex: NSRegularExpression, _ template: String) {
             let range = NSRange(result.startIndex..., in: result)
             result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: template)

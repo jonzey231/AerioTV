@@ -32,6 +32,10 @@ struct MultiviewLayoutView<Content: View>: View {
     let spotlightTileID: String?
     /// Issue #48: the user-selected layout shape for the current tile count.
     let layoutMode: MultiviewLayoutMode
+    /// Keep the grid branch at one tile (the phone composite is running):
+    /// the N=1 short-circuit below mounts the tile under a different view
+    /// identity, which restarts its player.
+    let keepGridAtOne: Bool
     @ViewBuilder var content: (MultiviewTile) -> Content
 
     init(
@@ -39,12 +43,14 @@ struct MultiviewLayoutView<Content: View>: View {
         spacing: CGFloat = MultiviewGridMath.defaultSpacing,
         spotlightTileID: String? = nil,
         layoutMode: MultiviewLayoutMode = .auto,
+        keepGridAtOne: Bool = false,
         @ViewBuilder content: @escaping (MultiviewTile) -> Content
     ) {
         self.tiles = tiles
         self.spacing = spacing
         self.spotlightTileID = spotlightTileID
         self.layoutMode = layoutMode
+        self.keepGridAtOne = keepGridAtOne
         self.content = content
     }
 
@@ -88,7 +94,7 @@ struct MultiviewLayoutView<Content: View>: View {
 
     var body: some View {
         GeometryReader { geom in
-            if tiles.count == 1, let sole = tiles.first {
+            if tiles.count == 1, !keepGridAtOne, let sole = tiles.first {
                 // N=1 short-circuit — critical for auto-PiP restore.
                 //
                 // At N=1 the sole tile IS the player view. Wrapping it

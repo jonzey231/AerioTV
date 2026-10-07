@@ -336,6 +336,10 @@ final class MultiviewCompositeSession: ObservableObject {
     }
     var isActive: Bool { transport != nil }
     var subtitle: String { channelNames.joined(separator: ", ") }
+    /// The one channel a composite down to a single tile shows full frame
+    /// (round 9): the card and sheet read it like a normal single-channel
+    /// session while the stream stays the composite. Nil with 2 or more.
+    var singleChannelName: String? { channelNames.count == 1 ? channelNames.first : nil }
 
     private var compositor: MultiviewCompositor?
     private var cancellables: Set<AnyCancellable> = []
@@ -417,9 +421,8 @@ final class MultiviewCompositeSession: ObservableObject {
     /// why would they continue on my phone?"). False on a restart, when
     /// the local Multiview itself closed, and for Play Here (the tiles
     /// become the local fullscreen player).
-    /// `surfaceHidden`: false when the one tile left becomes the receiver's
-    /// single-channel session (`handOffSingleTile`): it stays headless behind
-    /// the remote card, exactly like a single channel played on AirPlay.
+    /// `surfaceHidden`: false to leave the remaining tiles headless behind
+    /// the remote card for the receiver.
     func stop(_ reason: StopReason = .stopped, detail: String, endTransport: Bool = false,
               teardownTiles: Bool = true, surfaceHidden: Bool = true) {
         guard let t = transport else { return }
@@ -483,37 +486,6 @@ final class MultiviewCompositeSession: ObservableObject {
             }
         case .airPlay:
             AirPlayMonitor.shared.stop()
-        }
-    }
-
-    /// One tile left (round 7, device log 2026-10-07 15:47:22 Cast and
-    /// 15:53:31 AirPlay: "composite tiles changed: 1", the composite kept
-    /// running as a one-tile picture). The remaining channel goes to the
-    /// receiver as a single-channel session:
-    /// - Cast: the card's channel path (castPickedChannel). The new cast
-    ///   content stops this composite through the castingContent observer,
-    ///   which also ends the headless local Multiview: the receiver plays
-    ///   the channel from its own proxy ingest.
-    /// - AirPlay: the composite stops here, before the remaining tile
-    ///   re-mounts as the sole tile (it does on 2 to 1, 15:53:31.370
-    ///   "MV-Tile onAppear"). With no composite running, that tile is the
-    ///   AirPlay route owner again (ownsAirPlay: the audio tile), so its
-    ///   fresh tune takes the normal "route already selected: starting on
-    ///   LAN" handover, and it stays headless behind the card.
-    private func handOffSingleTile(_ tile: MultiviewTile) {
-        guard let t = transport else { return }
-        debugLog("[MV-CAST] composite: one tile left (\(tile.item.name)); the receiver plays it as a single channel (\(t == .cast ? "cast" : "airplay"))")
-        switch t {
-        case .cast:
-            AerioCastController.shared.castPickedChannel(tile.item)
-            // No castable stream: castPickedChannel surfaced it and the
-            // composite is still the cast content; end it like Stop.
-            if isActive {
-                stop(detail: "one tile left, not castable", endTransport: true)
-            }
-        case .airPlay:
-            stop(detail: "one tile left: \(tile.item.name) as a single channel on AirPlay",
-                 teardownTiles: false, surfaceHidden: false)
         }
     }
 
@@ -581,13 +553,16 @@ final class MultiviewCompositeSession: ObservableObject {
                     return
                 }
                 let ids = Array(tiles.prefix(MultiviewCompositeLayout.maxTiles)).map(\.id)
-                // Round 7: the composite takes 2 to 4 tiles. With one left
-                // the receiver plays that channel as a normal single-channel
-                // session instead of a one-tile composite.
-                if ids.count == 1, ids != self.tileIDs, let last = tiles.first {
-                    self.handOffSingleTile(last)
-                    return
-                }
+                // Round 9 (Logan 2026-10-07: removing down to one tile must
+                // be seamless on Cast and AirPlay): the composite keeps
+                // running with the one tile full frame (no padding, border,
+                // indicator or logo), so the receiver keeps the same media
+                // URL and never reloads. Round 7's hand-off to a fresh
+                // single-channel session left the TV dark (Cast 16:57:46.9
+                // to 16:58:05.9, proxy restart + receiver error 310 +
+                // 9 s start gate; AirPlay about 10 s). Add to Multiview
+                // returns to the grid in place; removing the last tile
+                // stops as before (tiles.isEmpty above).
                 if ids != self.tileIDs {
                     let shown = Array(tiles.prefix(MultiviewCompositeLayout.maxTiles))
                     let added = shown.filter { !self.tileIDs.contains($0.id) }
@@ -596,7 +571,7 @@ final class MultiviewCompositeSession: ObservableObject {
                     self.compositor?.setNames(Dictionary(shown.map { ($0.id, $0.item.name) }, uniquingKeysWith: { a, _ in a }))
                     self.compositor?.setTiles(ids)
                     if !added.isEmpty { self.loadLogos(added.map { ($0.id, $0.item.logoURL) }) }
-                    debugLog("[MV-CAST] composite tiles changed: \(ids.count)")
+                    debugLog("[MV-CAST] composite tiles changed: \(ids.count)\(ids.count == 1 ? " (one tile full frame, same stream, no receiver reload)" : "")")
                 }
             }
             .store(in: &cancellables)
@@ -1215,11 +1190,19 @@ final class MultiviewTileVideoDecoder: @unchecked Sendable {
                             Double(maxReorderTicks) / 90, Double(newest - target) / 90_000,
                             Double(newest - aus[0].dts) / 90_000,
                             stalls, session == nil ? "none" : "live", rebuilds, invalidations))
+            let summary = String(format: "shown %.1f fps decoded %d missed %d held %d buffered %.1f s behind %.1f s stalls %d",
+                                 Double(shown) / span, decoded, missed, held,
+                                 Double(newest - aus[0].dts) / 90_000, Double(newest - target) / 90_000, stalls)
+            lock.lock(); lastHealth = summary; lock.unlock()
             shown = 0
             decoded = 0
             maxReorderTicks = 0
         }
     }
+
+    /// The last 10 s decode summary, for the composite's health line.
+    private var lastHealth = "no decode stats yet"
+    var healthSummary: String { lock.lock(); defer { lock.unlock() }; return lastHealth }
 
     /// Decode restarts at the last keyframe at or before `src`.
     private func seek(to src: Int64) {
@@ -1477,6 +1460,10 @@ final class MultiviewCompositor: @unchecked Sendable {
     private var noPixelsLogged: Set<String> = []
     private var t0: CFTimeInterval = 0
     private var inFlight = 0
+    /// Deepest encoder queue since the last health line.
+    private var maxInFlightSeen = 0
+    /// Ingest bytes per tile since the last health line (lock).
+    private var ingestBytes: [String: Int] = [:]
     private var submitted = 0
     private var dropped = 0
     private var encodedSinceStats = 0
@@ -1834,6 +1821,7 @@ final class MultiviewCompositor: @unchecked Sendable {
         if forceKeyframe { key = true; forceKeyframe = false }
         let props: CFDictionary? = key ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil
         inFlight += 1
+        maxInFlightSeen = max(maxInFlightSeen, inFlight)
         submitted += 1
         lastPTS = pts
         let submittedAt = host
@@ -1901,14 +1889,17 @@ final class MultiviewCompositor: @unchecked Sendable {
         }
         let focusIndex = tiles.firstIndex(of: focus)
         let key = "\(rects)|\(tiles)|\(focus)|\(st)|\(aspects.sorted { $0.key < $1.key })|\(logoMap.keys.sorted())|\(focusIndex.map { nameMap[tiles[$0]] ?? "" } ?? "")"
+        // One tile (round 9): full frame like a single-channel cast, so no
+        // rounded clip, logo or focus indicator.
+        let single = tiles.count == 1
         if key != overlayKey {
             overlayKey = key
-            clipMaskImage = st.cornerPx > 0 ? MultiviewCompositeOverlay.clipMask(rects: rects, radius: st.cornerPx) : nil
-            logoOverlay = st.showLogos && !logoMap.isEmpty
+            clipMaskImage = !single && st.cornerPx > 0 ? MultiviewCompositeOverlay.clipMask(rects: rects, radius: st.cornerPx) : nil
+            logoOverlay = !single && st.showLogos && !logoMap.isEmpty
                 ? MultiviewCompositeOverlay.logos(rects: rects, tiles: tiles, aspects: aspects, logos: logoMap, style: st)
                 : nil
             let accentColor = UIColor(red: CGFloat(accent.0), green: CGFloat(accent.1), blue: CGFloat(accent.2), alpha: 1)
-            indicatorOverlay = focusIndex.flatMap { i in
+            indicatorOverlay = single ? nil : focusIndex.flatMap { i in
                 i < rects.count ? MultiviewCompositeOverlay.indicator(rect: rects[i], name: nameMap[focus] ?? "",
                                                                        style: st, accent: accentColor) : nil
             }
@@ -2062,6 +2053,24 @@ final class MultiviewCompositor: @unchecked Sendable {
         let enc = encodedSinceStats > 0 ? encodeMsSum / Double(encodedSinceStats) : 0
         debugLog(String(format: "[MV-CAST] composite fps=%.1f enc=%.1fms dropped=%d thermal=%d",
                         fps, enc, dropped, ProcessInfo.processInfo.thermalState.rawValue))
+        // Round 9 health line (Logan 2026-10-07: "Playback is a bit
+        // stuttery"): one line per 10 s that answers the stutter question
+        // for every tile (ingest rate, decode, held/missed pictures,
+        // buffer, stalls) and for the encoder (fps, drops, queue depth).
+        let (tiles, _) = snapshot()
+        lock.lock()
+        let bytes = ingestBytes
+        ingestBytes.removeAll()
+        let decs = tiles.map { decoders[$0] }
+        lock.unlock()
+        var parts: [String] = []
+        for (i, id) in tiles.enumerated() {
+            let kbps = Int(Double(bytes[id] ?? 0) * 8 / secs / 1000)
+            parts.append("tile \(i) \(id.prefix(8)): ingest \(kbps) kbps, \(decs[i]?.healthSummary ?? "no decoder")")
+        }
+        debugLog(String(format: "[MV-CAST] health encoder fps=%.1f dropped=%d queue=%d (max %d of %d) | ",
+                        fps, dropped, inFlight, maxInFlightSeen, Self.maxInFlight) + parts.joined(separator: " | "))
+        maxInFlightSeen = inFlight
         lastStatsAt = now
         encodedSinceStats = 0
         encodeMsSum = 0
@@ -2202,6 +2211,7 @@ final class MultiviewCompositor: @unchecked Sendable {
 
     /// A tile's raw ingest bytes (its remuxer queue).
     func tileBytes(tileID: String, data: Data) {
+        lock.lock(); ingestBytes[tileID, default: 0] += data.count; lock.unlock()
         decoder(tileID)?.feed(data)
         audioQueue.async { [weak self] in self?.handleTileBytes(tileID, [UInt8](data)) }
     }

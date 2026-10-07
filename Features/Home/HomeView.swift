@@ -6506,16 +6506,22 @@ struct MainTabView: View {
         case .cast:
             let device = castController.connectedDeviceName ?? "TV"
             let content = castController.castingContent
+            let castCompositeSingle = content?.mediaID == MultiviewCompositeSession.castMediaID
+                && mvComposite.transport == .cast && mvComposite.singleChannelName != nil
             RemoteSessionCard(
                 transport: .cast,
                 // Rule 1: a session connected with nothing playing reads as
                 // the invitation, not as a channel.
-                title: content?.title ?? "Casting to \(device)",
+                // A composite down to one tile (round 9) reads as that
+                // channel, like a normal cast, while the stream stays the
+                // composite.
+                title: (castCompositeSingle ? mvComposite.singleChannelName : nil) ?? content?.title ?? "Casting to \(device)",
                 // A web-receiver channel flip replaces this with
                 // "Switching to <channel>" until the receiver plays. A
                 // Multiview composite lists its channels.
                 status: content == nil ? "Select a Channel"
                     : (content?.mediaID == MultiviewCompositeSession.castMediaID && mvComposite.transport == .cast
+                        && !castCompositeSingle
                         ? mvComposite.subtitle : castController.castStatusLine(deviceName: device)),
                 artURL: content?.artURL,
                 isPlaying: castController.remoteIsPlaying,
@@ -6576,9 +6582,10 @@ struct MainTabView: View {
                 let composite = mvComposite.transport == .airPlay
                 RemoteSessionCard(
                     transport: .airPlay,
-                    title: composite ? "Multiview" : (item?.name ?? "AirPlay"),
+                    title: composite ? (mvComposite.singleChannelName ?? "Multiview") : (item?.name ?? "AirPlay"),
                     status: probing ? "Connecting to AirPlay"
-                        : (composite ? mvComposite.subtitle : airPlay.statusLine(playing: airPlayPlayingStatus)),
+                        : (composite && mvComposite.singleChannelName == nil
+                            ? mvComposite.subtitle : airPlay.statusLine(playing: airPlayPlayingStatus)),
                     artURL: composite ? nil : item?.logoURL?.absoluteString,
                     isPlaying: airPlay.isPlaying,
                     // Nothing to pause until the receiver has the video.
@@ -6615,7 +6622,8 @@ struct MainTabView: View {
             RemoteSessionSheet(
                 transport: .cast,
                 mode: content == nil ? .idle : .playing,
-                channelName: content?.title ?? device,
+                channelName: (castComposite && mvComposite.transport == .cast ? mvComposite.singleChannelName : nil)
+                    ?? content?.title ?? device,
                 statusText: content == nil ? "Connected. Select a channel to start."
                     : castController.castStatusLine(deviceName: device),
                 artURL: content?.artURL,
@@ -6624,7 +6632,7 @@ struct MainTabView: View {
                 // channels (round 8: the list kept a removed channel, since
                 // the cast content's subtitle is set once at the load).
                 fallbackSubtitle: castComposite && mvComposite.transport == .cast
-                    ? mvComposite.subtitle : content?.subtitle,
+                    ? (mvComposite.singleChannelName == nil ? mvComposite.subtitle : nil) : content?.subtitle,
                 isPlaying: castController.remoteIsPlaying,
                 item: item,
                 onTogglePlayPause: { castController.remoteTogglePlayPause() },
@@ -6679,13 +6687,13 @@ struct MainTabView: View {
             RemoteSessionSheet(
                 transport: .airPlay,
                 mode: idle ? .idle : (airPlayIsProbing ? .connecting : .playing),
-                channelName: idle ? (airPlay.deviceName ?? "AirPlay") : (composite ? "Multiview" : (item?.name ?? "AirPlay")),
+                channelName: idle ? (airPlay.deviceName ?? "AirPlay") : (composite ? (mvComposite.singleChannelName ?? "Multiview") : (item?.name ?? "AirPlay")),
                 statusText: idle ? "Connected. Select a channel to start."
                     : (airPlayIsProbing ? "Connecting to AirPlay"
                         : airPlay.statusLine(playing: airPlayPlayingStatus)),
                 artURL: item?.logoURL?.absoluteString,
                 channelID: item?.id,
-                fallbackSubtitle: composite ? mvComposite.subtitle : nil,
+                fallbackSubtitle: composite && mvComposite.singleChannelName == nil ? mvComposite.subtitle : nil,
                 isPlaying: airPlay.isPlaying,
                 item: item,
                 onTogglePlayPause: { airPlay.togglePlayPause() },

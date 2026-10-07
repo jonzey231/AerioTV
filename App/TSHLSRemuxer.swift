@@ -255,15 +255,20 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     /// Minimum seconds between segment cuts; the actual cut lands on the
     /// FIRST keyframe at or after this much elapsed PTS.
-    private var targetSegmentSeconds: Double { compositeSource ? 1.0 : 2.0 }
+    private let targetSegmentSeconds = 2.0
     /// The phone's own Multiview composite (loopback `/multiview.ts`, the
-    /// AirPlay composite tile), not a channel. Its encoder places a key
-    /// frame every second (MultiviewKeyframePolicy) and its loopback feed
-    /// never bursts, so the LAN copy uses 1 s cuts, TARGETDURATION 1 and a
-    /// 4 s hold-back floor (round 8, device log 2026-10-07 16:43:33: 2 s
-    /// cuts, TARGETDURATION 4 and the 12 s channel hold-back put the Apple
-    /// TV about 10 s behind a tap). Channels, including every Roku and
-    /// single-channel AirPlay tune, keep the values below unchanged.
+    /// AirPlay composite tile), not a channel. Round 8 gave it 1 s cuts,
+    /// TARGETDURATION 1 and a 4 s hold-back floor; round 9 reverts that
+    /// (Logan 2026-10-07 17:00: "lots of stalls" on the 3-tile AirPlay
+    /// composite). Device log r10 16:59:12 to 17:02:21: the LAN reservoir
+    /// sat at 1 seg / 1.0 s, "LAN reserve released: no segment for 1.0 s"
+    /// fired about every 30 s (a 1.03 s cut alone crosses the 1 s
+    /// threshold) and each release was followed by 1 to 2 s of
+    /// "rebuilding" with the edge held, while TARGETDURATION 1 leaves the
+    /// Apple TV only 1.5 s before it treats an unchanged playlist as a
+    /// stall (-12888). The composite is back on the proven channel values
+    /// (2 s cuts, TARGETDURATION 4, 8 s floor, 12 s hold-back). Kept as a
+    /// flag for logging and for a later measured change.
     private let compositeSource: Bool
     /// Startup ramp (2026-08-25 ESPN capture): the 6.15s tune-in was
     /// 1.9s connect + 4s of accumulating readyThreshold 2.0s segments.
@@ -2204,6 +2209,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         spillSegment(seq: nextSeq, data: data, duration: duration)
         if inProcessDelivery { deliveryBase64[nextSeq] = data.base64EncodedString() }
         nextSeq += 1
+        closedSegmentCount.set(Double(nextSeq))
         let ramCap = retainedRAMCap ?? (lanListener != nil ? lanRingSegments : maxBufferedSegments)
         if segments.count > ramCap {
             let evicted = segments.prefix(segments.count - ramCap)
@@ -2315,6 +2321,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// 18:07: the value grew from 3 to 4 when a 3.92 s segment closed and
     /// the poll cadence went with it).
     let advertisedTargetDuration = DoubleBox(2.0)
+    /// Segments closed so far (any thread). The tile watchdog reads a
+    /// growing count as "the playlist is still filling toward the join
+    /// offset", not a dead start.
+    let closedSegmentCount = DoubleBox(0)
+    /// Media segments the loopback server answered 200 (any thread). A
+    /// start that fetched segments was not a proxy capturing 127.0.0.1.
+    let loopbackSegmentsServed = DoubleBox(0)
     /// LAN (AirPlay receiver) TARGETDURATION: a constant for the session.
     /// 4 covers the fMP4/HEVC arm's keyframe cuts (cut at or after 2.0 s,
     /// 3.8 s segments all session on Sky Sports UHD, device log
@@ -2322,7 +2335,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// TS arm's 2.5 s cuts (EXTINF rounded to the nearest integer must be
     /// <= TARGETDURATION); a longer segment is logged once, never
     /// re-advertised.
-    private var lanTargetDuration: Int { compositeSource ? 1 : 4 }
+    private let lanTargetDuration = 4
     /// Segment seq -> wall clock of its close, for the LAN publication
     /// delay. Touched only on `queue`; pruned with the RAM ring.
     private var segmentCloseWall: [Int: Date] = [:]
@@ -2728,7 +2741,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// Device log 2026-09-26 11:44: proxy ingest gaps of 4.0, 4.7, 7.8 and
     /// 15.6 s within 30 s overran the old 20 s ceiling.
     private let lanRingSegments = 24
-    private var lanHoldBackFloor: Double { compositeSource ? 4.0 : 8.0 }
+    private let lanHoldBackFloor = 8.0
     private let lanHoldBackCeiling = 40.0
     /// Touched only on `queue`. Monotonic per LAN session (only grows), so
     /// a receiver that re-joins after a stall joins at least as deep.
@@ -3021,8 +3034,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if ramping { why += String(format: " (ramping toward %.1f s)", targetHoldBack) }
         lanHoldBackReason = why
         lanHoldBack.set(hb)
-        debugLog(String(format: "[TS-REMUX] LAN hold-back %.1f s (%@; ceiling %.0f s); LAN playlist unpaced, RAM ring %d segs, publication delay %.1f s",
-                        hb, why, lanHoldBackCeiling, lanRingSegments, lanPublicationDelay))
+        debugLog(String(format: "[TS-REMUX] LAN hold-back %.1f s (%@; ceiling %.0f s); LAN playlist unpaced, RAM ring %d segs, publication delay %.1f s%@",
+                        hb, why, lanHoldBackCeiling, lanRingSegments, lanPublicationDelay,
+                        compositeSource ? " (Multiview composite)" : ""))
     }
     private let airPlayLock = NSLock()
     private var sourceAudioStreamTypeShared: UInt8 = 0
@@ -3611,7 +3625,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
         if let ev = item.errorLog()?.events.last {
             out += " errorLog last: status=\(ev.errorStatusCode) domain=\(ev.errorDomain)"
-            out += " comment=\(ev.errorComment ?? "-") uri=\(ev.uri ?? "-")"
+            out += " comment=\(ev.errorComment ?? "-") uri=\(DebugLogger.loggableURI(ev.uri))"
         } else {
             out += " errorLog: none"
         }
@@ -3702,6 +3716,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             // spent 15 s earlier, so "AVPlayer stopped fetching" and
             // "AVPlayer kept fetching" looked identical in the log
             // (session6.txt, exactly 24 GET lines, last at 17:58:40).
+            if !lan, r.status == 200, path.hasPrefix("/seg") {
+                self.loopbackSegmentsServed.set(self.loopbackSegmentsServed.get() + 1)
+            }
             let isPlaylistPoll = path.hasSuffix("live.m3u8")
             let throttledPoll = isPlaylistPoll
                 && Date().timeIntervalSince(self.lastPollLogAt) > 10
@@ -4036,14 +4053,26 @@ final class AVPStallWatchdog {
             // app-side clue; the item's own logs name playlist parse
             // errors, segment fetch failures and format rejections).
             if let events = item.errorLog()?.events, !events.isEmpty {
+                // Identical consecutive events collapse to one line with a
+                // count (device log 2026-10-07: six identical -16832 lines
+                // per watchdog verdict).
+                var lines: [(text: String, count: Int)] = []
                 for e in events.suffix(6) {
-                    debugLog("[AVP-WATCHDOG] errorLog: code=\(e.errorStatusCode) domain=\(e.errorDomain) uri=\(e.uri ?? "-") comment=\(e.errorComment ?? "-")")
+                    let text = "code=\(e.errorStatusCode) domain=\(e.errorDomain) uri=\(DebugLogger.loggableURI(e.uri)) comment=\(e.errorComment ?? "-")"
+                    if let last = lines.last, last.text == text {
+                        lines[lines.count - 1].count += 1
+                    } else {
+                        lines.append((text, 1))
+                    }
+                }
+                for l in lines {
+                    debugLog("[AVP-WATCHDOG] errorLog: \(l.text)\(l.count > 1 ? " (x\(l.count))" : "")")
                 }
             } else {
                 debugLog("[AVP-WATCHDOG] errorLog: none")
             }
             if let a = item.accessLog()?.events.last {
-                debugLog("[AVP-WATCHDOG] accessLog: segments=\(a.numberOfMediaRequests) bytes=\(a.numberOfBytesTransferred) stalls=\(a.numberOfStalls) startup=\(String(format: "%.2f", a.startupTime)) indicated=\(Int(a.indicatedBitrate)) observed=\(Int(a.observedBitrate)) uri=\(a.uri ?? "-")")
+                debugLog("[AVP-WATCHDOG] accessLog: segments=\(a.numberOfMediaRequests) bytes=\(a.numberOfBytesTransferred) stalls=\(a.numberOfStalls) startup=\(String(format: "%.2f", a.startupTime)) indicated=\(Int(a.indicatedBitrate)) observed=\(Int(a.observedBitrate)) uri=\(DebugLogger.loggableURI(a.uri))")
             } else {
                 debugLog("[AVP-WATCHDOG] accessLog: none")
             }
@@ -6155,6 +6184,16 @@ struct AVPlayerMultiviewTile: View {
             if reason.contains("never became ready"), reason.contains(".unknown"), airPlayServed {
                 debugLog("[AVP-MV] loopback start not counted as failed (AirPlay route / external playback active); retry stays on loopback title=\(channelName)")
             } else if reason.contains("never became ready"), reason.contains(".unknown"),
+                      let mux = remuxer, !mux.inProcessDelivery, mux.loopbackSegmentsServed.get() > 0 {
+                // Device log 2026-10-07 16:55:01 to 16:55:37 (ESPNU HD
+                // tile): loopback served seg0 to seg5 with 200 and the item
+                // still sat at .unknown, because its 18 s learned join
+                // offset exceeded the playlist (AVFoundation -16832
+                // "restarting 8.0 s from end of live playlist"). Blaming
+                // loopback switched the retry to in-process delivery,
+                // whose segments are data: URIs (1.77 MB log lines).
+                debugLog("[AVP-MV] loopback served \(Int(mux.loopbackSegmentsServed.get())) segment(s); not a loopback capture, retry stays on loopback title=\(channelName)")
+            } else if reason.contains("never became ready"), reason.contains(".unknown"),
                let mux = remuxer, !mux.inProcessDelivery {
                 // Loopback fetches never answered: a proxy or VPN is
                 // capturing 127.0.0.1 (see HLSDelivery). The retry hands
@@ -7465,7 +7504,18 @@ struct AVPlayerMultiviewTile: View {
         let progressServer = mkvServer
         let watchdog = AVPStallWatchdog(
             player: avPlayer, item: playerItem, label: "tile \(channelName)",
-            mediaBytes: progressServer.map { s in { s.mediaBytesStreamed } },
+            // TS remux tiles: closed segments are the progress signal. A
+            // tile whose learned join offset (up to 18 s) is longer than
+            // the playlist sits at .unknown while the playlist fills; the
+            // watchdog's 12 s "at .unknown, stalled" verdict killed every
+            // such start (ESPNU HD, device log 2026-10-07 16:55:01,
+            // 16:56:39, 16:57:33: 6 segments served, isReadyForDisplay at
+            // +9.2 s, then torn down at +12 s; the composite's picture of
+            // that tile froze for 30 s per cycle). With segments still
+            // closing the watchdog waits ("media stream advancing") up to
+            // its 60 s cap.
+            mediaBytes: progressServer.map { s in { s.mediaBytesStreamed } }
+                ?? remuxer.map { mux in { [weak mux] in Int64(mux?.closedSegmentCount.get() ?? 0) } },
             onDead: { failOrFallback($0) })
         if let mux = remuxer {
             watchdog.audioOnlyExpected = { [weak mux] in mux?.isAudioOnlyProgram ?? false }

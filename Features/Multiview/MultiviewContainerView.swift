@@ -35,6 +35,18 @@ struct MultiviewContainerView: View {
     @StateObject private var compositeProgress = PlayerProgressStore()
     #endif
 
+    /// Round 9: while a phone composite feeds a receiver the tiles stay in
+    /// the grid branch at one tile, so the remaining tile is not re-mounted
+    /// (a re-mount restarts its player and ingest, and the composite's
+    /// picture of it would hold for the channel's first-byte time).
+    private var compositeKeepsGrid: Bool {
+        #if os(iOS)
+        mvComposite.isActive
+        #else
+        false
+        #endif
+    }
+
     /// When `true`, the add-channel sheet is presented. Wired to the
     /// transport bar's "Add Tile" button.
     @State private var showAddSheet: Bool = false
@@ -2061,7 +2073,7 @@ struct MultiviewContainerView: View {
         // last tile. User-facing fullscreen-within-grid
         // (fullscreenTileID set) is still technically N>1 behind
         // the scenes, so we leave `isSoleTile = false` there.
-        let isSole = PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1
+        let isSole = PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1 && !compositeKeepsGrid
 
         if let fullscreenID = store.fullscreenTileID,
            let fullscreenTile = store.tiles.first(where: { $0.id == fullscreenID }) {
@@ -2072,7 +2084,7 @@ struct MultiviewContainerView: View {
             // they're already at live edge.
             MultiviewTileView(tile: fullscreenTile, store: store)
         } else {
-            let grid = MultiviewLayoutView(tiles: store.tiles, spacing: tileSpacing, spotlightTileID: store.spotlightTileID, layoutMode: layoutMode) { tile in
+            let grid = MultiviewLayoutView(tiles: store.tiles, spacing: tileSpacing, spotlightTileID: store.spotlightTileID, layoutMode: layoutMode, keepGridAtOne: compositeKeepsGrid) { tile in
                 #if os(tvOS)
                 MultiviewTileView(tile: tile, store: store, isSoleTile: isSole)
                     // Issue #30: during Move Tile (relocate) mode prefer focus

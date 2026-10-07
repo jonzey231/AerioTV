@@ -37,11 +37,13 @@ enum MultiviewCompositeLayout {
     static let borderWidth: CGFloat = 2
     static let focusBorderWidth: CGFloat = 4
 
-    /// Tile rects in tile order for `count` tiles (2 to 4), in the
+    /// Tile rects in tile order for `count` tiles (1 to 4; one is full frame), in the
     /// composite's top-left-origin pixel space, snapped to whole pixels.
     static func tileRects(count: Int, mode: MultiviewLayoutMode = .auto, spacing: CGFloat = spacing) -> [CGRect] {
         let n = max(0, min(count, maxTiles))
         let container = CGSize(width: width, height: height)
+        // One tile left (round 9): the whole frame, no gutter or padding.
+        if n == 1 { return [CGRect(origin: .zero, size: container)] }
         return MultiviewGridMath.rects(for: mode, count: n, in: container, spacing: spacing)
             .map { $0.integral.intersection(CGRect(origin: .zero, size: container)) }
     }
