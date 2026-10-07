@@ -719,15 +719,25 @@ final class AerioCastController: NSObject, ObservableObject {
     /// load (the startup buffering is where the 9 s were lost), and on
     /// every focus and layout change.
     ///
-    /// The threshold is deliberately above the receiver's measured settle
-    /// point after a seek: the round 7 nudge (15:46:38) landed at 196.6
-    /// against a seek end of 201.0, 4.4 s behind, because the receiver
-    /// re-buffers about 3.5 s after any seek (seeking 15:46:38.9, playing
-    /// 15:46:42.4 with 5.5 s buffered ahead). A lower threshold would seek
-    /// again on every tap and re-buffer back to the same place.
-    static let compositeNudgeThresholdSeconds: Double = 6.0
+    /// Round 8 (device log 2026-10-07 16:36 to 16:41, receiver gh-pages
+    /// 0ba57941 with rebufferingGoal 1, bufferingGoal 3): the receiver
+    /// joined and stayed 3.7 to 4.0 s behind the live seek end (startup
+    /// 16:36:47.157 behind=3.7 s, focus 16:38:29.851 behind=4.0 s, layout
+    /// 16:39:04.444 behind=3.9 s, 16:39:51.436 behind=3.8 s), so the TV ran
+    /// 6.9 to 7.2 s behind the composite live point ("receiver lag"), the
+    /// 7 s Logan timed, and the old 6 s threshold never nudged. The
+    /// receiver's own status says why: its playhead sits about 3 s below
+    /// its seekable end (t=110.609, seek end 113.566 at 16:38:30.181), the
+    /// receiver page's composite "behind 3" start target taken from a seek
+    /// end that already sits the presentation delay behind the newest
+    /// segment. With a 1 s re-buffering goal a seek now settles about 1 s
+    /// after it lands (it was 3.5 s on Shaka's defaults, round 7), so the
+    /// nudge fires above 2 s and aims 0.5 s inside the seek end: the
+    /// startup catch-up brings the TV to about 4 s behind the composite
+    /// and later focus changes find it under the threshold (no re-seek).
+    static let compositeNudgeThresholdSeconds: Double = 2.0
     /// Where the nudge aims: just inside the live seek end.
-    static let compositeNudgeMarginSeconds: Double = 0.25
+    static let compositeNudgeMarginSeconds: Double = 0.5
     /// The composite playlists' HOLD-BACK: three targets of the composite
     /// profile's nearest-second TARGETDURATION of 1 (CastSegmentProfile).
     static let compositeHoldBackSeconds: Double = 3.0
@@ -3377,6 +3387,9 @@ struct MultiviewCompositePreviewGrid: View {
     /// Live frames (Logan 2026-10-07): the composite itself, scaled down,
     /// so the sheet shows what the receiver shows.
     @ObservedObject private var composite = MultiviewCompositeSession.shared
+    /// The live frames publish here (about 5 fps), so only this grid
+    /// re-renders per frame, not the sheet around it.
+    @ObservedObject private var preview = MultiviewCompositePreview.shared
     @ObservedObject private var theme = ThemeManager.shared
 
     /// The tile picked up by the long-press (drag source or Move Tile).
@@ -3410,7 +3423,7 @@ struct MultiviewCompositePreviewGrid: View {
         // Padding Between Tiles), so the hit rects match the frame.
         let rects = MultiviewCompositeLayout.tileRects(count: tiles.count, mode: mode,
                                                        spacing: MultiviewCompositeStyle.current().spacingPx)
-        let live = composite.previewImage
+        let live = preview.image
         GeometryReader { geo in
             let scale = geo.size.width / CGFloat(MultiviewCompositeLayout.width)
             let scaled = rects.map { CGRect(x: $0.minX * scale, y: $0.minY * scale,
@@ -3469,9 +3482,14 @@ struct MultiviewCompositePreviewGrid: View {
                     .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
                     .onChanged { value in
                         switch value {
-                        case .first(true):
-                            longPressFired = true
                         case .second(true, let drag):
+                            // The press held for the minimum duration. Not
+                            // `.first(true)`: a LongPressGesture reports
+                            // that the moment the finger goes down, so every
+                            // plain tap was marked as a long-press and
+                            // ignored (round 8: no tap ever moved the audio,
+                            // Logan had to use Make Audio).
+                            longPressFired = true
                             guard let drag else { return }
                             if lifted == nil || !dragging {
                                 if let id = hit(drag.startLocation) {
@@ -3528,6 +3546,7 @@ struct MultiviewCompositePreviewGrid: View {
                         if id != from { swapTiles(from, id) } else { lifted = nil }
                         return
                     }
+                    debugLog("[MV-CAST] preview tap tile=\(id): audio")
                     store.setAudio(to: id)
                 }
             )

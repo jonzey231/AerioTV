@@ -280,6 +280,14 @@ final class MultiviewCompositeTaps: @unchecked Sendable {
 /// for a receiver without native Multiview; stopped by the remote card's
 /// Stop, the cast/AirPlay session ending, the local Multiview closing, or
 /// the resource rules.
+/// The composite's live preview frames, observed only by the preview grid.
+@MainActor
+final class MultiviewCompositePreview: ObservableObject {
+    static let shared = MultiviewCompositePreview()
+    @Published var image: UIImage?
+    private init() {}
+}
+
 @MainActor
 final class MultiviewCompositeSession: ObservableObject {
     static let shared = MultiviewCompositeSession()
@@ -294,8 +302,20 @@ final class MultiviewCompositeSession: ObservableObject {
     /// AirPlay: the loopback TS the hidden composite tile plays.
     @Published private(set) var airPlayTileURL: URL?
     /// Scaled-down live frames of the composite (about 5 fps) for the
-    /// remote controls sheet's preview grid.
-    @Published fileprivate(set) var previewImage: UIImage?
+    /// remote controls sheet's preview grid. Published on its own object
+    /// (MultiviewCompositePreview), not on this session: MainTabView
+    /// observes this session, so a frame published here re-rendered the
+    /// whole tab root and the remote controls sheet about 5 times a second
+    /// (device log 2026-10-07 round 8: "[TAB] bodies/1s ... MainTabView=6"
+    /// for the whole composite cast against 2 before it), which rebuilt
+    /// the sheet's Layout menu mid-tap (flicker, taps lost).
+    var previewImage: UIImage? {
+        get { MultiviewCompositePreview.shared.image }
+        set {
+            if newValue == nil, MultiviewCompositePreview.shared.image == nil { return }
+            MultiviewCompositePreview.shared.image = newValue
+        }
+    }
     /// The composite's grid layout for this session (Layout row in the
     /// remote controls sheet). Seeded from the stored preference at start.
     @Published private(set) var layoutMode: MultiviewLayoutMode = .auto

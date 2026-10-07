@@ -6620,7 +6620,11 @@ struct MainTabView: View {
                     : castController.castStatusLine(deviceName: device),
                 artURL: content?.artURL,
                 channelID: content?.mediaID,
-                fallbackSubtitle: content?.subtitle,
+                // A Multiview composite lists the composite's current
+                // channels (round 8: the list kept a removed channel, since
+                // the cast content's subtitle is set once at the load).
+                fallbackSubtitle: castComposite && mvComposite.transport == .cast
+                    ? mvComposite.subtitle : content?.subtitle,
                 isPlaying: castController.remoteIsPlaying,
                 item: item,
                 onTogglePlayPause: { castController.remoteTogglePlayPause() },

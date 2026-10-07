@@ -255,7 +255,16 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     /// Minimum seconds between segment cuts; the actual cut lands on the
     /// FIRST keyframe at or after this much elapsed PTS.
-    private let targetSegmentSeconds = 2.0
+    private var targetSegmentSeconds: Double { compositeSource ? 1.0 : 2.0 }
+    /// The phone's own Multiview composite (loopback `/multiview.ts`, the
+    /// AirPlay composite tile), not a channel. Its encoder places a key
+    /// frame every second (MultiviewKeyframePolicy) and its loopback feed
+    /// never bursts, so the LAN copy uses 1 s cuts, TARGETDURATION 1 and a
+    /// 4 s hold-back floor (round 8, device log 2026-10-07 16:43:33: 2 s
+    /// cuts, TARGETDURATION 4 and the 12 s channel hold-back put the Apple
+    /// TV about 10 s behind a tap). Channels, including every Roku and
+    /// single-channel AirPlay tune, keep the values below unchanged.
+    private let compositeSource: Bool
     /// Startup ramp (2026-08-25 ESPN capture): the 6.15s tune-in was
     /// 1.9s connect + 4s of accumulating readyThreshold 2.0s segments.
     /// The first few segments therefore cut at the first keyframe after
@@ -862,6 +871,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         self.sourceURLStorage = sourceURL
         self.headers = headers
         self.rewindWindowSeconds = rewindWindowSeconds
+        self.compositeSource = sourceURL.host == "127.0.0.1" && sourceURL.path == "/multiview.ts"
         let proxy = HLSDelivery.systemProxyDescription()
         let forced = HLSDelivery.forceInProcessNextStart
         HLSDelivery.forceInProcessNextStart = false
@@ -2312,7 +2322,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// TS arm's 2.5 s cuts (EXTINF rounded to the nearest integer must be
     /// <= TARGETDURATION); a longer segment is logged once, never
     /// re-advertised.
-    private let lanTargetDuration = 4
+    private var lanTargetDuration: Int { compositeSource ? 1 : 4 }
     /// Segment seq -> wall clock of its close, for the LAN publication
     /// delay. Touched only on `queue`; pruned with the RAM ring.
     private var segmentCloseWall: [Int: Date] = [:]
@@ -2718,7 +2728,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// Device log 2026-09-26 11:44: proxy ingest gaps of 4.0, 4.7, 7.8 and
     /// 15.6 s within 30 s overran the old 20 s ceiling.
     private let lanRingSegments = 24
-    private let lanHoldBackFloor = 8.0
+    private var lanHoldBackFloor: Double { compositeSource ? 4.0 : 8.0 }
     private let lanHoldBackCeiling = 40.0
     /// Touched only on `queue`. Monotonic per LAN session (only grows), so
     /// a receiver that re-joins after a stall joins at least as deep.
