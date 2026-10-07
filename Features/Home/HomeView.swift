@@ -9567,14 +9567,26 @@ final class TabBarCollapseState: ObservableObject {
     /// collapsed; the minimized button draws the selected tab instead.
     private static func setCollapsedMask(_ bar: UIView, on: Bool) {
         if on {
+            // The mask alone still left the bar's glass capsule drawn at the
+            // parked mini scale (screenshot 2026-10-07 12:03, Settings with
+            // the AirPlay and Kept Live cards: a dark rounded block from
+            // about x 49 to 92 pt beside the 48 pt button, which is the
+            // 398 pt capsule scaled 0.109 around the button's anchor; the
+            // log shows the bar parked at frame 46,886 48x48 with the mask
+            // on). The glass is composited outside the bar's own layer mask,
+            // so the collapsed bar is also hidden outright. isHidden on the
+            // view (not the tab bar visibility API) leaves the tab bar
+            // controller's layout and insets alone, so nothing reflows.
+            if !bar.isHidden { bar.isHidden = true }
             guard bar.layer.mask?.name != collapsedMaskName else { return }
             let mask = CALayer()
             mask.name = collapsedMaskName
             mask.frame = .zero
             bar.layer.mask = mask
-            debugLog("[TABBAR] collapsed mask on alpha=\(bar.alpha)")
+            debugLog("[TABBAR] collapsed mask on alpha=\(bar.alpha) hidden=\(bar.isHidden)")
         } else if bar.layer.mask?.name == collapsedMaskName {
             bar.layer.mask = nil
+            bar.isHidden = false
         }
     }
     private static let collapsedMaskName = "aerio.tabbar.collapsed"

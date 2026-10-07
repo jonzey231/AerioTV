@@ -198,6 +198,16 @@ final class AirPlayMonitor: ObservableObject {
         }
     }
 
+    /// "Play on <receiver>" in the play-where prompt is an explicit pick of
+    /// that receiver (device log 2026-10-07 12:00:35: the pick came after
+    /// the X latch at 12:00:29 and the player was pinned local anyway, so
+    /// ESPN2 HD played on the phone with its audio on the Apple TV).
+    func userPickedReceiver() {
+        guard userEndedRouteUID != nil, AirPlayReceiverResolver.currentAirPlayOutput() != nil else { return }
+        clearUserEnded("Play on receiver picked")
+        evaluate()
+    }
+
     private func clearUserEnded(_ why: String) {
         latchIsPerTune = false
         perTuneSawPlayer = false
@@ -489,6 +499,18 @@ final class AirPlayMonitor: ObservableObject {
         MultiviewCompositeSession.shared.stop(detail: "airplay session ended")
         hostsHeadless = false
         headlessTune = false
+        // End the receiver's video session from the sender before the tile
+        // goes (device log 2026-10-07 12:01:13, Play Here for ESPN HD while
+        // ESPN2 HD played on the Apple TV: the tile was kept live as Kept
+        // Live, its LAN listener closed, and the Apple TV sat paused on the
+        // last picture). Pausing and turning external playback off on the
+        // external player is the AVPlayer way to hand the receiver back.
+        if let p = player, p.isExternalPlaybackActive || p.allowsExternalPlayback {
+            let wasExternal = p.isExternalPlaybackActive
+            p.pause()
+            p.allowsExternalPlayback = false
+            if wasExternal { debugLog("[AVP-AIRPLAY] receiver session ended from the phone (external playback off)") }
+        }
         detach(silently: true)
         PlayerSession.shared.stop()
         NowPlayingManager.shared.stop()

@@ -274,18 +274,8 @@ final class MultiviewCompositeSession: ObservableObject {
     /// Scaled-down live frames of the composite (about 5 fps) for the
     /// remote controls sheet's preview grid.
     @Published fileprivate(set) var previewImage: UIImage?
-    /// The app is in the background and the tiles stopped delivering
-    /// pictures (iOS gives a background app no video decode): the
-    /// composite holds its last frame with a Paused label and silence
-    /// until the app returns (Logan 2026-10-07 lock-screen freeze).
-    @Published private(set) var pausedInBackground = false
-
-    static let pausedInBackgroundLine = "Paused in background"
-
     var isActive: Bool { transport != nil }
-    var subtitle: String {
-        pausedInBackground ? Self.pausedInBackgroundLine : channelNames.joined(separator: ", ")
-    }
+    var subtitle: String { channelNames.joined(separator: ", ") }
 
     private var compositor: MultiviewCompositor?
     private var cancellables: Set<AnyCancellable> = []
@@ -311,13 +301,6 @@ final class MultiviewCompositeSession: ObservableObject {
                                        accent: (Double(r), Double(g), Double(b)),
                                        style: MultiviewCompositeStyle.current())
         comp.setNames(Dictionary(tiles.map { ($0.id, $0.item.name) }, uniquingKeysWith: { a, _ in a }))
-        pausedInBackground = false
-        comp.onPauseChange = { [weak self] paused in
-            Task { @MainActor in
-                guard let self, self.compositor === comp else { return }
-                self.pausedInBackground = paused
-            }
-        }
         comp.onPreview = { [weak self] image in
             Task { @MainActor in
                 guard let self, self.compositor === comp else { return }
@@ -382,7 +365,6 @@ final class MultiviewCompositeSession: ObservableObject {
         airPlayTileURL = nil
         channelNames = []
         previewImage = nil
-        pausedInBackground = false
         logoTask?.cancel()
         logoTask = nil
         playingState.removeAll()
@@ -701,18 +683,503 @@ enum MultiviewCompositeOverlay {
         }
     }
 
-    /// Dim plus a centered "Paused" label (background pause).
-    static func paused(scale k: CGFloat) -> CIImage? {
-        render { ctx in
-            ctx.setFillColor(UIColor.black.withAlphaComponent(0.5).cgColor)
-            ctx.fill(CGRect(origin: .zero, size: canvas))
-            let font = UIFont.systemFont(ofSize: 20 * k, weight: .semibold)
-            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.white]
-            let text = "Paused" as NSString
-            let size = text.size(withAttributes: attrs)
-            text.draw(at: CGPoint(x: (canvas.width - size.width) / 2, y: (canvas.height - size.height) / 2),
-                      withAttributes: attrs)
+}
+
+// MARK: - Tile video decoder (keeps the composite playing in the background)
+
+/// One composite tile's pictures, decoded straight from its TSHLSRemuxer
+/// ingest with a VTDecompressionSession: no AVPlayer, no layer.
+///
+/// Why (device log 2026-10-07 11:55:52 to 11:56:32, 3-up cast, phone
+/// locked): the tile AVPlayers stopped delivering pictures the moment the
+/// app went to the background (AVPlayerItemVideoOutput gave nothing, the
+/// loopback playlists went unfetched, AVP-PERF edge grew +4 s, +6 s,
+/// +20 s) while the remuxers kept ingesting and the composite encoder,
+/// rebuilt once on the background transition, kept encoding 30 fps with
+/// nothing dropped. VideoToolbox sessions are invalidated on every
+/// foreground/background transition (kVTInvalidSessionErr) and work again
+/// once recreated, which the encoder rebuild in that log proves on this
+/// device; the same rule applies to decompression sessions (FFmpeg and
+/// GStreamer recreate them on kVTInvalidSessionErr). So the composite
+/// decodes its own tiles, always, and recreates the session when it is
+/// invalidated.
+///
+/// Timing: each tile has a picture clock (source PTS shown at a host
+/// time). The focused tile's audio uses the SAME clock, so audio and
+/// picture stay together by construction. The clock is seeded from the
+/// tile player's measured position (so the composite keeps the player's
+/// learned distance behind live) and advances at wall rate; it holds when
+/// the ingest runs dry and resumes when 2 s are buffered again.
+final class MultiviewTileVideoDecoder: @unchecked Sendable {
+    struct AccessUnit {
+        var dts: Int64   // unwrapped 90 kHz
+        var pts: Int64   // unwrapped 90 kHz
+        var key: Bool
+        var nals: [[UInt8]]
+        var params: [[UInt8]]?
+        var bytes: Int
+    }
+
+    let tileID: String
+    /// Measured on-screen source PTS of the tile player (33-bit), if known.
+    var anchorHint: (() -> Int64?)?
+    /// The picture clock (re)anchored or resumed (reason), any queue.
+    var onClockJump: ((String) -> Void)?
+
+    private let queue: DispatchQueue
+    private let lock = NSLock()
+
+    // Demux (queue)
+    private var carry: [UInt8] = []
+    private var pmtPID = -1
+    private var videoPID = -1
+    private var hevc = false
+    private var pes: [UInt8] = []
+    private var lastRaw: Int64 = -1
+    private var wrapBase: Int64 = 0
+    private var paramSets: [Int: [UInt8]] = [:]
+
+    // Buffer + decode (queue)
+    private var aus: [AccessUnit] = []
+    private var bufferedBytes = 0
+    private var next = 0
+    private var session: VTDecompressionSession?
+    private var sessionParams: [[UInt8]]?
+    private var needKey = true
+    private var lastRebuildAt: CFTimeInterval = 0
+    private var firstAUHost: CFTimeInterval = 0
+    private var stalled = false
+    private var stalls = 0
+    private var rebuilds = 0
+    private var invalidations = 0
+    private var decoded = 0
+    private var shown = 0
+    private var lastStatsAt: CFTimeInterval = 0
+    private var stopped = false
+
+    // Clock + frames (lock)
+    private var anchor: (src: Int64, host: CFTimeInterval)?
+    private var frames: [(pts: Int64, pb: CVPixelBuffer)] = []
+    private var lastShownPTS: Int64 = .min
+
+    static let maxBufferedBytes = 48 * 1024 * 1024
+    static let resumeAheadTicks: Int64 = 2 * 90_000
+    static let maxOutput = CGSize(width: 960, height: 540)
+
+    init(tileID: String) {
+        self.tileID = tileID
+        queue = DispatchQueue(label: "aerio.mv-composite.decode.\(tileID.prefix(8))", qos: .userInitiated)
+    }
+
+    var isAnchored: Bool { lock.lock(); defer { lock.unlock() }; return anchor != nil }
+
+    /// Source PTS (33-bit) the picture clock shows at `host`, nil until anchored.
+    func displayedPTS(host: CFTimeInterval) -> Int64? {
+        lock.lock(); defer { lock.unlock() }
+        guard let a = anchor else { return nil }
+        return (a.src + Int64((host - a.host) * 90_000)) & TSLANAudioRewriter.pts33Mask
+    }
+
+    func stop() {
+        queue.sync {
+            stopped = true
+            if let session { VTDecompressionSessionInvalidate(session) }
+            session = nil
+            aus.removeAll()
         }
+        lock.lock(); frames.removeAll(); anchor = nil; lock.unlock()
+    }
+
+    // MARK: Ingest
+
+    func feed(_ data: Data) {
+        queue.async { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.carry += data
+            var i = 0
+            while i + 188 <= self.carry.count {
+                if self.carry[i] != 0x47 { i += 1; continue }
+                self.packet(Array(self.carry[i..<(i + 188)]))
+                i += 188
+            }
+            self.carry.removeFirst(i)
+        }
+    }
+
+    private func packet(_ p: [UInt8]) {
+        let pid = (Int(p[1] & 0x1F) << 8) | Int(p[2])
+        let pusi = p[1] & 0x40 != 0
+        if pid == 0, pusi {
+            if let pmt = TSLANAudioRewriter.firstPMTPID(p) { pmtPID = pmt }
+            return
+        }
+        if pid == pmtPID, pusi, let info = TSLANAudioRewriter.parsePMT(p) {
+            if info.videoPID >= 0, info.videoPID != videoPID || (info.videoType == 0x24) != hevc {
+                pes.removeAll()
+                videoPID = info.videoPID
+                hevc = info.videoType == 0x24
+            }
+            return
+        }
+        guard pid == videoPID, let payload = TSLANAudioRewriter.payload(p) else { return }
+        if pusi { flushPES() }
+        if pusi || !pes.isEmpty { pes += payload }
+    }
+
+    private func unwrap(_ raw: Int64) -> Int64 {
+        let period = TSLANAudioRewriter.pts33Mask + 1
+        if lastRaw >= 0 {
+            if raw < lastRaw && lastRaw - raw > period / 2 { wrapBase += period }
+            else if raw > lastRaw && raw - lastRaw > period / 2 { wrapBase -= period }
+        }
+        lastRaw = raw
+        return raw + wrapBase
+    }
+
+    private func flushPES() {
+        defer { pes.removeAll(keepingCapacity: true) }
+        guard pes.count >= 14, pes[0] == 0, pes[1] == 0, pes[2] == 1 else { return }
+        let flags = pes[7] >> 6
+        guard flags & 0x2 != 0 else { return }
+        let start = 9 + Int(pes[8])
+        guard start < pes.count else { return }
+        let ptsRaw = TSLANAudioRewriter.decodePTS(pes, 9)
+        let dtsRaw = flags == 3 && pes.count >= 19 ? TSLANAudioRewriter.decodePTS(pes, 14) : ptsRaw
+        let dts = unwrap(dtsRaw)
+        var ptsDelta = (ptsRaw - dtsRaw) & TSLANAudioRewriter.pts33Mask
+        if ptsDelta > TSLANAudioRewriter.pts33Mask / 2 { ptsDelta -= TSLANAudioRewriter.pts33Mask + 1 }
+        let pts = dts + ptsDelta
+        var nals: [[UInt8]] = []
+        var key = false
+        for nal in Self.splitAnnexB(pes, from: start) where !nal.isEmpty {
+            let t = hevc ? Int((nal[0] >> 1) & 0x3F) : Int(nal[0] & 0x1F)
+            if hevc {
+                if t == 32 || t == 33 || t == 34 { paramSets[t] = nal; continue }
+                if t == 35 { continue }
+                if (16...21).contains(t) { key = true }
+            } else {
+                if t == 7 || t == 8 { paramSets[t] = nal; continue }
+                if t == 9 { continue }
+                if t == 5 { key = true }
+            }
+            nals.append(nal)
+        }
+        guard !nals.isEmpty else { return }
+        var params: [[UInt8]]?
+        if key {
+            let order = hevc ? [32, 33, 34] : [7, 8]
+            let sets = order.compactMap { paramSets[$0] }
+            if sets.count == order.count { params = sets }
+        }
+        let bytes = nals.reduce(0) { $0 + $1.count + 4 }
+        append(AccessUnit(dts: dts, pts: pts, key: key, nals: nals, params: params, bytes: bytes))
+    }
+
+    static func splitAnnexB(_ b: [UInt8], from: Int) -> [[UInt8]] {
+        var out: [[UInt8]] = []
+        var i = from
+        var nalStart = -1
+        let n = b.count
+        while i + 2 < n {
+            if b[i] == 0, b[i + 1] == 0, b[i + 2] == 1 {
+                if nalStart >= 0 {
+                    var end = i
+                    while end > nalStart, b[end - 1] == 0 { end -= 1 }
+                    out.append(Array(b[nalStart..<end]))
+                }
+                i += 3
+                nalStart = i
+                continue
+            }
+            i += 1
+        }
+        if nalStart >= 0, nalStart < n { out.append(Array(b[nalStart..<n])) }
+        return out
+    }
+
+    private func append(_ au: AccessUnit) {
+        if let last = aus.last {
+            let d = au.dts - last.dts
+            // A retried tile's new connection replays the server's backlog:
+            // drop what is already buffered.
+            if d <= 0, d > -60 * 90_000 { return }
+            if d > 10 * 90_000 || d <= -60 * 90_000 {
+                reset(reason: String(format: "source jump %+.1f s", Double(d) / 90_000))
+            }
+        }
+        if aus.isEmpty { firstAUHost = CACurrentMediaTime() }
+        aus.append(au)
+        bufferedBytes += au.bytes
+        while bufferedBytes > Self.maxBufferedBytes, aus.count > 1 {
+            // Drop the oldest GOP.
+            var cut = 1
+            while cut < aus.count, !aus[cut].key { cut += 1 }
+            if cut >= aus.count { cut = aus.count - 1 }
+            dropFront(cut)
+        }
+    }
+
+    private func dropFront(_ count: Int) {
+        guard count > 0 else { return }
+        for k in 0..<count { bufferedBytes -= aus[k].bytes }
+        aus.removeFirst(count)
+        next = max(0, next - count)
+    }
+
+    private func reset(reason: String) {
+        aus.removeAll()
+        bufferedBytes = 0
+        next = 0
+        needKey = true
+        stalled = false
+        lock.lock(); anchor = nil; frames.removeAll(); lastShownPTS = .min; lock.unlock()
+        debugLog("[MV-CAST] tile decode \(tileID): buffer reset (\(reason)); picture clock re-anchors")
+    }
+
+    // MARK: Pump (compose tick)
+
+    /// Decodes what the picture clock needs at `host`. Async on the decoder queue.
+    func pump(host: CFTimeInterval, background: Bool) {
+        queue.async { [weak self] in self?.pumpOnQueue(host: host, background: background) }
+    }
+
+    private func pumpOnQueue(host: CFTimeInterval, background: Bool) {
+        guard !stopped, !aus.isEmpty else { return }
+        lock.lock(); var a = anchor; lock.unlock()
+        if a == nil {
+            guard let firstKey = aus.firstIndex(where: \.key) else { return }
+            let newest = aus[aus.count - 1].pts
+            var src: Int64
+            var how: String
+            if let hint = anchorHint?() {
+                var v = (newest & ~TSLANAudioRewriter.pts33Mask) + hint
+                let period = TSLANAudioRewriter.pts33Mask + 1
+                if v - newest > period / 2 { v -= period }
+                if newest - v > period / 2 { v += period }
+                src = v
+                how = "player position"
+            } else if host - firstAUHost >= 4 {
+                src = newest - 12 * 90_000
+                how = "buffer (no player position)"
+            } else {
+                return
+            }
+            let floorPTS = aus[firstKey].pts
+            if src < floorPTS { src = floorPTS }
+            if src > newest { src = newest }
+            a = (src, host)
+            lock.lock(); anchor = a; lock.unlock()
+            seek(to: src)
+            debugLog(String(format: "[MV-CAST] tile decode %@: picture clock anchored from %@, %.1f s behind the newest ingested picture, %.1f s buffered",
+                            tileID, how, Double(newest - src) / 90_000, Double(newest - aus[0].dts) / 90_000))
+            onClockJump?("picture clock anchored")
+        }
+        guard var anchorNow = a else { return }
+        var target = anchorNow.src + Int64((host - anchorNow.host) * 90_000)
+        let newestDTS = aus[aus.count - 1].dts
+        if stalled {
+            if newestDTS - anchorNow.src >= Self.resumeAheadTicks {
+                stalled = false
+                anchorNow = (anchorNow.src, host)
+                lock.lock(); anchor = anchorNow; lock.unlock()
+                target = anchorNow.src
+                debugLog("[MV-CAST] tile decode \(tileID): ingest back, picture clock resumes")
+                onClockJump?("picture clock resumed after a stall")
+            } else {
+                anchorNow = (anchorNow.src, host)
+                lock.lock(); anchor = anchorNow; lock.unlock()
+                target = anchorNow.src
+            }
+        } else if target > newestDTS + 45_000 {
+            stalled = true
+            stalls += 1
+            anchorNow = (newestDTS, host)
+            lock.lock(); anchor = anchorNow; lock.unlock()
+            target = newestDTS
+            debugLog("[MV-CAST] tile decode \(tileID): ingest ran dry, picture clock holds (stall \(stalls))")
+        }
+        if target < aus[0].dts {
+            // Fell out of the buffer: jump to its oldest picture.
+            let src = aus.first(where: \.key)?.pts ?? aus[0].pts
+            lock.lock(); anchor = (src, host); lock.unlock()
+            target = src
+            seek(to: src)
+            debugLog("[MV-CAST] tile decode \(tileID): picture clock fell behind the buffer; re-anchored")
+            onClockJump?("picture clock re-anchored")
+        }
+        // Far behind the clock (session rebuilt, app back): restart at the
+        // keyframe before the target instead of decoding the whole gap.
+        if next < aus.count, aus[next].dts < target - 90_000 { seek(to: target) }
+        var budget = 40
+        while next < aus.count, aus[next].dts <= target + 9_000, budget > 0 {
+            decode(aus[next])
+            next += 1
+            budget -= 1
+        }
+        // Keep from the keyframe before (target - 1 s): a rebuild restarts there.
+        if let k = aus.lastIndex(where: { $0.key && $0.pts <= target - 90_000 }), k > 0, k <= next {
+            dropFront(k)
+        }
+        if host - lastStatsAt >= 10 {
+            let span = lastStatsAt > 0 ? host - lastStatsAt : 10
+            lastStatsAt = host
+            let newest = aus[aus.count - 1].pts
+            debugLog(String(format: "[MV-CAST] tile decode %@ bg=%@ shown=%.1f fps decoded=%d behind=%.1f s buffered=%.1f s stalls=%d session=%@ rebuilds=%d invalidated=%d",
+                            tileID, background ? "yes" : "no", Double(shown) / span, decoded,
+                            Double(newest - target) / 90_000, Double(newest - aus[0].dts) / 90_000,
+                            stalls, session == nil ? "none" : "live", rebuilds, invalidations))
+            shown = 0
+            decoded = 0
+        }
+    }
+
+    /// Decode restarts at the last keyframe at or before `src`.
+    private func seek(to src: Int64) {
+        guard let k = aus.lastIndex(where: { $0.key && $0.pts <= src }) ?? aus.firstIndex(where: \.key) else { return }
+        next = k
+        needKey = true
+        if let session { VTDecompressionSessionWaitForAsynchronousFrames(session) }
+        lock.lock(); frames.removeAll(); lastShownPTS = .min; lock.unlock()
+    }
+
+    private func decode(_ au: AccessUnit) {
+        if au.key, let params = au.params, params != sessionParams || session == nil {
+            makeSession(params)
+        }
+        guard let session else { return }
+        if needKey {
+            guard au.key else { return }
+            needKey = false
+        }
+        var sample: [UInt8] = []
+        sample.reserveCapacity(au.bytes)
+        for nal in au.nals {
+            let n = UInt32(nal.count)
+            sample += [UInt8(n >> 24), UInt8((n >> 16) & 0xFF), UInt8((n >> 8) & 0xFF), UInt8(n & 0xFF)]
+            sample += nal
+        }
+        var block: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault, memoryBlock: nil,
+                                                 blockLength: sample.count, blockAllocator: kCFAllocatorDefault,
+                                                 customBlockSource: nil, offsetToData: 0, dataLength: sample.count,
+                                                 flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block) == noErr,
+              let block,
+              sample.withUnsafeBytes({ CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block,
+                                                                     offsetIntoDestination: 0, dataLength: sample.count) }) == noErr
+        else { return }
+        var timing = CMSampleTimingInfo(duration: .invalid,
+                                        presentationTimeStamp: CMTime(value: au.pts, timescale: 90_000),
+                                        decodeTimeStamp: CMTime(value: au.dts, timescale: 90_000))
+        var size = sample.count
+        var sb: CMSampleBuffer?
+        guard let fd = formatDescription,
+              CMSampleBufferCreateReady(allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: fd,
+                                        sampleCount: 1, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+                                        sampleSizeEntryCount: 1, sampleSizeArray: &size, sampleBufferOut: &sb) == noErr,
+              let sb else { return }
+        let st = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sb, flags: [], infoFlagsOut: nil) {
+            [weak self] status, _, image, pts, _ in
+            guard let self, status == noErr, let image else { return }
+            self.lock.lock()
+            self.frames.append((pts.value, image))
+            self.frames.sort { $0.pts < $1.pts }
+            if self.frames.count > 6 { self.frames.removeFirst(self.frames.count - 6) }
+            self.lock.unlock()
+        }
+        if st == noErr {
+            decoded += 1
+        } else if st == kVTInvalidSessionErr {
+            // Foreground/background transition: the session is gone.
+            invalidations += 1
+            VTDecompressionSessionInvalidate(session)
+            self.session = nil
+            sessionParams = nil
+            needKey = true
+            debugLog("[MV-CAST] tile decode \(tileID): session invalidated (app \(UIApplication.shared.applicationState == .background ? "background" : "transition")); rebuilding at the next keyframe")
+            if let k = aus.lastIndex(where: { $0.key && $0.dts <= au.dts }) { next = max(0, k - 1) }
+        }
+    }
+
+    private var formatDescription: CMVideoFormatDescription?
+
+    private func makeSession(_ params: [[UInt8]]) {
+        let now = CACurrentMediaTime()
+        if session == nil, sessionParams == nil, rebuilds > 0, now - lastRebuildAt < 1 { return }
+        lastRebuildAt = now
+        if let session { VTDecompressionSessionInvalidate(session) }
+        session = nil
+        sessionParams = nil
+        guard let fd = Self.makeFormat(params, hevc: hevc) else {
+            debugLog("[MV-CAST] tile decode \(tileID): parameter sets rejected")
+            return
+        }
+        let dims = CMVideoFormatDescriptionGetPresentationDimensions(fd, usePixelAspectRatio: true, useCleanAperture: true)
+        let scale = min(1, Self.maxOutput.width / max(dims.width, 1), Self.maxOutput.height / max(dims.height, 1))
+        let w = max(2, Int((dims.width * scale / 2).rounded()) * 2)
+        let h = max(2, Int((dims.height * scale / 2).rounded()) * 2)
+        let attrs: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: w,
+            kCVPixelBufferHeightKey as String: h,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
+        ]
+        var s: VTDecompressionSession?
+        let st = VTDecompressionSessionCreate(allocator: kCFAllocatorDefault, formatDescription: fd,
+                                              decoderSpecification: nil, imageBufferAttributes: attrs as CFDictionary,
+                                              outputCallback: nil, decompressionSessionOut: &s)
+        guard st == noErr, let s else {
+            rebuilds += 1
+            debugLog("[MV-CAST] tile decode \(tileID): session create failed status=\(st)")
+            return
+        }
+        rebuilds += 1
+        session = s
+        sessionParams = params
+        formatDescription = fd
+        needKey = true
+        debugLog("[MV-CAST] tile decode \(tileID): \(hevc ? "HEVC" : "H.264") session \(rebuilds == 1 ? "created" : "rebuilt (\(rebuilds - 1))") \(Int(dims.width))x\(Int(dims.height)) -> \(w)x\(h)\(UIApplication.shared.applicationState == .background ? " in background" : "")")
+    }
+
+    static func makeFormat(_ sets: [[UInt8]], hevc: Bool) -> CMVideoFormatDescription? {
+        let ptrs: [UnsafeMutablePointer<UInt8>] = sets.map { s in
+            let p = UnsafeMutablePointer<UInt8>.allocate(capacity: max(1, s.count))
+            p.initialize(from: s, count: s.count)
+            return p
+        }
+        defer { ptrs.forEach { $0.deallocate() } }
+        let cptrs: [UnsafePointer<UInt8>] = ptrs.map { UnsafePointer($0) }
+        let sizes = sets.map(\.count)
+        var fd: CMFormatDescription?
+        let st: OSStatus = cptrs.withUnsafeBufferPointer { pp in
+            sizes.withUnsafeBufferPointer { ss in
+                hevc
+                    ? CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                        allocator: kCFAllocatorDefault, parameterSetCount: sets.count,
+                        parameterSetPointers: pp.baseAddress!, parameterSetSizes: ss.baseAddress!,
+                        nalUnitHeaderLength: 4, extensions: nil, formatDescriptionOut: &fd)
+                    : CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                        allocator: kCFAllocatorDefault, parameterSetCount: sets.count,
+                        parameterSetPointers: pp.baseAddress!, parameterSetSizes: ss.baseAddress!,
+                        nalUnitHeaderLength: 4, formatDescriptionOut: &fd)
+            }
+        }
+        return st == noErr ? fd : nil
+    }
+
+    // MARK: Frames (compose queue)
+
+    /// The newest decoded picture at or before the clock, if it is new.
+    func frame(host: CFTimeInterval) -> CVPixelBuffer? {
+        lock.lock(); defer { lock.unlock() }
+        guard let a = anchor else { return nil }
+        let target = a.src + Int64((host - a.host) * 90_000)
+        guard let idx = frames.lastIndex(where: { $0.pts <= target }) else { return nil }
+        let f = frames[idx]
+        frames.removeFirst(idx)
+        guard f.pts != lastShownPTS else { return nil }
+        lastShownPTS = f.pts
+        queue.async { [weak self] in self?.shown += 1 }
+        return f.pb
     }
 }
 
@@ -736,11 +1203,9 @@ final class MultiviewCompositor: @unchecked Sendable {
     static let aacFrameTicks: Int64 = 1920   // 1024 samples at 48 kHz
 
     var onFailure: (((MultiviewCompositeSession.StopReason, String)) -> Void)?
-    /// Background pause entered (true) or left (false), compose queue.
-    var onPauseChange: ((Bool) -> Void)?
     /// No new picture from any tile for this long while backgrounded is
-    /// the background pause.
-    static let backgroundPauseSeconds: Double = 1.5
+    /// logged (diagnostic only; the composite keeps running).
+    static let backgroundNoPictureSeconds: Double = 1.5
     /// A scaled-down composed frame every `previewEvery` ticks.
     var onPreview: ((CGImage) -> Void)?
     static let previewEvery = 6
@@ -765,6 +1230,12 @@ final class MultiviewCompositor: @unchecked Sendable {
     private var logos: [String: CGImage] = [:]
     /// Host time of the last focus change (indicator fade, latency log).
     private var focusChangedHost: CFTimeInterval = 0
+    /// Per-tile VideoToolbox decoders fed from the ingest taps: the
+    /// composite's pictures and the focused tile's audio clock.
+    private var decoders: [String: MultiviewTileVideoDecoder] = [:]
+    /// Last measured player position per tile (33-bit source PTS and host),
+    /// the decoder's first anchor.
+    private var measuredShared: [String: (pts: Int64, host: CFTimeInterval, playing: Bool)] = [:]
 
     // Compose queue
     private let mode: MultiviewLayoutMode
@@ -803,10 +1274,9 @@ final class MultiviewCompositor: @unchecked Sendable {
     private var clipMaskImage: CIImage?
     private var logoOverlay: CIImage?
     private var indicatorOverlay: CIImage?
-    private var pausedOverlay: CIImage?
-    /// Background pause (compose queue).
+    /// Background diagnostic (compose queue).
     private var lastAnyPixelsHost: CFTimeInterval = 0
-    private var pausedInBackground = false
+    private var noPictureLogged = false
 
     // Audio queue
     private struct TileAudio {
@@ -825,7 +1295,6 @@ final class MultiviewCompositor: @unchecked Sendable {
     /// frames of older epochs, so a switched-away tile's audio (queued up
     /// to its display lag ahead) never plays after the switch.
     private var audioEpoch = 0
-    private var audioPaused = false
     /// The tile player's on-screen source PTS (90 kHz, 33-bit), measured
     /// from its item time and its remuxer's segment map, and when.
     private var measured: [String: (pts: Int64, host: CFTimeInterval, playing: Bool)] = [:]
@@ -856,6 +1325,31 @@ final class MultiviewCompositor: @unchecked Sendable {
         self.mode = mode
         self.accent = accent
         self.style = style
+        for id in tileIDs { decoders[id] = makeDecoder(id) }
+    }
+
+    private func makeDecoder(_ id: String) -> MultiviewTileVideoDecoder {
+        let d = MultiviewTileVideoDecoder(tileID: id)
+        d.anchorHint = { [weak self] in
+            guard let self else { return nil }
+            self.lock.lock(); let m = self.measuredShared[id]; self.lock.unlock()
+            guard let m, CACurrentMediaTime() - m.host < 1.5 else { return nil }
+            let age = CACurrentMediaTime() - m.host
+            return (m.pts + (m.playing ? Int64(age * 90_000) : 0)) & TSLANAudioRewriter.pts33Mask
+        }
+        d.onClockJump = { [weak self] reason in
+            self?.audioQueue.async {
+                guard let self, !self.isStopped, self.snapshot().focus == id else { return }
+                self.anchorReason = reason
+                self.reanchorFocused()
+            }
+        }
+        return d
+    }
+
+    private func decoder(_ id: String) -> MultiviewTileVideoDecoder? {
+        lock.lock(); defer { lock.unlock() }
+        return decoders[id]
     }
 
     /// Settings > Multiview changed while the composite runs (polled).
@@ -903,7 +1397,8 @@ final class MultiviewCompositor: @unchecked Sendable {
     }
 
     func stop() {
-        lock.lock(); stopped = true; lock.unlock()
+        lock.lock(); stopped = true; let ds = Array(decoders.values); decoders.removeAll(); lock.unlock()
+        ds.forEach { $0.stop() }
         composeQueue.sync {
             timer?.cancel()
             timer = nil
@@ -945,7 +1440,14 @@ final class MultiviewCompositor: @unchecked Sendable {
 
     func setTiles(_ ids: [String]) {
         // A rearrange is an interaction: the indicator shows again.
-        lock.lock(); tileIDs = ids; focusChangedHost = CACurrentMediaTime(); lock.unlock()
+        lock.lock()
+        tileIDs = ids
+        focusChangedHost = CACurrentMediaTime()
+        var gone: [MultiviewTileVideoDecoder] = []
+        for (id, d) in decoders where !ids.contains(id) { gone.append(d); decoders[id] = nil }
+        for id in ids where decoders[id] == nil { decoders[id] = makeDecoder(id) }
+        lock.unlock()
+        gone.forEach { $0.stop() }
     }
 
     /// Wall seconds since the compose tick last ran (render-stall rule).
@@ -963,7 +1465,9 @@ final class MultiviewCompositor: @unchecked Sendable {
     func tilePCM(tileID: String, samples: [Int16], sampleRate: Int) {
         let now = compositeNow()
         audioQueue.async { [weak self] in
-            guard let self, !self.isStopped, !self.audioPaused, tileID == self.snapshot().focus else { return }
+            // The picture clock owns the timing once the decoder runs.
+            guard let self, !self.isStopped, tileID == self.snapshot().focus,
+                  self.decoder(tileID)?.isAnchored != true else { return }
             let first = self.tapPCMAt[tileID] == nil
             self.tapPCMAt[tileID] = CACurrentMediaTime()
             if first {
@@ -1050,7 +1554,14 @@ final class MultiviewCompositor: @unchecked Sendable {
         lock.lock(); lastComposeHost = host; lock.unlock()
         var gotPixels = false
         for (n, id) in tiles.enumerated() {
-            if let pb = MultiviewCompositeTaps.shared.newPixelBuffer(tileID: id, hostTime: host) {
+            // The tile's own decoder once its picture clock runs (it keeps
+            // running in the background); the player's output only until then.
+            let dec = decoder(id)
+            dec?.pump(host: host, background: backgrounded)
+            let pbOpt = dec?.isAnchored == true
+                ? dec?.frame(host: host)
+                : MultiviewCompositeTaps.shared.newPixelBuffer(tileID: id, hostTime: host)
+            if let pb = pbOpt {
                 gotPixels = true
                 if latest[id] == nil, firstPixelLogged.insert(id).inserted {
                     debugLog("[MV-CAST] composite frame source tile=\(n) first pixel buffer \(CVPixelBufferGetWidth(pb))x\(CVPixelBufferGetHeight(pb)) id=\(id) after \(String(format: "%.1f", host - (tileSince[id] ?? host))) s")
@@ -1065,20 +1576,17 @@ final class MultiviewCompositor: @unchecked Sendable {
                 }
             }
         }
-        if gotPixels { lastAnyPixelsHost = host }
-        // Background pause (field log 2026-10-07 11:27: locked phone, the
-        // encoder rebuilt and kept 30 fps on the CPU renderer, yet the TV
-        // froze with audio running: a background app gets no video decode,
-        // so the tiles stop delivering pictures). Hold the last frame with
-        // a Paused label and silence; resume when pictures return.
-        let wantPause = backgrounded && host - lastAnyPixelsHost > Self.backgroundPauseSeconds
-        if wantPause != pausedInBackground {
-            pausedInBackground = wantPause
-            debugLog(wantPause
-                ? String(format: "[MV-CAST] composite paused in background: no tile picture for %.1f s", host - lastAnyPixelsHost)
-                : "[MV-CAST] composite resumed: tile pictures flowing again\(backgrounded ? " (still background)" : "")")
-            onPauseChange?(wantPause)
-            audioQueue.async { [weak self] in self?.setAudioPaused(wantPause) }
+        if gotPixels {
+            lastAnyPixelsHost = host
+            if noPictureLogged {
+                noPictureLogged = false
+                debugLog("[MV-CAST] composite tile pictures flowing again\(backgrounded ? " (background)" : "")")
+            }
+        } else if !noPictureLogged, host - lastAnyPixelsHost > Self.backgroundNoPictureSeconds, backgrounded {
+            // Diagnostic only (device log 2026-10-07 11:55:54): the tiles
+            // decode on the phone now, so this should not appear.
+            noPictureLogged = true
+            debugLog(String(format: "[MV-CAST] composite background: no new tile picture for %.1f s", host - lastAnyPixelsHost))
         }
         var out: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &out) == kCVReturnSuccess,
@@ -1151,7 +1659,6 @@ final class MultiviewCompositor: @unchecked Sendable {
                 i < rects.count ? MultiviewCompositeOverlay.indicator(rect: rects[i], name: nameMap[focus] ?? "",
                                                                        style: st, accent: accentColor) : nil
             }
-            if pausedOverlay == nil, pausedInBackground { pausedOverlay = MultiviewCompositeOverlay.paused(scale: st.scale) }
         }
         var videos = CIImage(color: .black).cropped(to: full)
         for (i, rect) in rects.enumerated() where i < tiles.count {
@@ -1186,10 +1693,6 @@ final class MultiviewCompositor: @unchecked Sendable {
                     "inputAVector": CIVector(x: 0, y: 0, z: 0, w: alpha),
                 ]).composited(over: image)
             }
-        }
-        if pausedInBackground {
-            if pausedOverlay == nil { pausedOverlay = MultiviewCompositeOverlay.paused(scale: st.scale) }
-            if let pausedOverlay { image = pausedOverlay.composited(over: image) }
         }
         return image.cropped(to: full)
     }
@@ -1415,6 +1918,7 @@ final class MultiviewCompositor: @unchecked Sendable {
 
     /// A tile's raw ingest bytes (its remuxer queue).
     func tileBytes(tileID: String, data: Data) {
+        decoder(tileID)?.feed(data)
         audioQueue.async { [weak self] in self?.handleTileBytes(tileID, [UInt8](data)) }
     }
 
@@ -1433,7 +1937,7 @@ final class MultiviewCompositor: @unchecked Sendable {
         // Fallback only: the player's audio tap is the source when it runs
         // (Apple documents no audio tap for HLS items, so the ingest path
         // stays for tiles whose tap never delivers).
-        if id == snapshot().focus, !tapLive(id), !audioPaused {
+        if id == snapshot().focus, !tapLive(id) {
             if fallbackLogged.insert(id).inserted {
                 debugLog("[MV-CAST] composite audio: tile \(id) via ingest tap (no player audio tap PCM)")
             }
@@ -1452,18 +1956,6 @@ final class MultiviewCompositor: @unchecked Sendable {
         }
     }
 
-    /// Audio queue. Background pause: silence while paused (the queued
-    /// future audio is dropped), a fresh anchor on resume.
-    private func setAudioPaused(_ paused: Bool) {
-        guard paused != audioPaused else { return }
-        audioPaused = paused
-        bumpAudioEpoch()
-        if !paused {
-            anchorReason = "resume from background pause"
-            refocusAudio()
-        }
-    }
-
     /// The tile player's position (main thread sample, 2 Hz). Maps it to
     /// the on-screen source PTS through the remuxer, re-anchors the audio
     /// when the focused tile resumes after a stall or drifts off the
@@ -1475,11 +1967,17 @@ final class MultiviewCompositor: @unchecked Sendable {
         audioQueue.async { [weak self] in
             guard let self, !self.isStopped else { return }
             if let src = remuxer?.localSourcePTS(itemTime: itemTime) {
-                self.measured[tileID] = (Int64(src * 90_000) & TSLANAudioRewriter.pts33Mask, host, playing)
+                let m = (Int64(src * 90_000) & TSLANAudioRewriter.pts33Mask, host, playing)
+                self.measured[tileID] = m
+                self.lock.lock(); self.measuredShared[tileID] = m; self.lock.unlock()
             } else {
                 self.measured[tileID] = nil
+                self.lock.lock(); self.measuredShared[tileID] = nil; self.lock.unlock()
             }
-            guard tileID == self.snapshot().focus, !self.audioPaused, !self.tapLive(tileID) else { return }
+            // With the tile's decoder running, its picture clock is the
+            // timing: the player's stalls and drift no longer apply.
+            guard tileID == self.snapshot().focus, !self.tapLive(tileID),
+                  self.decoder(tileID)?.isAnchored != true else { return }
             if resumed {
                 self.anchorReason = "stall recovery"
                 debugLog("[MV-CAST] composite audio: focused tile \(tileID) resumed after a stall; re-anchoring")
@@ -1543,6 +2041,7 @@ final class MultiviewCompositor: @unchecked Sendable {
     /// estimate (newest ingested audio minus the player's distance behind
     /// the live edge), else that estimate with a 6 s guess.
     private func displayedSource(_ id: String) -> (pts: Int64, method: String) {
+        if let pts = decoder(id)?.displayedPTS(host: CACurrentMediaTime()) { return (pts, "picture clock") }
         let mask = TSLANAudioRewriter.pts33Mask
         let last = tileAudio[id]?.lastPTS ?? 0
         lock.lock()
@@ -1569,7 +2068,6 @@ final class MultiviewCompositor: @unchecked Sendable {
     private func displayedSourcePTS(_ id: String) -> Int64 { displayedSource(id).pts }
 
     private func process(_ pes: [MultiviewTapAudioPES], tileID: String) {
-        guard !audioPaused else { return }
         var produced: [(pts: Int64, adts: [UInt8])] = []
         let now = compositeNow()
         for p in pes {
@@ -1611,7 +2109,9 @@ final class MultiviewCompositor: @unchecked Sendable {
                                                           channels: frame.channels, samplesPerFrame: frame.samples,
                                                           asc: frame.asc)
                     normalizerKey = key
-                    if normalizer == nil {
+                    if let n = normalizer {
+                        debugLog("[MV-CAST] composite audio: \(key) codec delay compensated (\(n.codecDelayDescription))")
+                    } else {
                         debugLog("[MV-CAST] composite audio: no decoder for \(key); silence")
                     }
                 }
@@ -1696,6 +2196,29 @@ final class MultiviewAudioNormalizer {
     private var inputSamples: Int64 = 0
     private var outputPackets: Int64 = 0
     private let input = ConverterInput()
+    /// Codec delay the converters report (kAudioConverterPrimeInfo
+    /// leadingFrames): the decoder's at the source rate plus the AAC
+    /// encoder's priming at 48 kHz. Output packet k carries the input from
+    /// k * 1024 - leading samples, so every output PTS is moved earlier by
+    /// this (measured from the converters, not a constant).
+    private(set) var codecDelayTicks: Int64 = 0
+    private(set) var codecDelayDescription = ""
+
+    private static func leadingFrames(_ c: AudioConverterRef?) -> Int {
+        guard let c else { return 0 }
+        var info = AudioConverterPrimeInfo(leadingFrames: 0, trailingFrames: 0)
+        var size = UInt32(MemoryLayout<AudioConverterPrimeInfo>.size)
+        guard AudioConverterGetProperty(c, kAudioConverterPrimeInfo, &size, &info) == noErr else { return 0 }
+        return Int(info.leadingFrames)
+    }
+
+    private func measureCodecDelay() {
+        let dec = Self.leadingFrames(decoder)
+        let enc = Self.leadingFrames(encoder)
+        codecDelayTicks = Int64(dec) * 90_000 / Int64(max(1, sampleRate)) + Int64(enc) * 90_000 / Int64(Self.outputRate)
+        codecDelayDescription = String(format: "decoder %d frames at %d Hz, encoder %d frames at %d Hz, %.1f ms",
+                                       dec, sampleRate, enc, Self.outputRate, Double(codecDelayTicks) / 90)
+    }
 
     /// PCM input (the player audio tap): no decoder, encoder only.
     init?(pcmSampleRate: Int) {
@@ -1711,6 +2234,7 @@ final class MultiviewAudioNormalizer {
         var bitrate: UInt32 = 160_000
         _ = AudioConverterSetProperty(enc, kAudioConverterEncodeBitRate, UInt32(MemoryLayout<UInt32>.size), &bitrate)
         encoder = enc
+        measureCodecDelay()
     }
 
     /// Interleaved stereo PCM stamped on the composite clock.
@@ -1772,6 +2296,7 @@ final class MultiviewAudioNormalizer {
         var bitrate: UInt32 = 160_000
         _ = AudioConverterSetProperty(enc, kAudioConverterEncodeBitRate, UInt32(MemoryLayout<UInt32>.size), &bitrate)
         encoder = enc
+        measureCodecDelay()
     }
 
     deinit {
@@ -1837,7 +2362,7 @@ final class MultiviewAudioNormalizer {
                 guard st == noErr || st == ConverterInput.noMoreData, packets > 0 else { break }
                 let size = Int(desc.mDataByteSize)
                 if size > 0 {
-                    let pts = anchorPTS + outputPackets * 1024 * 90_000 / Int64(Self.outputRate)
+                    let pts = anchorPTS + outputPackets * 1024 * 90_000 / Int64(Self.outputRate) - codecDelayTicks
                     outputPackets += 1
                     result.append((pts, TSLANAudioRewriter.adtsHeader(payloadLength: size, frequencyIndex: freq)
                                    + buffer[Int(desc.mStartOffset)..<(Int(desc.mStartOffset) + size)]))

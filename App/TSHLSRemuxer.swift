@@ -3153,7 +3153,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         linkStats.receiverHighestSeq = -1
         linkLock.unlock()
         listener.cancel()
-        debugLog("[TS-REMUX] LAN delivery stopped (loopback only)")
+        // Accepted keep-alive connections outlive their listener: close
+        // them so the receiver sees the stream end instead of a stale one.
+        httpConnLock.lock()
+        let open = lanConns.allObjects
+        lanConns.removeAllObjects()
+        httpConnLock.unlock()
+        open.forEach { $0.shutdown() }
+        debugLog("[TS-REMUX] LAN delivery stopped (loopback only)\(open.isEmpty ? "" : "; closed \(open.count) receiver connection(s)")")
     }
 
     /// Peer filter: the stream leaves the device on this listener, so only
@@ -3327,6 +3334,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private let httpConnLock = NSLock()
     private var httpConnCount = 0
     private var httpConnSeq = 0
+    /// Open LAN connections (httpConnLock), closed when LAN delivery stops.
+    private let lanConns = NSHashTable<HTTPConn>.weakObjects()
 
     private func handleConnection(_ connection: NWConnection, lan: Bool = false, peer: String? = nil) {
         httpConnLock.lock()
@@ -3346,6 +3355,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             || peer == "::ffff:127.0.0.1" || (localIP != nil && peer == localIP)
         let conn = HTTPConn(id: id, connection: connection, lan: lan, peer: peer,
                             logLAN: lan && !isLocal, owner: self)
+        if lan { httpConnLock.lock(); lanConns.add(conn); httpConnLock.unlock() }
         conn.start()
     }
 
@@ -3380,6 +3390,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
 
         private var tag: String { "\(peer ?? "?")#\(id)" }
+
+        /// LAN delivery ended: drop the socket now.
+        func shutdown() {
+            q.async { [self] in
+                guard !ended else { return }
+                closing = true
+                connection.cancel()
+            }
+        }
 
         func start() {
             connection.stateUpdateHandler = { [self] state in
@@ -3601,6 +3620,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     func serve(path: String, lan: Bool = false, completion: @escaping (ServedResource) -> Void) {
         queue.async { [weak self] in
             guard let self else {
+                completion(ServedResource(status: 410, body: Data(), contentType: "text/plain", uti: "public.plain-text"))
+                return
+            }
+            // LAN delivery ended (Play Here, X, a flip away): a receiver
+            // still on a kept-alive connection gets 410, never a playlist
+            // rebuilt from reset LAN state (device log 2026-10-07 12:01:13:
+            // the Apple TV re-polled after Play Here and got MEDIA-SEQUENCE 0
+            // from the retained remuxer, then sat paused).
+            if lan, self.lanListener == nil {
                 completion(ServedResource(status: 410, body: Data(), contentType: "text/plain", uti: "public.plain-text"))
                 return
             }

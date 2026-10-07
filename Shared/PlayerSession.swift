@@ -1619,6 +1619,7 @@ final class PlayWhereRouter: ObservableObject {
         case (.airPlay, _):
             // The normal tune: with the route on AirPlay it runs headless
             // and the receiver takes the player.
+            AirPlayMonitor.shared.userPickedReceiver()
             play()
         default:
             break

@@ -207,6 +207,8 @@ final class TSLANAudioRewriter {
         var pcrPID: Int
         var videoPID: Int
         var audio: [AudioES]
+        /// stream_type of `videoPID` (0x1B H.264, 0x24 HEVC), 0 when none.
+        var videoType: UInt8 = 0
         struct AudioES: Equatable { var pid: Int; var type: UInt8 }
     }
 
@@ -251,7 +253,7 @@ final class TSLANAudioRewriter {
             guard o + 5 + esil <= end else { break }
             let desc = p[(o + 5)..<(o + 5 + esil)]
             if [0x1B, 0x24, 0x01, 0x02].contains(type) {
-                if info.videoPID < 0 { info.videoPID = pid }
+                if info.videoPID < 0 { info.videoPID = pid; info.videoType = type }
             } else if isAudio(type: type, descriptors: desc) {
                 info.audio.append(.init(pid: pid, type: type))
             }
