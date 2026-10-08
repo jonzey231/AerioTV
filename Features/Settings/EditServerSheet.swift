@@ -630,6 +630,21 @@ struct EditServerSheet: View {
                     .foregroundColor(Color.contrastText(.textTertiary))
             }
 
+            // GH Android#129: catch-up request time offset. Catch-up is
+            // built for Dispatcharr and Xtream Codes only.
+            if server.type == .dispatcharrAPI || server.type == .xtreamCodes {
+                Section {
+                    CatchupTimeOffsetPicker(serverID: server.id)
+                        .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Catch-Up").sectionHeaderStyle()
+                } footer: {
+                    Text(CatchupOffsetChoices.helpText)
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
+                }
+            }
+
             // Task #189 (Android parity): user-chosen Channel Profile.
             if server.type == .dispatcharrAPI {
                 ChannelProfilePickerSection(server: server)
@@ -783,3 +798,39 @@ enum GuideDayChoices {
         SettingsChoice(0, "All Available"),
     ] }
 }
+
+/// GH Android#129: per-playlist Catch-Up Time Offset choices, in minutes.
+/// Stored under `catchupTimeOffsetMinutes.<playlist UUID>` (see
+/// `CatchupSupport.timeOffsetKey`). Applied to catch-up request times only,
+/// never to the guide.
+enum CatchupOffsetChoices {
+    static let helpText = "Shift catch-up start times when your EPG and your provider's catch-up server disagree."
+    static var all: [SettingsChoice<Int>] {
+        [-180, -120, -90, -60, -45, -30, -15, -10, -5, 0, 5, 10, 15, 30, 45, 60, 90, 120, 180].map {
+            SettingsChoice($0, label(for: $0))
+        }
+    }
+    static func label(for minutes: Int) -> String {
+        if minutes == 0 { return "0 Minutes (Default)" }
+        let sign = minutes > 0 ? "+" : "-"
+        let m = abs(minutes)
+        return "\(sign)\(m) \(m == 1 ? "Minute" : "Minutes")"
+    }
+}
+
+/// Catch-Up Time Offset row, shared by the iOS sheet and the tvOS page.
+struct CatchupTimeOffsetPicker: View {
+    @AppStorage private var minutes: Int
+
+    init(serverID: UUID) {
+        _minutes = AppStorage(wrappedValue: 0, CatchupSupport.timeOffsetKey(serverID: serverID))
+    }
+
+    var body: some View {
+        SettingsChoicePicker("Catch-Up Time Offset",
+                             options: CatchupOffsetChoices.all,
+                             selection: $minutes,
+                             footer: CatchupOffsetChoices.helpText)
+    }
+}
+

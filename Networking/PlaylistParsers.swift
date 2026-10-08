@@ -189,6 +189,13 @@ struct M3UParser {
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
+        // GH Android#124: playlist and guide bodies must come from the
+        // server on every fetch. The default configuration shares
+        // URLCache.shared (400 MB disk since 2026-09-04, sized for artwork),
+        // so a provider response carrying cache headers could be replayed
+        // from disk on a cold launch and show a stale playlist.
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.urlCache = nil
         return URLSession(configuration: config)
     }()
 
@@ -251,6 +258,13 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 60
+        // GH Android#124: playlist and guide bodies must come from the
+        // server on every fetch. The default configuration shares
+        // URLCache.shared (400 MB disk since 2026-09-04, sized for artwork),
+        // so a provider response carrying cache headers could be replayed
+        // from disk on a cold launch and show a stale playlist.
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.urlCache = nil
         return URLSession(configuration: config)
     }()
 

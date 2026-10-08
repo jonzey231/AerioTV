@@ -228,7 +228,7 @@ final class SyncManager: ObservableObject {
         LogoCorners.guideKey,
         LogoCorners.guideCellsKey,
         LogoCorners.legacyKey
-    ] + PlayerInfoCardSettings.allKeys
+    ] + PlayerInfoCardSettings.allKeys + [PlayerInfoCardSettings.showOnChannelChangeKey]
     // Player Info Card row visibility (Settings > App Behaviors). All
     // six default ON and are only written once the user flips a row,
     // so an absent key stays absent and older clients ignore them.

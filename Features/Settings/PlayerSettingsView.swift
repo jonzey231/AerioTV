@@ -37,6 +37,8 @@ struct PlayerSettingsView: View {
     @ObservedObject private var theme = ThemeManager.shared
 
     // MARK: - Player Info Card (Logan 2026-09-15, Android parity)
+    @AppStorage(PlayerInfoCardSettings.showOnChannelChangeKey)
+    private var showChannelInfoCard = true
     @AppStorage(PlayerInfoCardSettings.channelLogoKey)
     private var infoCardChannelLogo = true
     @AppStorage(PlayerInfoCardSettings.channelNameKey)
@@ -216,6 +218,20 @@ struct PlayerSettingsView: View {
             // that says what the card currently shows. The section
             // header is gone because the subgroup row carries the title.
             Section {
+                // GH Android#127 part 1.
+                Toggle(isOn: $showChannelInfoCard) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show Channel Info Card")
+                            .scaledFont(.bodyMedium)
+                            .foregroundColor(.textPrimary)
+                        Text("Pop up the channel and program card when you change channels")
+                            .scaledFont(.labelSmall.subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
+                    }
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+
                 SettingsSubgroup("Info Card",
                                  summary: playerInfoCardSummary,
                                  icon: "rectangle.on.rectangle",
@@ -585,6 +601,15 @@ struct PlayerSettingsView: View {
                 // Same "On-Screen Display" eyebrow the phone uses, so the page
                 // does not open on a headerless card.
                 SettingsSection("On-Screen Display", style: .plain) {
+                    // GH Android#127 part 1.
+                    TVSettingsToggleRow(
+                        icon: "rectangle.on.rectangle",
+                        iconColor: theme.accent,
+                        title: "Show Channel Info Card",
+                        subtitle: "Pop up the channel and program card when you change channels",
+                        isOn: $showChannelInfoCard
+                    ) { _ in }
+
                     SettingsSubgroup("Info Card",
                                      summary: playerInfoCardSummary,
                                      icon: "rectangle.on.rectangle",

@@ -127,11 +127,25 @@ final class RecentChannelsStore: ObservableObject {
         }
     }
 
-    /// Drop the entire list. Useful for "Clear Recents" in a future
-    /// settings UI. v1 doesn't expose this but it's here for
-    /// consistency with other per-user preference stores.
+    /// Whether a channel is on the list (gates the row menu's
+    /// "Remove from Recently Watched").
+    func contains(_ id: String) -> Bool {
+        recentIDs.contains(id)
+    }
+
+    /// GH Android#130: drop one channel from the active playlist's list.
+    func remove(id: String) {
+        guard recentIDs.contains(id) else { return }
+        recentIDs.removeAll { $0 == id }
+        save()
+        debugLog("[RECENTS] removed one channel, \(recentIDs.count) left")
+    }
+
+    /// GH Android#130: drop the active playlist's whole list
+    /// (Settings > Live TV > Clear Recently Watched, after a confirmation).
     func clear() {
         recentIDs = []
         save()
+        debugLog("[RECENTS] cleared")
     }
 }

@@ -421,6 +421,14 @@ struct EditServerPage: View {
                                              footer: "How many days of guide data to load, back and ahead. Dispatcharr only; other sources show what their guide carries.")
                     }
 
+                    // GH Android#129: catch-up request time offset
+                    // (Dispatcharr and Xtream Codes build catch-up times).
+                    if server.type == .dispatcharrAPI || server.type == .xtreamCodes {
+                        SettingsSection("Catch-Up", style: .eyebrowCard) {
+                            CatchupTimeOffsetPicker(serverID: server.id)
+                        }
+                    }
+
                     // Task #189 (Android parity): user-chosen Channel
                     // Profile. Radio-style rows (like Android's picker);
                     // a segmented control can't hold N variable-length

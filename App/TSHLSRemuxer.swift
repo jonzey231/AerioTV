@@ -6957,7 +6957,8 @@ struct AVPlayerMultiviewTile: View {
                 url: catchupURL ?? streamURL,
                 panelTimeZoneID: cu.panelTimeZoneID,
                 programStart: cu.programStart, programEnd: cu.programEnd,
-                offsetSeconds: flooredSecs) else {
+                offsetSeconds: flooredSecs,
+                requestShiftSeconds: cu.requestShiftSeconds) else {
                 debugLog("[AVP-CU] XC rebuild failed; keeping current window")
                 return
             }

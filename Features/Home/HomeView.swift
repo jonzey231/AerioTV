@@ -7918,8 +7918,28 @@ struct MainTabView: View {
                 // background, depending on EPG size. The user sees
                 // the cached guide instantly; categories tint in
                 // progressively as enrichment results land.
-                if let activeServer, activeServer.type == .dispatcharrAPI {
-                    debugLog("🟢 [Orchestrator] phase 2 EPG: firing background fetchUpcoming on Dispatcharr (cache fresh — refresh categories + repopulate programIDs)")
+                // GH Android#124 (2026-10-07): a cold launch (the app was
+                // killed in the background, then reopened) must refresh.
+                // This background pass used to run for Dispatcharr only, so
+                // an Xtream or M3U playlist whose cache was younger than the
+                // freshness window (bgRefreshIntervalMins, 24 h by default)
+                // made no guide request at all until a manual refresh. Every
+                // backend now gets the same settled, non-blocking refresh.
+                // Huge non-Dispatcharr panels keep the old skip: their full
+                // XMLTV pass on top of the cache is what took the Apple TV
+                // past its memory line (2026-09-03).
+                let startupRefreshAllowed: Bool = {
+                    guard let activeServer else { return false }
+                    if activeServer.type == .dispatcharrAPI { return true }
+                    return totalChannels <= GuideStore.largePlaylistChannels
+                }()
+                if startupRefreshAllowed {
+                    debugLog("[STARTUP] refresh scheduled: cold launch, guide cache fresh, background refresh (type=\(activeServer?.type.rawValue ?? "none"), channels=\(totalChannels))")
+                } else {
+                    debugLog("[STARTUP] refresh skipped: \(activeServer == nil ? "no active playlist" : "large non-Dispatcharr playlist (\(totalChannels) channels > \(GuideStore.largePlaylistChannels)), guide cache fresh")")
+                }
+                if startupRefreshAllowed {
+                    debugLog("🟢 [Orchestrator] phase 2 EPG: firing background fetchUpcoming (cache fresh: refresh categories + repopulate programIDs)")
                     // GuideStore.fetchUpcoming is @MainActor-isolated
                     // (it mutates @Published `programs` and writes
                     // through ChannelStore.shared), so the background
@@ -7983,6 +8003,7 @@ struct MainTabView: View {
                 } else {
                     debugLog("🟢 [Orchestrator] phase 2 EPG: starting loadAllEPG (cache stale, fresh=\(cacheIsFresh), hasFuture=\(hasFuturePrograms), coverage=\(coveragePct)%), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
                 }
+                debugLog("[STARTUP] refresh running: cold launch, guide cache \(cacheIsFresh ? "fresh but incomplete" : "stale or empty") (hasFuture=\(hasFuturePrograms), coverage=\(coveragePct)%)")
                 await channelStore.loadAllEPG()
                 // The bulk grid alone leaves rows blank: Dispatcharr's
                 // /api/epg/grid/ answers for most channels but not all
@@ -8696,6 +8717,8 @@ private struct ChannelInfoBanner: View {
     // #42 Part 4: gate the "Up/Down changes channels" hint on the same Settings
     // toggle that enables that gesture (default on).
     @AppStorage("appBehaviorsAppleTVChannelFlip") private var appleTVChannelFlip = true
+    /// GH Android#127 part 1: Settings > Player > Show Channel Info Card.
+    @AppStorage(PlayerInfoCardSettings.showOnChannelChangeKey) private var showOnChannelChange = true
 
     /// Local 5s window that opens on every `streamStartedToken`
     /// bump. Lets the banner appear on a Siri Remote channel-flip
@@ -8752,12 +8775,15 @@ private struct ChannelInfoBanner: View {
         // iPhone/iPad: the card rides ONLY on the chrome's visibility (same
         // timer, same tap toggle). Channel changes wake the chrome instead of
         // opening a card-only window.
-        _ = bannerWindowFresh
-        let visible = nowPlaying.chromeIsVisible
+        // GH Android#127: with Show Channel Info Card off, the tune-in
+        // window (5 s after a channel starts) hides the card even though the
+        // channel change woke the chrome; a later tap still shows it.
+        let visible = nowPlaying.chromeIsVisible && (showOnChannelChange || !bannerWindowFresh)
         #else
         // tvOS keeps the card-only tune-in window: Siri Remote up/down flips
-        // need the chrome hidden so the next press keeps flipping.
-        let visible = bannerWindowFresh || nowPlaying.chromeIsVisible
+        // need the chrome hidden so the next press keeps flipping. Off
+        // drops that window; Select still summons the card with the chrome.
+        let visible = (showOnChannelChange && bannerWindowFresh) || nowPlaying.chromeIsVisible
         #endif
         return visible
             && isSingleStream

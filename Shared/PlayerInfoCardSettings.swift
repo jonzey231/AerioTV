@@ -46,6 +46,13 @@ enum PlayerInfoCardSettings {
         UserDefaults.standard.object(forKey: key) as? Bool ?? true
     }
 
+    /// GH Android#127 part 1: Settings > Player > Show Channel Info Card.
+    /// Off = the card no longer pops up by itself when a channel starts
+    /// (list, guide, flip); it still shows with the player controls when
+    /// they are summoned. Unset reads ON. Synced like the row keys.
+    static let showOnChannelChangeKey = "playerShowChannelInfoCard"
+    static var showOnChannelChange: Bool { isOn(showOnChannelChangeKey) }
+
     static var showChannelLogo: Bool       { isOn(channelLogoKey) }
     static var showChannelName: Bool       { isOn(channelNameKey) }
     static var showProgramName: Bool       { isOn(programNameKey) }

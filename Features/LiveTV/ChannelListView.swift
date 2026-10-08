@@ -4015,6 +4015,11 @@ struct ChannelRow: View {
         let isFav = favoritesStore.isFavorite(item.id)
         items.append(.init(title: isFav ? "Remove from Favorites" : "Add to Favorites",
                            systemImage: isFav ? "star.slash" : "star") { favoritesStore.toggle(item) })
+        if RecentChannelsStore.shared.contains(item.id) {
+            items.append(.init(title: "Remove from Recently Watched", systemImage: "clock.badge.xmark", destructive: true) {
+                RecentChannelsStore.shared.remove(id: item.id)
+            })
+        }
         let isStaged = MultiviewStore.shared.tile(forChannelID: item.id) != nil
         items.append(.init(title: isStaged ? "Remove from Multiview" : "Add to Multiview",
                            systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill") { toggleMultiview() })
@@ -4074,6 +4079,12 @@ struct ChannelRow: View {
         #endif
         Button { favoritesStore.toggle(item) } label: {
             Label(isFav ? "Remove from Favorites" : "Add to Favorites", systemImage: isFav ? "star.slash" : "star")
+        }
+        // GH Android#130: drop this channel from Recently Watched.
+        if RecentChannelsStore.shared.contains(item.id) {
+            Button(role: .destructive) {
+                RecentChannelsStore.shared.remove(id: item.id)
+            } label: { Label("Remove from Recently Watched", systemImage: "clock.badge.xmark") }
         }
         #if os(iOS)
         // Same Multiview toggle as the guide menu (Logan 2026-09-06):

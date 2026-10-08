@@ -3063,7 +3063,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             panelTimeZoneID: cu.panelTimeZoneID,
                             programStart: cu.programStart,
                             programEnd: cu.programEnd,
-                            offsetSeconds: flooredSecs) else { return }
+                            offsetSeconds: flooredSecs,
+                            requestShiftSeconds: cu.requestShiftSeconds) else { return }
                         self.playbackEnded = false
                         self.catchupBaseOffsetMs = Int32(flooredSecs * 1000)
                         // NO residual in-stream seek: the stream is opened

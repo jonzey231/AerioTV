@@ -19,6 +19,9 @@ struct LiveTVSettingsView: View {
 
     // MARK: Guide presentation
     @AppStorage("ui.showChannelLogos")     private var showChannelLogos = true
+    /// GH Android#130: Clear Recently Watched confirmation.
+    @State private var showClearRecentsConfirm = false
+    @ObservedObject private var recentsStore = RecentChannelsStore.shared
     /// Settings > Live TV > Logo Size (same ladder as Multiview's). Shown
     /// only while Show Channel Logos is on.
     @AppStorage(liveTVLogoSizeKey)         private var channelLogoSize = liveTVLogoSizeDefault
@@ -125,6 +128,12 @@ struct LiveTVSettingsView: View {
         .toolbar(.hidden, for: .navigationBar)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
+        .alert("Clear Recently Watched?", isPresented: $showClearRecentsConfirm) {
+            Button("Clear", role: .destructive) { RecentChannelsStore.shared.clear() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Removes every channel from Recently Watched for this playlist.")
+        }
         .onAppear {
             // Logan 2026-09-18: Live TV scales cap at 150% like Movies.
             // A value saved under the old 175% range would sit outside the
@@ -333,6 +342,25 @@ struct LiveTVSettingsView: View {
                 Text("Badges").sectionHeaderStyle()
             } footer: {
                 Text("Show the LIVE, NEW, and season/episode pills on the guide, channel list, and program info. Remembered separately for iPhone/iPad and Apple TV, and synced across your devices of that kind.")
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+            }
+            .listSectionSeparator(.hidden)
+
+            // MARK: Recently Watched (GH Android#130)
+            Section {
+                Button(role: .destructive) {
+                    showClearRecentsConfirm = true
+                } label: {
+                    Label("Clear Recently Watched", systemImage: "clock.badge.xmark")
+                        .scaledFont(.bodyMedium)
+                        .foregroundColor(recentsStore.recentIDs.isEmpty ? Color.contrastText(.textTertiary) : .red)
+                }
+                .disabled(recentsStore.recentIDs.isEmpty)
+                .listRowBackground(Color.cardBackground)
+            } header: {
+                Text("Recently Watched").sectionHeaderStyle()
+            } footer: {
+                Text("Remove a single channel from its long-press menu in the channel list.")
                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
             .listSectionSeparator(.hidden)
@@ -711,6 +739,17 @@ struct LiveTVSettingsView: View {
                     }
 
                     tvFooter("Show the LIVE, NEW, and season/episode pills on the guide, channel list, and program info. Remembered separately for Apple TV and iPhone/iPad, and synced across your Apple TVs.")
+                }
+
+                // MARK: Recently Watched (GH Android#130)
+                // Never disabled on TV (a disabled row drops focus); an
+                // empty list just confirms and clears nothing.
+                SettingsSection("Recently Watched", style: .plain) {
+                    TVSettingsActionRow(
+                        icon: "clock.badge.xmark",
+                        label: "Clear Recently Watched",
+                        isDestructive: true
+                    ) { showClearRecentsConfirm = true }
                 }
 
                 // MARK: Display Scale

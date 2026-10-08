@@ -378,6 +378,15 @@ struct MultiviewTileView: View {
 
     // MARK: - tvOS body (Button + ButtonStyle + contextMenu)
 
+    /// GH Android#125: per-tile Switch Stream shows only for a Dispatcharr
+    /// channel on an admin account (`dispatcharrCanSwitchStream`, which
+    /// fails closed while the level is unknown). Hidden otherwise.
+    private var canSwitchTileStream: Bool {
+        guard tile.item.dispatcharrChannelID != nil,
+              let uuid = tile.item.uuid, !uuid.isEmpty else { return false }
+        return ChannelStore.shared.activeServer?.dispatcharrCanSwitchStream ?? false
+    }
+
     #if os(tvOS)
     /// tvOS tile wraps the video content in a SwiftUI `Button` and
     /// drives focus chrome through `MultiviewTileButtonStyle`. This
@@ -772,8 +781,7 @@ struct MultiviewTileView: View {
             Label("Playback", systemImage: "slider.horizontal.below.rectangle")
         }
 
-        if tile.item.dispatcharrChannelID != nil,
-           let uuid = tile.item.uuid, !uuid.isEmpty {
+        if canSwitchTileStream {
             Button {
                 store.pendingStreamSwitchTileID = tile.id
             } label: {
@@ -2127,8 +2135,7 @@ struct MultiviewTileView: View {
             store.pendingSwapTileID = tile.id
         }
 
-        if tile.item.dispatcharrChannelID != nil,
-           let uuid = tile.item.uuid, !uuid.isEmpty {
+        if canSwitchTileStream {
             Button("Switch Stream") {
                 store.pendingStreamSwitchTileID = tile.id
             }

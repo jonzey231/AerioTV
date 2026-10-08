@@ -1014,6 +1014,10 @@ struct XtreamCodesAPI {
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 20
+        // GH Android#124: never answer a channel or guide call from
+        // URLCache.shared (see M3UParser.session).
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.urlCache = nil
         // NO total-resource cap. timeoutIntervalForResource budgets the ENTIRE
         // transfer, so on a provider-sized payload it silently becomes a
         // MINIMUM BANDWIDTH requirement rather than a liveness check. Measured
@@ -6246,6 +6250,11 @@ struct CatchupPlayback: Identifiable, Equatable, Sendable {
     /// Program-relative start offset (ms) restored from
     /// CatchupResumeStore. nil = start at the beginning.
     var resumeOffsetMs: Int32? = nil
+    /// GH Android#129: the playlist's Catch-Up Time Offset, in seconds,
+    /// added to every REQUEST time (timeshift URL start, native session
+    /// start) and never to `programStart`/`programEnd`, which stay the
+    /// guide's times for positions, resume keys and display.
+    var requestShiftSeconds: Double = 0
 
     var programDurationMs: Int32 {
         Int32(max(0, programEnd.timeIntervalSince(programStart)) * 1000)
@@ -6373,6 +6382,21 @@ enum CatchupError: LocalizedError {
 @MainActor
 enum CatchupSupport {
 
+    /// GH Android#129: per-playlist Catch-Up Time Offset, in minutes
+    /// (negative to positive, default 0). UserDefaults key
+    /// `catchupTimeOffsetMinutes.<playlist UUID>`; Android mirrors it.
+    nonisolated static func timeOffsetKey(serverID: UUID) -> String {
+        "catchupTimeOffsetMinutes.\(serverID.uuidString)"
+    }
+
+    /// Allowed range for the offset picker, in minutes.
+    nonisolated static let timeOffsetRange: ClosedRange<Int> = -180...180
+
+    nonisolated static func timeOffsetMinutes(serverID: UUID) -> Int {
+        let v = UserDefaults.standard.integer(forKey: timeOffsetKey(serverID: serverID))
+        return min(max(v, timeOffsetRange.lowerBound), timeOffsetRange.upperBound)
+    }
+
     /// Per-server-id memo of Dispatcharr XC credentials (username, xc_password).
     private static var xcCredsCache: [UUID: (String, String)] = [:]
     /// Per-server-id memo of the XC panel's advertised timezone.
@@ -6464,12 +6488,12 @@ enum CatchupSupport {
               let scheme = currentURL.scheme, let host = currentURL.host else { return nil }
         let port = currentURL.port.map { ":\($0)" } ?? ""
         let base = "\(scheme)://\(host)\(port)"
-        let start = playback.programStart.addingTimeInterval(max(0, offsetSeconds))
+        let start = playback.programStart.addingTimeInterval(max(0, offsetSeconds) + playback.requestShiftSeconds)
         // Task #183: window the re-minted session to the REMAINING length
         // (start is mid-programme). Full length would overshoot into the
         // next show by the seek offset; nil past the end lets the server
         // fall back to its default window.
-        let remainingSecs = playback.programEnd.timeIntervalSince(start)
+        let remainingSecs = playback.programEnd.addingTimeInterval(playback.requestShiftSeconds).timeIntervalSince(start)
         let remainingMinutes = remainingSecs > 0 ? max(1, Int((remainingSecs / 60).rounded(.up))) : nil
         if case .created(let url) = await mintNativeSession(base: base,
                                                             authHeaders: playback.nativeAuthHeaders,
@@ -6585,7 +6609,8 @@ enum CatchupSupport {
                                  panelTimeZoneID: String,
                                  programStart: Date,
                                  programEnd: Date,
-                                 offsetSeconds: Double) -> URL? {
+                                 offsetSeconds: Double,
+                                 requestShiftSeconds: Double = 0) -> URL? {
         let str = url.absoluteString
         guard let regex = try? NSRegularExpression(
             pattern: "/timeshift/([^/]+)/([^/]+)/(\\d+)/([^/]+)/") else { return nil }
@@ -6594,8 +6619,10 @@ enum CatchupSupport {
               let full = Range(m.range, in: str),
               let userR = Range(m.range(at: 1), in: str),
               let passR = Range(m.range(at: 2), in: str) else { return nil }
-        let newStartDate = programStart.addingTimeInterval(max(0, offsetSeconds))
-        let durationMin = max(1, Int(ceil(programEnd.timeIntervalSince(newStartDate) / 60.0)))
+        // GH Android#129: the Catch-Up Time Offset moves the request window
+        // as a whole, so start and end shift together.
+        let newStartDate = programStart.addingTimeInterval(max(0, offsetSeconds) + requestShiftSeconds)
+        let durationMin = max(1, Int(ceil(programEnd.addingTimeInterval(requestShiftSeconds).timeIntervalSince(newStartDate) / 60.0)))
         let start = formatStart(newStartDate, panelTimeZoneID: panelTimeZoneID)
         let replacement = "/timeshift/\(str[userR])/\(str[passR])/\(durationMin)/\(start)/"
         return URL(string: str.replacingCharacters(in: full, with: replacement))
@@ -6618,6 +6645,15 @@ enum CatchupSupport {
                         programStart: Date,
                         programEnd: Date) async throws -> CatchupPlayback {
         guard channel.hasCatchup else { throw CatchupError.notCatchup }
+        // GH Android#129: request times shift by the playlist's Catch-Up Time
+        // Offset; the guide times (programStart/End) are kept as-is.
+        let shiftMinutes = timeOffsetMinutes(serverID: server.id)
+        let shift = TimeInterval(shiftMinutes * 60)
+        let requestStart = programStart.addingTimeInterval(shift)
+        let requestEnd = programEnd.addingTimeInterval(shift)
+        if shiftMinutes != 0 {
+            debugLog("[CATCHUP] time offset \(shiftMinutes) min applied to request times")
+        }
         switch server.type {
         case .dispatcharrAPI:
             // Task #149: prefer the native sessions API (normal auth on
@@ -6642,7 +6678,7 @@ enum CatchupSupport {
                 switch await mintNativeSession(base: nativeBase,
                                                authHeaders: authHeaders,
                                                channelUUID: channelUUID,
-                                               start: programStart,
+                                               start: requestStart,
                                                durationMinutes: programMinutes) {
                 case .created(let playbackURL):
                     nativeSupportCache[nativeBase] = true
@@ -6655,7 +6691,8 @@ enum CatchupSupport {
                                            title: programTitle,
                                            headers: headers,
                                            nativeChannelUUID: channelUUID,
-                                           nativeAuthHeaders: authHeaders)
+                                           nativeAuthHeaders: authHeaders,
+                                           requestShiftSeconds: shift)
                 case .unsupported:
                     nativeSupportCache[nativeBase] = false
                 case .error:
@@ -6689,8 +6726,8 @@ enum CatchupSupport {
                                               username: creds.0,
                                               password: creds.1,
                                               streamID: streamID,
-                                              programStart: programStart,
-                                              programEnd: programEnd,
+                                              programStart: requestStart,
+                                              programEnd: requestEnd,
                                               panelTimeZoneID: "UTC") else {
                 throw CatchupError.badURL
             }
@@ -6698,13 +6735,14 @@ enum CatchupSupport {
             let ua = server.effectiveUserAgent
             if !ua.isEmpty { headers["User-Agent"] = ua }
             // Creds live in the URL path; log only the shape, never the URL.
-            debugLog("[CATCHUP] resolved Dispatcharr timeshift host=\(url.host ?? "?") stream=\(streamID) start=\(formatStart(programStart, panelTimeZoneID: "UTC")) durMin=\(Int(programEnd.timeIntervalSince(programStart) / 60))")
+            debugLog("[CATCHUP] resolved Dispatcharr timeshift host=\(url.host ?? "?") stream=\(streamID) start=\(formatStart(requestStart, panelTimeZoneID: "UTC")) durMin=\(Int(programEnd.timeIntervalSince(programStart) / 60))")
             return CatchupPlayback(url: url,
                                    panelTimeZoneID: "UTC",
                                    programStart: programStart,
                                    programEnd: programEnd,
                                    title: programTitle,
-                                   headers: headers)
+                                   headers: headers,
+                                   requestShiftSeconds: shift)
         case .xtreamCodes:
             let tz: String
             if let cached = panelTzCache[server.id] {
@@ -6727,8 +6765,8 @@ enum CatchupSupport {
                                               username: server.username,
                                               password: server.effectivePassword,
                                               streamID: channel.id,
-                                              programStart: programStart,
-                                              programEnd: programEnd,
+                                              programStart: requestStart,
+                                              programEnd: requestEnd,
                                               panelTimeZoneID: tz) else {
                 throw CatchupError.badURL
             }
@@ -6736,13 +6774,14 @@ enum CatchupSupport {
             let ua = server.effectiveUserAgent
             if !ua.isEmpty { headers["User-Agent"] = ua }
             // Creds live in the URL path; log only the shape, never the URL.
-            debugLog("[CATCHUP] resolved XC timeshift host=\(url.host ?? "?") stream=\(channel.id) tz=\(tz) start=\(formatStart(programStart, panelTimeZoneID: tz)) durMin=\(Int(programEnd.timeIntervalSince(programStart) / 60))")
+            debugLog("[CATCHUP] resolved XC timeshift host=\(url.host ?? "?") stream=\(channel.id) tz=\(tz) start=\(formatStart(requestStart, panelTimeZoneID: tz)) durMin=\(Int(programEnd.timeIntervalSince(programStart) / 60))")
             return CatchupPlayback(url: url,
                                    panelTimeZoneID: tz,
                                    programStart: programStart,
                                    programEnd: programEnd,
                                    title: programTitle,
-                                   headers: headers)
+                                   headers: headers,
+                                   requestShiftSeconds: shift)
         default:
             throw CatchupError.unsupportedServer
         }
