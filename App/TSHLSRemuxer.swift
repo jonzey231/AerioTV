@@ -6476,6 +6476,15 @@ struct AVPlayerMultiviewTile: View {
         guard !progressStore.isPiPActive else { return }
         guard tileError == nil, player != nil || statusText != nil else { return }
         guard !backgroundSuspended, graceStartedAt == nil else { return }
+        // CarPlay connected (2026-10-07): locking the phone used to pause the
+        // tile here and the car went silent. Hand a live channel to the
+        // headless CarPlay engine, which is built to play with no view.
+        if NowPlayingManager.shared.isCarPlayConnected, !isVOD, !isDVR, catchup == nil {
+            debugLog("[CARPLAY] yield: tile backgrounded with a car connected, handing off channel=\(channelName)")
+            quiesceForBackground()
+            HeadlessPlaybackController.shared.takeOverFromBackgroundedView(reason: "phone locked or app left")
+            return
+        }
         let taskID = UIApplication.shared.beginBackgroundTask(withName: "aerio.tile.backgroundGrace") {
             // iOS is about to expire the task: quiesce now (which ends it).
             debugLog("[AVP-MV] background grace: task expiration handler fired; quiescing channel=\(channelName)")
@@ -6589,6 +6598,10 @@ struct AVPlayerMultiviewTile: View {
     private func resumeFromBackground() {
         guard backgroundSuspended else { return }
         backgroundSuspended = false
+        // Back on screen: the view engine takes the channel from a headless
+        // CarPlay engine (no-op when none runs). Must precede start(), whose
+        // background deferral checks for an active headless engine.
+        HeadlessPlaybackController.shared.yieldToViewEngine()
         // Each background cycle earns fresh silent retries; without the
         // reset the second background trip went straight to the card.
         mismatchAutoRetries = 0
@@ -6623,6 +6636,22 @@ struct AVPlayerMultiviewTile: View {
             debugLog("[AVP-MV] start() with a live pipeline present; tearing it down first channel=\(channelName)")
             stop()
         }
+        #if os(iOS)
+        // CarPlay coexistence (2026-10-07): in the background the headless
+        // CarPlay engine owns the car's audio. A tile started now (a car tap
+        // swapped its channel while the phone is locked) would be a second
+        // producer, so it waits for the next foreground, where
+        // resumeFromBackground rebuilds it. In the foreground the tile owns
+        // playback and the headless engine yields.
+        if UIApplication.shared.applicationState == .background,
+           HeadlessPlaybackController.shared.isActive {
+            endBackgroundGrace()
+            backgroundSuspended = true
+            debugLog("[CARPLAY] yield: tile start deferred to foreground, headless engine owns the car channel=\(channelName)")
+            return
+        }
+        HeadlessPlaybackController.shared.yieldToViewEngine()
+        #endif
         tileStopped = false
         tileError = nil
         progressStore.liveStopNotice = nil

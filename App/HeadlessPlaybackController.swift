@@ -12,6 +12,11 @@ import UIKit
 /// mounted and decoding. The headless CarPlay engine must never run at the
 /// same time as a view-mounted engine (double audio), so it consults this
 /// before starting and yields to a coordinator the instant one mounts.
+///
+/// AVPlayer tiles (`AVPlayerMultiviewTile`) do not register here: they
+/// follow a simpler ownership rule (see `HeadlessPlaybackController`):
+/// in the background with a car connected the headless engine owns audio,
+/// in the foreground the tile does, and the tile yields or defers itself.
 @MainActor
 final class PlaybackEngineRegistry {
     static let shared = PlaybackEngineRegistry()
@@ -35,18 +40,35 @@ final class PlaybackEngineRegistry {
     var hasLiveCoordinator: Bool { liveCoordinatorCount > 0 }
 }
 
-/// Plays a live channel's AUDIO with no SwiftUI player view mounted.
+/// Plays a live channel with no SwiftUI player view mounted (CarPlay with
+/// the phone locked, or the app launched by the car alone).
 ///
-/// The full player (mpv/AVPlayer engine + `AVAudioSession` activation +
-/// `NowPlayingBridge`) lives inside the `MPVPlayerView` SwiftUI representable,
-/// which only instantiates when a foreground `UIWindowScene` renders it. In a
-/// car the phone is typically locked / the app is not foregrounded (or the app
-/// was cold-launched purely to service the CarPlay scene), so nothing mounts
-/// and a CarPlay channel tap produced no audio. This controller closes that
-/// gap: it drives a headless audio-only mpv instance directly from
-/// `CarPlaySceneDelegate.playChannel`, activates the audio session durably, and
-/// publishes complete Now Playing metadata — with a clean handoff to/from the
-/// view engine so only one of them ever decodes audio.
+/// The full player (engine + `AVAudioSession` activation + Now Playing)
+/// lives inside the SwiftUI tile, which only renders in a foreground
+/// `UIWindowScene`. In a car the phone is usually locked, so this
+/// controller drives its own engine straight from `CarPlaySceneDelegate`.
+///
+/// Engine (2026-10-07): the AVPlayer live path, routed exactly like the
+/// foreground tile (`PlayerSession.resolveEngine`): direct HLS plays
+/// straight into AVPlayer, raw MPEG-TS goes through the on-device
+/// `TSHLSRemuxer` loopback playlist. Audio only (no layer, external
+/// playback off) unless the car session supports video and the stream is
+/// direct HLS. The legacy audio-only mpv engine is kept as a fallback
+/// behind `PlaybackFeatureFlags.mpvEngineEnabled` for what AVPlayer cannot
+/// take: live channels the resolver sends to mpv (formats that are neither
+/// HLS nor MPEG-TS, or the AVPlayer toggles switched off) and TS sources
+/// the remuxer's codec gate rejects (MPEG-2 video, MP2 audio, HEVC after a
+/// mid-stream source switch).
+///
+/// Ownership rules (no double audio):
+/// 1. Only starts with CarPlay connected, no foreground app scene, and no
+///    mounted mpv coordinator.
+/// 2. A foreground view engine starting (mpv coordinator mount, AVPlayer
+///    tile start) calls `yieldToViewEngine()` first.
+/// 3. An AVPlayer tile that starts while the app is in the background and
+///    this controller is active defers itself to the next foreground.
+/// 4. A live AVPlayer tile going to the background with a car connected
+///    quiesces and hands its channel here (`takeOverFromBackgroundedView`).
 @MainActor
 final class HeadlessPlaybackController {
     static let shared = HeadlessPlaybackController()
@@ -61,12 +83,6 @@ final class HeadlessPlaybackController {
         case mpv(HeadlessMPVAudioEngine)
         case avPlayer(HeadlessAVPlayerEngine)
 
-        @MainActor func play(url: URL, headers: [String: String]) {
-            switch self {
-            case .mpv(let e): e.play(url: url, headers: headers)
-            case .avPlayer(let e): e.play(url: url, headers: headers)
-            }
-        }
         @MainActor func setPaused(_ paused: Bool) {
             switch self {
             case .mpv(let e): e.setPaused(paused)
@@ -79,39 +95,44 @@ final class HeadlessPlaybackController {
             case .avPlayer(let e): e.stop()
             }
         }
-        var isAVPlayer: Bool {
-            if case .avPlayer = self { return true }
-            return false
+        var name: String {
+            if case .avPlayer = self { return "AVPlayer" }
+            return "mpv"
         }
     }
 
     private var engine: Engine?
-    private var currentItemID: String?
+    private var currentItem: ChannelDisplayItem?
+    private var currentItemID: String? { currentItem?.id }
     private var isPaused = false
+    private var pausedAt: Date?
     /// Whether the connected car session can present video (CarPlay video
-    /// entitlement + car support, iOS 26.4+). Set per-start by the scene
-    /// delegate; remembered so the $playingItem re-tune observer keeps the
-    /// same engine choice across channel flips.
-    private var videoCapable = false
-    /// The last engine resolution, kept for the AVPlayer-failure fallback.
-    private var lastResolved: ResolvedEngine?
+    /// entitlement + car support, iOS 26.4+). Set by the scene delegate at
+    /// connect; kept so re-tunes and take-overs make the same choice.
+    var videoCapable = false
+    /// Index into the channel's `streamURLs` for the failover walk, and the
+    /// number of attempts made for the current channel.
+    private var attempt = 0
+    private var healthySince: Date?
+    private var retryWork: DispatchWorkItem?
     /// Tracks the audio-session refcount we own, decoupled from `engine`
-    /// existence because a mid-session engine swap (mpv <-> AVPlayer)
+    /// existence because a mid-session engine swap (AVPlayer <-> mpv)
     /// destroys and recreates `engine` without releasing the session.
     private var ownsAudioSession = false
     /// Advances the Now Playing program timeline while headless (there is no
-    /// perf pump calling `updateElapsed` when no coordinator is mounted).
+    /// perf pump calling `updateElapsed` when no view is mounted).
     private var elapsedTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
 
+    /// True while a headless engine owns playback.
+    var isActive: Bool { engine != nil }
+
     private init() {
         // Re-tune when the active channel changes (CarPlay next/previous track,
-        // or a re-tap in the list) WHILE we own the engine. The gate inside
-        // `start` keeps this inert on the foreground path.
+        // or a re-tap in the list) WHILE we own the engine.
         NowPlayingManager.shared.$playingItem
             .receive(on: RunLoop.main)
             .sink { [weak self] item in
-                // Delivered on the main run loop (== MainActor executor).
                 MainActor.assumeIsolated {
                     guard let self, self.engine != nil, let item else { return }
                     if item.id != self.currentItemID {
@@ -121,78 +142,68 @@ final class HeadlessPlaybackController {
                 }
             }
             .store(in: &cancellables)
+
+        // Phone call / Siri / navigation prompt: AVPlayer and mpv both go
+        // quiet on interruption. A live stream resumed from where it paused
+        // would replay stale audio or stall on an expired window, so a
+        // resumable end re-tunes the channel at the live edge.
+        NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in
+                MainActor.assumeIsolated { self?.handleInterruption(note) }
+            }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: AVAudioSession.mediaServicesWereResetNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.engine != nil else { return }
+                    debugLog("[CARPLAY] error: media services were reset; re-tuning")
+                    self.retune(reason: "media services reset")
+                }
+            }
+            .store(in: &cancellables)
     }
 
-    /// True when a foreground `UIWindowScene` exists — i.e. the phone app is on
-    /// screen, so the SwiftUI player will mount and own playback. Mirrors the
-    /// scene lookup in `AerioApp`.
+    /// True when a foreground app `UIWindowScene` exists, i.e. the phone app
+    /// is on screen and the SwiftUI player will mount and own playback. Car
+    /// window scenes (`UIWindowSceneSessionRoleCarPlay`) are not the phone UI
+    /// and never count.
     static func hasForegroundPlayerScene() -> Bool {
-        UIApplication.shared.connectedScenes
-            .contains { ($0 as? UIWindowScene)?.activationState == .foregroundActive }
+        UIApplication.shared.connectedScenes.contains {
+            $0.session.role == .windowApplication
+                && ($0 as? UIWindowScene)?.activationState == .foregroundActive
+        }
     }
 
     /// Start (or re-tune to) a channel headlessly. No-op unless we're in the
-    /// cold-car state: CarPlay connected, no foreground scene, and no mounted
-    /// coordinator — so this never fights the view engine or spawns a second
-    /// audio producer.
+    /// car-only state: CarPlay connected, no foreground scene, and no mounted
+    /// mpv coordinator, so this never fights the view engine.
     func start(item: ChannelDisplayItem, server: ServerConnection?, isLive: Bool,
                videoCapable: Bool = false) {
         guard NowPlayingManager.shared.isCarPlayConnected,
               !Self.hasForegroundPlayerScene(),
               !PlaybackEngineRegistry.shared.hasLiveCoordinator
         else {
-            debugLog("[CarPlay-Headless] no-op for \(item.name): carplay=\(NowPlayingManager.shared.isCarPlayConnected) fgScene=\(Self.hasForegroundPlayerScene()) liveCoordinators=\(PlaybackEngineRegistry.shared.liveCoordinatorCount) (view engine owns playback)")
+            debugLog("[CARPLAY] engine: headless not started for \(item.name): carplay=\(NowPlayingManager.shared.isCarPlayConnected) fgScene=\(Self.hasForegroundPlayerScene()) mpvCoordinators=\(PlaybackEngineRegistry.shared.liveCoordinatorCount) (view engine owns playback)")
             return
         }
 
-        // Already playing this channel — nothing to do (idempotent for the
+        // Already playing this channel: nothing to do (idempotent for the
         // playChannel + $playingItem observer both firing).
         if engine != nil, currentItemID == item.id { return }
 
         self.videoCapable = videoCapable
-        let resolved = PlayerSession.resolveEngine(item: item, server: server, isLive: isLive)
-        lastResolved = resolved
-        // Host logged (never the full URL - stream URLs can carry query
-        // credentials): the cold-car failure mode to catch is a LAN host
-        // being handed to a cellular-only phone.
-        debugLog("[CarPlay-Headless] start channel=\(item.name) scheme=\(resolved.routeURL.scheme ?? "?") host=\(resolved.routeURL.host ?? "?")")
-
-        // CarPlay video: a video-capable car session + a direct-HLS stream
-        // plays through a headless AVPlayer with external playback enabled,
-        // so the car can present the video (CarPlay video rides the AirPlay
-        // video path, which mpv cannot feed). Everything else — audio-only
-        // sessions, non-HLS streams — stays on the proven mpv audio engine.
-        // The remux engine is deliberately excluded: its loopback server
-        // suspends when the app backgrounds, which is the norm in a car.
-        let wantsAVPlayer = videoCapable && resolved.engine == .avPlayerDirectHLS
-        if let current = engine, current.isAVPlayer != wantsAVPlayer {
-            current.stop()
-            engine = nil
-        }
         if !ownsAudioSession {
             AudioSessionRefCount.increment(caller: "carplay-headless")
             ownsAudioSession = true
         }
-
-        // Reuse the engine instance across channel flips to avoid
-        // audio-session bounce; create it on the first start.
-        let eng: Engine
-        if let existing = engine {
-            eng = existing
-        } else if wantsAVPlayer {
-            let av = HeadlessAVPlayerEngine()
-            av.onPlaybackFailure = { [weak self] message in
-                Task { @MainActor in self?.handleAVPlayerFailure(message) }
-            }
-            debugLog("[CarPlay-Headless] engine=AVPlayer (video-capable car, direct HLS)")
-            eng = .avPlayer(av)
-        } else {
-            eng = .mpv(HeadlessMPVAudioEngine())
-        }
-        engine = eng
-        currentItemID = item.id
+        currentItem = item
+        attempt = 0
+        healthySince = nil
         isPaused = false
-        eng.play(url: resolved.routeURL, headers: resolved.headers)
+        pausedAt = nil
+        tune(server: server)
 
         // Complete Now Playing: title / program subtitle / channel logo /
         // program-relative timeline, plus play-pause + next/prev commands.
@@ -206,57 +217,184 @@ final class HeadlessPlaybackController {
         startElapsedTimer()
     }
 
-    /// A SwiftUI player view is taking over (phone foregrounded / unlocked).
-    /// Stop the headless engine but DON'T tear down Now Playing — the mounting
-    /// coordinator re-arms the bridge itself, so the lock-screen/CarPlay chrome
+    /// A live AVPlayer tile is leaving the screen (phone locked or app
+    /// switched) with a car connected. The tile has already quiesced; pick
+    /// its channel up here so the car keeps playing.
+    func takeOverFromBackgroundedView(reason: String) {
+        guard NowPlayingManager.shared.isCarPlayConnected,
+              let item = NowPlayingManager.shared.playingItem else { return }
+        guard engine == nil || currentItemID != item.id else { return }
+        debugLog("[CARPLAY] engine: headless take-over from view (\(reason)) channel=\(item.name)")
+        start(item: item, server: ChannelStore.shared.activeServer, isLive: true,
+              videoCapable: videoCapable)
+    }
+
+    /// A view engine is taking over (phone foregrounded / unlocked). Stop
+    /// the headless engine but DON'T tear down Now Playing: the mounting
+    /// view re-arms the bridge itself, so the lock-screen/CarPlay chrome
     /// never flickers.
     func yieldToViewEngine() {
         guard engine != nil else { return }
-        NSLog("[CarPlay-Headless] yield to view engine")
-        elapsedTimer?.invalidate()
-        elapsedTimer = nil
-        engine?.stop()
-        engine = nil
-        currentItemID = nil
-        if ownsAudioSession {
-            ownsAudioSession = false
-            AudioSessionRefCount.decrement(caller: "carplay-headless")
-        }
+        debugLog("[CARPLAY] yield: headless \(engine?.name ?? "?") engine stops, view engine takes over channel=\(currentItem?.name ?? "?")")
+        shutDownEngine()
     }
 
     /// Full teardown (CarPlay disconnect, or a global stop/exit). Clears Now
     /// Playing only if we still own the engine.
     func stop() {
         guard engine != nil else { return }
-        NSLog("[CarPlay-Headless] stop")
+        debugLog("[CARPLAY] teardown: headless \(engine?.name ?? "?") engine stopped channel=\(currentItem?.name ?? "?")")
+        shutDownEngine()
+        NowPlayingBridge.shared.teardown()
+    }
+
+    private func shutDownEngine() {
+        retryWork?.cancel()
+        retryWork = nil
         elapsedTimer?.invalidate()
         elapsedTimer = nil
         engine?.stop()
         engine = nil
-        currentItemID = nil
+        currentItem = nil
         if ownsAudioSession {
             ownsAudioSession = false
             AudioSessionRefCount.decrement(caller: "carplay-headless")
         }
-        NowPlayingBridge.shared.teardown()
     }
 
-    /// The headless AVPlayer hit a hard failure (asset refused, item errored).
-    /// Fall back to the mpv audio engine on the same resolved URL so the car
-    /// session degrades to audio instead of dead air. One-way for the current
-    /// channel; the next channel flip re-evaluates video eligibility.
-    private func handleAVPlayerFailure(_ message: String) {
-        guard let current = engine, current.isAVPlayer, let resolved = lastResolved else { return }
-        debugLog("[CarPlay-Headless] AVPlayer failed (\(message)); falling back to mpv audio")
-        current.stop()
-        let eng = Engine.mpv(HeadlessMPVAudioEngine())
-        engine = eng
-        eng.play(url: resolved.routeURL, headers: resolved.headers)
+    // MARK: Tune / failover
+
+    /// Resolve the current channel (with the failover walk's URL) the same
+    /// way the foreground tile does, and play it on the matching engine.
+    private func tune(server: ServerConnection?, forceMPV: Bool = false) {
+        guard var item = currentItem else { return }
+        let urls = item.streamURLs
+        if attempt > 0, !urls.isEmpty {
+            item.streamURL = urls[attempt % urls.count]
+        }
+        let resolved = PlayerSession.resolveEngine(item: item, server: server, isLive: true)
+        let useMPV = forceMPV || resolved.engine == .mpv
+        // Host logged, never the full URL (stream URLs can carry query
+        // credentials): the cold-car failure to catch is a LAN host handed
+        // to a cellular-only phone.
+        debugLog("[CARPLAY] tune: channel=\(item.name) attempt=\(attempt + 1) route=\(resolved.engine) scheme=\(resolved.routeURL.scheme ?? "?") host=\(resolved.routeURL.host ?? "?") video=\(videoCapable && !useMPV && resolved.engine == .avPlayerDirectHLS)")
+
+        if useMPV {
+            guard PlaybackFeatureFlags.mpvEngineEnabled else {
+                debugLog("[CARPLAY] error: \(item.name) needs the mpv fallback but the mpv engine is disabled; nothing to play")
+                return
+            }
+            if case .mpv(let e)? = engine {
+                e.play(url: resolved.routeURL, headers: resolved.headers)
+            } else {
+                engine?.stop()
+                let e = HeadlessMPVAudioEngine()
+                engine = .mpv(e)
+                debugLog("[CARPLAY] engine: mpv audio-only (fallback) channel=\(item.name)")
+                e.play(url: resolved.routeURL, headers: resolved.headers)
+            }
+            return
+        }
+
+        let av: HeadlessAVPlayerEngine
+        if case .avPlayer(let e)? = engine {
+            av = e
+        } else {
+            engine?.stop()
+            av = HeadlessAVPlayerEngine()
+            av.onFailure = { [weak self] failure in
+                self?.handleAVPlayerFailure(failure)
+            }
+            av.onPlaying = { [weak self] in
+                guard let self, self.healthySince == nil else { return }
+                self.healthySince = Date()
+            }
+            engine = .avPlayer(av)
+        }
+        debugLog("[CARPLAY] engine: AVPlayer \(resolved.engine == .avPlayerDirectHLS ? "direct HLS" : "TS remux loopback") channel=\(item.name)")
+        av.play(resolved, allowsVideo: videoCapable && resolved.engine == .avPlayerDirectHLS)
+    }
+
+    private func handleAVPlayerFailure(_ failure: HeadlessAVPlayerEngine.Failure) {
+        guard engine != nil, let item = currentItem else { return }
+        // A stream that played for a minute earns a fresh failover budget;
+        // without the reset one blip an hour into a drive would exhaust it.
+        if let since = healthySince, Date().timeIntervalSince(since) > 60 {
+            attempt = 0
+        }
+        healthySince = nil
+        switch failure {
+        case .codec(let codec):
+            debugLog("[CARPLAY] error: AVPlayer cannot take \(item.name) (\(codec)); mpv fallback=\(PlaybackFeatureFlags.mpvEngineEnabled)")
+            tune(server: ChannelStore.shared.activeServer, forceMPV: true)
+        case .playback(let message):
+            let budget = max(2, item.streamURLs.count)
+            attempt += 1
+            guard attempt < budget else {
+                debugLog("[CARPLAY] error: \(item.name) failed after \(attempt) attempts (\(message)); mpv fallback=\(PlaybackFeatureFlags.mpvEngineEnabled)")
+                if PlaybackFeatureFlags.mpvEngineEnabled {
+                    tune(server: ChannelStore.shared.activeServer, forceMPV: true)
+                }
+                return
+            }
+            debugLog("[CARPLAY] error: \(item.name) \(message); failover attempt \(attempt + 1)/\(budget) in 2 s")
+            retryWork?.cancel()
+            let id = item.id
+            let work = DispatchWorkItem { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.engine != nil, self.currentItemID == id else { return }
+                    self.tune(server: ChannelStore.shared.activeServer)
+                }
+            }
+            retryWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+        }
+    }
+
+    /// Re-tune the current channel from scratch (live edge).
+    private func retune(reason: String) {
+        guard engine != nil, currentItem != nil else { return }
+        debugLog("[CARPLAY] tune: re-tune current channel (\(reason))")
+        engine?.stop()
+        engine = nil
+        attempt = 0
+        healthySince = nil
+        isPaused = false
+        pausedAt = nil
+        tune(server: ChannelStore.shared.activeServer)
+    }
+
+    private func handleInterruption(_ note: Notification) {
+        guard engine != nil,
+              let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+        switch type {
+        case .began:
+            debugLog("[CARPLAY] interruption began channel=\(currentItem?.name ?? "?")")
+        case .ended:
+            let optRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            let shouldResume = AVAudioSession.InterruptionOptions(rawValue: optRaw).contains(.shouldResume)
+            debugLog("[CARPLAY] interruption ended shouldResume=\(shouldResume) userPaused=\(isPaused)")
+            guard shouldResume, !isPaused else { return }
+            try? AVAudioSession.sharedInstance().setActive(true)
+            retune(reason: "interruption ended")
+        @unknown default:
+            break
+        }
     }
 
     private func setPaused(_ paused: Bool) {
         guard let engine else { return }
+        // Live: a resume after more than 30 s paused goes back to the live
+        // edge instead of playing a stale (or expired) window.
+        if !paused, isPaused, let at = pausedAt, Date().timeIntervalSince(at) > 30 {
+            debugLog("[CARPLAY] tune: resume after \(Int(Date().timeIntervalSince(at))) s paused, back to live")
+            retune(reason: "resume after long pause")
+            NowPlayingBridge.shared.updateElapsed(0, rate: 1.0)
+            return
+        }
         isPaused = paused
+        pausedAt = paused ? Date() : nil
         engine.setPaused(paused)
         NowPlayingBridge.shared.updateElapsed(0, rate: paused ? 0.0 : 1.0)
     }
@@ -273,6 +411,171 @@ final class HeadlessPlaybackController {
             }
         }
         elapsedTimer = timer
+    }
+}
+
+/// Headless AVPlayer engine for CarPlay, on the same live path as the
+/// foreground tile: direct HLS straight into AVPlayer, raw MPEG-TS through
+/// `TSHLSRemuxer` (loopback or in-process delivery, chosen by the remuxer
+/// exactly as for the tile). No layer is attached. External playback is off
+/// unless the car session supports video and the stream is direct HLS, in
+/// which case the car can take the video surface while parked and the same
+/// player keeps supplying audio when it cannot (CarPlay's rule).
+@MainActor
+final class HeadlessAVPlayerEngine {
+    enum Failure {
+        /// The remuxer's codec gate refused the source: AVPlayer cannot take it.
+        case codec(String)
+        /// Ingest, item or stall failure: worth a failover attempt.
+        case playback(String)
+    }
+
+    var onFailure: ((Failure) -> Void)?
+    var onPlaying: (() -> Void)?
+
+    private var player: AVPlayer?
+    private var remuxer: TSHLSRemuxer?
+    private var statusObservation: NSKeyValueObservation?
+    private var timeControlObservation: NSKeyValueObservation?
+    private var externalObservation: NSKeyValueObservation?
+    private var failedToEndObserver: NSObjectProtocol?
+    /// Bumped on every play/stop so late callbacks from a torn-down
+    /// pipeline are ignored.
+    private var token = UUID()
+
+    func play(_ resolved: ResolvedEngine, allowsVideo: Bool) {
+        teardownPipeline()
+        token = UUID()
+        let t = token
+        switch resolved.engine {
+        case .avPlayerDirectHLS, .mpv:
+            startPlayer(url: resolved.routeURL, headers: resolved.headers, allowsVideo: allowsVideo)
+        case .avPlayerRemuxTS:
+            let mux = TSHLSRemuxer(sourceURL: resolved.routeURL, headers: resolved.headers)
+            mux.reportsIngestStall = true
+            // Remuxer callbacks are delivered on the main queue.
+            mux.onReady = { [weak self] localURL in
+                MainActor.assumeIsolated {
+                    guard let self, self.token == t else { return }
+                    debugLog("[CARPLAY] engine: remux ready, starting AVPlayer on \(localURL.scheme ?? "?")://\(localURL.host ?? "")")
+                    self.startPlayer(url: localURL, headers: [:], allowsVideo: false)
+                }
+            }
+            mux.onError = { [weak self] error in
+                MainActor.assumeIsolated {
+                    guard let self, self.token == t else { return }
+                    if case .unsupportedCodec(let codec) = error {
+                        self.fail(.codec(codec))
+                    } else {
+                        self.fail(.playback("\(error)"))
+                    }
+                }
+            }
+            mux.onIngestSilence = { silent in
+                debugLog("[CARPLAY] engine: remux ingest \(silent ? "silent" : "flowing again")")
+            }
+            mux.onIngestClosed = { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.token == t else { return }
+                    self.fail(.playback("upstream closed the stream"))
+                }
+            }
+            remuxer = mux
+            mux.start()
+        }
+    }
+
+    func setPaused(_ paused: Bool) {
+        paused ? player?.pause() : player?.play()
+    }
+
+    func stop() {
+        token = UUID()
+        teardownPipeline()
+    }
+
+    private func fail(_ failure: Failure) {
+        // One report per pipeline: invalidate before handing it up so a
+        // second callback from the same dying pipeline is dropped.
+        token = UUID()
+        teardownPipeline()
+        onFailure?(failure)
+    }
+
+    private func teardownPipeline() {
+        statusObservation = nil
+        timeControlObservation = nil
+        externalObservation = nil
+        if let obs = failedToEndObserver {
+            NotificationCenter.default.removeObserver(obs)
+            failedToEndObserver = nil
+        }
+        player?.pause()
+        player?.replaceCurrentItem(with: nil)
+        player = nil
+        if let mux = remuxer {
+            mux.onReady = nil
+            mux.onError = nil
+            mux.onIngestSilence = nil
+            mux.onIngestClosed = nil
+            mux.stop()
+            remuxer = nil
+        }
+    }
+
+    private func startPlayer(url: URL, headers: [String: String], allowsVideo: Bool) {
+        var options: [String: Any] = [:]
+        if !headers.isEmpty {
+            options["AVURLAssetHTTPHeaderFieldsKey"] = headers
+        }
+        let asset = AVURLAsset(url: url, options: options)
+        if url.scheme == HLSDelivery.scheme {
+            asset.resourceLoader.setDelegate(HLSResourceLoaderRegistry.shared,
+                                             queue: HLSResourceLoaderRegistry.shared.queue)
+        }
+        let item = AVPlayerItem(asset: asset)
+        // Same live-edge policy as the tile: trust the server's join point.
+        item.automaticallyPreservesTimeOffsetFromLive = true
+        let p = AVPlayer(playerItem: item)
+        p.allowsExternalPlayback = allowsVideo
+        p.usesExternalPlaybackWhileExternalScreenIsActive = allowsVideo
+        // No layer and a locked phone: keep decoding audio in the background.
+        p.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
+        let t = token
+        statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            guard item.status == .failed else { return }
+            let message = item.error?.localizedDescription ?? "unknown item error"
+            Task { @MainActor in
+                guard let self, self.token == t else { return }
+                self.fail(.playback("item failed: \(message)"))
+            }
+        }
+        timeControlObservation = p.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            guard player.timeControlStatus == .playing else { return }
+            Task { @MainActor in
+                guard let self, self.token == t else { return }
+                self.onPlaying?()
+            }
+        }
+        if allowsVideo {
+            externalObservation = p.observe(\.isExternalPlaybackActive, options: [.new]) { _, change in
+                // The line that proves the car took the video surface.
+                debugLog("[CARPLAY] engine: externalPlaybackActive=\(change.newValue ?? false)")
+            }
+        }
+        failedToEndObserver = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.failedToPlayToEndTimeNotification,
+            object: item, queue: .main
+        ) { [weak self] note in
+            let err = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?
+                .localizedDescription ?? "failed to play to end"
+            MainActor.assumeIsolated {
+                guard let self, self.token == t else { return }
+                self.fail(.playback(err))
+            }
+        }
+        player = p
+        p.play()
     }
 }
 
@@ -293,10 +596,14 @@ final class HeadlessMPVAudioEngine: @unchecked Sendable {
     /// loop at all, so a failed or ended stream just sat there as dead air
     /// with Now Playing still up (Logan's real-car report 2026-08-07).
     private var retriedCurrentLoad = false
+    /// The +1 reference handed to mpv as the wakeup-callback context.
+    /// Touched only on `queue`.
+    private var callbackContext: Unmanaged<HeadlessMPVAudioEngine>?
+    /// Bumped by stop() so a delayed reload scheduled before it is dropped.
+    private var retryGeneration = 0
 
     func play(url: URL, headers: [String: String]) {
-        queue.async { [weak self] in
-            guard let self else { return }
+        queue.async { [self] in
             if self.mpv == nil {
                 self.setup(headers: headers)
             }
@@ -315,15 +622,26 @@ final class HeadlessMPVAudioEngine: @unchecked Sendable {
     }
 
     func stop() {
-        queue.async { [weak self] in
-            guard let self, let mpv = self.mpv else { return }
+        // STRONG capture on purpose (TestFlight 1.8.9 crash, thread 11:
+        // objc_msgSend in dispatch_async from the wakeup closure, called on
+        // mpv's core thread from reinit_audio_chain_src). This block used to
+        // capture [weak self]; every caller drops its last reference right
+        // after calling stop(), so self was already nil when the block ran,
+        // the guard returned, and mpv was never destroyed: its core thread
+        // kept loading the file and fired the wakeup callback with an
+        // unretained pointer to the freed engine. Holding self here
+        // guarantees the callback is detached and the handle destroyed.
+        queue.async { [self] in
+            self.retryGeneration &+= 1
+            guard let mpv = self.mpv else { return }
             self.mpv = nil
             self.currentURL = nil
-            // Detach the wakeup callback BEFORE destroy: it holds an
-            // unretained self, and the engine can deallocate right after
-            // this block while a late wakeup is still in flight.
+            // Detach the wakeup callback BEFORE destroy, then release the
+            // retained context it carried (setup's passRetained).
             mpv_set_wakeup_callback(mpv, nil, nil)
             mpv_terminate_destroy(mpv)
+            self.callbackContext?.release()
+            self.callbackContext = nil
         }
     }
 
@@ -333,7 +651,7 @@ final class HeadlessMPVAudioEngine: @unchecked Sendable {
         MPVLibraryWarmup.waitUntilComplete()
 
         guard let handle = mpv_create() else {
-            NSLog("[CarPlay-Headless] mpv_create failed")
+            debugLog("[CARPLAY] error: mpv_create failed")
             return
         }
         mpv_set_option_string(handle, "vo", "libmpv")
@@ -355,7 +673,7 @@ final class HeadlessMPVAudioEngine: @unchecked Sendable {
         }
         let initResult = mpv_initialize(handle)
         if initResult < 0 {
-            debugLog("[CarPlay-Headless] mpv_initialize failed: \(String(cString: mpv_error_string(initResult)))")
+            debugLog("[CARPLAY] error: mpv_initialize failed: \(String(cString: mpv_error_string(initResult)))")
             mpv_terminate_destroy(handle)
             return
         }
@@ -366,13 +684,18 @@ final class HeadlessMPVAudioEngine: @unchecked Sendable {
         // lifecycle, and give a dead live stream ONE reload before going
         // quiet (the CarPlay UI has no error surface; dead air + a log line
         // beats an invisible crash-loop of retries).
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        // The context is RETAINED for as long as the handle lives and
+        // released in stop() only after mpv_set_wakeup_callback(nil) and
+        // mpv_terminate_destroy, so a wakeup from mpv's core thread can
+        // never reach a freed engine (the 1.8.9 thread-11 crash).
+        let context = Unmanaged.passRetained(self)
+        callbackContext = context
         mpv_set_wakeup_callback(handle, { ctx in
             guard let ctx else { return }
             let engine = Unmanaged<HeadlessMPVAudioEngine>.fromOpaque(ctx).takeUnretainedValue()
             engine.queue.async { engine.drainEvents() }
-        }, selfPtr)
-        debugLog("[CarPlay-Headless] mpv initialized (audio-only)")
+        }, context.toOpaque())
+        debugLog("[CARPLAY] engine: mpv initialized (audio-only)")
     }
 
     /// Runs on `queue`. Drains pending mpv events; logs lifecycle + errors.
@@ -385,7 +708,7 @@ final class HeadlessMPVAudioEngine: @unchecked Sendable {
             case MPV_EVENT_NONE:
                 return
             case MPV_EVENT_FILE_LOADED:
-                debugLog("[CarPlay-Headless] stream loaded, audio starting")
+                debugLog("[CARPLAY] engine: mpv stream loaded, audio starting")
                 retriedCurrentLoad = false
             case MPV_EVENT_END_FILE:
                 let end = ev.data.assumingMemoryBound(to: mpv_event_end_file.self).pointee
@@ -393,15 +716,17 @@ final class HeadlessMPVAudioEngine: @unchecked Sendable {
                 let reason = isError
                     ? String(cString: mpv_error_string(end.error))
                     : "reason=\(end.reason.rawValue)"
-                debugLog("[CarPlay-Headless] end-file: \(reason)")
+                debugLog("[CARPLAY] engine: mpv end-file: \(reason)")
                 // Only self-heal genuine stream ends/errors; reason STOP (our
                 // own loadfile replace / teardown) must not retrigger.
                 if (isError || end.reason == MPV_END_FILE_REASON_EOF),
                    let url = currentURL, !retriedCurrentLoad {
                     retriedCurrentLoad = true
-                    debugLog("[CarPlay-Headless] one-shot reload after dead stream")
+                    debugLog("[CARPLAY] engine: mpv one-shot reload after dead stream")
+                    let generation = retryGeneration
                     queue.asyncAfter(deadline: .now() + 2) { [weak self] in
-                        guard let self, let mpv = self.mpv, self.currentURL == url else { return }
+                        guard let self, self.retryGeneration == generation,
+                              let mpv = self.mpv, self.currentURL == url else { return }
                         self.command(mpv, ["loadfile", url.absoluteString, "replace"])
                     }
                 }
@@ -420,83 +745,6 @@ final class HeadlessMPVAudioEngine: @unchecked Sendable {
         pointers.append(nil)
         mpv_command(mpv, &pointers)
         for ptr in cargs { free(ptr) }
-    }
-}
-
-/// Headless AVPlayer engine for CarPlay VIDEO sessions. CarPlay presents app
-/// video via the AirPlay video path, which only AVPlayer can feed:
-/// `allowsExternalPlayback` lets the car take the video surface while the
-/// phone stays locked. No layer is attached on the phone — external playback
-/// needs none, and when the car declines video (driving) the same player
-/// keeps supplying audio, which is exactly the fallback CarPlay specifies.
-/// Only ever fed direct-HLS URLs (`.avPlayerDirectHLS`), the same
-/// device-verified path the in-app AVPlayer engine defaults to.
-@MainActor
-final class HeadlessAVPlayerEngine {
-    private var player: AVPlayer?
-    private var statusObservation: NSKeyValueObservation?
-    private var externalObservation: NSKeyValueObservation?
-    private var failedToEndObserver: NSObjectProtocol?
-    /// Hard failure hook (asset refused / item errored) so the controller can
-    /// drop to the mpv audio engine instead of leaving dead air.
-    var onPlaybackFailure: ((String) -> Void)?
-
-    func play(url: URL, headers: [String: String]) {
-        let asset = AVURLAsset(url: url, options: [
-            "AVURLAssetHTTPHeaderFieldsKey": headers
-        ])
-        let item = AVPlayerItem(asset: asset)
-        observeFailures(of: item)
-
-        if let player {
-            player.replaceCurrentItem(with: item)
-        } else {
-            let p = AVPlayer(playerItem: item)
-            p.allowsExternalPlayback = true
-            p.usesExternalPlaybackWhileExternalScreenIsActive = true
-            externalObservation = p.observe(\.isExternalPlaybackActive, options: [.new]) { _, change in
-                // The single log line that proves the car actually took the
-                // video surface (vs quietly staying audio-only).
-                debugLog("[CarPlay-Headless] externalPlaybackActive=\(change.newValue ?? false)")
-            }
-            player = p
-        }
-        player?.play()
-    }
-
-    func setPaused(_ paused: Bool) {
-        paused ? player?.pause() : player?.play()
-    }
-
-    func stop() {
-        statusObservation = nil
-        externalObservation = nil
-        if let obs = failedToEndObserver {
-            NotificationCenter.default.removeObserver(obs)
-            failedToEndObserver = nil
-        }
-        player?.pause()
-        player?.replaceCurrentItem(with: nil)
-        player = nil
-    }
-
-    private func observeFailures(of item: AVPlayerItem) {
-        statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
-            guard item.status == .failed else { return }
-            let message = item.error?.localizedDescription ?? "unknown item error"
-            Task { @MainActor in self?.onPlaybackFailure?(message) }
-        }
-        if let obs = failedToEndObserver {
-            NotificationCenter.default.removeObserver(obs)
-        }
-        failedToEndObserver = NotificationCenter.default.addObserver(
-            forName: AVPlayerItem.failedToPlayToEndTimeNotification,
-            object: item, queue: .main
-        ) { [weak self] note in
-            let err = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?
-                .localizedDescription ?? "failed to play to end"
-            Task { @MainActor in self?.onPlaybackFailure?(err) }
-        }
     }
 }
 #endif

@@ -27,6 +27,13 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     private var favoritesTemplate: CPListTemplate?
     private var groupsTemplate: CPListTemplate?
     private var cancellables = Set<AnyCancellable>()
+    /// Whether the current root is the Favorites+Groups tab bar. The root
+    /// is chosen at connect; if favorites appear later (iCloud sync, or the
+    /// user stars a channel on the phone) the root is rebuilt once.
+    private var rootHasFavoritesTab = false
+    /// Remaining retries for a cold connect that raced app init
+    /// (`AerioApp.sharedContainer` still nil).
+    private var hydrateRetriesLeft = 5
     /// Session capabilities (CarPlay video support lives here). Created on
     /// connect; `supportsVideoPlayback` is stable for the session per Apple,
     /// only the moment-to-moment availability changes (handled by the system
@@ -87,24 +94,32 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         // black box: every CarPlay log line was DEBUG-only print, so "channels
         // never loaded in the car" could not be told apart from "process was
         // never launched").
-        debugLog("[CarPlay] didConnect: channels=\(ChannelStore.shared.channels.count) hasFavorites=\(FavoritesStore.shared.hasFavorites) fgScene=\(HeadlessPlaybackController.hasForegroundPlayerScene())")
+        debugLog("[CARPLAY] connect: channels=\(ChannelStore.shared.channels.count) hasFavorites=\(FavoritesStore.shared.hasFavorites) fgScene=\(HeadlessPlaybackController.hasForegroundPlayerScene())")
 
         sessionConfiguration = CPSessionConfiguration(delegate: self)
-        debugLog("[CarPlay] session video support: \(carSupportsVideo)")
+        HeadlessPlaybackController.shared.videoCapable = carSupportsVideo
+        debugLog("[CARPLAY] connect: session video support=\(carSupportsVideo) phoneLocked=\(!UIApplication.shared.isProtectedDataAvailable) appState=\(UIApplication.shared.applicationState.rawValue)")
 
         // A car can be the only scene (phone app never opened), so mark the
         // session, default it to audio-only, hydrate channels if the store
         // is empty, and observe the store so the lists fill in once the
         // load lands.
         NowPlayingManager.shared.isCarPlayConnected = true
+        hydrateRetriesLeft = 5
         hydrateChannelsIfNeeded()
-        observeChannelStore()
 
+        setRoot(animated: false)
+        // After the root exists, so the observers' first emissions refresh
+        // it instead of racing it.
+        observeChannelStore()
+    }
+
+    private func setRoot(animated: Bool) {
         let root = buildRootTemplate()
-        interfaceController.setRootTemplate(root, animated: false) { ok, err in
-            #if DEBUG
-            print("[CarPlay] setRootTemplate done ok=\(ok) err=\(String(describing: err))")
-            #endif
+        interfaceController?.setRootTemplate(root, animated: animated) { ok, err in
+            if !ok || err != nil {
+                debugLog("[CARPLAY] error: setRootTemplate ok=\(ok) err=\(String(describing: err))")
+            }
         }
     }
 
@@ -112,18 +127,25 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         _ templateApplicationScene: CPTemplateApplicationScene,
         didDisconnectInterfaceController interfaceController: CPInterfaceController
     ) {
-        #if DEBUG
-        print("[CarPlay] didDisconnect: scene torn down")
-        #endif
+        let headlessOwned = HeadlessPlaybackController.shared.isActive
+        debugLog("[CARPLAY] teardown: car disconnected headlessActive=\(headlessOwned) fgScene=\(HeadlessPlaybackController.hasForegroundPlayerScene())")
         self.interfaceController = nil
         favoritesTemplate = nil
         groupsTemplate = nil
         sessionConfiguration = nil
         cancellables.removeAll()
         NowPlayingManager.shared.isCarPlayConnected = false
-        // Tear down any headless engine started for this car session (no-op if
-        // a foreground view coordinator was the live engine instead).
-        HeadlessPlaybackController.shared.stop()
+        HeadlessPlaybackController.shared.videoCapable = false
+        if headlessOwned, !HeadlessPlaybackController.hasForegroundPlayerScene() {
+            // The car was the only thing playing: end the whole session, not
+            // just the engine. Leaving the store's tile behind made the phone
+            // start that channel by itself the next time it was opened.
+            // exit() also stops the headless engine and clears Now Playing.
+            PlayerSession.shared.exit()
+        } else {
+            // No-op unless a headless engine is still up.
+            HeadlessPlaybackController.shared.stop()
+        }
     }
 
     // MARK: - Standalone hydration
@@ -137,23 +159,34 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         // Every bail is logged: the cold-car empty-list report hinged on
         // knowing which of these guards fired, and none of them said a word.
         guard !ChannelStore.shared.isLoading else {
-            debugLog("[CarPlay] hydrate: skip, load already in flight")
+            debugLog("[CARPLAY] hydrate: skip, load already in flight")
             return
         }
         guard let container = AerioApp.sharedContainer else {
-            debugLog("[CarPlay] hydrate: FAIL, sharedContainer is nil (CarPlay scene connected before app init?)")
+            // Cold launch by the car can deliver the scene before the app
+            // struct finished init. Used to be a permanent empty list.
+            debugLog("[CARPLAY] error: hydrate: sharedContainer is nil, retries left \(hydrateRetriesLeft)")
+            if hydrateRetriesLeft > 0 {
+                hydrateRetriesLeft -= 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    MainActor.assumeIsolated {
+                        guard let self, self.interfaceController != nil else { return }
+                        self.hydrateChannelsIfNeeded()
+                    }
+                }
+            }
             return
         }
         let context = ModelContext(container)
         let servers = (try? context.fetch(FetchDescriptor<ServerConnection>())) ?? []
         guard !servers.isEmpty else {
-            debugLog("[CarPlay] hydrate: FAIL, 0 servers fetched from SwiftData")
+            debugLog("[CARPLAY] hydrate: FAIL, 0 servers fetched from SwiftData")
             return
         }
 
         let hadChannels = !ChannelStore.shared.channels.isEmpty
         let lanBefore = TVLANProbe.persistedLANDetected
-        debugLog("[CarPlay] hydrate: servers=\(servers.count) hadChannels=\(hadChannels) lanBefore=\(lanBefore)")
+        debugLog("[CARPLAY] hydrate: servers=\(servers.count) hadChannels=\(hadChannels) lanBefore=\(lanBefore)")
         Task { @MainActor in
             // THE 2026-08-07 real-car failure: the LAN/WAN routing flag is
             // persisted from the LAST probe (usually "home, LAN reachable"),
@@ -167,7 +200,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             // connect re-probes and rebuilds when the network flipped.
             TVLANProbe.shared.probe(servers: servers)
             let lanNow = await TVLANProbe.shared.reprobeAndWait()
-            debugLog("[CarPlay] hydrate: LAN probe -> \(lanNow) (was \(lanBefore))")
+            debugLog("[CARPLAY] hydrate: LAN probe -> \(lanNow) (was \(lanBefore))")
             if !hadChannels || lanNow != lanBefore {
                 ChannelStore.shared.refresh(servers: servers)
             }
@@ -178,7 +211,36 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     /// (the standalone load above completing, or a server switch on the
     /// phone while connected).
     private func observeChannelStore() {
+        // Debounced: the store republishes on every EPG merge, and each
+        // refresh rebuilds every row (and refetches favorites' logos).
         ChannelStore.shared.$channels
+            .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
+            .sink { [weak self] channels in
+                MainActor.assumeIsolated {
+                    // Favorites resolve their rows from the channel list, and
+                    // only the phone's channel list view did that. A car-only
+                    // launch therefore showed an empty Favorites tab forever.
+                    if !channels.isEmpty {
+                        FavoritesStore.shared.register(items: channels)
+                    }
+                    debugLog("[CARPLAY] lists: channels=\(channels.count) groups=\(ChannelStore.shared.orderedGroups.count) favorites=\(FavoritesStore.shared.favoriteItems.count)")
+                    self?.refreshLists()
+                }
+            }
+            .store(in: &cancellables)
+
+        FavoritesStore.shared.$favoriteItems
+            .dropFirst()
+            .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshLists() }
+            }
+            .store(in: &cancellables)
+
+        // Loading -> loaded flips the empty-state copy ("Loading channels"
+        // vs "No Channels") even when the channel array itself is unchanged.
+        ChannelStore.shared.$isLoading
+            .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 MainActor.assumeIsolated { self?.refreshLists() }
@@ -198,6 +260,15 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     }
 
     private func refreshLists() {
+        guard interfaceController != nil else { return }
+        // Root chosen at connect without favorites, favorites exist now
+        // (or the reverse): rebuild the root once instead of leaving the
+        // Favorites tab missing (or empty) for the whole drive.
+        if FavoritesStore.shared.hasFavorites != rootHasFavoritesTab {
+            debugLog("[CARPLAY] lists: favorites \(rootHasFavoritesTab ? "gone" : "appeared"), rebuilding root")
+            setRoot(animated: false)
+            return
+        }
         favoritesTemplate?.updateSections(favoritesSections())
         groupsTemplate?.updateSections(groupsSections())
         applyEmptyState(favoritesTemplate, kind: .favorites)
@@ -217,6 +288,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         let groups = makeGroupsTemplate()
         groupsTemplate = groups
 
+        rootHasFavoritesTab = FavoritesStore.shared.hasFavorites
         guard FavoritesStore.shared.hasFavorites else {
             // No favorites: Groups is the whole experience, no tab bar.
             favoritesTemplate = nil
@@ -250,7 +322,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     }
 
     private func favoritesSections() -> [CPListSection] {
-        let items = FavoritesStore.shared.favoriteItems.map { makeChannelItem($0) }
+        let items = Self.capped(FavoritesStore.shared.favoriteItems).map { makeChannelItem($0) }
         return [CPListSection(items: items)]
     }
 
@@ -265,7 +337,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 
     private func groupsSections() -> [CPListSection] {
         let channels = ChannelStore.shared.channels
-        let groupItems: [CPListItem] = ChannelStore.shared.orderedGroups.map { groupName in
+        let groupItems: [CPListItem] = Self.capped(ChannelStore.shared.orderedGroups).map { groupName in
             let count = channels.filter { $0.group == groupName }.count
             let item = CPListItem(
                 text: groupName,
@@ -284,9 +356,19 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     /// Push a channel list for a specific group.
     private func showChannelsInGroup(_ group: String) {
         let channels = ChannelStore.shared.channels.filter { $0.group == group }
-        let items = channels.map { makeChannelItem($0) }
+        let items = Self.capped(channels).map { makeChannelItem($0) }
         let template = CPListTemplate(title: group, sections: [CPListSection(items: items)])
         interfaceController?.pushTemplate(template, animated: true, completion: nil)
+    }
+
+    /// CarPlay rejects lists past the head unit's item limit (it varies by
+    /// car; large IPTV groups run to thousands of channels). Trim to the
+    /// limit the system reports.
+    private static func capped<T>(_ items: [T]) -> [T] {
+        let limit = Int(CPListTemplate.maximumItemCount)
+        guard limit > 0, items.count > limit else { return items }
+        debugLog("[CARPLAY] lists: trimmed \(items.count) rows to the car's limit of \(limit)")
+        return Array(items.prefix(limit))
     }
 
     // MARK: - Empty / loading state
@@ -413,45 +495,76 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         // Re-resolve against the live store so the seeded tile carries the
         // CURRENT program (and start/end). The `ChannelDisplayItem` captured
         // in the list item's handler is a snapshot from list-build time and
-        // can predate the EPG populating `currentProgram`, which is why the
-        // Now Playing screen showed the channel name with no program. The
-        // live store row has the up-to-date program; fall back to the tapped
-        // snapshot if the row is gone (e.g. mid-refresh).
+        // can predate the EPG populating `currentProgram`.
         let channel = ChannelStore.shared.channels.first { $0.id == tappedChannel.id } ?? tappedChannel
-        guard !channel.streamURLs.isEmpty else { return }
-        #if DEBUG
-        print("[CarPlay] playChannel: \(channel.name) tappedProgram=\(tappedChannel.currentProgram ?? "nil") freshProgram=\(channel.currentProgram ?? "nil")")
-        #endif
+        guard !channel.streamURLs.isEmpty || channel.streamURL != nil else {
+            debugLog("[CARPLAY] error: tune: \(channel.name) has no stream URL")
+            return
+        }
+        let server = ChannelStore.shared.activeServer
+        debugLog("[CARPLAY] tune: tap \(channel.name) fgScene=\(HeadlessPlaybackController.hasForegroundPlayerScene()) headless=\(HeadlessPlaybackController.shared.isActive) tiles=\(MultiviewStore.shared.tiles.count)")
 
         if PlaybackFeatureFlags.useUnifiedPlayback {
-            // Phase B routing: funnel through PlayerSession so the iPad UI
-            // (if the user unlocks mid-CarPlay session) sees this channel as
-            // tile 0 and multiview + lockscreen stay in sync.
-            _ = PlayerSession.shared.begin(
-                item: channel,
-                server: ChannelStore.shared.activeServer
-            )
+            switchSession(to: channel, server: server)
         } else {
-            let headers = ChannelStore.shared.activeServer?.authHeaders ?? ["Accept": "*/*"]
+            let headers = server?.authHeaders ?? ["Accept": "*/*"]
             NowPlayingManager.shared.startPlaying(channel, headers: headers)
         }
 
-        // The calls above only mutate shared state; the real player + audio
-        // session live in the SwiftUI `MPVPlayerView`, which mounts only when a
-        // foreground window scene renders. In a cold car / locked phone that
-        // scene doesn't exist, so nothing would actually play. Drive a headless
-        // audio engine directly for that case; it no-ops (and lets the view
-        // engine take over) whenever the phone app is foreground.
+        // The calls above only mutate shared state; the real player lives in
+        // the SwiftUI tile, which mounts only when a foreground window scene
+        // renders. In a car / locked phone that scene doesn't exist, so drive
+        // the headless engine directly; it no-ops whenever the phone app is
+        // foreground.
         HeadlessPlaybackController.shared.start(
             item: channel,
-            server: ChannelStore.shared.activeServer,
+            server: server,
             isLive: true,
             videoCapable: carSupportsVideo
         )
 
-        // Surface Now Playing (pushing it is allowed even though it cannot
-        // be a tab).
-        interfaceController?.pushTemplate(CPNowPlayingTemplate.shared, animated: true, completion: nil)
+        showNowPlaying()
+    }
+
+    /// A car tap REPLACES what is playing. `PlayerSession.begin` with a
+    /// session already up appends a tile (that is the phone's Add to
+    /// Multiview behavior), so every tap in the car used to grow a hidden
+    /// multiview until the cap refused further taps, and the phone opened
+    /// onto a grid of every channel tried on the drive.
+    private func switchSession(to channel: ChannelDisplayItem, server: ServerConnection?) {
+        let store = MultiviewStore.shared
+        // Cast / AerioTV Remote routing lives in begin(); let it decide.
+        let routedElsewhere = AerioCastController.shared.isCasting
+            || CompanionClient.shared.isControlling
+        if store.tiles.isEmpty || routedElsewhere {
+            _ = PlayerSession.shared.begin(item: channel, server: server)
+            return
+        }
+        if store.tiles.count == 1, store.tiles.first?.item.id == channel.id {
+            return
+        }
+        if store.tiles.count == 1, let tileID = store.audioTileID,
+           store.swapTileContent(tileID: tileID, to: channel, server: server) {
+            NowPlayingManager.shared.startPlaying(
+                channel, headers: server?.authHeaders ?? ["Accept": "*/*"], isLive: true)
+            return
+        }
+        debugLog("[CARPLAY] tune: replacing a \(store.tiles.count)-tile session with \(channel.name)")
+        PlayerSession.shared.exit()
+        _ = PlayerSession.shared.begin(item: channel, server: server)
+    }
+
+    /// Show Now Playing without pushing it twice: pushing a template that is
+    /// already in the stack throws inside CarPlay.
+    private func showNowPlaying() {
+        guard let ic = interfaceController else { return }
+        let np = CPNowPlayingTemplate.shared
+        if ic.topTemplate === np { return }
+        if ic.templates.contains(where: { $0 === np }) {
+            ic.pop(to: np, animated: true, completion: nil)
+        } else {
+            ic.pushTemplate(np, animated: true, completion: nil)
+        }
     }
 }
 
@@ -466,7 +579,7 @@ extension CarPlaySceneDelegate: CPSessionConfigurationDelegate {
         _ sessionConfiguration: CPSessionConfiguration,
         limitedUserInterfacesChanged limitedUserInterfaces: CPLimitableUserInterface
     ) {
-        debugLog("[CarPlay] limited UI changed: rawValue=\(limitedUserInterfaces.rawValue)")
+        debugLog("[CARPLAY] limited UI changed: rawValue=\(limitedUserInterfaces.rawValue)")
     }
 }
 
