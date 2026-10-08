@@ -2839,7 +2839,12 @@ struct ChannelListView: View {
             // Need at least one identifier to query EPG
             guard !tvgID.isEmpty || channelID != nil else { return nil }
             let baseURL  = server.effectiveBaseURL
-            let apiKey   = server.effectiveApiKey
+            // The API key is a Keychain read (SecItemCopyMatching, a
+            // synchronous IPC). This factory runs in every row's body, so the
+            // read now happens inside the closure, off the main thread, and
+            // only on an EPGCache miss (iPad log 2026-10-07 23:05:16: a main
+            // thread sample parked in effectiveApiKey -> SecItemCopyMatching).
+            let apiKeyRef = ServerConnection.CredentialRef(server, field: .apiKey)
             // v1.6.20: per-server auth shape capture.
             let authMode = server.dispatcharrHeaderMode
             let userAgent = server.effectiveUserAgent
@@ -2851,6 +2856,7 @@ struct ChannelListView: View {
             let cacheKey = "d_\(baseURL)_\(tvgID.isEmpty ? item.id : tvgID)"
             return {
                 if let cached = await EPGCache.shared.get(cacheKey) { return cached }
+                let apiKey = await apiKeyRef.resolveOffMain()
                 let dAPI = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey),
                                           userAgent: userAgent, authMode: authMode,
                                           serverID: serverID, savedUsername: savedUsername)
@@ -2890,11 +2896,12 @@ struct ChannelListView: View {
         case .xtreamCodes:
             let baseURL   = server.effectiveBaseURL
             let username  = server.username
-            let password  = server.effectivePassword
+            let passwordRef = ServerConnection.CredentialRef(server, field: .password)
             let streamID  = item.id
             let cacheKey  = "x_\(baseURL)_\(streamID)"
             return {
                 if let cached = await EPGCache.shared.get(cacheKey) { return cached }
+                let password = await passwordRef.resolveOffMain()
                 let xAPI = XtreamCodesAPI(baseURL: baseURL, username: username, password: password)
                 guard let epg = try? await xAPI.getEPG(streamID: streamID, limit: 48) else { return [] }
                 let now = Date()
@@ -3762,7 +3769,9 @@ struct ChannelRow: View {
             // SELECT toggles the inline guide panel.
             Button {
                 debugLog("🎮 Channel expand: \(item.name) — toggling schedule (expanded=\(!isExpanded))")
+                let expandStart = CFAbsoluteTimeGetCurrent()
                 withAnimation(.spring(response: 0.25)) { isExpanded.toggle() }
+                ListExpandCost.measure(start: expandStart, channel: item.name, expanded: isExpanded)
                 // Skip the network fetch when GuideStore already has
                 // programmes for this channel — the expanded panel
                 // now prefers GuideStore, so the fetch would be
@@ -3915,7 +3924,9 @@ struct ChannelRow: View {
             // -- Expand chevron --
             if item.currentProgram != nil || fetchUpcoming != nil {
                 Button {
+                    let expandStart = CFAbsoluteTimeGetCurrent()
                     withAnimation(.spring(response: 0.25)) { isExpanded.toggle() }
+                    ListExpandCost.measure(start: expandStart, channel: item.name, expanded: isExpanded)
                     // Skip the network fetch when GuideStore already has
                 // programmes for this channel: the expanded panel
                 // now prefers GuideStore, so the fetch would be
@@ -4579,7 +4590,7 @@ struct ChannelRow: View {
     /// inside the guide panel with the upcoming rows; on tvOS it sits
     /// above the upcoming ScrollView.
     @ViewBuilder
-    private var airedSection: some View {
+    private func airedSection(_ airedPrograms: [EPGEntry]) -> some View {
         // Catch-up: retained history shown without a disclosure tap
         // (Logan 2026-09-09, matching Android): the aired rows come
         // first, then a centered "Previously aired" divider, then the
@@ -4587,7 +4598,7 @@ struct ChannelRow: View {
         // playback; older-than-retention entries (or channels with no
         // archive) render as plain reference rows.
         if !airedPrograms.isEmpty {
-            VStack(alignment: .leading, spacing: 0) {
+            LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(airedPrograms) { entry in
                     airedEntryRow(entry)
                 }
@@ -4634,12 +4645,19 @@ struct ChannelRow: View {
 
     @ViewBuilder
     private var guidePanel: some View {
+        // Computed ONCE per body (iPad expand hang, Logan 2026-10-07): the
+        // rows used to read `futurePrograms` / `airedPrograms` (a filter,
+        // sort and map over the channel's whole resident list) in every
+        // row's `isLast` check, so expanding a 300-program channel ran that
+        // pass 300 times on the main thread.
+        let future = futurePrograms
+        let aired = airedPrograms
         Divider()
             .background(Color.borderSubtle)
             .padding(.horizontal, 14)
 
         #if os(tvOS)
-        airedSection
+        airedSection(aired)
         #endif
 
         if fetchUpcoming != nil {
@@ -4652,9 +4670,9 @@ struct ChannelRow: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.bottom, 8)
-            } else if futurePrograms.isEmpty {
+            } else if future.isEmpty {
                 #if os(iOS)
-                airedSection
+                airedSection(aired)
                 #endif
                 HStack(spacing: 6) {
                     Image(systemName: "calendar.badge.exclamationmark")
@@ -4676,10 +4694,13 @@ struct ChannelRow: View {
                 // to the outer list.
                 ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 0) {
-                airedSection
-                VStack(spacing: 0) {
-                    ForEach(futurePrograms) { entry in
+                // Lazy (iPad expand hang): only the rows on screen are
+                // built, not every aired and upcoming row with its own
+                // confirmation dialog.
+                LazyVStack(spacing: 0) {
+                airedSection(aired)
+                LazyVStack(spacing: 0) {
+                    ForEach(future) { entry in
                         // Rebind to a local constant so SwiftUI's ForEach
                         // diffing can't swap the captured reference between
                         // when the user starts a long-press and when the
@@ -4705,7 +4726,7 @@ struct ChannelRow: View {
                         // `attachmentAnchor: .rect(.bounds)` — which is
                         // exactly "where the user long-pressed" per #23
                         // feedback.
-                        epgEntryRow(entry: rowEntry, isLast: rowEntry.id == futurePrograms.last?.id)
+                        epgEntryRow(entry: rowEntry, isLast: rowEntry.id == future.last?.id)
                             // No horizontal outer padding — rows now
                             // extend to the card's inner edge, so the
                             // parent card's category gradient can't
@@ -4795,11 +4816,11 @@ struct ChannelRow: View {
                 // branch keeps the chain continuous.
                 ScrollView(.vertical, showsIndicators: true) {
                     VStack(spacing: 0) {
-                        ForEach(futurePrograms) { entry in
+                        ForEach(future) { entry in
                             // UIKit-backed overlay because SwiftUI's tvOS
                             // long-press fires on release, not at threshold
                             // (see Shared/TVPressGesture.swift).
-                            epgEntryRow(entry: entry, isLast: entry.id == futurePrograms.last?.id)
+                            epgEntryRow(entry: entry, isLast: entry.id == future.last?.id)
                                 .overlay(
                                     TVPressOverlay(
                                         minimumPressDuration: 0.25,
@@ -6329,5 +6350,22 @@ struct KeptChannelBadge: View {
                 .accessibilityLabel("Kept live")
                 .allowsHitTesting(false)
         }
+    }
+}
+
+/// [LIST] expand cost: main-thread time from the expand/collapse tap to the
+/// end of the run loop turn that rendered it (after the Core Animation
+/// commit), so it covers the schedule panel build, not just the handler.
+@MainActor
+enum ListExpandCost {
+    static func measure(start: CFAbsoluteTime, channel: String, expanded: Bool) {
+        let observer = CFRunLoopObserverCreateWithHandler(
+            nil, CFRunLoopActivity.beforeWaiting.rawValue, false, CFIndex.max
+        ) { _, _ in
+            let ms = (CFAbsoluteTimeGetCurrent() - start) * 1000
+            debugLog(String(format: "[LIST] %@ cost %.1fms (%@)",
+                            expanded ? "expand" : "collapse", ms, channel))
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
     }
 }

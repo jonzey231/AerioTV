@@ -315,13 +315,29 @@ final class VODStore: ObservableObject {
     /// Delete one server's stored catalog outright: every row, the sweep
     /// bookkeeping, the categories, the legacy snapshot and position files.
     /// Only the playlist DELETE path and Refresh Everything reach this.
+    /// Plain values of a playlist whose catalog is being deleted, captured
+    /// before the model can go away (a deleted model traps on any read).
+    struct DeletedCatalogRef {
+        let serverID: UUID
+        let libraryIdentity: String
+        let sweepIdentity: String
+        init(_ server: ServerConnection) {
+            serverID = server.id
+            libraryIdentity = VODLibraryCache.identity(for: server)
+            sweepIdentity = VODSweepProgress.identity(for: server)
+        }
+    }
+
     func deleteCatalog(for server: ServerConnection) async {
-        let serverID = server.id
-        await catalog.deleteServer(serverID: serverID)
-        VODLibraryCache.clear(kinds: [.movie, .series], identity: VODLibraryCache.identity(for: server))
-        VODSweepProgress.clear(identity: VODSweepProgress.identity(for: server))
-        migratedIdentities.remove(VODLibraryCache.identity(for: server))
-        if catalogKey == VODLibraryCache.identity(for: server) {
+        await deleteCatalog(DeletedCatalogRef(server))
+    }
+
+    func deleteCatalog(_ ref: DeletedCatalogRef) async {
+        await catalog.deleteServer(serverID: ref.serverID)
+        VODLibraryCache.clear(kinds: [.movie, .series], identity: ref.libraryIdentity)
+        VODSweepProgress.clear(identity: ref.sweepIdentity)
+        migratedIdentities.remove(ref.libraryIdentity)
+        if catalogKey == ref.libraryIdentity {
             moviesCount = 0; seriesCount = 0
             hasLoadedMovies = false; hasLoadedSeries = false
             restoredMoviesAt = nil; restoredSeriesAt = nil
@@ -1620,6 +1636,26 @@ final class ChannelStore: ObservableObject {
 
     // MARK: - Public API
 
+    /// Playlist delete (TestFlight 1.8.41 crash): stops every ChannelStore
+    /// task that holds the ServerConnection before the model is deleted, so
+    /// none of them reads a persisted property of a deleted model after its
+    /// next suspension. Plain values only from here on.
+    func cancelWork(forDeletedServerID id: UUID, name: String) {
+        var cancelled: [String] = []
+        if let t = loadTask { t.cancel(); cancelled.append("channel load") }
+        if let t = forceRefreshTask { t.cancel(); cancelled.append("force refresh") }
+        if let t = epgEnrichTask { t.cancel(); cancelled.append("EPG enrich") }
+        loadTask = nil; forceRefreshTask = nil; epgEnrichTask = nil
+        if currentChannelServerID == id {
+            activeServer = nil
+            currentChannelServerID = nil
+            isEPGLoading = false
+            cancelled.append("active server reference")
+        }
+        for item in cancelled { debugLog("[PLAYLIST] delete: cancelled \(item) for \(name)") }
+        if cancelled.isEmpty { debugLog("[PLAYLIST] delete: no running channel tasks for \(name)") }
+    }
+
     /// Called by MainTabView whenever the server list changes.
     func refresh(servers: [ServerConnection]) {
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first else {
@@ -1732,8 +1768,9 @@ final class ChannelStore: ObservableObject {
         )
         isEPGLoading = false
 
+        guard !server.isGone, !Task.isCancelled else { return }
         await GuideStore.shared.seedEPGCache(channels: channels, server: server)
-        if didRefreshGuide, let modelContext {
+        if didRefreshGuide, let modelContext, !server.isGone {
             GuideStore.shared.saveToCache(modelContext: modelContext, serverID: server.id.uuidString)
         }
     }
@@ -1941,7 +1978,7 @@ final class ChannelStore: ObservableObject {
         // too and will re-dispatch, but snapshotting here keeps
         // the call site sync-clean.
         let snapshot = channels
-        guard let activeServer = activeServer else { return false }
+        guard let activeServer = activeServer, !activeServer.isGone else { return false }
         let categoryServerID = activeServer.id.uuidString
 
         let xmltvDidLand = await GuideStore.shared.fetchXMLTVFromURL(
@@ -1968,6 +2005,7 @@ final class ChannelStore: ObservableObject {
         // overwritten the JSON-bulk's category-less entries —
         // leaving rows uncolored. Awaiting ensures the category
         // data is actually in-place before we return.
+        guard !activeServer.isGone, !Task.isCancelled else { return false }
         await GuideStore.shared.seedEPGCache(channels: snapshot, server: activeServer)
 
         // Let any currently-expanded schedule panels know the
@@ -2239,7 +2277,7 @@ final class ChannelStore: ObservableObject {
     /// Loads ALL EPG data upfront so browsing/playback never triggers network requests.
     /// Called immediately after channels load. Sets isEPGLoading during the process.
     func loadAllEPG() async {
-        guard let server = activeServer else { return }
+        guard let server = activeServer, !server.isGone else { return }
         let baseURL  = server.effectiveBaseURL
         let type     = server.type
         let username = server.username
@@ -6650,7 +6688,10 @@ struct MainTabView: View {
                         showCompanionPickerGlobal = true
                     }
                 },
-                footnoteLines: content == nil ? [] : castCardDetailLines,
+                // Composite Multiview: Stream Info already carries the
+                // RECEIVER row, so no plain-text "Receiver:" line under Stop
+                // Casting (Logan 2026-10-07). Single channel keeps it.
+                footnoteLines: (content == nil || castComposite) ? [] : castCardDetailLines,
                 seekWindow: castComposite ? nil : { castController.remoteSeekWindow() },
                 onSeekTo: { castController.remoteSeek(to: $0) },
                 compositeMultiview: castComposite
@@ -7929,12 +7970,12 @@ struct MainTabView: View {
                 // XMLTV pass on top of the cache is what took the Apple TV
                 // past its memory line (2026-09-03).
                 let startupRefreshAllowed: Bool = {
-                    guard let activeServer else { return false }
+                    guard let activeServer, !activeServer.isGone else { return false }
                     if activeServer.type == .dispatcharrAPI { return true }
                     return totalChannels <= GuideStore.largePlaylistChannels
                 }()
                 if startupRefreshAllowed {
-                    debugLog("[STARTUP] refresh scheduled: cold launch, guide cache fresh, background refresh (type=\(activeServer?.type.rawValue ?? "none"), channels=\(totalChannels))")
+                    debugLog("[STARTUP] refresh scheduled: cold launch, guide cache fresh, background refresh (type=\(activeServer.flatMap { $0.isGone ? nil : $0.type.rawValue } ?? "none"), channels=\(totalChannels))")
                 } else {
                     debugLog("[STARTUP] refresh skipped: \(activeServer == nil ? "no active playlist" : "large non-Dispatcharr playlist (\(totalChannels) channels > \(GuideStore.largePlaylistChannels)), guide cache fresh")")
                 }
@@ -7994,6 +8035,15 @@ struct MainTabView: View {
                         )
                         let elapsed = Int(Date().timeIntervalSince(fetchStart))
                         debugLog("🟢 [Orchestrator] background fetchUpcoming COMPLETE — didRefresh=\(didRefresh), elapsed=\(elapsed)s (cache-fresh refresh, held \(heldSec)s)")
+                        // Persist what the refresh fetched (iPad log 2026-10-07
+                        // 23:09:25: the cold-launch refresh merged 47482
+                        // programs and nothing saved them, so a kill threw the
+                        // refresh away). Only while the guide still shows the
+                        // playlist this refresh was for.
+                        if didRefresh, !Task.isCancelled,
+                           guideStore.displayedServerID == activeServerID {
+                            guideStore.saveToCache(modelContext: modelContext, serverID: activeServerID)
+                        }
                     }
                 }
             } else {
@@ -8016,7 +8066,7 @@ struct MainTabView: View {
                 // Guide tab triggered the walk 30 s or more later (iPhone
                 // log 2026-10-02 16:03:41 to 16:04:24). Same settle and
                 // playback holds as the fresh path.
-                if let activeServer, activeServer.type == .dispatcharrAPI {
+                if let activeServer, !activeServer.isGone, activeServer.type == .dispatcharrAPI {
                     debugLog("🟢 [Orchestrator] phase 2 EPG: firing background fetchUpcoming on Dispatcharr (after loadAllEPG, fills channels the bulk grid omitted)")
                     Task { @MainActor [allServers] in
                         var heldSec = 0

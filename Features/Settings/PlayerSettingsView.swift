@@ -221,10 +221,10 @@ struct PlayerSettingsView: View {
                 // GH Android#127 part 1.
                 Toggle(isOn: $showChannelInfoCard) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Show Channel Info Card")
+                        Text("Pop Up Info Card on Channel Change")
                             .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
-                        Text("Pop up the channel and program card when you change channels")
+                        Text("Show the channel and program card for a few seconds after a channel change. The card still appears with the player controls.")
                             .scaledFont(.labelSmall.subtext())
                             .foregroundColor(Color.contrastText(.textTertiary))
                     }
@@ -605,8 +605,8 @@ struct PlayerSettingsView: View {
                     TVSettingsToggleRow(
                         icon: "rectangle.on.rectangle",
                         iconColor: theme.accent,
-                        title: "Show Channel Info Card",
-                        subtitle: "Pop up the channel and program card when you change channels",
+                        title: "Pop Up Info Card on Channel Change",
+                        subtitle: "Show the channel and program card for a few seconds after a channel change. The card still appears with the player controls.",
                         isOn: $showChannelInfoCard
                     ) { _ in }
 

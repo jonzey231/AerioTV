@@ -151,6 +151,8 @@ final class SyncManager: ObservableObject {
         "defaultTab", "streamBufferSize",
         // Live TV group the guide opens on (Manage Groups). "" = All.
         "defaultChannelGroup",
+        // Guide Program Info Button (Settings > Live TV): off|current|all.
+        "guideProgramInfoButton",
         // Time Format (Settings > Appearance): "system" | "12" | "24".
         ClockFormat.defaultsKey,
         "bgRefreshType",

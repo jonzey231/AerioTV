@@ -1635,6 +1635,11 @@ final class GuideStore: ObservableObject {
     /// then forward, then history). Kept so a pause can resume where it left
     /// off instead of starting over.
     private var backgroundSweepRemaining: [Date] = []
+    /// Bumped by every sweep start and cancel. A sweep task keeps working on
+    /// `backgroundSweepRemaining` only while this still equals the value it
+    /// started with (TestFlight 1.8.40 crash: two sweep tasks shared the array
+    /// across awaits and `removeFirst` trapped on an empty array).
+    private var backgroundSweepGeneration = 0
 
     /// Gate re-check cadence in the foreground.
     nonisolated static let epgSourceGateInterval: TimeInterval = 15 * 60
@@ -1886,7 +1891,8 @@ final class GuideStore: ObservableObject {
             return false  // `defer` above resets isLoading
         }
         debugLog("📺 GuideStore.fetchUpcoming: server=\(server.name), type=\(server.type), channels=\(channels.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
-        beginDisplaying(serverID: server.id.uuidString)
+        let fetchServerID = server.id.uuidString
+        beginDisplaying(serverID: fetchServerID)
 
         // Android parity (Logan 2026-09-11): if the stored Dispatcharr server
         // version is blank when the EPG loads, fetch version + permissions
@@ -1904,6 +1910,11 @@ final class GuideStore: ObservableObject {
         if server.type == .dispatcharrAPI,
            server.dispatcharrServerVersion.isEmpty || server.dispatcharrCapabilities.isStale {
             await DispatcharrCapabilityProbe.refresh(server, reason: "EPG load")
+            // Playlist deleted during the probe: never read the model again.
+            guard !server.isGone else {
+                debugLog("[PLAYLIST] fetchUpcoming: playlist deleted during capability probe, stopping")
+                return false
+            }
             debugLog("📺 GuideStore.fetchUpcoming: primed Dispatcharr version=\(server.dispatcharrServerVersion.isEmpty ? "?" : server.dispatcharrServerVersion) caps=\(server.dispatcharrCapabilities.debugDescription) for \(server.name)")
         }
 
@@ -1941,6 +1952,10 @@ final class GuideStore: ObservableObject {
                 let gridWindowCapable = server.dispatcharrVersionAtLeast("0.30.0")
                 Task { [weak self] in
                     guard let self else { return }
+                    guard !server.isGone else {
+                        self.upstreamLayeringInFlight = false
+                        return
+                    }
                     if gridWindowCapable, didRefresh {
                         // Dispatcharr 0.30: the grid itself serves history and
                         // days ahead; no third-party XMLTV layering needed.
@@ -2009,7 +2024,7 @@ final class GuideStore: ObservableObject {
         // because the user switched playlists mid-flight reports true (to
         // suppress the backstop) but refreshed nothing the user can see, and
         // must not mark the NEW playlist's guide as fresh.
-        if didRefresh, displayedServerID == server.id.uuidString { newestFetchedAt = now }
+        if didRefresh, displayedServerID == fetchServerID { newestFetchedAt = now }
         return didRefresh
     }
 
@@ -2171,7 +2186,7 @@ final class GuideStore: ObservableObject {
 
         // Try the EPG grid endpoint first — returns -1h to +24h in one request with
         // synthetic dummy programs for channels without EPG data.
-        lastDispatcharrMaps = DispatcharrGridMaps(serverID: server.id.uuidString,
+        lastDispatcharrMaps = DispatcharrGridMaps(serverID: categoryServerID,
                                                   tvgIDToChannelIDs: tvgIDToChannelIDs,
                                                   intIDToChannelID: intIDToChannelID,
                                                   uuidToChannelID: uuidToChannelID)
@@ -2375,6 +2390,8 @@ final class GuideStore: ObservableObject {
             debugLog("📺 Dispatcharr upstream-source list failed (\(error.localizedDescription)); catch-up depth stays grid-only")
             return
         }
+        guard !server.isGone else { return }
+        let layerServerID = server.id.uuidString
         let explicit = server.dispatcharrXMLTVURL.trimmingCharacters(in: .whitespacesAndNewlines)
         var seen = Set<String>()
         let candidates: [(sourceID: Int, url: URL)] = sources.compactMap { src in
@@ -2457,7 +2474,7 @@ final class GuideStore: ObservableObject {
                                         windowStart: historyStart,
                                         windowEnd: windowEnd,
                                         extraTVGIDs: bridgedBySource[sourceID] ?? [:],
-                                        categoryServerID: server.id.uuidString,
+                                        categoryServerID: layerServerID,
                                         replaceExisting: false)
             }
             let watchdog = Task {
@@ -2868,6 +2885,7 @@ final class GuideStore: ObservableObject {
         // list: an explicit Refresh just rewrote every chunk in the foreground
         // so it simply ADOPTS the current fingerprint, while an ordinary load
         // hands the gate to the quiet background re-sweep.
+        guard !server.isGone else { return }
         if wasForcedReload {
             if let probe = await fetchEPGSourcesFingerprint(server: server) {
                 gridCoverageSourcesFingerprint = probe.fingerprint
@@ -3054,6 +3072,7 @@ final class GuideStore: ObservableObject {
         guard backgroundSweepTask != nil else { return }
         backgroundSweepTask?.cancel()
         backgroundSweepTask = nil
+        backgroundSweepGeneration &+= 1
         debugLog("[EPG grid window] background re-sweep cancelled (\(reason))")
     }
 
@@ -3106,11 +3125,18 @@ final class GuideStore: ObservableObject {
                                           channels: [ChannelDisplayItem],
                                           maps: DispatcharrGridMaps) {
         let serverID = server.id.uuidString
+        if let previous = backgroundSweepTask {
+            previous.cancel()
+            debugLog("[EPG grid window] background re-sweep superseded (a new sweep is starting)")
+        }
+        backgroundSweepGeneration &+= 1
+        let generation = backgroundSweepGeneration
         backgroundSweepRemaining = backgroundSweepDays()
         let api = dispatcharrAPI(for: server)
         // Background priority on purpose: this competes with nothing.
         backgroundSweepTask = Task(priority: .background) { [weak self] in
-            await self?.runBackgroundGridSweep(api: api, maps: maps, serverID: serverID)
+            await self?.runBackgroundGridSweep(api: api, maps: maps, serverID: serverID,
+                                               generation: generation)
         }
     }
 
@@ -3128,7 +3154,11 @@ final class GuideStore: ObservableObject {
     /// worse than a stale one.
     private func runBackgroundGridSweep(api: DispatcharrAPI,
                                         maps: DispatcharrGridMaps,
-                                        serverID: String) async {
+                                        serverID: String,
+                                        generation: Int) async {
+        /// False once a newer sweep started or this one was cancelled: the
+        /// shared remaining list and task slot then belong to someone else.
+        var isCurrent: Bool { generation == backgroundSweepGeneration }
         let startedWith = backgroundSweepRemaining.count
         debugLog("[EPG grid window] background re-sweep starting: \(startedWith) day(s), \(Int(Self.backgroundSweepChunkPause * 1000))ms apart")
         // Settle first: the guide paints from cache, and a tune started with
@@ -3138,11 +3168,11 @@ final class GuideStore: ObservableObject {
         var unpublished = 0
         var swept = 0
         var merged = 0
-        while !backgroundSweepRemaining.isEmpty {
+        while isCurrent, !backgroundSweepRemaining.isEmpty {
             if Task.isCancelled { break }
             guard displayedServerID == nil || displayedServerID == serverID else {
                 debugLog("[EPG grid window] background re-sweep stopped: the guide now displays another playlist")
-                backgroundSweepTask = nil
+                if isCurrent { backgroundSweepTask = nil }
                 return
             }
             // Pause (do not abandon): resume on the same remaining list.
@@ -3151,6 +3181,13 @@ final class GuideStore: ObservableObject {
                 try? await Task.sleep(for: .seconds(5))
             }
             if Task.isCancelled { break }
+            // Re-check after the awaits above: a newer sweep or a cancel may
+            // own (or have emptied) the list now. Never pop an empty array.
+            guard isCurrent else {
+                debugLog("[EPG grid window] background re-sweep superseded")
+                return
+            }
+            guard !backgroundSweepRemaining.isEmpty else { break }
             let day = backgroundSweepRemaining.removeFirst()
             let dayEnd = day.addingTimeInterval(Self.gridChunkSeconds)
             // A day the published map does not hold must not be merged into it:
@@ -3263,6 +3300,10 @@ final class GuideStore: ObservableObject {
             // coalesces into a much larger batch.
             let isFirstChunk = swept == 1
             if isFirstChunk || unpublished >= Self.backgroundSweepPublishEvery || backgroundSweepRemaining.isEmpty {
+                guard isCurrent else {
+                    debugLog("[EPG grid window] background re-sweep superseded")
+                    return
+                }
                 guard commitPrograms(staged, for: serverID, source: "dispatcharr-grid-resweep") else {
                     backgroundSweepTask = nil
                     return
@@ -3272,6 +3313,10 @@ final class GuideStore: ObservableObject {
             }
             recordGridCoverage(start: day, end: dayEnd, programCount: fetched.count)
             try? await Task.sleep(for: .seconds(Self.backgroundSweepChunkPause))
+        }
+        guard isCurrent else {
+            debugLog("[EPG grid window] background re-sweep superseded: \(swept) of \(startedWith) day(s) done")
+            return
         }
         if unpublished > 0 {
             _ = commitPrograms(staged, for: serverID, source: "dispatcharr-grid-resweep")
@@ -3292,7 +3337,7 @@ final class GuideStore: ObservableObject {
             saveToCache(modelContext: ModelContext(container), serverID: serverID)
         }
         debugLog("[EPG grid window] background re-sweep \(finished ? "complete" : "interrupted"): \(swept) of \(startedWith) day(s), \(merged) program(s) merged")
-        backgroundSweepTask = nil
+        if isCurrent { backgroundSweepTask = nil }
     }
 
     /// Write one swept day straight into the SwiftData cache, with no publish.
@@ -4740,7 +4785,10 @@ final class GuideStore: ObservableObject {
     func seedEPGCache(channels: [ChannelDisplayItem], server: ServerConnection?) async {
         MainThreadWatchdog.shared.begin("seedEPGCache")
         defer { MainThreadWatchdog.shared.end("seedEPGCache") }
-        guard let server else { return }
+        guard let server, !server.isGone, !Task.isCancelled else {
+            if server?.isGone == true { debugLog("[PLAYLIST] seedEPGCache: skipped, playlist was deleted") }
+            return
+        }
 
         // Dedupe — see `lastSeedEPGCacheSignature` doc. On warm
         // relaunch three call sites fire this back-to-back with
@@ -5853,11 +5901,20 @@ struct EPGGuideView: View {
     // .onAppear immediately re-lands on "now" using the real catch-up
     // history depth (hoursBack * pixelsPerHour), gated by
     // `didSetInitialGuideOffset` so later size changes don't re-jump.
+    // The offset lives in `GuideHScroll` (iPad drag lag, 2026-10-07): only
+    // small reader views read it, so a drag frame or release no longer
+    // re-runs this body. `horizontalOffset` stays as the read/write name for
+    // the event handlers; reading it in a body path would bring the
+    // full-body re-render back, so body paths go through the readers.
     #if os(tvOS)
-    @State private var horizontalOffset: CGFloat = -600  // -(hoursBack=1 * pixelsPerHour=600)
+    @State private var hScroll = GuideHScroll(offset: -600, stepWidth: 300)  // -(hoursBack=1 * pixelsPerHour=600)
     #else
-    @State private var horizontalOffset: CGFloat = -360  // -(hoursBack=1 * pixelsPerHour=360)
+    @State private var hScroll = GuideHScroll(offset: -360, stepWidth: 180)  // -(hoursBack=1 * pixelsPerHour=360)
     #endif
+    private var horizontalOffset: CGFloat {
+        get { hScroll.offset }
+        nonmutating set { hScroll.set(newValue) }
+    }
     @State private var didSetInitialGuideOffset = false
     /// When focusedProgramID last changed: a Left whose engine move landed
     /// within the last quarter second is judged by its destination cell.
@@ -5940,8 +5997,11 @@ struct EPGGuideView: View {
                     }
                     .overlay(alignment: .topLeading) {
                         TimelineView(.periodic(from: .now, by: 60)) { context in
-                            timeIndicatorLine(screenWidth: geo.size.width, now: context.date)
-                                .allowsHitTesting(false)
+                            GuideHOffsetReader(scroll: hScroll) { liveOffset in
+                                timeIndicatorLine(screenWidth: geo.size.width, now: context.date,
+                                                  offset: liveOffset)
+                                    .allowsHitTesting(false)
+                            }
                         }
                     }
                 }
@@ -6004,6 +6064,7 @@ struct EPGGuideView: View {
             #endif
             .onAppear {
                     visibleProgramWidth = geo.size.width - channelColumnWidth
+                    hScroll.setStepWidth(pixelsPerHour / 2)
                 // Audit #50: seed the guide-cell recording markers so the red
                 // "set to record" dot renders on first guide open, before any
                 // recording mutation or reconcile has refreshed the snapshot.
@@ -6035,7 +6096,8 @@ struct EPGGuideView: View {
             // Jump-to-day (Logan 2026-09-06): scrolling back until the now
             // line is on screen ends the jump on its own; the clock returns
             // to the live time and the grid width settles back.
-            .onChange(of: horizontalOffset) { _, offset in
+            .background(GuideHOffsetReader(scroll: hScroll) { liveOffset in
+                Color.clear.onChange(of: liveOffset) { _, offset in
                 // Page the next cached day in before the user scrolls onto it
                 // (the resident map holds today plus or minus a day; see
                 // `GuideStore.residentForwardSeconds`).
@@ -6045,7 +6107,8 @@ struct EPGGuideView: View {
                 guard jumpTarget != nil, -offset <= xOffset(for: Date()) else { return }
                 debugLog("[GUIDE] jump ended: scrolled back to now")
                 jumpTarget = nil
-            }
+                }
+            })
             #if os(iOS)
             // iOS-only: `guideScale` (the Settings -> Appearance -> Display
             // Scale -> Guide slider) exists only on iOS; the tvOS guide uses
@@ -6058,6 +6121,7 @@ struct EPGGuideView: View {
             // This guide has no live pinch, so guideScale only changes from the
             // discrete slider and this never fights a gesture.
             .onChange(of: guideScale) { _, _ in
+                hScroll.setStepWidth(pixelsPerHour / 2)
                 horizontalOffset = min(0, max(maxHorizontalOffset, -CGFloat(hoursBack) * pixelsPerHour))
             }
             #endif
@@ -6619,7 +6683,7 @@ struct EPGGuideView: View {
             // channel column sibling above.
             programRow(for: channel)
                 .frame(width: totalGridWidth, height: rowHeight)
-                .offset(x: horizontalOffset)
+                .modifier(GuideHOffsetModifier(scroll: hScroll))
                 .frame(width: max(0, screenWidth - channelColumnWidth),
                        height: rowHeight,
                        alignment: .leading)
@@ -7546,7 +7610,7 @@ struct EPGGuideView: View {
 
             timeHeaderRow
                 .frame(width: totalGridWidth, height: timeHeaderHeight)
-                .offset(x: horizontalOffset)
+                .modifier(GuideHOffsetModifier(scroll: hScroll))
                 .frame(width: geoWidth - channelColumnWidth, height: timeHeaderHeight, alignment: .leading)
                 .clipped()
         }
@@ -7574,7 +7638,9 @@ struct EPGGuideView: View {
             // extent, which at All Available is up to 60 days ahead: about
             // 2,900 half-hour labels, each formatted and laid out on every
             // guide body pass (every D-pad move). 2026-10-04.
-            ForEach(hourMarkers(from: visibleTimeRange().start, to: visibleTimeRange().end), id: \.self) { date in
+            GuideHSliceReader(scroll: hScroll) { sliceOffset in
+            let range = visibleTimeRange(sliceOffset: sliceOffset)
+            ForEach(hourMarkers(from: range.start, to: range.end), id: \.self) { date in
                 let offset = xOffset(for: date)
                 VStack(spacing: 0) {
                     #if os(tvOS)
@@ -7594,6 +7660,7 @@ struct EPGGuideView: View {
                     #endif
                 }
                 .offset(x: offset + 8)
+            }
             }
 
             Rectangle().fill(Color.accentPrimary.opacity(0.15))
@@ -7645,10 +7712,13 @@ struct EPGGuideView: View {
 
             let progs = guideStore.programs[channel.id] ?? []
 
+            // Only this reader re-runs when the viewport crosses a half-hour
+            // step; a drag frame inside a step touches none of it.
+            GuideHSliceReader(scroll: hScroll) { sliceOffset in
             // Viewport clipping: only render programs overlapping the visible time window
             // plus 30-min padding on each side for smooth scrolling.
-            let visibleFraction = -horizontalOffset / totalGridWidth
-            let visibleWidthFraction = visibleProgramWidth / totalGridWidth
+            let visibleFraction = -sliceOffset / totalGridWidth
+            let visibleWidthFraction = (visibleProgramWidth + hScroll.stepWidth) / totalGridWidth
             let visibleTimeStart = windowStart.addingTimeInterval(Double(visibleFraction) * totalDuration)
             let visibleTimeEnd = visibleTimeStart.addingTimeInterval(Double(visibleWidthFraction) * totalDuration)
             let pad: TimeInterval = 1800 // 30 minutes
@@ -7695,7 +7765,7 @@ struct EPGGuideView: View {
                     label: emptyRowLabel(for: channel),
                     width: max(1, visibleProgramWidth), rowHeight: rowHeight
                 ) { onSelectChannel(channel) }
-                .offset(x: -horizontalOffset)
+                .modifier(GuideHOffsetModifier(scroll: hScroll, sign: -1))
                 #else
                 Text(emptyRowLabel(for: channel))
                     .scaledFont(.labelSmall.subtext())
@@ -7703,13 +7773,14 @@ struct EPGGuideView: View {
                     .frame(width: max(1, visibleProgramWidth), height: rowHeight, alignment: .center)
                     .contentShape(Rectangle())
                     .onTapGesture { onSelectChannel(channel) }
-                    .offset(x: -horizontalOffset)
+                    .modifier(GuideHOffsetModifier(scroll: hScroll, sign: -1))
                 #endif
             } else {
                 ForEach(Array(sortedProgs.enumerated()), id: \.element.id) { index, prog in
                     let nextStart: Date? = index + 1 < sortedProgs.count ? sortedProgs[index + 1].start : nil
                     programCell(prog, channelItem: channel, nextProgramStart: nextStart)
                 }
+            }
             }
 
             // Row bottom border
@@ -7738,8 +7809,9 @@ struct EPGGuideView: View {
         // How much of the cell is hidden behind the channel column?
         // screenX = channelColumnWidth + horizontalOffset + x
         // If screenX < channelColumnWidth, the difference is the hidden portion.
-        let screenX = channelColumnWidth + horizontalOffset + x
-        let leadingClip = max(0, channelColumnWidth - screenX)
+        // The clip follows the live offset inside GuideCellClipReader, so a
+        // drag frame re-runs the reader, not this function.
+        let columnWidth = channelColumnWidth
 
         // The program cell now owns the `.focused(focusedProgramID, equals:)`
         // binding internally (on its single SwiftUI-native focusable). There
@@ -7747,7 +7819,8 @@ struct EPGGuideView: View {
         // is what the focus-restore handlers drive. tvOS passes the binding;
         // iOS uses the no-binding init.
         #if os(tvOS)
-        return GuideProgramButton(
+        return GuideCellClipReader(scroll: hScroll, cellX: x, cellWidth: width, columnWidth: columnWidth) { leadingClip in
+        GuideProgramButton(
             prog: prog, channelItem: channelItem, width: width, rowHeight: rowHeight,
             leadingClip: leadingClip,
             shortTimeFormatter: shortTimeFormatter,
@@ -7759,9 +7832,11 @@ struct EPGGuideView: View {
             compact: previewMode
         )
         .equatable()
+        }
         .offset(x: x, y: 0)
         #else
-        return GuideProgramButton(
+        return GuideCellClipReader(scroll: hScroll, cellX: x, cellWidth: width, columnWidth: columnWidth) { leadingClip in
+        GuideProgramButton(
             prog: prog, channelItem: channelItem, width: width, rowHeight: rowHeight,
             leadingClip: leadingClip,
             shortTimeFormatter: shortTimeFormatter,
@@ -7770,6 +7845,7 @@ struct EPGGuideView: View {
             onWatchCatchup: { ch, gp in handleWatchCatchup(channel: ch, prog: gp) }
         )
         .equatable()
+        }
         .offset(x: x, y: 0)
         #endif
     }
@@ -7786,9 +7862,9 @@ struct EPGGuideView: View {
     #endif
 
     // MARK: - Time Indicator Line
-    private func timeIndicatorLine(screenWidth: CGFloat, now: Date = Date()) -> some View {
+    private func timeIndicatorLine(screenWidth: CGFloat, now: Date = Date(), offset: CGFloat) -> some View {
         let x = xOffset(for: now)
-        let screenX = channelColumnWidth + horizontalOffset + x
+        let screenX = channelColumnWidth + offset + x
         // Only show if it's within the visible program area
         let visible = screenX >= channelColumnWidth && screenX <= screenWidth
         return Rectangle()
@@ -8031,9 +8107,11 @@ struct EPGGuideView: View {
     /// Time span the program area shows at the current horizontal offset,
     /// padded 30 min each side. Shared by the program rows and the time strip
     /// so both build only what is on screen.
-    private func visibleTimeRange() -> (start: Date, end: Date) {
-        let visibleFraction = -horizontalOffset / totalGridWidth
-        let visibleWidthFraction = visibleProgramWidth / totalGridWidth
+    /// `sliceOffset` is the step-aligned offset from `GuideHScroll`: at most
+    /// one step left of the real viewport edge, so the end gets one step more.
+    private func visibleTimeRange(sliceOffset: CGFloat) -> (start: Date, end: Date) {
+        let visibleFraction = -sliceOffset / totalGridWidth
+        let visibleWidthFraction = (visibleProgramWidth + hScroll.stepWidth) / totalGridWidth
         let visibleTimeStart = windowStart.addingTimeInterval(Double(visibleFraction) * totalDuration)
         let visibleTimeEnd = visibleTimeStart.addingTimeInterval(Double(visibleWidthFraction) * totalDuration)
         let pad: TimeInterval = 1800 // 30 minutes
@@ -8604,6 +8682,10 @@ private struct GuideProgramButton: View {
     }
     /// Settings > Appearance > Channel List > Show Program Subtitles.
     @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
+    #if !os(tvOS)
+    /// Settings > Live TV > Program Info Button: "off" | "current" | "all".
+    @AppStorage(GuideProgramInfoButton.key) private var programInfoButtonMode = GuideProgramInfoButton.defaultValue
+    #endif
 
     private var hasReminder: Bool {
         isFutureProgram && reminderManager.hasReminder(forKey: reminderKey)
@@ -9128,6 +9210,12 @@ private struct GuideProgramButton: View {
                        : "Add to Favorites") {
                     favoritesStore.toggle(channelItem)
                 }
+                // GH Android#130 parity with the List view card menu.
+                if RecentChannelsStore.shared.contains(channelItem.id) {
+                    Button("Remove from Recently Watched", role: .destructive) {
+                        RecentChannelsStore.shared.remove(id: channelItem.id)
+                    }
+                }
                 // v1.7.x: Add / Remove from Multiview. Label flips
                 // based on whether this channel is currently staged
                 // so the action verb always describes what tapping
@@ -9271,7 +9359,10 @@ private struct GuideProgramButton: View {
                     // edge of its VISIBLE part opens the full Program Info
                     // without the long-press menu. Only on cells wide
                     // enough to show text, so it never crowds a short slot.
-                    if prog.isLive, !multiviewStore.isStagingFromGuide,
+                    // Behind Settings > Live TV > Program Info Button (Logan
+                    // 2026-10-07): Off by default, Current Programs, or All.
+                    if GuideProgramInfoButton.shows(mode: programInfoButtonMode, isLive: prog.isLive),
+                       !multiviewStore.isStagingFromGuide,
                        min(width - leadingClip, UIScreen.main.bounds.width) >= 120 {
                         Button {
                             presentProgramInfo(after: 0)
@@ -9358,6 +9449,12 @@ private struct GuideProgramButton: View {
         let isFav = favoritesStore.isFavorite(channelItem.id)
         items.append(.init(title: isFav ? "Remove from Favorites" : "Add to Favorites",
                            systemImage: isFav ? "star.slash" : "star") { favoritesStore.toggle(channelItem) })
+        // GH Android#130 parity with the List view card menu.
+        if RecentChannelsStore.shared.contains(channelItem.id) {
+            items.append(.init(title: "Remove from Recently Watched", systemImage: "clock.badge.xmark", destructive: true) {
+                RecentChannelsStore.shared.remove(id: channelItem.id)
+            })
+        }
         let isStaged = multiviewStore.tile(forChannelID: channelItem.id) != nil
         items.append(.init(title: isStaged ? "Remove from Multiview" : "Add to Multiview",
                            systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill") {
@@ -9425,6 +9522,11 @@ private struct GuideProgramButton: View {
         let isFav = favoritesStore.isFavorite(channelItem.id)
         Button { favoritesStore.toggle(channelItem) } label: {
             Label(isFav ? "Remove from Favorites" : "Add to Favorites", systemImage: isFav ? "star.slash" : "star")
+        }
+        if RecentChannelsStore.shared.contains(channelItem.id) {
+            Button(role: .destructive) {
+                RecentChannelsStore.shared.remove(id: channelItem.id)
+            } label: { Label("Remove from Recently Watched", systemImage: "clock.badge.xmark") }
         }
         let isStaged = multiviewStore.tile(forChannelID: channelItem.id) != nil
         Button {
@@ -9909,5 +10011,123 @@ struct MultiviewStagingBannerSlot: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: multiviewStore.isStagingFromGuide)
+    }
+}
+
+/// Settings > Live TV > Program Info Button (Logan 2026-10-07). Android key
+/// is the same string with the same values.
+enum GuideProgramInfoButton {
+    static let key = "guideProgramInfoButton"
+    static let off = "off"
+    static let current = "current"
+    static let all = "all"
+    static let defaultValue = off
+
+    static func shows(mode: String, isLive: Bool) -> Bool {
+        switch mode {
+        case all: return true
+        case current: return isLive
+        default: return false
+        }
+    }
+}
+
+// MARK: - Guide horizontal scroll (iPad drag lag, Logan 2026-10-07)
+
+/// The guide's horizontal offset, kept OUT of `EPGGuideView`'s body.
+///
+/// The offset used to be `@State` on the guide, so every drag frame and every
+/// release re-ran the whole guide body: every visible row, every channel
+/// column cell (GuideChannelRow) and every program cell whose inputs the pass
+/// touched. iPad log 2026-10-07 23:07:41: one second of drags evaluated
+/// `GuideChannelRow=104 (13 distinct) GuideProgramCell=241 (91 distinct)`,
+/// `[GUIDE] drag end cost 315.6ms (handler 0.1ms ...)`, and a release that
+/// moved 2 pt still cost 64.7 ms (23:07:45.134), i.e. the cost was the full
+/// body pass, not the cells the slice added.
+///
+/// Now only small reader views read `offset` (the per-row `.offset`, the time
+/// strip, the now line, each cell's text pin), so a frame re-runs those and
+/// nothing else. The row slice reads `sliceStep`, which changes only when the
+/// viewport crosses a half-hour step, and then only the row slices re-run;
+/// existing cells skip on their Equatable inputs.
+@MainActor
+@Observable
+final class GuideHScroll {
+    private(set) var offset: CGFloat
+    /// floor(-offset / stepWidth): the half-hour step the viewport's left
+    /// edge is in. Written only when it changes.
+    private(set) var sliceStep: Int
+    @ObservationIgnored private(set) var stepWidth: CGFloat
+
+    init(offset: CGFloat, stepWidth: CGFloat) {
+        self.offset = offset
+        self.stepWidth = max(1, stepWidth)
+        self.sliceStep = Self.step(for: offset, width: max(1, stepWidth))
+    }
+
+    func set(_ value: CGFloat) {
+        // An equal write still invalidates every reader under Observation.
+        if value != offset { offset = value }
+        let s = Self.step(for: value, width: stepWidth)
+        if s != sliceStep { sliceStep = s }
+    }
+
+    func setStepWidth(_ width: CGFloat) {
+        let w = max(1, width)
+        guard w != stepWidth else { return }
+        stepWidth = w
+        let s = Self.step(for: offset, width: w)
+        if s != sliceStep { sliceStep = s }
+    }
+
+    /// Offset of the step's leading edge (never right of the real viewport
+    /// edge; at most one step left of it).
+    var sliceOffset: CGFloat { -CGFloat(sliceStep) * stepWidth }
+
+    nonisolated static func step(for offset: CGFloat, width: CGFloat) -> Int {
+        Int((-offset / width).rounded(.down))
+    }
+}
+
+/// Applies the live horizontal offset (times `sign`) to its content. The only
+/// thing that re-runs per drag frame for a row.
+struct GuideHOffsetModifier: ViewModifier {
+    let scroll: GuideHScroll
+    var sign: CGFloat = 1
+    func body(content: Content) -> some View {
+        content.offset(x: scroll.offset * sign)
+    }
+}
+
+/// Hands the live offset to `content`. For the few views that must follow
+/// every frame (time strip, now line, change hooks).
+struct GuideHOffsetReader<Content: View>: View {
+    let scroll: GuideHScroll
+    @ViewBuilder let content: (CGFloat) -> Content
+    var body: some View { content(scroll.offset) }
+}
+
+/// Hands the step-aligned slice offset to `content`: re-runs only when the
+/// viewport crosses a half-hour step.
+struct GuideHSliceReader<Content: View>: View {
+    let scroll: GuideHScroll
+    @ViewBuilder let content: (CGFloat) -> Content
+    var body: some View { content(scroll.sliceOffset) }
+}
+
+/// Pixels of a cell hidden behind the channel column at the live offset,
+/// clamped to the cell width and whole points, so only the cell under the
+/// left edge sees a new value on a frame. Cells fully visible stay at 0 and
+/// cells fully hidden stay at their width, and their Equatable body skips.
+struct GuideCellClipReader<Content: View>: View {
+    let scroll: GuideHScroll
+    let cellX: CGFloat
+    let cellWidth: CGFloat
+    let columnWidth: CGFloat
+    @ViewBuilder let content: (CGFloat) -> Content
+    var body: some View {
+        let screenX = columnWidth + scroll.offset + cellX
+        let clip = min(max(0, columnWidth - screenX), cellWidth).rounded()
+        content(clip)
     }
 }

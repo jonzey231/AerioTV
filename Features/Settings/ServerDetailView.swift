@@ -14,6 +14,14 @@ func performServerCascadeDelete(_ server: ServerConnection,
                                 servers: [ServerConnection],
                                 modelContext: ModelContext) {
     let sid = server.id.uuidString
+    let deletedID = server.id
+    // TestFlight 1.8.41 crash: the channel-server task was inside
+    // seedEPGCache holding this model when it was deleted. Cancel every
+    // long task that holds it first; they re-check `isGone` after each
+    // suspension.
+    ChannelStore.shared.cancelWork(forDeletedServerID: server.id, name: server.name)
+    VODStore.shared.clear()
+    debugLog("[PLAYLIST] delete: cancelled VOD loads and sweeps for \(server.name)")
     server.deleteCredentialsFromKeychain()
     // Display-only account facts for the permissions section.
     DispatcharrAccountFactsStore.clear(server.id)
@@ -89,8 +97,9 @@ func performServerCascadeDelete(_ server: ServerConnection,
     VODSweepProgress.clear(identity: VODSweepProgress.identity(for: server))
     // The paged VOD catalog (GH #109) is keyed per server and survives a
     // playlist switch; deleting the playlist is what removes its rows.
-    let deletedServer = server
-    Task { await VODStore.shared.deleteCatalog(for: deletedServer) }
+    // Values captured now: the Task body runs after the model is deleted.
+    let deletedRef = VODStore.DeletedCatalogRef(server)
+    Task { await VODStore.shared.deleteCatalog(deletedRef) }
     EPGGridCoverage.clear(identity: EPGGridCoverage.identity(serverID: sid, server: server))
     modelContext.delete(server)
     try? modelContext.save()
@@ -104,7 +113,9 @@ func performServerCascadeDelete(_ server: ServerConnection,
     // server remains active (if any).
     VODStore.shared.clear()
     // Push updated list to iCloud (server removed)
-    SyncManager.shared.pushServers(servers.filter { $0.id != server.id })
+    // `server` is deleted now: compare against the id captured up front and
+    // skip any row that is gone, never read the deleted model.
+    SyncManager.shared.pushServers(servers.filter { !$0.isGone && $0.id != deletedID })
     // Push the post-cascade WatchProgress set to
     // iCloud (immediate, not debounced) so the
     // deletion replicates to other devices before

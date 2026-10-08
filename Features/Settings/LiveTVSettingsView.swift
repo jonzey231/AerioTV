@@ -31,6 +31,8 @@ struct LiveTVSettingsView: View {
     @AppStorage(LogoCorners.listKey)  private var roundedLogoCorners = LogoCorners.listDefault
     @AppStorage(LogoCorners.guideKey) private var roundedGuideCorners = LogoCorners.guideDefault
     @AppStorage(LogoCorners.guideCellsKey) private var roundedProgramCells = LogoCorners.guideCellsDefault
+    /// Guide on-air cell "i" button: "off" (default), "current", "all".
+    @AppStorage(GuideProgramInfoButton.key) private var programInfoButton = GuideProgramInfoButton.defaultValue
 
     // MARK: List view / layout
     @AppStorage("defaultLiveTVView") private var defaultLiveTVView = ""
@@ -232,6 +234,21 @@ struct LiveTVSettingsView: View {
                 .tint(theme.accent)
                 .listRowBackground(Color.cardBackground)
                 .onChange(of: roundedProgramCells) { _, _ in
+                    SyncManager.shared.pushPreferencesImmediate()
+                }
+                SettingsChoicePicker(
+                    "Program Info Button",
+                    options: [
+                        SettingsChoice(GuideProgramInfoButton.off, "Off", icon: "circle.slash"),
+                        SettingsChoice(GuideProgramInfoButton.current, "Current Programs", icon: "dot.radiowaves.left.and.right"),
+                        SettingsChoice(GuideProgramInfoButton.all, "All Programs", icon: "info.circle")
+                    ],
+                    selection: $programInfoButton,
+                    footer: "Adds an info button to guide program cells that opens Program Info in one tap. Current Programs shows it on programs airing now; All Programs shows it on every cell wide enough for it.",
+                    icon: "info.circle"
+                )
+                .listRowBackground(Color.cardBackground)
+                .onChange(of: programInfoButton) { _, _ in
                     SyncManager.shared.pushPreferencesImmediate()
                 }
             } header: {

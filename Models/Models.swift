@@ -397,6 +397,10 @@ final class ServerConnection {
     /// off or the Credentials sync category is disabled — keep the historical
     /// local-first order so this device still works offline / local-only.
     private func resolvedCredential(for key: String, fallback: String) -> String {
+        Self.resolveCredential(key: key, fallback: fallback)
+    }
+
+    nonisolated static func resolveCredential(key: String, fallback: String) -> String {
         if UserDefaults.standard.bool(forKey: "iCloudSyncEnabled") && SyncCategory.credentials.isEnabled {
             return KeychainHelper.load(key: key, synchronizable: true)
                 ?? KeychainHelper.load(key: key)
@@ -1874,6 +1878,43 @@ struct DispatcharrPermissionNoticeAlert: ViewModifier {
             Button("OK", role: .cancel) { notice.dismiss() }
         } message: {
             Text(notice.message ?? "")
+        }
+    }
+}
+
+extension ServerConnection {
+    /// True once the playlist was deleted (or its context is gone). Reading
+    /// any persisted property of a deleted SwiftData model traps in
+    /// `_KKMDBackingData.getValue` (TestFlight 1.8.41 crash: playlist delete
+    /// while the channel-server task was inside seedEPGCache). Long-running
+    /// paths check this after every suspension before touching the model.
+    var isGone: Bool { isDeleted || modelContext == nil }
+}
+
+extension ServerConnection {
+    /// Plain values needed to resolve a Keychain-backed credential later,
+    /// off the main thread, without touching the model again.
+    struct CredentialRef: Sendable {
+        enum Field: Sendable { case apiKey, password }
+        let key: String
+        let fallback: String
+
+        init(_ server: ServerConnection, field: Field) {
+            switch field {
+            case .apiKey:
+                key = "apiKey_\(server.id.uuidString)"
+                fallback = server.apiKey
+            case .password:
+                key = "password_\(server.id.uuidString)"
+                fallback = server.password
+            }
+        }
+
+        func resolveOffMain() async -> String {
+            let key = key, fallback = fallback
+            return await Task.detached(priority: .userInitiated) {
+                ServerConnection.resolveCredential(key: key, fallback: fallback)
+            }.value
         }
     }
 }
