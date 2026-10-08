@@ -586,7 +586,15 @@ final class AerioCastController: NSObject, ObservableObject {
     /// (the silent-render keepalive) plus play/pause without unlocking.
     /// Channel up/down stay on the in-app cover: the bridge's transport is
     /// play/pause/seek only, matching the web receiver's control surface.
-    private func syncNowPlayingCard() {
+    func syncNowPlayingCard() {
+        if case .connected = state, let content = castingContent,
+           content.mediaID == MultiviewCompositeSession.castMediaID {
+            syncCompositeNowPlayingCard()
+            return
+        }
+        compositeNowPlayingTimer?.invalidate()
+        compositeNowPlayingTimer = nil
+        compositeNowPlayingSignature = nil
         guard case .connected = state, let content = castingContent,
               let item = ChannelStore.shared.channels.first(where: { $0.id == content.mediaID })
         else {
@@ -605,6 +613,58 @@ final class AerioCastController: NSObject, ObservableObject {
                     .currentCastSession?.remoteMediaClient?.pause()
             },
             onSeek: nil
+        )
+    }
+
+    private var compositeNowPlayingTimer: Timer?
+    private var compositeNowPlayingSignature: String?
+
+    /// Composited Multiview cast (Logan 2026-10-08, Android parity): title
+    /// "Multiview", subtitle the audio-focused tile's channel, the third line
+    /// that channel's current program, artwork that channel's logo, and the
+    /// program's timeline. A composite down to one tile reads as that
+    /// channel, like the remote card. Re-run on a focus change, a tile set
+    /// change and each minute (program rollover); republished only when what
+    /// it shows changed.
+    private func syncCompositeNowPlayingCard() {
+        if compositeNowPlayingTimer == nil {
+            compositeNowPlayingTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in
+                Task { @MainActor in AerioCastController.shared.syncNowPlayingCard() }
+            }
+        }
+        let store = MultiviewStore.shared
+        let tiles = store.tiles
+        guard let tile = tiles.first(where: { $0.id == store.audioTileID }) ?? tiles.first else { return }
+        let item = ChannelStore.shared.channels.first(where: { $0.id == tile.item.id }) ?? tile.item
+        let trimmed = item.currentProgram?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let program: String? = trimmed.isEmpty ? nil : trimmed
+        let single = MultiviewCompositeSession.shared.singleChannelName != nil
+        let title = single ? item.name : "Multiview"
+        let subtitle = single ? program : item.name
+        let programLine = single ? nil : program
+        let signature = [title, subtitle ?? "", programLine ?? "", item.logoURL?.absoluteString ?? "",
+                         item.currentProgramStart.map { "\($0.timeIntervalSince1970)" } ?? ""].joined(separator: "|")
+        guard signature != compositeNowPlayingSignature else { return }
+        compositeNowPlayingSignature = signature
+        debugLog("[MV-CAST] now playing title=\(title) subtitle=\(subtitle ?? "-") program=\(programLine ?? "-")")
+        NowPlayingBridge.shared.configure(
+            title: title,
+            subtitle: subtitle,
+            artworkURL: item.logoURL,
+            duration: nil,
+            isLive: true,
+            programStart: item.currentProgramStart,
+            programEnd: item.currentProgramEnd,
+            onPlay: {
+                GCKCastContext.sharedInstance().sessionManager
+                    .currentCastSession?.remoteMediaClient?.play()
+            },
+            onPause: {
+                GCKCastContext.sharedInstance().sessionManager
+                    .currentCastSession?.remoteMediaClient?.pause()
+            },
+            onSeek: nil,
+            programLine: programLine
         )
     }
 
@@ -749,6 +809,7 @@ final class AerioCastController: NSObject, ObservableObject {
     /// Called by MultiviewCompositeSession on every composite focus change
     /// while the composite is cast.
     func compositeFocusChanged(tileID: String) {
+        syncNowPlayingCard()
         compositeCatchUp(reason: "focus \(tileID)")
     }
 

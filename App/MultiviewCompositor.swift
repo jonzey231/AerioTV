@@ -649,6 +649,7 @@ final class MultiviewCompositeSession: ObservableObject {
                     let added = shown.filter { !self.tileIDs.contains($0.id) }
                     self.tileIDs = ids
                     self.channelNames = shown.map(\.item.name)
+                    if self.transport == .cast { AerioCastController.shared.syncNowPlayingCard() }
                     self.compositor?.setNames(Dictionary(shown.map { ($0.id, $0.item.name) }, uniquingKeysWith: { a, _ in a }))
                     self.compositor?.setTiles(ids)
                     if !added.isEmpty { self.loadLogos(added.map { ($0.id, $0.item.logoURL) }) }

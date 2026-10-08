@@ -97,8 +97,10 @@ final class NowPlayingBridge {
         onPause: @escaping () -> Void,
         onSeek: ((TimeInterval) -> Void)?,
         onSkip: ((Double) -> Void)? = nil,
-        onFlipChannel: ((Int) -> Void)? = nil
+        onFlipChannel: ((Int) -> Void)? = nil,
+        programLine: String? = nil
     ) {
+        self.programLine = programLine
         self.onPlay = onPlay
         self.onPause = onPause
         self.onSeek = onSeek
@@ -177,7 +179,7 @@ final class NowPlayingBridge {
             info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0.0
         }
 
-        if let remoteDeviceLabel { info[MPMediaItemPropertyAlbumTitle] = remoteDeviceLabel }
+        if let album = albumLine() { info[MPMediaItemPropertyAlbumTitle] = album }
         infoDict = info
         publishInfo()
 
@@ -211,12 +213,23 @@ final class NowPlayingBridge {
     /// nil otherwise. Survives `configure` so a channel flip keeps it.
     private var remoteDeviceLabel: String?
 
+    /// Third line for a card whose subtitle is not the program: the
+    /// composited Multiview cast (title "Multiview", subtitle the audio-
+    /// focused channel, this line its current program). Reset by every
+    /// `configure`; shares the album line with the receiver label.
+    private var programLine: String?
+
+    private func albumLine() -> String? {
+        let parts = [programLine, remoteDeviceLabel].compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     func setRemoteDeviceLabel(_ label: String?) {
         guard remoteDeviceLabel != label else { return }
         remoteDeviceLabel = label
         guard !infoDict.isEmpty else { return }
-        if let label {
-            infoDict[MPMediaItemPropertyAlbumTitle] = label
+        if let album = albumLine() {
+            infoDict[MPMediaItemPropertyAlbumTitle] = album
         } else {
             infoDict.removeValue(forKey: MPMediaItemPropertyAlbumTitle)
         }
