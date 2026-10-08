@@ -348,6 +348,11 @@ final class AerioCastController: NSObject, ObservableObject {
     /// The web receiver cannot run Multiview, and an older TV app does not
     /// say it, so both leave this false and the sheet offers Play Here only.
     @Published private(set) var receiverMultiviewCapable = false
+    /// The Multiview the AerioTV Android TV app is running over Cast Connect,
+    /// as its `multiview.state` pushes report it; nil when none (Logan
+    /// 2026-10-08). The remote-session card and sheet show it instead of the
+    /// last single channel.
+    @Published private(set) var nativeMultiview: NativeMultiviewState?
     /// A live load held until the receiver type is known. Guessing is not an
     /// option in either direction: guessing web starts a proxy plus a server
     /// transcode for a TV that can play the raw TS natively, and guessing native
@@ -401,6 +406,9 @@ final class AerioCastController: NSObject, ObservableObject {
             receiverMultiviewCapable = mv
             debugLog("[MV-CAST] receiver multiview capable=\(mv)")
         }
+        // A sender that joins while the TV already runs a Multiview asks for
+        // it, so the card shows it at once.
+        if mv { sendControl(MultiviewRemoteCommand.frame(MultiviewRemoteCommand.getState)) }
         switch json["platform"] as? String {
         case "android-tv-app": resolveReceiverTarget(.androidTVApp)
         case "web-receiver": resolveReceiverTarget(.webReceiver)
@@ -480,6 +488,33 @@ final class AerioCastController: NSObject, ObservableObject {
         sendControl(frame)
         debugLog("[MV-CAST] sent multiview.open to \(connectedDeviceName ?? "TV") channels=\(n)")
         return true
+    }
+
+    /// Give the audio to tile `index` of the TV's Multiview (Cast Connect).
+    func setNativeMultiviewFocus(_ index: Int) {
+        guard var mv = nativeMultiview, mv.channels.indices.contains(index), index != mv.focus else { return }
+        debugLog("[MV-CAST] sent multiview.focus focus=\(index)")
+        mv.focus = index
+        nativeMultiview = mv  // optimistic; the TV's state push confirms
+        sendControl(MultiviewRemoteCommand.frame(MultiviewRemoteCommand.focus, ["focus": index]))
+    }
+
+    /// Set the TV's Multiview layout.
+    func setNativeMultiviewLayout(_ mode: MultiviewLayoutMode) {
+        guard var mv = nativeMultiview, mode != mv.layout else { return }
+        debugLog("[MV-CAST] sent multiview.layout layout=\(mode.rawValue)")
+        mv.layout = mode
+        nativeMultiview = mv
+        sendControl(MultiviewRemoteCommand.frame(MultiviewRemoteCommand.layout, ["layout": mode.rawValue]))
+    }
+
+    /// Stop Casting on a Cast Connect Multiview: the TV leaves Multiview for
+    /// its own UI before the session ends.
+    func stopNativeMultiview() {
+        debugLog("[MV-CAST] sent multiview.stop")
+        nativeMultiview = nil
+        sendControl(MultiviewRemoteCommand.frame(MultiviewRemoteCommand.stop))
+        stopCasting()
     }
 
     /// Fire-and-forget JSON on the control namespace. No-op with no channel.
@@ -1798,6 +1833,7 @@ extension AerioCastController: GCKSessionManagerListener {
         targetProbeTask = nil
         receiverTarget = .unknown
         remoteState = CompanionClient.RemoteState()
+        nativeMultiview = nil
         deferredLoad = nil
         receiverCaps = nil
         loggedCaps = nil
@@ -1961,6 +1997,12 @@ extension AerioCastController: GCKGenericChannelDelegate {
             // receiver applied an aspect / speed / audio-only command.
             debugLog("[Cast] state <- aspect=\(decoded.aspect) speed=\(decoded.speed) audioOnly=\(decoded.audioOnly) audio=\(decoded.audio.count) tracks text=\(decoded.text.count) tracks textOff=\(decoded.textOff)")
             if decoded != remoteState { remoteState = decoded }
+            return
+        }
+        if kind == MultiviewRemoteCommand.state {
+            let st = NativeMultiviewState(json: json)
+            debugLog("[MV-CAST] state <- active=\(st != nil) count=\(st?.channels.count ?? 0) focus=\(st?.focus ?? 0) layout=\(st?.layout.rawValue ?? "auto")")
+            if st != nativeMultiview { nativeMultiview = st }
             return
         }
         if kind == "multiview.opened" || kind == "multiview.error" {
@@ -3119,6 +3161,10 @@ struct RemoteSessionSheet: View {
     /// Channel Up/Down and Back/Forward are hidden; Play/Pause, Options and
     /// Stop stay.
     var compositeMultiview: Bool = false
+    /// A Multiview the AerioTV Android TV app runs over Cast Connect (Logan
+    /// 2026-10-08): its channels with the audio one marked and the Layout
+    /// row; no channel flips, skips or Play/Pause (no single transport).
+    var nativeMultiview: NativeMultiviewState? = nil
 
     @State private var contentHeight: CGFloat = 320
     @State private var liveWindow: RemoteSeekWindow?
@@ -3203,25 +3249,28 @@ struct RemoteSessionSheet: View {
         let enabled = mode == .playing
         return VStack(spacing: 14) {
             header
-            if compositeMultiview {
+            if let native = nativeMultiview {
+                NativeMultiviewPanel(state: native)
+            } else if compositeMultiview {
                 MultiviewCompositePreviewGrid()
                 MultiviewCompositeLayoutRow()
             }
             programBlock
             Group {
-                if !compositeMultiview {
+                if !compositeMultiview && nativeMultiview == nil {
                     HStack(spacing: 24) {
                         labeledButton("chevron.down", label: "Channel Down", action: onChannelDown)
                         labeledButton("chevron.up", label: "Channel Up", action: onChannelUp)
                     }
                 }
                 HStack(alignment: .top, spacing: 0) {
-                    if !compositeMultiview {
+                    if !compositeMultiview && nativeMultiview == nil {
                         labeledButton(SkipIntervals.backSymbol(skipBackSeconds),
                                       label: "Back \(skipBackSeconds)s") {
                             onSeek(-Double(skipBackSeconds))
                         }
                     }
+                    if nativeMultiview == nil {
                     Button(action: onTogglePlayPause) {
                         VStack(spacing: 6) {
                             ZStack {
@@ -3237,7 +3286,8 @@ struct RemoteSessionSheet: View {
                         .frame(width: Self.buttonColumnWidth)
                     }
                     .accessibilityLabel(isPlaying ? "Pause" : "Play")
-                    if !compositeMultiview {
+                    }
+                    if !compositeMultiview && nativeMultiview == nil {
                         labeledButton(SkipIntervals.forwardSymbol(skipForwardSeconds),
                                       label: "Forward \(skipForwardSeconds)s") {
                             onSeek(Double(skipForwardSeconds))
@@ -3736,6 +3786,77 @@ struct MultiviewCompositePreviewGrid: View {
 /// options Settings > Player > Multiview offers for the current tile count
 /// (Android parity, 2026-10-07). Changes the composite live for this
 /// session (Cast and AirPlay share the compositor); the preview follows.
+/// The cast sheet's view of a Multiview the AerioTV Android TV app runs over
+/// Cast Connect (Logan 2026-10-08). There is no phone-side frame to preview,
+/// so the channels are listed in grid order: the audio channel carries the
+/// speaker, a tap gives a channel the audio on the TV. Below, the Layout row
+/// with the options the TV reports. Android NativeMultiviewPanel parity.
+struct NativeMultiviewPanel: View {
+    let state: NativeMultiviewState
+    private var accent: Color { ThemeManager.shared.accent }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(state.channels.enumerated()), id: \.offset) { i, ch in
+                let focused = i == state.focus
+                Button {
+                    debugLog("[MV-CAST] native panel: Make Audio tile=\(i)")
+                    AerioCastController.shared.setNativeMultiviewFocus(i)
+                } label: {
+                    HStack {
+                        Text(ch.name.isEmpty ? "Channel \(i + 1)" : ch.name)
+                            .scaledFont(.subheadline)
+                            .foregroundStyle(focused ? accent : .white)
+                            .lineLimit(1)
+                        Spacer()
+                        if focused {
+                            Image(systemName: "speaker.wave.2.fill")
+                                .foregroundStyle(accent)
+                                .accessibilityLabel("Audio")
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(focused)
+            }
+            if state.layouts.count > 1 {
+                HStack {
+                    Text("Layout")
+                        .scaledFont(.subheadline)
+                        .foregroundStyle(.white)
+                    Spacer()
+                    Menu {
+                        Picker("Layout", selection: Binding(
+                            get: { state.layout },
+                            set: { m in
+                                debugLog("[MV-CAST] native panel layout menu: \(m.displayName)")
+                                AerioCastController.shared.setNativeMultiviewLayout(m)
+                            }
+                        )) {
+                            ForEach(state.layouts) { m in
+                                Label(m.displayName, systemImage: m.symbolName).tag(m)
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(state.layout.displayName)
+                            Image(systemName: "chevron.up.chevron.down")
+                        }
+                        .scaledFont(.subheadline)
+                        .foregroundStyle(.white.opacity(0.8))
+                    }
+                    .accessibilityLabel("Layout, \(state.layout.displayName)")
+                }
+                .padding(.horizontal, 4)
+                .padding(.top, 4)
+            }
+        }
+    }
+}
+
 struct MultiviewCompositeLayoutRow: View {
     @ObservedObject private var store = MultiviewStore.shared
     @ObservedObject private var composite = MultiviewCompositeSession.shared

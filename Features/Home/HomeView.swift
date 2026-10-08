@@ -6564,6 +6564,24 @@ struct MainTabView: View {
             let content = castController.castingContent
             let castCompositeSingle = content?.mediaID == MultiviewCompositeSession.castMediaID
                 && mvComposite.transport == .cast && mvComposite.singleChannelName != nil
+            // Cast Connect Multiview (Logan 2026-10-08): the TV app runs the
+            // grid; the card follows its state pushes.
+            if let native = castController.nativeMultiview {
+                RemoteSessionCard(
+                    transport: .cast,
+                    title: "Multiview",
+                    status: native.subtitle,
+                    artURL: nil,
+                    isPlaying: true,
+                    showTransport: false,
+                    onTap: { showRemoteControls = true },
+                    onTogglePlayPause: {},
+                    onStop: {
+                        debugLog("[Remote] X: stop Multiview + close")
+                        castController.stopNativeMultiview()
+                    }
+                )
+            } else {
             RemoteSessionCard(
                 transport: .cast,
                 // Rule 1: a session connected with nothing playing reads as
@@ -6594,6 +6612,7 @@ struct MainTabView: View {
                     castController.stopCasting()
                 }
             )
+            }
         case .companion:
             let device = companionClient.connectedTVName ?? "TV"
             RemoteSessionCard(
@@ -6693,20 +6712,21 @@ struct MainTabView: View {
                 ChannelStore.shared.channels.first(where: { $0.id == c.mediaID })
             }
             let castComposite = content?.mediaID == MultiviewCompositeSession.castMediaID
+            let native = castController.nativeMultiview
             RemoteSessionSheet(
                 transport: .cast,
-                mode: content == nil ? .idle : .playing,
-                channelName: (castComposite && mvComposite.transport == .cast ? mvComposite.singleChannelName : nil)
+                mode: (content == nil && native == nil) ? .idle : .playing,
+                channelName: native != nil ? "Multiview" : (castComposite && mvComposite.transport == .cast ? mvComposite.singleChannelName : nil)
                     ?? content?.title ?? device,
-                statusText: content == nil ? "Connected. Select a channel to start."
+                statusText: (content == nil && native == nil) ? "Connected. Select a channel to start."
                     : castController.castStatusLine(deviceName: device),
-                artURL: content?.artURL,
-                channelID: content?.mediaID,
+                artURL: native != nil ? nil : content?.artURL,
+                channelID: native != nil ? nil : content?.mediaID,
                 // A Multiview composite lists the composite's current
                 // channels (round 8: the list kept a removed channel, since
                 // the cast content's subtitle is set once at the load).
-                fallbackSubtitle: castComposite && mvComposite.transport == .cast
-                    ? (mvComposite.singleChannelName == nil ? mvComposite.subtitle : nil) : content?.subtitle,
+                fallbackSubtitle: native?.subtitle ?? (castComposite && mvComposite.transport == .cast
+                    ? (mvComposite.singleChannelName == nil ? mvComposite.subtitle : nil) : content?.subtitle),
                 isPlaying: castController.remoteIsPlaying,
                 item: item,
                 onTogglePlayPause: { castController.remoteTogglePlayPause() },
@@ -6714,7 +6734,7 @@ struct MainTabView: View {
                 onChannelDown: { castController.castChannel(-1) },
                 onSeek: { castController.remoteSeek(by: $0) },
                 onStop: {
-                    castController.stopCasting()
+                    if native != nil { castController.stopNativeMultiview() } else { castController.stopCasting() }
                     showRemoteControls = false
                 },
                 onChangeDevice: {
@@ -6727,10 +6747,11 @@ struct MainTabView: View {
                 // Composite Multiview: Stream Info already carries the
                 // RECEIVER row, so no plain-text "Receiver:" line under Stop
                 // Casting (Logan 2026-10-07). Single channel keeps it.
-                footnoteLines: (content == nil || castComposite) ? [] : castCardDetailLines,
-                seekWindow: castComposite ? nil : { castController.remoteSeekWindow() },
+                footnoteLines: (content == nil || castComposite || native != nil) ? [] : castCardDetailLines,
+                seekWindow: (castComposite || native != nil) ? nil : { castController.remoteSeekWindow() },
                 onSeekTo: { castController.remoteSeek(to: $0) },
-                compositeMultiview: castComposite
+                compositeMultiview: castComposite,
+                nativeMultiview: native
             )
         case .companion:
             RemoteControlScreen(

@@ -430,7 +430,7 @@ final class PlayerSession: ObservableObject {
     /// "Back to TV Guide" from the multiview exit dialog (Android
     /// parity): the same full playback teardown as `exit()`, except the
     /// staged tile SET survives and staging mode is re-armed, so the
-    /// guide greets the user with its "N tiles staged" banner and Play
+    /// guide greets the user with its "N channels staged" banner and Play
     /// resumes the same grid. The tile players themselves die with the
     /// container unmount; Play mounts fresh ones against the surviving
     /// tile list (the banner path never re-seeds).

@@ -9943,7 +9943,7 @@ struct SystemMenuAnchor: UIViewRepresentable {
 
 // MARK: - Multiview staging banner (shared)
 
-/// The "N tiles staged for Multiview" banner with Clear, Play and Done.
+/// The "N channels staged for Multiview" banner with Clear, Play and Done.
 /// Shared by the Guide and the List so staging from either Live TV view
 /// shows the same banner in the same top-edge placement.
 struct MultiviewStagingBanner: View {
@@ -9953,8 +9953,8 @@ struct MultiviewStagingBanner: View {
     var body: some View {
         let count = multiviewStore.tiles.count
         let label = count == 1
-            ? "1 tile staged for Multiview"
-            : "\(count) tiles staged for Multiview"
+            ? "1 channel staged for Multiview"
+            : "\(count) channels staged for Multiview"
         #if os(tvOS)
         let spacing: CGFloat = 12
         #else

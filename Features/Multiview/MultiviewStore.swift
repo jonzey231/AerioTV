@@ -1263,6 +1263,26 @@ enum MultiviewRemoteCommand {
                 "focus": max(0, min(focus, max(0, list.count - 1)))]
     }
 
+    // Multiview control over Cast Connect (Logan 2026-10-08), the same
+    // "cmd" plus "type" framing (Android CastControl):
+    //   phone -> TV  multiview.focus {"focus":i}, multiview.layout
+    //                {"layout":"<MultiviewLayoutMode raw value>"},
+    //                multiview.stop, multiview.getState
+    //   TV -> phone  multiview.state {"active":bool,"channels":[{"channelId",
+    //                "name"}],"focus":i,"layout":"<key>","layouts":[keys]},
+    //                pushed on every change, TV remote included.
+    static let focus = "multiview.focus"
+    static let layout = "multiview.layout"
+    static let stop = "multiview.stop"
+    static let getState = "multiview.getState"
+    static let state = "multiview.state"
+
+    static func frame(_ type: String, _ extra: [String: Any] = [:]) -> [String: Any] {
+        var f: [String: Any] = ["cmd": type, "type": type]
+        for (k, v) in extra { f[k] = v }
+        return f
+    }
+
     static func reply(count: Int) -> [String: Any] {
         ["cmd": opened, "type": opened, "count": count]
     }
@@ -1270,4 +1290,33 @@ enum MultiviewRemoteCommand {
     static func reply(error message: String) -> [String: Any] {
         ["cmd": error, "type": error, "error": message]
     }
+}
+
+/// A Multiview the AerioTV Android TV app runs over Cast Connect, decoded from
+/// its `multiview.state` push. Nil (init fails) when the TV reports none.
+struct NativeMultiviewState: Equatable {
+    struct Channel: Equatable { let channelID: String; let name: String }
+    var channels: [Channel]
+    var focus: Int
+    var layout: MultiviewLayoutMode
+    var layouts: [MultiviewLayoutMode]
+
+    init?(json: [String: Any]) {
+        guard json["active"] as? Bool == true else { return nil }
+        let list = (json["channels"] as? [[String: Any]] ?? []).map {
+            Channel(channelID: $0["channelId"] as? String ?? "", name: $0["name"] as? String ?? "")
+        }
+        guard !list.isEmpty else { return nil }
+        channels = list
+        focus = max(0, min((json["focus"] as? NSNumber)?.intValue ?? 0, list.count - 1))
+        layout = MultiviewLayoutMode(rawValue: json["layout"] as? String ?? "") ?? .auto
+        var seen: [MultiviewLayoutMode] = []
+        for key in json["layouts"] as? [String] ?? [] {
+            if let m = MultiviewLayoutMode(rawValue: key), !seen.contains(m) { seen.append(m) }
+        }
+        layouts = seen
+    }
+
+    /// The channel names in grid order, for the card's status line.
+    var subtitle: String { channels.map(\.name).joined(separator: ", ") }
 }
