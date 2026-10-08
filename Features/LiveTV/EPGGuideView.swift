@@ -5926,6 +5926,12 @@ struct EPGGuideView: View {
     /// frame and clears it on `.onEnded`.
     #if os(iOS)
     @State private var dragBaselineOffset: CGFloat? = nil
+    /// True once the active drag moved the timeline (see the drag onEnded).
+    @State private var dragIsHorizontal = false
+    /// Release speed (pt/s) below which a drag adds no momentum.
+    private static let flickMinVelocity: CGFloat = 300
+    /// Glide distance per pt/s of release speed: 0.99 / (1 - 0.99) / 1000.
+    private static let flickDistancePerVelocity: CGFloat = 0.099
     #endif
 
     /// Maximum the user can scroll right (negative = content shifts left).
@@ -6152,27 +6158,53 @@ struct EPGGuideView: View {
                         }
                         guard let base = dragBaselineOffset else { return }
                         guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                        dragIsHorizontal = true
                         let target = base + value.translation.width
                         horizontalOffset = min(0, max(maxHorizontalOffset, target))
                     }
                     .onEnded { value in
-                        let base = dragBaselineOffset ?? horizontalOffset
-                        // `predictedEndTranslation` gives us flick
-                        // momentum — iOS's built-in projection based
-                        // on the release velocity — so fast swipes
-                        // keep gliding instead of stopping dead.
                         let dragEndStart = CFAbsoluteTimeGetCurrent()
                         // Names the render turn this release causes in the
                         // [HANG] line instead of a bare "main runloop turn".
                         MainThreadWatchdog.shared.notePublish("guide drag end")
-                        let projected = base + value.predictedEndTranslation.width
-                        let landed = min(0, max(maxHorizontalOffset, projected))
-                        let travel = Int(abs(landed - horizontalOffset))
-                        hScroll.nextChangeAnimation = 0.25
-                        withAnimation(.easeOut(duration: 0.25)) {
-                            horizontalOffset = landed
-                        }
+                        let wasHorizontal = dragIsHorizontal
                         dragBaselineOffset = nil
+                        dragIsHorizontal = false
+                        // A vertical row scroll never moves the timeline on
+                        // release (its predicted width used to be applied).
+                        guard wasHorizontal else { return }
+                        // Release momentum (iPad, Logan 2026-10-08: "Works
+                        // until I release and then it snaps"). The full
+                        // `predictedEndTranslation` was applied in a fixed
+                        // 0.25 s ease-out, so even a slow release threw the
+                        // grid 580 to 860 pt. Now: the finger's position is
+                        // kept, momentum comes from the release velocity
+                        // with a fast deceleration (rate 0.99 per ms, the
+                        // UIScrollView .fast rate: distance = v * 0.099),
+                        // capped at one viewport width, and slow releases
+                        // add none.
+                        let velocity = value.velocity.width
+                        let released = horizontalOffset
+                        var momentum: CGFloat = 0
+                        if abs(velocity) >= Self.flickMinVelocity {
+                            let cap = max(1, UIScreen.main.bounds.width - channelColumnWidth)
+                            momentum = min(cap, max(-cap, velocity * Self.flickDistancePerVelocity))
+                        }
+                        let landed = min(0, max(maxHorizontalOffset, released + momentum))
+                        let travel = Int(abs(landed - released))
+                        if abs(landed - released) < 8 {
+                            // Stops exactly where the finger let go.
+                            if landed != released { horizontalOffset = landed }
+                        } else {
+                            // Ease-out whose initial slope is 4x the mean
+                            // speed (control point 0.25,1), so the glide
+                            // starts at the release velocity: T = 4d / v.
+                            let duration = min(0.9, max(0.2, Double(4 * abs(landed - released) / max(1, abs(velocity)))))
+                            hScroll.nextChangeAnimation = duration
+                            withAnimation(.timingCurve(0.25, 1, 0.5, 1, duration: duration)) {
+                                horizontalOffset = landed
+                            }
+                        }
                         logVisibleWindow(offset: landed, reason: "drag end")
                         GuideDragEndCost.measure(start: dragEndStart, travel: travel)
                     }
@@ -10795,7 +10827,8 @@ final class GuideCanvasRowView: UIView, GuideHScrollListener, UIContextMenuInter
         CATransaction.begin()
         if animation > 0 {
             CATransaction.setAnimationDuration(animation)
-            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
+            // Same curve as the guide's release glide so pins track it.
+            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(controlPoints: 0.25, 1, 0.5, 1))
         } else {
             CATransaction.setDisableActions(true)
         }
