@@ -152,6 +152,12 @@ final class HLSResourceLoaderRegistry: NSObject, AVAssetResourceLoaderDelegate, 
 }
 
 /// Thread-safe scalar slot.
+/// Mutable flag with reference semantics for SwiftUI views (see
+/// AVPlayerMultiviewTile.resumeFlag).
+final class CarPlayResumeFlag {
+    var on = false
+}
+
 final class DoubleBox: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Double
@@ -4895,6 +4901,13 @@ struct AVPlayerMultiviewTile: View {
     /// out." + a -12888 stale playlist and the error card (field
     /// 2026-08-29). willEnterForeground rebuilds the pipeline.
     @State private var backgroundSuspended = false
+    #if os(iOS)
+    /// Set only for the synchronous resumeFromBackground -> start() call, so
+    /// the CarPlay background deferral in start() lets the rebuild through.
+    /// A reference box: a @State Bool written and read in the same call is
+    /// not guaranteed to read back the new value.
+    @State private var resumeFlag = CarPlayResumeFlag()
+    #endif
     /// Position saved at quiesce for kinds that can resume in place.
     @State private var backgroundResumeMs: Int32 = 0
     #if os(iOS)
@@ -5268,12 +5281,27 @@ struct AVPlayerMultiviewTile: View {
         // willSet-old inside this handler).
         .onReceive(MultiviewStore.shared.$audioTileID) { newAudioID in
             #if os(iOS)
-            // A running Multiview composite keeps the phone silent.
+            // A running Multiview composite keeps the phone silent, and so
+            // does a headless CarPlay engine (the car owns audio).
             player?.isMuted = MultiviewCompositeTaps.isMuted(tileID: tileID, audioID: newAudioID)
+                || HeadlessPlaybackController.shared.isActive
             #else
             player?.isMuted = (newAudioID != tileID)
             #endif
         }
+        #if os(iOS)
+        // The car took or released audio (headless CarPlay engine started,
+        // stopped, or the car disconnected): follow it without a rebuild.
+        .onReceive(HeadlessPlaybackController.shared.activeSubject.removeDuplicates()) { carOwns in
+            guard let p = player else { return }
+            let muted = MultiviewCompositeTaps.isMuted(tileID: tileID, audioID: MultiviewStore.shared.audioTileID)
+                || carOwns
+            if p.isMuted != muted {
+                p.isMuted = muted
+                debugLog("[CARPLAY] yield: tile \(muted ? "muted, car owns audio" : "unmuted, phone owns audio") channel=\(channelName)")
+            }
+        }
+        #endif
         .onChange(of: shouldPause) { _, paused in
             if paused { player?.pause() } else { player?.play() }
         }
@@ -6598,10 +6626,14 @@ struct AVPlayerMultiviewTile: View {
     private func resumeFromBackground() {
         guard backgroundSuspended else { return }
         backgroundSuspended = false
-        // Back on screen: the view engine takes the channel from a headless
-        // CarPlay engine (no-op when none runs). Must precede start(), whose
-        // background deferral checks for an active headless engine.
-        HeadlessPlaybackController.shared.yieldToViewEngine()
+        // Back on screen with a headless CarPlay engine running: the car keeps
+        // the audio and this tile rebuilds with video only (muted). Must not
+        // be deferred again, so mark the scene as returning before start().
+        if HeadlessPlaybackController.shared.isActive {
+            debugLog("[CARPLAY] yield: tile back on screen, video only while the car owns audio channel=\(channelName)")
+        }
+        resumeFlag.on = true
+        defer { resumeFlag.on = false }
         // Each background cycle earns fresh silent retries; without the
         // reset the second background trip went straight to the card.
         mismatchAutoRetries = 0
@@ -6637,20 +6669,19 @@ struct AVPlayerMultiviewTile: View {
             stop()
         }
         #if os(iOS)
-        // CarPlay coexistence (2026-10-07): in the background the headless
-        // CarPlay engine owns the car's audio. A tile started now (a car tap
-        // swapped its channel while the phone is locked) would be a second
-        // producer, so it waits for the next foreground, where
-        // resumeFromBackground rebuilds it. In the foreground the tile owns
-        // playback and the headless engine yields.
+        // CarPlay coexistence (2026-10-08): while the headless CarPlay engine
+        // runs, the car owns audio. In the background this tile would be a
+        // second producer with nothing to show, so it waits for the next
+        // foreground (resumeFromBackground rebuilds it). In the foreground it
+        // plays video MUTED (see the activeSubject receiver below).
         if UIApplication.shared.applicationState == .background,
+           !resumeFlag.on,
            HeadlessPlaybackController.shared.isActive {
             endBackgroundGrace()
             backgroundSuspended = true
             debugLog("[CARPLAY] yield: tile start deferred to foreground, headless engine owns the car channel=\(channelName)")
             return
         }
-        HeadlessPlaybackController.shared.yieldToViewEngine()
         #endif
         tileStopped = false
         tileError = nil
@@ -7352,6 +7383,7 @@ struct AVPlayerMultiviewTile: View {
         // Live truth at this instant, never a captured snapshot.
         #if os(iOS)
         avPlayer.isMuted = MultiviewCompositeTaps.isMuted(tileID: tileID, audioID: MultiviewStore.shared.audioTileID)
+            || HeadlessPlaybackController.shared.isActive
         #else
         avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)
         #endif

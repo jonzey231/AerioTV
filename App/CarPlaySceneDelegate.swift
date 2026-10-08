@@ -200,7 +200,11 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             // connect re-probes and rebuilds when the network flipped.
             TVLANProbe.shared.probe(servers: servers)
             let lanNow = await TVLANProbe.shared.reprobeAndWait()
-            debugLog("[CARPLAY] hydrate: LAN probe -> \(lanNow) (was \(lanBefore))")
+            // A verdict with no candidate (no Local URL on the active
+            // playlist) returns at once and always routes the public URL.
+            let active = servers.first(where: { $0.isActive }) ?? servers.first
+            let hasLocal = !(active?.localURL.trimmingCharacters(in: .whitespaces).isEmpty ?? true)
+            debugLog("[CARPLAY] hydrate: LAN probe -> \(lanNow) (was \(lanBefore)) activeHasLocalURL=\(hasLocal)")
             if !hadChannels || lanNow != lanBefore {
                 ChannelStore.shared.refresh(servers: servers)
             }

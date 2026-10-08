@@ -101,7 +101,15 @@ final class HeadlessPlaybackController {
         }
     }
 
-    private var engine: Engine?
+    private var engine: Engine? {
+        didSet {
+            let active = engine != nil
+            if active != activeSubject.value { activeSubject.send(active) }
+        }
+    }
+    /// Emits whether the car (headless engine) owns audio. AVPlayer tiles
+    /// mute themselves while it is true and unmute when it drops.
+    let activeSubject = CurrentValueSubject<Bool, Never>(false)
     private var currentItem: ChannelDisplayItem?
     private var currentItemID: String? { currentItem?.id }
     private var isPaused = false
@@ -176,13 +184,16 @@ final class HeadlessPlaybackController {
         }
     }
 
-    /// Start (or re-tune to) a channel headlessly. No-op unless we're in the
-    /// car-only state: CarPlay connected, no foreground scene, and no mounted
-    /// mpv coordinator, so this never fights the view engine.
+    /// Start (or re-tune to) a channel headlessly. Runs whenever CarPlay is
+    /// connected, whatever the phone app's state (field test 2026-10-08:
+    /// a car tap with the phone app on screen used to hand playback to the
+    /// phone's player and leave the car silent). While it runs the car owns
+    /// audio and any AVPlayer tile on the phone renders video muted. Only a
+    /// mounted legacy mpv coordinator (which cannot be muted from here)
+    /// blocks it.
     func start(item: ChannelDisplayItem, server: ServerConnection?, isLive: Bool,
                videoCapable: Bool = false) {
         guard NowPlayingManager.shared.isCarPlayConnected,
-              !Self.hasForegroundPlayerScene(),
               !PlaybackEngineRegistry.shared.hasLiveCoordinator
         else {
             debugLog("[CARPLAY] engine: headless not started for \(item.name): carplay=\(NowPlayingManager.shared.isCarPlayConnected) fgScene=\(Self.hasForegroundPlayerScene()) mpvCoordinators=\(PlaybackEngineRegistry.shared.liveCoordinatorCount) (view engine owns playback)")
