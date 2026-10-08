@@ -1847,7 +1847,12 @@ struct VODDetailView: View {
     }
 
     private func loadVersionProviders() async {
-        guard let api = versionAPI, let numericID = Int(item.id) else { return }
+        guard let api = versionAPI, let numericID = Int(item.id) else {
+            // "Can't play other versions" (iPad 2026-10-07): say why the
+            // Version row is absent instead of staying silent.
+            debugLog("[VOD] versions: 0 for \(item.name) (no Dispatcharr API playlist or non-numeric id \(item.id), server type \(server?.type.rawValue ?? "none"))")
+            return
+        }
         do {
             switch item.type {
             case .movie:
@@ -1862,6 +1867,7 @@ struct VODDetailView: View {
             case .episode:
                 break
             }
+            debugLog("[VOD] versions: \(versionProviders.count) for \(item.name)")
             if versionProviders.count > 1 {
                 debugLog("[VOD-VERSION] \(item.type) \(item.id): \(versionProviders.count) provider copies")
                 restoreRememberedVersion()

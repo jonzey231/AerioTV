@@ -6168,6 +6168,7 @@ struct EPGGuideView: View {
                         let projected = base + value.predictedEndTranslation.width
                         let landed = min(0, max(maxHorizontalOffset, projected))
                         let travel = Int(abs(landed - horizontalOffset))
+                        hScroll.nextChangeAnimation = 0.25
                         withAnimation(.easeOut(duration: 0.25)) {
                             horizontalOffset = landed
                         }
@@ -7776,10 +7777,30 @@ struct EPGGuideView: View {
                     .modifier(GuideHOffsetModifier(scroll: hScroll, sign: -1))
                 #endif
             } else {
+                #if os(tvOS)
                 ForEach(Array(sortedProgs.enumerated()), id: \.element.id) { index, prog in
                     let nextStart: Date? = index + 1 < sortedProgs.count ? sortedProgs[index + 1].start : nil
                     programCell(prog, channelItem: channel, nextProgramStart: nextStart)
                 }
+                #else
+                // iPad drag lag round 3 (Logan 2026-10-07): the row draws its
+                // cells itself (GuideCanvasRow) instead of one SwiftUI view
+                // per programme. See GuideCanvasRow for the measurements.
+                let slots = canvasSlots(sortedProgs)
+                let originX = slots.map(\.x).min() ?? 0
+                let sliceWidth = max(1, (slots.map { $0.x + $0.width }.max() ?? 1) - originX)
+                GuideCanvasRow(
+                    channel: channel, slots: slots, originX: originX,
+                    rowHeight: rowHeight, viewportWidth: visibleProgramWidth,
+                    shortTimeFormatter: shortTimeFormatter, scroll: hScroll,
+                    onSelect: onSelectChannel,
+                    onMultiviewIntent: { handleMultiviewIntent(channel: $0) },
+                    onWatchCatchup: { ch, gp in handleWatchCatchup(channel: ch, prog: gp) }
+                )
+                .equatable()
+                .frame(width: sliceWidth, height: rowHeight)
+                .offset(x: originX)
+                #endif
             }
             }
 
@@ -7789,6 +7810,24 @@ struct EPGGuideView: View {
                 .offset(y: rowHeight / 2 - 0.5)
         }
     }
+
+    #if !os(tvOS)
+    /// Same geometry `programCell` computes, for the canvas row: grid x and
+    /// width per programme, end clamped to the next start, 20 pt minimum.
+    private func canvasSlots(_ progs: [GuideProgram]) -> [GuideCanvasSlot] {
+        var out: [GuideCanvasSlot] = []
+        out.reserveCapacity(progs.count)
+        for (i, prog) in progs.enumerated() {
+            let clampedStart = max(prog.start, windowStart)
+            var maxEnd = min(prog.end, windowEnd)
+            if i + 1 < progs.count { maxEnd = min(maxEnd, max(progs[i + 1].start, windowStart)) }
+            let x = xOffset(for: clampedStart)
+            let rawWidth = CGFloat(maxEnd.timeIntervalSince(clampedStart) / totalDuration) * totalGridWidth
+            out.append(GuideCanvasSlot(prog: prog, x: x, width: max(20, rawWidth - cellGap)))
+        }
+        return out
+    }
+    #endif
 
     // MARK: - Program Cell
     private func programCell(_ prog: GuideProgram, channelItem: ChannelDisplayItem, nextProgramStart: Date? = nil) -> some View {
@@ -10050,6 +10089,12 @@ enum GuideProgramInfoButton {
 /// nothing else. The row slice reads `sliceStep`, which changes only when the
 /// viewport crosses a half-hour step, and then only the row slices re-run;
 /// existing cells skip on their Equatable inputs.
+/// Receives every guide horizontal offset change (see `GuideHScroll`).
+@MainActor
+protocol GuideHScrollListener: AnyObject {
+    func guideHScrollChanged(offset: CGFloat, animation: Double)
+}
+
 @MainActor
 @Observable
 final class GuideHScroll {
@@ -10065,11 +10110,29 @@ final class GuideHScroll {
         self.sliceStep = Self.step(for: offset, width: max(1, stepWidth))
     }
 
+    /// UIKit rows (iOS canvas rows) that follow every offset change without
+    /// a SwiftUI body pass: they move their text pins and info buttons with
+    /// layer frame writes only.
+    @ObservationIgnored private let listeners = NSHashTable<AnyObject>.weakObjects()
+    /// Duration of the animation the NEXT `set` is wrapped in (the drag
+    /// release glides 0.25 s), so listeners can animate their pins with the
+    /// SwiftUI offset instead of jumping. Consumed by that `set`.
+    @ObservationIgnored var nextChangeAnimation: Double = 0
+
+    func addListener(_ listener: GuideHScrollListener) { listeners.add(listener) }
+    func removeListener(_ listener: GuideHScrollListener) { listeners.remove(listener) }
+
     func set(_ value: CGFloat) {
+        let animation = nextChangeAnimation
+        nextChangeAnimation = 0
         // An equal write still invalidates every reader under Observation.
-        if value != offset { offset = value }
+        guard value != offset else { return }
+        offset = value
         let s = Self.step(for: value, width: stepWidth)
         if s != sliceStep { sliceStep = s }
+        for case let l as GuideHScrollListener in listeners.allObjects {
+            l.guideHScrollChanged(offset: value, animation: animation)
+        }
     }
 
     func setStepWidth(_ width: CGFloat) {
@@ -10131,3 +10194,1033 @@ struct GuideCellClipReader<Content: View>: View {
         content(clip)
     }
 }
+
+#if !os(tvOS)
+// MARK: - Guide canvas row (iOS / iPadOS)
+
+/// iPad drag lag, round 3 (Logan 2026-10-07). Two rounds of trimming the
+/// one-SwiftUI-view-per-programme cell left the release at 88 to 135 ms
+/// (iPad log 23:36:04 to 23:36:11: `[GUIDE] drag end cost 116.1ms (handler
+/// 19.7ms, travel 322pt, live cells 79 -> 89)`), with every [PROFILE] sample
+/// inside SwiftUI/AttributeGraph/CoreGraphics render and ~900 layers for 13
+/// rows. The cost was the SwiftUI cell tree itself (about 90 live cells, each
+/// a stack of Text views, observers and an anchor view), not app logic, so
+/// the row now draws its cells the way the Android guide does: one UIKit view
+/// per row, one background layer and one CoreText bitmap per programme,
+/// cached until the programme, its state, the row geometry or the theme
+/// changes. A drag frame moves layers only; a release adds the few cells the
+/// new hour slice brings in and renders their text off the main thread.
+/// tvOS keeps the focusable `GuideProgramButton` cells (the focus engine
+/// needs a focusable view per programme).
+struct GuideCanvasSlot: Equatable {
+    let prog: GuideProgram
+    /// Grid x of the cell's leading edge and its drawn width.
+    let x: CGFloat
+    let width: CGFloat
+}
+
+/// Everything one cell draws. Equal models draw the same pixels.
+struct GuideCanvasCellModel: Equatable {
+    let prog: GuideProgram
+    let x: CGFloat
+    let width: CGFloat
+    let isLive: Bool
+    let canReplay: Bool
+    let hasReminder: Bool
+    let hasRecording: Bool
+    /// Program Info Button setting allows it for this programme and the
+    /// guide is not picking for Multiview. The width gate is applied per
+    /// frame by the row view.
+    let infoAllowed: Bool
+    let timeText: String
+}
+
+/// Row-wide drawing inputs. A change re-renders every cell of the row.
+struct GuideCanvasStyle: Equatable {
+    var guideScale: CGFloat
+    var textScale: CGFloat
+    var subtextScale: CGFloat
+    var showBadges: Bool
+    var hiddenBadges: String
+    var categoryColors: Bool
+    var rounded: Bool
+    var isPhone: Bool
+    var themeToken: String
+}
+
+struct GuideCanvasRow: View {
+    let channel: ChannelDisplayItem
+    let slots: [GuideCanvasSlot]
+    let originX: CGFloat
+    let rowHeight: CGFloat
+    let viewportWidth: CGFloat
+    let shortTimeFormatter: DateFormatter
+    let scroll: GuideHScroll
+    let onSelect: (ChannelDisplayItem) -> Void
+    let onMultiviewIntent: (ChannelDisplayItem) -> Void
+    let onWatchCatchup: (ChannelDisplayItem, GuideProgram) -> Void
+
+    @ObservedObject private var recordingCoordinator = RecordingCoordinator.shared
+    @ObservedObject private var multiviewStore = MultiviewStore.shared
+    @ObservedObject private var theme = ThemeManager.shared
+    @EnvironmentObject private var favoritesStore: FavoritesStore
+    @AppStorage(CategoryColor.enabledKey) private var categoryColorsEnabled: Bool = true
+    @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+    @AppStorage(LogoCorners.guideCellsKey) private var roundedGuideCorners = LogoCorners.guideCellsDefault
+    @AppStorage(GuideProgramInfoButton.key) private var programInfoButtonMode = GuideProgramInfoButton.defaultValue
+    @AppStorage("guideScale") private var guideScaleRaw: Double = 1.0
+    @AppStorage("ui.hiddenEpgBadges") private var hiddenEpgBadgesRaw = ""
+    @Environment(\.aerioTextScale) private var textScale
+    @Environment(\.aerioSubtextScale) private var subtextScale
+
+    @State private var recordTarget: GuideProgram?
+    @State private var programInfo: ProgramInfoTarget?
+    @State private var collectionChannel: ChannelDisplayItem?
+    @State private var showCollectionPicker = false
+    @State private var showNewCollectionAlert = false
+    @State private var newCollectionName = ""
+
+    /// "h:mm - h:mm" strings, shared by every row. Keyed by the two
+    /// instants; dropped when the clock format changes.
+    private static var timeCache: [String: String] = [:]
+    private static var timeCacheFormat = ""
+
+    private func timeText(_ p: GuideProgram) -> String {
+        let fmt = shortTimeFormatter.dateFormat ?? ""
+        if fmt != Self.timeCacheFormat || Self.timeCache.count > 4000 {
+            Self.timeCache.removeAll(keepingCapacity: true)
+            Self.timeCacheFormat = fmt
+        }
+        let key = "\(p.start.timeIntervalSinceReferenceDate)|\(p.end.timeIntervalSinceReferenceDate)"
+        if let s = Self.timeCache[key] { return s }
+        let s = "\(shortTimeFormatter.string(from: p.start)) - \(shortTimeFormatter.string(from: p.end))"
+        Self.timeCache[key] = s
+        return s
+    }
+
+    private var style: GuideCanvasStyle {
+        GuideCanvasStyle(
+            guideScale: CGFloat(max(0.85, min(1.5, guideScaleRaw))),
+            textScale: textScale, subtextScale: subtextScale,
+            showBadges: showEpgBadges, hiddenBadges: hiddenEpgBadgesRaw,
+            categoryColors: categoryColorsEnabled, rounded: roundedGuideCorners,
+            isPhone: UIDevice.current.userInterfaceIdiom == .phone,
+            themeToken: "\(theme.selectedTheme)|\(theme.appearanceMode)|\(theme.useCustomAccent)|\(theme.customAccentHex)|\(theme.textContrast)|\(theme.trueBlack)")
+    }
+
+    private func models(now: Date) -> [GuideCanvasCellModel] {
+        let staging = multiviewStore.isStagingFromGuide
+        let reminders = ReminderManager.shared
+        return slots.map { slot in
+            let p = slot.prog
+            let live = p.start <= now && p.end > now
+            let future = p.start > now
+            return GuideCanvasCellModel(
+                prog: p, x: slot.x, width: slot.width, isLive: live,
+                canReplay: channel.canReplay(start: p.start, end: p.end, now: now),
+                hasReminder: future && reminders.hasReminder(
+                    forKey: ReminderManager.programKey(channelName: channel.name, title: p.title, start: p.start)),
+                hasRecording: recordingCoordinator.hasGuideRecordingMarker(
+                    channelID: channel.id, channelName: channel.name,
+                    dispatcharrChannelID: channel.dispatcharrChannelID,
+                    title: p.title, start: p.start, end: p.end),
+                infoAllowed: !staging && GuideProgramInfoButton.shows(mode: programInfoButtonMode, isLive: live),
+                timeText: timeText(p))
+        }
+    }
+
+    var body: some View {
+        let _ = TabProbe.body("GuideCanvasRow", key: channel.id)
+        // Minute tick: the live tint, catch-up badge and reminder bell follow
+        // the clock. Only cells whose model changed redraw.
+        TimelineView(.everyMinute) { context in
+            GuideCanvasRowRepresentable(
+                cells: models(now: context.date), originX: originX, rowHeight: rowHeight,
+                viewportWidth: viewportWidth, style: style, scroll: scroll,
+                onTap: { handleTap($0) },
+                onInfo: { programInfo = infoTarget(for: $0) },
+                menuItems: { menuItems(for: $0) })
+        }
+        .background(
+            Color.clear
+                .sheet(item: $recordTarget) { prog in
+                    RecordProgramSheet(
+                        programTitle: prog.title,
+                        programDescription: prog.description,
+                        channelID: channel.id,
+                        channelName: channel.name,
+                        scheduledStart: prog.start,
+                        scheduledEnd: prog.end,
+                        isLive: prog.isLive,
+                        dispatcharrChannelID: channel.dispatcharrChannelID,
+                        streamURL: channel.streamURL,
+                        channelLogoURL: channel.logoURL,
+                        programSubTitle: prog.subTitle,
+                        programSeason: prog.season,
+                        programEpisode: prog.episode,
+                        programID: prog.programID,
+                        channelTVGID: channel.tvgID
+                    )
+                }
+        )
+        .programInfoPresenter(item: $programInfo, usesGuideCorners: true)
+        .confirmationDialog("Add to Collection", isPresented: $showCollectionPicker, titleVisibility: .visible) {
+            ForEach(ChannelCollectionsStore.shared.collections) { c in
+                Button((ChannelCollectionsStore.shared.contains(channelID: channel.id, in: c.id) ? "\u{2713} " : "") + c.name) {
+                    ChannelCollectionsStore.shared.toggleMember(channelID: channel.id, in: c.id)
+                }
+            }
+            Button("New Collection") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showNewCollectionAlert = true }
+            }
+        }
+        .alert("New Collection", isPresented: $showNewCollectionAlert) {
+            TextField("Name", text: $newCollectionName)
+            Button("Add at Beginning") {
+                ChannelCollectionsStore.shared.create(name: newCollectionName, memberIDs: [channel.id], placement: .beginning)
+                newCollectionName = ""
+            }
+            Button("Add at End") {
+                ChannelCollectionsStore.shared.create(name: newCollectionName, memberIDs: [channel.id], placement: .end)
+                newCollectionName = ""
+            }
+            Button("Cancel", role: .cancel) { newCollectionName = "" }
+        } message: {
+            Text("Name the collection and choose where its pill appears in the Live TV row.")
+        }
+    }
+
+    private func handleTap(_ prog: GuideProgram) {
+        if multiviewStore.isStagingFromGuide {
+            onMultiviewIntent(channel)
+        } else if channel.canReplay(start: prog.start, end: prog.end) {
+            onWatchCatchup(channel, prog)
+        } else {
+            onSelect(channel)
+        }
+    }
+
+    private func infoTarget(for prog: GuideProgram) -> ProgramInfoTarget {
+        ProgramInfoTarget(
+            channelName: channel.name, title: prog.title, start: prog.start, end: prog.end,
+            description: prog.description, category: prog.category, programID: prog.programID,
+            posterURLString: prog.posterURL,
+            subTitle: prog.subTitle, season: prog.season, episode: prog.episode,
+            isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
+            isPremiere: prog.isPremiere, isFinale: prog.isFinale, isRepeat: prog.isRepeat)
+    }
+
+    /// Same items, order and wording as the former per-cell menu.
+    private func menuItems(for prog: GuideProgram) -> [SystemMenuItem] {
+        let channelItem = channel
+        let reminderManager = ReminderManager.shared
+        let reminderKey = ReminderManager.programKey(channelName: channelItem.name, title: prog.title, start: prog.start)
+        let canReplayNow = channelItem.canReplay(start: prog.start, end: prog.end)
+        var items: [SystemMenuItem] = []
+        if canReplayNow {
+            items.append(.init(title: "Watch", systemImage: "clock.arrow.circlepath") { onWatchCatchup(channelItem, prog) })
+        } else if prog.isLive {
+            items.append(.init(title: "Watch", systemImage: "play.fill") { onSelect(channelItem) })
+        }
+        let isFav = favoritesStore.isFavorite(channelItem.id)
+        let favorites = favoritesStore
+        items.append(.init(title: isFav ? "Remove from Favorites" : "Add to Favorites",
+                           systemImage: isFav ? "star.slash" : "star") { favorites.toggle(channelItem) })
+        if RecentChannelsStore.shared.contains(channelItem.id) {
+            items.append(.init(title: "Remove from Recently Watched", systemImage: "clock.badge.xmark", destructive: true) {
+                RecentChannelsStore.shared.remove(id: channelItem.id)
+            })
+        }
+        let isStaged = multiviewStore.tile(forChannelID: channelItem.id) != nil
+        items.append(.init(title: isStaged ? "Remove from Multiview" : "Add to Multiview",
+                           systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { onMultiviewIntent(channelItem) }
+        })
+        items.append(.init(title: "Add Channel to Collection", systemImage: "folder.badge.plus") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
+        })
+        if let cid = ChannelCollectionsStore.shared.activeFilterCollectionID,
+           let coll = ChannelCollectionsStore.shared.collection(id: cid),
+           coll.memberIDs.contains(channelItem.id) {
+            items.append(.init(title: "Remove from \(coll.name)", systemImage: "folder.badge.minus", destructive: true) {
+                ChannelCollectionsStore.shared.removeMember(channelID: channelItem.id, in: cid)
+            })
+        } else if ChannelCollectionsStore.shared.activeFilterCollectionID == nil,
+                  ChannelCollectionsStore.shared.isInAnyCollection(channelItem.id) {
+            items.append(.init(title: "Remove from All Collections", systemImage: "folder.badge.minus", destructive: true) {
+                ChannelCollectionsStore.shared.removeFromAllCollections(channelItem.id)
+            })
+        }
+        let target = infoTarget(for: prog)
+        items.append(.init(title: "Program Info", systemImage: "info.circle") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { programInfo = target }
+        })
+        // Same tier gate as the former cell: a future programme records on
+        // the server only, which needs an admin Dispatcharr account.
+        if prog.end > Date(),
+           prog.isLive || (ChannelStore.shared.activeServer?.dispatcharrCanRecordToServer ?? true) {
+            items.append(.init(title: prog.isLive ? "Record from Now" : "Record", systemImage: "record.circle") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { recordTarget = prog }
+            })
+        }
+        if prog.start > Date() {
+            if reminderManager.hasReminder(forKey: reminderKey) {
+                items.append(.init(title: "Cancel Reminder", systemImage: "bell.slash", destructive: true) {
+                    reminderManager.cancelReminder(forKey: reminderKey)
+                })
+            } else {
+                items.append(.init(title: "Set Reminder", systemImage: "bell.badge") {
+                    reminderManager.scheduleReminder(programTitle: prog.title, channelName: channelItem.name,
+                                                     startTime: prog.start)
+                })
+            }
+        }
+        return items
+    }
+}
+
+/// Inputs that change the drawing. Closures are left out (they differ on
+/// every parent render); observed objects inside still invalidate the row.
+extension GuideCanvasRow: @MainActor Equatable {
+    static func == (a: GuideCanvasRow, b: GuideCanvasRow) -> Bool {
+        a.channel == b.channel && a.slots == b.slots && a.originX == b.originX
+            && a.rowHeight == b.rowHeight && a.viewportWidth == b.viewportWidth
+            && a.shortTimeFormatter === b.shortTimeFormatter && a.scroll === b.scroll
+    }
+}
+
+struct GuideCanvasRowRepresentable: UIViewRepresentable {
+    let cells: [GuideCanvasCellModel]
+    let originX: CGFloat
+    let rowHeight: CGFloat
+    let viewportWidth: CGFloat
+    let style: GuideCanvasStyle
+    let scroll: GuideHScroll
+    let onTap: (GuideProgram) -> Void
+    let onInfo: (GuideProgram) -> Void
+    let menuItems: (GuideProgram) -> [SystemMenuItem]
+
+    func makeUIView(context: Context) -> GuideCanvasRowView {
+        GuideCanvasRowView(scroll: scroll)
+    }
+
+    func updateUIView(_ v: GuideCanvasRowView, context: Context) {
+        v.onTap = onTap
+        v.onInfo = onInfo
+        v.menuItems = menuItems
+        v.apply(cells: cells, originX: originX, rowHeight: rowHeight,
+                viewportWidth: viewportWidth, style: style)
+    }
+
+    static func dismantleUIView(_ v: GuideCanvasRowView, coordinator: ()) {
+        v.tearDown()
+    }
+}
+
+/// Colors resolved for the row's trait collection, rebuilt on a style or
+/// appearance change.
+private struct GuideCanvasPalette {
+    let primary: CGColor
+    let secondary: CGColor
+    let tertiary: CGColor
+    let accent: CGColor
+    let border: CGColor
+    let record: CGColor
+    let liveFill: CGColor
+    let cardFill: CGColor
+    let infoImage: CGImage?
+    var categoryFills: [String: CGColor] = [:]
+
+    @MainActor
+    init(traits: UITraitCollection) {
+        func cg(_ c: Color) -> CGColor { UIColor(c).resolvedColor(with: traits).cgColor }
+        primary = cg(.textPrimary)
+        secondary = cg(Color.contrastText(.textSecondary))
+        tertiary = cg(Color.contrastText(.textTertiary))
+        accent = cg(.accentPrimary)
+        border = cg(.borderMedium)
+        record = UIColor(red: 1.0, green: 0.28, blue: 0.34, alpha: 1).cgColor
+        liveFill = cg(Color.accentPrimary.opacity(0.25))
+        cardFill = cg(.cardBackground)
+        let tint = UIColor(Color.textSecondary).resolvedColor(with: traits)
+        infoImage = UIImage(systemName: "info.circle",
+                            withConfiguration: UIImage.SymbolConfiguration(pointSize: 16, weight: .medium))?
+            .withTintColor(tint, renderingMode: .alwaysOriginal)
+            .rasterized(scale: traits.displayScale > 0 ? traits.displayScale : 2)
+    }
+}
+
+private extension UIImage {
+    func rasterized(scale: CGFloat) -> CGImage? {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            draw(in: CGRect(origin: .zero, size: size))
+        }.cgImage
+    }
+}
+
+final class GuideCanvasRowView: UIView, GuideHScrollListener, UIContextMenuInteractionDelegate {
+    private final class Cell {
+        var model: GuideCanvasCellModel
+        let container = CALayer()
+        let text = CALayer()
+        let info = CALayer()
+        /// Left clip and text width the current bitmap was drawn for.
+        var renderedClip: CGFloat = -1
+        var renderedWidth: CGFloat = 0
+        var renderedReserve = false
+        var token = 0
+        init(model: GuideCanvasCellModel) { self.model = model }
+    }
+
+    var onTap: (GuideProgram) -> Void = { _ in }
+    var onInfo: (GuideProgram) -> Void = { _ in }
+    var menuItems: (GuideProgram) -> [SystemMenuItem] = { _ in [] }
+
+    private var cells: [String: Cell] = [:]
+    private var originX: CGFloat = 0
+    private var rowHeight: CGFloat = 0
+    private var viewportWidth: CGFloat = 0
+    private var style: GuideCanvasStyle?
+    private var palette: GuideCanvasPalette?
+    private weak var scroll: GuideHScroll?
+    private var offset: CGFloat
+    private var settleWork: DispatchWorkItem?
+    private var menuGhost: UIView?
+
+    private static let renderQueue = DispatchQueue(label: "app.molinete.aerio.guide-canvas",
+                                                   qos: .userInitiated, attributes: .concurrent)
+    private static let paddingH: CGFloat = 8
+    private static let paddingV: CGFloat = 6
+    private static let minWidthForText: CGFloat = 44
+    private static let infoSide: CGFloat = 18
+    private static let infoInset: CGFloat = 4
+    private static let infoMinVisibleWidth: CGFloat = 120
+
+    init(scroll: GuideHScroll) {
+        self.scroll = scroll
+        self.offset = scroll.offset
+        super.init(frame: .zero)
+        backgroundColor = .clear
+        isOpaque = false
+        scroll.addListener(self)
+        addInteraction(UIContextMenuInteraction(delegate: self))
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped(_:))))
+        isAccessibilityElement = false
+        registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitDisplayScale.self]) { (view: GuideCanvasRowView, _: UITraitCollection) in
+            view.palette = nil
+            view.rebuildAll()
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    func tearDown() {
+        scroll?.removeListener(self)
+        settleWork?.cancel()
+        for _ in cells.values { LiveCensus.cellDisappeared() }
+        cells.removeAll()
+    }
+
+    // MARK: Model
+
+    func apply(cells models: [GuideCanvasCellModel], originX: CGFloat, rowHeight: CGFloat,
+               viewportWidth: CGFloat, style: GuideCanvasStyle) {
+        let styleChanged = style != self.style
+        let heightChanged = rowHeight != self.rowHeight
+        let viewportChanged = viewportWidth != self.viewportWidth
+        let initial = cells.isEmpty
+        self.originX = originX
+        self.rowHeight = rowHeight
+        self.viewportWidth = viewportWidth
+        self.style = style
+        if styleChanged || palette == nil { palette = GuideCanvasPalette(traits: traitCollection) }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        var keep = Set<String>()
+        keep.reserveCapacity(models.count)
+        for m in models {
+            let id = m.prog.id
+            keep.insert(id)
+            if let cell = cells[id] {
+                let redraw = styleChanged || heightChanged || viewportChanged || cell.model != m
+                cell.model = m
+                layoutContainer(cell)
+                if redraw { render(cell, sync: false) }
+            } else {
+                let cell = Cell(model: m)
+                for l in [cell.text, cell.info] {
+                    l.contentsGravity = .topLeft
+                    l.contentsScale = currentScale
+                    cell.container.addSublayer(l)
+                }
+                cell.info.contentsGravity = .resizeAspect
+                cell.container.masksToBounds = true
+                cell.container.cornerCurve = .continuous
+                layer.addSublayer(cell.container)
+                cells[id] = cell
+                LiveCensus.cellAppeared()
+                layoutContainer(cell)
+                // A row coming on screen draws its visible cells now (no
+                // blank flash); slice growth on a release renders off-main.
+                render(cell, sync: initial && intersectsViewport(cell))
+            }
+        }
+        for (id, cell) in cells where !keep.contains(id) {
+            cell.container.removeFromSuperlayer()
+            cells[id] = nil
+            LiveCensus.cellDisappeared()
+        }
+        layoutPins()
+        CATransaction.commit()
+        rebuildAccessibility()
+    }
+
+    private func rebuildAll() {
+        guard let style else { return }
+        let models = cells.values.map(\.model)
+        self.style = nil   // force a full redraw
+        apply(cells: models, originX: originX, rowHeight: rowHeight,
+              viewportWidth: viewportWidth, style: style)
+    }
+
+    private var currentScale: CGFloat {
+        traitCollection.displayScale > 0 ? traitCollection.displayScale : UIScreen.main.scale
+    }
+
+    private func intersectsViewport(_ cell: Cell) -> Bool {
+        let vL = -offset, vR = vL + viewportWidth
+        return cell.model.x < vR && cell.model.x + cell.model.width > vL
+    }
+
+    private func layoutContainer(_ cell: Cell) {
+        guard let style, var palette else { return }
+        let m = cell.model
+        cell.container.frame = CGRect(x: m.x - originX, y: 0, width: m.width, height: rowHeight)
+        cell.container.cornerRadius = style.rounded
+            ? max(0, min(LogoCorners.guideRadius, min(m.width, rowHeight) * LogoCorners.maxRadiusFraction))
+            : 0
+        let key = "\(m.prog.category)|\(m.isLive)"
+        let fill: CGColor
+        if style.categoryColors, let cached = palette.categoryFills[key] {
+            fill = cached
+        } else if style.categoryColors,
+                  let c = CategoryColor.backgroundColor(rawCategory: m.prog.category, isLive: m.isLive, isFocused: false) {
+            fill = UIColor(c).resolvedColor(with: traitCollection).cgColor
+            palette.categoryFills[key] = fill
+            self.palette = palette
+        } else {
+            fill = m.isLive ? palette.liveFill : palette.cardFill
+        }
+        cell.container.backgroundColor = fill
+        cell.info.contents = palette.infoImage
+    }
+
+    // MARK: Scroll
+
+    func guideHScrollChanged(offset: CGFloat, animation: Double) {
+        self.offset = offset
+        CATransaction.begin()
+        if animation > 0 {
+            CATransaction.setAnimationDuration(animation)
+            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
+        } else {
+            CATransaction.setDisableActions(true)
+        }
+        layoutPins()
+        CATransaction.commit()
+        // Once the guide settles, redraw the (at most one or two) cells whose
+        // pinned text now has a different width.
+        settleWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.redrawPinnedCells() }
+        }
+        settleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15 + animation, execute: work)
+    }
+
+    /// Pixels of the cell hidden left of the program area (text pins to the
+    /// visible edge), whole points, clamped to the width.
+    private func leftClip(_ m: GuideCanvasCellModel) -> CGFloat {
+        min(max(0, -offset - m.x), m.width).rounded()
+    }
+
+    private func infoVisible(_ m: GuideCanvasCellModel, clip: CGFloat) -> Bool {
+        m.infoAllowed && m.width >= Self.minWidthForText && m.width - clip >= Self.infoMinVisibleWidth
+    }
+
+    private func textWidth(_ m: GuideCanvasCellModel, clip: CGFloat) -> CGFloat {
+        min(m.width - clip, max(viewportWidth, 1)) - 2 * Self.paddingH
+    }
+
+    private func layoutPins() {
+        for cell in cells.values {
+            let m = cell.model
+            let clip = leftClip(m)
+            let visibleTextWidth = max(0, m.width - clip - 2 * Self.paddingH)
+            let shownWidth = min(cell.renderedWidth, visibleTextWidth)
+            let frame = CGRect(x: clip + Self.paddingH, y: Self.paddingV,
+                               width: shownWidth, height: max(0, rowHeight - 2 * Self.paddingV))
+            if cell.text.frame != frame {
+                cell.text.frame = frame
+                cell.text.masksToBounds = true
+            }
+            let showInfo = infoVisible(m, clip: clip)
+            if cell.info.isHidden == showInfo { cell.info.isHidden = !showInfo }
+            if showInfo {
+                // Bottom-right corner of the cell (Logan 2026-10-07): clear of
+                // the description, which the text layout keeps out of this box.
+                let f = CGRect(x: m.width - Self.infoInset - Self.infoSide,
+                               y: rowHeight - Self.infoInset - Self.infoSide,
+                               width: Self.infoSide, height: Self.infoSide)
+                if cell.info.frame != f { cell.info.frame = f }
+            }
+        }
+    }
+
+    private func redrawPinnedCells() {
+        for cell in cells.values {
+            let clip = leftClip(cell.model)
+            let reserve = infoVisible(cell.model, clip: clip)
+            if clip != cell.renderedClip || reserve != cell.renderedReserve {
+                render(cell, sync: false)
+            }
+        }
+    }
+
+    // MARK: Rendering
+
+    private func render(_ cell: Cell, sync: Bool) {
+        cell.token &+= 1
+        let token = cell.token
+        let clip = leftClip(cell.model)
+        cell.renderedClip = clip
+        let reserve = infoVisible(cell.model, clip: clip)
+        cell.renderedReserve = reserve
+        guard let spec = makeSpec(cell.model, clip: clip, reserveInfo: reserve) else {
+            cell.text.contents = nil
+            cell.renderedWidth = 0
+            return
+        }
+        if sync {
+            cell.text.contents = GuideCanvasRenderer.render(spec)
+            cell.renderedWidth = spec.size.width
+            return
+        }
+        let box = GuideCanvasSpecBox(spec: spec)
+        Self.renderQueue.async { [weak self] in
+            let image = GuideCanvasImageBox(image: GuideCanvasRenderer.render(box.spec))
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, let cell = self.cells[box.spec.id], cell.token == token else { return }
+                    CATransaction.begin()
+                    CATransaction.setDisableActions(true)
+                    cell.text.contents = image.image
+                    cell.renderedWidth = box.spec.size.width
+                    self.layoutPins()
+                    CATransaction.commit()
+                }
+            }
+        }
+    }
+
+    private func makeSpec(_ m: GuideCanvasCellModel, clip: CGFloat, reserveInfo: Bool) -> GuideCanvasRenderSpec? {
+        guard let style, let palette, m.width >= Self.minWidthForText else { return nil }
+        let width = textWidth(m, clip: clip)
+        let height = rowHeight - 2 * Self.paddingV
+        guard width >= 4, height > 0 else { return nil }
+        let p = m.prog
+        let gs = style.guideScale
+        let ts = style.textScale
+        let sub = ts * style.subtextScale
+        func font(_ size: CGFloat, _ weight: UIFont.Weight, italic: Bool = false) -> UIFont {
+            let f = UIFont.systemFont(ofSize: size, weight: weight)
+            guard italic, let d = f.fontDescriptor.withSymbolicTraits(.traitItalic) else { return f }
+            return UIFont(descriptor: d, size: size)
+        }
+        let subShown = p.subTitle.map { !$0.isEmpty && $0 != p.title && $0 != p.description } ?? false
+        let seLabel = style.showBadges ? seasonEpisodeLabel(season: p.season, episode: p.episode) : nil
+        var flags: [(String, CGColor)] = []
+        if style.showBadges {
+            let hidden = Set(style.hiddenBadges.split(separator: "\n").map(String.init))
+            for f in epgFlagBadges(isLiveBroadcast: p.isLiveBroadcast, isNew: p.isNew, isPremiere: p.isPremiere,
+                                   isFinale: p.isFinale, isRepeat: p.isRepeat) where !hidden.contains(f.label) {
+                flags.append((f.label, UIColor(f.color).cgColor))
+            }
+        }
+        let badgesVisible = seLabel != nil || !flags.isEmpty
+        // Same give-way rule as the former cell: phone always offers two
+        // description lines; other idioms skip the description when both a
+        // sub-title and a badge row render.
+        let showDesc = !p.description.isEmpty && (style.isPhone || !(subShown && badgesVisible))
+        // Info box in text-image coordinates (the image starts at clip + 8).
+        var reserve: CGRect? = nil
+        if reserveInfo {
+            let boxLeftInCell = m.width - Self.infoInset - Self.infoSide - 4
+            let boxTopInCell = rowHeight - Self.infoInset - Self.infoSide - 2
+            let x = boxLeftInCell - (clip + Self.paddingH)
+            if x < width { reserve = CGRect(x: max(0, x), y: boxTopInCell - Self.paddingV,
+                                            width: width - max(0, x), height: height) }
+        }
+        let symbol = { (name: String, size: CGFloat, weight: UIImage.SymbolWeight, color: CGColor) -> CGImage? in
+            UIImage(systemName: name, withConfiguration: UIImage.SymbolConfiguration(pointSize: size, weight: weight))?
+                .withTintColor(UIColor(cgColor: color), renderingMode: .alwaysOriginal)
+                .rasterized(scale: self.currentScale)
+        }
+        return GuideCanvasRenderSpec(
+            id: p.id,
+            size: CGSize(width: width, height: height), scale: currentScale,
+            title: p.title, sub: subShown ? p.subTitle : nil,
+            desc: showDesc ? p.description : nil, descMaxLines: style.isPhone ? 2 : 0,
+            time: m.timeText, seLabel: seLabel, flags: flags,
+            replayImage: m.canReplay ? symbol("clock.arrow.circlepath", 9 * gs * ts, .semibold, palette.accent) : nil,
+            bellImage: m.hasReminder ? symbol("bell.fill", 9 * gs * ts, .regular, palette.accent) : nil,
+            hasRecording: m.hasRecording,
+            titleFont: font(12 * gs * ts, .semibold),
+            subFont: font(10 * gs * sub, .regular, italic: true),
+            descFont: font(10 * gs * sub, .regular),
+            timeFont: font(9 * gs * sub, .regular),
+            seFont: font(7 * sub, .medium),
+            flagFont: font(7 * ts, .bold),
+            primary: palette.primary, secondary: palette.secondary, tertiary: palette.tertiary,
+            border: palette.border, record: palette.record,
+            dotSide: 6 * gs, reserve: reserve)
+    }
+
+    // MARK: Hit testing
+
+    private func cell(atX x: CGFloat) -> Cell? {
+        let gx = x + originX
+        return cells.values.first { gx >= $0.model.x && gx < $0.model.x + $0.model.width }
+    }
+
+    @objc private func tapped(_ g: UITapGestureRecognizer) {
+        let pt = g.location(in: self)
+        guard let cell = cell(atX: pt.x) else { return }
+        let m = cell.model
+        if !cell.info.isHidden {
+            // 40 pt target around the bottom-right info glyph.
+            let cellRight = m.x - originX + m.width
+            let target = CGRect(x: cellRight - 40, y: rowHeight - 40, width: 40, height: 40)
+            if target.contains(pt) {
+                onInfo(m.prog)
+                return
+            }
+        }
+        onTap(m.prog)
+    }
+
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
+        guard let cell = cell(atX: location.x) else { return nil }
+        let items = menuItems(cell.model.prog)
+        debugLog("[MENU] long-press menu: \(items.map(\.title).joined(separator: " | "))")
+        // A clear stand-in over the cell anchors the menu there with nothing
+        // lifted (same look as SystemMenuAnchor).
+        menuGhost?.removeFromSuperview()
+        let ghost = UIView(frame: cell.container.frame)
+        ghost.backgroundColor = .clear
+        ghost.isUserInteractionEnabled = false
+        addSubview(ghost)
+        menuGhost = ghost
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
+            UIMenu(children: items.map { item in
+                UIAction(title: item.title, image: UIImage(systemName: item.systemImage),
+                         attributes: item.destructive ? .destructive : []) { _ in item.action() }
+            })
+        }
+    }
+
+    private func clearPreview() -> UITargetedPreview? {
+        guard let ghost = menuGhost else { return nil }
+        let p = UIPreviewParameters()
+        p.backgroundColor = .clear
+        p.shadowPath = UIBezierPath()
+        return UITargetedPreview(view: ghost, parameters: p)
+    }
+
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                previewForHighlightingMenuWithConfiguration configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+        clearPreview()
+    }
+
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                previewForDismissingMenuWithConfiguration configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+        clearPreview()
+    }
+
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                willEndFor configuration: UIContextMenuConfiguration,
+                                animator: (any UIContextMenuInteractionAnimating)?) {
+        let ghost = menuGhost
+        menuGhost = nil
+        if let animator {
+            animator.addCompletion { ghost?.removeFromSuperview() }
+        } else {
+            ghost?.removeFromSuperview()
+        }
+    }
+
+    // MARK: Accessibility
+
+    private func rebuildAccessibility() {
+        accessibilityElements = cells.values
+            .sorted { $0.model.x < $1.model.x }
+            .map { cell in
+                let e = UIAccessibilityElement(accessibilityContainer: self)
+                e.accessibilityLabel = "\(cell.model.prog.title), \(cell.model.timeText)"
+                e.accessibilityTraits = .button
+                e.accessibilityFrameInContainerSpace = cell.container.frame
+                return e
+            }
+    }
+}
+
+/// Immutable inputs for one cell bitmap; built on the main actor, drawn on
+/// the render queue.
+struct GuideCanvasRenderSpec {
+    let id: String
+    let size: CGSize
+    let scale: CGFloat
+    let title: String
+    let sub: String?
+    let desc: String?
+    /// 0 = as many as fit.
+    let descMaxLines: Int
+    let time: String
+    let seLabel: String?
+    let flags: [(String, CGColor)]
+    let replayImage: CGImage?
+    let bellImage: CGImage?
+    let hasRecording: Bool
+    let titleFont: UIFont
+    let subFont: UIFont
+    let descFont: UIFont
+    let timeFont: UIFont
+    let seFont: UIFont
+    let flagFont: UIFont
+    let primary: CGColor
+    let secondary: CGColor
+    let tertiary: CGColor
+    let border: CGColor
+    let record: CGColor
+    let dotSide: CGFloat
+    /// Info glyph box in image coordinates; lines that reach it stop short.
+    let reserve: CGRect?
+}
+
+private struct GuideCanvasSpecBox: @unchecked Sendable { let spec: GuideCanvasRenderSpec }
+private struct GuideCanvasImageBox: @unchecked Sendable { let image: CGImage? }
+
+/// Draws one cell's text in a single CoreText pass. Pure: safe off the main
+/// thread. Layout matches the former SwiftUI cell: title row (catch-up
+/// glyph, title, bell, record dot), sub-title, flexible description, time,
+/// then the season/episode and flag pills, 2 pt apart, top-leading.
+enum GuideCanvasRenderer {
+    nonisolated static func render(_ s: GuideCanvasRenderSpec) -> CGImage? {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = s.scale
+        format.opaque = false
+        let image = UIGraphicsImageRenderer(size: s.size, format: format).image { ctx in
+            draw(s, in: ctx.cgContext)
+        }
+        return image.cgImage
+    }
+
+    private nonisolated static func attr(_ text: String, _ font: UIFont, _ color: CGColor) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [
+            NSAttributedString.Key(kCTFontAttributeName as String): font,
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): color,
+        ])
+    }
+
+    private nonisolated static func ellipsis(_ font: UIFont, _ color: CGColor) -> CTLine {
+        CTLineCreateWithAttributedString(attr("\u{2026}", font, color))
+    }
+
+    /// Width available to a line occupying [top, top + h).
+    private nonisolated static func avail(_ s: GuideCanvasRenderSpec, top: CGFloat, h: CGFloat, from x: CGFloat = 0) -> CGFloat {
+        if let r = s.reserve, top + h > r.minY { return max(0, r.minX - x) }
+        return max(0, s.size.width - x)
+    }
+
+    @discardableResult
+    private nonisolated static func drawLine(_ str: NSAttributedString, font: UIFont, color: CGColor,
+                                             x: CGFloat, top: CGFloat, maxWidth: CGFloat, in c: CGContext) -> CGFloat {
+        guard maxWidth > 0 else { return 0 }
+        var line = CTLineCreateWithAttributedString(str)
+        var w = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        if w > maxWidth {
+            line = CTLineCreateTruncatedLine(line, Double(maxWidth), .end, ellipsis(font, color)) ?? line
+            w = min(w, maxWidth)
+        }
+        c.saveGState()
+        c.textMatrix = .identity
+        c.translateBy(x: x, y: top + font.ascender)
+        c.scaleBy(x: 1, y: -1)
+        c.textPosition = .zero
+        CTLineDraw(line, c)
+        c.restoreGState()
+        return w
+    }
+
+    private nonisolated static func draw(_ s: GuideCanvasRenderSpec, in c: CGContext) {
+        let spacing: CGFloat = 2
+        let H = s.size.height
+        let titleH = s.titleFont.lineHeight
+        let subH = s.sub != nil ? s.subFont.lineHeight : 0
+        let timeH = s.timeFont.lineHeight
+        let badgesVisible = s.seLabel != nil || !s.flags.isEmpty
+        let badgeH = badgesVisible ? max(s.seFont.lineHeight, s.flagFont.lineHeight) + 1 : 0
+        var fixedRows = 2 + (s.sub != nil ? 1 : 0) + (badgesVisible ? 1 : 0)
+        let fixed = titleH + subH + timeH + badgeH
+        // Description: the flexible row, it gets what the fixed rows leave.
+        var descLines = 0
+        if s.desc != nil {
+            let room = H - fixed - CGFloat(fixedRows) * spacing
+            descLines = max(0, Int((room / s.descFont.lineHeight).rounded(.down)))
+            if s.descMaxLines > 0 { descLines = min(descLines, s.descMaxLines) }
+            if descLines > 0 { fixedRows += 1 }
+        }
+        var y: CGFloat = 0
+
+        // Title row.
+        var x: CGFloat = 0
+        let iconGap: CGFloat = 4
+        if let img = s.replayImage {
+            let sz = CGSize(width: CGFloat(img.width) / s.scale, height: CGFloat(img.height) / s.scale)
+            drawImage(img, CGRect(x: 0, y: y + (titleH - sz.height) / 2, width: sz.width, height: sz.height), c)
+            x += sz.width + iconGap
+        }
+        var trailing: CGFloat = 0
+        let bellSize = s.bellImage.map { CGSize(width: CGFloat($0.width) / s.scale, height: CGFloat($0.height) / s.scale) }
+        if let b = bellSize { trailing += iconGap + b.width }
+        if s.hasRecording { trailing += iconGap + s.dotSide }
+        let titleMax = max(0, avail(s, top: y, h: titleH) - x - trailing)
+        let tw = drawLine(attr(s.title, s.titleFont, s.primary), font: s.titleFont, color: s.primary,
+                          x: x, top: y, maxWidth: titleMax, in: c)
+        x += tw
+        if let img = s.bellImage, let b = bellSize {
+            x += iconGap
+            drawImage(img, CGRect(x: x, y: y + (titleH - b.height) / 2, width: b.width, height: b.height), c)
+            x += b.width
+        }
+        if s.hasRecording {
+            x += iconGap
+            c.setFillColor(s.record)
+            c.fillEllipse(in: CGRect(x: x, y: y + (titleH - s.dotSide) / 2, width: s.dotSide, height: s.dotSide))
+        }
+        y += titleH
+
+        if let sub = s.sub {
+            y += spacing
+            drawLine(attr(sub, s.subFont, s.secondary), font: s.subFont, color: s.secondary,
+                     x: 0, top: y, maxWidth: avail(s, top: y, h: subH), in: c)
+            y += subH
+        }
+
+        if let desc = s.desc, descLines > 0 {
+            y += spacing
+            y = drawWrapped(attr(desc, s.descFont, s.secondary), s, font: s.descFont, color: s.secondary,
+                            top: y, maxLines: descLines, in: c)
+        }
+
+        y += spacing
+        drawLine(attr(s.time, s.timeFont, s.tertiary), font: s.timeFont, color: s.tertiary,
+                 x: 0, top: y, maxWidth: avail(s, top: y, h: timeH), in: c)
+        y += timeH
+
+        if badgesVisible {
+            y += spacing
+            drawBadges(s, top: y, height: badgeH, in: c)
+        }
+    }
+
+    private nonisolated static func drawImage(_ img: CGImage, _ rect: CGRect, _ c: CGContext) {
+        c.saveGState()
+        c.translateBy(x: rect.minX, y: rect.maxY)
+        c.scaleBy(x: 1, y: -1)
+        c.draw(img, in: CGRect(origin: .zero, size: rect.size))
+        c.restoreGState()
+    }
+
+    /// Wraps line by line so a line that reaches the info box breaks short of
+    /// it; the last allowed line ends in an ellipsis when text remains.
+    private nonisolated static func drawWrapped(_ str: NSAttributedString, _ s: GuideCanvasRenderSpec,
+                                                font: UIFont, color: CGColor, top: CGFloat,
+                                                maxLines: Int, in c: CGContext) -> CGFloat {
+        let typesetter = CTTypesetterCreateWithAttributedString(str)
+        let length = str.length
+        let lh = font.lineHeight
+        var start = 0
+        var y = top
+        var lines = 0
+        while start < length, lines < maxLines {
+            let width = avail(s, top: y, h: lh)
+            guard width > 0 else { break }
+            var count = CTTypesetterSuggestLineBreak(typesetter, start, Double(width))
+            if count <= 0 { count = 1 }
+            var line = CTTypesetterCreateLine(typesetter, CFRange(location: start, length: count))
+            if lines == maxLines - 1, start + count < length {
+                let rest = CTTypesetterCreateLine(typesetter, CFRange(location: start, length: length - start))
+                line = CTLineCreateTruncatedLine(rest, Double(width), .end, ellipsis(font, color)) ?? line
+            }
+            c.saveGState()
+            c.textMatrix = .identity
+            c.translateBy(x: 0, y: y + font.ascender)
+            c.scaleBy(x: 1, y: -1)
+            c.textPosition = .zero
+            CTLineDraw(line, c)
+            c.restoreGState()
+            y += lh
+            start += count
+            lines += 1
+        }
+        return y
+    }
+
+    private nonisolated static func drawBadges(_ s: GuideCanvasRenderSpec, top: CGFloat, height: CGFloat, in c: CGContext) {
+        var x: CGFloat = 0
+        let limit = avail(s, top: top, h: height)
+        func pill(_ text: String, font: UIFont, textColor: CGColor, fill: CGColor?, stroke: CGColor?) -> Bool {
+            let line = CTLineCreateWithAttributedString(attr(text, font, textColor))
+            let tw = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+            let w = tw + 6
+            guard x + w <= limit else { return false }
+            let rect = CGRect(x: x, y: top, width: w, height: height)
+            let path = UIBezierPath(roundedRect: rect, cornerRadius: 3).cgPath
+            if let fill {
+                c.setFillColor(fill)
+                c.addPath(path)
+                c.fillPath()
+            }
+            if let stroke {
+                c.setStrokeColor(stroke)
+                c.setLineWidth(1)
+                c.addPath(UIBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), cornerRadius: 3).cgPath)
+                c.strokePath()
+            }
+            c.saveGState()
+            c.textMatrix = .identity
+            c.translateBy(x: x + 3, y: top + (height - font.lineHeight) / 2 + font.ascender)
+            c.scaleBy(x: 1, y: -1)
+            c.textPosition = .zero
+            CTLineDraw(line, c)
+            c.restoreGState()
+            x += w + 4
+            return true
+        }
+        if let se = s.seLabel {
+            guard pill(se, font: s.seFont, textColor: s.secondary, fill: nil, stroke: s.border) else { return }
+        }
+        let white = UIColor.white.cgColor
+        for (label, color) in s.flags {
+            guard pill(label, font: s.flagFont, textColor: white, fill: color, stroke: nil) else { return }
+        }
+    }
+}
+#endif

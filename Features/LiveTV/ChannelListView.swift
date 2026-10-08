@@ -3060,7 +3060,13 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     /// Dispatcharr server cap). Same gate drives the guide badge and the
     /// Watch action so the two can never disagree (AerioTV-Android parity).
     func canReplay(start: Date, end: Date, now: Date = Date()) -> Bool {
-        guard hasCatchup else { return false }
+        Self.canReplay(catchupDays: catchupDays, start: start, end: end, now: now)
+    }
+
+    /// Value-only form of `canReplay` so the List expanded-schedule builder
+    /// (`ListScheduleCache`) can run off the main thread with the same gate.
+    static func canReplay(catchupDays: Int, start: Date, end: Date, now: Date) -> Bool {
+        guard catchupDays > 0 else { return false }
         guard end <= now else { return false }
         let windowDays = min(catchupDays, 30)
         return now.timeIntervalSince(end) <= Double(windowDays) * 86_400
@@ -3345,6 +3351,8 @@ struct ChannelRow: View {
     @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
     @State private var upcomingPrograms: [EPGEntry] = []
     @State private var isLoadingUpcoming = false
+    /// True while the expanded schedule's rows are being built off-main.
+    @State private var isPreparingSchedule = false
     @State private var reminderTarget: EPGEntry?
     @State private var showReminderDialog = false
     /// Unified sheet/cover driver for this channel row. Replaces the
@@ -3769,21 +3777,7 @@ struct ChannelRow: View {
             // SELECT toggles the inline guide panel.
             Button {
                 debugLog("🎮 Channel expand: \(item.name) — toggling schedule (expanded=\(!isExpanded))")
-                let expandStart = CFAbsoluteTimeGetCurrent()
-                withAnimation(.spring(response: 0.25)) { isExpanded.toggle() }
-                ListExpandCost.measure(start: expandStart, channel: item.name, expanded: isExpanded)
-                // Skip the network fetch when GuideStore already has
-                // programmes for this channel — the expanded panel
-                // now prefers GuideStore, so the fetch would be
-                // redundant work. Still fires for Xtream + cold-
-                // launch-before-XMLTV cases (GuideStore empty).
-                if isExpanded, futurePrograms.isEmpty, fetchUpcoming != nil {
-                    isLoadingUpcoming = true
-                    Task {
-                        upcomingPrograms = await fetchUpcoming?() ?? []
-                        isLoadingUpcoming = false
-                    }
-                }
+                toggleExpanded(animated: true)
             } label: {
                 Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                     .scaledFont(.system(size: 24, weight: .semibold))
@@ -3924,21 +3918,9 @@ struct ChannelRow: View {
             // -- Expand chevron --
             if item.currentProgram != nil || fetchUpcoming != nil {
                 Button {
-                    let expandStart = CFAbsoluteTimeGetCurrent()
-                    withAnimation(.spring(response: 0.25)) { isExpanded.toggle() }
-                    ListExpandCost.measure(start: expandStart, channel: item.name, expanded: isExpanded)
-                    // Skip the network fetch when GuideStore already has
-                // programmes for this channel: the expanded panel
-                // now prefers GuideStore, so the fetch would be
-                // redundant work. Still fires for Xtream + cold-
-                // launch-before-XMLTV cases (GuideStore empty).
-                if isExpanded, futurePrograms.isEmpty, fetchUpcoming != nil {
-                        isLoadingUpcoming = true
-                        Task {
-                            upcomingPrograms = await fetchUpcoming?() ?? []
-                            isLoadingUpcoming = false
-                        }
-                    }
+                    // No spring on iOS: an animated row-height change in
+                    // the List relayouts every visible cell per frame.
+                    toggleExpanded(animated: false)
                 } label: {
                     if isWide {
                         HStack(spacing: 5) {
@@ -4241,29 +4223,6 @@ struct ChannelRow: View {
     /// per-server Guide History setting bounds the depth); the section
     /// renders collapsed so the panel still lands on the upcoming
     /// schedule, Android-parity semantics adapted to SwiftUI.
-    private var airedPrograms: [EPGEntry] {
-        let now = Date()
-        let fromGuideStore = guideStore.programs[item.id] ?? []
-        return fromGuideStore
-            .filter { $0.end <= now }
-            // Catch-up channels list only what the archive can still play
-            // (Logan 2026-09-05: two weeks of greyed rows sat above the
-            // playable ones). Channels without an archive keep their
-            // reference rows.
-            .filter { !item.hasCatchup || item.canReplay(start: $0.start, end: $0.end, now: now) }
-            .sorted { $0.start < $1.start }
-            .map {
-                EPGEntry(title: $0.title, description: $0.description,
-                         startTime: $0.start, endTime: $0.end,
-                         category: $0.category, programID: $0.programID,
-                         subTitle: $0.subTitle, season: $0.season,
-                         episode: $0.episode, isNew: $0.isNew,
-                         isLiveBroadcast: $0.isLiveBroadcast,
-                         isPremiere: $0.isPremiere, isFinale: $0.isFinale,
-                         isRepeat: $0.isRepeat)
-            }
-    }
-
     /// Catch-up: resolve an aired programme and present the player,
     /// silencing any live session first (recordings-pattern teardown).
     private func watchCatchup(_ entry: EPGEntry) {
@@ -4298,43 +4257,87 @@ struct ChannelRow: View {
         }
     }
 
-    private var futurePrograms: [EPGEntry] {
-        let now = Date()
-        let fromGuideStore = guideStore.programs[item.id] ?? []
-        if !fromGuideStore.isEmpty {
-            // v1.6.10: filter only by `end > now` so the currently-
-            // airing program (start ≤ now < end) is included at the
-            // top of the expanded list. Previously also required
-            // `start > now`, which silently dropped the in-progress
-            // show — users would expand a row at 12:47 PM and see
-            // the first entry start at 2:00 PM, with no indication
-            // of what was actually airing right now.
-            return fromGuideStore
-                .filter { $0.end > now }
-                .sorted { $0.start < $1.start }
-                .map {
-                    // v1.7.x: thread `programID` so the resulting
-                    // ProgramInfoTarget can lazy-load `<category>`
-                    // via /api/epg/programs/<id>/ when the modal
-                    // opens with an empty category — the bulk grid
-                    // strips category data, so non-now-airing
-                    // programs land here with category: "".
-                    EPGEntry(title: $0.title, description: $0.description,
-                             startTime: $0.start, endTime: $0.end,
-                             category: $0.category, programID: $0.programID,
-                             subTitle: $0.subTitle, season: $0.season,
-                             episode: $0.episode, isNew: $0.isNew,
-                             isLiveBroadcast: $0.isLiveBroadcast,
-                             isPremiere: $0.isPremiere, isFinale: $0.isFinale,
-                             isRepeat: $0.isRepeat)
-                }
+    /// Aired + upcoming rows for the expanded panel, pre-formatted. A
+    /// dictionary hit while the channel's guide slice (same array buffer),
+    /// the fallback list and the clock boundaries are unchanged; otherwise
+    /// built synchronously (slice publish while open, Xtream fallback).
+    /// Semantics are the old `airedPrograms` / `futurePrograms` passes.
+    private var currentSchedule: ListSchedule {
+        ListScheduleCache.shared.schedule(
+            channelID: item.id,
+            source: guideStore.programs[item.id] ?? [],
+            fallback: upcomingPrograms,
+            catchupDays: item.catchupDays,
+            now: Date()
+        )
+    }
+
+    /// Expand / collapse. Expanding builds the panel's rows OFF the main
+    /// thread first (iPad 137 ms expand, 2026-10-07: per-row DateFormatter
+    /// in `DVRFormat.day`, `Text(_:style:)` date formatting, and the
+    /// filter/sort/map over the whole resident list all ran inside the
+    /// render turn), then flips `isExpanded` in one pass. A re-expand with
+    /// an unchanged slice is a cache hit and flips immediately.
+    private func toggleExpanded(animated: Bool) {
+        if isExpanded {
+            commitExpanded(false, animated: animated, tapStart: nil)
+            return
         }
-        return upcomingPrograms.filter { entry in
-            guard let end = entry.endTime else { return true }
-            // Same fix on the legacy `fetchUpcoming` fallback path
-            // (Xtream short-EPG, cold-launch pre-XMLTV). Drop only
-            // programs that have already ended.
-            return end > now
+        guard !isPreparingSchedule else { return }
+        let tapStart = CFAbsoluteTimeGetCurrent()
+        let channelID = item.id
+        let channelName = item.name
+        let days = item.catchupDays
+        let source = guideStore.programs[channelID] ?? []
+        let fallback = upcomingPrograms
+        if ListScheduleCache.shared.lookup(channelID: channelID, source: source,
+                                           fallback: fallback, catchupDays: days,
+                                           now: Date()) != nil {
+            commitExpanded(true, animated: animated, tapStart: tapStart)
+            return
+        }
+        isPreparingSchedule = true
+        Task { @MainActor in
+            let built: (ListSchedule, Double) = await Task.detached(priority: .userInitiated) {
+                let t0 = CFAbsoluteTimeGetCurrent()
+                let schedule = ListScheduleCache.shared.schedule(
+                    channelID: channelID, source: source, fallback: fallback,
+                    catchupDays: days, now: Date())
+                return (schedule, (CFAbsoluteTimeGetCurrent() - t0) * 1000)
+            }.value
+            debugLog(String(format: "[LIST] expand rows built %.1fms off-main, %d rows (%@)",
+                            built.1, built.0.aired.count + built.0.future.count, channelName))
+            isPreparingSchedule = false
+            commitExpanded(true, animated: animated, tapStart: tapStart)
+        }
+    }
+
+    private func commitExpanded(_ value: Bool, animated: Bool, tapStart: CFAbsoluteTime?) {
+        let commitStart = CFAbsoluteTimeGetCurrent()
+        if let tapStart, commitStart - tapStart > 0.002 {
+            debugLog(String(format: "[LIST] expand tap-to-commit %.1fms (%@)",
+                            (commitStart - tapStart) * 1000, item.name))
+        }
+        if animated {
+            withAnimation(.spring(response: 0.25)) { isExpanded = value }
+        } else {
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) { isExpanded = value }
+        }
+        // Measures this main-thread turn (state flip + panel render) up to
+        // the run loop's next wait.
+        ListExpandCost.measure(start: commitStart, channel: item.name, expanded: value)
+        // Skip the network fetch when GuideStore already has programmes
+        // for this channel: the expanded panel prefers GuideStore, so the
+        // fetch would be redundant work. Still fires for Xtream + cold-
+        // launch-before-XMLTV cases (GuideStore empty).
+        if value, fetchUpcoming != nil, currentSchedule.future.isEmpty {
+            isLoadingUpcoming = true
+            Task {
+                upcomingPrograms = await fetchUpcoming?() ?? []
+                isLoadingUpcoming = false
+            }
         }
     }
 
@@ -4541,11 +4544,9 @@ struct ChannelRow: View {
     /// rewind badge and tap straight into catch-up playback; the rest are
     /// dimmed reference rows.
     @ViewBuilder
-    private func airedEntryRow(_ entry: EPGEntry) -> some View {
-        let replayable: Bool = {
-            guard let start = entry.startTime, let end = entry.endTime else { return false }
-            return item.canReplay(start: start, end: end)
-        }()
+    private func airedEntryRow(_ row: ListScheduleRow) -> some View {
+        let entry = row.entry
+        let replayable = row.replayable
         Button {
             debugLog("[CATCHUP] tap \(item.name) days=\(item.catchupDays) replayable=\(replayable) \(entry.title) \(entry.startTime.map { DVRFormat.dateRange($0, entry.endTime ?? $0) } ?? "")")
             if replayable { watchCatchup(entry) }
@@ -4561,19 +4562,19 @@ struct ChannelRow: View {
                     .foregroundColor(replayable ? .textPrimary : Color.contrastText(.textTertiary))
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                if let start = entry.startTime, let end = entry.endTime {
+                if entry.startTime != nil, let endText = row.endText {
                     HStack(spacing: 3) {
                         // Day before the times once it is not today
                         // (Logan 2026-09-05: a week of history reads as
                         // one long day otherwise).
-                        if !Calendar.current.isDateInToday(start) {
-                            Text(DVRFormat.day(start))
+                        if let dayText = row.dayText {
+                            Text(dayText)
                                 .foregroundColor(Color.contrastText(.textSecondary))
                             Text("·")
                         }
-                        Text(start, style: .time)
+                        Text(row.startText)
                         Text("-")
-                        Text(end, style: .time)
+                        Text(endText)
                     }
                     .scaledFont(.system(size: 11).subtext())
                     .foregroundColor(Color.contrastText(.textTertiary))
@@ -4590,7 +4591,7 @@ struct ChannelRow: View {
     /// inside the guide panel with the upcoming rows; on tvOS it sits
     /// above the upcoming ScrollView.
     @ViewBuilder
-    private func airedSection(_ airedPrograms: [EPGEntry]) -> some View {
+    private func airedSection(_ airedPrograms: [ListScheduleRow]) -> some View {
         // Catch-up: retained history shown without a disclosure tap
         // (Logan 2026-09-09, matching Android): the aired rows come
         // first, then a centered "Previously aired" divider, then the
@@ -4650,8 +4651,12 @@ struct ChannelRow: View {
         // sort and map over the channel's whole resident list) in every
         // row's `isLast` check, so expanding a 300-program channel ran that
         // pass 300 times on the main thread.
-        let future = futurePrograms
-        let aired = airedPrograms
+        // Since 2026-10-07 the rows come pre-built (formatted strings,
+        // badges, replay gate) from `ListScheduleCache`.
+        let schedule = currentSchedule
+        let future = schedule.future
+        let aired = schedule.aired
+        let futureLastID = schedule.futureLastID
         Divider()
             .background(Color.borderSubtle)
             .padding(.horizontal, 14)
@@ -4710,6 +4715,7 @@ struct ChannelRow: View {
                         // (e.g. user long-pressed "Moeder Natuur 07:10" but
                         // the dialog previewed "Timmy tijd 06:05–06:10").
                         let rowEntry = entry
+                        let rowProgram = entry.entry
                         // Long-press + popover replaces `.contextMenu` here
                         // because SwiftUI's `.contextMenu(menuItems:preview:)`
                         // on iPhone has a documented "docks the preview +
@@ -4726,7 +4732,7 @@ struct ChannelRow: View {
                         // `attachmentAnchor: .rect(.bounds)` — which is
                         // exactly "where the user long-pressed" per #23
                         // feedback.
-                        epgEntryRow(entry: rowEntry, isLast: rowEntry.id == future.last?.id)
+                        epgEntryRow(row: rowEntry, isLast: rowEntry.id == futureLastID)
                             // No horizontal outer padding — rows now
                             // extend to the card's inner edge, so the
                             // parent card's category gradient can't
@@ -4758,8 +4764,8 @@ struct ChannelRow: View {
                                         .fill(Color.cardBackground)
                                     if tintChannelCards,
                                        CategoryColor.isEnabled,
-                                       !rowEntry.category.isEmpty,
-                                       let bucket = CategoryColor.bucket(for: rowEntry.category) {
+                                       !rowProgram.category.isEmpty,
+                                       let bucket = CategoryColor.bucket(for: rowProgram.category) {
                                         LinearGradient(
                                             stops: [
                                                 .init(color: CategoryColor.tint(bucket.baseColor, 0.30), location: 0.0),
@@ -4782,14 +4788,14 @@ struct ChannelRow: View {
                             // Native action sheet (Logan 2026-09-05), the
                             // same items the tvOS long press offers.
                             .confirmationDialog(
-                                rowEntry.title,
+                                rowProgram.title,
                                 isPresented: Binding(
                                     get: { activePopoverEntryID == rowEntry.id },
                                     set: { if !$0 { activePopoverEntryID = nil } }
                                 ),
                                 titleVisibility: .visible
                             ) {
-                                programActionSheetButtons(for: rowEntry)
+                                programActionSheetButtons(for: rowProgram)
                             }
                     }
                 }
@@ -4820,11 +4826,11 @@ struct ChannelRow: View {
                             // UIKit-backed overlay because SwiftUI's tvOS
                             // long-press fires on release, not at threshold
                             // (see Shared/TVPressGesture.swift).
-                            epgEntryRow(entry: entry, isLast: entry.id == future.last?.id)
+                            epgEntryRow(row: entry, isLast: entry.id == futureLastID)
                                 .overlay(
                                     TVPressOverlay(
                                         minimumPressDuration: 0.25,
-                                        onLongPress: { ctxDialogEntry = entry }
+                                        onLongPress: { ctxDialogEntry = entry.entry }
                                     )
                                 )
                         }
@@ -4987,11 +4993,9 @@ struct ChannelRow: View {
     /// Feed badges + season/episode line for an expanded-schedule row.
     /// Renders nothing when the program carries neither.
     @ViewBuilder
-    private func epgEntryMetaRow(_ entry: EPGEntry) -> some View {
-        let seLabel = seasonEpisodeLabel(season: entry.season, episode: entry.episode)
-        let flags = epgFlagBadges(isLiveBroadcast: entry.isLiveBroadcast,
-                                  isNew: entry.isNew, isPremiere: entry.isPremiere,
-                                  isFinale: entry.isFinale, isRepeat: entry.isRepeat)
+    private func epgEntryMetaRow(_ row: ListScheduleRow) -> some View {
+        let seLabel = row.seLabel
+        let flags = row.flags
         if showEpgBadges, seLabel != nil || !flags.isEmpty {
             HStack(spacing: 6) {
                 SeasonEpisodePill(label: seLabel, compact: true)
@@ -5001,8 +5005,9 @@ struct ChannelRow: View {
         }
     }
 
-    private func epgEntryRow(entry: EPGEntry, isLast: Bool) -> some View {
-        VStack(spacing: 0) {
+    private func epgEntryRow(row: ListScheduleRow, isLast: Bool) -> some View {
+        let entry = row.entry
+        return VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Rectangle()
                     .fill(Color.borderSubtle)
@@ -5031,19 +5036,19 @@ struct ChannelRow: View {
                             .foregroundColor(Color.contrastText(.textSecondary))
                             .lineLimit(2)
                     }
-                    if let start = entry.startTime {
+                    if entry.startTime != nil {
                         HStack(spacing: 4) {
                             // Day prefix once the programme is not today
                             // (tomorrow's schedule, or history).
-                            if !Calendar.current.isDateInToday(start) {
-                                Text(DVRFormat.day(start))
+                            if let dayText = row.dayText {
+                                Text(dayText)
                                     .foregroundColor(Color.contrastText(.textSecondary))
                                 Text("·")
                             }
-                            Text(start, style: .time)
-                            if let end = entry.endTime {
+                            Text(row.startText)
+                            if let endText = row.endText {
                                 Text("–")
-                                Text(end, style: .time)
+                                Text(endText)
                             }
                         }
                         #if os(tvOS)
@@ -5054,7 +5059,7 @@ struct ChannelRow: View {
                         .foregroundColor(Color.contrastText(.textTertiary))
                         #endif
                     }
-                    epgEntryMetaRow(entry)
+                    epgEntryMetaRow(row)
                 }
                 Spacer()
 
@@ -6367,5 +6372,164 @@ enum ListExpandCost {
                             expanded ? "expand" : "collapse", ms, channel))
         }
         CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+    }
+}
+
+
+// MARK: - List expanded schedule (prebuilt rows)
+
+/// One expanded-schedule row with everything the row view used to compute
+/// in `body` (time strings, day prefix, badges, replay gate) done up front.
+struct ListScheduleRow: Identifiable {
+    let entry: EPGEntry
+    let id: String
+    /// "Tomorrow", "Sep 5", ... ; nil when the program starts today.
+    let dayText: String?
+    let startText: String
+    let endText: String?
+    let seLabel: String?
+    let flags: [EPGFlag]
+    /// Aired rows: inside the channel's catch-up window.
+    let replayable: Bool
+}
+
+struct ListSchedule {
+    let aired: [ListScheduleRow]
+    let future: [ListScheduleRow]
+    let futureLastID: String?
+    /// First instant the row split, replay gate or day labels can change
+    /// (a program ends, an aired row leaves the archive, midnight).
+    let validUntil: Date
+}
+
+/// Per-channel memo of the List view's expanded schedule. Thread-safe so
+/// the expand tap can build off the main thread; `body` then reads a hit.
+/// The slice is compared with `==`, which is O(1) when the array buffer is
+/// unchanged (Swift arrays short-circuit on buffer identity).
+final class ListScheduleCache: @unchecked Sendable {
+    static let shared = ListScheduleCache()
+
+    private struct Slot {
+        let source: [GuideProgram]
+        let fallback: [EPGEntry]
+        let catchupDays: Int
+        let schedule: ListSchedule
+    }
+    private let lock = NSLock()
+    private var slots: [String: Slot] = [:]
+
+    func lookup(channelID: String, source: [GuideProgram], fallback: [EPGEntry],
+                catchupDays: Int, now: Date) -> ListSchedule? {
+        lock.lock(); defer { lock.unlock() }
+        guard let slot = slots[channelID],
+              now < slot.schedule.validUntil,
+              slot.catchupDays == catchupDays,
+              slot.source == source,
+              slot.fallback == fallback else { return nil }
+        return slot.schedule
+    }
+
+    func schedule(channelID: String, source: [GuideProgram], fallback: [EPGEntry],
+                  catchupDays: Int, now: Date) -> ListSchedule {
+        if let hit = lookup(channelID: channelID, source: source, fallback: fallback,
+                            catchupDays: catchupDays, now: now) {
+            return hit
+        }
+        let built = Self.build(source: source, fallback: fallback,
+                               catchupDays: catchupDays, now: now)
+        lock.lock()
+        if slots.count > 64 { slots.removeAll(keepingCapacity: true) }
+        slots[channelID] = Slot(source: source, fallback: fallback,
+                                catchupDays: catchupDays, schedule: built)
+        lock.unlock()
+        return built
+    }
+
+    /// Same selection as the former `ChannelRow.airedPrograms` /
+    /// `futurePrograms`, plus the formatting the rows did in `body`.
+    static func build(source: [GuideProgram], fallback: [EPGEntry],
+                      catchupDays: Int, now: Date) -> ListSchedule {
+        let cal = Calendar.current
+        // `Text(date, style: .time)` renders the short time style.
+        let timeFormatter = DateFormatter()
+        timeFormatter.dateStyle = .none
+        timeFormatter.timeStyle = .short
+        // `DVRFormat.day` built a DateFormatter per call; same output with
+        // one formatter per template.
+        let monthDay = DateFormatter()
+        monthDay.setLocalizedDateFormatFromTemplate("MMM d")
+        let monthDayYear = DateFormatter()
+        monthDayYear.setLocalizedDateFormatFromTemplate("MMM d yyyy")
+        func dayText(_ date: Date) -> String? {
+            if cal.isDateInToday(date) { return nil }
+            if cal.isDateInTomorrow(date) { return "Tomorrow" }
+            if cal.isDateInYesterday(date) { return "Yesterday" }
+            return cal.isDate(date, equalTo: now, toGranularity: .year)
+                ? monthDay.string(from: date) : monthDayYear.string(from: date)
+        }
+        func entry(_ p: GuideProgram) -> EPGEntry {
+            EPGEntry(title: p.title, description: p.description,
+                     startTime: p.start, endTime: p.end,
+                     category: p.category, programID: p.programID,
+                     subTitle: p.subTitle, season: p.season,
+                     episode: p.episode, isNew: p.isNew,
+                     isLiveBroadcast: p.isLiveBroadcast,
+                     isPremiere: p.isPremiere, isFinale: p.isFinale,
+                     isRepeat: p.isRepeat)
+        }
+        var validUntil = cal.startOfDay(for: cal.date(byAdding: .day, value: 1, to: now) ?? now.addingTimeInterval(86_400))
+        let windowSeconds = Double(min(catchupDays, 30)) * 86_400
+        func row(_ e: EPGEntry) -> ListScheduleRow {
+            var replayable = false
+            if let start = e.startTime, let end = e.endTime {
+                replayable = ChannelDisplayItem.canReplay(catchupDays: catchupDays,
+                                                          start: start, end: end, now: now)
+                if end > now {
+                    validUntil = min(validUntil, end)
+                } else if catchupDays > 0 {
+                    let expiry = end.addingTimeInterval(windowSeconds)
+                    if expiry > now { validUntil = min(validUntil, expiry) }
+                }
+            }
+            return ListScheduleRow(
+                entry: e,
+                id: e.id,
+                dayText: e.startTime.flatMap(dayText),
+                startText: e.startTime.map { timeFormatter.string(from: $0) } ?? "",
+                endText: e.endTime.map { timeFormatter.string(from: $0) },
+                seLabel: seasonEpisodeLabel(season: e.season, episode: e.episode),
+                flags: epgFlagBadges(isLiveBroadcast: e.isLiveBroadcast,
+                                     isNew: e.isNew, isPremiere: e.isPremiere,
+                                     isFinale: e.isFinale, isRepeat: e.isRepeat),
+                replayable: replayable
+            )
+        }
+
+        let aired: [ListScheduleRow] = source
+            .filter { $0.end <= now }
+            // Catch-up channels list only what the archive can still play
+            // (Logan 2026-09-05); channels without an archive keep their
+            // reference rows.
+            .filter { catchupDays <= 0 || ChannelDisplayItem.canReplay(catchupDays: catchupDays, start: $0.start, end: $0.end, now: now) }
+            .sorted { $0.start < $1.start }
+            .map { row(entry($0)) }
+
+        let future: [ListScheduleRow]
+        if !source.isEmpty {
+            // Includes the currently-airing program (v1.6.10).
+            future = source
+                .filter { $0.end > now }
+                .sorted { $0.start < $1.start }
+                .map { row(entry($0)) }
+        } else {
+            future = fallback
+                .filter { e in
+                    guard let end = e.endTime else { return true }
+                    return end > now
+                }
+                .map(row)
+        }
+        return ListSchedule(aired: aired, future: future,
+                            futureLastID: future.last?.id, validUntil: validUntil)
     }
 }
