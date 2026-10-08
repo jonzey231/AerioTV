@@ -306,11 +306,20 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         consumePoint = max(consumePoint, offset + Int64(out.count))
         let trimTo = consumePoint - keepBehind
         if trimTo > bufferStart {
-            buffer.removeFirst(Int(trimTo - bufferStart))
             // Data keeps its backing allocation on removeFirst (Apple #74
-            // lesson); re-seat so trimmed history is actually released.
-            buffer = Data(buffer)
-            bufferStart = trimTo
+            // lesson), so copy the kept tail into a fresh allocation.
+            // Never re-seat with Data(buffer) on a slice: an empty slice
+            // has a nil base address and Data's init force-unwraps it
+            // (1.8.40 TestFlight crash). Clamp the drop to what is held
+            // so bufferStart stays contiguous with what the writer appends.
+            let want = trimTo - bufferStart
+            let drop = Int(min(want, Int64(buffer.count)))
+            if want > Int64(drop) {
+                debugLog(String(format: "[MKV] read clamped trim %lld -> %d bytes (buffer %d)",
+                                want, drop, buffer.count))
+            }
+            buffer = drop >= buffer.count ? Data() : buffer.subdata(in: drop..<buffer.count)
+            bufferStart += Int64(drop)
         }
         let ahead = Int(bufferStart + Int64(buffer.count) - consumePoint)
         if suspended, !finished,
