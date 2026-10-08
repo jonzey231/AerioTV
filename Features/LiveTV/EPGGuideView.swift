@@ -7800,6 +7800,19 @@ struct EPGGuideView: View {
                 .equatable()
                 .frame(width: sliceWidth, height: rowHeight)
                 .offset(x: originX)
+                // Program cells jumping on release (iPad, Logan 2026-10-08):
+                // the release glide is a withAnimation(.easeOut 0.25 s) and the
+                // half-hour slice step that the same write crosses changes
+                // originX and sliceWidth inside that transaction. SwiftUI then
+                // animated this row's frame from the old origin to the new one
+                // while the UIKit cell layers (placed at x - originX, actions
+                // off) moved at once, so every cell jumped by the origin delta
+                // and slid back over 0.25 s. The glide itself lives on the
+                // ancestor offset; this row's origin and width always snap.
+                .transaction { t in
+                    t.animation = nil
+                    t.disablesAnimations = true
+                }
                 #endif
             }
             }
@@ -9401,7 +9414,6 @@ private struct GuideProgramButton: View {
                     // Behind Settings > Live TV > Program Info Button (Logan
                     // 2026-10-07): Off by default, Current Programs, or All.
                     if GuideProgramInfoButton.shows(mode: programInfoButtonMode, isLive: prog.isLive),
-                       !multiviewStore.isStagingFromGuide,
                        min(width - leadingClip, UIScreen.main.bounds.width) >= 120 {
                         Button {
                             presentProgramInfo(after: 0)
@@ -10309,7 +10321,7 @@ struct GuideCanvasRow: View {
     }
 
     private func models(now: Date) -> [GuideCanvasCellModel] {
-        let staging = multiviewStore.isStagingFromGuide
+        _ = multiviewStore.isStagingFromGuide
         let reminders = ReminderManager.shared
         return slots.map { slot in
             let p = slot.prog
@@ -10324,7 +10336,7 @@ struct GuideCanvasRow: View {
                     channelID: channel.id, channelName: channel.name,
                     dispatcharrChannelID: channel.dispatcharrChannelID,
                     title: p.title, start: p.start, end: p.end),
-                infoAllowed: !staging && GuideProgramInfoButton.shows(mode: programInfoButtonMode, isLive: live),
+                infoAllowed: GuideProgramInfoButton.shows(mode: programInfoButtonMode, isLive: live),
                 timeText: timeText(p))
         }
     }
@@ -10678,6 +10690,62 @@ final class GuideCanvasRowView: UIView, GuideHScrollListener, UIContextMenuInter
         layoutPins()
         CATransaction.commit()
         rebuildAccessibility()
+        auditLayout()
+    }
+
+    // MARK: Layout audit
+
+    /// Window x of each cell at the previous layout, and the guide offset it
+    /// was measured at.
+    private var auditX: [String: CGFloat] = [:]
+    private var auditOffset: CGFloat = .nan
+    private static var lastAuditLog: CFAbsoluteTime = 0
+
+    /// `[GUIDE] row layout`: a cell whose on-screen x moved more than 2 pt
+    /// between two consecutive layouts with no guide offset change, or a row
+    /// whose own frame is being animated (its cells would slide while their
+    /// layers are already placed). At most once per second, app wide.
+    private func auditLayout() {
+        guard window != nil else { return }
+        var moved: (String, CGFloat)? = nil
+        var next: [String: CGFloat] = [:]
+        next.reserveCapacity(cells.count)
+        for (id, cell) in cells {
+            let x = layer.convert(cell.container.frame, to: nil).minX
+            next[id] = x
+            if offset == auditOffset, let prev = auditX[id], abs(prev - x) > 2,
+               moved == nil || abs(prev - x) > abs(moved!.1) {
+                moved = (cell.model.prog.title, x - prev)
+            }
+        }
+        auditX = next
+        auditOffset = offset
+        if let (title, dx) = moved, Self.auditMayLog() {
+            debugLog(String(format: "[GUIDE] row layout: cell moved %.1fpt without an offset change (\"%@\", originX %.0f, offset %.0f)",
+                            dx, title, originX, offset))
+        }
+        // SwiftUI attaches a frame animation after updateUIView returns, so
+        // look once the current transaction has been committed.
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.window != nil else { return }
+                let layers = [self.layer, self.superview?.layer].compactMap { $0 }
+                let keys = layers.flatMap { $0.animationKeys() ?? [] }
+                    .filter { $0.hasPrefix("position") || $0.hasPrefix("bounds") }
+                guard !keys.isEmpty, Self.auditMayLog() else { return }
+                let model = self.layer.frame.minX
+                let shown = (self.layer.presentation() ?? self.layer).frame.minX
+                debugLog(String(format: "[GUIDE] row layout: row frame animating (keys %@, presentation x %.0f, model x %.0f, originX %.0f)",
+                                keys.joined(separator: ","), shown, model, self.originX))
+            }
+        }
+    }
+
+    private static func auditMayLog() -> Bool {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastAuditLog >= 1 else { return false }
+        lastAuditLog = now
+        return true
     }
 
     private func rebuildAll() {
