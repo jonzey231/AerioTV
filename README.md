@@ -11,10 +11,15 @@ AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS 
 Sideload using your preferred method using the .ipa from [Releases](https://github.com/jonzey231/AerioTV/releases).
 - This version will occasionally be ahead of the Apple Testflight version.
 
-## Other Platforms
+## The AerioTV Family
 
-- [AerioTV for Android](https://github.com/jonzey231/AerioTV-Android): phones, tablets, and Google TV / Android TV.
-- [AerioTV for Roku](https://github.com/EndofLineTech/AerioTV-Roku): community port for Roku devices.
+| App | Devices | Repository |
+| --- | --- | --- |
+| **AerioTV for Apple** (this repo) | iPhone, iPad, Apple TV, Mac | [jonzey231/AerioTV](https://github.com/jonzey231/AerioTV) |
+| **AerioTV for Android** | Phones, tablets, Google TV and Android TV | [jonzey231/AerioTV-Android](https://github.com/jonzey231/AerioTV-Android) |
+| **AerioTV for Roku** | Roku players and Roku TVs (community port) | [EndofLineTech/AerioTV-Roku](https://github.com/EndofLineTech/AerioTV-Roku) |
+
+The Apple and Android apps share one design and feature set. They also work together: cast from an iPhone to AerioTV on Android TV, or AirPlay to an Apple TV.
 
 ## Screenshots
 
