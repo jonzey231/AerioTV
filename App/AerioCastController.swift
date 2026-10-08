@@ -4247,9 +4247,6 @@ struct CastOptionsSheet: View {
                                 .scaledFont(.footnote)
                                 .foregroundStyle(.secondary)
                         }
-                        if let lines = MultiviewCompositeStreamInfo.lines(for: .airPlay) {
-                            MultiviewCompositeStreamInfo.LinesView(lines: lines)
-                        }
                     }
                 }
                 if !isAirPlay {
@@ -4257,18 +4254,15 @@ struct CastOptionsSheet: View {
                     if let stats {
                         CastStreamInfoCard(stats: stats,
                                            receiverName: cast.connectedDeviceName,
-                                           receiverVideo: cast.receiverVideoLine)
+                                           receiverVideo: cast.receiverVideoLine,
+                                           composite: MultiviewCompositeStreamInfo.isActive(.cast),
+                                           compositeSource: MultiviewCompositeStreamInfo.sourceHost())
                             .listRowInsets(EdgeInsets())
                             .listRowBackground(Color.clear)
                     } else {
                         Text("Waiting for the cast proxy to report.")
                             .scaledFont(.footnote)
                             .foregroundStyle(.secondary)
-                    }
-                    // A composite cast: the composite lines (Android
-                    // MultiviewCompositeLayout.streamInfoLines wording).
-                    if let lines = MultiviewCompositeStreamInfo.lines(for: .cast) {
-                        MultiviewCompositeStreamInfo.LinesView(lines: lines)
                     }
                     // Same three lines as the cast card.
                     if let note = cast.transcodeNote {
@@ -4337,22 +4331,30 @@ struct CastOptionsSheet: View {
 
 }
 
-/// Composite Stream Info lines (Android parity,
-/// MultiviewCompositeLayout.STREAM_INFO_LINES): the tiles' upstream host,
-/// then the composite's video, container and audio. Shown under the Cast
-/// proxy card for a composite cast and under the AirPlay card for an
-/// AirPlay composite, so both sheets keep one structure.
+/// Composite Stream Info rows (Logan 2026-10-07, round 3). A composite cast
+/// used to show the proxy box (SOURCE 127.0.0.1: the proxy ingests the
+/// phone's own composite) with four plain-text lines under it. The facts now
+/// live inside the box as rows: SOURCE carries the tiles' upstream host the
+/// way the AirPlay box does, COMPOSITE the grid size and rate, FORMAT the
+/// container, AUDIO the composite's audio. Both sheets use the same rows.
 enum MultiviewCompositeStreamInfo {
-    @MainActor static func lines(for transport: MultiviewCompositeSession.Transport) -> [String]? {
-        guard MultiviewCompositeSession.shared.transport == transport else { return nil }
-        var out: [String] = []
-        if let host = sourceHost() { out.append("Source: \(host)") }
-        out.append("Multiview composite \(MultiviewCompositeLayout.width)x\(MultiviewCompositeLayout.height)@\(MultiviewCompositeLayout.fps)")
-        // Cast: the proxy remuxes the composite TS to fMP4 for the
-        // receiver. AirPlay: the TS is served as is.
-        out.append(transport == .cast ? "Container: MPEG-TS to fMP4" : "Container: MPEG-TS")
-        out.append("Audio: AAC-LC stereo 48 kHz")
-        return out
+    @MainActor static func isActive(_ transport: MultiviewCompositeSession.Transport) -> Bool {
+        MultiviewCompositeSession.shared.transport == transport
+    }
+
+    /// "1280x720 at 30 fps".
+    static var compositeValue: String {
+        "\(MultiviewCompositeLayout.width)x\(MultiviewCompositeLayout.height) at \(MultiviewCompositeLayout.fps) fps"
+    }
+
+    /// The composite encoder is VideoToolbox H.264 (MultiviewCompositor).
+    static let videoValue = "H.264"
+    static let audioValue = "AAC-LC stereo 48 kHz"
+
+    /// Cast: the proxy remuxes the composite TS to fMP4 for the receiver.
+    /// AirPlay: the TS is served as is.
+    static func formatValue(_ transport: MultiviewCompositeSession.Transport) -> String {
+        transport == .cast ? "MPEG-TS to fMP4" : "MPEG-TS muxed"
     }
 
     /// Distinct upstream hosts of the Multiview tiles, comma separated
@@ -4363,17 +4365,6 @@ enum MultiviewCompositeStreamInfo {
             if let h = tile.streamURL.host, !h.isEmpty, !hosts.contains(h) { hosts.append(h) }
         }
         return hosts.isEmpty ? nil : hosts.joined(separator: ", ")
-    }
-
-    struct LinesView: View {
-        let lines: [String]
-        var body: some View {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(lines, id: \.self) { Text($0) }
-            }
-            .scaledFont(.footnote)
-            .foregroundStyle(.secondary)
-        }
     }
 }
 
@@ -4394,6 +4385,8 @@ struct AirPlayStreamInfo: Equatable {
     var bitrate: String
     var buffer: String
     var health: String
+    /// "1280x720 at 30 fps" for a Multiview composite, nil otherwise.
+    var composite: String? = nil
 
     @MainActor static func snapshot() -> AirPlayStreamInfo? {
         let monitor = AirPlayMonitor.shared
@@ -4409,8 +4402,8 @@ struct AirPlayStreamInfo: Equatable {
         if facts != nil {
             delivery = "phone serves HLS to the TV over Wi-Fi"
             let audioForm = facts?.aacRewrite == true ? "audio AAC rewrite" : "audio passthrough"
-            container = MultiviewCompositeSession.shared.transport == .airPlay
-                ? "MPEG-TS muxed" : "MPEG-TS muxed, \(audioForm)"
+            container = composite
+                ? MultiviewCompositeStreamInfo.formatValue(.airPlay) : "MPEG-TS muxed, \(audioForm)"
         } else {
             delivery = "AVPlayer external playback"
             container = "as the source sends it"
@@ -4419,7 +4412,7 @@ struct AirPlayStreamInfo: Equatable {
         // Video: codec, resolution, fps.
         var video: String
         if composite {
-            video = "Multiview composite \(MultiviewCompositeLayout.width)x\(MultiviewCompositeLayout.height)@\(MultiviewCompositeLayout.fps)"
+            video = MultiviewCompositeStreamInfo.videoValue
         } else {
             var codec = "H.264"
             var size = ""
@@ -4466,7 +4459,7 @@ struct AirPlayStreamInfo: Equatable {
             audio = codec + (channels > 0 ? "  \(channels) ch" : "  channels from the source")
             if facts != nil { audio += "  passthrough" }
             // Android parity wording for the composite.
-            if composite { audio = "AAC-LC stereo 48 kHz" }
+            if composite { audio = MultiviewCompositeStreamInfo.audioValue }
         }
 
         let event = item?.accessLog()?.events.last
@@ -4490,7 +4483,8 @@ struct AirPlayStreamInfo: Equatable {
         if source == nil, let h = (item?.asset as? AVURLAsset)?.url.host, !isLoopback(h) { source = h }
         let health = "drops \(max(0, event?.numberOfDroppedVideoFrames ?? 0))  stalls \(max(0, event?.numberOfStalls ?? 0))"
         return AirPlayStreamInfo(receiver: monitor.deviceName ?? "AirPlay", source: source ?? "-", delivery: delivery, container: container,
-                                 video: video, audio: audio, bitrate: bitrate, buffer: buffer, health: health)
+                                 video: video, audio: audio, bitrate: bitrate, buffer: buffer, health: health,
+                                 composite: composite ? MultiviewCompositeStreamInfo.compositeValue : nil)
     }
 
     private static func isLoopback(_ host: String) -> Bool {
@@ -4524,6 +4518,9 @@ struct AirPlayStreamInfoCard: View {
             row(label: "TV", value: info.receiver)
             row(label: "SOURCE", value: info.source)
             row(label: "VIA", value: info.delivery)
+            if let composite = info.composite {
+                row(label: "COMPOSITE", value: composite)
+            }
             row(label: "FORMAT", value: info.container)
             row(label: "VIDEO", value: info.video)
             row(label: "AUDIO", value: info.audio)
@@ -4547,6 +4544,10 @@ struct AirPlayStreamInfoCard: View {
             Text(label)
                 .scaledFont(.system(size: 9, weight: .bold, design: .monospaced))
                 .foregroundColor(Color.contrastText(Color.accentPrimary))
+                // COMPOSITE (9 characters) is the one label wider than the
+                // column; it shrinks to fit instead of wrapping.
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
                 .frame(width: TextScale.grow(46, textScale), alignment: .trailing)
             Text(value)
                 .scaledFont(.system(size: 10, weight: .medium, design: .monospaced))
@@ -4564,12 +4565,25 @@ private struct CastStreamInfoCard: View {
     let receiverName: String?
     /// "1920x1080 at 60fps" from the receiver's own telemetry.
     let receiverVideo: String?
+    /// A phone-side Multiview composite is on this cast.
+    var composite: Bool = false
+    /// The tiles' upstream host(s) for a composite (the proxy itself ingests
+    /// the phone's loopback composite, so `ingestHost` reads 127.0.0.1).
+    var compositeSource: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            row(label: "SOURCE", value: stats.ingestHost)
-            row(label: "VIDEO", value: stats.videoCodec ?? "detecting")
-            row(label: "AUDIO", value: stats.audioPath ?? "detecting")
+            if composite {
+                row(label: "SOURCE", value: compositeSource ?? "-")
+                row(label: "COMPOSITE", value: MultiviewCompositeStreamInfo.compositeValue)
+                row(label: "FORMAT", value: MultiviewCompositeStreamInfo.formatValue(.cast))
+                row(label: "VIDEO", value: stats.videoCodec ?? MultiviewCompositeStreamInfo.videoValue)
+                row(label: "AUDIO", value: MultiviewCompositeStreamInfo.audioValue)
+            } else {
+                row(label: "SOURCE", value: stats.ingestHost)
+                row(label: "VIDEO", value: stats.videoCodec ?? "detecting")
+                row(label: "AUDIO", value: stats.audioPath ?? "detecting")
+            }
             row(label: "SEGS", value: "\(stats.segmentsProduced) produced  gen \(stats.generation)")
             row(label: "RATE", value: rateLine)
             row(label: "PROXY", value: "HLS on port \(stats.port)")
@@ -4603,6 +4617,10 @@ private struct CastStreamInfoCard: View {
             Text(label)
                 .scaledFont(.system(size: 9, weight: .bold, design: .monospaced))
                 .foregroundColor(Color.contrastText(Color.accentPrimary))
+                // COMPOSITE (9 characters) is the one label wider than the
+                // column; it shrinks to fit instead of wrapping.
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
                 .frame(width: TextScale.grow(46, textScale), alignment: .trailing)
             Text(value)
                 .scaledFont(.system(size: 10, weight: .medium, design: .monospaced))

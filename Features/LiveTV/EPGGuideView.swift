@@ -79,6 +79,63 @@ struct GuideProgram: Identifiable, Equatable {
 
 import SwiftData
 
+/// One writer at a time for the on-disk EPG cache (iPad duplicates, Logan
+/// 2026-10-07). `saveToCache` deletes the replaceable span and then inserts in
+/// 5000-row chunks over minutes; nothing stopped a second save from starting
+/// mid-insert. ipad2 log 2026-10-05: saves began at 23:50:21, 23:51:43 and
+/// 23:54:34 and ran 229569, 242988 and 199169 ms, so each later save's delete
+/// ran while the earlier one was still inserting, and the earlier save's later
+/// chunks landed on top of the later save's full copy. Those rows came back on
+/// every cache load (22:33:01.545: 5 duplicate ids right after `cache-load`).
+/// Saves and swept-day writes now queue behind each other here.
+actor EPGCacheWriteGate {
+    static let shared = EPGCacheWriteGate()
+    private var tail: Task<Void, Never>?
+    private var latestTicket: [String: Int] = [:]
+
+    /// A save that is still queued when a newer save for the same server
+    /// arrives has nothing left to write: the newer snapshot replaces it.
+    func ticket(for key: String) -> Int {
+        let next = (latestTicket[key] ?? 0) + 1
+        latestTicket[key] = next
+        return next
+    }
+
+    func isLatest(_ ticket: Int, for key: String) -> Bool { latestTicket[key] == ticket }
+
+    func run<T: Sendable>(_ label: String, _ body: @escaping @Sendable () async -> T) async -> T {
+        let previous = tail
+        let waitStart = CFAbsoluteTimeGetCurrent()
+        let task = Task<T, Never> {
+            await previous?.value
+            let waited = Int((CFAbsoluteTimeGetCurrent() - waitStart) * 1000)
+            if waited >= 50 { debugLog("[GUIDE] epg cache write \(label) waited \(waited)ms for the previous write") }
+            return await body()
+        }
+        tail = Task { _ = await task.value }
+        return await task.value
+    }
+}
+
+extension GuideProgram {
+    /// Drops entries whose `id` repeats within each channel list, keeping the
+    /// first. Returns the cleaned map and how many entries were dropped.
+    nonisolated static func dedupedByID(_ dict: [String: [GuideProgram]]) -> (dict: [String: [GuideProgram]], dropped: Int) {
+        var out = dict
+        var dropped = 0
+        for (channelID, list) in dict where list.count > 1 {
+            var seen = Set<String>()
+            seen.reserveCapacity(list.count)
+            let kept = list.filter { seen.insert($0.id).inserted }
+            if kept.count != list.count {
+                dropped += list.count - kept.count
+                out[channelID] = kept
+            }
+        }
+        return (out, dropped)
+    }
+}
+
 // MARK: - EPG grid chunk coverage (incremental guide loading)
 
 /// What one-day grid chunks this playlist has already fetched, persisted so a
@@ -877,6 +934,15 @@ final class GuideStore: ObservableObject {
                     if rows.count < pageSize { break }
                 }
                 guard total > 0 else { return (nil, false) }
+                // Rows the cache holds twice (overlapping saves before
+                // EPGCacheWriteGate, see there) are dropped here, so the map
+                // never carries one id twice and the next save heals the disk.
+                let deduped = GuideProgram.dedupedByID(dict)
+                if deduped.dropped > 0 {
+                    debugLog("[GUIDE] cache-load dropped \(deduped.dropped) duplicate row(s) the cache held (same channel, title and start)")
+                    dict = deduped.dict
+                    total -= deduped.dropped
+                }
                 let isFresh = now.timeIntervalSince(newestFetch) < stalenessThreshold
                 return ((dict, total, isFresh, Int(now.timeIntervalSince(newestFetch))), false)
             }.value
@@ -1125,6 +1191,13 @@ final class GuideStore: ObservableObject {
         // [PUBLISH] timing for the chunked SwiftData write.
         let saveStart = CFAbsoluteTimeGetCurrent()
         Task.detached(priority: .utility) {
+          let gate = EPGCacheWriteGate.shared
+          let ticket = await gate.ticket(for: serverID)
+          await gate.run("save") {
+            guard await gate.isLatest(ticket, for: serverID) else {
+                debugLog("📺 GuideStore.saveToCache: queued save superseded by a newer one, skipped (server \(serverID))")
+                return
+            }
             let now = Date()
             let retentionCutoff = now.addingTimeInterval(-retentionSecs)
             // The delete must be bounded by what the snapshot can replace.
@@ -1165,10 +1238,16 @@ final class GuideStore: ObservableObject {
 
             var count = 0
             var chunk = 0
+            var duplicateRows = 0
             var ctx = ModelContext(container)
             ctx.autosaveEnabled = false
             for (channelID, progs) in snapshot {
+                // One row per id: a list carrying one programme twice must
+                // not write it twice (the future rows had no key check).
+                var writtenIDs = Set<String>()
+                writtenIDs.reserveCapacity(progs.count)
                 for gp in progs {
+                    guard writtenIDs.insert(gp.id).inserted else { duplicateRows += 1; continue }
                     if gp.end <= now {
                         let key = "\(channelID)|\(Int(gp.start.timeIntervalSince1970))"
                         if pastKeys.contains(key) { continue }
@@ -1197,8 +1276,12 @@ final class GuideStore: ObservableObject {
                 }
             }
             try? ctx.save()
+            if duplicateRows > 0 {
+                debugLog("[GUIDE] saveToCache skipped \(duplicateRows) duplicate row(s) in the snapshot")
+            }
             debugLog("[PUBLISH] swiftdata epg save \(count) items took \(Int((CFAbsoluteTimeGetCurrent() - saveStart) * 1000))ms (background context)")
             debugLog("📺 GuideStore.saveToCache: saved \(count) programs for server \(serverID) (background, chunked) rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
+          }
         }
     }
 
@@ -3225,7 +3308,8 @@ final class GuideStore: ObservableObject {
                                  serverID: String,
                                  day: Date, dayEnd: Date) async -> Int {
         guard let container = cachedContainer else { return 0 }
-        return await Task.detached(priority: .background) {
+        return await EPGCacheWriteGate.shared.run("swept day") {
+          await Task.detached(priority: .background) {
             // Empty base: `mergeGridPrograms` clamps to the window, so the
             // result is exactly this day's programmes.
             let merged = GuideStore.mergeGridPrograms(fetched, into: [:],
@@ -3275,7 +3359,8 @@ final class GuideStore: ObservableObject {
             }
             try? ctx.save()
             return written
-        }.value
+          }.value
+        }
     }
 
     private static func chunkStamp(_ d: Date) -> String {
@@ -4361,9 +4446,11 @@ final class GuideStore: ObservableObject {
                     debugLog("📺 GuideStore.prefetch: DISCARDED stale per-cell result for \(prefetchServerKey.prefix(8)) — guide now displays \(self.displayedServerID!.prefix(8))")
                     return
                 }
-                for prog in fetched {
-                    self.mergeProgram(prog, for: channelID)
-                }
+                // One write per prefetch (iPad log 2026-10-07 22:33:11 to
+                // 22:33:20: pub:guide.programs=121 with no [PUBLISH] line, the
+                // count climbing 38208 to 38339 while the guide scrolled). Each
+                // per-programme merge was its own publish of the whole map.
+                self.mergePrefetched(fetched, for: channelID)
                 // Mark this channel as fetched ONLY if we actually got
                 // programs back. Previously the id was inserted BEFORE
                 // the fetch ran, so a timeout / transient failure left
@@ -4435,6 +4522,28 @@ final class GuideStore: ObservableObject {
     /// `programs` otherwise) and delegates to the nonisolated static
     /// implementation so the logic can be shared with the
     /// `performXMLTVFetch` off-main merge path.
+    /// Merges one channel's prefetch result with a single write to
+    /// `programs` (one publish) instead of one per programme.
+    private func mergePrefetched(_ fetched: [GuideProgram], for channelID: String) {
+        guard !fetched.isEmpty else { return }
+        if _isBatching {
+            for prog in fetched { Self.mergeProgramInto(&_pendingPrograms, program: prog, for: channelID) }
+            return
+        }
+        let before = programs[channelID] ?? []
+        var scratch: [String: [GuideProgram]] = [channelID: before]
+        for prog in fetched {
+            Self.mergeProgramInto(&scratch, program: prog, for: channelID, deferSort: true)
+        }
+        var merged = scratch[channelID] ?? []
+        merged.sort { $0.start < $1.start }
+        guard merged != before else { return }
+        _changedHint = [channelID]
+        defer { _changedHint = nil }
+        programs[channelID] = merged
+        debugLog("[GUIDE] prefetch merged \(merged.count - before.count) new program(s) for channel \(channelID) in one write")
+    }
+
     private func mergeProgram(_ prog: GuideProgram, for channelID: String) {
         if _isBatching {
             Self.mergeProgramInto(&_pendingPrograms, program: prog, for: channelID)
@@ -4781,6 +4890,16 @@ enum GuideRowIdentity {
 
     static func unique(_ slice: [GuideProgram], channelID: String) -> [GuideProgram] {
         guard slice.count > 1 else { return slice }
+        // Allocation-free fast path: lists are start-sorted and the id carries
+        // the start, so a repeated id always sits next to an equal start.
+        // Rows with no two equal starts (every row once the sources are clean)
+        // return here without building a set on the render path.
+        var equalStarts = false
+        for i in 1..<slice.count where slice[i].start == slice[i - 1].start {
+            equalStarts = true
+            break
+        }
+        guard equalStarts else { return slice }
         var seen = Set<String>()
         seen.reserveCapacity(slice.count)
         var out: [GuideProgram] = []
@@ -5965,13 +6084,19 @@ struct EPGGuideView: View {
                         // momentum — iOS's built-in projection based
                         // on the release velocity — so fast swipes
                         // keep gliding instead of stopping dead.
+                        let dragEndStart = CFAbsoluteTimeGetCurrent()
+                        // Names the render turn this release causes in the
+                        // [HANG] line instead of a bare "main runloop turn".
+                        MainThreadWatchdog.shared.notePublish("guide drag end")
                         let projected = base + value.predictedEndTranslation.width
                         let landed = min(0, max(maxHorizontalOffset, projected))
+                        let travel = Int(abs(landed - horizontalOffset))
                         withAnimation(.easeOut(duration: 0.25)) {
                             horizontalOffset = landed
                         }
                         dragBaselineOffset = nil
                         logVisibleWindow(offset: landed, reason: "drag end")
+                        GuideDragEndCost.measure(start: dragEndStart, travel: travel)
                     }
             )
             #endif
@@ -7494,8 +7619,16 @@ struct EPGGuideView: View {
             let visibleTimeStart = windowStart.addingTimeInterval(Double(visibleFraction) * totalDuration)
             let visibleTimeEnd = visibleTimeStart.addingTimeInterval(Double(visibleWidthFraction) * totalDuration)
             let pad: TimeInterval = 1800 // 30 minutes
-            let filterStart = visibleTimeStart.addingTimeInterval(-pad)
-            let filterEnd = visibleTimeEnd.addingTimeInterval(pad)
+            // Hour-aligned slice bounds (iPad drag lag, Logan 2026-10-07): with
+            // raw bounds the slice moved on every offset change, so cells
+            // entered and left the ForEach on every drag frame and on every
+            // release. Rounded outward to the hour, the slice (and the cells
+            // SwiftUI keeps) changes only when the viewport crosses an hour.
+            let hour: TimeInterval = 3600
+            let filterStart = Date(timeIntervalSinceReferenceDate:
+                (visibleTimeStart.addingTimeInterval(-pad).timeIntervalSinceReferenceDate / hour).rounded(.down) * hour)
+            let filterEnd = Date(timeIntervalSinceReferenceDate:
+                (visibleTimeEnd.addingTimeInterval(pad).timeIntervalSinceReferenceDate / hour).rounded(.up) * hour)
 
             // Task #188: no re-sort. Every GuideStore write path stores each
             // channel's programmes start-sorted (loadFromCache uses a
@@ -7592,6 +7725,7 @@ struct EPGGuideView: View {
             sidebarOpen: sidebarOpen,
             compact: previewMode
         )
+        .equatable()
         .offset(x: x, y: 0)
         #else
         return GuideProgramButton(
@@ -7602,6 +7736,7 @@ struct EPGGuideView: View {
             onMultiviewIntent: { handleMultiviewIntent(channel: $0) },
             onWatchCatchup: { ch, gp in handleWatchCatchup(channel: ch, prog: gp) }
         )
+        .equatable()
         .offset(x: x, y: 0)
         #endif
     }
@@ -7790,9 +7925,14 @@ struct EPGGuideView: View {
     /// screen, the resident span and the loaded programme extent, plus the
     /// viewport width the slice math used. A visible span outside the
     /// resident one, or a width that is not the screen's, shows here.
-    private func logVisibleWindow(offset: CGFloat, reason: String) {
+    private static let visibleWindowFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "MM-dd HH:mm"
+        return f
+    }()
+
+    private func logVisibleWindow(offset: CGFloat, reason: String) {
+        let f = Self.visibleWindowFormatter
         let visStart = windowStart.addingTimeInterval(Double(-offset) / Double(pixelsPerHour) * 3600)
         let visEnd = visStart.addingTimeInterval(Double(visibleProgramWidth) / Double(pixelsPerHour) * 3600)
         let resident = guideStore.residentSpan.map { "\(f.string(from: $0.start))..\(f.string(from: $0.end))" } ?? "none"
@@ -8292,6 +8432,47 @@ private struct GuideChannelButton: View {
 }
 
 // MARK: - Guide Program Button (own @FocusState for tvOS highlight)
+/// Cell inputs that change what it draws. The closures are left out on
+/// purpose: they route to `EPGGuideView` methods and differ on every parent
+/// render, which made SwiftUI re-run every cell body whenever a row body ran
+/// (iPad log 2026-10-07 22:33:55: GuideProgramCell=571 bodies for 78 distinct
+/// cells in one second of horizontal drags). Observed objects inside the cell
+/// still invalidate it on their own.
+extension GuideProgramButton: @MainActor Equatable {
+    static func == (a: GuideProgramButton, b: GuideProgramButton) -> Bool {
+        guard a.prog == b.prog, a.channelItem == b.channelItem,
+              a.width == b.width, a.rowHeight == b.rowHeight,
+              a.leadingClip == b.leadingClip,
+              a.shortTimeFormatter === b.shortTimeFormatter else { return false }
+        #if os(tvOS)
+        guard a.sidebarOpen == b.sidebarOpen, a.compact == b.compact else { return false }
+        #endif
+        return true
+    }
+}
+
+/// [GUIDE] drag end cost: main-thread time from the drag release to the end
+/// of the run loop turn that rendered the landed position (after the Core
+/// Animation commit), so the number covers the row and cell rebuild the
+/// release caused, not just the gesture handler.
+@MainActor
+enum GuideDragEndCost {
+    static func measure(start: CFAbsoluteTime, travel: Int) {
+        let handlerMs = (CFAbsoluteTimeGetCurrent() - start) * 1000
+        let cellsBefore = LiveCensus.cells
+        // Order CFIndex.max: runs after the commit observers of this turn.
+        let observer = CFRunLoopObserverCreateWithHandler(
+            nil, CFRunLoopActivity.beforeWaiting.rawValue, false, CFIndex.max
+        ) { _, _ in
+            let totalMs = (CFAbsoluteTimeGetCurrent() - start) * 1000
+            let cellsAfter = MainActor.assumeIsolated { LiveCensus.cells }
+            debugLog(String(format: "[GUIDE] drag end cost %.1fms (handler %.1fms, travel %dpt, live cells %d -> %d)",
+                            totalMs, handlerMs, travel, cellsBefore, cellsAfter))
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+    }
+}
+
 private struct GuideProgramButton: View {
     let prog: GuideProgram
     let channelItem: ChannelDisplayItem
