@@ -578,6 +578,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// later by the silence/stale-frame ladder; a closed connection is
     /// proof the upstream is gone, so the consumer re-tunes at once.
     var onIngestClosed: (() -> Void)?
+    /// Fires on the main queue once per new LAN peer (its first request on
+    /// the LAN listener). CarPlay video logs the head unit's first fetch.
+    var onLANFirstRequest: ((String) -> Void)?
     /// Multiview composite (2026-10-06): the raw ingest bytes, on `queue`,
     /// for the phone-side composite's audio. nil when no composite runs.
     fileprivate var ingestTap: ((Data) -> Void)?
@@ -3217,6 +3220,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             queue.async { [weak self] in
                 guard let self, self.lanPeersLogged.insert(peer).inserted else { return }
                 debugLog("[TS-REMUX] LAN delivery: first request from \(peer)")
+                if let cb = self.onLANFirstRequest {
+                    DispatchQueue.main.async { cb(peer) }
+                }
             }
         }
         handleConnection(connection, lan: true, peer: peer)

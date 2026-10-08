@@ -328,12 +328,23 @@ final class HeadlessPlaybackController: ObservableObject {
         if attempt > 0, !urls.isEmpty {
             item.streamURL = urls[attempt % urls.count]
         }
-        let resolved = PlayerSession.resolveEngine(item: item, server: server, isLive: true)
+        var resolved = PlayerSession.resolveEngine(item: item, server: server, isLive: true)
+        // CarPlay video: every MPEG-TS channel goes through the remuxer so
+        // the car can be served its credential-free LAN playlist, including
+        // channels the resolver would upgrade to Dispatcharr HLS (Force HLS
+        // or a cached probe). The car cannot present our auth headers or the
+        // HLS session token (cp3 00:26:30: 404 after external playback).
+        if videoCapable, !forceMPV, PlaybackFeatureFlags.avPlayerRemuxTS,
+           let raw = item.streamURL ?? item.streamURLs.first,
+           classifyStreamURL(raw) == .mpegTS, resolved.engine != .avPlayerRemuxTS {
+            debugLog("[CARPLAY] video: \(item.name) routed through the TS remuxer for LAN delivery (resolver said \(resolved.engine))")
+            resolved = ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: raw, headers: resolved.headers)
+        }
         let useMPV = forceMPV || resolved.engine == .mpv
         // Host logged, never the full URL (stream URLs can carry query
         // credentials): the cold-car failure to catch is a LAN host handed
         // to a cellular-only phone.
-        debugLog("[CARPLAY] tune: channel=\(item.name) attempt=\(attempt + 1) route=\(resolved.engine) scheme=\(resolved.routeURL.scheme ?? "?") host=\(resolved.routeURL.host ?? "?") video=\(videoCapable && !useMPV && resolved.engine == .avPlayerDirectHLS)")
+        debugLog("[CARPLAY] tune: channel=\(item.name) attempt=\(attempt + 1) route=\(resolved.engine) scheme=\(resolved.routeURL.scheme ?? "?") host=\(resolved.routeURL.host ?? "?") video=\(videoCapable && !useMPV)")
 
         if useMPV {
             guard PlaybackFeatureFlags.mpvEngineEnabled else {
@@ -368,7 +379,12 @@ final class HeadlessPlaybackController: ObservableObject {
             engine = .avPlayer(av)
         }
         debugLog("[CARPLAY] engine: AVPlayer \(resolved.engine == .avPlayerDirectHLS ? "direct HLS" : "TS remux loopback") channel=\(item.name)")
-        av.play(resolved, allowsVideo: videoCapable && resolved.engine == .avPlayerDirectHLS)
+        // Video for the remux path (LAN playlist) and for genuine HLS sources
+        // that need no headers. Dispatcharr direct HLS never reaches here in
+        // video mode (rerouted above).
+        let video = videoCapable && (resolved.engine == .avPlayerRemuxTS
+            || (resolved.engine == .avPlayerDirectHLS && resolved.headers["X-API-Key"] == nil))
+        av.play(resolved, allowsVideo: video)
     }
 
     private func handleAVPlayerFailure(_ failure: HeadlessAVPlayerEngine.Failure) {
@@ -503,6 +519,11 @@ final class HeadlessAVPlayerEngine {
     private var token = UUID()
     private var silenceStarted: Date?
     private var silenceLogged = false
+    /// CarPlay video: the head unit is served the remuxer's LAN playlist.
+    private var lanURL: URL?
+    private var keepaliveHeld = false
+    private var itemReissues = 0
+    static let keepaliveHolder = "carplay-video"
 
     func play(_ resolved: ResolvedEngine, allowsVideo: Bool) {
         teardownPipeline()
@@ -518,8 +539,12 @@ final class HeadlessAVPlayerEngine {
             mux.onReady = { [weak self] localURL in
                 MainActor.assumeIsolated {
                     guard let self, self.token == t else { return }
-                    debugLog("[CARPLAY] engine: remux ready, starting AVPlayer on \(localURL.scheme ?? "?")://\(localURL.host ?? "")")
-                    self.startPlayer(url: localURL, headers: [:], allowsVideo: false)
+                    guard allowsVideo else {
+                        debugLog("[CARPLAY] engine: remux ready, audio only on loopback \(localURL.scheme ?? "?")://\(localURL.host ?? "")")
+                        self.startPlayer(url: localURL, headers: [:], allowsVideo: false)
+                        return
+                    }
+                    self.startLANVideo(mux: mux, loopbackURL: localURL, token: t)
                 }
             }
             mux.onError = { [weak self] error in
@@ -565,8 +590,46 @@ final class HeadlessAVPlayerEngine {
                     self.fail(.playback("upstream closed the stream"))
                 }
             }
+            if allowsVideo {
+                mux.onLANFirstRequest = { peer in
+                    debugLog("[CARPLAY] video: receiver first request from \(peer)")
+                }
+            }
             remuxer = mux
             mux.start()
+        }
+    }
+
+    /// CarPlay video (2026-10-08, cp3): with external playback the HEAD UNIT
+    /// fetches the item URL itself, and AVURLAsset's header option never
+    /// leaves the phone, so a Dispatcharr URL that needs X-API-Key / the
+    /// HLS session token cannot be fetched by the car. Serve the car the
+    /// remuxer's LAN playlist instead (the AirPlay listener: muxed TS,
+    /// keep-alive HTTP, LAN hold-back), which needs no credentials and
+    /// works for every TS channel. No LAN address: audio only on loopback.
+    private func startLANVideo(mux: TSHLSRemuxer, loopbackURL: URL, token t: UUID) {
+        mux.startLANDelivery { [weak self] result in
+            guard let self, self.token == t else { return }
+            switch result {
+            case .ready(let ip, let port):
+                guard let url = URL(string: "http://\(ip):\(port)/live.m3u8") else {
+                    debugLog("[CARPLAY] video: bad LAN url; audio only on loopback")
+                    self.startPlayer(url: loopbackURL, headers: [:], allowsVideo: false)
+                    return
+                }
+                self.lanURL = url
+                debugLog("[CARPLAY] video: lan url \(url.absoluteString)")
+                if !self.keepaliveHeld {
+                    // External playback leaves no local audio render, so
+                    // the process needs the keepalive AirPlay uses.
+                    self.keepaliveHeld = true
+                    BackgroundKeepalive.acquire(Self.keepaliveHolder)
+                }
+                self.startPlayer(url: url, headers: [:], allowsVideo: true)
+            default:
+                debugLog("[CARPLAY] video: LAN delivery unavailable (\(result)); audio only on loopback")
+                self.startPlayer(url: loopbackURL, headers: [:], allowsVideo: false)
+            }
         }
     }
 
@@ -598,7 +661,14 @@ final class HeadlessAVPlayerEngine {
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         player = nil
+        lanURL = nil
+        itemReissues = 0
+        if keepaliveHeld {
+            keepaliveHeld = false
+            BackgroundKeepalive.release(Self.keepaliveHolder)
+        }
         if let mux = remuxer {
+            mux.onLANFirstRequest = nil
             mux.onReady = nil
             mux.onError = nil
             mux.onIngestSilence = nil
@@ -606,6 +676,31 @@ final class HeadlessAVPlayerEngine {
             mux.stop()
             remuxer = nil
         }
+    }
+
+    /// A failed item while the car is fetching the LAN playlist is usually
+    /// the receiver, not the pipeline (the remuxer is still ingesting):
+    /// hand it a fresh item on the SAME LAN URL (AirPlay's reissue) up to
+    /// twice before a full failover, so the retry never tears the
+    /// listener out from under the car's fetch.
+    private func itemFailed(_ message: String) {
+        if let url = lanURL, remuxer != nil, itemReissues < 2 {
+            itemReissues += 1
+            debugLog("[CARPLAY] external playback: item failed (\(message)); reissuing on the same LAN url (\(itemReissues)/2)")
+            statusObservation = nil
+            timeControlObservation = nil
+            externalObservation = nil
+            if let obs = failedToEndObserver {
+                NotificationCenter.default.removeObserver(obs)
+                failedToEndObserver = nil
+            }
+            player?.pause()
+            player?.replaceCurrentItem(with: nil)
+            player = nil
+            startPlayer(url: url, headers: [:], allowsVideo: true)
+            return
+        }
+        fail(.playback(message))
     }
 
     private func startPlayer(url: URL, headers: [String: String], allowsVideo: Bool) {
@@ -632,7 +727,7 @@ final class HeadlessAVPlayerEngine {
             let message = item.error?.localizedDescription ?? "unknown item error"
             Task { @MainActor in
                 guard let self, self.token == t else { return }
-                self.fail(.playback("item failed: \(message)"))
+                self.itemFailed("item failed: \(message)")
             }
         }
         timeControlObservation = p.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
@@ -645,7 +740,7 @@ final class HeadlessAVPlayerEngine {
         if allowsVideo {
             externalObservation = p.observe(\.isExternalPlaybackActive, options: [.new]) { _, change in
                 // The line that proves the car took the video surface.
-                debugLog("[CARPLAY] engine: externalPlaybackActive=\(change.newValue ?? false)")
+                debugLog("[CARPLAY] external playback active=\(change.newValue ?? false)")
             }
         }
         failedToEndObserver = NotificationCenter.default.addObserver(
@@ -656,7 +751,7 @@ final class HeadlessAVPlayerEngine {
                 .localizedDescription ?? "failed to play to end"
             MainActor.assumeIsolated {
                 guard let self, self.token == t else { return }
-                self.fail(.playback(err))
+                self.itemFailed(err)
             }
         }
         player = p

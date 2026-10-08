@@ -5928,6 +5928,8 @@ struct EPGGuideView: View {
     @State private var dragBaselineOffset: CGFloat? = nil
     /// True once the active drag moved the timeline (see the drag onEnded).
     @State private var dragIsHorizontal = false
+    /// True when the current drag locked to the horizontal axis on its first event.
+    @State private var dragAxisLocked = false
     /// Release speed (pt/s) below which a drag adds no momentum.
     private static let flickMinVelocity: CGFloat = 300
     /// Glide distance per pt/s of release speed: 0.99 / (1 - 0.99) / 1000.
@@ -6153,11 +6155,16 @@ struct EPGGuideView: View {
             .simultaneousGesture(
                 DragGesture(minimumDistance: 10)
                     .onChanged { value in
+                        // Direction lock (Logan 2026-10-08, iPad: a vertical
+                        // row scroll with a slight angle moved the timeline):
+                        // the first event past the threshold decides the axis
+                        // for the whole gesture. A drag that starts vertical
+                        // never touches the timeline, whatever later events do.
                         if dragBaselineOffset == nil {
                             dragBaselineOffset = horizontalOffset
+                            dragAxisLocked = abs(value.translation.width) > abs(value.translation.height) * 1.5
                         }
-                        guard let base = dragBaselineOffset else { return }
-                        guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                        guard dragAxisLocked, let base = dragBaselineOffset else { return }
                         dragIsHorizontal = true
                         let target = base + value.translation.width
                         horizontalOffset = min(0, max(maxHorizontalOffset, target))
@@ -6170,6 +6177,7 @@ struct EPGGuideView: View {
                         let wasHorizontal = dragIsHorizontal
                         dragBaselineOffset = nil
                         dragIsHorizontal = false
+                        dragAxisLocked = false
                         // A vertical row scroll never moves the timeline on
                         // release (its predicted width used to be applied).
                         guard wasHorizontal else { return }
