@@ -1530,6 +1530,8 @@ final class GuideStore: ObservableObject {
     /// The span `programs` currently holds, nil before the first cache load.
     /// Widened only by `ensureResidentRange`.
     private var residentWindow: (start: Date, end: Date)?
+    /// Read-only view of the resident span for the guide's [GUIDE] lines.
+    var residentSpan: (start: Date, end: Date)? { residentWindow }
     /// One page-in at a time.
     private var residentPagingInFlight = false
 
@@ -2538,10 +2540,21 @@ final class GuideStore: ObservableObject {
         // because the merge and the per-channel sort ran on the main actor.
         // Now the task returns the finished map and main only commits it.
         let base = programs
-        let fetched: (dict: [String: [GuideProgram]], count: Int) = await Task.detached(priority: .userInitiated) {
+        let fetched: (dict: [String: [GuideProgram]], count: Int, skipped: Int) = await Task.detached(priority: .userInitiated) {
             var dict: [String: [GuideProgram]] = base
             var touched: Set<String> = []
             var total = 0
+            // Rows already in the map are skipped (iPad blank cells, Logan
+            // 2026-10-07 22:20). The span predicate is an overlap test, so a
+            // programme straddling the resident edge is read again, and after
+            // `catchup-reach-prune` moves the window start off the day grid
+            // the floored read re-covers hours the map still holds (log
+            // 22:21:14: 1588 rows across 625 channels with the window ending
+            // where it began). The copies shared the original's id, which
+            // broke the row ForEach's identity: cells drew blank and came
+            // back depending on which slice the scroll position produced.
+            var residentIDs: [String: Set<String>] = [:]
+            var skipped = 0
             for (spanStart, spanEnd) in spans {
                 let descriptor = FetchDescriptor<EPGProgram>(
                     predicate: #Predicate<EPGProgram> {
@@ -2561,9 +2574,7 @@ final class GuideStore: ObservableObject {
                     }
                     if rows.isEmpty { break }
                     for ep in rows {
-                        touched.insert(ep.channelID)
-                        dict[ep.channelID, default: []].append(
-                            GuideProgram(channelID: ep.channelID, title: ep.title,
+                        let gp = GuideProgram(channelID: ep.channelID, title: ep.title,
                                          description: ep.programDescription,
                                          start: ep.startTime, end: ep.endTime,
                                          category: ep.category,
@@ -2573,7 +2584,16 @@ final class GuideStore: ObservableObject {
                                          isLiveBroadcast: ep.isLiveBroadcast,
                                          isPremiere: ep.isPremiere, isFinale: ep.isFinale,
                                          isRepeat: ep.isRepeat,
-                                         posterURL: ep.posterURL.isEmpty ? nil : ep.posterURL))
+                                         posterURL: ep.posterURL.isEmpty ? nil : ep.posterURL)
+                        if residentIDs[ep.channelID] == nil {
+                            residentIDs[ep.channelID] = Set((dict[ep.channelID] ?? []).map(\.id))
+                        }
+                        guard residentIDs[ep.channelID]!.insert(gp.id).inserted else {
+                            skipped += 1
+                            continue
+                        }
+                        touched.insert(ep.channelID)
+                        dict[ep.channelID, default: []].append(gp)
                         total += 1
                     }
                     offset += rows.count
@@ -2582,12 +2602,15 @@ final class GuideStore: ObservableObject {
             }
             // Sort only the channels that gained programmes.
             for cid in touched { dict[cid]?.sort { $0.start < $1.start } }
-            return (dict, total)
+            return (dict, total, skipped)
         }.value
         // Widen the window even when the cache had nothing for those days, so
         // a quiet day is not re-read on every scroll tick.
         window = (min(window.start, readStart), max(window.end, readEnd))
         residentWindow = window
+        if fetched.skipped > 0 {
+            debugLog("[GUIDE] resident page-in skipped \(fetched.skipped) row(s) already resident (span \(spans.map { "\(Self.chunkStamp($0.0))..\(Self.chunkStamp($0.1))" }.joined(separator: ", ")))")
+        }
         guard fetched.count > 0 else {
             debugLog("📺 GuideStore.ensureResidentRange: cache had no programmes for the new span; window now \(Self.chunkStamp(window.start)) to \(Self.chunkStamp(window.end))")
             return
@@ -4745,6 +4768,38 @@ final class GuideChannelSliceCell: ObservableObject {
     }
 }
 
+/// Guide row identity guard (iPad blank cells, Logan 2026-10-07). The row
+/// ForEach is keyed by `GuideProgram.id`; two entries with one id in a slice
+/// leave SwiftUI's identity undefined and cells draw blank or reappear with
+/// the scroll position. The resident page-in no longer writes copies, but
+/// the row drops any that reach it (cache rows written twice included) and
+/// says so, throttled, in a [GUIDE] line.
+@MainActor
+enum GuideRowIdentity {
+    private static var lastLog = Date.distantPast
+    private static var droppedSinceLog = 0
+
+    static func unique(_ slice: [GuideProgram], channelID: String) -> [GuideProgram] {
+        guard slice.count > 1 else { return slice }
+        var seen = Set<String>()
+        seen.reserveCapacity(slice.count)
+        var out: [GuideProgram] = []
+        out.reserveCapacity(slice.count)
+        for p in slice where seen.insert(p.id).inserted { out.append(p) }
+        let dropped = slice.count - out.count
+        if dropped > 0 {
+            droppedSinceLog += dropped
+            let now = Date()
+            if now.timeIntervalSince(lastLog) >= 5 {
+                debugLog("[GUIDE] row identity: dropped \(droppedSinceLog) duplicate program id(s) in the last \(lastLog == .distantPast ? 0 : Int(now.timeIntervalSince(lastLog)))s, e.g. channel \(channelID)")
+                lastLog = now
+                droppedSinceLog = 0
+            }
+        }
+        return out
+    }
+}
+
 /// Bumped only when the guide grid has something new to draw: a changed
 /// channel with programs overlapping the grid window, or a moved loaded
 /// extent. Extent bumps are held while a grid walk is in flight and released
@@ -5837,6 +5892,7 @@ struct EPGGuideView: View {
                 } else if timelineIsAwayFromNow() {
                     reAnchorTimelineToNow(animated: false)
                 }
+                logVisibleWindow(offset: horizontalOffset, reason: "appear")
             }
             .onChange(of: geo.size.width) { _, w in
                 visibleProgramWidth = w - channelColumnWidth
@@ -5910,10 +5966,12 @@ struct EPGGuideView: View {
                         // on the release velocity — so fast swipes
                         // keep gliding instead of stopping dead.
                         let projected = base + value.predictedEndTranslation.width
+                        let landed = min(0, max(maxHorizontalOffset, projected))
                         withAnimation(.easeOut(duration: 0.25)) {
-                            horizontalOffset = min(0, max(maxHorizontalOffset, projected))
+                            horizontalOffset = landed
                         }
                         dragBaselineOffset = nil
+                        logVisibleWindow(offset: landed, reason: "drag end")
                     }
             )
             #endif
@@ -7451,7 +7509,8 @@ struct EPGGuideView: View {
             // visible, so this row build is now O(log n + visible) rather than
             // O(n). The backward walk picks up a long programme that started
             // before the window and still overlaps it.
-            let sortedProgs = visibleSlice(of: progs, from: filterStart, to: filterEnd)
+            let sortedProgs = GuideRowIdentity.unique(
+                visibleSlice(of: progs, from: filterStart, to: filterEnd), channelID: channel.id)
 
             if sortedProgs.isEmpty {
                 // No VISIBLE guide cells - truly EPG-less channels AND channels
@@ -7725,6 +7784,22 @@ struct EPGGuideView: View {
                 catchupErrorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// [GUIDE] visible window vs what the store holds: the time span on
+    /// screen, the resident span and the loaded programme extent, plus the
+    /// viewport width the slice math used. A visible span outside the
+    /// resident one, or a width that is not the screen's, shows here.
+    private func logVisibleWindow(offset: CGFloat, reason: String) {
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm"
+        let visStart = windowStart.addingTimeInterval(Double(-offset) / Double(pixelsPerHour) * 3600)
+        let visEnd = visStart.addingTimeInterval(Double(visibleProgramWidth) / Double(pixelsPerHour) * 3600)
+        let resident = guideStore.residentSpan.map { "\(f.string(from: $0.start))..\(f.string(from: $0.end))" } ?? "none"
+        let loaded = guideStore.loadedProgramCount > 0
+            ? "\(f.string(from: guideStore.loadedMinProgramStart))..\(f.string(from: guideStore.loadedMaxProgramEnd))"
+            : "none"
+        debugLog("[GUIDE] visible window \(f.string(from: visStart))..\(f.string(from: visEnd)) (\(reason), width \(Int(visibleProgramWidth))pt) resident \(resident) loaded \(loaded) programs \(guideStore.loadedProgramCount)")
     }
 
     private func xOffset(for date: Date) -> CGFloat {
