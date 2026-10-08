@@ -15,7 +15,7 @@ Sideload using your preferred method using the .ipa from [Releases](https://gith
 
 | App | Devices | Repository |
 | --- | --- | --- |
-| **AerioTV for Apple** (this repo) | iPhone, iPad, Apple TV, Mac | [jonzey231/AerioTV](https://github.com/jonzey231/AerioTV) |
+| **AerioTV for Apple** (this repo) | iPhone, iPad, Apple TV, and Mac (iPad app) | [jonzey231/AerioTV](https://github.com/jonzey231/AerioTV) |
 | **AerioTV for Android** | Phones, tablets, Google TV, and Android TV | [jonzey231/AerioTV-Android](https://github.com/jonzey231/AerioTV-Android) |
 | **AerioTV for Roku** | Roku players and Roku TVs (community port) | [EndofLineTech/AerioTV-Roku](https://github.com/EndofLineTech/AerioTV-Roku) |
 
