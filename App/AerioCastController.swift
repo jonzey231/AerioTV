@@ -3371,6 +3371,35 @@ struct RemoteSessionSheet: View {
 
 // MARK: - Multiview composite preview grid
 
+/// The composite preview surface: an AVSampleBufferDisplayLayer the
+/// compositor enqueues each composed frame into from its own queue
+/// (MultiviewCompositePreviewSink), so frames never touch SwiftUI or the
+/// main thread (Logan 2026-10-08: the old 5 fps UIImage publish stuttered).
+struct MultiviewCompositePreviewLayerView: UIViewRepresentable {
+    final class LayerView: UIView {
+        override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
+        var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            let t0 = CACurrentMediaTime()
+            if window != nil {
+                MultiviewCompositePreviewSink.shared.attach(displayLayer)
+            } else {
+                MultiviewCompositePreviewSink.shared.detach(displayLayer)
+            }
+            MultiviewCompositePreviewSink.shared.addMainTime(CACurrentMediaTime() - t0)
+        }
+    }
+    func makeUIView(context: Context) -> LayerView {
+        let v = LayerView()
+        v.isUserInteractionEnabled = false
+        v.backgroundColor = .black
+        v.displayLayer.videoGravity = .resize
+        return v
+    }
+    func updateUIView(_ uiView: LayerView, context: Context) {}
+}
+
 /// Top of the remote controls sheet while the phone sends a Multiview
 /// composite (Android parity, 2026-10-06): the composite's tiles in its own
 /// layout. Tap a tile: the audio moves there (the receiver follows without
@@ -3387,8 +3416,8 @@ struct MultiviewCompositePreviewGrid: View {
     /// Live frames (Logan 2026-10-07): the composite itself, scaled down,
     /// so the sheet shows what the receiver shows.
     @ObservedObject private var composite = MultiviewCompositeSession.shared
-    /// The live frames publish here (about 5 fps), so only this grid
-    /// re-renders per frame, not the sheet around it.
+    /// Only the first-frame flag publishes here; the frames themselves go
+    /// to the display layer below without a SwiftUI update.
     @ObservedObject private var preview = MultiviewCompositePreview.shared
     @ObservedObject private var theme = ThemeManager.shared
 
@@ -3423,7 +3452,7 @@ struct MultiviewCompositePreviewGrid: View {
         // Padding Between Tiles), so the hit rects match the frame.
         let rects = MultiviewCompositeLayout.tileRects(count: tiles.count, mode: mode,
                                                        spacing: MultiviewCompositeStyle.current().spacingPx)
-        let live = preview.image
+        let live: Bool? = preview.hasFrame ? true : nil
         GeometryReader { geo in
             let scale = geo.size.width / CGFloat(MultiviewCompositeLayout.width)
             let scaled = rects.map { CGRect(x: $0.minX * scale, y: $0.minY * scale,
@@ -3435,12 +3464,12 @@ struct MultiviewCompositePreviewGrid: View {
             let target = dragPoint.flatMap(hit)
             ZStack(alignment: .topLeading) {
                 Color.black
-                if let live {
-                    Image(uiImage: live)
-                        .resizable()
-                        .interpolation(.medium)
-                        .frame(width: geo.size.width, height: geo.size.height)
-                }
+                // Always mounted so the layer is attached before the first
+                // frame; it stays black until frames arrive.
+                MultiviewCompositePreviewLayerView()
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
                 ForEach(Array(zip(tiles.indices, scaled)), id: \.0) { i, r in
                     let tile = tiles[i]
                     let focused = tile.id == store.audioTileID

@@ -280,12 +280,109 @@ final class MultiviewCompositeTaps: @unchecked Sendable {
 /// for a receiver without native Multiview; stopped by the remote card's
 /// Stop, the cast/AirPlay session ending, the local Multiview closing, or
 /// the resource rules.
-/// The composite's live preview frames, observed only by the preview grid.
+/// The composite's live preview, observed only by the preview grid.
+/// Frames no longer go through SwiftUI (Logan 2026-10-08: the iPhone
+/// preview "stutters a lot" while the TV is smooth). The old path took a
+/// 480x270 CGImage readback every 6th compose tick (5 fps at 30 fps),
+/// hopped it to the main actor as a UIImage and published it, so the
+/// preview showed 5 fps and every frame re-ran the grid body (GeometryReader,
+/// gestures, overlays) on the main thread. Now the compositor hands each
+/// composed CVPixelBuffer to `MultiviewCompositePreviewSink`, which enqueues
+/// it on an AVSampleBufferDisplayLayer from the compose queue: full
+/// composite rate, GPU scaling, no main-thread work per frame. Only
+/// `hasFrame` (first frame / stop) is published here.
 @MainActor
 final class MultiviewCompositePreview: ObservableObject {
     static let shared = MultiviewCompositePreview()
-    @Published var image: UIImage?
+    @Published var hasFrame = false
     private init() {}
+}
+
+/// Thread-safe hand-off from the compose queue to the preview layer.
+final class MultiviewCompositePreviewSink: @unchecked Sendable {
+    static let shared = MultiviewCompositePreviewSink()
+    private let lock = NSLock()
+    private var layer: AVSampleBufferDisplayLayer?
+    private var format: CMVideoFormatDescription?
+    private var announced = false
+    // Stats (lock): frames enqueued and main-thread ms spent on the preview.
+    private var frames = 0
+    private var mainSeconds: Double = 0
+    private var statsSince = CACurrentMediaTime()
+
+    func attach(_ l: AVSampleBufferDisplayLayer) {
+        lock.lock(); layer = l; lock.unlock()
+    }
+    func detach(_ l: AVSampleBufferDisplayLayer) {
+        lock.lock(); if layer === l { layer = nil }; lock.unlock()
+    }
+    /// Main-thread time spent on preview work (layer attach, layout).
+    func addMainTime(_ seconds: Double) {
+        lock.lock(); mainSeconds += seconds; lock.unlock()
+    }
+    /// Compose queue, every composed frame.
+    func push(_ pb: CVPixelBuffer, host: CFTimeInterval) {
+        lock.lock()
+        let l = layer
+        let first = !announced
+        announced = true
+        var fmt = format
+        if fmt == nil || !CMVideoFormatDescriptionMatchesImageBuffer(fmt!, imageBuffer: pb) {
+            var f: CMVideoFormatDescription?
+            CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: pb, formatDescriptionOut: &f)
+            format = f
+            fmt = f
+        }
+        lock.unlock()
+        if first {
+            Task { @MainActor in
+                let t0 = CACurrentMediaTime()
+                if !MultiviewCompositePreview.shared.hasFrame { MultiviewCompositePreview.shared.hasFrame = true }
+                MultiviewCompositePreviewSink.shared.addMainTime(CACurrentMediaTime() - t0)
+            }
+        }
+        if let l, let fmt {
+            var timing = CMSampleTimingInfo(duration: .invalid,
+                                            presentationTimeStamp: CMTime(seconds: host, preferredTimescale: 90_000),
+                                            decodeTimeStamp: .invalid)
+            var sb: CMSampleBuffer?
+            CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: pb,
+                                                     formatDescription: fmt, sampleTiming: &timing,
+                                                     sampleBufferOut: &sb)
+            if let sb {
+                if let atts = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true),
+                   CFArrayGetCount(atts) > 0 {
+                    let d = unsafeBitCast(CFArrayGetValueAtIndex(atts, 0), to: CFMutableDictionary.self)
+                    CFDictionarySetValue(d, Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+                                         Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
+                }
+                // A layer that failed (app backgrounded, media services
+                // reset) stays black until flushed.
+                if l.status == .failed { l.flush() }
+                nonisolated(unsafe) let sample = sb
+                l.enqueue(sample)
+                lock.lock(); frames += 1; lock.unlock()
+            }
+        }
+        lock.lock()
+        let secs = host - statsSince
+        guard secs >= 10 else { lock.unlock(); return }
+        let fps = Double(frames) / secs
+        let mainMs = mainSeconds * 1000
+        let attached = layer != nil
+        frames = 0; mainSeconds = 0; statsSince = host
+        lock.unlock()
+        debugLog(String(format: "[MV-CAST] preview fps=%.1f main=%.1f attached=%@", fps, mainMs, attached ? "yes" : "no"))
+    }
+    /// Session stop: the next session announces its first frame again.
+    func reset() {
+        lock.lock()
+        announced = false
+        let l = layer
+        frames = 0; mainSeconds = 0; statsSince = CACurrentMediaTime()
+        lock.unlock()
+        l?.flushAndRemoveImage()
+    }
 }
 
 @MainActor
@@ -301,21 +398,10 @@ final class MultiviewCompositeSession: ObservableObject {
     @Published private(set) var channelNames: [String] = []
     /// AirPlay: the loopback TS the hidden composite tile plays.
     @Published private(set) var airPlayTileURL: URL?
-    /// Scaled-down live frames of the composite (about 5 fps) for the
-    /// remote controls sheet's preview grid. Published on its own object
-    /// (MultiviewCompositePreview), not on this session: MainTabView
-    /// observes this session, so a frame published here re-rendered the
-    /// whole tab root and the remote controls sheet about 5 times a second
-    /// (device log 2026-10-07 round 8: "[TAB] bodies/1s ... MainTabView=6"
-    /// for the whole composite cast against 2 before it), which rebuilt
-    /// the sheet's Layout menu mid-tap (flicker, taps lost).
-    var previewImage: UIImage? {
-        get { MultiviewCompositePreview.shared.image }
-        set {
-            if newValue == nil, MultiviewCompositePreview.shared.image == nil { return }
-            MultiviewCompositePreview.shared.image = newValue
-        }
-    }
+    /// Live preview frames go straight from the compositor to the sheet's
+    /// display layer (MultiviewCompositePreviewSink), never through this
+    /// session: MainTabView observes this session, and a per-frame publish
+    /// here re-rendered the whole tab root (device log 2026-10-07 round 8).
     /// The composite's grid layout for this session (Layout row in the
     /// remote controls sheet). Seeded from the stored preference at start.
     @Published private(set) var layoutMode: MultiviewLayoutMode = .auto
@@ -370,12 +456,6 @@ final class MultiviewCompositeSession: ObservableObject {
                                        accent: (Double(r), Double(g), Double(b)),
                                        style: MultiviewCompositeStyle.current())
         comp.setNames(Dictionary(tiles.map { ($0.id, $0.item.name) }, uniquingKeysWith: { a, _ in a }))
-        comp.onPreview = { [weak self] image in
-            Task { @MainActor in
-                guard let self, self.compositor === comp else { return }
-                self.previewImage = UIImage(cgImage: image)
-            }
-        }
         comp.onFailure = { [weak self] reason in
             Task { @MainActor in self?.failed(reason.0, detail: reason.1) }
         }
@@ -438,7 +518,8 @@ final class MultiviewCompositeSession: ObservableObject {
         setKeepalive(false)
         airPlayTileURL = nil
         channelNames = []
-        previewImage = nil
+        MultiviewCompositePreviewSink.shared.reset()
+        if MultiviewCompositePreview.shared.hasFrame { MultiviewCompositePreview.shared.hasFrame = false }
         logoTask?.cancel()
         logoTask = nil
         playingState.removeAll()
@@ -1391,12 +1472,6 @@ final class MultiviewCompositor: @unchecked Sendable {
     /// No new picture from any tile for this long while backgrounded is
     /// logged (diagnostic only; the composite keeps running).
     static let backgroundNoPictureSeconds: Double = 1.5
-    /// A scaled-down composed frame every `previewEvery` ticks.
-    var onPreview: ((CGImage) -> Void)?
-    static let previewEvery = 6
-    static let previewSize = CGSize(width: 480, height: 270)
-    private var previewTick = 0
-
     private let composeQueue = DispatchQueue(label: "aerio.mv-composite.compose", qos: .userInteractive)
     private let audioQueue = DispatchQueue(label: "aerio.mv-composite.audio", qos: .userInitiated)
     private let muxQueue = DispatchQueue(label: "aerio.mv-composite.mux", qos: .userInitiated)
@@ -1805,18 +1880,12 @@ final class MultiviewCompositor: @unchecked Sendable {
         guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &out) == kCVReturnSuccess,
               let out else { dropped += 1; return }
         let image = compose(tiles: tiles, focus: focus, host: host)
-        previewTick += 1
-        if previewTick >= Self.previewEvery, let onPreview {
-            previewTick = 0
-            let sx = Self.previewSize.width / CGFloat(MultiviewCompositeLayout.width)
-            let small = image.transformed(by: CGAffineTransform(scaleX: sx, y: sx))
-            if let cg = ciContext.createCGImage(small, from: CGRect(origin: .zero, size: Self.previewSize)) {
-                onPreview(cg)
-            }
-        }
         ciContext.render(image, to: out, bounds: CGRect(x: 0, y: 0, width: MultiviewCompositeLayout.width,
                                                        height: MultiviewCompositeLayout.height),
                          colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+        // The sheet's preview shows this exact buffer at the composite's
+        // rate (no CGImage readback, no main-thread hop).
+        MultiviewCompositePreviewSink.shared.push(out, host: host)
         var key = keyPolicy.isKeyframe(pts: pts)
         if forceKeyframe { key = true; forceKeyframe = false }
         let props: CFDictionary? = key ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil
