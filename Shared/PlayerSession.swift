@@ -790,6 +790,16 @@ final class PlayerSession: ObservableObject {
             AerioCastController.shared.castPickedChannel(item)
             return true
         }
+        // CarPlay (Logan 2026-10-08): with the app open in CarPlay the phone
+        // never plays video. A live channel picked on the phone goes to the
+        // car's headless engine, exactly like a pick while casting, and the
+        // phone shows the CarPlay dock card.
+        if isLive, NowPlayingManager.shared.isCarPlayConnected {
+            debugLog("[CARPLAY] tune: phone pick \(item.name) routed to the car")
+            HeadlessPlaybackController.shared.start(item: item, server: server, isLive: true,
+                                                    videoCapable: HeadlessPlaybackController.shared.videoCapable)
+            return true
+        }
         #endif
 
         let store = MultiviewStore.shared

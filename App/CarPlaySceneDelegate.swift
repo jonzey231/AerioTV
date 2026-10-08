@@ -105,6 +105,17 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         // is empty, and observe the store so the lists fill in once the
         // load lands.
         NowPlayingManager.shared.isCarPlayConnected = true
+        CarPlaySceneDelegate.suspendKeepAlive(reason: "car connected")
+        // A channel already playing on the phone moves to the car (the phone
+        // goes idle, like any media app): Cast-style hand-off.
+        if let playing = NowPlayingManager.shared.playingItem,
+           MultiviewStore.shared.tiles.count > 0 {
+            debugLog("[CARPLAY] connect: phone was playing \(playing.name); handing it to the car")
+            endPhoneSession(reason: "car connected")
+            HeadlessPlaybackController.shared.start(
+                item: playing, server: ChannelStore.shared.activeServer,
+                isLive: true, videoCapable: carSupportsVideo)
+        }
         hydrateRetriesLeft = 5
         hydrateChannelsIfNeeded()
 
@@ -136,16 +147,10 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         cancellables.removeAll()
         NowPlayingManager.shared.isCarPlayConnected = false
         HeadlessPlaybackController.shared.videoCapable = false
-        if headlessOwned, !HeadlessPlaybackController.hasForegroundPlayerScene() {
-            // The car was the only thing playing: end the whole session, not
-            // just the engine. Leaving the store's tile behind made the phone
-            // start that channel by itself the next time it was opened.
-            // exit() also stops the headless engine and clears Now Playing.
-            PlayerSession.shared.exit()
-        } else {
-            // No-op unless a headless engine is still up.
-            HeadlessPlaybackController.shared.stop()
-        }
+        // The phone sat idle while the car played, so there is no phone
+        // session to restore: stopping the car engine ends playback.
+        HeadlessPlaybackController.shared.stop()
+        CarPlaySceneDelegate.resumeKeepAlive()
     }
 
     // MARK: - Standalone hydration
@@ -254,7 +259,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         // Rebuild rows when the playing channel changes so the isPlaying
         // indicator and per-item playback configuration (play vs none on a
         // video-capable car) track reality, not just list-build time.
-        NowPlayingManager.shared.$playingItem
+        HeadlessPlaybackController.shared.$carItem
             .receive(on: RunLoop.main)
             .removeDuplicates { $0?.id == $1?.id }
             .sink { [weak self] _ in
@@ -471,7 +476,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             completion()
         }
 
-        let isThisPlaying = NowPlayingManager.shared.playingItem?.id == channel.id
+        let isThisPlaying = HeadlessPlaybackController.shared.carItem?.id == channel.id
         if isThisPlaying {
             item.isPlaying = true
         }
@@ -508,18 +513,14 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         let server = ChannelStore.shared.activeServer
         debugLog("[CARPLAY] tune: tap \(channel.name) fgScene=\(HeadlessPlaybackController.hasForegroundPlayerScene()) headless=\(HeadlessPlaybackController.shared.isActive) tiles=\(MultiviewStore.shared.tiles.count)")
 
-        if PlaybackFeatureFlags.useUnifiedPlayback {
-            switchSession(to: channel, server: server)
-        } else {
-            let headers = server?.authHeaders ?? ["Accept": "*/*"]
-            NowPlayingManager.shared.startPlaying(channel, headers: headers)
-        }
+        // Logan 2026-10-08 (standing rule): while the app is open in CarPlay
+        // the phone never plays video and never presents its player. A car
+        // tap only ever drives the headless engine; the phone shows the
+        // passive CarPlay dock card. A phone session left over from before
+        // (or pinned with Play Here) ends here so there is one producer.
+        endPhoneSession(reason: "car tap")
+        CarPlaySceneDelegate.suspendKeepAlive(reason: "car tune")
 
-        // The calls above only mutate shared state; the real player lives in
-        // the SwiftUI tile, which mounts only when a foreground window scene
-        // renders. In a car / locked phone that scene doesn't exist, so drive
-        // the headless engine directly; it no-ops whenever the phone app is
-        // foreground.
         HeadlessPlaybackController.shared.start(
             item: channel,
             server: server,
@@ -530,32 +531,37 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         showNowPlaying()
     }
 
-    /// A car tap REPLACES what is playing. `PlayerSession.begin` with a
-    /// session already up appends a tile (that is the phone's Add to
-    /// Multiview behavior), so every tap in the car used to grow a hidden
-    /// multiview until the cap refused further taps, and the phone opened
-    /// onto a grid of every channel tried on the drive.
-    private func switchSession(to channel: ChannelDisplayItem, server: ServerConnection?) {
-        let store = MultiviewStore.shared
-        // Cast / AerioTV Remote routing lives in begin(); let it decide.
-        let routedElsewhere = AerioCastController.shared.isCasting
-            || CompanionClient.shared.isControlling
-        if store.tiles.isEmpty || routedElsewhere {
-            _ = PlayerSession.shared.begin(item: channel, server: server)
+    /// End any phone-side playback session (fullscreen player or tiles) so
+    /// the headless engine is the only producer. Never presents anything.
+    private func endPhoneSession(reason: String) {
+        let tiles = MultiviewStore.shared.tiles.count
+        guard tiles > 0 || NowPlayingManager.shared.playingItem != nil else {
+            debugLog("[CARPLAY] tune: no phone session to end (\(reason))")
             return
         }
-        if store.tiles.count == 1, store.tiles.first?.item.id == channel.id {
-            return
-        }
-        if store.tiles.count == 1, let tileID = store.audioTileID,
-           store.swapTileContent(tileID: tileID, to: channel, server: server) {
-            NowPlayingManager.shared.startPlaying(
-                channel, headers: server?.authHeaders ?? ["Accept": "*/*"], isLive: true)
-            return
-        }
-        debugLog("[CARPLAY] tune: replacing a \(store.tiles.count)-tile session with \(channel.name)")
+        debugLog("[CARPLAY] tune: ending the phone session (\(tiles) tile(s)) for \(reason); the car owns playback")
+        // exit() also stops any headless engine; the caller starts the car's.
         PlayerSession.shared.exit()
-        _ = PlayerSession.shared.begin(item: channel, server: server)
+    }
+
+    /// Kept Live (Logan 2026-10-08): nothing is kept alive while CarPlay is
+    /// active. Releases every kept channel and blocks new ones until the car
+    /// disconnects.
+    static func suspendKeepAlive(reason: String) {
+        if !LiveChannelRetention.suspendedForCarPlay {
+            LiveChannelRetention.suspendedForCarPlay = true
+            debugLog("[CARPLAY] keep-alive suspended (\(reason))")
+        }
+        if !LiveChannelRetention.shared.entries.isEmpty {
+            debugLog("[CARPLAY] keep-alive: releasing \(LiveChannelRetention.shared.entries.count) kept channel(s)")
+            LiveChannelRetention.shared.stopAll(reason: "CarPlay active")
+        }
+    }
+
+    static func resumeKeepAlive() {
+        guard LiveChannelRetention.suspendedForCarPlay else { return }
+        LiveChannelRetention.suspendedForCarPlay = false
+        debugLog("[CARPLAY] keep-alive resumed (car disconnected)")
     }
 
     /// Show Now Playing without pushing it twice: pushing a template that is

@@ -4765,6 +4765,9 @@ struct MainTabView: View {
     /// card above the tab bar; on session end it just closes (no local
     /// resume, rule 4).
     @ObservedObject private var castController = AerioCastController.shared
+    /// CarPlay (Logan 2026-10-08): while the car owns playback the phone is
+    /// idle and shows only the CarPlay dock card.
+    @ObservedObject private var carPlayHeadless = HeadlessPlaybackController.shared
     /// Phone-side Multiview composite (2026-10-06): the remote card and
     /// sheet read "Multiview" with the channel names while it runs.
     @ObservedObject private var mvComposite = MultiviewCompositeSession.shared
@@ -6397,6 +6400,7 @@ struct MainTabView: View {
     /// over companion (they are already mutually exclusive), and AirPlay is
     /// last because it is the only one that keeps a local AVPlayer alive.
     private var activeRemoteTransport: RemoteSessionCard.Transport? {
+        if carPlayHeadless.carItem != nil { return .carPlay }
         if castController.isCasting { return .cast }
         if companionClient.isControlling { return .companion }
         switch airPlay.phase {
@@ -6446,6 +6450,8 @@ struct MainTabView: View {
             return castController.castingContent?.mediaID
         case .airPlay:
             return airPlayIsIdleRoute ? nil : nowPlaying.playingItem?.id
+        case .carPlay:
+            return carPlayHeadless.carItem?.id
         case .companion:
             guard let cid = companionClient.controllingChannelID else { return nil }
             return ChannelStore.shared.channels.first(where: {
@@ -6541,6 +6547,18 @@ struct MainTabView: View {
     @ViewBuilder
     private var remoteSessionCardContent: some View {
         switch activeRemoteTransport {
+        case .carPlay:
+            let item = carPlayHeadless.carItem
+            RemoteSessionCard(
+                transport: .carPlay,
+                title: item?.name ?? "CarPlay",
+                status: (item?.currentProgram?.isEmpty == false ? item!.currentProgram! : "Playing in CarPlay"),
+                artURL: item?.logoURL?.absoluteString,
+                isPlaying: !carPlayHeadless.carPaused,
+                onTap: { showRemoteControls = true },
+                onTogglePlayPause: { carPlayHeadless.togglePause() },
+                onStop: { carPlayHeadless.stopFromPhone() }
+            )
         case .cast:
             let device = castController.connectedDeviceName ?? "TV"
             let content = castController.castingContent
@@ -6647,6 +6665,24 @@ struct MainTabView: View {
     @ViewBuilder
     private var remoteControlsSheet: some View {
         switch activeRemoteTransport {
+        case .carPlay:
+            // Minimal (Logan 2026-10-08): play/pause, channel up/down, Stop.
+            let item = carPlayHeadless.carItem
+            RemoteControlScreen(
+                title: item?.name ?? "CarPlay",
+                subtitle: item?.currentProgram,
+                artURL: item?.logoURL?.absoluteString,
+                statusText: "Playing in CarPlay",
+                isPlaying: !carPlayHeadless.carPaused,
+                stopLabel: "Stop",
+                onTogglePlayPause: { carPlayHeadless.togglePause() },
+                onChannelUp: { carPlayHeadless.flipChannel(1) },
+                onChannelDown: { carPlayHeadless.flipChannel(-1) },
+                onStop: {
+                    carPlayHeadless.stopFromPhone()
+                    showRemoteControls = false
+                }
+            )
         case .cast:
             // 2026-09-21 production recording: the shared Cast/AirPlay sheet.
             // Nothing loaded -> the minimal idle sheet; a web-receiver flip

@@ -70,8 +70,14 @@ final class PlaybackEngineRegistry {
 /// 4. A live AVPlayer tile going to the background with a car connected
 ///    quiesces and hands its channel here (`takeOverFromBackgroundedView`).
 @MainActor
-final class HeadlessPlaybackController {
+final class HeadlessPlaybackController: ObservableObject {
     static let shared = HeadlessPlaybackController()
+
+    /// The channel the car is playing, for the phone's CarPlay dock card and
+    /// the CarPlay list's playing indicator. nil when the car owns nothing.
+    @Published private(set) var carItem: ChannelDisplayItem?
+    /// User pause state of the car session (card / sheet play-pause glyph).
+    @Published private(set) var carPaused = false
 
     /// The active engine. A two-case enum instead of a shared protocol ON
     /// PURPOSE: a @MainActor protocol conformance infers main-actor isolation
@@ -105,6 +111,7 @@ final class HeadlessPlaybackController {
         didSet {
             let active = engine != nil
             if active != activeSubject.value { activeSubject.send(active) }
+            if !active, carItem != nil { carItem = nil }
         }
     }
     /// Emits whether the car (headless engine) owns audio. AVPlayer tiles
@@ -210,6 +217,8 @@ final class HeadlessPlaybackController {
             ownsAudioSession = true
         }
         currentItem = item
+        carItem = item
+        carPaused = false
         attempt = 0
         healthySince = nil
         isPaused = false
@@ -218,14 +227,50 @@ final class HeadlessPlaybackController {
 
         // Complete Now Playing: title / program subtitle / channel logo /
         // program-relative timeline, plus play-pause + next/prev commands.
+        // Next/previous from the car or lock screen flip the CAR's channel
+        // here; the phone's changeChannel path would need a phone session,
+        // which never exists while the car owns playback.
+        let subtitle = item.currentProgram?.trimmingCharacters(in: .whitespacesAndNewlines)
         NowPlayingBridge.shared.configure(
-            for: item,
+            title: item.name,
+            subtitle: (subtitle?.isEmpty == false) ? subtitle : item.group,
+            artworkURL: item.logoURL,
+            duration: nil,
             isLive: isLive,
+            programStart: item.currentProgramStart,
+            programEnd: item.currentProgramEnd,
             onPlay: { [weak self] in self?.setPaused(false) },
             onPause: { [weak self] in self?.setPaused(true) },
-            onSeek: nil
+            onSeek: nil,
+            onFlipChannel: { [weak self] dir in self?.flipChannel(dir) }
         )
         startElapsedTimer()
+    }
+
+    // MARK: Phone-side controls (CarPlay dock card / sheet)
+
+    func togglePause() {
+        debugLog("[CARPLAY] card: play/pause (paused=\(isPaused) -> \(!isPaused))")
+        setPaused(!isPaused)
+    }
+
+    /// Step the car's channel through the active playlist's channel list
+    /// (same order as the phone's channel up/down).
+    func flipChannel(_ direction: Int) {
+        guard let current = currentItem else { return }
+        let list = ChannelStore.shared.channels
+        guard let idx = list.firstIndex(where: { $0.id == current.id }) else { return }
+        let next = list[max(0, min(list.count - 1, idx + direction))]
+        guard next.id != current.id else { return }
+        debugLog("[CARPLAY] tune: flip \(direction > 0 ? "+1" : "-1") \(current.name) -> \(next.name)")
+        start(item: next, server: ChannelStore.shared.activeServer, isLive: true,
+              videoCapable: videoCapable)
+    }
+
+    /// Phone card X / sheet Stop: end the car session.
+    func stopFromPhone() {
+        debugLog("[CARPLAY] card: stop from phone")
+        stop()
     }
 
     /// A live AVPlayer tile is leaving the screen (phone locked or app
@@ -367,10 +412,12 @@ final class HeadlessPlaybackController {
         guard engine != nil, currentItem != nil else { return }
         debugLog("[CARPLAY] tune: re-tune current channel (\(reason))")
         engine?.stop()
-        engine = nil
+        engine = .none
+        carItem = currentItem
         attempt = 0
         healthySince = nil
         isPaused = false
+        carPaused = false
         pausedAt = nil
         tune(server: ChannelStore.shared.activeServer)
     }
@@ -405,6 +452,7 @@ final class HeadlessPlaybackController {
             return
         }
         isPaused = paused
+        carPaused = paused
         pausedAt = paused ? Date() : nil
         engine.setPaused(paused)
         NowPlayingBridge.shared.updateElapsed(0, rate: paused ? 0.0 : 1.0)
@@ -453,6 +501,8 @@ final class HeadlessAVPlayerEngine {
     /// Bumped on every play/stop so late callbacks from a torn-down
     /// pipeline are ignored.
     private var token = UUID()
+    private var silenceStarted: Date?
+    private var silenceLogged = false
 
     func play(_ resolved: ResolvedEngine, allowsVideo: Bool) {
         teardownPipeline()
@@ -482,8 +532,32 @@ final class HeadlessAVPlayerEngine {
                     }
                 }
             }
-            mux.onIngestSilence = { silent in
-                debugLog("[CARPLAY] engine: remux ingest \(silent ? "silent" : "flowing again")")
+            // Dispatcharr's proxy delivers in bursts, so 2 to 6 s of socket
+            // silence between bursts is normal (cp2 2026-10-08 00:13:18 to
+            // :28, every gap closed by the next burst; the TS-REMUX lines
+            // still record each one). Only a gap that outlasts 10 s is worth
+            // a CarPlay line, and its recovery is logged only after it.
+            mux.onIngestSilence = { [weak self] silent in
+                MainActor.assumeIsolated {
+                    guard let self, self.token == t else { return }
+                    if silent {
+                        self.silenceStarted = Date()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+                            MainActor.assumeIsolated {
+                                guard let self, self.token == t, let since = self.silenceStarted,
+                                      !self.silenceLogged else { return }
+                                self.silenceLogged = true
+                                debugLog("[CARPLAY] engine: remux ingest silent for \(Int(Date().timeIntervalSince(since)) + 2) s")
+                            }
+                        }
+                    } else {
+                        if self.silenceLogged, let since = self.silenceStarted {
+                            debugLog("[CARPLAY] engine: remux ingest flowing again after \(Int(Date().timeIntervalSince(since)) + 2) s")
+                        }
+                        self.silenceStarted = nil
+                        self.silenceLogged = false
+                    }
+                }
             }
             mux.onIngestClosed = { [weak self] in
                 MainActor.assumeIsolated {

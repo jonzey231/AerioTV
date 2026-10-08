@@ -4343,8 +4343,13 @@ final class LiveChannelRetention: ObservableObject {
         }
     }
 
+    /// Set while CarPlay is connected (Logan 2026-10-08): nothing is kept
+    /// alive while the car owns playback. Main thread only.
+    nonisolated(unsafe) static var suspendedForCarPlay = false
+
     static var isEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "liveRewindEnabled")
+        !suspendedForCarPlay
+            && UserDefaults.standard.bool(forKey: "liveRewindEnabled")
             && UserDefaults.standard.bool(forKey: "liveRewindRetainChannels")
     }
     /// User-facing "channels to keep going" INCLUDING the one playing.

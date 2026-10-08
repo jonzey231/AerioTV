@@ -5036,13 +5036,14 @@ struct CompanionPickerSheet: View {
 struct RemoteSessionCard: View {
 
     enum Transport {
-        case cast, airPlay, companion
+        case cast, airPlay, companion, carPlay
 
         var glyph: String {
             switch self {
             case .cast: return "sparkles.tv"
             case .airPlay: return "airplay.video"
             case .companion: return "tv.and.mediabox"
+            case .carPlay: return "car.fill"
             }
         }
     }
