@@ -5306,6 +5306,19 @@ enum GuideArrowPressEdges {
         return (upAt[key] ?? .distantPast) < down
     }
 
+    /// GH Android #128 parity: when the player last left fullscreen for the
+    /// guide (hold-Left minimize, Back). Set from the guide's refocus hold.
+    static var guideOpenedAt: Date = .distantPast
+
+    /// True while `key` is still held from a press that began BEFORE the
+    /// guide opened: the press that minimized the player. Its repeats and
+    /// its release must never reach the guide (they scrolled the timeline
+    /// back in time on Android). Swallowed until key-up; a new press works.
+    static func isHeldFromBeforeGuideOpen(_ key: String) -> Bool {
+        guard isDown(key), let down = downAt[key] else { return false }
+        return down < guideOpenedAt
+    }
+
     static func record(_ press: UIPress) {
         let key: String
         switch press.type {
@@ -6849,6 +6862,13 @@ struct EPGGuideView: View {
         // guide on release (focusedProgramID == nil); gating on a focused
         // cell drops that stray scroll, while normal scrolling (which
         // always has a focused cell) is untouched.
+        // GH Android #128 parity: a move command from the arrow that
+        // minimized the player (still held) never scrolls the guide.
+        let heldKey: String? = direction == .left ? "LEFT" : (direction == .right ? "RIGHT" : nil)
+        if let heldKey, GuideArrowPressEdges.isHeldFromBeforeGuideOpen(heldKey) {
+            debugLog("[PRESS] swallowed repeat after guide open key=\(heldKey) (move command)")
+            return
+        }
         guard focusedProgramID != nil else { return }
         switch direction {
         case .left:
@@ -7051,6 +7071,13 @@ struct EPGGuideView: View {
         TVPagePressCatcher { (down: Bool) in
             pageGuideFocus(down: down, proxy: proxy)
         }
+        // GH Android #128 parity: stamp the moment the player leaves
+        // fullscreen for the guide (chromeFocusHold mirrors
+        // NowPlayingManager.guideRefocusPending, set by applyMinimized), so
+        // a still-held arrow from that press is swallowed until key-up.
+        .onChange(of: chromeFocusHold) { _, holding in
+            if holding { GuideArrowPressEdges.guideOpenedAt = Date() }
+        }
         // Guide key rows: the arrow focus veto lives as long as the grid.
         .onAppear {
             GuideArrowFocusVeto.install()
@@ -7073,8 +7100,14 @@ struct EPGGuideView: View {
     private func shouldVetoArrowFocusMove(_ context: UIFocusUpdateContext) -> Bool {
         let heading = context.focusHeading
         let isLeft = heading.contains(.left)
-        guard isLeft || heading.contains(.right),
-              !TVSearchOverlayState.shared.isUp,
+        guard isLeft || heading.contains(.right) else { return false }
+        // GH Android #128 parity: the arrow that minimized the player is
+        // still held; refuse every move it asks for until key-up.
+        if GuideArrowPressEdges.isHeldFromBeforeGuideOpen(isLeft ? "LEFT" : "RIGHT") {
+            debugLog("[PRESS] swallowed repeat after guide open key=\(isLeft ? "LEFT" : "RIGHT") (focus move)")
+            return true
+        }
+        guard !TVSearchOverlayState.shared.isUp,
               let pid = focusedProgramID else { return false }
         if !isLeft && rightHoldPinningTimeline { return false }
         let key = isLeft ? "LEFT" : "RIGHT"
@@ -9232,6 +9265,27 @@ private struct GuideProgramButton: View {
                 }
                 .frame(width: max(20, min(width - leadingClip, UIScreen.main.bounds.width)),
                        height: rowHeight)
+                .overlay(alignment: .trailing) {
+                    // GH Android #127 part 2 (Logan 2026-10-07): the on-air
+                    // cell keeps tap-to-tune; a small "i" at the trailing
+                    // edge of its VISIBLE part opens the full Program Info
+                    // without the long-press menu. Only on cells wide
+                    // enough to show text, so it never crowds a short slot.
+                    if prog.isLive, !multiviewStore.isStagingFromGuide,
+                       min(width - leadingClip, UIScreen.main.bounds.width) >= 120 {
+                        Button {
+                            presentProgramInfo(after: 0)
+                        } label: {
+                            Image(systemName: "info.circle")
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundColor(.textSecondary)
+                                .frame(width: 44, height: rowHeight)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Program Info")
+                    }
+                }
                 .offset(x: leadingClip)
             }
             .confirmationDialog("Add to Collection", isPresented: $showCollectionPicker, titleVisibility: .visible) {
