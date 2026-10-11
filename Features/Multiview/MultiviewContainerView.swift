@@ -1638,7 +1638,7 @@ struct MultiviewContainerView: View {
         if PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1 {
             return "Stops playback and returns to the channel guide."
         }
-        return "Exit Multiview collapses the grid back to the stream you were listening to."
+        return "Exit Multiview stops every channel and returns to the guide."
     }
 
     /// Run the actual exit action that the confirmation dialog was
@@ -1646,16 +1646,11 @@ struct MultiviewContainerView: View {
     /// confirmation's Yes-button and any future programmatic exit
     /// path (e.g. iPad toolbar "Exit" button) share one code path.
     private func performConfirmedExit() {
-        if PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1 {
-            // Unified-path N=1: full teardown — HomeView falls
-            // through to the Live TV guide / previous tab once
-            // mode flips to `.idle`.
-            session.stop()
-        } else {
-            // N>=2 (or legacy N=1 which doesn't hit the unified
-            // branch): collapse to the audio tile.
-            session.exitMultiviewKeepingAudioTile()
-        }
+        // Exit Multiview stops every channel and returns to the guide
+        // (Logan 2026-10-11, parity with Android, where Exit Multiview
+        // clears the store). It used to collapse N>=2 to the audio tile,
+        // which left a one-tile Multiview playing full screen.
+        session.stop()
     }
 
     #if os(tvOS)
