@@ -6679,6 +6679,17 @@ struct MainTabView: View {
         }
     }
 
+    /// The channel the AerioTV Remote last sent ("disp:<uuid>"), resolved on
+    /// this phone for the sheet's logo and program block.
+    private var companionControlledItem: ChannelDisplayItem? {
+        guard let cid = companionClient.controllingChannelID else { return nil }
+        if cid.hasPrefix("disp:") {
+            let uuid = String(cid.dropFirst(5))
+            return ChannelStore.shared.channels.first(where: { $0.uuid == uuid })
+        }
+        return ChannelStore.shared.channels.first(where: { $0.id == cid })
+    }
+
     /// Rule 3: the SAME RemoteControlScreen the deleted covers used, now in a
     /// sheet. Each transport passes the options surface it actually supports.
     @ViewBuilder
@@ -6754,27 +6765,54 @@ struct MainTabView: View {
                 nativeMultiview: native
             )
         case .companion:
-            RemoteControlScreen(
-                title: companionClient.nowPlaying,
-                subtitle: nil,
-                artURL: nil,
-                statusText: "Controlling \(companionClient.connectedTVName ?? "TV")",
+            // The Cast sheet layout (Logan 2026-10-11): only the glyph, the
+            // "Controlling X" line and the Disconnect wording differ.
+            let item = companionControlledItem
+            let tvName = companionClient.connectedTVName ?? "TV"
+            let title = companionClient.nowPlaying
+            RemoteSessionSheet(
+                transport: .companion,
+                mode: title.isEmpty && item == nil ? .idle : .playing,
+                channelName: item?.name ?? (title.isEmpty ? tvName : title),
+                statusText: title.isEmpty && item == nil
+                    ? "Connected. Select a channel to start."
+                    : "Controlling \(tvName)",
+                artURL: item?.logoURL?.absoluteString,
+                channelID: item?.id,
+                fallbackSubtitle: item == nil ? nil : (title == item?.name ? nil : title),
                 isPlaying: companionClient.remoteIsPlaying,
-                stopLabel: "Stop and close",
+                item: item,
                 onTogglePlayPause: { companionClient.togglePlayPause() },
                 onChannelUp: { companionClient.flipChannel(1) },
                 onChannelDown: { companionClient.flipChannel(-1) },
+                // Back / Forward seek the TV's rewind buffer when it has one.
+                onSeek: { delta in
+                    guard companionClient.remoteState.canSeek else { return }
+                    companionClient.seekBy(Int64(delta * 1000))
+                },
                 // Same semantic as the card's X: stop the TV, then close.
                 onStop: {
                     companionClient.stopPlaybackAndDisconnect()
                     showRemoteControls = false
+                },
+                seekWindow: {
+                    let s = companionClient.remoteState
+                    guard s.canSeek else { return nil }
+                    return RemoteSeekWindow(start: Double(s.windowStartMs) / 1000,
+                                            end: Double(s.windowEndMs) / 1000,
+                                            position: Double(s.positionWallMs) / 1000,
+                                            isLive: true)
+                },
+                onSeekTo: { target in
+                    debugLog("[Cast] scrub seek to \(Int(target))s (companion wall clock)")
+                    companionClient.seekToWall(Int64(target * 1000))
                 },
                 // Companion-only: drop the link, TV keeps playing.
                 onDisconnect: {
                     companionClient.disconnectLeavingTVPlaying()
                     showRemoteControls = false
                 },
-                companion: companionClient  // full options (scrubber + sheet)
+                companion: companionClient
             )
         case .airPlay:
             // Idle route -> the minimal idle sheet; probing = the playing

@@ -274,9 +274,8 @@ struct MultiviewTileView: View {
     /// upgraded URL on tile.streamURL (MultiviewStore.add does the upgrade
     /// at add-time under a direct-HLS lock), so this falls through.
     private var avPlayerTileURL: URL {
-        if store.sessionEngine == .avPlayerDirectHLS,
-           let routeURL = store.sessionRouteURL,
-           tile.id == store.tiles.first?.id {
+        // By tile id, not grid position: Move Tile must not re-tune.
+        if let routeURL = store.routeURL(for: tile) {
             return routeURL
         }
         // A composite session relocked from direct HLS to the remux path

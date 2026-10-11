@@ -228,6 +228,25 @@ final class MultiviewStore: ObservableObject {
     /// The upgraded route URL for the seed tile when the lock is
     /// direct-HLS (server-side TS->HLS upgrade); nil otherwise.
     @Published private(set) var sessionRouteURL: URL?
+    /// The tile (and its source URL) the route URL belongs to: the seed
+    /// tile, by id, not by grid position. Keyed on position, a Move Tile
+    /// swap handed the seed's route URL to whichever tile landed first and
+    /// re-tuned both tiles (Apple TV log 2026-10-11 17:02:56, "flip start
+    /// after confirmed teardown" on ESPNU HD and ESPN HD right after the
+    /// swap).
+    @Published private(set) var sessionRouteTileID: String?
+    private(set) var sessionRouteSourceURL: URL?
+
+    /// The route URL for `tile` when it is still the seed tile playing the
+    /// seed channel; nil otherwise (moved tiles keep their own URL).
+    func routeURL(for tile: MultiviewTile) -> URL? {
+        guard sessionEngine == .avPlayerDirectHLS,
+              let url = sessionRouteURL,
+              let id = sessionRouteTileID, id == tile.id,
+              sessionRouteSourceURL == nil || sessionRouteSourceURL == tile.streamURL
+        else { return nil }
+        return url
+    }
     /// The auth headers resolveEngine built for AVPlayer tiles. These use
     /// the X-API-Key + `Authorization: ApiKey` shape the Dispatcharr HLS
     /// endpoint requires, which differs from a server's configured
@@ -247,6 +266,8 @@ final class MultiviewStore: ObservableObject {
     func clearEngineLock() {
         sessionEngine = .mpv
         sessionRouteURL = nil
+        sessionRouteTileID = nil
+        sessionRouteSourceURL = nil
         sessionHeaders = [:]
     }
 
@@ -996,6 +1017,8 @@ final class MultiviewStore: ObservableObject {
         )
         tiles = [tile]
         audioTileID = tile.id
+        sessionRouteTileID = tile.id
+        sessionRouteSourceURL = tile.streamURL
         DebugLogger.shared.log(
             "[MV-Tile] seed tile[0] from single: \(item.name) id=\(item.id)",
             category: "Playback", level: .info

@@ -8062,13 +8062,13 @@ struct EPGGuideView: View {
         // composite) takes the channel as one more tile instead of a fresh
         // pile (device log 2026-10-07 13:30:15: the wipe stopped the
         // composite cast and left the new tile playing hidden).
-        if PlayerSession.shared.mode != .multiview, !multiviewStore.isStagingFromGuide {
-            multiviewStore.clearAll()
-            multiviewStore.isStagingFromGuide = true
-            DebugLogger.shared.log(
-                "[MV-Tile] staging mode: entered from Guide (channel=\(channel.name))",
-                category: "Playback", level: .info
-            )
+        // A single session (incl. the mini player) becomes staged channel 1
+        // rather than growing into a grid (PlayerSession).
+        let seededFromSession = PlayerSession.shared.prepareLiveTVMultiviewAdd()
+        if seededFromSession == channel.id {
+            // The channel already playing: it is staged once, never twice.
+            showStagingToast("Added \(channel.name)")
+            return
         }
         // Toggle: already-staged → remove, else → add.
         if let tile = multiviewStore.tile(forChannelID: channel.id) {

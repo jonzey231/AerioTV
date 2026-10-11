@@ -1403,6 +1403,10 @@ struct ChannelListView: View {
                             groupFilterBar
                                 .padding(.vertical, previewMode ? 4 : 10)
                                 .focusSection()
+                                // Up from the clock (or any entry into the
+                                // row) lands on the selected pill, not on
+                                // whichever item sits geometrically nearest.
+                                .defaultFocus($groupPillFocused, selectedGroup)
                                 // Not focusable while the guide reclaims focus
                                 // after the player closes (pill style ignores
                                 // isEnabled, so no visual change).
@@ -2271,7 +2275,12 @@ struct ChannelListView: View {
                     action: { showManageGroups = true },
                     hiddenCount: hiddenGroups.count
                 )
-                .focusable(!leftHoldPinningAll)
+                // Logan 2026-10-11: `.focusable(true)` on a Button nests a
+                // second focusable around it; the outer one took focus and
+                // the button style never drew the ring (trace: Up from the
+                // clock landed on an unringed item). Only block focus during
+                // the hold, never wrap it otherwise.
+                .modifier(TVFocusBlock(blocked: leftHoldPinningAll))
                 #endif
                 // #45: collections placed at the beginning sit before "All".
                 // #42 Part 1: also non-focusable while a guide Left is held, so
@@ -2293,7 +2302,12 @@ struct ChannelListView: View {
                         // default pill carries the thumbtack.
                         isDefault: group == defaultGroupToken
                             || (group == DefaultChannelGroupStore.allToken && defaultGroupToken.isEmpty),
-                        onLongPress: { setDefaultGroupConfirmed(group) }
+                        onLongPress: { setDefaultGroupConfirmed(group) },
+                        // The chrome reads focus from the row's FocusState:
+                        // `@Environment(\.isFocused)` under a bare
+                        // `.focusable()` stayed false, so no pill ever showed
+                        // a focus ring (Logan 2026-10-11).
+                        isFocused: groupPillFocused == group
                     )
                     // #42 Part 1: make the pills programmatic focus targets so a
                     // guide long-press Left can land focus on the "All" pill.
@@ -2380,7 +2394,9 @@ struct ChannelListView: View {
         .focused($groupPillFocused, equals: token)
         // #42 Part 1: not focusable while a guide hold-Left pins focus to
         // the first pill, so the hold cannot land on a beginning collection.
-        .focusable(canFocus)
+        // Applied only while blocked: a standing `.focusable(true)` nests a
+        // second focusable around the Button and hides its ring.
+        .modifier(TVFocusBlock(blocked: !canFocus))
         .contextMenu { collectionManageActions(c) }
         #else
         Button {
@@ -4021,11 +4037,9 @@ struct ChannelRow: View {
         // pile here wiped the running tiles (device log 2026-10-07
         // 13:30:15: clearAll, the composite cast stopped, the new tile
         // played hidden on the phone).
-        let running = PlayerSession.shared.mode == .multiview
-        if !running, !store.isStagingFromGuide {
-            store.clearAll()
-            store.isStagingFromGuide = true
-        }
+        // Same routing as the Guide (PlayerSession.prepareLiveTVMultiviewAdd):
+        // a single session becomes staged channel 1, counted once.
+        if PlayerSession.shared.prepareLiveTVMultiviewAdd() == item.id { return }
         if let tile = store.tile(forChannelID: item.id) {
             store.remove(id: tile.id)
             return
@@ -5274,6 +5288,15 @@ struct MarqueeText: View {
     }
 }
 
+/// Makes a view unfocusable only while `blocked`; otherwise adds nothing, so
+/// a Button keeps its own single focusable and its style's ring.
+private struct TVFocusBlock: ViewModifier {
+    let blocked: Bool
+    func body(content: Content) -> some View {
+        if blocked { content.focusable(false) } else { content }
+    }
+}
+
 // MARK: - tvOS Group Pill
 // Each pill owns its own @FocusState so it can apply a scale+glow effect
 // instead of the system's default white focus ring.
@@ -5293,6 +5316,8 @@ private struct TVGroupPill: View {
     var isDefault: Bool = false
     /// Hold Select (default group), Logan 2026-10-10.
     var onLongPress: (() -> Void)? = nil
+    /// Focus state from the row's `@FocusState` (long-press pills only).
+    var isFocused: Bool = false
 
     /// Not a `Button` once a long press is wanted: a tvOS Button fires on
     /// RELEASE and swallows the hold (Shared/TVPressGesture.swift). Same
@@ -5303,7 +5328,7 @@ private struct TVGroupPill: View {
     var body: some View {
         if let onLongPress {
             label
-                .modifier(TVGroupPillChrome(isSelected: isSelected))
+                .modifier(TVGroupPillChrome(isSelected: isSelected, isFocused: isFocused))
                 .contentShape(Capsule())
                 .focusable()
                 .onTapGesture { action() }
@@ -5331,11 +5356,11 @@ private struct TVGroupPill: View {
     }
 }
 
-/// TVGroupPillButtonStyle's look for a non-Button pill (reads focus from the
-/// enclosing `.focusable()`).
+/// TVGroupPillButtonStyle's look for a non-Button pill. Focus is passed in
+/// from the row's `@FocusState` (same as GroupSidebarRowChrome).
 private struct TVGroupPillChrome: ViewModifier {
     let isSelected: Bool
-    @Environment(\.isFocused) private var isFocused
+    let isFocused: Bool
 
     func body(content: Content) -> some View {
         let focused = isFocused

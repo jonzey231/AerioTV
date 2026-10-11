@@ -3121,7 +3121,10 @@ struct RemoteSessionSheet: View {
     /// 2026-09-25): transport glyph, device name, "Connected. Select a
     /// channel to start." and a single Change Device button.
     enum Mode { case connecting, playing, idle }
-    enum Transport { case cast, airPlay }
+    /// `.companion`: the AerioTV Remote driving the AerioTV TV app (Logan
+    /// 2026-10-11: the Remote sheet is the Cast sheet; only the glyph, the
+    /// "Controlling X" line and the Disconnect wording differ).
+    enum Transport { case cast, airPlay, companion }
 
     var transport: Transport
     var mode: Mode
@@ -3165,6 +3168,11 @@ struct RemoteSessionSheet: View {
     /// 2026-10-08): its channels with the audio one marked and the Layout
     /// row; no channel flips, skips or Play/Pause (no single transport).
     var nativeMultiview: NativeMultiviewState? = nil
+    /// Companion only: drop the link while the TV keeps playing.
+    var onDisconnect: () -> Void = {}
+    /// Companion only: the client whose Options sheet (Stream Info, tracks,
+    /// speed) the Options button opens.
+    var companion: CompanionClient? = nil
 
     @State private var contentHeight: CGFloat = 320
     @State private var liveWindow: RemoteSeekWindow?
@@ -3209,7 +3217,9 @@ struct RemoteSessionSheet: View {
             }
         }
         .sheet(isPresented: $showOptions) {
-            if transport == .cast {
+            if transport == .companion, let companion {
+                RemoteOptionsSheet(companion: companion)
+            } else if transport == .cast {
                 CastOptionsSheet(cast: AerioCastController.shared)
             } else {
                 CastOptionsSheet(cast: AerioCastController.shared, airPlayItem: item, airPlay: true)
@@ -3234,11 +3244,11 @@ struct RemoteSessionSheet: View {
             }
             .multilineTextAlignment(.center)
             wideButton {
-                Label(transport == .cast ? "Change Cast Device" : "Change AirPlay Device",
-                      systemImage: transport == .cast ? RemoteSessionCard.Transport.cast.glyph
-                                                      : RemoteSessionCard.Transport.airPlay.glyph)
+                Label(changeDeviceTitle, systemImage: transportGlyphName)
                     .foregroundStyle(.white)
-            } background: { Color.white.opacity(0.12) } action: { onChangeDevice() }
+            } background: { Color.white.opacity(0.12) } action: {
+                if transport == .companion { onDisconnect() } else { onChangeDevice() }
+            }
         }
         .frame(maxWidth: .infinity)
     }
@@ -3306,11 +3316,12 @@ struct RemoteSessionSheet: View {
             // session first (the same path as Stop) so the new device never
             // races a still-live one, then opens the same picker as the idle sheet.
             wideButton {
-                Label(transport == .cast ? "Change Cast Device" : "Change AirPlay Device",
-                      systemImage: transport == .cast ? RemoteSessionCard.Transport.cast.glyph
-                                                      : RemoteSessionCard.Transport.airPlay.glyph)
+                Label(changeDeviceTitle, systemImage: transportGlyphName)
                     .foregroundStyle(.white)
             } background: { Color.white.opacity(0.12) } action: {
+                // AerioTV Remote: the same slot drops the link and leaves the
+                // TV playing (the Remote's Disconnect).
+                if transport == .companion { onDisconnect(); return }
                 debugLog("[Remote] Change \(transport == .cast ? "Cast" : "AirPlay") Device while playing: stopping, then opening the picker")
                 // The channel follows the user to the next receiver (Logan
                 // 2026-09-27: the switch to the Streamer connected and then
@@ -3320,8 +3331,7 @@ struct RemoteSessionSheet: View {
                 onChangeDevice()
             }
             wideButton {
-                Label(transport == .cast ? "Stop Casting" : "Stop AirPlay",
-                      systemImage: "stop.fill")
+                Label(stopTitle, systemImage: "stop.fill")
                     .foregroundStyle(.red)
             } background: { Color.red.opacity(0.15) } action: { onStop() }
             if !footnoteLines.isEmpty {
@@ -3377,9 +3387,32 @@ struct RemoteSessionSheet: View {
         .multilineTextAlignment(.center)
     }
 
+    private var transportGlyphName: String {
+        switch transport {
+        case .cast: return RemoteSessionCard.Transport.cast.glyph
+        case .airPlay: return RemoteSessionCard.Transport.airPlay.glyph
+        case .companion: return RemoteSessionCard.Transport.companion.glyph
+        }
+    }
+
+    private var changeDeviceTitle: String {
+        switch transport {
+        case .cast: return "Change Cast Device"
+        case .airPlay: return "Change AirPlay Device"
+        case .companion: return "Disconnect (leave TV playing)"
+        }
+    }
+
+    private var stopTitle: String {
+        switch transport {
+        case .cast: return "Stop Casting"
+        case .airPlay: return "Stop AirPlay"
+        case .companion: return "Stop and Disconnect"
+        }
+    }
+
     private var transportGlyph: some View {
-        Image(systemName: transport == .cast ? RemoteSessionCard.Transport.cast.glyph
-                                             : RemoteSessionCard.Transport.airPlay.glyph)
+        Image(systemName: transportGlyphName)
             .font(.system(size: 40))  // glyph in a fixed box: not text, stays fixed
             .foregroundStyle(accent)
             .frame(height: 56)

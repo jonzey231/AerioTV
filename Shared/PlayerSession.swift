@@ -427,6 +427,46 @@ final class PlayerSession: ObservableObject {
         )
     }
 
+    /// Live TV "Add to Multiview" (Guide cells and List rows) routing,
+    /// shared so both views decide the same way. Returns the channel id of
+    /// a single session that was just turned into the first staged
+    /// channel, or nil.
+    ///
+    /// - A real Multiview (2+ tiles, or a phone composite feeding a
+    ///   receiver) takes the channel as one more tile (e1dcbd2).
+    /// - A unified single session (one tile, the full player or the mini
+    ///   player) is NOT a Multiview: appending to it grew the minimized
+    ///   container into a full-screen grid while `isMinimized` stayed true,
+    ///   so Back was ignored and the app looked stuck (Apple TV log
+    ///   2026-10-11 17:05:31 "add ok ... total=2" with no staging line, then
+    ///   17:06:28 "isMinimized=true tiles=2 -> minimized -> ignored"). Its
+    ///   channel becomes staged channel 1 instead (counted once), staging
+    ///   starts and the banner shows; Play opens Multiview.
+    /// - Otherwise the first add starts a fresh staged set.
+    @discardableResult
+    func prepareLiveTVMultiviewAdd() -> String? {
+        let store = MultiviewStore.shared
+        if mode == .multiview {
+            #if os(iOS)
+            let composite = MultiviewCompositeSession.shared.isActive
+            #else
+            let composite = false
+            #endif
+            if store.tiles.count >= 2 || composite { return nil }
+            if store.tiles.count == 1, let seed = store.tiles.first {
+                exitMultiviewKeepingStagedTiles()
+                return seed.item.id
+            }
+        }
+        if !store.isStagingFromGuide {
+            store.clearAll()
+            store.isStagingFromGuide = true
+            DebugLogger.shared.log("[MV-Tile] staging mode: entered from Live TV",
+                                   category: "Playback", level: .info)
+        }
+        return nil
+    }
+
     /// "Back to TV Guide" from the multiview exit dialog (Android
     /// parity): the same full playback teardown as `exit()`, except the
     /// staged tile SET survives and staging mode is re-armed, so the

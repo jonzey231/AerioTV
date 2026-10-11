@@ -2133,10 +2133,7 @@ struct MultiviewContainerView: View {
                 // completes — otherwise our write can be overridden.
                 .onChange(of: store.relocatingTileID) { _, newID in
                     guard let newID else { return }
-                    Task { @MainActor in
-                        await Task.yield()
-                        focusedTileID = newID
-                    }
+                    reassertRelocateFocus(newID)
                 }
             #else
             grid
@@ -2200,6 +2197,24 @@ struct MultiviewContainerView: View {
 #endif
 
 #if os(tvOS)
+    /// Pins focus on the tile being moved. A single write right after the
+    /// relocate edge lost to the context menu's dismiss pass (Apple TV log
+    /// 2026-10-11 17:02:54-55: relocate entered with focus still on
+    /// _UIContextMenuCell, so the first arrow only moved focus and did not
+    /// swap), and after a swap the engine drifted to another tile
+    /// (17:02:57.010). Re-assert over the dismiss/settle window while the
+    /// same tile is still relocating.
+    private func reassertRelocateFocus(_ id: String) {
+        Task { @MainActor in
+            await Task.yield()
+            for delay in [0.0, 0.15, 0.35, 0.7] {
+                if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+                guard store.relocatingTileID == id else { return }
+                if focusedTileID != id { focusedTileID = id }
+            }
+        }
+    }
+
     /// Extracted from the inline .onMoveCommand closure (Xcode 26
     /// Release type-checker budget on the container chain).
     private func handleTVMoveCommand(_ direction: MoveCommandDirection) {
@@ -2244,6 +2259,7 @@ struct MultiviewContainerView: View {
                 // the case where tvOS's post-swap focus pass
                 // tried to move focus elsewhere.
                 focusedTileID = relocatingID
+                reassertRelocateFocus(relocatingID)
             }
             return
         }
