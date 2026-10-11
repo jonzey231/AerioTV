@@ -4325,6 +4325,11 @@ extension UIApplication {
                 if press.phase == .began { InputProbe.begin(name) }
             }
         }
+        // Multiview Move Tile owns every press while a tile is moving.
+        if event.type == .presses, let presses = (event as? UIPressesEvent)?.allPresses,
+           MainActor.assumeIsolated({ MultiviewRelocateInput.intercept(presses) }) {
+            return
+        }
         aerio_sendEvent(event)
     }
 }

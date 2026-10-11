@@ -8064,41 +8064,15 @@ struct EPGGuideView: View {
         // composite cast and left the new tile playing hidden).
         // A single session (incl. the mini player) becomes staged channel 1
         // rather than growing into a grid (PlayerSession).
-        let seededFromSession = PlayerSession.shared.prepareLiveTVMultiviewAdd()
-        if seededFromSession == channel.id {
-            // The channel already playing: it is staged once, never twice.
-            showStagingToast("Added \(channel.name)")
-            return
-        }
-        // Toggle: already-staged → remove, else → add.
-        if let tile = multiviewStore.tile(forChannelID: channel.id) {
-            multiviewStore.remove(id: tile.id)
-            showStagingToast("Removed \(channel.name)")
-            return
-        }
         let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
-        let result = multiviewStore.add(channel, server: activeServer)
-        switch result {
-        case .added:
+        switch PlayerSession.shared.handleLiveTVMultiviewIntent(channel, server: activeServer) {
+        case .added, .alreadyPlaying:
             showStagingToast("Added \(channel.name)")
-        case .needsWarning:
-            // Staging mode is an explicit "I want a lot of tiles"
-            // intent. Bypassing the warning here avoids interrupting
-            // the build flow with a confirmation dialog on every
-            // tile past the soft limit. The user can still observe
-            // the count climbing in the banner.
-            _ = multiviewStore.add(channel, server: activeServer, bypassWarning: true)
-            showStagingToast("Added \(channel.name)")
-        case .rejectedMax:
+        case .removed:
+            showStagingToast("Removed \(channel.name)")
+        case .maxReached:
             showStagingToast("Maximum \(multiviewStore.maxTiles) streams reached")
-            // Hit the hard cap. Exit staging so the user gets the
-            // banner out of their way and can move on to the
-            // Multiview tab.
-            multiviewStore.isStagingFromGuide = false
-        case .alreadyPresent:
-            // Defensive: the tile(forChannelID:) check above should
-            // have caught this. If we somehow reach here, surface
-            // the toast and move on.
+        case .alreadyAdded:
             showStagingToast("Already added")
         case .unresolvable:
             showStagingToast("\(channel.name) has no playable stream")
@@ -9331,11 +9305,13 @@ private struct GuideProgramButton: View {
                 // based on whether this channel is currently staged
                 // so the action verb always describes what tapping
                 // will do.
-                Button(multiviewStore.tile(forChannelID: channelItem.id) != nil
-                       ? "Remove from Multiview"
-                       : "Add to Multiview") {
+                let mvState = PlayerSession.shared.liveTVMultiviewMenuState(channelID: channelItem.id)
+                Button(mvState == .remove ? "Remove from Multiview" : "Add to Multiview") {
                     onMultiviewIntent(channelItem)
                 }
+                // The channel playing in the mini player is already staged
+                // channel 1: shown, grayed out (Logan 2026-10-11).
+                .disabled(mvState == .addDisabled)
                 // #45: add/remove this channel from a user collection.
                 Button("Add Channel to Collection") {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
@@ -9565,9 +9541,11 @@ private struct GuideProgramButton: View {
                 RecentChannelsStore.shared.remove(id: channelItem.id)
             })
         }
-        let isStaged = multiviewStore.tile(forChannelID: channelItem.id) != nil
+        let mvState = PlayerSession.shared.liveTVMultiviewMenuState(channelID: channelItem.id)
+        let isStaged = mvState == .remove
         items.append(.init(title: isStaged ? "Remove from Multiview" : "Add to Multiview",
-                           systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill") {
+                           systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill",
+                           disabled: mvState == .addDisabled) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { onMultiviewIntent(channelItem) }
         })
         items.append(.init(title: "Add Channel to Collection", systemImage: "folder.badge.plus") {
@@ -9638,13 +9616,15 @@ private struct GuideProgramButton: View {
                 RecentChannelsStore.shared.remove(id: channelItem.id)
             } label: { Label("Remove from Recently Watched", systemImage: "clock.badge.xmark") }
         }
-        let isStaged = multiviewStore.tile(forChannelID: channelItem.id) != nil
+        let mvState = PlayerSession.shared.liveTVMultiviewMenuState(channelID: channelItem.id)
+        let isStaged = mvState == .remove
         Button {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { onMultiviewIntent(channelItem) }
         } label: {
             Label(isStaged ? "Remove from Multiview" : "Add to Multiview",
                   systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill")
         }
+        .disabled(mvState == .addDisabled)
         Button {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
         } label: { Label("Add Channel to Collection", systemImage: "folder.badge.plus") }
@@ -9891,9 +9871,11 @@ struct SystemMenuItem {
     let title: String
     let systemImage: String
     var destructive = false
+    var disabled = false
     let action: () -> Void
-    init(title: String, systemImage: String, destructive: Bool = false, action: @escaping () -> Void) {
-        self.title = title; self.systemImage = systemImage; self.destructive = destructive; self.action = action
+    init(title: String, systemImage: String, destructive: Bool = false, disabled: Bool = false, action: @escaping () -> Void) {
+        self.title = title; self.systemImage = systemImage; self.destructive = destructive
+        self.disabled = disabled; self.action = action
     }
 }
 
@@ -9935,7 +9917,7 @@ struct SystemMenuAnchor: UIViewRepresentable {
             return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
                 UIMenu(children: items.map { item in
                     UIAction(title: item.title, image: UIImage(systemName: item.systemImage),
-                             attributes: item.destructive ? .destructive : []) { _ in item.action() }
+                             attributes: (item.destructive ? UIMenuElement.Attributes.destructive : []).union(item.disabled ? .disabled : [])) { _ in item.action() }
                 })
             }
         }
@@ -9970,7 +9952,9 @@ struct MultiviewStagingBanner: View {
     let activeServer: ServerConnection?
 
     var body: some View {
-        let count = multiviewStore.tiles.count
+        // The channel playing in the mini player counts as staged
+        // channel 1 (PlayerSession.liveTVStagedCount).
+        let count = PlayerSession.shared.liveTVStagedCount
         let label = count == 1
             ? "1 channel staged for Multiview"
             : "\(count) channels staged for Multiview"
@@ -10001,13 +9985,7 @@ struct MultiviewStagingBanner: View {
             // across tabs, so without this the only outs were Play or
             // unstaging channels one by one.
             Button {
-                let staged = multiviewStore.tiles.count
-                multiviewStore.reset()
-                multiviewStore.isStagingFromGuide = false
-                DebugLogger.shared.log(
-                    "[MV-Tile] staging mode: user tapped Clear (count=\(staged))",
-                    category: "Playback", level: .info
-                )
+                PlayerSession.shared.clearLiveTVStaged()
             } label: {
                 Text("Clear")
                     .scaledFont(.system(size: 15, weight: .semibold))
@@ -10028,13 +10006,7 @@ struct MultiviewStagingBanner: View {
             // staged so the user doesn't fire `enterMultiview` with
             // an empty store.
             Button {
-                let staged = multiviewStore.tiles.count
-                multiviewStore.isStagingFromGuide = false
-                                PlayerSession.shared.enterMultiview(seeding: nil, server: activeServer)
-                DebugLogger.shared.log(
-                    "[MV-Tile] staging mode: user tapped Play (count=\(staged))",
-                    category: "Playback", level: .info
-                )
+                PlayerSession.shared.playLiveTVStaged(server: activeServer)
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "play.fill")
@@ -10067,7 +10039,7 @@ struct MultiviewStagingBanner: View {
             Button {
                 multiviewStore.isStagingFromGuide = false
                 DebugLogger.shared.log(
-                    "[MV-Tile] staging mode: user tapped Done (count=\(multiviewStore.tiles.count))",
+                    "[MV-Tile] staging mode: user tapped Done (count=\(PlayerSession.shared.liveTVStagedCount))",
                     category: "Playback", level: .info
                 )
             } label: {
@@ -10552,9 +10524,11 @@ struct GuideCanvasRow: View {
                 RecentChannelsStore.shared.remove(id: channelItem.id)
             })
         }
-        let isStaged = multiviewStore.tile(forChannelID: channelItem.id) != nil
+        let mvState = PlayerSession.shared.liveTVMultiviewMenuState(channelID: channelItem.id)
+        let isStaged = mvState == .remove
         items.append(.init(title: isStaged ? "Remove from Multiview" : "Add to Multiview",
-                           systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill") {
+                           systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill",
+                           disabled: mvState == .addDisabled) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { onMultiviewIntent(channelItem) }
         })
         items.append(.init(title: "Add Channel to Collection", systemImage: "folder.badge.plus") {
@@ -11154,7 +11128,7 @@ final class GuideCanvasRowView: UIView, GuideHScrollListener, UIContextMenuInter
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
             UIMenu(children: items.map { item in
                 UIAction(title: item.title, image: UIImage(systemName: item.systemImage),
-                         attributes: item.destructive ? .destructive : []) { _ in item.action() }
+                         attributes: (item.destructive ? UIMenuElement.Attributes.destructive : []).union(item.disabled ? .disabled : [])) { _ in item.action() }
             })
         }
     }

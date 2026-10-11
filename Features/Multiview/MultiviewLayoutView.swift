@@ -59,6 +59,20 @@ struct MultiviewLayoutView<Content: View>: View {
     /// present, with more than one tile), the spotlighted tile is moved to
     /// the front so it occupies the big rect and the rest stack small.
     private func tileLayout(in size: CGSize) -> (tiles: [MultiviewTile], rects: [CGRect]) {
+        Self.resolvedRects(tiles: tiles, spotlightTileID: spotlightTileID, layoutMode: layoutMode, in: size, spacing: spacing)
+    }
+
+    /// The on-screen rect of every tile (same order as `tiles`) for the
+    /// current layout mode and spotlight. Shared with the tvOS Move Tile
+    /// stepping so its neighbor graph is the layout the user sees, the
+    /// same rule Android uses (MultiviewGridMath.resolvedRects).
+    static func resolvedRects(
+        tiles: [MultiviewTile],
+        spotlightTileID: String?,
+        layoutMode: MultiviewLayoutMode,
+        in size: CGSize,
+        spacing: CGFloat
+    ) -> (tiles: [MultiviewTile], rects: [CGRect]) {
         // Spotlight is active when a tile was explicitly spotlighted (#27) OR
         // the user picked the Spotlight layout mode (#48). The hero is the
         // explicitly spotlighted tile, otherwise the first tile.

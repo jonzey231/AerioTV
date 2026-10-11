@@ -4031,23 +4031,7 @@ struct ChannelRow: View {
     /// Mirror of `EPGGuideView.handleMultiviewIntent`: the first add from a
     /// menu starts a fresh pile and flags staging; later taps toggle.
     private func toggleMultiview() {
-        let store = MultiviewStore.shared
-        // A running Multiview (on the phone, or feeding a receiver as the
-        // composite) takes the channel as one more tile. Starting a fresh
-        // pile here wiped the running tiles (device log 2026-10-07
-        // 13:30:15: clearAll, the composite cast stopped, the new tile
-        // played hidden on the phone).
-        // Same routing as the Guide (PlayerSession.prepareLiveTVMultiviewAdd):
-        // a single session becomes staged channel 1, counted once.
-        if PlayerSession.shared.prepareLiveTVMultiviewAdd() == item.id { return }
-        if let tile = store.tile(forChannelID: item.id) {
-            store.remove(id: tile.id)
-            return
-        }
-        let server = ChannelStore.shared.activeServer
-        if case .needsWarning = store.add(item, server: server) {
-            _ = store.add(item, server: server, bypassWarning: true)
-        }
+        _ = PlayerSession.shared.handleLiveTVMultiviewIntent(item, server: ChannelStore.shared.activeServer)
     }
     #endif
 
@@ -4064,9 +4048,11 @@ struct ChannelRow: View {
                 RecentChannelsStore.shared.remove(id: item.id)
             })
         }
-        let isStaged = MultiviewStore.shared.tile(forChannelID: item.id) != nil
+        let mvState = PlayerSession.shared.liveTVMultiviewMenuState(channelID: item.id)
+        let isStaged = mvState == .remove
         items.append(.init(title: isStaged ? "Remove from Multiview" : "Add to Multiview",
-                           systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill") { toggleMultiview() })
+                           systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill",
+                           disabled: mvState == .addDisabled) { toggleMultiview() })
         items.append(.init(title: "Add Channel to Collection", systemImage: "folder.badge.plus") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
         })
@@ -4134,11 +4120,13 @@ struct ChannelRow: View {
         // Same Multiview toggle as the guide menu (Logan 2026-09-06):
         // stage the channel for the Multiview tab, the guide's banner
         // and the Multiview tab both read the store.
-        let isStaged = MultiviewStore.shared.tile(forChannelID: item.id) != nil
+        let mvState = PlayerSession.shared.liveTVMultiviewMenuState(channelID: item.id)
+        let isStaged = mvState == .remove
         Button { toggleMultiview() } label: {
             Label(isStaged ? "Remove from Multiview" : "Add to Multiview",
                   systemImage: isStaged ? "rectangle.3.group" : "rectangle.3.group.fill")
         }
+        .disabled(mvState == .addDisabled)
         #endif
 
         // #45: add/remove this channel from a user collection. Deferred so

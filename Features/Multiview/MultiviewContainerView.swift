@@ -2131,9 +2131,8 @@ struct MultiviewContainerView: View {
                 // work. The reassertion is asynchronous via a tiny
                 // Task.yield so it runs AFTER tvOS's own focus pass
                 // completes — otherwise our write can be overridden.
-                .onChange(of: store.relocatingTileID) { _, newID in
-                    guard let newID else { return }
-                    reassertRelocateFocus(newID)
+                .onChange(of: store.relocatingTileID) { oldID, newID in
+                    handleRelocateEdge(from: oldID, to: newID)
                 }
             #else
             grid
@@ -2215,6 +2214,55 @@ struct MultiviewContainerView: View {
         }
     }
 
+    /// Move Tile enter/exit. While a tile is moving, every Siri Remote
+    /// press is taken at the UIApplication.sendEvent level
+    /// (`MultiviewRelocateInput`) BEFORE the focus engine sees it, so the
+    /// first arrow after choosing Move Tile is not spent moving focus out
+    /// of the dismissing context menu (Apple TV log 2026-10-11 17:25:58.608:
+    /// LEFT moved focus _UIContextMenuCell -> tile, no swap), and each
+    /// arrow is exactly one swap with focus never drifting. Android parity:
+    /// MultiviewScreen.kt relocate mode (arrows swap, OK or Back finish).
+    private func handleRelocateEdge(from oldID: String?, to newID: String?) {
+        if let newID {
+            let slot = store.tiles.firstIndex(where: { $0.id == newID }) ?? -1
+            DebugLogger.shared.log(
+                "[MV-Tile] move enter tile=\(newID) slot=\(slot) tiles=\(store.tiles.count) layout=\(layoutMode)",
+                category: "Playback", level: .info
+            )
+            MultiviewRelocateInput.handler = { press in
+                guard store.relocatingTileID != nil else { return false }
+                switch press {
+                case .leftArrow:  handleTVMoveCommand(.left)
+                case .rightArrow: handleTVMoveCommand(.right)
+                case .upArrow:    handleTVMoveCommand(.up)
+                case .downArrow:  handleTVMoveCommand(.down)
+                case .select, .menu:
+                    let id = store.relocatingTileID ?? "nil"
+                    let slot = store.tiles.firstIndex(where: { $0.id == id }) ?? -1
+                    DebugLogger.shared.log(
+                        "[MV-Tile] move exit via=\(press == .select ? "select" : "menu") tile=\(id) slot=\(slot)",
+                        category: "Playback", level: .info
+                    )
+                    store.relocatingTileID = nil
+                default:
+                    return false
+                }
+                return true
+            }
+            reassertRelocateFocus(newID)
+        } else {
+            MultiviewRelocateInput.handler = nil
+            if let oldID {
+                DebugLogger.shared.log(
+                    "[MV-Tile] move ended tile=\(oldID) slot=\(store.tiles.firstIndex(where: { $0.id == oldID }) ?? -1)",
+                    category: "Playback", level: .info
+                )
+                // Leave focus on the moved tile where it now sits.
+                focusedTileID = oldID
+            }
+        }
+    }
+
     /// Extracted from the inline .onMoveCommand closure (Xcode 26
     /// Release type-checker budget on the container chain).
     private func handleTVMoveCommand(_ direction: MoveCommandDirection) {
@@ -2241,14 +2289,28 @@ struct MultiviewContainerView: View {
             case .down:  neighborDir = .down
             @unknown default: return
             }
+            // Neighbor by the layout ON SCREEN (layout mode + spotlight),
+            // not the `.auto` table: a 3-tile row in the auto table is big
+            // left + stacked right, so Left from the right tile used to
+            // jump straight to slot 0 (Apple TV log 2026-10-11 17:26:01).
+            // Android's rule: MultiviewScreen.kt neighborOf over
+            // resolvedRects with spacing 0.
+            let rects = MultiviewLayoutView<EmptyView>.resolvedRects(
+                tiles: store.tiles,
+                spotlightTileID: store.spotlightTileID,
+                layoutMode: layoutMode,
+                in: CGSize(width: 1920, height: 1080),
+                spacing: 0
+            ).rects
             if let neighborIdx = MultiviewGridMath.physicalNeighbor(
                 of: idx,
-                count: store.tiles.count,
-                direction: neighborDir
+                in: rects,
+                direction: neighborDir,
+                spacing: 0
             ) {
                 let neighborID = store.tiles[neighborIdx].id
                 DebugLogger.shared.log(
-                    "[MV-Cmd] tvOS relocate swap (container-level) dir=\(neighborDir) tile=\(relocatingID) neighbor=\(neighborID)",
+                    "[MV-Tile] move swap dir=\(neighborDir) tile=\(relocatingID) from slot=\(idx) to slot=\(neighborIdx) neighbor=\(neighborID)",
                     category: "Playback", level: .info
                 )
                 store.swap(relocatingID, neighborID)
@@ -2260,6 +2322,11 @@ struct MultiviewContainerView: View {
                 // tried to move focus elsewhere.
                 focusedTileID = relocatingID
                 reassertRelocateFocus(relocatingID)
+            } else {
+                DebugLogger.shared.log(
+                    "[MV-Tile] move edge dir=\(neighborDir) tile=\(relocatingID) slot=\(idx) (no neighbor)",
+                    category: "Playback", level: .info
+                )
             }
             return
         }
@@ -2548,9 +2615,9 @@ struct MultiviewContainerView: View {
         // the orange capsule styling identical so the visual
         // affordance reads the same across devices.
         #if os(tvOS)
-        let message = "Move Tile — use arrows; press Menu to finish"
+        let message = "Move Tile · arrows to move · OK or Back to finish"
         #else
-        let message = "Move Tile — tap a tile to swap, or tap again to cancel"
+        let message = "Tap a tile to swap"
         #endif
         return VStack {
             HStack {
@@ -2914,3 +2981,36 @@ private struct ObservingProgressStore<Content: View>: View {
 
     var body: some View { content(store) }
 }
+
+#if os(tvOS)
+/// Move Tile press tap (tvOS). `UIApplication.aerio_sendEvent` offers each
+/// press here first; while a tile is moving the handler consumes arrows,
+/// Select and Menu (both phases) so the focus engine and the context menu
+/// never see them.
+@MainActor
+enum MultiviewRelocateInput {
+    static var handler: ((UIPress.PressType) -> Bool)?
+    private static var swallowing: Set<UIPress.PressType> = []
+
+    /// True when the whole event was consumed.
+    static func intercept(_ presses: Set<UIPress>) -> Bool {
+        guard !presses.isEmpty else { return false }
+        var consumed = true
+        for press in presses {
+            switch press.phase {
+            case .began:
+                if let handler, handler(press.type) {
+                    swallowing.insert(press.type)
+                } else {
+                    consumed = false
+                }
+            case .ended, .cancelled:
+                if swallowing.remove(press.type) == nil { consumed = false }
+            default:
+                if !swallowing.contains(press.type) { consumed = false }
+            }
+        }
+        return consumed
+    }
+}
+#endif

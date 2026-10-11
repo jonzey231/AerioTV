@@ -364,6 +364,13 @@ final class MultiviewStore: ObservableObject {
     /// Guide checks at tap time.
     @Published var isStagingFromGuide: Bool = false
 
+    /// Channels staged for Multiview while a single channel keeps playing
+    /// in the mini player (Logan 2026-10-11). They are NOT tiles: `tiles`
+    /// drives the mounted player, so staging there would start playing
+    /// them in the mini player. The playing channel counts as staged
+    /// channel 1; Play appends these to the running session.
+    @Published var stagedExtras: [ChannelDisplayItem] = []
+
     /// Looks up the tile currently representing `channelID`, or
     /// `nil` if no tile is tracking that channel. Used by the Guide
     /// staging-mode toggle to find which tile to remove on re-tap,

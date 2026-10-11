@@ -169,6 +169,19 @@ enum MultiviewGridMath {
         // positions. 1920×1080 is arbitrary but matches a common
         // tvOS screen so the rect math produces well-shaped rects.
         let rects = Self.rects(for: count, in: container, spacing: spacing)
+        return physicalNeighbor(of: index, in: rects, direction: direction, spacing: spacing)
+    }
+
+    /// Neighbor search over explicit rects (the resolved on-screen layout:
+    /// any layout mode plus spotlight). Nearest edge-adjacent tile with
+    /// positive perpendicular overlap wins, matching Android's
+    /// MultiviewGridMath.neighbor.
+    static func physicalNeighbor(
+        of index: Int,
+        in rects: [CGRect],
+        direction: NeighborDirection,
+        spacing: CGFloat = defaultSpacing
+    ) -> Int? {
         guard rects.indices.contains(index) else { return nil }
         let me = rects[index]
         // Primary-axis tolerance: lets tiles separated by `spacing`

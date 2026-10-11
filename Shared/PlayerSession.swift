@@ -446,25 +446,139 @@ final class PlayerSession: ObservableObject {
     @discardableResult
     func prepareLiveTVMultiviewAdd() -> String? {
         let store = MultiviewStore.shared
-        if mode == .multiview {
-            #if os(iOS)
-            let composite = MultiviewCompositeSession.shared.isActive
-            #else
-            let composite = false
-            #endif
-            if store.tiles.count >= 2 || composite { return nil }
-            if store.tiles.count == 1, let seed = store.tiles.first {
-                exitMultiviewKeepingStagedTiles()
-                return seed.item.id
+        if let seed = miniPlayerSeedTile {
+            if !store.isStagingFromGuide {
+                store.isStagingFromGuide = true
+                DebugLogger.shared.log(
+                    "[MV-Tile] staging mode: entered with mini player playing \(seed.item.name) as staged channel 1",
+                    category: "Playback", level: .info)
             }
+            return seed.item.id
         }
+        if mode == .multiview { return nil }
         if !store.isStagingFromGuide {
             store.clearAll()
+            store.stagedExtras = []
             store.isStagingFromGuide = true
             DebugLogger.shared.log("[MV-Tile] staging mode: entered from Live TV",
                                    category: "Playback", level: .info)
         }
         return nil
+    }
+
+    /// The one tile of a live single-channel session (the mini player is a
+    /// one-tile Multiview internally). Not a Multiview from the user's
+    /// point of view: Live TV stages around it instead of growing it.
+    var miniPlayerSeedTile: MultiviewTile? {
+        let store = MultiviewStore.shared
+        guard mode == .multiview, store.tiles.count == 1 else { return nil }
+        #if os(iOS)
+        if MultiviewCompositeSession.shared.isActive { return nil }
+        #endif
+        return store.tiles.first
+    }
+
+    enum LiveTVMultiviewMenuState { case add, addDisabled, remove }
+
+    /// Label/state for a Live TV long-press "Add to Multiview" item. The
+    /// channel playing in the mini player reads "Add to Multiview",
+    /// disabled (it is already staged channel 1).
+    func liveTVMultiviewMenuState(channelID: String) -> LiveTVMultiviewMenuState {
+        let store = MultiviewStore.shared
+        if let seed = miniPlayerSeedTile {
+            if seed.item.id == channelID { return .addDisabled }
+            return store.stagedExtras.contains(where: { $0.id == channelID }) ? .remove : .add
+        }
+        if store.stagedExtras.contains(where: { $0.id == channelID }) { return .remove }
+        return store.tile(forChannelID: channelID) != nil ? .remove : .add
+    }
+
+    /// Count shown in the "N channels staged for Multiview" banner.
+    var liveTVStagedCount: Int {
+        let store = MultiviewStore.shared
+        return (miniPlayerSeedTile != nil ? 1 : store.tiles.count) + store.stagedExtras.count
+    }
+
+    enum LiveTVMultiviewOutcome { case added, removed, alreadyPlaying, maxReached, unresolvable, alreadyAdded }
+
+    /// Live TV "Add to Multiview" (Guide and List). With the mini player
+    /// playing, the channel joins `stagedExtras` and the mini player keeps
+    /// playing; otherwise the classic pile in `tiles` (no session) or one
+    /// more tile in the running Multiview (2+ tiles or composite).
+    func handleLiveTVMultiviewIntent(_ channel: ChannelDisplayItem, server: ServerConnection?) -> LiveTVMultiviewOutcome {
+        let store = MultiviewStore.shared
+        if prepareLiveTVMultiviewAdd() == channel.id { return .alreadyPlaying }
+        if miniPlayerSeedTile != nil || !store.stagedExtras.isEmpty && mode != .multiview {
+            if let i = store.stagedExtras.firstIndex(where: { $0.id == channel.id }) {
+                store.stagedExtras.remove(at: i)
+                DebugLogger.shared.log("[MV-Tile] staged extra removed: \(channel.name) staged=\(liveTVStagedCount)",
+                                       category: "Playback", level: .info)
+                return .removed
+            }
+        }
+        if miniPlayerSeedTile != nil {
+            if liveTVStagedCount >= store.maxTiles {
+                store.isStagingFromGuide = false
+                return .maxReached
+            }
+            guard MultiviewStore.resolveStream(channel, server: server) != nil else { return .unresolvable }
+            store.stagedExtras.append(channel)
+            DebugLogger.shared.log("[MV-Tile] staged extra added (mini player keeps playing): \(channel.name) staged=\(liveTVStagedCount)",
+                                   category: "Playback", level: .info)
+            return .added
+        }
+        if let tile = store.tile(forChannelID: channel.id) {
+            store.remove(id: tile.id)
+            return .removed
+        }
+        switch store.add(channel, server: server) {
+        case .added: return .added
+        case .needsWarning:
+            // Staging is an explicit many-tiles intent: no warning dialog.
+            _ = store.add(channel, server: server, bypassWarning: true)
+            return .added
+        case .rejectedMax:
+            store.isStagingFromGuide = false
+            return .maxReached
+        case .alreadyPresent: return .alreadyAdded
+        case .unresolvable: return .unresolvable
+        }
+    }
+
+    /// Banner Play. With the mini player playing, the staged extras join
+    /// its session (the playing channel stays tile 1, no re-tune, no
+    /// duplicate) and the player expands; otherwise the classic launch.
+    func playLiveTVStaged(server: ServerConnection?) {
+        let store = MultiviewStore.shared
+        let extras = store.stagedExtras
+        store.stagedExtras = []
+        store.isStagingFromGuide = false
+        let running = mode == .multiview && !store.tiles.isEmpty
+        for ch in extras where store.tile(forChannelID: ch.id) == nil {
+            if case .needsWarning = store.add(ch, server: server) {
+                _ = store.add(ch, server: server, bypassWarning: true)
+            }
+        }
+        DebugLogger.shared.log(
+            "[MV-Tile] staging mode: user tapped Play (count=\(store.tiles.count) extras=\(extras.count) running=\(running))",
+            category: "Playback", level: .info)
+        if running {
+            NowPlayingManager.shared.expand()
+        } else {
+            enterMultiview(seeding: nil, server: server)
+        }
+    }
+
+    /// Banner Clear. Drops the staged extras; a playing mini player is
+    /// left exactly as it was.
+    func clearLiveTVStaged() {
+        let store = MultiviewStore.shared
+        let count = liveTVStagedCount
+        store.stagedExtras = []
+        if miniPlayerSeedTile == nil, mode != .multiview { store.reset() }
+        store.isStagingFromGuide = false
+        DebugLogger.shared.log("[MV-Tile] staging mode: user tapped Clear (count=\(count))",
+                               category: "Playback", level: .info)
     }
 
     /// "Back to TV Guide" from the multiview exit dialog (Android
