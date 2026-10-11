@@ -8387,6 +8387,33 @@ struct MainTabView: View {
                                     }
                                 }
                             }
+                        // The mini's own close (688b486 follow-up): drawn on
+                        // every dock, above the expand tap layer and outside
+                        // the disabled container. Same stop path as the
+                        // full-screen X, so Kept Live applies when enabled.
+                        if !stashed {
+                            Button {
+                                PlayerSession.shared.stop()
+                            } label: {
+                                ZStack {
+                                    Circle()
+                                        .fill(.ultraThinMaterial)
+                                        .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                                        .shadow(color: .black.opacity(0.45), radius: 6, y: 2)
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(.white)
+                                }
+                                .frame(width: 32, height: 32)
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Close player")
+                            .padding(.trailing, 28)
+                            .padding(.top, 28)
+                            .zIndex(1)
+                        }
                     }
                 }
                 .frame(

@@ -854,6 +854,11 @@ struct MultiviewContainerView: View {
                 )
                 NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
             } else {
+                #if os(iOS)
+                // Expanding from the iPad mini: bring back the full-screen
+                // controls that hideNow() took away on minimize.
+                chromeState.reportInteraction(reason: "expand")
+                #endif
                 // v1.6.15: when the player un-minimizes, re-assert
                 // focus on the front tile so the container's
                 // `.onMoveCommand` (and its up/down channel-flip)
