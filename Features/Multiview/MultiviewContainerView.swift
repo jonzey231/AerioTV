@@ -18,6 +18,13 @@ import SwiftUI
 /// - `.focusSection()` on the grid container so tvOS D-pad doesn't
 ///   escape to the tab bar mid-grid (see plan's focus-engine note).
 struct MultiviewContainerView: View {
+    /// The N>=2 bottom transport bar (counter, + and X). tvOS dropped it
+    /// 2026-10-11 (Menu confirms exit, Add Channel is in the tile menu).
+    #if os(tvOS)
+    private static let showsGridTransportBar = false
+    #else
+    private static let showsGridTransportBar = true
+    #endif
     @ObservedObject private var store = MultiviewStore.shared
     @ObservedObject private var session = PlayerSession.shared
     /// Watched so the tvOS tile focus can be released the instant
@@ -448,7 +455,11 @@ struct MultiviewContainerView: View {
                 // gridArea above so the video stays full-bleed. See that
                 // overlay for the focus-trap handling.
 
-                if !isSoleTile {
+                // tvOS (Logan 2026-10-11): no bottom transport bar on the
+                // N>=2 grid. Menu goes straight to the Leave Multiview
+                // prompt and Add Channel lives in the tile long-press menu.
+                // iPhone / iPad keep the bar.
+                if !isSoleTile && Self.showsGridTransportBar {
                     // Transport bar spans edge-to-edge with its own
                     // black background — no outer horizontal padding so
                     // it reads as an integrated strip docked at the
@@ -1049,6 +1060,10 @@ struct MultiviewContainerView: View {
             )
         )
         .onChange(of: chromeState.isVisible) { _, visible in
+            // N>=2 grid has no tvOS chrome to focus (Logan 2026-10-11): a
+            // tile Select still bumps the chrome clock, but focus must stay
+            // on the tile instead of being released to a pill that is gone.
+            if visible && store.tiles.count >= 2 { return }
             if visible {
                 // v1.7.x: when chrome appears, programmatically move
                 // focus to the "+" / Add Stream pill so the user can
@@ -1986,14 +2001,19 @@ struct MultiviewContainerView: View {
             )
             chromeState.hideNow()
         } else if !chromeState.isVisible
-            && !(PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1) {
+            && !PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1 {
+            // Logan 2026-10-11: the N>=2 grid no longer has a bottom chrome
+            // on tvOS (the counter, + and X were unreachable), so Menu at
+            // N>=2 goes straight to the Leave Multiview prompt below with no
+            // summon step. Only the legacy (non-unified) N=1 path still
+            // summons chrome here.
             // #42 Part 4: only the N>=2 multiview grid uses Menu to SUMMON chrome.
             // At N=1 (single-stream) Select summons chrome (MultiviewTileView) and
             // chrome auto-fades after 5s, so Menu skips this branch and falls
             // through to minimize below — a single Back returns to the guide +
             // mini-player in one press (Android-TV parity).
             DebugLogger.shared.log(
-                "[MV-Cmd]   → branch: chrome hidden + N>=2 → summon chrome",
+                "[MV-Cmd]   → branch: legacy N=1 chrome hidden → summon chrome",
                 category: "Playback", level: .info
             )
             chromeState.reportInteraction()
@@ -2048,7 +2068,7 @@ struct MultiviewContainerView: View {
                 }
             } else {
                 DebugLogger.shared.log(
-                    "[MV-Cmd]   → branch: chrome visible + N>=2 → confirm exit",
+                    "[MV-Cmd]   → branch: N>=2 → confirm exit (chromeVisible=\(chromeState.isVisible))",
                     category: "Playback", level: .info
                 )
                 showExitConfirmation = true

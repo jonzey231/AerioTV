@@ -126,8 +126,21 @@ struct GuidePreviewBanner: View {
     @State private var lastArtBottom: CGFloat = 0
     /// The corner mini player (410 wide, 40 from the trailing edge) sits
     /// over the banner's right end; the copy stops short of it.
+    ///
+    /// The mini can also be a one-tile Multiview left over from Exit
+    /// Multiview: that collapse keeps the audio tile without re-seeding
+    /// NowPlaying's item, so `isActive` is false while the mini is on screen
+    /// and the copy ran under it (Logan 2026-10-11; same root cause as
+    /// 825c86f's Menu fix). HomeView draws the mini for exactly
+    /// `mode == .multiview && tiles == 1 && isMinimized`, so read the same
+    /// state. Unobserved reads on purpose: `isMinimized` (observed) is what
+    /// flips when the mini appears, and observing MultiviewStore here would
+    /// re-render the banner on every tile publish.
     private var trailingReserve: CGFloat {
-        nowPlaying.isActive && nowPlaying.isMinimized ? 422 : 0
+        guard nowPlaying.isMinimized else { return 0 }
+        let oneTileMultiview = PlayerSession.shared.mode == .multiview
+            && MultiviewStore.shared.tiles.count == 1
+        return (nowPlaying.isActive || oneTileMultiview) ? 422 : 0
     }
 
     static let height: CGFloat = 212

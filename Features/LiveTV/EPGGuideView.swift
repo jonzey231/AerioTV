@@ -9951,6 +9951,23 @@ struct MultiviewStagingBanner: View {
     @ObservedObject private var multiviewStore = MultiviewStore.shared
     let activeServer: ServerConnection?
 
+    // tvOS (Logan 2026-10-11): Clear, Play and Done match TVGroupPill
+    // (ChannelListView) exactly: 22 pt medium text, 18 pt glyph, 26 pt
+    // horizontal and 13 pt vertical padding, so the banner capsules are the
+    // same height as the group pills above them. Android TV parity:
+    // MultiviewStagingBanner.kt TvBannerCapsule.
+    #if os(tvOS)
+    private static let actionFont: AerioFont = .system(size: 22, weight: .medium)
+    private static let glyphFont: AerioFont = .system(size: 18, weight: .medium)
+    private static let hPad: CGFloat = 26
+    private static let vPad: CGFloat = 13
+    #else
+    private static let actionFont: AerioFont = .system(size: 15, weight: .semibold)
+    private static let glyphFont: AerioFont = .system(size: 13, weight: .semibold)
+    private static let hPad: CGFloat = 14
+    private static let vPad: CGFloat = 6
+    #endif
+
     var body: some View {
         // The channel playing in the mini player counts as staged
         // channel 1 (PlayerSession.liveTVStagedCount).
@@ -9988,15 +10005,16 @@ struct MultiviewStagingBanner: View {
                 PlayerSession.shared.clearLiveTVStaged()
             } label: {
                 Text("Clear")
-                    .scaledFont(.system(size: 15, weight: .semibold))
+                    .scaledFont(Self.actionFont)
                     .lineLimit(1)
                     .fixedSize()
                     .foregroundColor(Color.contrastText(.textSecondary))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
+                    .padding(.horizontal, Self.hPad)
+                    .padding(.vertical, Self.vPad)
             }
             #if os(tvOS)
             .buttonStyle(TVNoHighlightButtonStyle())
+            .tvFocusRingShape(.capsule)
             #else
             .buttonStyle(.plain)
             #endif
@@ -10010,9 +10028,9 @@ struct MultiviewStagingBanner: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "play.fill")
-                        .scaledFont(.system(size: 13, weight: .semibold))
+                        .scaledFont(Self.glyphFont)
                     Text("Play")
-                        .scaledFont(.system(size: 15, weight: .semibold))
+                        .scaledFont(Self.actionFont)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                 }
@@ -10020,8 +10038,8 @@ struct MultiviewStagingBanner: View {
                 // pill keeps its ideal width and the count label shrinks.
                 .fixedSize()
                 .foregroundColor(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
+                .padding(.horizontal, Self.hPad)
+                .padding(.vertical, Self.vPad)
                 .background(Capsule().fill(Color.accentPrimary))
             }
             // tvOS: use the app's themed focus style (accent stroke ring)
@@ -10029,6 +10047,7 @@ struct MultiviewStagingBanner: View {
             // focus glow blob through and clashes with the capsule pill.
             #if os(tvOS)
             .buttonStyle(TVNoHighlightButtonStyle())
+            .tvFocusRingShape(.capsule)
             #else
             .buttonStyle(.plain)
             #endif
@@ -10044,18 +10063,19 @@ struct MultiviewStagingBanner: View {
                 )
             } label: {
                 Text("Done")
-                    .scaledFont(.system(size: 15, weight: .semibold))
+                    .scaledFont(Self.actionFont)
                     .lineLimit(1)
                     .fixedSize()
                     .foregroundColor(Color.contrastText(.accentPrimary))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
+                    .padding(.horizontal, Self.hPad)
+                    .padding(.vertical, Self.vPad)
                     .background(
                         Capsule().stroke(Color.accentPrimary, lineWidth: 1)
                     )
             }
             #if os(tvOS)
             .buttonStyle(TVNoHighlightButtonStyle())
+            .tvFocusRingShape(.capsule)
             #else
             .buttonStyle(.plain)
             #endif
