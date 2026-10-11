@@ -405,6 +405,47 @@ URL — including providers that don't support the Xtream Codes API.
 
 </details>
 
+## Networking
+
+AerioTV talks to your server directly from the device. If the server sits
+behind a reverse proxy with single sign-on (SSO), the app's requests have no
+browser session, so the paths it uses need to pass through to the server's
+own authentication instead. Each bypassed path is still guarded by the
+server: the Dispatcharr API by an API key or token, the Xtream Codes paths
+by the account's username and password, and the stream proxy by the stream
+UUID in the URL.
+
+<details>
+<summary><strong>Pangolin access rules for Dispatcharr</strong> (click to expand)</summary>
+
+Add these rules to the Dispatcharr resource in this order. The three
+"Pass to Auth" rules keep the API documentation behind SSO; the rest let
+AerioTV reach the server. Rules 7 through 12 are only needed when a
+Dispatcharr user connects through an Xtream Codes playlist instead of
+Direct Connect.
+
+| # | Action | Match | Path | Needed for |
+|---|--------|-------|------|------------|
+| 1 | Pass to Auth | Path | `/api/swagger/*` | keeps the API docs behind SSO |
+| 2 | Pass to Auth | Path | `/api/redoc/*` | keeps the API docs behind SSO |
+| 3 | Pass to Auth | Path | `/api/schema/*` | keeps the API docs behind SSO |
+| 4 | Bypass Auth | Path | `/api/*` | channels, EPG, VOD, recordings, logos, native Catch-Up sessions |
+| 5 | Bypass Auth | Path | `/proxy/*` | live streams, VOD streams, Catch-Up playback, stream switching |
+| 6 | Bypass Auth | Path | `/output/*` | M3U output |
+| 7 | Bypass Auth | Path | `/player_api.php` | Xtream Codes only |
+| 8 | Bypass Auth | Path | `/xmltv.php` | Xtream Codes only |
+| 9 | Bypass Auth | Path | `/get.php` | Xtream Codes only |
+| 10 | Bypass Auth | Path | `/live/*` | Xtream Codes only |
+| 11 | Bypass Auth | Path | `/movie/*` | Xtream Codes only |
+| 12 | Bypass Auth | Path | `/series/*` | Xtream Codes only |
+| 13 | Bypass Auth | Path | `/timeshift/*` | Xtream Codes Catch-Up; also the Direct Connect Catch-Up fallback on Dispatcharr builds without native catch-up sessions |
+
+Anyone who knows a stream UUID can play that stream through rules 5 and 6,
+which is how Dispatcharr's proxy works with or without a reverse proxy. A
+geo or IP rule on the resource narrows that further if you want it.
+
+</details>
+
 ## OTA / HDHomeRun Channels (MPEG-2)
 
 Over-the-air broadcast channels (ATSC tuners such as HDHomeRun) carry
