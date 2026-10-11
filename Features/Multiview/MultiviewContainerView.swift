@@ -838,6 +838,12 @@ struct MultiviewContainerView: View {
         // focus off the container on tvOS.
         .onChange(of: nowPlaying.isMinimized) { _, minimized in
             if minimized {
+                #if os(iOS)
+                // The iPad mini draws its own X (HomeView iOSMultiviewWrapper);
+                // hide the full-screen chrome so an untappable shrunken copy
+                // is not left in the mini.
+                chromeState.hideNow()
+                #endif
                 // Clear local @FocusState so the binding no longer
                 // pulls focus to the tile, then post the guide-focus
                 // claim.
