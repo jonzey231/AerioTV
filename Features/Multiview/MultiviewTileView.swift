@@ -1003,8 +1003,15 @@ struct MultiviewTileView: View {
                 MultiviewTileLogoOverlay(tileID: tile.id,
                                          logoURL: tile.item.logoURL,
                                          nameStripVisible: chromeState.isVisible)
+                // Name strip, audio icon and focus border sit on the
+                // FITTED video rect, not the slot: with three tiles in a
+                // row the slot is full height and the picture is
+                // letterboxed in its middle (Android Tile parity).
+                MultiviewVideoRect(tileID: tile.id) {
+                    ZStack {
                 labelStrip
                 centerAudioIcon
+                audioFocusStrokeOverlay
                 // Accent border marking the focused tile during D-pad
                 // navigation. It lives here in the button label (a ZStack
                 // sibling of centerAudioIcon), NOT in
@@ -1013,6 +1020,8 @@ struct MultiviewTileView: View {
                 // audio icon already uses. See TileFocusBorder.
                 TileFocusBorder(tileID: tile.id,
                                 isRelocating: store.relocatingTileID == tile.id)
+                    }
+                }
             }
         }
         .background(Color.black)
@@ -1177,13 +1186,16 @@ struct MultiviewTileView: View {
                 tappableRegion
             }
             .overlay(
-                // Focus ring (tvOS) / relocate-amber. Audio-active is
-                // signalled by the audioBadge (speaker icon top-left),
-                // not a ring — see `ring` docstring.
-                tileShape
-                    .stroke(ring.color, lineWidth: ring.width)
+                // Relocate-amber ring and audio stroke trace the fitted
+                // video rect, not the slot (letterboxed panes).
+                MultiviewVideoRect(tileID: tile.id) {
+                    ZStack {
+                        tileShape
+                            .stroke(ring.color, lineWidth: ring.width)
+                        audioFocusStrokeOverlay
+                    }
+                }
             )
-            .overlay(audioFocusStrokeOverlay)
             .clipShape(tileShape)
             // Black underlay so letterbox bars aren't transparent.
             .background(tileShape.fill(Color.black))
@@ -1348,10 +1360,15 @@ struct MultiviewTileView: View {
                 MultiviewTileLogoOverlay(tileID: tile.id,
                                          logoURL: tile.item.logoURL,
                                          nameStripVisible: chromeState.isVisible && !isAudioActive)
-                if isAudioActive {
-                    audioBadge
-                } else {
-                    labelStrip
+                // On the fitted video rect, not the slot (letterbox).
+                MultiviewVideoRect(tileID: tile.id) {
+                    ZStack {
+                        if isAudioActive {
+                            audioBadge
+                        } else {
+                            labelStrip
+                        }
+                    }
                 }
             }
 
@@ -2553,14 +2570,10 @@ private struct TileFocusBorder: View {
         // registered (every mpv tile, i.e. all tiles with the AVPlayer
         // toggles off) the border traces the full cell, identical to
         // main, rather than guessing.
-        GeometryReader { geo in
-            let fitted = store.tileVideoAspects[tileID]
-                .map { Self.fittedSize(aspect: $0, in: geo.size) } ?? geo.size
-            RoundedRectangle(cornerRadius: cornersRounded ? 12 : 0, style: .continuous)
-                .strokeBorder(ThemeManager.shared.accent, lineWidth: 5)
-                .frame(width: fitted.width, height: fitted.height)
-                .position(x: geo.size.width / 2, y: geo.size.height / 2)
-        }
+        // The caller places this inside MultiviewVideoRect, so the
+        // bounds already ARE the fitted video rect (16:9 fallback).
+        RoundedRectangle(cornerRadius: cornersRounded ? 12 : 0, style: .continuous)
+            .strokeBorder(ThemeManager.shared.accent, lineWidth: 5)
         .opacity(isFocused && chromeState.focusIndicatorVisible && !isRelocating ? 1 : 0)
         .allowsHitTesting(false)
         .animation(.easeInOut(duration: 0.18), value: isFocused)
@@ -2580,6 +2593,29 @@ private struct TileFocusBorder: View {
     }
 }
 #endif
+
+/// Lays `content` out on the tile's FITTED video rect: the aspect-fit
+/// of the player's reported presentation size (AVPlayer KVO, via
+/// `MultiviewStore.tileVideoAspects`), else 16:9, centered in the slot.
+/// Used for per-tile chrome (focus ring, name badge, audio glyph) so it
+/// hugs the picture rather than the letterboxed slot (Android
+/// MultiviewScreen `Tile` parity).
+struct MultiviewVideoRect<Content: View>: View {
+    let tileID: String
+    @ViewBuilder let content: () -> Content
+    @ObservedObject private var store = MultiviewStore.shared
+
+    var body: some View {
+        GeometryReader { geo in
+            let fitted = MultiviewTileLogoOverlay.fittedSize(
+                aspect: store.tileVideoAspects[tileID] ?? (16.0 / 9.0),
+                in: geo.size)
+            content()
+                .frame(width: fitted.width, height: fitted.height)
+                .position(x: geo.size.width / 2, y: geo.size.height / 2)
+        }
+    }
+}
 
 // NOTE: `iOSCenterAudioIndicator` (an iOS center-of-tile audio-
 // routing badge ported from tvOS's `CenterAudioIconView`) was
