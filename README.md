@@ -452,6 +452,60 @@ then limit it with Dispatcharr's own network access settings.
 
 </details>
 
+<details>
+<summary><strong>Every Dispatcharr API path AerioTV uses</strong> (for a narrower set of rules than <code>/api/*</code>)</summary>
+
+If you would rather not bypass SSO for all of `/api/*`, these are the paths
+the app requests, taken from the code of both platforms. Wildcards cover ids
+and sub-routes under the same prefix.
+
+**Login and account**
+1. `/api/accounts/token/` (username and password login)
+2. `/api/accounts/token/refresh/`
+3. `/api/accounts/users/*` (`/me/` for the API key and Catch-Up credentials)
+
+**Server**
+4. `/api/core/version/`
+5. `/api/core/settings/`
+6. `/api/core/outputprofiles/`
+
+**Channels and guide**
+7. `/api/channels/channels/*` (list, detail, `/streams/` for Switch Stream)
+8. `/api/channels/groups/`
+9. `/api/channels/profiles/*`
+10. `/api/channels/logos/*` (logo images under `/<id>/cache/`)
+11. `/api/channels/summary/`
+12. `/api/epg/grid/`
+13. `/api/epg/programs/*`
+14. `/api/epg/current-programs/`
+15. `/api/epg/epgdata/`
+16. `/api/epg/sources/`
+17. `/api/m3u/accounts/`
+
+**DVR**
+18. `/api/channels/recordings/*` (list, detail, `/file/`, `/stop/`, `/comskip/`)
+19. `/api/channels/series-rules/*` (including `/evaluate/`)
+
+**VOD**
+20. `/api/vod/categories/`
+21. `/api/vod/movies/*` (including `/providers/` and `/provider-info/`)
+22. `/api/vod/series/*` (same sub-routes)
+23. `/api/vod/episodes/`
+
+**Playback sessions**
+24. `/api/proxy/hls/sessions/*` (Force HLS)
+25. `/api/catchup/sessions/*` (native Catch-Up, including `/position/`)
+
+**Collapsed to prefixes (10 rules cover everything above):**
+`/api/accounts/*`, `/api/core/*`, `/api/channels/*`, `/api/epg/*`, `/api/m3u/*`,
+`/api/vod/*`, `/api/proxy/*`, `/api/catchup/*`, plus `/proxy/*` and
+`/timeshift/*`.
+
+New Dispatcharr features will add paths over time, which is the trade against
+the single `/api/*` rule.
+
+</details>
+
 ## OTA / HDHomeRun Channels (MPEG-2)
 
 Over-the-air broadcast channels (ATSC tuners such as HDHomeRun) carry
