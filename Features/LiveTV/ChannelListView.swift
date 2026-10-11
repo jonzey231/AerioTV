@@ -476,6 +476,9 @@ struct ChannelListView: View {
     // (`leftHoldPinningAll` itself is declared unconditionally above, shared
     // group-filter-bar code reads it to gate collection-pill focus.)
     @State private var leftHoldSafetyTask: Task<Void, Never>?
+    /// Pill-row hold stepper (Logan 2026-10-11): while Left/Right is held on
+    /// the group pill row, focus steps one item per tick until release.
+    @State private var pillHoldTask: Task<Void, Never>?
 
     /// Explicit row that the next `resetFocus(in: guideFocusNS)` should
     /// land on, driving `.prefersDefaultFocus`. Set by the Menu/Back
@@ -1529,8 +1532,11 @@ struct ChannelListView: View {
                         // Search screen covers the guide. Left (hold) mapped
                         // to Move focus detaches it so the held Left
                         // repeats through the engine like any arrow.
+                        // A hold on the pill row always arms it: the hold
+                        // drives the pill stepper instead of the guide.
                         isEnabled: !searchOverlay.isUp
-                            && remoteStore.effectiveGuideAction(.leftLong) != .navigate,
+                            && (groupPillFocused != nil
+                                || remoteStore.effectiveGuideAction(.leftLong) != .navigate),
                         onBegan: { NotificationCenter.default.post(name: .guideLeftHoldBegan, object: nil) },
                         onEnded: { NotificationCenter.default.post(name: .guideLeftHoldEnded, object: nil) }
                     )
@@ -1547,6 +1553,8 @@ struct ChannelListView: View {
                             // the search keyboard closed the mini (Logan
                             // 2026-08-12). The gesture is the guide's only.
                             if searchOverlay.isUp { return false }
+                            // Pill row: the hold steps the pills.
+                            if groupPillFocused != nil { return true }
                             let action = RemoteControlStore.shared.guideAction(.rightLong)
                             if action == .closeMiniPlayer {
                                 return nowPlaying.isActive && nowPlaying.isMinimized
@@ -1554,12 +1562,19 @@ struct ChannelListView: View {
                             return action != .none && action != .navigate
                         }(),
                         onBegan: {
+                            // Pill row hold: step the pills; no guide action
+                            // (no mini close, no timeline pin).
+                            if groupPillFocused != nil {
+                                startPillHoldSteps(forward: true)
+                                return
+                            }
                             NotificationCenter.default.post(name: .guideRightHoldBegan, object: nil)
                             GuideRemoteDispatch.perform(
                                 RemoteControlStore.shared.guideAction(.rightLong)
                             )
                         },
                         onEnded: {
+                            stopPillHoldSteps(reason: "Right released")
                             NotificationCenter.default.post(name: .guideRightHoldEnded, object: nil)
                         }
                     )
@@ -1575,8 +1590,14 @@ struct ChannelListView: View {
                     // A hold on the pill row is a pill-row gesture, not a
                     // guide one: it must not scroll the grid below it back
                     // in time (Logan, Apple TV 2026-10-11).
-                    if groupPillFocused != nil || !GuideGridSignal.shared.gridHasFocus {
-                        debugLog("[PRESS] guide hold-Left ignored: focus outside the grid (pill=\(groupPillFocused ?? "none"))")
+                    if groupPillFocused != nil {
+                        // The recognizer consumes the held press, so the
+                        // system repeat never reaches the row: step it here.
+                        startPillHoldSteps(forward: false)
+                        return
+                    }
+                    if !GuideGridSignal.shared.gridHasFocus {
+                        debugLog("[PRESS] guide hold-Left ignored: focus outside the grid (pill=none)")
                         return
                     }
                     var action = RemoteControlStore.shared.effectiveGuideAction(.leftLong)
@@ -1619,6 +1640,7 @@ struct ChannelListView: View {
                     groupPillFocused = groupTokens.first ?? "All"
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .guideLeftHoldEnded)) { _ in
+                    stopPillHoldSteps(reason: "Left released")
                     leftHoldPinningAll = false
                     leftHoldSafetyTask?.cancel()
                     leftHoldSafetyTask = nil
@@ -2288,6 +2310,9 @@ struct ChannelListView: View {
                 // clock landed on an unringed item). Only block focus during
                 // the hold, never wrap it otherwise.
                 .modifier(TVFocusBlock(blocked: leftHoldPinningAll))
+                // Part of the pill row's focus set, so a hold on it steps
+                // the row like any pill and never reaches the grid.
+                .focused($groupPillFocused, equals: Self.manageGroupsFocusToken)
                 #endif
                 // #45: collections placed at the beginning sit before "All".
                 // #42 Part 1: also non-focusable while a guide Left is held, so
@@ -2483,6 +2508,56 @@ struct ChannelListView: View {
     /// GH #80: the pill tokens actually shown. "All" can be hidden like any
     /// group (its sentinel lives in `hiddenGroups`); it is kept when nothing
     /// else would be left so the list never goes unfilterable.
+    #if os(tvOS)
+    /// Focus token for the Manage Groups button on the pill row.
+    static let manageGroupsFocusToken = "__aerio_manage_groups__"
+
+    /// The pill row's focus order, left to right: Manage Groups, beginning
+    /// collections, the group pills, end collections.
+    private var pillRowFocusOrder: [String] {
+        guard showsGroupPills else { return [] }
+        return [Self.manageGroupsFocusToken]
+            + collectionsStore.beginningCollections.map { "collection:\($0.id)" }
+            + groupTokens
+            + collectionsStore.endCollections.map { "collection:\($0.id)" }
+    }
+
+    /// Held Left/Right on the pill row (Logan 2026-10-11): one step now (the
+    /// hold threshold is the initial delay), then ~8 per second until the
+    /// release or an end of the row. The focus engine keeps the focused pill
+    /// scrolled into view.
+    private func startPillHoldSteps(forward: Bool) {
+        pillHoldTask?.cancel()
+        pillHoldTask = Task { @MainActor in
+            // Backstop: a missed release never leaves the stepper running.
+            let deadline = Date().addingTimeInterval(30)
+            while !Task.isCancelled && Date() < deadline {
+                let order = pillRowFocusOrder
+                guard let current = groupPillFocused,
+                      let idx = order.firstIndex(of: current) else {
+                    debugLog("[PRESS] pill-row hold stop: focus left the row")
+                    return
+                }
+                let next = forward ? idx + 1 : idx - 1
+                guard order.indices.contains(next) else {
+                    debugLog("[PRESS] pill-row hold stop: end of row at \(current)")
+                    return
+                }
+                groupPillFocused = order[next]
+                debugLog("[PRESS] pill-row hold step \(forward ? "Right" : "Left") \(current) -> \(order[next])")
+                try? await Task.sleep(nanoseconds: 125_000_000)
+            }
+        }
+    }
+
+    private func stopPillHoldSteps(reason: String) {
+        guard let task = pillHoldTask else { return }
+        task.cancel()
+        pillHoldTask = nil
+        debugLog("[PRESS] pill-row hold end: \(reason)")
+    }
+    #endif
+
     private var groupTokens: [String] {
         let visible = visibleGroups
         var tokens: [String] = []
