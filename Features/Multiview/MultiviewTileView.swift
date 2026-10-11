@@ -192,6 +192,10 @@ struct MultiviewTileView: View {
     /// codebase's reliable tvOS shape; a tap dismisses, and reopening
     /// shows the updated offset in the title).
     @State private var showAudioSyncMenu: Bool = false
+    /// iPhone / iPad: the tile menu's "Layout..." opens this dialog (the
+    /// chrome's Add and Layout buttons were removed; the tile menu is
+    /// their one home, Android parity 2026-10-11).
+    @State private var showLayoutMenu: Bool = false
     // Issue #48: the global multiview layout mode, shared with the container's
     // binding through the same @AppStorage key. Surfaced as a "Layout" submenu
     // in the per-tile long-press menu (the reachable multiview surface, the
@@ -1060,6 +1064,13 @@ struct MultiviewTileView: View {
                 titleVisibility: .visible
             ) {
                 subtitleTrackButtons
+            }
+            .confirmationDialog(
+                "Layout",
+                isPresented: $showLayoutMenu,
+                titleVisibility: .visible
+            ) {
+                layoutButtons_iOS
             }
             .confirmationDialog(
                 audioSyncDialogTitle,
@@ -2157,6 +2168,20 @@ struct MultiviewTileView: View {
             }
         }
 
+        // Add Channel and Layout live here only: the chrome's "+" and
+        // layout buttons were removed (Android parity 2026-10-11).
+        if !store.isAtMax {
+            Button("Add Channel") {
+                store.addSheetRequested = true
+            }
+        }
+
+        if MultiviewLayoutMode.available(forTileCount: store.tiles.count).count > 1 {
+            Button("Layout: \(layoutMode.displayName)\u{2026}") {
+                Task { @MainActor in showLayoutMenu = true }
+            }
+        }
+
         let isFullscreen = store.fullscreenTileID == tile.id
         Button(isFullscreen ? "Exit Full-Screen" : "Full-Screen in Grid") {
             store.fullscreenTileID = isFullscreen ? nil : tile.id
@@ -2240,6 +2265,20 @@ struct MultiviewTileView: View {
             store.remove(id: tile.id)
         }
 
+        Button("Cancel", role: .cancel) {}
+    }
+
+    @ViewBuilder
+    private var layoutButtons_iOS: some View {
+        ForEach(MultiviewLayoutMode.available(forTileCount: store.tiles.count)) { mode in
+            Button(layoutMode == mode ? "\(mode.displayName) (Current)" : mode.displayName) {
+                debugLog("[MV-LAYOUT] select mode=\(mode.rawValue) was=\(layoutMode.rawValue) tile=\(tile.id) tiles=\(store.tiles.count) (iOS menu)")
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    layoutMode = mode
+                    if mode != .spotlight { store.spotlightTileID = nil }
+                }
+            }
+        }
         Button("Cancel", role: .cancel) {}
     }
     #endif

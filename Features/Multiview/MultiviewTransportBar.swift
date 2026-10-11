@@ -46,10 +46,11 @@ struct MultiviewTransportBar: View {
         .padding(.vertical, 24)
         .background(Color.black)
         #else
+        // iPhone / iPad: no "+"; Add Channel lives in the tile's
+        // long-press menu (Android parity 2026-10-11).
         HStack(spacing: 14) {
             tileCountChip
             Spacer(minLength: 12)
-            addButton
             exitButton
         }
         .padding(.horizontal, 16)

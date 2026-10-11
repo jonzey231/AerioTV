@@ -128,6 +128,7 @@ final class PlayerSession: ObservableObject {
             debugLog("[MV-Audio] enterMultiview float released")
         }
 
+        if current == nil { releaseKeptLiveForMultiTileLaunch() }
         if let current {
             // Lock the session engine ONCE, from the seed channel, before
             // any tile renders. Every tile inherits MultiviewStore.
@@ -463,7 +464,45 @@ final class PlayerSession: ObservableObject {
             DebugLogger.shared.log("[MV-Tile] staging mode: entered from Live TV",
                                    category: "Playback", level: .info)
         }
+        // A Kept Live channel (iPhone has no mini player: the swiped-away
+        // player keeps its channel alive headless) counts as the playing
+        // channel, same rule as the mini player: it is staged channel 1.
+        if let kept = keptLiveSeedChannel, store.tile(forChannelID: kept.id) == nil, store.tiles.isEmpty {
+            store.seedInitialTile(kept, server: ChannelStore.shared.activeServer)
+            DebugLogger.shared.log(
+                "[MV-Tile] staging mode: Kept Live \(kept.name) staged as channel 1",
+                category: "Playback", level: .info)
+        }
         return nil
+    }
+
+    /// The channel kept live in the background (Kept Live card) when no
+    /// player is up. Counts as the playing channel for Live TV "Add to
+    /// Multiview" (grayed for itself, staged channel 1 for the others).
+    /// With several kept, the most recently kept one.
+    var keptLiveSeedChannel: ChannelDisplayItem? {
+        #if os(iOS)
+        guard mode == .idle else { return nil }
+        guard let kept = KeptLiveChannels.shared.channels.max(by: { $0.since < $1.since }) else { return nil }
+        return ChannelStore.shared.channels.first(where: { $0.id == kept.id })
+        #else
+        return nil
+        #endif
+    }
+
+    /// Multiview tiles that are also kept live: a fresh multi-tile mount
+    /// does not adopt the kept ingest (only a lone tile does), so the
+    /// keep-alive ends here instead of running a second upstream
+    /// connection to the same channel next to the tile's own.
+    private func releaseKeptLiveForMultiTileLaunch() {
+        let store = MultiviewStore.shared
+        guard store.tiles.count > 1 else { return }
+        for tile in store.tiles where KeptLiveChannels.shared.ids.contains(tile.item.id) {
+            DebugLogger.shared.log(
+                "[MV-Tile] Kept Live \(tile.item.name) joins Multiview as a tile; keep-alive ended",
+                category: "Playback", level: .info)
+            LiveChannelRetention.shared.releaseByUser(channelID: tile.item.id)
+        }
     }
 
     /// The one tile of a live single-channel session (the mini player is a
@@ -489,6 +528,7 @@ final class PlayerSession: ObservableObject {
             if seed.item.id == channelID { return .addDisabled }
             return store.stagedExtras.contains(where: { $0.id == channelID }) ? .remove : .add
         }
+        if keptLiveSeedChannel?.id == channelID { return .addDisabled }
         if store.stagedExtras.contains(where: { $0.id == channelID }) { return .remove }
         return store.tile(forChannelID: channelID) != nil ? .remove : .add
     }
@@ -507,6 +547,7 @@ final class PlayerSession: ObservableObject {
     /// more tile in the running Multiview (2+ tiles or composite).
     func handleLiveTVMultiviewIntent(_ channel: ChannelDisplayItem, server: ServerConnection?) -> LiveTVMultiviewOutcome {
         let store = MultiviewStore.shared
+        if miniPlayerSeedTile == nil, keptLiveSeedChannel?.id == channel.id { return .alreadyPlaying }
         if prepareLiveTVMultiviewAdd() == channel.id { return .alreadyPlaying }
         if miniPlayerSeedTile != nil || !store.stagedExtras.isEmpty && mode != .multiview {
             if let i = store.stagedExtras.firstIndex(where: { $0.id == channel.id }) {

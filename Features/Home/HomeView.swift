@@ -8442,10 +8442,20 @@ struct MainTabView: View {
                 // Multiview goes to the background, no mini player (the
                 // single player's pinch-in minimize; one tile keeps the
                 // player's own Fit pinch).
+                // One tile (Logan 2026-10-11): pinch-in minimizes, same as
+                // iPad; on iPhone that is foreground PiP
+                // (NowPlayingManager.minimize -> ForegroundPiPBridge).
                 .simultaneousGesture(
                     MagnificationGesture()
                         .onEnded { scale in
-                            guard scale < 0.85, MultiviewBackgroundSession.canEnter else { return }
+                            guard scale < 0.85 else { return }
+                            if multiviewStore.tiles.count == 1 {
+                                guard !nowPlaying.isMinimized, !hidden else { return }
+                                debugLog("[MV-Mode] iPhone pinch-in on sole tile -> minimize")
+                                nowPlaying.minimize()
+                                return
+                            }
+                            guard MultiviewBackgroundSession.canEnter else { return }
                             MultiviewBackgroundSession.shared.enter()
                         }
                 )

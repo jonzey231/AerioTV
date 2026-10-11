@@ -334,7 +334,8 @@ struct PlaybackChromeOverlay: View {
                         onMenuClose: { chromeState.reportInteraction() }
                     )
                 }
-                addButton_iOS
+                // No "+" here: Add Channel lives in the tile's long-press
+                // menu (Android parity 2026-10-11).
             }
             .padding(.horizontal, 16)
             // Dynamic top inset, not a hardcoded constant, and not a
