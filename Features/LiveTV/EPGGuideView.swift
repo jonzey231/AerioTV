@@ -4976,6 +4976,12 @@ final class GuideGridSignal: ObservableObject {
     static let shared = GuideGridSignal()
     @Published private(set) var revision = 0
 
+    /// True while a guide cell (program or channel) holds focus. Left and
+    /// Right holds move the timeline only then; a hold on the pills, the
+    /// clock, the hero or the nav bar leaves the grid alone (Logan, Apple
+    /// TV 2026-10-11). Plain storage, never published.
+    var gridHasFocus = false
+
     /// Grid window registered by EPGGuideView (plain storage, never
     /// published). Nil until the guide has rendered once; then every change
     /// counts.
@@ -6239,7 +6245,11 @@ struct EPGGuideView: View {
             // channel and the landed cell does not contain the viewport anchor
             // column, snap to the cell that does. Same-channel changes (our
             // own snaps/restores/pans) are ignored so this can never loop.
+            .onChange(of: focusedChannelID) { _, newValue in
+                GuideGridSignal.shared.gridHasFocus = newValue != nil || focusedProgramID != nil
+            }
             .onChange(of: focusedProgramID) { oldValue, newValue in
+                GuideGridSignal.shared.gridHasFocus = newValue != nil || focusedChannelID != nil
                 focusScratch.lastFocusChangeAt = Date()
                 focusScratch.previousFocusedProgramID = oldValue
                 guard let pid = newValue else { focusScratch.lastFocusedChannel = nil; return }
@@ -6310,6 +6320,10 @@ struct EPGGuideView: View {
             #endif
             .onReceive(NotificationCenter.default.publisher(for: .guideRightHoldBegan)) { _ in
                 #if os(tvOS)
+                guard GuideGridSignal.shared.gridHasFocus else {
+                    debugLog("[PRESS] guide hold-Right ignored: focus outside the grid")
+                    return
+                }
                 // The hold owns this press: the deferred short step is dropped.
                 focusScratch.pendingRightStep = false
                 // Freeze the EPG timeline for the duration of the close-mini hold.

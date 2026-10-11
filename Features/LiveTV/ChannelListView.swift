@@ -1575,8 +1575,8 @@ struct ChannelListView: View {
                     // A hold on the pill row is a pill-row gesture, not a
                     // guide one: it must not scroll the grid below it back
                     // in time (Logan, Apple TV 2026-10-11).
-                    if groupPillFocused != nil {
-                        debugLog("[PRESS] guide hold-Left ignored: focus on pill \(groupPillFocused ?? "")")
+                    if groupPillFocused != nil || !GuideGridSignal.shared.gridHasFocus {
+                        debugLog("[PRESS] guide hold-Left ignored: focus outside the grid (pill=\(groupPillFocused ?? "none"))")
                         return
                     }
                     var action = RemoteControlStore.shared.effectiveGuideAction(.leftLong)
