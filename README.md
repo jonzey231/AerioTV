@@ -64,14 +64,14 @@ The Apple and Android apps share one design and feature set. They also work toge
 A native Apple-platform IPTV client. Stream live TV with full EPG,
 browse on-demand movies and series, schedule recordings to a
 Dispatcharr server or to your device, and watch up to 9 channels
-at once with Multiview — across iPhone, iPad, Apple TV, and macOS
+at once with Multiview, across iPhone, iPad, Apple TV, and macOS
 (running the iPad app), with iCloud sync stitching it all
 together.
 
 Click each section for the full list:
 
 <details>
-<summary><strong>Live TV & Guide</strong> — MPV-powered playback, list + grid views, EPG, reminders.</summary>
+<summary><strong>Live TV & Guide</strong>: MPV-powered playback, list + grid views, EPG, reminders.</summary>
 
 - MPV-powered, GPU-accelerated playback
 - List view + full EPG guide (grid on iPad/tvOS, list on iPhone)
@@ -87,7 +87,7 @@ Click each section for the full list:
 </details>
 
 <details>
-<summary><strong>Multiview</strong> <em>(v1.6.0)</em> — up to 9 streams at once.</summary>
+<summary><strong>Multiview</strong> <em>(v1.6.0)</em>: up to 9 streams at once.</summary>
 
 - Watch up to 9 live channels at once in a dynamically-sized grid
 - Enter from any playing channel: tap the grid button (iPad) or
@@ -99,7 +99,7 @@ Click each section for the full list:
 - Long-press menu on every tile: Make Audio / Full-Screen in
   Grid / Audio Track / Subtitle Track / Move Tile / Remove
 - Move Mode for rearranging tiles (long-press → "Move Tile")
-- Picture-in-Picture from multiview on iPad — only the audio
+- Picture-in-Picture from multiview on iPad, only the audio
   tile continues; other tiles pause to conserve resources
 - Performance warning at the 5th tile (2-hour throttle); hard
   cap at 9 tiles; thermal watchdog stops new tiles at
@@ -108,23 +108,23 @@ Click each section for the full list:
 </details>
 
 <details>
-<summary><strong>DVR Recording</strong> <em>(v1.5.0)</em> — server-side on Dispatcharr, local on every server type.</summary>
+<summary><strong>DVR Recording</strong> <em>(v1.5.0)</em>: server-side on Dispatcharr, local on every server type.</summary>
 
 - Schedule live or upcoming programs from the Live TV guide
-- **Dispatcharr server-side recording** — continues even when
+- **Dispatcharr server-side recording**, continues even when
   AerioTV is closed (the server runs the recording); ideal for
   unattended recordings
-- **Local recording on this device** — records to
+- **Local recording on this device**, records to
   `Documents/Recordings` (or a user-chosen folder on iOS).
   Available for Dispatcharr, Xtream Codes, and M3U
 - Per-recording pre-roll (start early) and post-roll (end late)
   buffers: None / 5 / 10 / 15 / 30 / 60 min or custom
-- **Remove Commercials (Comskip)** — server-side processing on
+- **Remove Commercials (Comskip)**, server-side processing on
   Dispatcharr; toggle at schedule time or run post-recording
 - DVR tab appears automatically when there's at least one
   recording, with Scheduled / Recording / Completed segments
 - Auto-discovery of recordings scheduled outside the app
-  (Dispatcharr web UI) — they show up in AerioTV within ~2 min
+  (Dispatcharr web UI), they show up in AerioTV within ~2 min
 - Download completed server recordings to local storage
 - Local storage quota with live usage bar (1–200 GB,
   default 10 GB) and low-storage warnings
@@ -135,7 +135,7 @@ Click each section for the full list:
 </details>
 
 <details>
-<summary><strong>Movies & TV Shows</strong> <em>(Dispatcharr & Xtream Codes)</em> — VOD library, Continue Watching, TMDB-rich metadata.</summary>
+<summary><strong>Movies & TV Shows</strong> <em>(Dispatcharr & Xtream Codes)</em>: VOD library, Continue Watching, TMDB-rich metadata.</summary>
 
 - Browse and filter on-demand content by category
 - TMDB-rich metadata on Dispatcharr (backdrop, plot, cast,
@@ -143,7 +143,7 @@ Click each section for the full list:
   ratings, IMDB IDs, and per-episode artwork)
 - Provider-supplied metadata on Xtream Codes (poster, title,
   one-line plot)
-- Continue Watching — resume movies and episodes; progress
+- Continue Watching, resume movies and episodes; progress
   syncs across devices via iCloud
 - Long-press to remove items from Continue Watching
 - Per-playlist VOD toggle in Settings → Edit Playlist
@@ -152,27 +152,27 @@ Click each section for the full list:
 </details>
 
 <details>
-<summary><strong>Player</strong> — chrome, Stream Info, Sleep Timer, AirPlay, PiP, swipe channel-flip.</summary>
+<summary><strong>Player</strong>: chrome, Stream Info, Sleep Timer, AirPlay, PiP, swipe channel-flip.</summary>
 
 - Tap to summon chrome; auto-fade after 5s of inactivity
 - Single overflow menu (iOS) / Options panel (tvOS) for all
   secondary controls
 - Audio track + subtitle track selection
-- Playback speed (0.5×, 0.75×, 1×, 1.25×, 1.5×, 2×) for VOD —
+- Playback speed (0.5×, 0.75×, 1×, 1.25×, 1.5×, 2×) for VOD,
   not available on live streams
 - Sleep Timer (30 / 60 / 90 / 120 min), with a countdown in the
   overflow menu
 - Audio Only mode
 - AirPlay
-- Picture-in-Picture on iOS — swipe home during playback and
+- Picture-in-Picture on iOS, swipe home during playback and
   the stream continues in a floating window
-- **Stream Info overlay** — codec, resolution, FPS, pixel
+- **Stream Info overlay**, codec, resolution, FPS, pixel
   format, hardware decode status, audio codec + sample rate +
   channel count, cache duration, bitrate, A/V sync, and
   dropped-frame count. Sourced from mpv on every server type
   (Dispatcharr, Xtream Codes, M3U) so you see what the device
   is actually decoding, not what the upstream server reports
-- **Channel-flip gestures** — Up/Down on the Siri Remote
+- **Channel-flip gestures**, Up/Down on the Siri Remote
   (Apple TV) or swipe up/down with chrome visible (iPhone /
   iPad) to flip channels in single-stream playback
 
@@ -212,14 +212,14 @@ Click each section for the full list:
 </details>
 
 <details>
-<summary><strong>iCloud Sync</strong> — granular categories, scoped delete, set-up-once.</summary>
+<summary><strong>iCloud Sync</strong>: granular categories, scoped delete, set-up-once.</summary>
 
 - Server configurations, preferences, VOD watch progress, EPG
   reminders, and per-playlist sort order sync across all your
   Apple devices
 - Uses iCloud Key-Value Storage
-- Granular per-category sync controls in Settings *(v1.6.17+)*
-  — opt out of any category individually
+- Granular per-category sync controls in Settings *(v1.6.17+)*;
+  opt out of any category individually
 - Per-category "Delete from iCloud" actions for scrubbing stale
   state without affecting local data
 - Set up once on one device and your other devices pick up the
@@ -228,7 +228,7 @@ Click each section for the full list:
 </details>
 
 <details>
-<summary><strong>Apple TV</strong> — Siri Remote, Top Shelf, floating player, LAN detection.</summary>
+<summary><strong>Apple TV</strong>: Siri Remote, Top Shelf, floating player, LAN detection.</summary>
 
 - Full Siri Remote support with d-pad navigation
 - Options panel for audio, subtitles, speed, sleep timer, and
@@ -238,17 +238,17 @@ Click each section for the full list:
 - Press Menu to minimize live TV to a floating corner player;
   press Menu again to stop
 - Channels and logos sized for living-room viewing
-- LAN detection probes local server URLs automatically — no
+- LAN detection probes local server URLs automatically; no
   SSID configuration needed
-- **Top Shelf** — your 6 most-watched channels (with the
+- **Top Shelf**, your 6 most-watched channels (with the
   current program), plus a Continue Watching row of movie and
   episode posters. Populates as soon as AerioTV is on the top
-  row of the Apple TV Home screen — no setup
+  row of the Apple TV Home screen, no setup
 
 </details>
 
 <details>
-<summary><strong>iPhone & iPad polish</strong> — gestures, layouts, mini-player, multiview safe-area carve-outs.</summary>
+<summary><strong>iPhone & iPad polish</strong>: gestures, layouts, mini-player, multiview safe-area carve-outs.</summary>
 
 - Mini-player (iPhone bottom bar / iPad top-right corner) keeps
   the stream alive while you browse the guide, settings, or
@@ -256,7 +256,7 @@ Click each section for the full list:
 - Pinch-to-zoom-out shrinks the iPad player to the corner mini
   *(v1.6.13+)*
 - Swipe down to dismiss / minimize the player on iPhone
-- iPhone multiview respects the notch and Dynamic Island —
+- iPhone multiview respects the notch and Dynamic Island,
   tiles render inside the safe area, black background fills
   the corners around the cutout *(v1.6.17+)*
 - iPad / Mac Catalyst use the iPad app as-is; macOS gets the
@@ -273,7 +273,7 @@ short version is:
 Click each type for the full breakdown:
 
 <details>
-<summary><strong>Dispatcharr Direct Connect</strong> <em>(Recommended)</em> — Dispatcharr Admin Username & Password or API with API key authentication. <em>Most full-featured option.</em></summary>
+<summary><strong>Dispatcharr Direct Connect</strong> <em>(Recommended)</em>: Dispatcharr Admin Username & Password or API with API key authentication. <em>Most full-featured option.</em></summary>
 
 [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) is a
 self-hosted IPTV middleware that gives users control over their IPTV services.
@@ -281,40 +281,40 @@ See the linked GitHub.
 
 **Benefits Dispatcharr is uniquely good at**
 
-- **Server-side DVR** — schedule recordings that continue running
+- **Server-side DVR**, schedule recordings that continue running
   even when AerioTV is closed or the device is asleep. (Local
   recording to the device works on every server type, but Dispatcharr
   is the only one where the server itself can run the recording.)
-- **Comskip (commercial-skip)** — toggle when scheduling a server-side
+- **Comskip (commercial-skip)**, toggle when scheduling a server-side
   recording or run it post-recording from the DVR tab. Comskip runs
   on the Dispatcharr server, so it's only available for server-side
   recordings.
-- **Server-side recording playback** — stream completed server
+- **Server-side recording playback**, stream completed server
   recordings directly with HTTP Range support, no auth headers
   needed.
-- **Server-side stream failover via channel UUID** — when a primary
+- **Server-side stream failover via channel UUID**, when a primary
   stream dies mid-playback, Dispatcharr swaps to a backup provider
   transparently. The player doesn't even hiccup. (Xtream Codes has
-  client-side URL fallback — AerioTV tries `.m3u8` then `.ts` — but
+  client-side URL fallback, AerioTV tries `.m3u8` then `.ts`, but
   the server can't swap to a different provider on its own.)
-- **TMDB-enriched VOD metadata** — backdrops, plots, cast, director,
+- **TMDB-enriched VOD metadata**, backdrops, plots, cast, director,
   year, rating, runtime, plus per-episode air dates, TMDB ratings,
   IMDB IDs, and per-episode artwork. Pulled in by Dispatcharr's
   TMDB scraper. (Xtream Codes also has VOD, but its metadata is
-  whatever the provider supplies — usually poster + title +
+  whatever the provider supplies, usually poster + title +
   one-line plot, not TMDB-grade.)
-- **Bulk EPG fetch** — one network call returns -1h to +24h for
+- **Bulk EPG fetch**, one network call returns -1h to +24h for
   every channel via `/api/epg/grid/`. Xtream Codes uses per-stream
   EPG calls; M3U pulls XMLTV from a separate URL.
-- **Per-server custom User-Agent override** — set in Settings →
+- **Per-server custom User-Agent override**, set in Settings →
   Edit Playlist. Sent on every Dispatcharr API request and to mpv
   on playback so the value shows up in Dispatcharr's admin Stats
   panel. Not currently exposed for XC or M3U.
-- **External XMLTV URL override** *(advanced)* — point the EPG at
+- **External XMLTV URL override** *(advanced)*, point the EPG at
   a third-party XMLTV source while keeping channels from
-  Dispatcharr's API. (M3U has its own EPG URL field — it's the
+  Dispatcharr's API. (M3U has its own EPG URL field, it's the
   primary EPG source there, not an override.)
-- **Auto-discovery of recordings scheduled outside the app** —
+- **Auto-discovery of recordings scheduled outside the app**,
   recordings you scheduled from the Dispatcharr web UI appear in
   AerioTV's DVR tab within ~2 minutes. XC / M3U don't have a
   server-side scheduler to discover from.
@@ -322,7 +322,7 @@ See the linked GitHub.
 </details>
 
 <details>
-<summary><strong>Xtream Codes</strong> — IPTV Source URL + username & password authentication. <em>No self-hosting required.</em></summary>
+<summary><strong>Xtream Codes</strong>: IPTV Source URL + username & password authentication. <em>No self-hosting required.</em></summary>
 
 The Xtream Codes API is what most IPTV providers natively expose.
 You log in with the username / password your provider gave you and
@@ -331,9 +331,9 @@ AerioTV pulls live TV, movies, and series.
 **Benefits**
 
 - **No self-hosting.** Most IPTV providers expose an Xtream Codes
-  endpoint by default — paste the URL, type your credentials, done.
+  endpoint by default: paste the URL, type your credentials, done.
 - **Live TV + VOD library.** Movies and series come from the same
-  login as live channels — no separate EPG / VOD URLs to manage.
+  login as live channels, no separate EPG / VOD URLs to manage.
 - **Per-playlist VOD toggle.** Settings → Edit Playlist exposes
   the same "Fetch VOD from this playlist" switch Dispatcharr does,
   so you can keep a sandbox / secondary playlist's Live TV
@@ -342,12 +342,12 @@ AerioTV pulls live TV, movies, and series.
   device, with the same buffer pickers (None / 5 / 10 / 15 / 30 /
   60 min or custom) Dispatcharr server-side recordings get.
   Recordings continue while the app stays running.
-- **EPG via TVG ID matching** — most provider EPGs key to
+- **EPG via TVG ID matching**, most provider EPGs key to
   Xtream's `tvg_id` field automatically.
-- **Client-side stream URL fallback** — Aerio tries `.m3u8` first,
+- **Client-side stream URL fallback**, Aerio tries `.m3u8` first,
   then `.ts`, so a transient HLS hiccup doesn't kill playback
   outright.
-- **Familiar auth model** — single username and password.
+- **Familiar auth model**, single username and password.
 
 **Drawbacks**
 
@@ -355,20 +355,20 @@ AerioTV pulls live TV, movies, and series.
   typically get the poster, title, and one-line plot. Per-episode
   air dates, TMDB ratings, and per-episode artwork are not
   available.
-- **No server-side DVR.** Recordings are local-only — must keep
+- **No server-side DVR.** Recordings are local-only, must keep
   AerioTV running for the recording duration. No comskip
   (Dispatcharr-only).
-- **EPG depth varies by provider** — some give you a few days,
+- **EPG depth varies by provider**, some give you a few days,
   some give you a few hours.
 
 </details>
 
 <details>
-<summary><strong>M3U Playlist</strong> — Direct URL + optional XMLTV EPG. <em>Universal compatibility, simplest setup.</em></summary>
+<summary><strong>M3U Playlist</strong>: Direct URL + optional XMLTV EPG. <em>Universal compatibility, simplest setup.</em></summary>
 
 A plain M3U playlist is just a list of stream URLs in a text file.
 Works with literally any IPTV provider that gives you a playlist
-URL — including providers that don't support the Xtream Codes API.
+URL, including providers that don't support the Xtream Codes API.
 
 **Benefits**
 
@@ -383,24 +383,24 @@ URL — including providers that don't support the Xtream Codes API.
   running.
 - **Optional separate XMLTV URL** for EPG. Bring your own EPG
   source if your provider doesn't include one.
-- **Compressed `.xml.gz` EPG** — *coming in a future release*.
+- **Compressed `.xml.gz` EPG**, *coming in a future release*.
 
 **Drawbacks**
 
-- **No VOD library.** M3U is live TV only — no movies or series.
+- **No VOD library.** M3U is live TV only, no movies or series.
   If your provider has VOD, you'll need their Xtream Codes
   endpoint (or a Dispatcharr instance pointed at them) to access
   it.
-- **No server-side DVR.** Recordings are local-only — AerioTV
+- **No server-side DVR.** Recordings are local-only, AerioTV
   has to be running for the recording to capture. No comskip
   (Dispatcharr-only).
 - **EPG depends on a separate XMLTV source.** You set the URL
   yourself, and EPG quality is whatever that source provides.
 - **No stream failover at all.** When a stream URL stops working,
-  the provider has to fix the playlist — there's no `.m3u8`/`.ts`
+  the provider has to fix the playlist; there's no `.m3u8`/`.ts`
   client fallback like XC has, and no server-side swap like
   Dispatcharr has.
-- **Large M3U files can be slow to parse** on first launch — a
+- **Large M3U files can be slow to parse** on first launch, a
   20,000-channel playlist takes a noticeable beat to ingest.
 
 </details>
