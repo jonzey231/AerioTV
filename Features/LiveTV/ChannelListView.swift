@@ -546,6 +546,8 @@ struct ChannelListView: View {
     /// Mirrors the stored default so the pinned pill / drawer row re-renders
     /// the moment a long press changes it.
     @State private var defaultGroupToken: String = DefaultChannelGroupStore.current
+    /// Brief "Live TV opens on X" confirmation after a tvOS pill hold.
+    @State private var defaultGroupToast: String? = nil
     #if os(iOS)
     @AppStorage(phoneGroupSelectorKey) private var phoneGroupSelector = "sidebar"
     @State private var phoneSearchPresented = false
@@ -568,6 +570,21 @@ struct ChannelListView: View {
                                          guide: GuideStore.shared)
         NavigationStack {
             mainContent
+                #if os(tvOS)
+                .overlay(alignment: .bottom) {
+                    if let msg = defaultGroupToast {
+                        Text(msg)
+                            .scaledFont(.system(size: 24, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 28)
+                            .padding(.vertical, 14)
+                            .background(Capsule().fill(Color.black.opacity(0.8)))
+                            .padding(.bottom, 60)
+                            .transition(.opacity)
+                            .allowsHitTesting(false)
+                    }
+                }
+                #endif
                 // Frame / input probe also covers the Live TV list, which is
                 // where the iPhone scroll lag is reported (Logan 2026-09-12).
                 .onAppear { FrameProbe.start("channel list") }
@@ -2244,6 +2261,18 @@ struct ChannelListView: View {
                 // so it is the part that hides in sidebar mode or when the
                 // playlist has no groups. The controls above stay put.
                 if showsGroupPills {
+                // Logan 2026-10-10 (explicit decision): on TV the round Manage
+                // Groups button sits to the LEFT of the first group pill.
+                // #42 Part 1: not focusable while a guide hold-Left pins focus
+                // to "All", so the hold cannot land on it. Initial focus still
+                // goes to the selected pill (groupPillFocused).
+                #if os(tvOS)
+                ManageGroupsButton(
+                    action: { showManageGroups = true },
+                    hiddenCount: hiddenGroups.count
+                )
+                .focusable(!leftHoldPinningAll)
+                #endif
                 // #45: collections placed at the beginning sit before "All".
                 // #42 Part 1: also non-focusable while a guide Left is held, so
                 // the hold cannot land on a beginning collection before "All".
@@ -2258,7 +2287,13 @@ struct ChannelListView: View {
                         isSelected: selectedGroup == group,
                         action: { withAnimation(.spring(response: 0.25)) { selectedGroup = group } },
                         systemImage: pillIcon(for: group),
-                        title: Self.groupTitle(group)
+                        title: Self.groupTitle(group),
+                        // Hold Select sets/clears the default group, the same
+                        // toggle as the sidebar rows and the iOS pills; the
+                        // default pill carries the thumbtack.
+                        isDefault: group == defaultGroupToken
+                            || (group == DefaultChannelGroupStore.allToken && defaultGroupToken.isEmpty),
+                        onLongPress: { setDefaultGroupConfirmed(group) }
                     )
                     // #42 Part 1: make the pills programmatic focus targets so a
                     // guide long-press Left can land focus on the "All" pill.
@@ -2305,19 +2340,6 @@ struct ChannelListView: View {
                     collectionPill(c)
                 }
 
-                // GH #57 (Logan 2026-08-10): on TV the round Manage Groups
-                // button sits AFTER the last group, not among the leading
-                // controls. Two reasons: it reads as an action ON the pill row
-                // rather than a fourth mode chip beside Guide/Search, and it
-                // leaves the leading run to the controls that #42's hold-Left
-                // deliberately skips past on its way to "All", so this button
-                // no longer needs to be de-focused during the hold.
-                #if os(tvOS)
-                ManageGroupsButton(
-                    action: { showManageGroups = true },
-                    hiddenCount: hiddenGroups.count
-                )
-                #endif
                 }   // showsGroupPills
             }
             .padding(.horizontal, 16)
@@ -2572,6 +2594,21 @@ struct ChannelListView: View {
     /// Long-press handler shared by the tvOS sidebar rows and the iOS pills:
     /// toggles the default group through the one store that owns the rule,
     /// then picks up the un-hide side effect (Recently Watched) locally.
+    /// tvOS pill hold: set/clear the default group with a brief confirmation
+    /// (Logan 2026-10-10, Android TV parity); the thumbtack is the lasting mark.
+    private func setDefaultGroupConfirmed(_ token: String) {
+        let clearing = token == defaultGroupToken
+        setDefaultGroup(token)
+        let message = clearing ? "Default group cleared" : "Live TV opens on \(Self.groupTitle(token))"
+        debugLog("[GROUPS] default group \(clearing ? "cleared" : "set") via pill: \(token)")
+        withAnimation(.easeInOut(duration: 0.2)) { defaultGroupToast = message }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            if defaultGroupToast == message {
+                withAnimation(.easeInOut(duration: 0.2)) { defaultGroupToast = nil }
+            }
+        }
+    }
+
     private func setDefaultGroup(_ token: String) {
         defaultGroupToken = DefaultChannelGroupStore.toggle(token)
         let stored = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
@@ -5252,19 +5289,68 @@ private struct TVGroupPill: View {
     var systemImage: String? = nil
     /// Display title when the token is a sentinel ("favorites").
     var title: String? = nil
+    /// Trailing thumbtack: this pill is the default group.
+    var isDefault: Bool = false
+    /// Hold Select (default group), Logan 2026-10-10.
+    var onLongPress: (() -> Void)? = nil
 
+    /// Not a `Button` once a long press is wanted: a tvOS Button fires on
+    /// RELEASE and swallows the hold (Shared/TVPressGesture.swift). Same
+    /// shape as the GroupSidebar rows: a focusable view with `.onTapGesture`
+    /// for select and `.onLongPressGesture` for the default group, so SwiftUI
+    /// resolves exactly one of the two per press. The chrome is the
+    /// TVGroupPillButtonStyle look, driven by the focus environment.
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                if let img = systemImage {
-                    Image(systemName: img)
-                        .scaledFont(.system(size: 18, weight: .medium))
-                }
-                Text(title ?? group)
-                    .scaledFont(.system(size: 22, weight: .medium))
+        if let onLongPress {
+            label
+                .modifier(TVGroupPillChrome(isSelected: isSelected))
+                .contentShape(Capsule())
+                .focusable()
+                .onTapGesture { action() }
+                .onLongPressGesture(minimumDuration: 0.45) { onLongPress() }
+        } else {
+            Button(action: action) { label }
+                .buttonStyle(TVGroupPillButtonStyle(isSelected: isSelected))
+        }
+    }
+
+    private var label: some View {
+        HStack(spacing: 6) {
+            if let img = systemImage {
+                Image(systemName: img)
+                    .scaledFont(.system(size: 18, weight: .medium))
+            }
+            Text(title ?? group)
+                .scaledFont(.system(size: 22, weight: .medium))
+            if isDefault {
+                Image(systemName: "pin.fill")
+                    .scaledFont(.system(size: 14, weight: .semibold))
+                    .opacity(0.7)
             }
         }
-        .buttonStyle(TVGroupPillButtonStyle(isSelected: isSelected))
+    }
+}
+
+/// TVGroupPillButtonStyle's look for a non-Button pill (reads focus from the
+/// enclosing `.focusable()`).
+private struct TVGroupPillChrome: ViewModifier {
+    let isSelected: Bool
+    @Environment(\.isFocused) private var isFocused
+
+    func body(content: Content) -> some View {
+        let focused = isFocused
+        return content
+            .foregroundColor(isSelected ? .appBackground : (focused ? .white : .textSecondary))
+            .padding(.horizontal, 26)
+            .padding(.vertical, 13)
+            .background(Capsule().fill(isSelected ? Color.accentPrimary : Color.elevatedBackground))
+            .overlay(
+                Capsule()
+                    .stroke(isSelected ? Color.white : Color.accentPrimary, lineWidth: focused ? 3 : 0)
+            )
+            .scaleEffect(focused ? 1.05 : 1.0)
+            .opacity(focused ? 1.0 : (isSelected ? 1.0 : 0.85))
+            .animation(.easeInOut(duration: 0.15), value: focused)
     }
 }
 
