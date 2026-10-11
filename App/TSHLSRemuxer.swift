@@ -7482,9 +7482,12 @@ struct AVPlayerMultiviewTile: View {
             // The direct-HLS paths never set readyLocalURL (no remuxer), so
             // the handler that clears the loading overlay for remux tiles
             // never runs; "Preparing..." with its byte counter stayed over
-            // live video for a whole Force HLS session (2026-10-07).
+            // live video for a whole Force HLS session (2026-10-07), and
+            // "Retrying..." stayed for minutes after the watchdog's fresh
+            // pipeline came up on direct HLS (Apple TV 2026-10-11 11:14).
             if remuxer == nil, mkvServer == nil,
-               statusText == "Preparing..." || statusText == "Tuning..." {
+               statusText == "Preparing..." || statusText == "Tuning..."
+                || statusText == "Retrying..." {
                 statusText = nil
             }
             if let pending = pendingDisplayCriteria {
