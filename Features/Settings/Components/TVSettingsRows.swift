@@ -242,7 +242,7 @@ struct TVSettingsReadOnlyCard<Content: View>: View {
 }
 
 /// Selection row for "pick one of many" settings lists (Color Theme,
-/// Default Tab, buffer pickers, etc.) — shows an accent checkmark on
+/// Default Tab, buffer pickers, etc.), shows an accent checkmark on
 /// the selected option and uses the same teal card highlight on focus.
 /// Supports an optional icon, leading badge (e.g. theme swatch), and
 /// subtitle.
@@ -324,7 +324,7 @@ extension TVSettingsSelectionRow where Leading == AnyView {
     }
 }
 
-/// Toggle row for tvOS — renders as a Button that flips a Bool on select,
+/// Toggle row for tvOS, renders as a Button that flips a Bool on select,
 /// showing an "On / Off" indicator. Consistent with TVGroupToggleRow in ManageGroupsSheet.
 struct TVSettingsToggleRow: View {
     let icon: String
@@ -343,7 +343,7 @@ struct TVSettingsToggleRow: View {
             HStack(spacing: 0) {
                 SettingsRow(icon: icon, iconColor: iconColor, title: title, subtitle: subtitle)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                // On/Off indicator — mirrors TVGroupToggleRow style
+                // On/Off indicator, mirrors TVGroupToggleRow style
                 HStack(spacing: 8) {
                     Circle()
                         .fill(isOn ? iconColor : Color.textTertiary)

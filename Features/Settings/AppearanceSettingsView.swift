@@ -233,7 +233,7 @@ struct AppearanceSettingsView: View {
 
     /// tvOS section header + grouped content. Rows inside already supply
     /// their own card background via `tvSettingsCardBG`, so the section
-    /// wrapper only provides a section title — no outer card.
+    /// wrapper only provides a section title, no outer card.
     private func tvAppearanceSection(_ title: String,
                                      footer: String? = nil,
                                      @ViewBuilder content: () -> some View) -> some View {
@@ -583,7 +583,7 @@ struct AppearanceSettingsView: View {
                         .onChange(of: geo.size.width) { _, width in pageWidth = width }
                 }
             }
-            // See SettingsView for rationale — SwiftUI List cells
+            // See SettingsView for rationale, SwiftUI List cells
             // cache their rendered content even when the parent
             // re-renders, leaving accent-derived text colors
             // (.textSecondary, .textTertiary) and section header
@@ -600,7 +600,7 @@ struct AppearanceSettingsView: View {
     /// Appearance mode (Dark / Light / System). Its own headed card
     /// since Phase 3.
     private var appearanceModeRow: some View {
-        // Appearance mode — a surface luminance axis orthogonal to the
+        // Appearance mode, a surface luminance axis orthogonal to the
         // hue/identity themes. Defaults to Dark; selecting a theme never
         // changes the mode, and vice versa.
         // Phase 3: the segmented control becomes the shared picker row,
@@ -662,7 +662,7 @@ struct AppearanceSettingsView: View {
         }
 
         if theme.useCustomAccent {
-            // Native system color picker — tap the swatch to open the full picker
+            // Native system color picker, tap the swatch to open the full picker
             #if os(iOS)
             ColorPicker(
                 selection: Binding(

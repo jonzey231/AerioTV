@@ -15,7 +15,7 @@ final class AttemptLogStore: ObservableObject, @unchecked Sendable {
     @Published var lines: [String] = []
     private var _pending: [String] = []
 
-    /// Append silently — does NOT trigger SwiftUI update.
+    /// Append silently, does NOT trigger SwiftUI update.
     func append(_ line: String) {
         DispatchQueue.main.async { [weak self] in
             self?._pending.append(line)
@@ -93,7 +93,7 @@ struct StreamInfo: Equatable {
 /// single-stream path) and `MultiviewContainerView` (unified path).
 /// v1.6.15.x: extracted from PlayerView's private `streamInfoOverlay`
 /// because the unified path's `MultiviewContainerView` had its
-/// `showStreamInfo` toggle wired but no actual overlay mount —
+/// `showStreamInfo` toggle wired but no actual overlay mount,
 /// toggling the row in Options did nothing visible. Sharing one card
 /// view keeps the visual treatment identical across both paths.
 ///
@@ -103,7 +103,7 @@ struct StreamInfo: Equatable {
 /// from mpv on every server type. Rationale: Dispatcharr's
 /// `stream_stats` describe what the SERVER is doing, not what's
 /// arriving at the device. Users care about what their player is
-/// actually decoding — which mpv reports authoritatively across
+/// actually decoding, which mpv reports authoritatively across
 /// every server type. Same numbers everywhere = consistent UX,
 /// fewer "why is the resolution different on Apple TV vs iPhone"
 /// questions, less plumbing to maintain.
@@ -944,13 +944,13 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     @Published var liveStopNotice: LiveStopNotice? = nil
     /// Retry for `liveStopNotice`: one fresh tune, set by the engine.
     var liveStopRetryAction: (() -> Void)?
-    /// VOD resume tracking — set before playback starts, nil for live
+    /// VOD resume tracking, set before playback starts, nil for live
     var vodID: String?
     var vodTitle: String?
     var vodPosterURL: String?
     var vodStreamURL: String?   // Resolved stream URL (for Continue Watching resume)
     var vodServerID: String?    // Server UUID (for Continue Watching auth headers)
-    var vodType: String = "movie"  // "movie" or "episode" — determines which Continue Watching section
+    var vodType: String = "movie"  // "movie" or "episode", determines which Continue Watching section
     var explicitResumeMs: Int32?  // Pre-loaded resume position (bypasses DB lookup)
     /// True for an in-progress server recording played over its live-style
     /// HLS playlist (no ENDLIST, nothing rolls off). The AVPlayer driver
@@ -1031,7 +1031,7 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// the menus hide the control when unset.
     var setAudioSyncAction: ((Int) -> Void)?
     /// Whether PiP is currently active. Written synchronously by the
-    /// AVPictureInPictureController delegates (auto-PiP only — the manual
+    /// AVPictureInPictureController delegates (auto-PiP only, the manual
     /// menu entry was removed in favour of swipe-home auto-PiP). Read by
     /// `Coordinator.didEnterBackground` to skip the vid=no GPU-safeguard
     /// when iOS is actively driving the PiP window.
@@ -1252,7 +1252,7 @@ struct PlayerView: View {
     let vodID: String?
     let vodPosterURL: String?
     let vodServerID: String?
-    let vodType: String  // "movie" or "episode" — only used when vodID != nil
+    let vodType: String  // "movie" or "episode", only used when vodID != nil
     let resumePositionMs: Int32?
     /// Catch-up (timeshift): non-nil when this playback is an aired
     /// programme replayed from the provider archive. Fixes the timeline
@@ -1344,7 +1344,7 @@ struct PlayerView: View {
 
 // MARK: - Player Root View
 #if os(tvOS)
-/// Focus targets for the tvOS player — SwiftUI's native focus system
+/// Focus targets for the tvOS player, SwiftUI's native focus system
 /// replaces TVRemoteInputView so the player reliably captures focus
 /// from the guide/channel list behind it.
 enum TVPlayerFocus: Hashable {
@@ -1420,7 +1420,7 @@ private struct PlayerRootView: View {
     @State private var showControls = true
     @State private var controlsHideTask: Task<Void, Never>?
     @State private var dragOffset: CGFloat = 0
-    // Resume prompt removed — no DVR.
+    // Resume prompt removed, no DVR.
 
     /// v1.7.x: gates the Apple TV up/down d-pad channel-flip on
     /// single-stream live playback. Default ON to preserve the
@@ -1469,8 +1469,8 @@ private struct PlayerRootView: View {
 
     /// Channel-picker presentation. The `+` button in the top bar
     /// (iPad) / "Add Stream" row in the options panel (tvOS) sets
-    /// this to `true`. Presenting from PlayerView — *not* from
-    /// MultiviewContainerView after a mode flip — keeps the current
+    /// this to `true`. Presenting from PlayerView, *not* from
+    /// MultiviewContainerView after a mode flip, keeps the current
     /// stream playing under the sheet. The picker commits the mode
     /// transition on pick, so the user never sees the "original
     /// channel stops" mid-transition stall that the previous design
@@ -1480,7 +1480,7 @@ private struct PlayerRootView: View {
     #if os(tvOS)
     /// tvOS Player Options overlay (shown via gear icon or long-press Select).
     @State private var showTVOptions = false
-    /// Focus target for tvOS — drives which element receives Siri Remote input.
+    /// Focus target for tvOS, drives which element receives Siri Remote input.
     @FocusState private var tvFocus: TVPlayerFocus?
     /// v1.6.12: explicit observer for `NowPlayingManager` so SwiftUI
     /// re-renders PlayerView when `isMinimized` flips. Previously the
@@ -1503,7 +1503,7 @@ private struct PlayerRootView: View {
 
     /// GH #11 v3 fix: namespace for `.focusScope` + `resetFocus`.
     /// Earlier attempts (deferred `tvFocus` assignment, clear-then-set
-    /// nudge) shipped but didn't take on hardware — the focus engine
+    /// nudge) shipped but didn't take on hardware, the focus engine
     /// silently ignores cross-region programmatic focus claims when
     /// the source region (the guide) and target region (the player)
     /// are siblings under different focus sections. Apple's official
@@ -1630,7 +1630,7 @@ private struct PlayerRootView: View {
 
             case .playing:
                 ZStack {
-                    // Player stays in the hierarchy at all times — removing it tears down the
+                    // Player stays in the hierarchy at all times, removing it tears down the
                     // coordinator and forces a full restart when toggling back from audio-only.
                     playerView
                         .ignoresSafeArea()
@@ -1647,7 +1647,7 @@ private struct PlayerRootView: View {
                             .transition(.opacity)
                     }
 
-                    // Stream info overlay — visible when toggled, independent of controls auto-hide
+                    // Stream info overlay, visible when toggled, independent of controls auto-hide
                     if showStreamInfo {
                         #if os(iOS)
                         GeometryReader { geo in
@@ -1704,7 +1704,7 @@ private struct PlayerRootView: View {
                     }
 
                     #if os(tvOS)
-                    // tvOS: SwiftUI-native input layer — truly invisible focusable
+                    // tvOS: SwiftUI-native input layer, truly invisible focusable
                     // surface that captures Siri Remote input when controls are hidden.
                     // Always present (avoids view create/destroy lag) but only focusable
                     // when controls are hidden.
@@ -1716,7 +1716,7 @@ private struct PlayerRootView: View {
                         // When the player un-minimizes and we call
                         // `resetFocus(in: playerFocusScope)`, tvOS
                         // looks for a focusable view here that's flagged
-                        // as default — Color.clear matches whenever the
+                        // as default, Color.clear matches whenever the
                         // controls are hidden (its normal, full-screen,
                         // pre-minimize state). When showControls is true
                         // the gear icon's own focus binding takes over.
@@ -1724,7 +1724,7 @@ private struct PlayerRootView: View {
                         .onMoveCommand { direction in
                             // v1.6.15: Apple TV up/down channel-flip
                             // for live single-stream playback. Gated
-                            // on chrome being hidden AND live — when
+                            // on chrome being hidden AND live, when
                             // the user has summoned chrome via
                             // Menu/Back, up/down should walk the
                             // chrome controls (Options pill, Stream
@@ -1801,7 +1801,7 @@ private struct PlayerRootView: View {
                         .ignoresSafeArea()
 
                     #else
-                    // iOS: transparent tap layer — toggles controls on tap.
+                    // iOS: transparent tap layer, toggles controls on tap.
                     Color.clear
                         .contentShape(Rectangle())
                         .ignoresSafeArea()
@@ -1868,7 +1868,7 @@ private struct PlayerRootView: View {
                     }
                     // v1.6.18: when chrome is visible, a downward swipe
                     // is a channel-flip-down gesture (handled in
-                    // onEnded below) — NOT a minimize. Skip the
+                    // onEnded below), NOT a minimize. Skip the
                     // dragOffset assignment so the player doesn't
                     // visually slide while the user is trying to flip.
                     if showControls { return }
@@ -1975,7 +1975,7 @@ private struct PlayerRootView: View {
             }
         }
         .task(id: sleepTimerEnd) {
-            // Sleep timer countdown — checks every 30s, pauses playback when expired
+            // Sleep timer countdown, checks every 30s, pauses playback when expired
             guard let end = sleepTimerEnd else { return }
             while true {
                 let remaining = end.timeIntervalSince(Date())
@@ -2012,7 +2012,7 @@ private struct PlayerRootView: View {
             }
         }
         // Add-stream picker. Presented on top of the live PlayerView
-        // — deliberate: the current stream keeps playing under it, so
+        // deliberate: the current stream keeps playing under it, so
         // cancelling the picker leaves the user exactly where they
         // were. The sheet commits the multiview transition only if
         // the user actually picks a channel; that commit is the one
@@ -2027,7 +2027,7 @@ private struct PlayerRootView: View {
         }
         #else
         // tvOS uses `fullScreenCover` for the same reason the
-        // multiview-container version does — SwiftUI's default sheet
+        // multiview-container version does, SwiftUI's default sheet
         // on tvOS renders as a small centred modal that crops titles
         // and crams the channel rows unreadably.
         .fullScreenCover(isPresented: $showAddStreamSheet) {
@@ -2044,12 +2044,12 @@ private struct PlayerRootView: View {
         }
         .onChange(of: showStreamInfo) { _, visible in
             // Bridge to the coordinator so the volatile stats timer
-            // only runs while the overlay is visible — avoids mpv
+            // only runs while the overlay is visible, avoids mpv
             // lock contention that causes frame-delivery jitter.
             progressStore.isStreamInfoVisible = visible
             // v1.6.18: also publish to the shared NowPlayingManager
             // so `ChannelInfoBanner` can suppress itself while the
-            // user has Stream Info open — they sit at the same
+            // user has Stream Info open, they sit at the same
             // top-left coordinates on iPhone and would otherwise
             // overlap, covering the stats the user just asked for.
             NowPlayingManager.shared.streamInfoIsVisible = visible
@@ -2057,7 +2057,7 @@ private struct PlayerRootView: View {
         // v1.6.15: mirror this player's chrome visibility into the
         // shared `NowPlayingManager.chromeIsVisible` flag so the
         // `ChannelInfoBanner` overlay (in HomeView's outer ZStack)
-        // can lock step with chrome's auto-fade. Cross-platform —
+        // can lock step with chrome's auto-fade. Cross-platform,
         // both legacy iOS PlayerView and tvOS need this; the
         // unified iOS path goes through `MultiviewContainerView`'s
         // own mirror and lands in the same shared flag.
@@ -2067,7 +2067,7 @@ private struct PlayerRootView: View {
         // v1.6.15: wake the chrome only on stream starts that asked
         // for it (cold-launch auto-resume, channel-row tap). Siri
         // Remote up/down flips intentionally do not bump
-        // `chromeWakeToken` — a flip should keep chrome hidden so
+        // `chromeWakeToken`, a flip should keep chrome hidden so
         // the next up/down keeps flipping channels. The banner
         // (HomeView's `ChannelInfoBanner`) still surfaces on every
         // flip via its own 5s timer.
@@ -2118,7 +2118,7 @@ private struct PlayerRootView: View {
         // Earlier iterations tried (a) just observing `isMinimized`
         // so PlayerView re-renders, then (b) deferring `tvFocus`
         // assignment with `DispatchQueue.main.async` + a
-        // clear-then-set nudge — both shipped but neither held up
+        // clear-then-set nudge, both shipped but neither held up
         // on hardware. The user still had to press a D-pad
         // direction first to kick the focus engine into picking up
         // the player as a valid target.
@@ -2126,7 +2126,7 @@ private struct PlayerRootView: View {
         // Root cause: tvOS treats the player overlay (`.focusSection()`
         // on its wrapper in HomeView) and the guide as **sibling
         // focus regions**. `@FocusState` + `.focused()` only moves
-        // focus WITHIN the current region — it doesn't cross
+        // focus WITHIN the current region, it doesn't cross
         // boundaries when the engine has already settled on a
         // focused view in a different region. Programmatic
         // assignment is silently ignored cross-region.
@@ -2137,7 +2137,7 @@ private struct PlayerRootView: View {
         // opted in via `.prefersDefaultFocus(_:in:)`. Calling
         // `resetFocus(in: playerFocusScope)` clears the current
         // focus and lets tvOS pick the preferred-default child of
-        // the named scope — and unlike the `tvFocus` binding, this
+        // the named scope, and unlike the `tvFocus` binding, this
         // DOES cross region boundaries. The `Color.clear`
         // background-capture layer is opted in as the default when
         // controls are hidden (its normal full-screen state).
@@ -2180,7 +2180,7 @@ private struct PlayerRootView: View {
         //   chrome hidden            → Back reveals chrome.
         //
         // The same logic also runs in response to the
-        // `.playerBackPress` notification — fired by
+        // `.playerBackPress` notification, fired by
         // `MainTabView.handleMenuPress` when the user pressed Back
         // while focus was outside PlayerView (typically the guide
         // cell after expanding from mini via Play/Pause). Without
@@ -2205,7 +2205,7 @@ private struct PlayerRootView: View {
         // `.onChange(of: nowPlayingManager.isMinimized)` above) and
         // bounds where `.prefersDefaultFocus` hints from descendants
         // (Color.clear) are honored. Different from the
-        // `.focusSection()` on the player wrapper in HomeView —
+        // `.focusSection()` on the player wrapper in HomeView,
         // sections define D-pad navigation regions, scopes define
         // the namespace `resetFocus`/`prefersDefaultFocus` operate
         // within. They coexist.
@@ -2301,7 +2301,7 @@ private struct PlayerRootView: View {
     //    the LA pill visually extends further down than a plain DI. The
     //    player's top chrome ends up kissing (or under) the LA pill.
     //  • Landscape on DI/notch devices. iOS reports `safeAreaInsets.top == 0`
-    //    because the app isn't showing a traditional status bar — but the
+    //    because the app isn't showing a traditional status bar, but the
     //    system still draws the status-bar row + any LA as an overlay.
     //
     // Fix: on iPhone, bump the reported inset by a constant LA buffer on
@@ -2311,7 +2311,7 @@ private struct PlayerRootView: View {
     private var deviceSafeAreaTop: CGFloat {
         #if os(iOS)
         // Robust scene/window lookup. `.first { $0.isKeyWindow }` returns
-        // nil during fullScreenCover transitions — that's probably why the
+        // nil during fullScreenCover transitions, that's probably why the
         // previous read occasionally fell through to 0 even on iPhone Pro
         // Max portrait. Fall back to the first window of the active scene,
         // then any connected window, before giving up.
@@ -2330,18 +2330,18 @@ private struct PlayerRootView: View {
         }()
 
         guard UIDevice.current.userInterfaceIdiom == .phone else {
-            return max(reported, 24)  // iPad — conservative minimum
+            return max(reported, 24)  // iPad, conservative minimum
         }
         let isLandscape = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .first?.interfaceOrientation.isLandscape ?? false
         // Notch / Dynamic Island iPhones report > 40pt of top inset in
         // portrait; older home-button iPhones report ~20pt. Only apply
-        // the LA buffer to the former in portrait — iPhone SE / 8 would
+        // the LA buffer to the former in portrait, iPhone SE / 8 would
         // get wasted vertical space otherwise.
         //
         // In landscape we used to apply the LA buffer AND floor at 60pt,
-        // which stacked to ~88pt on Pro iPhones — way too low for a
+        // which stacked to ~88pt on Pro iPhones, way too low for a
         // fullscreen video (#22 feedback). In landscape iOS does not
         // overlay a Live Activity pill on top of fullscreen-landscape
         // app content, so the LA buffer isn't needed there, and the
@@ -2471,7 +2471,7 @@ private struct PlayerRootView: View {
                     .frame(width: geo.size.width * max(0, min(1, displayFraction)),
                            height: isDragging ? 5 : 3)
 
-                // Thumb — shown once the timeline is interactive
+                // Thumb, shown once the timeline is interactive
                 if isScrubberActive {
                     Circle()
                         .fill(Color.white)
@@ -2538,7 +2538,7 @@ private struct PlayerRootView: View {
         .focused($tvFocus, equals: focus)
     }
 
-    // MARK: - tvOS Scrubber (visual only — input handled by TVRemoteInputView)
+    // MARK: - tvOS Scrubber (visual only, input handled by TVRemoteInputView)
 
     private var tvScrubberBar: some View {
         let focused = (tvFocus == .scrubber)
@@ -2547,7 +2547,7 @@ private struct PlayerRootView: View {
 
         return GeometryReader { geo in
             ZStack(alignment: .leading) {
-                // Track — expands while scrubbing
+                // Track, expands while scrubbing
                 Capsule()
                     .fill(Color.white.opacity(active ? 0.35 : 0.25))
                     .frame(height: active ? 10 : 4)
@@ -2558,7 +2558,7 @@ private struct PlayerRootView: View {
                     .frame(width: geo.size.width * displayFraction,
                            height: active ? 10 : 4)
 
-                // Thumb — large and glowing while scrubbing
+                // Thumb, large and glowing while scrubbing
                 if isScrubberActive {
                     Circle()
                         .fill(Color.white)
@@ -2706,12 +2706,12 @@ private struct PlayerRootView: View {
     private var bottomControls: some View {
         VStack(spacing: 10) {
             #if os(tvOS)
-            // Options pill + popup — anchored to bottom-right (hidden in mini player)
+            // Options pill + popup, anchored to bottom-right (hidden in mini player)
             if !nowPlayingManager.isMinimized {
             HStack {
                 Spacer()
                 ZStack(alignment: .bottomTrailing) {
-                    // Popup panel — extends upward from the pill
+                    // Popup panel, extends upward from the pill
                     if showTVOptions {
                         TVPlayerOptionsPanel(
                             audioTracks: progressStore.audioTracks,
@@ -2736,7 +2736,7 @@ private struct PlayerRootView: View {
                                 // transition in `commitAdd` when the
                                 // user picks a channel; until then,
                                 // nothing about the current playback
-                                // path changes — the user sees a
+                                // path changes, the user sees a
                                 // picker, the live stream continues
                                 // under it. Previously this closure
                                 // called `enterMultiviewFromCurrent`
@@ -2845,7 +2845,7 @@ private struct PlayerRootView: View {
                 let remaining = max(0, end.timeIntervalSince(now))
 
                 // Progress bar + (tvOS) leading play/pause indicator.
-                // The indicator is NON-FOCUSABLE on tvOS — Siri
+                // The indicator is NON-FOCUSABLE on tvOS, Siri
                 // Remote's hardware Play/Pause button drives the
                 // actual toggle; this is purely visual feedback.
                 HStack(spacing: 12) {
@@ -3004,7 +3004,7 @@ private struct PlayerRootView: View {
             .padding(.horizontal, tvBandInset)
 
             #if os(tvOS)
-            // Circular cells BELOW the band, bottom-right — the live
+            // Circular cells BELOW the band, bottom-right, the live
             // chrome's exact arrangement.
             // Control row (Logan 2026-09-11): Rewind, Pause, Forward,
             // Options - with the Pause cell anchored on the SCREEN
@@ -3256,7 +3256,7 @@ private struct PlayerRootView: View {
         ZStack {
             VStack(spacing: 0) {
                 VStack(spacing: 8) {
-                    // Swipe-down handle — hints that dragging down minimizes
+                    // Swipe-down handle, hints that dragging down minimizes
                     Capsule()
                         .fill(Color.white.opacity(0.35))
                         .frame(width: 36, height: 4)
@@ -3265,7 +3265,7 @@ private struct PlayerRootView: View {
                     // Top bar
                     HStack(alignment: .center, spacing: 12) {
                         #if !os(tvOS)
-                        // Stop / close button (far left) — tvOS uses the Menu button instead
+                        // Stop / close button (far left), tvOS uses the Menu button instead
                         liquidButton(systemName: "xmark", tint: .white) { onDismiss() }
                         #endif
 
@@ -3371,12 +3371,12 @@ private struct PlayerRootView: View {
                             forcedLandscape.toggle()
                             requestOrientation(landscape: forcedLandscape)
                         }
-                        // Overflow menu — all secondary controls
+                        // Overflow menu, all secondary controls
                         playerOverflowMenu
                         #endif
 
                         #if os(iOS)
-                        // "+" add-stream button — iPad only. Screen is
+                        // "+" add-stream button, iPad only. Screen is
                         // too narrow on iPhone for a usable 2×2 grid,
                         // let alone 3×3 (see plan's iPhone out-of-scope
                         // note). Tapping opens the channel picker,
@@ -3385,7 +3385,7 @@ private struct PlayerRootView: View {
                         if UIDevice.current.userInterfaceIdiom == .pad {
                             addStreamButton
                         }
-                        // AirPlay moved into the overflow menu — the
+                        // AirPlay moved into the overflow menu, the
                         // `AirPlayMenuTrigger` helper keeps a hidden
                         // AVRoutePickerView in the key window so the
                         // menu item can still present the system picker.
@@ -3408,7 +3408,7 @@ private struct PlayerRootView: View {
                 bottomControls
             }
 
-            // Center play/pause button — iOS / iPadOS only. tvOS
+            // Center play/pause button, iOS / iPadOS only. tvOS
             // users press Play/Pause on the Siri Remote (hardware
             // button); the on-screen play/pause state is surfaced as
             // a small indicator next to the timeline instead, which
@@ -3441,11 +3441,11 @@ private struct PlayerRootView: View {
     /// matching circular buttons (overflow / `+` / AirPlay).
     ///
     /// Presents `AddToMultiviewSheet` **on top of the live PlayerView**
-    /// — crucially without touching `PlayerSession.mode`. The current
+    /// crucially without touching `PlayerSession.mode`. The current
     /// stream keeps playing behind the sheet. Only when the user
     /// commits (picks a channel) does the sheet call
     /// `PlayerSession.enterMultiview(...)` to seed tile 0 and flip
-    /// into multiview. That's where the view swap happens — after
+    /// into multiview. That's where the view swap happens, after
     /// the user has made a deliberate choice, not at button-tap.
     ///
     /// The earlier design flipped mode on tap + relied on a pending
@@ -3455,7 +3455,7 @@ private struct PlayerRootView: View {
     /// tile's cold-start), stalled the main thread 1.5-6s, and the
     /// picker sometimes never presented because SwiftUI was still
     /// churning on the view swap. Keeping the sheet owned by
-    /// PlayerView avoids all of that — the sheet is just an overlay
+    /// PlayerView avoids all of that, the sheet is just an overlay
     /// on an otherwise-untouched view tree.
     #if os(iOS)
     private var addStreamButton: some View {
@@ -3531,7 +3531,7 @@ private struct PlayerRootView: View {
         .equatable()
     }
 
-    // MARK: - Audio Track Menu (legacy — now used inside overflow menu)
+    // MARK: - Audio Track Menu (legacy, now used inside overflow menu)
 
     private var audioTrackMenu: some View {
         Menu {
@@ -3936,7 +3936,7 @@ struct KeptLiveMenuSection: View {
 /// cause the system Menu popover to flicker.  SwiftUI skips re-rendering
 /// when all Equatable inputs are unchanged.
 struct PlayerOverflowMenu: View, Equatable {
-    // Value properties — used for rendering AND equality comparison.
+    // Value properties, used for rendering AND equality comparison.
     /// v1.8.17 VOD version switching: provider-copy options + current
     /// selection. Empty options hide the row (single provider, XC/M3U,
     /// live). Defaults keep the other call sites (unified chrome) source-
@@ -3967,7 +3967,7 @@ struct PlayerOverflowMenu: View, Equatable {
     /// is non-nil (mpv engine; AVPlayer has no delay knob).
     let audioSyncMs: Int
 
-    // Action closures — excluded from equality check.
+    // Action closures, excluded from equality check.
     var setAudioTrack: ((Int) -> Void)?
     /// Task #184: same presence-gates-row pattern as switchStreamAction.
     nonisolated(unsafe) var setAudioSync: ((Int) -> Void)?
@@ -3993,7 +3993,7 @@ struct PlayerOverflowMenu: View, Equatable {
     var onMenuOpen: (() -> Void)?
     var onMenuClose: (() -> Void)?
 
-    // Only compare the data that affects rendering — skip closures.
+    // Only compare the data that affects rendering, skip closures.
     nonisolated static func == (lhs: PlayerOverflowMenu, rhs: PlayerOverflowMenu) -> Bool {
         lhs.audioTracks == rhs.audioTracks &&
         lhs.currentAudioTrackID == rhs.currentAudioTrackID &&
@@ -4248,7 +4248,7 @@ struct PlayerOverflowMenu: View, Equatable {
                     )
                 }
 
-                // Picture-in-Picture is automatic — no manual menu item.
+                // Picture-in-Picture is automatic, no manual menu item.
                 // Swipe home to shrink the player into a floating window;
                 // controlled by Settings → Appearance → Picture-in-Picture.
 
@@ -4546,8 +4546,8 @@ struct TVPlayerOptionsPanel: View {
 
     /// "Add Stream" row. Only rendered for live streams when the
     /// outer view provided an `onEnterMultiview` closure (i.e. from
-    /// HomeView's live-TV mount path). Named "Add Stream" — not
-    /// "Enter Multiview" — because user feedback was that the
+    /// HomeView's live-TV mount path). Named "Add Stream", not
+    /// "Enter Multiview", because user feedback was that the
     /// mode-switch framing felt jarring. Tapping fires the closure
     /// (which flips `PlayerRootView`'s `showAddStreamSheet` state)
     /// and dismisses the panel. The sheet presents on top of the
@@ -4572,7 +4572,7 @@ struct TVPlayerOptionsPanel: View {
                 // this panel presentation: the container flips
                 // `streamPickerVisible` while `showTVOptions` stays true.
                 // Dismissing the panel (showTVOptions = false) would tear
-                // the picker down with it — the "Switch Stream → blank
+                // the picker down with it, the "Switch Stream → blank
                 // screen / Options menu disappears" bug.
                 onSwitchStream?()
             }
@@ -4595,7 +4595,7 @@ struct TVPlayerOptionsPanel: View {
     }
 
     /// Stream Info lives in its own section but uses the same pill
-    /// chrome as every other row — just with a leading info icon and
+    /// chrome as every other row, just with a leading info icon and
     /// the title swapping based on the current toggle state. Unified
     /// so the whole panel reads as one consistent focusable list.
     /// Video Scale: Fit (letterbox) vs Fill (crop to fill). Same global
@@ -4650,7 +4650,7 @@ struct TVPlayerOptionsPanel: View {
     ///
     /// Why `TVNoHighlightButtonStyle` + an inner label that reads
     /// `@Environment(\.isFocused)`: plain `.buttonStyle(.plain)`
-    /// does NOT remove tvOS's system focus halo — it only strips
+    /// does NOT remove tvOS's system focus halo, it only strips
     /// the default button presentation. The halo stacks on top of
     /// our custom accent chrome, producing a bright white outline
     /// around the pill (user-reported). `TVNoHighlightButtonStyle`
@@ -4660,7 +4660,7 @@ struct TVPlayerOptionsPanel: View {
     /// drive the accent fill + stroke. One focus signal, no
     /// double-highlight.
     ///
-    /// `systemImage` is optional — nil by default. Passed non-nil
+    /// `systemImage` is optional, nil by default. Passed non-nil
     /// for the Stream Info row which needs a leading icon.
     private func optionPill(
         id: String,
@@ -4688,7 +4688,7 @@ struct TVPlayerOptionsPanel: View {
     }
 }
 
-/// Inner label for `optionPill` — rendered inside the Button so it
+/// Inner label for `optionPill`, rendered inside the Button so it
 /// picks up `@Environment(\.isFocused)` populated by the button
 /// style. Drives accent fill + stroke based on focus; checkmark
 /// for selected state inverts color when the pill is focused so
@@ -4764,7 +4764,7 @@ struct AirPlayButton: UIViewRepresentable {
 // menu. Since AerioTV streams audio-only via AirPlay (no video routing
 // on iPhone given the mix of HLS + MPV-backed TS streams), a dedicated
 // visible button was chrome bloat. Menus, however, can't host an
-// interactive `AVRoutePickerView` directly — items are rendered as
+// interactive `AVRoutePickerView` directly, items are rendered as
 // Buttons by SwiftUI. We route the menu tap through this helper,
 // which keeps one `AVRoutePickerView` permanently attached to the
 // key window (invisible and sized 1×1 offscreen) and fires the
@@ -4775,7 +4775,7 @@ struct AirPlayButton: UIViewRepresentable {
 // (Podcasts, Spotify, etc. all do it). The route picker view's
 // private subview layout has been stable through iOS 13 → 18; if
 // Apple ever rearranges it, `present()` becomes a no-op and the
-// user can still reach AirPlay via Control Center — a graceful
+// user can still reach AirPlay via Control Center, a graceful
 // degradation rather than a crash.
 @MainActor
 enum AirPlayMenuTrigger {
@@ -4802,7 +4802,7 @@ enum AirPlayMenuTrigger {
                 return
             }
         }
-        // Iteration fallback — Apple has historically nested the button one
+        // Iteration fallback, Apple has historically nested the button one
         // level deeper in some iOS versions. Walk one layer down before
         // giving up.
         for subview in pickerView.subviews {
@@ -4908,7 +4908,7 @@ struct TVRemoteInputView: UIViewRepresentable {
         override func didMoveToWindow() {
             super.didMoveToWindow()
             if window != nil {
-                // Retry focus grab — the first attempt may lose to views
+                // Retry focus grab, the first attempt may lose to views
                 // that are already in the hierarchy (e.g. the guide).
                 for delay in [0.15, 0.5, 1.0] {
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in

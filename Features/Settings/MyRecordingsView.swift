@@ -24,12 +24,12 @@ struct MyRecordingsView: View {
 
     // v1.6.8 (B1 Phase 1 / B2-partial): full-screen player
     // presentation for completed recordings. Both local and
-    // Dispatcharr server playback land here — local recordings
+    // Dispatcharr server playback land here, local recordings
     // resolve to a `file://` URL pointing into
     // `Documents/Recordings/`, server recordings to the
     // Dispatcharr `/api/channels/recordings/<id>/file/` endpoint
     // (which is `AllowAny` per `recordingPlaybackURL` doc, so
-    // no auth headers needed). One state variable drives both —
+    // no auth headers needed). One state variable drives both,
     // the URL is enough for `PlayerView` to set up MPV.
     @State private var playingRecording: PlayingRecording? = nil
 
@@ -40,7 +40,7 @@ struct MyRecordingsView: View {
     /// queue while they're using Server A. Mirrors how Live TV /
     /// Channels / On Demand all key off `isActive`. If no server is
     /// active (e.g. fresh install, M3U-only), `currentServerID` is
-    /// nil and the list shows nothing — the empty state then prompts
+    /// nil and the list shows nothing, the empty state then prompts
     /// the user to pick a server.
     private var currentServerID: String? {
         let active = servers.first(where: { $0.isActive }) ?? servers.first
@@ -146,7 +146,7 @@ struct MyRecordingsView: View {
                 // LazyVStack + TVRecordingRow, which uses the same subtle
                 // focus treatment (accent stroke + scale bump) as the rest
                 // of the tvOS UI. Context menu comes through as a
-                // .confirmationDialog triggered by .onLongPressGesture —
+                // .confirmationDialog triggered by .onLongPressGesture,
                 // same pattern used in the EPG guide.
                 ScrollView {
                     LazyVStack(spacing: 14) {
@@ -290,7 +290,7 @@ struct MyRecordingsView: View {
 
     /// Reconciles the **currently-active** server's Dispatcharr
     /// recordings. v1.6.10: previously walked every Dispatcharr
-    /// `serverID` in the local DB and pinged each one — which spent
+    /// `serverID` in the local DB and pinged each one, which spent
     /// bandwidth (and Dispatcharr quota) keeping data fresh for
     /// servers the user wasn't even viewing. Now scoped to the
     /// active server, matching the per-playlist visibility filter
@@ -843,7 +843,7 @@ private struct RecordingRow: View {
 /// rest of the tvOS UI's focus treatment (coloured stroke + small scale
 /// bump on focus) instead of the giant white halo that List + Button
 /// produced. Long-press opens a confirmationDialog of the same menu
-/// items that iOS shows as a .contextMenu — the dialog avoids the
+/// items that iOS shows as a .contextMenu, the dialog avoids the
 /// flashing / rebuilding issues that .contextMenu has on tvOS.
 private struct TVRecordingRow<Menu: View>: View {
     let recording: Recording
@@ -897,7 +897,7 @@ private struct TVRecordingRow<Menu: View>: View {
 /// every top-level in-tab segment selector in the app looks the same.
 ///
 /// Rendering goes through a custom `ButtonStyle` that reads
-/// `@Environment(\.isFocused)` directly — this is the only way on tvOS
+/// `@Environment(\.isFocused)` directly, this is the only way on tvOS
 /// to get the pill's custom focus treatment (accent stroke + scale)
 /// WITHOUT the default system white halo and WITHOUT triggering the
 /// `_UIReplicantView as a subview of UIHostingController.view`
@@ -931,7 +931,7 @@ struct DVRSegmentPill: View {
     }
 }
 
-// MARK: tvOS pill style — focusable, custom stroke, scale bump
+// MARK: tvOS pill style, focusable, custom stroke, scale bump
 
 #if os(tvOS)
 private struct DVRSegmentPillButtonStyle: ButtonStyle {
@@ -963,7 +963,7 @@ private struct DVRSegmentPillButtonStyle: ButtonStyle {
 }
 #endif
 
-// MARK: iOS pill style — plain tappable capsule, no focus state
+// MARK: iOS pill style, plain tappable capsule, no focus state
 
 #if os(iOS)
 private struct DVRSegmentPillButtonStyle: ButtonStyle {

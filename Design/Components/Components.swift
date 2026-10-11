@@ -337,10 +337,10 @@ struct TVInlineCardRowButtonStyle: ButtonStyle {
     }
 }
 
-/// Legacy alias — prefer TVNoHighlightButtonStyle for new code.
+/// Legacy alias, prefer TVNoHighlightButtonStyle for new code.
 typealias TVNoRingButtonStyle = TVNoHighlightButtonStyle
 
-/// Focus style for tvOS poster/card grids — scales up and adds a glow on focus.
+/// Focus style for tvOS poster/card grids, scales up and adds a glow on focus.
 /// The accent border is applied by VODPosterCard directly on the poster image
 /// (not the whole card including text), so this style only handles scale + shadow.
 struct TVCardButtonStyle: ButtonStyle {
@@ -373,7 +373,7 @@ struct PressableButtonStyle: ButtonStyle {
 }
 #endif
 
-// tvOS / macOS shim — UIKeyboardType isn't available outside iOS,
+// tvOS / macOS shim, UIKeyboardType isn't available outside iOS,
 // so we mirror the values the app references to keep call sites clean.
 #if !os(iOS)
 enum UIKeyboardType: Int { case `default` = 0, URL = 3 }
@@ -567,7 +567,7 @@ struct AppTextField: View {
     /// v1.7.x: when `isSecure` is true, this drives a trailing
     /// eye-toggle button that flips between `SecureField` and
     /// `TextField`. Lets users verify they typed the password
-    /// correctly — especially valuable on Apple TV where the Siri
+    /// correctly, especially valuable on Apple TV where the Siri
     /// Remote keyboard makes typos easy. Defaults to hidden so
     /// dots are still the at-rest state; security posture is
     /// unchanged unless the user explicitly taps reveal.
@@ -740,7 +740,7 @@ struct AppTextField: View {
                 // `passwordVisible`, which swaps the inner field
                 // between SecureField and TextField. Stays empty
                 // on tvOS focus engine because tvOS users tap the
-                // field directly — adding a sibling button would
+                // field directly, adding a sibling button would
                 // confuse the focus engine without corresponding
                 // value (Siri Remote keyboard reveal is server-side).
                 if isSecure {

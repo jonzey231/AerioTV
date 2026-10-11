@@ -762,10 +762,10 @@ final class HeadlessAVPlayerEngine {
 /// Minimal audio-only libmpv instance for headless CarPlay playback. Mirrors
 /// the pre-init subset of `MPVPlayerView.Coordinator.setupMPV` that matters for
 /// audio: `vo=libmpv`, `profile=fast`, `vid=no` (no video pipeline, no GL
-/// surface required — the same flag that lets audio play in the iOS Simulator),
+/// surface required, the same flag that lets audio play in the iOS Simulator),
 /// HTTP UA/headers, then `loadfile`. All handle access is serialised on one
-/// private queue; `@unchecked Sendable` because that queue — not the type
-/// system — provides the isolation for the C handle.
+/// private queue; `@unchecked Sendable` because that queue, not the type
+/// system, provides the isolation for the C handle.
 final class HeadlessMPVAudioEngine: @unchecked Sendable {
     private var mpv: OpaquePointer?
     private let queue = DispatchQueue(label: "app.molinete.aerio.headless.mpv")

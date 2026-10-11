@@ -131,9 +131,9 @@ struct RecordingActions {
     private func startLocal(_ rec: Recording, path: String) {
         let url = URL(fileURLWithPath: path)
         guard FileManager.default.fileExists(atPath: path) else {
-            debugLog("⚠️ Local recording file missing on disk: \(path) — id=\(rec.id)")
+            debugLog("⚠️ Local recording file missing on disk: \(path), id=\(rec.id)")
             DebugLogger.shared.log(
-                "Local recording file missing — \(rec.programTitle) at \(path)",
+                "Local recording file missing, \(rec.programTitle) at \(path)",
                 category: "DVR", level: .warning)
             return
         }

@@ -1,7 +1,7 @@
 //  SyncCategoriesSettingsView.swift
 //  Aerio
 //
-//  v1.6.17 — granular per-data-type iCloud sync controls.
+//  v1.6.17, granular per-data-type iCloud sync controls.
 //
 //  Anchored from the iCloud Sync section of the main SettingsView.
 //  Each row pairs a "Sync this category" toggle with a destructive
@@ -19,7 +19,7 @@ struct SyncCategoriesSettingsView: View {
     @ObservedObject private var theme = ThemeManager.shared
     @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = true
 
-    // One @AppStorage per category — written through SyncCategory.defaultsKey,
+    // One @AppStorage per category, written through SyncCategory.defaultsKey,
     // round-trips via SyncManager.buildPreferencesDict so a flip on one
     // device propagates to the user's other devices.
     @AppStorage(SyncCategory.servers.defaultsKey)       private var syncServers = true
@@ -32,7 +32,7 @@ struct SyncCategoriesSettingsView: View {
     /// The category whose Delete confirmation is currently being shown.
     @State private var pendingDeleteCategory: SyncCategory? = nil
 
-    /// Set when a delete completes — drives the toast confirmation.
+    /// Set when a delete completes, drives the toast confirmation.
     @State private var lastDeletedCategory: SyncCategory? = nil
     @State private var showDeletedToast = false
 

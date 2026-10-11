@@ -13,7 +13,7 @@ import AVFoundation
 /// IMPORTANT – tvOS MPNowPlayingInfoCenter has a framework bug where reading
 /// back `nowPlayingInfo` and writing it again (read-modify-write) triggers an
 /// internal `_dispatch_assert_queue_fail` crash.  To avoid this we keep our own
-/// shadow copy (`infoDict`) and **always write the full dict** — never read from
+/// shadow copy (`infoDict`) and **always write the full dict**, never read from
 /// the center.
 @MainActor
 final class NowPlayingBridge {
@@ -32,7 +32,7 @@ final class NowPlayingBridge {
     private var onFlipChannel: ((Int) -> Void)?
     private var artworkTask: Task<Void, Never>?
 
-    /// Our shadow copy of nowPlayingInfo — always written in full, never read
+    /// Our shadow copy of nowPlayingInfo, always written in full, never read
     /// back from MPNowPlayingInfoCenter.
     private var infoDict: [String: Any] = [:]
 
@@ -43,7 +43,7 @@ final class NowPlayingBridge {
     private var currentIsLive = false
     /// Explicit program bounds passed by the caller. When nil, `programBounds`
     /// resolves them LIVE from `ChannelStore` (which carries EPG-merged
-    /// current-program windows) keyed by the playing channel id — so the
+    /// current-program windows) keyed by the playing channel id, so the
     /// timeline fills in as EPG loads and rolls over to the next programme
     /// without a reconfigure.
     private var overrideProgramStart: Date?
@@ -121,7 +121,7 @@ final class NowPlayingBridge {
         // the 0→1 transition, so if that initial activation failed (we've seen
         // `SessionCore.mm Error -50` on cold app launch when the OS isn't
         // ready yet) the session is left in `.soloAmbient` / unconfigured and
-        // the lockscreen stays blank forever — subsequent increments no-op and
+        // the lockscreen stays blank forever, subsequent increments no-op and
         // never retry. Re-applying here is idempotent when it already succeeded
         // and rescues the case where it didn't.
         #if os(iOS)
@@ -146,7 +146,7 @@ final class NowPlayingBridge {
         registerCommands(isLive: isLive)
 
         #if canImport(UIKit)
-        // Synchronous on main — we're already on @MainActor — so iOS has the
+        // Synchronous on main, we're already on @MainActor, so iOS has the
         // remote-control route registered BEFORE `nowPlayingInfo` is written.
         // Previously this was `DispatchQueue.main.async`, which scheduled the
         // call AFTER `publishInfo()` had already published; iOS's lockscreen
@@ -170,7 +170,7 @@ final class NowPlayingBridge {
                 // a filling progress bar + full chrome instead of a bare "LIVE".
                 info[MPMediaItemPropertyPlaybackDuration] = bounds.duration
                 info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = bounds.elapsed
-                // Deliberately NOT setting IsLiveStream — that suppresses the timeline.
+                // Deliberately NOT setting IsLiveStream, that suppresses the timeline.
             } else {
                 info[MPNowPlayingInfoPropertyIsLiveStream] = true
             }
@@ -184,7 +184,7 @@ final class NowPlayingBridge {
         publishInfo()
 
         // #43: tvOS REQUIRES an explicit `playbackState` for the system to treat
-        // this app as the active Now Playing app — which is what makes the OS
+        // this app as the active Now Playing app, which is what makes the OS
         // relay the lock-screen / Control Center widget to a paired iPhone (the
         // same way YouTube/Emby surface their Apple TV playback on your phone).
         // iOS infers "playing" from the active audio session, but tvOS does not:
@@ -205,7 +205,7 @@ final class NowPlayingBridge {
 
     /// Update elapsed time and playback rate. For a live channel presented
     /// as a bounded program, the elapsed value is PROGRAM-relative
-    /// (now − programStart), not the raw stream clock `time` — otherwise the
+    /// (now − programStart), not the raw stream clock `time`, otherwise the
     /// per-tick perf pump would overwrite the program timeline with the mpv
     /// playback position (which resets to ~0 on every tune).
     /// Receiver label for the lock screen while an AirPlay or Cast receiver
@@ -240,14 +240,14 @@ final class NowPlayingBridge {
         if currentIsLive, let bounds = programBounds() {
             // EPG is (now) available: upgrade to a bounded programme timeline,
             // dropping the "LIVE" chip. This self-heals the common case where
-            // `configure` ran before EPG loaded (cold-car / resume) — the next
+            // `configure` ran before EPG loaded (cold-car / resume), the next
             // tick flips the bare "LIVE" presentation into a filling progress
             // bar with no reconfigure needed.
             infoDict[MPMediaItemPropertyPlaybackDuration] = bounds.duration
             infoDict[MPNowPlayingInfoPropertyElapsedPlaybackTime] = bounds.elapsed
             infoDict.removeValue(forKey: MPNowPlayingInfoPropertyIsLiveStream)
         } else if currentIsLive {
-            // Still no programme window — keep the live chip.
+            // Still no programme window, keep the live chip.
             infoDict[MPNowPlayingInfoPropertyIsLiveStream] = true
             infoDict.removeValue(forKey: MPMediaItemPropertyPlaybackDuration)
             infoDict.removeValue(forKey: MPNowPlayingInfoPropertyElapsedPlaybackTime)
@@ -264,7 +264,7 @@ final class NowPlayingBridge {
     /// Duration + clamped elapsed for the current-program window, or nil when
     /// no valid bounds are known (falls back to the live chip). Prefers the
     /// explicit override; otherwise reads the LIVE current-program window from
-    /// `ChannelStore` keyed by the playing channel id — re-read on every call
+    /// `ChannelStore` keyed by the playing channel id, re-read on every call
     /// so the timeline appears as EPG loads and advances to the next programme
     /// on rollover without a reconfigure.
     private func programBounds() -> (duration: Double, elapsed: Double)? {
@@ -325,7 +325,7 @@ final class NowPlayingBridge {
 
     // MARK: - Private
 
-    /// Write our shadow dict to the system center — always a full write,
+    /// Write our shadow dict to the system center, always a full write,
     /// never a read-modify-write.
     /// Called on @MainActor (guaranteed by class isolation).
     /// MPNowPlayingInfoCenter has internal queue assertions that crash when called
@@ -406,7 +406,7 @@ final class NowPlayingBridge {
         // v1.7.x CarPlay: on live channels, the car's (and lock screen's)
         // next/previous buttons flip channels. `changeChannel` has its own
         // 300ms debounce against rapid hardware-press cascades. VOD keeps
-        // these disabled — there is no "next channel" for on-demand.
+        // these disabled, there is no "next channel" for on-demand.
         cc.nextTrackCommand.removeTarget(nil)
         cc.previousTrackCommand.removeTarget(nil)
         if isLive {
@@ -436,7 +436,7 @@ final class NowPlayingBridge {
         // `MPMediaItemArtwork(boundsSize:requestHandler:)` init, when passed
         // a full-size channel logo (3200x2400 observed on-device), crashes
         // with `BUG IN CLIENT OF LIBDISPATCH: Block was expected to execute
-        // on queue` — a queue-specific assertion inside iOS's Media
+        // on queue`, a queue-specific assertion inside iOS's Media
         // framework. The crash sits on Thread 10 (MP's private serial queue)
         // after our dict write, deep inside `-[MPNowPlayingInfoCenter
         // setNowPlayingInfo:]` → `dispatch_barrier_async` → `dispatch_after`
@@ -449,13 +449,13 @@ final class NowPlayingBridge {
         // our controlled queue so iOS never has to pull pixels async,
         // (2) use the deprecated-but-functional `MPMediaItemArtwork(image:)`
         // init so there's no closure for iOS's Media framework to resolve
-        // on its private queue — the UIImage is retained directly on the
+        // on its private queue, the UIImage is retained directly on the
         // artwork object, (3) assign + publish in one atomic main-thread
-        // write. If this still crashes, fall back to the no-artwork path —
+        // write. If this still crashes, fall back to the no-artwork path,
         // the user's channel logo isn't worth a hard crash.
         //
         // tvOS has a separate, confirmed `_dispatch_assert_queue_fail`
-        // bug in MPNowPlayingInfoCenter that no workaround survives — keep
+        // bug in MPNowPlayingInfoCenter that no workaround survives, keep
         // it skipped entirely there.
         #if os(tvOS)
         return
@@ -465,7 +465,7 @@ final class NowPlayingBridge {
         artworkTask = Task { [weak self] in
             do {
                 // v1.6.23: route through LogoFetcher so the active
-                // server's auth headers are applied — Dispatcharr-API
+                // server's auth headers are applied, Dispatcharr-API
                 // logos live behind /api/channels/logos/<id>/cache/
                 // which 401s without X-API-Key, leaving the lockscreen
                 // artwork blank for every Dispatcharr-API channel.
@@ -480,11 +480,11 @@ final class NowPlayingBridge {
                 // Downscale to a lockscreen-sized thumbnail. 512pt matches
                 // the largest pixel dimension MPNowPlayingInfoCenter's
                 // consumers (lockscreen, Dynamic Island, Control Center)
-                // actually render at on current devices — handing iOS a
+                // actually render at on current devices, handing iOS a
                 // 30MB 3200x2400 source made the Media framework try to
                 // bounce pixels across its private queue and tripped the
                 // queue assertion. `byPreparingThumbnail` returns nil if
-                // it can't decode (corrupt data, memory pressure) — fall
+                // it can't decode (corrupt data, memory pressure), fall
                 // through silently.
                 let maxSide: CGFloat = 512
                 let targetSize: CGSize = {

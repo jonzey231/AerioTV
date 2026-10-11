@@ -5,7 +5,7 @@ import SwiftUI
 /// Slim version (per device-test feedback): solid black bar instead
 /// of ultraThinMaterial chrome, small monospaced tile-count chip on
 /// the left, icon-only `+` and `×` buttons on the right. No text
-/// labels — the icons are universally recognisable and leave more
+/// labels, the icons are universally recognisable and leave more
 /// vertical space for the actual grid. Accessibility labels still
 /// spell out the actions for VoiceOver.
 ///
@@ -39,7 +39,7 @@ struct MultiviewTransportBar: View {
             exitButton
         }
         // tvOS needs more vertical breathing room because the
-        // focused `+` / `×` buttons scale to 1.15 — cramming them
+        // focused `+` / `×` buttons scale to 1.15, cramming them
         // into the iPad-sized bar clips the focus halo against the
         // grid above.
         .padding(.horizontal, 60)
@@ -212,7 +212,7 @@ struct TransportButtonStyle: ButtonStyle {
 #endif
 
 #if DEBUG
-#Preview("Transport Bar — slim") {
+#Preview("Transport Bar, slim") {
     MultiviewTransportBar(
         store: MultiviewStore.shared,
         onAdd: {},

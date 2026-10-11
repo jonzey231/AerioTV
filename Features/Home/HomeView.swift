@@ -60,14 +60,14 @@ final class VODStore: ObservableObject {
     /// tabs show a loading state, not "No TV Shows", before the first one.
     @Published private(set) var hasLoadedMovies = false
     @Published private(set) var hasLoadedSeries = false
-    /// Series equivalent of `isRefillingMovies` — true for the whole
+    /// Series equivalent of `isRefillingMovies`, true for the whole
     /// `loadSeries` run.
     @Published private(set) var isRefillingSeries = false
     @Published private(set) var seriesError: String?
 
-    /// Server name last used for movies — shown in error/empty state for diagnosis.
+    /// Server name last used for movies, shown in error/empty state for diagnosis.
     @Published private(set) var lastMoviesServerName: String?
-    /// Server name last used for series — shown in error/empty state for diagnosis.
+    /// Server name last used for series, shown in error/empty state for diagnosis.
     @Published private(set) var lastSeriesServerName: String?
 
     private var moviesTask: Task<Void, Never>?
@@ -164,7 +164,7 @@ final class VODStore: ObservableObject {
             let serverHost = URL(string: base)?.host
             return VODService.validateAbsoluteURL(url, serverHost: serverHost)
         }
-        // Relative path — prepend server base URL.
+        // Relative path, prepend server base URL.
         let separator = raw.hasPrefix("/") ? "" : "/"
         return URL(string: base + separator + raw)
     }
@@ -880,7 +880,7 @@ final class VODStore: ObservableObject {
         defer { noteFirstVODPage(.movie, count: moviesCount) }
         debugLog("🎬 VODStore.loadMovies: starting, servers=\(servers.count) honorCache=\(honorCache) background=\(background)")
         let activeServer = servers.first(where: { $0.isActive })
-        // Active server exists but doesn't support VOD (e.g. M3U) — clear and bail silently.
+        // Active server exists but doesn't support VOD (e.g. M3U), clear and bail silently.
         if let active = activeServer, !active.supportsVOD {
             debugLog("🎬 VODStore.loadMovies: active server doesn't support VOD, clearing")
             publishMovieCount(0, "no VOD support", rowsChanged: false); movieCategories = []
@@ -918,7 +918,7 @@ final class VODStore: ObservableObject {
         let vodServers = servers.filter { $0.supportsVOD && $0.vodEnabled }
         // Use the active VOD server; fall back to first VOD server only when there is no
         // active server at all (never fall back to an inactive VOD server when a non-VOD
-        // server is explicitly active — that would show stale data from the wrong server).
+        // server is explicitly active, that would show stale data from the wrong server).
         guard let server = vodServers.first(where: { $0.isActive }) ?? (activeServer == nil ? vodServers.first : nil) else {
             // Nothing left to load from, so nothing should still be on screen.
             publishMovieCount(0, "no VOD server", rowsChanged: false); movieCategories = []
@@ -974,7 +974,7 @@ final class VODStore: ObservableObject {
         }
         var lastProgressivePublish = Date.distantPast
         moviesError = nil
-        DebugLogger.shared.log("VODStore loadMovies — \(server.name) (\(server.type.rawValue)) url=\(server.effectiveBaseURL)",
+        DebugLogger.shared.log("VODStore loadMovies, \(server.name) (\(server.type.rawValue)) url=\(server.effectiveBaseURL)",
                                category: "Movies", level: .info)
 
         if honorCache, moviesCount > 0, snapshotIsFresh(restoredMoviesAt, kind: "movies") {
@@ -1325,7 +1325,7 @@ final class VODStore: ObservableObject {
         }
         var lastSeriesProgressivePublish = Date()
         seriesError = nil
-        DebugLogger.shared.log("VODStore loadSeries — \(server.name) (\(server.type.rawValue)) url=\(server.effectiveBaseURL)",
+        DebugLogger.shared.log("VODStore loadSeries, \(server.name) (\(server.type.rawValue)) url=\(server.effectiveBaseURL)",
                                category: "TVShows", level: .info)
 
         if honorCache, seriesCount > 0, snapshotIsFresh(restoredSeriesAt, kind: "series") {
@@ -1572,7 +1572,7 @@ final class VODStore: ObservableObject {
 // MARK: - Channel Store
 // Owned by MainTabView as a @StateObject.  Pre-fetches channels (and EPG) as
 // soon as any server is available and re-fetches whenever the server list
-// changes — so the Live TV tab is already populated before the user taps it.
+// changes, so the Live TV tab is already populated before the user taps it.
 @MainActor
 final class ChannelStore: ObservableObject {
     static let shared = ChannelStore()
@@ -1591,7 +1591,7 @@ final class ChannelStore: ObservableObject {
     static func dispatcharrStreamURLs(base: String, uuid: String?) -> [URL] {
         guard let uuid, !uuid.isEmpty else { return [] }
         let trimmedBase = base.hasSuffix("/") ? String(base.dropLast()) : base
-        // TS stream — the only working Dispatcharr proxy endpoint.
+        // TS stream, the only working Dispatcharr proxy endpoint.
         // /proxy/ts/channel/ doesn't exist. HLS returns 404 on this instance.
         //
         // v1.7.x: pin `?output_format=mpegts`. Dispatcharr v0.25.0
@@ -1625,7 +1625,7 @@ final class ChannelStore: ObservableObject {
             DispatcharrConnectionLimit.directConnectActive = activeServer?.type == .dispatcharrAPI
         }
     }
-    /// ID of the server whose channels are currently loaded — detects server switches.
+    /// ID of the server whose channels are currently loaded, detects server switches.
     private var currentChannelServerID: UUID?
 
     private var loadTask: Task<Void, Never>?
@@ -1670,7 +1670,7 @@ final class ChannelStore: ObservableObject {
         // `.task(channelServerKey)` fires `refresh` AGAIN once the
         // splash dismisses. Without this guard the second call would
         // cancel the in-flight network request and re-issue it from
-        // scratch — wiping out the head start. With it, the second
+        // scratch, wiping out the head start. With it, the second
         // call is a no-op when a load is already in progress (or
         // complete) for the same server.
         if let task = loadTask, !task.isCancelled,
@@ -1690,7 +1690,7 @@ final class ChannelStore: ObservableObject {
         // Set isLoading immediately (before the Task starts) so the UI shows
         // the loading spinner right away. Without this, there's a brief gap
         // where channels are empty and isLoading is false, which shows the
-        // "No Channels" empty state — on tvOS this can deadlock the focus engine
+        // "No Channels" empty state, on tvOS this can deadlock the focus engine
         // as views rapidly swap during the onboarding transition.
         if channels.isEmpty { isLoading = true }
         loadTask?.cancel()
@@ -1718,7 +1718,7 @@ final class ChannelStore: ObservableObject {
         await task.value
     }
 
-    /// Called by pull-to-refresh — always re-fetches channels AND EPG.
+    /// Called by pull-to-refresh, always re-fetches channels AND EPG.
     /// This is async so the pull-to-refresh spinner stays visible until done.
     /// Pass `modelContext` to persist the rebuilt guide back to SwiftData.
     func forceRefresh(servers: [ServerConnection], modelContext: ModelContext? = nil) async {
@@ -1741,7 +1741,7 @@ final class ChannelStore: ObservableObject {
     private func performForceRefresh(servers: [ServerConnection], modelContext: ModelContext?) async {
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first else { return }
         // The user asked for fresh data, so the bulk guide must actually be
-        // re-downloaded even if a pass completed moments ago — and a server
+        // re-downloaded even if a pass completed moments ago, and a server
         // that got refusal-latched by an earlier 403 must get a real retry,
         // not a silent no-op (Cloudflare rate-limits lift; bans expire).
         GuideStore.shared.invalidateBulkGuideReuse()
@@ -1802,7 +1802,7 @@ final class ChannelStore: ObservableObject {
     /// Apply whatever category data we have cached from the last
     /// XMLTV pass so the tint stripe renders immediately on cold
     /// launch. The fresh XMLTV pass still runs in `loadAllEPG` and
-    /// overwrites with current data — this just means the user
+    /// overwrites with current data, this just means the user
     /// doesn't stare at an uncolored card while the XMLTV parse
     /// churns. Call from the channel-load success path.
     func primeCategoriesFromCache(serverID: String) {
@@ -1815,7 +1815,7 @@ final class ChannelStore: ObservableObject {
     /// data. Channel cards in Live TV list view read
     /// `currentProgramCategory` to drive the "Tint Channel Cards"
     /// stripe, but the initial channel load uses Dispatcharr's JSON
-    /// API which doesn't include categories — so we back-fill here
+    /// API which doesn't include categories, so we back-fill here
     /// from the guide's XMLTV pass. Only updates channels whose
     /// stored category differs, to avoid spurious @Published fires
     /// on every EPG refresh.
@@ -1885,7 +1885,7 @@ final class ChannelStore: ObservableObject {
 
     func applyXMLTVCategories(_ categoriesByChannelID: [String: String], serverID: String) {
         guard !categoriesByChannelID.isEmpty else {
-            debugLog("📺 applyXMLTVCategories: SKIP — empty categories dict (serverID=\(serverID.prefix(8)))")
+            debugLog("📺 applyXMLTVCategories: SKIP, empty categories dict (serverID=\(serverID.prefix(8)))")
             return
         }
         let shouldApplyToCurrentChannels =
@@ -1948,7 +1948,7 @@ final class ChannelStore: ObservableObject {
     }
 
     /// Full XMLTV pass that feeds the SAME `GuideStore.programs`
-    /// dataset the Guide view reads from — so Live-TV list rows
+    /// dataset the Guide view reads from, so Live-TV list rows
     /// (current-program tint) AND the expanded schedule panel
     /// (per-upcoming-program tint) share one source of truth with
     /// the Guide view's tinted cells. Previously List view re-
@@ -1961,7 +1961,7 @@ final class ChannelStore: ObservableObject {
     /// eventually mounts, the view's own fetchXMLTVFromURL call
     /// becomes a refresh (the merge logic in `mergeProgram`
     /// dedupes by title + time). On iPhone this is the only
-    /// XMLTV pass that happens — which is exactly why we need it
+    /// XMLTV pass that happens, which is exactly why we need it
     /// here.
     @discardableResult
     func primeXMLTVFromURL(_ url: URL, headers: [String: String] = [:]) async -> Bool {
@@ -1974,7 +1974,7 @@ final class ChannelStore: ObservableObject {
         let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
 
         // Snapshot channels + server on the main actor before
-        // handing off — GuideStore's XMLTV method is @MainActor
+        // handing off, GuideStore's XMLTV method is @MainActor
         // too and will re-dispatch, but snapshotting here keeps
         // the call site sync-clean.
         let snapshot = channels
@@ -2002,7 +2002,7 @@ final class ChannelStore: ObservableObject {
         // set-loop was still running. The ServerSyncView cover
         // would dismiss, the user would expand a channel, and
         // `fetchUpcoming` would hit EPGCache before the seed had
-        // overwritten the JSON-bulk's category-less entries —
+        // overwritten the JSON-bulk's category-less entries,
         // leaving rows uncolored. Awaiting ensures the category
         // data is actually in-place before we return.
         guard !activeServer.isGone, !Task.isCancelled else { return false }
@@ -2056,11 +2056,11 @@ final class ChannelStore: ObservableObject {
         // 20s URLSession timeout before the error view surfaces.
         // HEAD with a 4s timeout turns that into ~3s with a specific,
         // actionable message. Skipped when we already have cached
-        // channels — if the user is refreshing and the probe blips,
+        // channels, if the user is refreshing and the probe blips,
         // we don't want to wipe working data over a transient failure.
         if channels.isEmpty {
             if let probeMessage = await Self.reachabilityProbe(baseURL: baseURL) {
-                debugLog("🔷 ChannelStore.load: probe failed — \(probeMessage)")
+                debugLog("🔷 ChannelStore.load: probe failed, \(probeMessage)")
                 self.error = probeMessage
                 self.isLoading = false
                 DebugLogger.shared.logChannelLoad(
@@ -2069,9 +2069,9 @@ final class ChannelStore: ObservableObject {
                     error: nil)
                 return
             }
-            debugLog("🔷 ChannelStore.load: probe ok — starting fetch...")
+            debugLog("🔷 ChannelStore.load: probe ok, starting fetch...")
         } else {
-            debugLog("🔷 ChannelStore.load: probe skipped (warm refresh) — starting fetch...")
+            debugLog("🔷 ChannelStore.load: probe skipped (warm refresh), starting fetch...")
         }
 
         // Auto-retry for transient server-side errors (503/502/504) with backoff.
@@ -2120,7 +2120,7 @@ final class ChannelStore: ObservableObject {
                     channelCount: items.count,
                     duration: Date().timeIntervalSince(start))
                 isLoading = false
-                // For Xtream Codes, EPG isn't available in bulk — enrich
+                // For Xtream Codes, EPG isn't available in bulk, enrich
                 // channels in the background with per-stream short EPG.
                 if type == .xtreamCodes {
                     epgEnrichTask?.cancel()
@@ -2135,9 +2135,9 @@ final class ChannelStore: ObservableObject {
                 isLoading = false; return
             } catch let e as APIError {
                 if case .serverError(let code) = e, retryableCodes.contains(code), attempt < maxAttempts {
-                    // Transient error — show a soft retry message and wait before next attempt.
+                    // Transient error, show a soft retry message and wait before next attempt.
                     if channels.isEmpty {
-                        error = "Server unavailable (\(code)) — retrying in \(attempt == 1 ? "2" : attempt == 2 ? "5" : "10")s… (attempt \(attempt)/\(maxAttempts))"
+                        error = "Server unavailable (\(code)), retrying in \(attempt == 1 ? "2" : attempt == 2 ? "5" : "10")s… (attempt \(attempt)/\(maxAttempts))"
                     }
                     try? await Task.sleep(nanoseconds: retryDelays[attempt - 1])
                     continue
@@ -2174,7 +2174,7 @@ final class ChannelStore: ObservableObject {
     /// wrong IP, LAN-blocking VPN, no network).
     ///
     /// Returns `nil` when the server responds with anything from
-    /// 100–599 — a 401, 404, or 405 all prove the network + host are
+    /// 100–599, a 401, 404, or 405 all prove the network + host are
     /// alive, which is all we care about at this stage. Returns a
     /// user-facing error string otherwise. Callers use the return
     /// value as an early-exit path: a non-nil result means "set this
@@ -2188,7 +2188,7 @@ final class ChannelStore: ObservableObject {
     private static func reachabilityProbe(baseURL: String) async -> String? {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let url = URL(string: trimmed) else {
-            return "Invalid server URL — check Settings → Server."
+            return "Invalid server URL, check Settings → Server."
         }
         var request = URLRequest(url: url, timeoutInterval: 4)
         request.httpMethod = "HEAD"
@@ -2211,7 +2211,7 @@ final class ChannelStore: ObservableObject {
             // we mistakenly tell the user the server is unreachable.
             let (_, response) = try await HTTPRouter.data(for: request, using: session)
             // Any HTTP response proves the TCP + TLS + HTTP path is
-            // alive. We don't care about the status code here — even
+            // alive. We don't care about the status code here, even
             // a 404 / 405 means the box is up.
             if let http = response as? HTTPURLResponse,
                (100..<600).contains(http.statusCode) {
@@ -2312,7 +2312,7 @@ final class ChannelStore: ObservableObject {
             // lazily when the user opens the Guide tab, so the
             // category data is just deferred, not abandoned.
             var bulkEPGSucceeded = false
-            // Dispatcharr: one bulk call via /api/epg/grid/ — all channels, -1h to +24h
+            // Dispatcharr: one bulk call via /api/epg/grid/, all channels, -1h to +24h
             do {
                 let dAPI = DispatcharrAPI(baseURL: baseURL,
                                           auth: .apiKey(apiKey),
@@ -2711,7 +2711,7 @@ final class ChannelStore: ObservableObject {
             }
 
         case .m3uPlaylist:
-            // M3U: XMLTV is already fully parsed during channel load — EPGCache is populated.
+            // M3U: XMLTV is already fully parsed during channel load, EPGCache is populated.
             // Nothing additional needed.
             debugLog("📺 M3U EPG: already loaded from XMLTV during channel fetch")
         }
@@ -2722,7 +2722,7 @@ final class ChannelStore: ObservableObject {
     /// Progressively fetches short EPG for Xtream channels and updates `channels`
     /// so "Now Playing" info appears without user interaction. Runs in batches of 8
     /// concurrent requests to avoid hammering the server.
-    /// Parses Xtream EPG timestamp strings — Unix seconds/ms or "yyyy-MM-dd HH:mm:ss".
+    /// Parses Xtream EPG timestamp strings, Unix seconds/ms or "yyyy-MM-dd HH:mm:ss".
     /// Must be `nonisolated` so child tasks in `withTaskGroup` can call it freely.
     private nonisolated static func parseXtreamDate(_ s: String) -> Date? {
         XtreamDateParser.parse(s)
@@ -2981,12 +2981,12 @@ final class ChannelStore: ObservableObject {
         // group names in `groupOrder` (some IPTV resellers ship
         // multiple categories with identical display names) don't
         // trap the way `uniqueKeysWithValues:` would. First
-        // occurrence wins — the duplicate just collapses onto
+        // occurrence wins, the duplicate just collapses onto
         // the same display position.
         let idx = Dictionary(groupOrder.enumerated().map { ($1, $0) },
                              uniquingKeysWith: { first, _ in first })
         // GH #59: when the provider's row order is more trustworthy than its
-        // channel numbers (Dispatcharr behind Xtream — see
+        // channel numbers (Dispatcharr behind Xtream, see
         // `dispatcharrXCNumbering`), sort on that and skip the numeric compare
         // entirely. Sorting by number here is exactly what displaced decimal
         // subchannels to the end of the list.
@@ -3036,7 +3036,7 @@ final class ChannelStore: ObservableObject {
                 } catch {
                     // The reroute is a URL-shape guess, not a probe. Some
                     // middleware serves get.php but has player_api disabled,
-                    // broken, or separately IP-locked — for those users the
+                    // broken, or separately IP-locked, for those users the
                     // pasted M3U worked before the reroute existed, and it
                     // must keep working. Only a get.php URL lands here, so
                     // falling back re-fetches at most the M3U they pasted.
@@ -3129,7 +3129,7 @@ final class ChannelStore: ObservableObject {
                     .sorted { $0.startTime < $1.startTime }
                     .map {
                         // M3U's upstream XMLTV carries `<category>`
-                        // tags — pass them through so the List-view
+                        // tags, pass them through so the List-view
                         // expanded schedule can render per-program
                         // tints matching what the Guide view shows.
                         EPGEntry(title: $0.title, description: $0.description,
@@ -3188,7 +3188,7 @@ final class ChannelStore: ObservableObject {
                 // subchannels like "6.1" included); list index only when the
                 // panel sent nothing. On a Dispatcharr-backed XC playlist a
                 // number the server demonstrably remapped is blanked instead
-                // (`numbering.suppressed`) — better to show nothing than a
+                // (`numbering.suppressed`), better to show nothing than a
                 // number belonging to a different channel.
                 number: numbering.suppressed.contains(i) ? "" : (s.channelNumber ?? String(i + 1)),
                 logoURL: s.streamIcon.flatMap { URL(string: $0) },
@@ -3236,7 +3236,7 @@ final class ChannelStore: ObservableObject {
         // dAPI.getCurrentPrograms()`) to populate `currentProgram`
         // on each ChannelDisplayItem up-front. That call became a
         // major source of server-side load on large Dispatcharr
-        // instances — the endpoint does a full-table scan of
+        // instances, the endpoint does a full-table scan of
         // epg_programs for every channel's now-airing row, which
         // can pin a uwsgi worker for 30-60+s on playlists with
         // thousands of channels. Combined with the 60s URLSession
@@ -3249,7 +3249,7 @@ final class ChannelStore: ObservableObject {
         // +24h in one indexed range query), which also populates
         // EPGCache for the Guide view. The channel list's
         // "now airing" row starts blank and fills in lazily as
-        // per-cell prefetch runs (throttled — see
+        // per-cell prefetch runs (throttled, see
         // EPGGuideView.prefetchIfNeeded).
         debugLog("🔷 ChannelStore.fetchDispatcharr: launching concurrent fetches")
         async let groupsFetch   = dAPI.getChannelGroups()
@@ -3351,9 +3351,9 @@ final class ChannelStore: ObservableObject {
         let usedGroupIDs  = Set(dChannels.compactMap { $0.channelGroupID })
         let channelsWithGroup = dChannels.filter { $0.channelGroupID != nil }.count
         let channelsWithoutGroup = dChannels.filter { $0.channelGroupID == nil }.count
-        debugLog("🔷 ChannelStore.fetchDispatcharr: groupMapping — \(dGroups.count) groups, \(usedGroupIDs.count) used, \(channelsWithGroup) channels have groupID, \(channelsWithoutGroup) channels have nil groupID")
+        debugLog("🔷 ChannelStore.fetchDispatcharr: groupMapping, \(dGroups.count) groups, \(usedGroupIDs.count) used, \(channelsWithGroup) channels have groupID, \(channelsWithoutGroup) channels have nil groupID")
         if let first = dChannels.first {
-            debugLog("🔷 ChannelStore.fetchDispatcharr: sample channel — id=\(first.id), name=\(first.name), channelGroupID=\(String(describing: first.channelGroupID))")
+            debugLog("🔷 ChannelStore.fetchDispatcharr: sample channel, id=\(first.id), name=\(first.name), channelGroupID=\(String(describing: first.channelGroupID))")
         }
         var groupOrder    = dGroups.filter { usedGroupIDs.contains($0.id) }.map { $0.name }
         if dChannels.contains(where: { $0.channelGroupID == nil }) { groupOrder.append("Uncategorized") }
@@ -3453,7 +3453,7 @@ final class ChannelStore: ObservableObject {
 @MainActor
 enum TopShelfDataManager {
     /// Used only by the (tvOS) `FavoritesStore` below, which still wants a
-    /// stable identifier string for UserDefaults suite naming — keychain
+    /// stable identifier string for UserDefaults suite naming, keychain
     /// shuttling doesn't need it.
     static let appGroupID = "group.app.molinete.aerio.topshelf"
 
@@ -3469,7 +3469,7 @@ enum TopShelfDataManager {
 
     /// Write top 6 channels (most-watched first, padded with first
     /// logo-bearing channels) to the shared keychain item. Only metadata +
-    /// raw logo URLs are stored — no downloading or image processing happens
+    /// raw logo URLs are stored, no downloading or image processing happens
     /// in the main app. The Top Shelf extension passes the raw `logoURL`
     /// directly to `setImageURL(_:for:)` and tvOS fetches it natively.
     ///
@@ -3478,7 +3478,7 @@ enum TopShelfDataManager {
     /// `.square` shape. That whole pipeline (main-app → Caches → extension
     /// → file URL → tvOS) was empirically proven unworkable: tvOS's host
     /// process cannot read files from either the extension's OR the main
-    /// app's data containers — both are private sandboxes. The only file
+    /// app's data containers, both are private sandboxes. The only file
     /// locations tvOS can read from are the extension's bundle Resources,
     /// which are sealed at build time and cannot hold dynamic per-user data.
     /// So we rely on remote URLs and accept tvOS's default scaling behavior.
@@ -3510,13 +3510,13 @@ enum TopShelfDataManager {
             return entry
         }
 
-        debugLog("🔐 TopShelf: syncTopChannels — \(channelEntries.count) channels (from \(channels.count) total)")
+        debugLog("🔐 TopShelf: syncTopChannels, \(channelEntries.count) channels (from \(channels.count) total)")
         TopShelfKeychain.write(array: channelEntries, key: "topChannels")
         #endif
     }
 
     /// Sync up to 10 most recent unfinished VOD items to the shared keychain.
-    /// Like `syncTopChannels`, this only stores metadata + raw poster URLs —
+    /// Like `syncTopChannels`, this only stores metadata + raw poster URLs,
     /// the extension passes `posterURL` directly to `setImageURL`.
     ///
     /// `servers` gates the rows against Dispatcharr 0.30 per-user
@@ -3556,7 +3556,7 @@ enum TopShelfDataManager {
             return entry
         }
 
-        debugLog("🔐 TopShelf: syncContinueWatching — \(vodEntries.count) entries (from \(items.count) total, \(items.filter{!$0.isFinished}.count) unfinished)")
+        debugLog("🔐 TopShelf: syncContinueWatching, \(vodEntries.count) entries (from \(items.count) total, \(items.filter{!$0.isFinished}.count) unfinished)")
         TopShelfKeychain.write(array: vodEntries, key: "continueWatching")
         #endif
     }
@@ -3567,7 +3567,7 @@ enum TopShelfDataManager {
     /// extension stops showing stale data from a previous install.
     ///
     /// This is necessary because iOS/tvOS keychain items persist across
-    /// app deletions — they're tied to the app's access group, not to the
+    /// app deletions, they're tied to the app's access group, not to the
     /// app's data container, so `delete + reinstall` does not wipe them
     /// the way it wipes `UserDefaults` or SwiftData.
     static func clearAll() {
@@ -3575,7 +3575,7 @@ enum TopShelfDataManager {
         TopShelfKeychain.delete(key: "continueWatching")
         TopShelfKeychain.delete(key: "topChannels")
         TopShelfKeychain.delete(key: "watchCounts")
-        debugLog("🔐 TopShelf: clearAll — wiped continueWatching, topChannels, watchCounts")
+        debugLog("🔐 TopShelf: clearAll, wiped continueWatching, topChannels, watchCounts")
         #endif
     }
 }
@@ -3588,7 +3588,7 @@ enum TopShelfDataManager {
 /// the main tvOS app and the Top Shelf extension can read/write these
 /// items without any portal changes.
 enum TopShelfKeychain {
-    /// Keychain service identifier — groups all Top Shelf entries together.
+    /// Keychain service identifier, groups all Top Shelf entries together.
     static let service = "aerio.topshelf"
     /// Keychain access group. The team ID prefix is required by iOS and is
     /// covered by the `47DTJ3Q67T.*` wildcard `keychain-access-groups`
@@ -3751,7 +3751,7 @@ enum TopShelfKeychain {
 // so the Auto-Resume Last Channel feature in Settings → Appearance →
 // App Behaviors can pick up where the user left off on next launch.
 //
-// Three pieces of state — channel id, server id, isLive — are written
+// Three pieces of state, channel id, server id, isLive, are written
 // synchronously to UserDefaults so even a force-quit during playback
 // leaves a usable marker. The launch hydration path resolves the
 // channel via `ChannelStore.channels.first(where: { $0.id == channelID })`,
@@ -3760,8 +3760,8 @@ enum TopShelfKeychain {
 // SwiftData) because the marker is per-device, not credential-class
 // data, and we want zero friction on the read path during launch.
 //
-// Storage is intentionally simple — three keys instead of a single
-// JSON-encoded struct — so a malformed value on one key still leaves
+// Storage is intentionally simple, three keys instead of a single
+// JSON-encoded struct, so a malformed value on one key still leaves
 // the others readable and makes the data easy to inspect by hand
 // (e.g. via `defaults read` for diagnostics).
 enum LastPlayedTracker {
@@ -3811,7 +3811,7 @@ enum LastPlayedTracker {
 // `.onChange(of: scenePhase)`) into a single ViewModifier so
 // MainTabView's body stays under Swift's type-checker budget.
 // Without this consolidation each `.onChange/.onAppear` is one
-// more modifier on body's already-long chain — tvOS x86_64
+// more modifier on body's already-long chain, tvOS x86_64
 // hits the heuristic limit and emits "compiler is unable to
 // type-check this expression in reasonable time".
 private struct AutoResumeWiring: ViewModifier {
@@ -3932,7 +3932,7 @@ final class NowPlayingManager: ObservableObject {
     /// `true` when `PlayerSession.mode == .multiview`. In that state
     /// `playingItem` / `playingHeaders` may still be populated (seed
     /// channel left over from the transition from single to multiview),
-    /// but the `MultiviewStore` is authoritative — whichever tile holds
+    /// but the `MultiviewStore` is authoritative, whichever tile holds
     /// audio drives the lockscreen / remote-command surface via
     /// `NowPlayingBridge`, and this manager's values should NOT also
     /// reach the bridge. Set by `PlayerSession.enterMultiview(...)` /
@@ -3943,7 +3943,7 @@ final class NowPlayingManager: ObservableObject {
     /// re-configure bridge" observer to stand down. Today the bridge
     /// is written exclusively from `MPVPlayerView.Coordinator` (which
     /// has its own `tileID` gate), so this flag is currently read-only
-    /// / documentary — but it exists so the invariant is queryable
+    /// / documentary, but it exists so the invariant is queryable
     /// from anywhere without having to also import `PlayerSession`.
     @Published private var _configuredAsMultiviewAdapter: Bool = false
     var configuredAsMultiviewAdapter: Bool {
@@ -3960,7 +3960,7 @@ final class NowPlayingManager: ObservableObject {
     /// tabs add a variable amount of vertical chrome that
     /// `.ignoresSafeArea()` may or may not penetrate, so the mini's
     /// effective bottom isn't reliably `topPadding + height`).
-    /// Default 0 means "no measurement yet" — the consumer treats
+    /// Default 0 means "no measurement yet", the consumer treats
     /// that as "no push" so layout stays at natural position until
     /// the geometry observer fires.
     @Published private var _miniPlayerBottomAbs: CGFloat = 0
@@ -3969,7 +3969,7 @@ final class NowPlayingManager: ObservableObject {
         set { if newValue != _miniPlayerBottomAbs { _miniPlayerBottomAbs = newValue } }
     }
 
-    /// v1.6.15: stream-start signal — bumped to a fresh UUID inside
+    /// v1.6.15: stream-start signal, bumped to a fresh UUID inside
     /// `startPlaying(...)` on EVERY live stream begin (cold auto-
     /// resume, channel-row tap, Siri Remote up/down flip). Drives
     /// the `ChannelInfoBanner`'s own 5s auto-hide timer so the
@@ -3977,7 +3977,7 @@ final class NowPlayingManager: ObservableObject {
     /// Nil at startup = nothing to do.
     @Published var streamStartedToken: UUID? = nil
 
-    /// v1.6.15: chrome-wake signal — bumped only when `wakeChrome ==
+    /// v1.6.15: chrome-wake signal, bumped only when `wakeChrome ==
     /// true` is passed to `startPlaying(...)`. Live channel-flips
     /// from the Siri Remote pass `wakeChrome: false` so up/down
     /// scrolling doesn't summon the bottom pills (which would put
@@ -3991,7 +3991,7 @@ final class NowPlayingManager: ObservableObject {
     /// legacy PlayerView controls) is currently visible. Driven by
     /// `.onChange(...)` observers on those surfaces. Read by
     /// `ChannelInfoBanner` so its visibility is locked in step with
-    /// chrome's auto-fade — banner + chrome appear/disappear together.
+    /// chrome's auto-fade, banner + chrome appear/disappear together.
     @Published private var _chromeIsVisible: Bool = false
     var chromeIsVisible: Bool {
         get { _chromeIsVisible }
@@ -4002,7 +4002,7 @@ final class NowPlayingManager: ObservableObject {
     /// Both the legacy PlayerView and unified MultiviewContainerView
     /// write this when their `showStreamInfo` flips. Read by
     /// `ChannelInfoBanner` to suppress itself while Stream Info is
-    /// visible — without this, on iPhone the banner's top-left
+    /// visible, without this, on iPhone the banner's top-left
     /// position overlaps the Stream Info card's top-left position
     /// and covers the stats the user explicitly opened.
     @Published private var _streamInfoIsVisible: Bool = false
@@ -4076,7 +4076,7 @@ final class NowPlayingManager: ObservableObject {
         // down needs to know whether this is a different item.
         let wasItemID = playingItem?.id
         if playingItem != item { playingItem = item }
-        // v1.6.18: persistent breadcrumb for guide focus default —
+        // v1.6.18: persistent breadcrumb for guide focus default,
         // see the property docstring above.
         lastPlayedChannelID = item.id
         playingHeaders = headers
@@ -4102,7 +4102,7 @@ final class NowPlayingManager: ObservableObject {
         #endif
         // v1.6.15: always bump the stream-start signal for live so
         // the channel-info banner can run its own 5s timer.
-        // Optionally also bump the chrome-wake signal — Siri Remote
+        // Optionally also bump the chrome-wake signal, Siri Remote
         // up/down channel-flip passes `wakeChrome: false` because
         // summoning chrome would put the user's next D-pad press on
         // the Record pill by surprise; cold-launch / row-tap keeps
@@ -4122,7 +4122,7 @@ final class NowPlayingManager: ObservableObject {
         // Track watch count for Top Shelf "most watched" ranking
         if isLive { TopShelfDataManager.incrementWatchCount(for: item) }
         // Push into the recents FIFO so the multiview add-sheet's
-        // "Recent" section reflects actual watching behavior — not
+        // "Recent" section reflects actual watching behavior, not
         // just channels the user added to multiview.
         if isLive { RecentChannelsStore.shared.push(item) }
         // v1.6.13 (GH #8): persist a "last played" marker for the
@@ -4280,7 +4280,7 @@ final class NowPlayingManager: ObservableObject {
         // #42: authoritative reset of the chrome mirror on every playback
         // teardown. The flag is only ever *set* by .onChange observers in
         // MultiviewContainerView / PlayerView, which don't fire `false` when
-        // those views unmount — so without this it persists `true` into the
+        // those views unmount, so without this it persists `true` into the
         // next session and the re-coupled banner flashes on the guide.
         chromeIsVisible = false
     }
@@ -4731,7 +4731,7 @@ struct MainTabView: View {
     }
     @ObservedObject private var channelStore = ChannelStore.shared
     /// Watched purely so `hasRecordings` recomputes the moment a capture
-    /// starts or stops — the DVR tab has to stay up for an in-flight
+    /// starts or stops, the DVR tab has to stay up for an in-flight
     /// recording even when it belongs to a server the user has switched away
     /// from. See `hasRecordings`.
     @ObservedObject private var recordingCoordinator = RecordingCoordinator.shared
@@ -4748,13 +4748,13 @@ struct MainTabView: View {
     /// Watches `PlayerSession.shared.mode` so the inline-player slot
     /// can mode-branch between single-stream `PlayerView` and the new
     /// `MultiviewContainerView`. `@ObservedObject` on a singleton is
-    /// the right fit here — the session outlives any view and should
+    /// the right fit here, the session outlives any view and should
     /// not be owned by this view.
     @ObservedObject private var playerSession = PlayerSession.shared
     /// Watched so the `.multiview` branch can distinguish N=1 (the
     /// unified single-stream path) from N≥2. At N=1 on iOS we restore
     /// the 1.6.0 swipe-down-to-minimize + mini-player behaviour that
-    /// the legacy `PlayerView` path used to own — the unified
+    /// the legacy `PlayerView` path used to own, the unified
     /// `MultiviewContainerView` is the rendering surface now, but
     /// collapsing it behaves like a single stream at N=1.
     @ObservedObject private var multiviewStore = MultiviewStore.shared
@@ -4795,12 +4795,12 @@ struct MainTabView: View {
     #endif
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
     @State private var showInitialEPGLoading = false
-    /// v1.6.23 — set to `true` when the user explicitly Skips the
+    /// v1.6.23, set to `true` when the user explicitly Skips the
     /// initial-sync cover so we don't immediately re-present it. The
     /// cover's natural re-show triggers (`onAppear`, `allServers.count`
     /// change) would otherwise fire right after dismissal, making the
     /// Skip button visually do nothing (jesmannstl v1.6.22 report:
-    /// "Skip did nothing"). Resets on cold launch — the next session
+    /// "Skip did nothing"). Resets on cold launch, the next session
     /// re-evaluates whether the cover should appear.
     @State private var userDismissedInitialLoading = false
     /// One-shot LAN/WAN failover guard for the channel/EPG orchestrator.
@@ -4840,7 +4840,7 @@ struct MainTabView: View {
     @State private var bgWorkHeartbeatTask: Task<Void, Never>? = nil
     /// Flipped true after the first DVR reconcile completes so the
     /// initial loading screen knows it can dismiss. Only gates the
-    /// dismiss when a Dispatcharr server is configured — other server
+    /// dismiss when a Dispatcharr server is configured, other server
     /// types skip this wait entirely.
     @State private var didInitialDVRReconcile = false
 
@@ -4859,24 +4859,24 @@ struct MainTabView: View {
     /// so `didAttemptAutoResume` retains `true` from the original
     /// launch and `attemptAutoResume()` short-circuits. We listen
     /// for the `.background → .active` transition, reset the flag,
-    /// and re-fire — but only when no player is currently active
+    /// and re-fire, but only when no player is currently active
     /// (which protects users who pressed Home mid-watch and want
     /// to come back to the same stream still running).
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
-        debugLog("🔶🔶 MainTabView.init() — NEW INSTANCE CREATED, thread=\(Thread.current)")
+        debugLog("🔶🔶 MainTabView.init(), NEW INSTANCE CREATED, thread=\(Thread.current)")
     }
 
-    /// Changes whenever any field that affects a VOD fetch changes — triggers re-fetch.
+    /// Changes whenever any field that affects a VOD fetch changes, triggers re-fetch.
     /// Includes all servers (not just VOD-capable) so switching to/from M3U also fires the task.
     ///
-    /// v1.6.17 (GH user report — "VOD detected in logs but never shows up"):
+    /// v1.6.17 (GH user report, "VOD detected in logs but never shows up"):
     /// also include `vodEnabled` and `supportsVOD` so toggling either flag
     /// re-fires the task. Without these the user could turn VOD on for the
     /// active playlist (or have iCloud sync flip the flag from another
     /// device) and the On Demand tab would stay hidden until next app
-    /// launch — `loadMovies`/`loadSeries` early-return when the active
+    /// launch, `loadMovies`/`loadSeries` early-return when the active
     /// server has `vodEnabled == false`, so a re-fetch is the only way to
     /// re-populate `vodStore.series`/`movies` and bring `hasVOD` back to
     /// true.
@@ -4895,7 +4895,7 @@ struct MainTabView: View {
             .joined(separator: ",")
     }
 
-    /// Changes whenever any server changes — used to trigger channel re-fetch.
+    /// Changes whenever any server changes, used to trigger channel re-fetch.
     /// Includes isActive so switching the active server always re-fires the task.
     /// `credentialGeneration` is part of the key so that replacing a
     /// playlist's credentials re-runs the whole load sequence the way
@@ -4949,7 +4949,7 @@ struct MainTabView: View {
     /// reconcile its server-side recordings against local SwiftData
     /// rows (status sync + prune + orphan import). Fires from a
     /// tab-bar-level .task so the DVR tab can light up even when the
-    /// user hasn't navigated to it yet — `hasRecordings` reads
+    /// user hasn't navigated to it yet, `hasRecordings` reads
     /// SwiftData, which the reconciler writes into.
     /// Dispatcharr 0.30 granular permissions: re-read /users/me/ (and the
     /// server version) on every launch so a permission change made on
@@ -5091,7 +5091,7 @@ struct MainTabView: View {
     // MARK: - Initial Loading Screen State
 
     /// True when the active server list contains a Dispatcharr server
-    /// — only those require a DVR reconcile before the loading
+    /// only those require a DVR reconcile before the loading
     /// screen can dismiss. Other server types ignore the DVR gate.
     private var needsInitialDVRSync: Bool {
         allServers.contains { $0.type == .dispatcharrAPI }
@@ -5103,7 +5103,7 @@ struct MainTabView: View {
     /// calls `tryDismissInitialLoading()` each time.
     ///
     /// VOD is intentionally **not** part of the key. VOD loading does
-    /// not block entering Live TV — the loading cover dismisses as
+    /// not block entering Live TV, the loading cover dismisses as
     /// soon as channels + EPG are ready, and the On Demand tab shows
     /// its own spinner while VOD continues loading in the background.
     /// Previously VOD was gating the cover, which on servers with
@@ -5120,7 +5120,7 @@ struct MainTabView: View {
         // XMLTV parse (`guideStore.isLoading`) need to wrap before the
         // loading cover is honest. XMLTV is generally the slower of
         // the two but carries the category data the user actually
-        // sees — dismissing before XMLTV finishes produces the
+        // sees, dismissing before XMLTV finishes produces the
         // "partial guide appears, then pops in more content" UX that
         // users reported as "no loading indicator, took forever."
         let epgDone      = !channelStore.isEPGLoading && !guideLoad.isLoading
@@ -5134,7 +5134,7 @@ struct MainTabView: View {
     /// phases run partly in parallel (channels + VOD at least), so
     /// the cover shows them as independent rows with their own status
     /// indicators rather than as a single progressing status string.
-    /// Derived from the observed stores — no separate fetch logic
+    /// Derived from the observed stores, no separate fetch logic
     /// lives inside the cover itself.
     private var loadingStages: [SyncStage] {
         // EPG: combined "channels + guide programs" stage. Still
@@ -5164,7 +5164,7 @@ struct MainTabView: View {
             epgStage.status = .loading
         }
 
-        // VOD stage — only really meaningful for servers that expose
+        // VOD stage, only really meaningful for servers that expose
         // a VOD library. For pure live-TV sources (M3U), the stage
         // resolves immediately to a "not available" done state.
         // Permission- and toggle-gated the same way Edit Playlist > Save
@@ -5193,7 +5193,7 @@ struct MainTabView: View {
             vodStage.status = .done(titles > 0 ? "\(titles) titles" : "")
         }
 
-        // DVR stage — only relevant for Dispatcharr servers.
+        // DVR stage, only relevant for Dispatcharr servers.
         // Resolves to "not available" on XC / M3U since those don't
         // have a server-side recording API.
         var dvrStage = SyncStage(id: "dvr", label: "Loading DVR")
@@ -5205,7 +5205,7 @@ struct MainTabView: View {
             dvrStage.status = .loading
         }
 
-        // Preferences stage — reflects the iCloud KVS pull. Always
+        // Preferences stage, reflects the iCloud KVS pull. Always
         // done by the time the cover even has channels to show
         // (SyncManager.pullFromCloud fires earlier during onboarding
         // or app launch), so we surface the synced/off state rather
@@ -5243,16 +5243,16 @@ struct MainTabView: View {
         // settling after iCloud sync, or another tryShow trigger
         // during the same session) fires immediately after.
         guard !userDismissedInitialLoading else {
-            debugLog("🔶 Initial sync — user dismissed this session, not re-showing")
+            debugLog("🔶 Initial sync, user dismissed this session, not re-showing")
             return
         }
         if UserDefaults.standard.bool(forKey: "appBehaviorsSkipLoadingScreen") {
-            debugLog("🔶 Initial sync — skip flag set in App Behaviors, skipping loading cover")
+            debugLog("🔶 Initial sync, skip flag set in App Behaviors, skipping loading cover")
             return
         }
         showInitialEPGLoading = true
         initialLoadingStartedAt = CFAbsoluteTimeGetCurrent()
-        debugLog("🔶 Initial sync starting — showing loading screen (servers=\(allServers.count))")
+        debugLog("🔶 Initial sync starting, showing loading screen (servers=\(allServers.count))")
     }
 
     /// v1.6.13 (GH #8): Auto-Resume Last Channel hydration. Fires
@@ -5298,7 +5298,7 @@ struct MainTabView: View {
 
         // If a channel is already playing (warm-resume case where
         // tvOS suspended us with the player intact and then woke us
-        // back up), we have nothing to resume — the player IS the
+        // back up), we have nothing to resume, the player IS the
         // resume. Mark attempted so we don't fight whatever the
         // user does next.
         if nowPlaying.isActive {
@@ -5312,7 +5312,7 @@ struct MainTabView: View {
         guard !channelStore.channels.isEmpty else { return }
 
         // From here on, mark the attempt regardless of whether we
-        // actually find a match — failure modes (deleted channel,
+        // actually find a match, failure modes (deleted channel,
         // missing marker) shouldn't keep firing on every channel
         // list change throughout the session.
         didAttemptAutoResume = true
@@ -5361,7 +5361,7 @@ struct MainTabView: View {
         // back-to-back state writes (`isMinimized = false` inside
         // startPlaying / begin, then `true` here) into the same
         // render pass, so the player view mounts already minimized
-        // — no fullscreen-then-shrink flicker.
+        // no fullscreen-then-shrink flicker.
         nowPlaying.minimize()
     }
 
@@ -5372,7 +5372,7 @@ struct MainTabView: View {
     /// from the original launch, and `attemptAutoResume()` short-
     /// circuits at its first guard. We listen for the
     /// `.background → .active` (or `.inactive → .active`)
-    /// transition, reset the gate, and re-fire — but the
+    /// transition, reset the gate, and re-fire, but the
     /// `nowPlaying.isActive` early-return inside `attemptAutoResume`
     /// itself keeps us from restarting a stream that survived the
     /// suspension intact.
@@ -5408,7 +5408,7 @@ struct MainTabView: View {
     private func handleAutoResumeScenePhase(from oldPhase: ScenePhase, to newPhase: ScenePhase) {
         guard oldPhase != .active, newPhase == .active else { return }
         guard !nowPlaying.isActive else { return }
-        debugLog("🎮 Auto-resume: scenePhase \(oldPhase) → active with no active player — re-trying")
+        debugLog("🎮 Auto-resume: scenePhase \(oldPhase) → active with no active player, re-trying")
         didAttemptAutoResume = false
         attemptAutoResume()
     }
@@ -5503,7 +5503,7 @@ struct MainTabView: View {
         // short enough that "opened it after a few hours" always lands fresh.
         let staleAfter: TimeInterval = 30 * 60
         guard GuideStore.shared.isEPGStale(olderThan: staleAfter) else { return }
-        debugLog("🔄 Guide refresh (\(reason)): EPG stale (>\(Int(staleAfter / 60))m old) — forcing channels + guide refresh")
+        debugLog("🔄 Guide refresh (\(reason)): EPG stale (>\(Int(staleAfter / 60))m old), forcing channels + guide refresh")
         let servers = allServers
         let ctx = modelContext
         Task { await channelStore.forceRefresh(servers: servers, modelContext: ctx) }
@@ -5511,7 +5511,7 @@ struct MainTabView: View {
 
     /// Called whenever `initialSyncKey` changes. Dismisses the
     /// Loading Guide screen once the Live-TV-critical signals are
-    /// done — channels loaded, EPG loaded, DVR reconciled. **VOD is
+    /// done, channels loaded, EPG loaded, DVR reconciled. **VOD is
     /// deliberately NOT gated here**: on servers with hundreds of
     /// enabled VOD categories (real-world user case: 779 movie + 479
     /// series categories) VOD loading takes minutes, and the user
@@ -5521,21 +5521,21 @@ struct MainTabView: View {
     private func tryDismissInitialLoading() {
         guard showInitialEPGLoading else { return }
 
-        // Error path — channel fetch ended with an error and no data arrived.
+        // Error path, channel fetch ended with an error and no data arrived.
         // Dismiss the loading screen so the underlying error view can render
-        // its actionable message (e.g. "Invalid credentials — check your API
+        // its actionable message (e.g. "Invalid credentials, check your API
         // Key in Settings") instead of trapping the user behind a spinner.
         if channelStore.error != nil, channelStore.channels.isEmpty, !channelStore.isLoading {
             withAnimation(.easeOut(duration: 0.4)) {
                 showInitialEPGLoading = false
             }
-            debugLog("🔶 Initial sync ended with error — dismissing loading screen so error view can show")
+            debugLog("🔶 Initial sync ended with error, dismissing loading screen so error view can show")
             return
         }
 
         guard !channelStore.isLoading, !channelStore.channels.isEmpty else { return }
         guard !channelStore.isEPGLoading else { return }
-        // XMLTV parse must also complete — see `initialSyncKey` doc comment.
+        // XMLTV parse must also complete, see `initialSyncKey` doc comment.
         guard !guideLoad.isLoading else { return }
         // VOD loading intentionally NOT gated here. VOD can take
         // minutes on large libraries and the user shouldn't wait on
@@ -5553,13 +5553,13 @@ struct MainTabView: View {
         initialLoadingStartedAt = nil
         let vodStillLoading = vodStore.isLoadingMovies || vodStore.isLoadingSeries
         let elapsedStr = elapsed.map { " \($0)ms" } ?? ""
-        debugLog("🔶 Initial sync complete — dismissing loading screen (total=\(elapsedStr), vodStillLoadingInBackground=\(vodStillLoading))")
+        debugLog("🔶 Initial sync complete, dismissing loading screen (total=\(elapsedStr), vodStillLoadingInBackground=\(vodStillLoading))")
     }
 
     /// Drives the top-of-screen "Syncing…" indicator so the user
     /// knows background work is ongoing that may still be publishing
     /// `@Published` updates (which can cause visible view churn on
-    /// the Live TV tab — e.g. the contextMenu pulse we diagnosed in
+    /// the Live TV tab, e.g. the contextMenu pulse we diagnosed in
     /// v1.6.7 before switching to the popover).
     ///
     /// Includes both `isLoadingMovies`/`isLoadingSeries` (cover the
@@ -5577,7 +5577,7 @@ struct MainTabView: View {
     }
 
     /// Short identifier labels used by the heartbeat log. Terse
-    /// by design — the log consumer needs grep-friendly tokens.
+    /// by design, the log consumer needs grep-friendly tokens.
     private var activeBackgroundTaskLabels: [String] {
         var labels: [String] = []
         if channelStore.isLoading        { labels.append("channels") }
@@ -5617,7 +5617,7 @@ struct MainTabView: View {
                 // channels, pick a new one, or press Menu to stop
                 // playback). Without this carve-out the guide stays
                 // `.disabled`, which renders every focus-release
-                // attempt inside the mini inert — focus has nowhere
+                // attempt inside the mini inert, focus has nowhere
                 // legal to go. This is the "missing piece" that made
                 // `.focusable(false)`, `@FocusState` claims, and
                 // `.forceGuideFocus` notifications silently fail for
@@ -5636,7 +5636,7 @@ struct MainTabView: View {
             // manual trigger.
 
             // Nav action circles: Refresh + Search immediately LEFT of the
-            // system tab bar, on every content tab (hidden on Settings) —
+            // system tab bar, on every content tab (hidden on Settings),
             // matching Android TV's TvTopTabBar, which was itself built to
             // this design. Placement ruling (Logan 2026-08-12): these live
             // beside the nav bar, NOT in the Live TV filter row, and do not
@@ -5865,11 +5865,11 @@ struct MainTabView: View {
             // swaps to MultiviewContainerView on the next render.
             //
             // `PlayerSession.exit()` flips mode back to .idle and
-            // clears the tile list — HomeView falls through to the
+            // clears the tile list, HomeView falls through to the
             // no-playback state (Live TV guide shows).
             //
             // `NowPlayingManager.playingItem` is intentionally NOT
-            // nil-ed during multiview — the seed channel metadata is
+            // nil-ed during multiview, the seed channel metadata is
             // still the single-stream fallback for when the user
             // exits multiview keeping the audio tile.
             // Rules 1 and 3 (Logan 2026-09-12): connecting a remote transport
@@ -5890,7 +5890,7 @@ struct MainTabView: View {
                 // interruption because MultiviewContainerView is
                 // never unmounted; only its frame / position change.
                 //
-                // At N≥2 (real multiview) the mini state is ignored —
+                // At N≥2 (real multiview) the mini state is ignored,
                 // the mini-player concept doesn't generalise to a
                 // grid, and the exit path there is the normal
                 // "Exit Multiview?" confirmation.
@@ -5926,7 +5926,7 @@ struct MainTabView: View {
                             // Hit-testing off so remote taps don't
                             // land on the mini. Focus-release is
                             // forced here by `.disabled(minimized)`
-                            // — that makes the tile Button inside
+                            // that makes the tile Button inside
                             // MultiviewTileView non-focusable, so
                             // tvOS's focus engine cannot land on
                             // the mini and must route D-pad focus
@@ -5937,7 +5937,7 @@ struct MainTabView: View {
                             // but Apple's docs + on-device testing
                             // showed that `.focusable(Bool)` on a
                             // SwiftUI Button is ignored while the
-                            // Button already holds focus — so the
+                            // Button already holds focus, so the
                             // tile stayed focused and only the
                             // NEXT D-pad movement escaped the
                             // mini. Disabling at this wrapper
@@ -5948,7 +5948,7 @@ struct MainTabView: View {
                             // `.onPlayPauseCommand { nowPlaying.expand() }`
                             // lives at the MainTabView body level
                             // (see HomeView `.onPlayPauseCommand`
-                            // far above) — that handler is attached
+                            // far above), that handler is attached
                             // OUTSIDE this disabled subtree and
                             // still fires, so Play/Pause on the
                             // Siri Remote still re-expands the
@@ -5996,20 +5996,20 @@ struct MainTabView: View {
                 // corner player even with hit-testing off, which is
                 // exactly the bug the mini UX needs to avoid.
                 #else
-                // iOS: see `iOSMultiviewWrapper` — extracted out of
+                // iOS: see `iOSMultiviewWrapper`, extracted out of
                 // body to keep Swift's type-checker under budget.
                 iOSMultiviewWrapper
                 #endif
             } else if nowPlaying.isActive, let item = nowPlaying.playingItem {
                 // Single PlayerView kept in hierarchy for uninterrupted playback.
                 // Transitions between full-screen and mini use size/position
-                // modifiers — the player instance is never destroyed.
+                // modifiers, the player instance is never destroyed.
                 #if os(iOS)
-                // iOS: see `iOSLegacyPlayerWrapper` — extracted out of
+                // iOS: see `iOSLegacyPlayerWrapper`, extracted out of
                 // body to keep Swift's type-checker under budget.
                 iOSLegacyPlayerWrapper(item: item)
                 #elseif os(tvOS)
-                // Single PlayerView instance — survives minimize/expand without
+                // Single PlayerView instance, survives minimize/expand without
                 // recreating the player (avoids 1s+ hang and stream restart).
                 GeometryReader { geo in
                     let minimized = nowPlaying.isMinimized
@@ -6068,8 +6068,8 @@ struct MainTabView: View {
                             }
                         }
 
-                        // Stop button — only visible when minimized
-                        // Mini player: no stop button — press Menu/Back to stop
+                        // Stop button, only visible when minimized
+                        // Mini player: no stop button, press Menu/Back to stop
                         // (handled by .onExitCommand on the outer ZStack).
                     }
                     .frame(width: geo.size.width, height: geo.size.height, alignment: minimized ? .topTrailing : .center)
@@ -6088,7 +6088,7 @@ struct MainTabView: View {
                 #endif
             }
 
-            // In-app reminder banner — shows when a reminder fires while app is in foreground
+            // In-app reminder banner, shows when a reminder fires while app is in foreground
             ReminderBannerView()
 
             // v1.6.15: channel-info HUD that briefly identifies the
@@ -6338,7 +6338,7 @@ struct MainTabView: View {
         // History: this slot used to do
         //   `if nowPlaying.isMinimized { PlayerSession.shared.stop() }`
         // with **nothing** in the `!isMinimized` case. SwiftUI's
-        // `.onExitCommand` is a sink — once attached it consumes
+        // `.onExitCommand` is a sink, once attached it consumes
         // the Back/Menu press regardless of whether the body does
         // anything. After expanding the player from mini back to
         // full-screen via Play/Pause from the guide, the press
@@ -6348,7 +6348,7 @@ struct MainTabView: View {
         // First fix attempt removed this entire handler thinking
         // the inner `.onExitCommand` on `tabContentView`
         // (`{ handleMenuPress() }`) would catch everything. It
-        // doesn't — `.onExitCommand` on a TabView only fires when
+        // doesn't, `.onExitCommand` on a TabView only fires when
         // focus is inside one of the tabs, and after the
         // expand-from-mini path leaves focus in a state where the
         // press bypasses tabContentView entirely (the player
@@ -6373,7 +6373,7 @@ struct MainTabView: View {
         // including the Live TV → Guide → Live TV cycle that GH #11
         // reported.
         .onExitCommand {
-            debugLog("🎮 [MT-OUTER] .onExitCommand FIRED (body's outer modifier — focus was outside tabContentView's TabView)")
+            debugLog("🎮 [MT-OUTER] .onExitCommand FIRED (body's outer modifier, focus was outside tabContentView's TabView)")
             handleMenuPress()
         }
         #endif
@@ -6865,16 +6865,16 @@ struct MainTabView: View {
     private var hasFavorites: Bool { !favoritesStore.favoriteItems.isEmpty }
 
     /// True when the **active** server has at least one recording
-    /// — local or server-side, scheduled / recording / completed —
+    /// local or server-side, scheduled / recording / completed,
     /// in the SwiftData store. v1.6.10:
     ///
-    ///   • Original (pre-v1.6.10): `!allRecordings.isEmpty` — surfaced
+    ///   • Original (pre-v1.6.10): `!allRecordings.isEmpty`, surfaced
     ///     the DVR tab whenever **any** server in the user's library
     ///     had recordings, so a user on Xtream playlist A would see
     ///     DVR because their idle Dispatcharr server B had recordings.
     ///   • v1.6.10 first cut: also returned true for any active
     ///     Dispatcharr server, on the reasoning "you can always
-    ///     schedule a new one." Wrong call — an active Dispatcharr
+    ///     schedule a new one." Wrong call, an active Dispatcharr
     ///     server with zero recordings still showed an empty DVR
     ///     tab, which the user (correctly) didn't want.
     ///   • Now: tab visible iff the active server has at least one
@@ -6890,8 +6890,8 @@ struct MainTabView: View {
     /// One exception to the per-server scope: a capture that is CURRENTLY
     /// running keeps the tab up no matter which server is active. The
     /// per-server filter is right for stored rows, but a local recording
-    /// outlives a playlist switch — the capture keeps writing in the
-    /// background — and scoping it away hid the only UI that can show or stop
+    /// outlives a playlist switch, the capture keeps writing in the
+    /// background, and scoping it away hid the only UI that can show or stop
     /// it, and bounced the user off the tab mid-recording (the `.onChange(of:
     /// hasRecordings)` redirect below). Android already ORs its live recorder
     /// state in the same way (`LocalRecordingService.activeRecording`).
@@ -6913,7 +6913,7 @@ struct MainTabView: View {
     /// loading prevents the flicker of "tab missing → tab appears" on
     /// cold launch or server switch. A server that completes loading
     /// with zero movies and zero series (e.g., a bare live-TV-only
-    /// M3U) hides the tab entirely — matching the dynamic behaviour
+    /// M3U) hides the tab entirely, matching the dynamic behaviour
     /// of the DVR and Favorites tabs.
     private var hasVOD: Bool { hasMovies || hasSeries }
 
@@ -7071,7 +7071,7 @@ struct MainTabView: View {
         let serChange = tabShowSeries != hasSeries
         let vodChange = movChange || serChange
         if recChange || vodChange {
-            // A tab APPEARING/DISAPPEARING mutates the TabView child set — the
+            // A tab APPEARING/DISAPPEARING mutates the TabView child set, the
             // exact action that can tear down a fragile Settings NavigationStack.
             // If the blank recurs, the last such line before it (with tab context)
             // is the culprit trigger.
@@ -7447,7 +7447,7 @@ struct MainTabView: View {
         }
         // Also re-evaluate the loading screen whenever the server list
         // transitions (e.g. iCloud sync imports servers after MainTabView
-        // has already appeared — without this observer the loading
+        // has already appeared, without this observer the loading
         // screen would never show for an iCloud-onboarded device and
         // the user would land on Live TV before channels/EPG/VOD/DVR
         // had finished syncing).
@@ -7457,7 +7457,7 @@ struct MainTabView: View {
         // Hold the initial loading screen until channels + EPG + VOD
         // + first DVR reconcile are ALL finished. The user previously
         // complained about landing in List/Guide views while VOD was
-        // still loading and DVR hadn't synced — this keeps the
+        // still loading and DVR hadn't synced, this keeps the
         // on-screen state honest. The key is a Hashable digest of
         // every signal; onChange fires each time any of them flip.
         .onChange(of: initialSyncKey) { _, _ in tryDismissInitialLoading() }
@@ -7469,10 +7469,10 @@ struct MainTabView: View {
         // v1.6.13: auto-resume hooks consolidated into a single
         // ViewModifier so the body's modifier chain stays under
         // Swift's type-checker budget on tvOS x86_64. The modifier
-        // wires three triggers — `.onAppear` (cold launch),
+        // wires three triggers, `.onAppear` (cold launch),
         // `.onChange(of: channels.isEmpty)` (channels arrive after
         // appear), and `.onChange(of: scenePhase)` (warm resume from
-        // suspension) — and forwards each to the corresponding
+        // suspension), and forwards each to the corresponding
         // method on this struct.
         .modifier(AutoResumeWiring(
             channelsAreEmpty: channelStore.channels.isEmpty,
@@ -7508,7 +7508,7 @@ struct MainTabView: View {
         // Background-work heartbeat logger. When `isAnyBackgroundWork`
         // transitions false → true we start a 15s-tick Task that
         // prints the currently-active task labels. The user-visible
-        // "Syncing…" badge at the top-left is one bit — the log
+        // "Syncing…" badge at the top-left is one bit, the log
         // says WHICH of the six (channels, epg, xmltv-parse, vod-
         // movies-initial/-refill/-search, vod-series-initial/-refill
         // /-search) is responsible. Particularly useful for
@@ -7519,13 +7519,13 @@ struct MainTabView: View {
             if nowActive && !wasActive {
                 let start = CFAbsoluteTimeGetCurrent()
                 bgWorkStartedAt = start
-                debugLog("⏳ Background work STARTED — \(activeBackgroundTaskLabels.joined(separator: ", "))")
+                debugLog("⏳ Background work STARTED, \(activeBackgroundTaskLabels.joined(separator: ", "))")
                 bgWorkHeartbeatTask?.cancel()
                 bgWorkHeartbeatTask = Task { @MainActor in
                     while !Task.isCancelled {
                         try? await Task.sleep(for: .seconds(15))
                         if Task.isCancelled { break }
-                        // Re-read the current labels on each tick —
+                        // Re-read the current labels on each tick,
                         // individual tasks finish mid-session (e.g.
                         // EPG cache load completes while VOD refill
                         // is still going), so the label set
@@ -7533,7 +7533,7 @@ struct MainTabView: View {
                         let labels = activeBackgroundTaskLabels
                         guard !labels.isEmpty else { break }
                         let elapsed = Int(CFAbsoluteTimeGetCurrent() - start)
-                        debugLog("⏳ Background work ongoing (\(elapsed)s elapsed) — \(labels.joined(separator: ", "))")
+                        debugLog("⏳ Background work ongoing (\(elapsed)s elapsed), \(labels.joined(separator: ", "))")
                     }
                 }
             } else if wasActive && !nowActive {
@@ -7556,7 +7556,7 @@ struct MainTabView: View {
                 mode: .initialLaunch(
                     stages: loadingStages,
                     onContinueAnyway: {
-                        // User-triggered escape hatch — drops them
+                        // User-triggered escape hatch, drops them
                         // into the main UI even if background fetches
                         // are still hung. When the fetch eventually
                         // fails with an error,
@@ -7628,7 +7628,7 @@ struct MainTabView: View {
             )
         }
         // DVR reconcile at tab-bar level so the DVR tab lights up as
-        // soon as a Dispatcharr server reports a recording — even if
+        // soon as a Dispatcharr server reports a recording, even if
         // the user scheduled it from the web UI (no local row to
         // trigger MyRecordingsView.task). Runs once on server change,
         // then every 2 minutes while the app is foregrounded. This is
@@ -7666,7 +7666,7 @@ struct MainTabView: View {
                 await reconcileAllDispatcharrRecordings()
             }
         }
-        // Global search — hidden during active playback
+        // Global search, hidden during active playback
         .toolbar {
             if !isPlaying && !nowPlaying.isActive && selectedTab != .settings {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -7752,14 +7752,14 @@ struct MainTabView: View {
         #endif
         .liquidGlassTabBar()
         #if os(tvOS)
-        // Body extracted to `handleMenuPress()` — the inline closure grew
+        // Body extracted to `handleMenuPress()`, the inline closure grew
         // past Swift's type-inference budget (the chain of `else if`
         // branches mixed with string interpolation in `debugLog`'s
         // `@autoclosure` repeatedly tripped "unable to type-check this
         // expression in reasonable time"). Calling a plain method side-
         // steps the budget entirely.
         .onExitCommand {
-            debugLog("🎮 [MT-INNER] .onExitCommand FIRED (tabContentView/TabView — focus was inside a tab)")
+            debugLog("🎮 [MT-INNER] .onExitCommand FIRED (tabContentView/TabView, focus was inside a tab)")
             handleMenuPress()
         }
         .onReceive(NotificationCenter.default.publisher(for: .aerioTabMenuPassthrough)) { _ in
@@ -7852,7 +7852,7 @@ struct MainTabView: View {
         #endif
         channelStore.refresh(servers: allServers)
         debugLog("🔶 MainTabView.task(channelServerKey): refresh called")
-        // Flip `isEPGLoading` to true RIGHT NOW — before the
+        // Flip `isEPGLoading` to true RIGHT NOW, before the
         // wait-for-channels loop. Without this there's a race
         // window: `channelStore.isLoading` flips false the
         // instant channels finish hydrating (from
@@ -7861,7 +7861,7 @@ struct MainTabView: View {
         // `loadAllEPG`. In that single-run-loop-tick gap,
         // `initialSyncKey` reads `channelsDone=true` AND
         // `epgDone=true` AND dismisses the ServerSyncView
-        // cover — before a single XMLTV byte has downloaded.
+        // cover, before a single XMLTV byte has downloaded.
         // The user sees Live TV with uncolored schedule rows
         // because `seedEPGCache` hasn't run yet. Setting the
         // flag pre-emptively closes the race; `loadAllEPG`'s
@@ -7872,8 +7872,8 @@ struct MainTabView: View {
 
         // Kick off the SwiftData EPG-cache load IN PARALLEL with
         // the channel network fetch. `loadFromCache` doesn't read
-        // the `channels` parameter — it only needs `serverID` +
-        // modelContext — so there's no dependency that requires
+        // the `channels` parameter, it only needs `serverID` +
+        // modelContext, so there's no dependency that requires
         // serializing it behind the `while channelStore.isLoading`
         // poll. Channel fetch is network-bound and EPG cache
         // load is disk-bound (SwiftData on a background
@@ -7892,7 +7892,7 @@ struct MainTabView: View {
         // `ModelContext` is non-Sendable and `async let` wants
         // to hand it across an implicit concurrency boundary.
         // The captured `modelContext` stays on MainActor through
-        // the entire chain — `loadFromCache` is @MainActor-
+        // the entire chain, `loadFromCache` is @MainActor-
         // isolated and dispatches its own off-main work via
         // `Task.detached` using only the Sendable container.
         let cacheLoadHandle = Task { () -> Bool in
@@ -7924,7 +7924,7 @@ struct MainTabView: View {
 
         // Collect the parallel cache-load verdict. If the
         // channel fetch took longer than the SwiftData load
-        // (the typical case — network RTT vs. local disk) this
+        // (the typical case, network RTT vs. local disk) this
         // await resolves immediately.
         let cacheIsFresh = await cacheLoadHandle.value
 
@@ -7938,14 +7938,14 @@ struct MainTabView: View {
             // needs. Re-running `loadAllEPG` would fire
             // `getEPGGrid` (68k+ programs, multi-MB JSON) AND an
             // awaited `primeXMLTVFromURL` (98k+ programs, full
-            // XMLTV download + parse) — on a large Dispatcharr
+            // XMLTV download + parse), on a large Dispatcharr
             // instance this easily adds 3-4 minutes to the cover
             // dismissal despite the data already being on disk.
             //
             // Previously this check lived inside
             // `EPGGuideView.task(id: channels.count)` and only
             // gated `guideStore.fetchUpcoming`, which runs in
-            // parallel with `loadAllEPG` — so the cache hit was
+            // parallel with `loadAllEPG`, so the cache hit was
             // visible in the log ("skipping network fetch") but
             // the cover still waited for `loadAllEPG` to
             // complete. Running the check here instead gates the
@@ -7958,7 +7958,7 @@ struct MainTabView: View {
             // card expansions don't trigger per-card network
             // fetches.
             //
-            // Nested short-circuiting contains — see the matching
+            // Nested short-circuiting contains, see the matching
             // comment in EPGGuideView.swift. The previous
             // `.values.flatMap { $0 }.contains` form allocated a
             // full flattened Array of all cached programs on the
@@ -8037,7 +8037,7 @@ struct MainTabView: View {
                 //      categories server-side. The cache hit gives
                 //      us program structure (title, time, desc) but
                 //      whatever categories were there came from
-                //      enrichment in a PRIOR session — they're now
+                //      enrichment in a PRIOR session, they're now
                 //      stale for any program the user opens
                 //      Program Info on.
                 //   2. Cached rows from pre-v1.7.x builds were
@@ -8091,7 +8091,7 @@ struct MainTabView: View {
                         // enrichment (category tints + programID backfill). Its ~30k-row
                         // grid decode runs HERE on the main actor; when it overlaps the
                         // cold start while a live stream is playing it starves the
-                        // heaviest live decoder on the SAME main thread — measured on a
+                        // heaviest live decoder on the SAME main thread, measured on a
                         // 4K HDR feed as cache->0.1s plus a watchdog-reload storm that
                         // then leaks memory. Hold this refresh until playback settles
                         // (tiles drain) or a 60s ceiling, whichever first, so it lands
@@ -8129,7 +8129,7 @@ struct MainTabView: View {
                             replaceExisting: false
                         )
                         let elapsed = Int(Date().timeIntervalSince(fetchStart))
-                        debugLog("🟢 [Orchestrator] background fetchUpcoming COMPLETE — didRefresh=\(didRefresh), elapsed=\(elapsed)s (cache-fresh refresh, held \(heldSec)s)")
+                        debugLog("🟢 [Orchestrator] background fetchUpcoming COMPLETE, didRefresh=\(didRefresh), elapsed=\(elapsed)s (cache-fresh refresh, held \(heldSec)s)")
                         // Persist what the refresh fetched (iPad log 2026-10-07
                         // 23:09:25: the cold-launch refresh merged 47482
                         // programs and nothing saved them, so a kill threw the
@@ -8176,7 +8176,7 @@ struct MainTabView: View {
                             servers: allServers,
                             replaceExisting: false
                         )
-                        debugLog("🟢 [Orchestrator] background fetchUpcoming COMPLETE — didRefresh=\(didRefresh), elapsed=\(Int(Date().timeIntervalSince(fetchStart)))s (post-bulk window walk, held \(heldSec)s)")
+                        debugLog("🟢 [Orchestrator] background fetchUpcoming COMPLETE, didRefresh=\(didRefresh), elapsed=\(Int(Date().timeIntervalSince(fetchStart)))s (post-bulk window walk, held \(heldSec)s)")
                     }
                 }
             }
@@ -8198,7 +8198,7 @@ struct MainTabView: View {
                 if !channelStore.channels.isEmpty { await channelStore.loadAllEPG() }
             }
             // Reset the flag we pre-set above so the cover can
-            // dismiss via the error path — otherwise the user
+            // dismiss via the error path, otherwise the user
             // would be stuck staring at "Setting Up …" with
             // no way out.
             channelStore.isEPGLoading = false
@@ -8263,7 +8263,7 @@ struct MainTabView: View {
     // x86_64 ("unable to type-check this expression in reasonable
     // time"). Each helper has its own scope so the budget resets.
     //
-    // Both helpers are iOS-only — `MagnificationGesture` and
+    // Both helpers are iOS-only, `MagnificationGesture` and
     // `UIDevice` aren't available on tvOS, and the tvOS branches in
     // the body are expressed inline with their own corner-mini
     // geometry.
@@ -8322,7 +8322,7 @@ struct MainTabView: View {
                         // publish it to NowPlayingManager so
                         // ChannelListView can position the chip row
                         // immediately below the real on-screen
-                        // bottom — not below the assumed
+                        // bottom, not below the assumed
                         // `topPadding + height` value, which is
                         // wrong on iPad iOS 18 because
                         // `.ignoresSafeArea()` doesn't penetrate
@@ -8336,7 +8336,7 @@ struct MainTabView: View {
                                 nowPlaying.miniPlayerBottomAbs = newValue
                             } else if nowPlaying.miniPlayerBottomAbs != 0 {
                                 // Mini went away (expanded back to full-screen
-                                // or stopped) — clear the published value so
+                                // or stopped), clear the published value so
                                 // chip row returns to its natural top.
                                 nowPlaying.miniPlayerBottomAbs = 0
                             }
@@ -8363,7 +8363,7 @@ struct MainTabView: View {
                     // v1.6.13.x: tap-to-expand overlay. When the
                     // mini is in minimized state, MultiviewContainer
                     // is `.disabled(minimized)` to keep tvOS's focus
-                    // engine off it — but that also blocks iPad
+                    // engine off it, but that also blocks iPad
                     // tap-to-expand. This sibling overlay sits at
                     // exactly the mini's frame and catches taps,
                     // calling `nowPlaying.expand()` to bring back
@@ -8408,14 +8408,14 @@ struct MainTabView: View {
             .allowsHitTesting(!airPlay.hostsHeadless && !mvComposite.isActive && !mvBackground.isActive)
             .zIndex(2)
         } else {
-            // v1.6.17 — iPhone branch. NO outer `.ignoresSafeArea()`.
+            // v1.6.17, iPhone branch. NO outer `.ignoresSafeArea()`.
             // MultiviewContainerView's internal black background still
             // extends edge-to-edge via its own `Color.black.ignoresSafeArea()`,
             // and `MultiviewSafeAreaModifier` keeps the tile grid INSIDE
             // the safe area on iPhone so the notch / Dynamic Island /
             // home-indicator carve-outs never overlap a tile. Wrapping
             // in `.ignoresSafeArea()` here was the v1.6.17 regression
-            // — it cascaded down and overrode the carve-out, putting
+            // it cascaded down and overrode the carve-out, putting
             // the tiles back under the cutout.
             //
             // Minimized = foreground PiP (the only iPhone minimize): the
@@ -8457,7 +8457,7 @@ struct MainTabView: View {
     }
 
     /// Legacy single-stream player wrapper. iPad uses the corner-
-    /// mini geometry (no swipe-down — replaced by pinch-to-zoom-out
+    /// mini geometry (no swipe-down, replaced by pinch-to-zoom-out
     /// per v1.6.13 spec); iPhone keeps today's offset-driven swipe-
     /// down minimize behavior unchanged.
     @ViewBuilder
@@ -8666,7 +8666,7 @@ struct MainTabView: View {
             // of minimizing directly. PlayerView's `.onExitCommand`
             // would handle this correctly if it had focus, but after
             // expanding from mini via Play/Pause focus is typically
-            // still on the guide cell — so the outer handler catches
+            // still on the guide cell, so the outer handler catches
             // the press first, and we end up here. Posting the
             // notification lets PlayerView run the same
             // hidden-chrome-shows / shown-chrome-minimizes cycle it
@@ -8677,7 +8677,7 @@ struct MainTabView: View {
             NotificationCenter.default.post(name: .playerBackPress, object: nil)
         } else if isVODDetailPushed {
             // #42 fix: a pushed navigation submenu (VOD detail / Settings
-            // subview) must pop BEFORE the mini-player Menu handling below —
+            // subview) must pop BEFORE the mini-player Menu handling below,
             // otherwise, with a mini active, the mini's single/double-Back
             // debounce eats the press and you can't back out of the submenu.
             // Pop programmatically because `.onExitCommand` consumes Menu
@@ -8689,7 +8689,7 @@ struct MainTabView: View {
             // Same as VOD: pop the innermost pushed Settings level before the
             // mini-player handling. Our `.onExitCommand` intercepts Menu before
             // SettingsView's NavigationStack can pop, so signal SettingsView to
-            // pop — classic stack first (ServerDetailView, MyRecordingsView),
+            // pop, classic stack first (ServerDetailView, MyRecordingsView),
             // then navPath (Appearance, Guide Display, Network, DVR, Developer,
             // Edit Server). SettingsView resets the flag.
             debugLog("🎮 Menu pressed: Settings subview pushed → popping")
@@ -8748,7 +8748,7 @@ struct MainTabView: View {
             // 2026-10-11 17:49: every Menu fell through to scroll-to-top.
             // #42 Part 3: with a mini-player active, a SINGLE Back restores it to
             // fullscreen; a DOUBLE Back jumps to the top channel (the long-press
-            // route isn't viable — tvOS owns a held Menu). Debounce ~0.3s: the
+            // route isn't viable, tvOS owns a held Menu). Debounce ~0.3s: the
             // expand is DEFERRED so the mini stays minimized during the window,
             // letting a quick second press land here and bump the count to 2.
             // Checked AFTER pushed navigation submenus (above) so Back can back
@@ -8862,7 +8862,7 @@ struct MainTabView: View {
 /// and the legacy player chrome (`PlayerView`'s `showControls`). When
 /// either chrome shows or hides, this banner rides along. Stream
 /// starts also wake the chrome, so the banner appears together with
-/// the chrome on every channel-flip — no separate timer.
+/// the chrome on every channel-flip, no separate timer.
 private struct ChannelInfoBanner: View {
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
     /// Observes only the playing channel's now/next cell, not the whole map.
@@ -8958,7 +8958,7 @@ private struct ChannelInfoBanner: View {
     /// cache); fall back to `GuideStore.programs[id].first(where:
     /// \.isLive)` for the bulk-EPG path. Same two-source pattern
     /// `ChannelListView` uses for row subtitles. Returns nil when
-    /// neither source has data — the banner then shows just channel
+    /// neither source has data, the banner then shows just channel
     /// number + name.
     // Settings > App Behaviors > Player Info Card (2026-09-15). Which
     // rows this card draws. Card-only: the guide, channel list, mini
@@ -9035,7 +9035,7 @@ private struct ChannelInfoBanner: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .allowsHitTesting(false)
         // v1.6.18: same safe-area carve-out as the chrome and
-        // Stream Info overlays — the `iOSDynamicTopInset` formula
+        // Stream Info overlays, the `iOSDynamicTopInset` formula
         // was designed against an absolute screen-top reference.
         // Without ignoresSafeArea, the parent's safe-area-top
         // (~59pt on Dynamic Island devices) gets added on top of
@@ -9047,17 +9047,17 @@ private struct ChannelInfoBanner: View {
         .ignoresSafeArea(edges: .top)
         #endif
         // Open the 5s banner-window every time a new stream starts
-        // (live only — token only bumps for live in NowPlayingManager).
+        // (live only, token only bumps for live in NowPlayingManager).
         // Independent of chrome so a channel-scroll surfaces just the
         // banner. If chrome is already up (Menu/Back, brand-new
         // stream-start that bumped `chromeWakeToken`), the banner is
-        // shown via that path too — both signals together are
+        // shown via that path too, both signals together are
         // idempotent.
         //
         // v1.7.x: replaced an `.onChange(of: streamStartedToken)`
         // with a manual Task by `.task(id:)` because Apple TV users
         // reported the banner occasionally getting stranded visible
-        // (2026-05-08) — the manual Task could be cancelled mid-
+        // (2026-05-08), the manual Task could be cancelled mid-
         // window without its replacement running, leaving
         // `bannerWindowActive` stuck at `true` forever. SwiftUI's
         // `.task(id:)` is bound to view lifecycle and re-runs
@@ -9073,7 +9073,7 @@ private struct ChannelInfoBanner: View {
                 try await Task.sleep(nanoseconds: UInt64(Self.bannerWindowSeconds * 1_000_000_000))
                 bannerWindowActive = false
             } catch {
-                // Cancelled — view torn down or token changed.
+                // Cancelled, view torn down or token changed.
                 // The wall-clock check in `shouldRender` is the
                 // backstop.
             }
@@ -9173,8 +9173,8 @@ private struct ChannelInfoBanner: View {
         .padding(.leading, sidePadding)
     }
 
-    /// "10:00 PM – 11:30 PM · 1h 30m" — single line, falls back to
-    /// nil when the airing window is invalid (defensive — guards
+    /// "10:00 PM – 11:30 PM · 1h 30m", single line, falls back to
+    /// nil when the airing window is invalid (defensive, guards
     /// against inverted EPG payloads).
     private func airingTimeAndDuration(start: Date, end: Date) -> String? {
         guard end > start else { return nil }
@@ -9280,7 +9280,7 @@ private struct ChannelInfoBanner: View {
         // close button's vertical center; banner sits to its right
         // since the wider screen has horizontal headroom.
         // v1.6.18: split iPhone landscape from portrait per
-        // user feedback — landscape has plenty of horizontal room
+        // user feedback, landscape has plenty of horizontal room
         // and the previous "below close button" placement looked
         // awkward.
         if isiPhonePortrait {
@@ -9296,7 +9296,7 @@ private struct ChannelInfoBanner: View {
         #else
         // iPhone PORTRAIT: left edge (banner sits below the close
         // button so there's no horizontal conflict). iPhone
-        // LANDSCAPE / iPad / Mac: clear the close button —
+        // LANDSCAPE / iPad / Mac: clear the close button,
         // `chrome.padding(.horizontal, 16)` + 52pt close-button
         // width + 12pt breathing room = 80pt. v1.6.18: iPhone
         // landscape now matches iPad here so the banner sits to
@@ -9345,7 +9345,7 @@ private struct ChannelInfoBanner: View {
     }
 
     /// v1.6.18: True only on iPhone in portrait orientation. Used
-    /// to gate the banner's "below close button" layout — landscape
+    /// to gate the banner's "below close button" layout, landscape
     /// iPhone now sits the banner to the right of the close button
     /// (matching iPad) since the wider screen has horizontal room.
     private var isiPhonePortrait: Bool {
@@ -9365,7 +9365,7 @@ private struct ChannelInfoBanner: View {
 /// Wraps the `MultiviewContainerView` with the mini-player visual
 /// chrome (rounded clip + drop shadow) when, and only when, the
 /// player is in its minimized state. Applying these modifiers
-/// unconditionally — even with cornerRadius=0 / color=.clear —
+/// unconditionally, even with cornerRadius=0 / color=.clear,
 /// inserts a mask layer + shadow rendering pass into the layer
 /// tree at fullscreen, and that extra layer stack was interfering
 /// with iOS's auto-PiP restore animation (the transition fell back

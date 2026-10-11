@@ -14,7 +14,7 @@ import UniformTypeIdentifiers
 /// - Handle tap-to-take-audio.
 /// - Handle long-press → `.confirmationDialog` with per-tile actions
 ///   (Remove / Make Audio / Full-Screen / Audio Track / Subtitle
-///   Track / Move Tile — tvOS only).
+///   Track / Move Tile, tvOS only).
 /// - Surface decode errors via a red overlay with a Remove button.
 /// - Act as a drag source + drop target on iPadOS for rearrange.
 /// - Announce state to VoiceOver via `.accessibilityLabel`.
@@ -31,7 +31,7 @@ struct MultiviewTileView: View {
     /// `true` when this tile is the only one on-screen (N=1 case).
     /// At N=1 the tile is effectively "the player view" so per-tile
     /// corner chrome (audio badge, bottom label strip, close `×`)
-    /// is redundant — the container-level `PlaybackChromeOverlay`
+    /// is redundant, the container-level `PlaybackChromeOverlay`
     /// renders title + Close at the top bar instead. Gating the
     /// three chrome pieces on `!isSoleTile` keeps the N=1 experience
     /// clean and matches the ported PlayerView chrome layout.
@@ -50,7 +50,7 @@ struct MultiviewTileView: View {
 
     /// Observed so the tvOS tile can drop its focusability when the
     /// single-stream player has been minimized to the corner. A
-    /// SwiftUI `Button` is always focusable by default on tvOS —
+    /// SwiftUI `Button` is always focusable by default on tvOS,
     /// even with `.allowsHitTesting(false)` on an ancestor, the
     /// focus engine still considers the Button as a target, which
     /// would trap focus inside the 400×225 corner instead of letting
@@ -86,7 +86,7 @@ struct MultiviewTileView: View {
 
     private var progressStore: PlayerProgressStore { stores.progress }
 
-    /// Per-tile attempt log — mpv events, failover attempts. Purely
+    /// Per-tile attempt log, mpv events, failover attempts. Purely
     /// diagnostic; nothing user-visible.
     private var logStore: AttemptLogStore { stores.log }
 
@@ -115,14 +115,14 @@ struct MultiviewTileView: View {
 
     /// iPadOS: focus state driven by `TVPressOverlay`'s UIKit focus
     /// callback. Unused on tvOS after the Button/ButtonStyle rewrite
-    /// — there, focus is driven by `@Environment(\.isFocused)`
+    /// there, focus is driven by `@Environment(\.isFocused)`
     /// inside `MultiviewTileButtonStyle`.
     #if !os(tvOS)
     @State private var isFocused: Bool = false
     #endif
 
     /// Whether the confirmation dialog (per-tile action menu) is
-    /// currently showing. iPadOS only — tvOS uses `.contextMenu`
+    /// currently showing. iPadOS only, tvOS uses `.contextMenu`
     /// (native long-press menu) which manages its own presentation.
     #if !os(tvOS)
     @State private var showMenu: Bool = false
@@ -175,7 +175,7 @@ struct MultiviewTileView: View {
     /// The single-tap action fires immediately (no 400ms delay) so
     /// normal audio-swap stays snappy. A user who double-clicks
     /// will briefly see audio switch on the first press before the
-    /// fullscreen promotion on the second — acceptable trade-off
+    /// fullscreen promotion on the second, acceptable trade-off
     /// for not introducing latency to the common case.
     @State private var lastSelectPressAt: Date? = nil
     private static let doubleClickWindowSeconds: TimeInterval = 0.4
@@ -194,7 +194,7 @@ struct MultiviewTileView: View {
     @State private var showAudioSyncMenu: Bool = false
     // Issue #48: the global multiview layout mode, shared with the container's
     // binding through the same @AppStorage key. Surfaced as a "Layout" submenu
-    // in the per-tile long-press menu (the reachable multiview surface — the
+    // in the per-tile long-press menu (the reachable multiview surface, the
     // single-player Options panel that also hosts it never appears here).
     @AppStorage(MultiviewLayoutMode.storageKey) private var layoutMode: MultiviewLayoutMode = .auto
 
@@ -204,7 +204,7 @@ struct MultiviewTileView: View {
     // visual treatment. Defaults preserve pre-v1.6.8 behaviour
     // (centerIcon focus indicator, no padding, square corners).
 
-    /// Audio-focus indicator style — center icon (default), gray
+    /// Audio-focus indicator style, center icon (default), gray
     /// persistent stroke, or accent fading stroke.
     @AppStorage(MultiviewAudioFocusStyle.storageKey)
     private var audioFocusStyleRaw: String = MultiviewAudioFocusStyle.centerIcon.rawValue
@@ -225,7 +225,7 @@ struct MultiviewTileView: View {
     /// continuous mosaic.
     private var tileCornerRadius: CGFloat { cornersRounded ? 12 : 0 }
 
-    /// Tile shape — recomputed per render off the user's preference
+    /// Tile shape, recomputed per render off the user's preference
     /// rather than a `static let` constant so toggling "Rounded
     /// Tiles" in Settings updates a live multiview session without
     /// requiring a re-mount.
@@ -316,7 +316,7 @@ struct MultiviewTileView: View {
         if store.isPickerPresented { return !isAudioActive }
         // Fullscreen-within-grid mode: the promoted tile keeps
         // decoding; every OTHER tile freezes. This is the
-        // double-click-Select UX (tvOS) — user zooms into one
+        // double-click-Select UX (tvOS), user zooms into one
         // stream, the rest pause until Menu is pressed. Saves
         // GPU decode + network cost for 1-3 background tiles
         // while the user is focused on one.
@@ -390,7 +390,7 @@ struct MultiviewTileView: View {
     /// tvOS tile wraps the video content in a SwiftUI `Button` and
     /// drives focus chrome through `MultiviewTileButtonStyle`. This
     /// replaces the earlier `TVPressOverlay` + `@State isFocused`
-    /// approach which didn't reliably surface focus visuals — users
+    /// approach which didn't reliably surface focus visuals, users
     /// reported hearing the focus-change sound with no visible
     /// indicator. Native Button + ButtonStyle is the proven tvOS
     /// path used elsewhere in the app (Settings cards, VOD posters)
@@ -408,7 +408,7 @@ struct MultiviewTileView: View {
     /// - **D-pad** while relocating = swap with the physical
     ///   neighbour in that direction.
     ///
-    /// No separate close button — Remove lives in the context menu
+    /// No separate close button, Remove lives in the context menu
     /// like every other action. Siri Remote users don't want a
     /// second focusable target per tile; it bloats the focus chain
     /// without matching UX value.
@@ -431,7 +431,7 @@ struct MultiviewTileView: View {
             // Error state: the playback-error overlay's own Retry /
             // Remove buttons are the primary targets (sibling
             // overlay, so they focus normally). If Select still
-            // lands on the tile button itself, treat it as Remove —
+            // lands on the tile button itself, treat it as Remove,
             // the tile has no meaningful audio to take.
             if decodeErrorMessage != nil {
                 DebugLogger.shared.log(
@@ -454,7 +454,7 @@ struct MultiviewTileView: View {
             // the window promotes this tile to fullscreen-within-grid.
             // The container's `.onExitCommand` reverses it on Menu.
             // `MultiviewTileView.shouldPause` pauses every other
-            // tile's mpv handle while a tile is fullscreen —
+            // tile's mpv handle while a tile is fullscreen,
             // decode/GPU savings come "for free" from that.
             //
             // Gate on N>1: at N=1 there's nothing to zoom into and
@@ -490,13 +490,13 @@ struct MultiviewTileView: View {
         // NOTE: do NOT apply `.focusable(Bool)` here. On tvOS,
         // explicitly attaching `.focusable(true)` to a SwiftUI
         // `Button` appears to disrupt how `@Environment(\.isFocused)`
-        // propagates into the Button's label — which broke the
+        // propagates into the Button's label, which broke the
         // `CenterAudioIconView` and the subtle scale-pop at N>=2
         // (user reported no focus indicator during D-pad nav).
         //
         // Mini-mode focus release is handled entirely by HomeView's
         // `.disabled(playerSession.mode == .multiview && !(N==1 && isMinimized))`
-        // gate on the `tabContentView` — once that gate opens in
+        // gate on the `tabContentView`, once that gate opens in
         // mini state, the tvOS focus engine lets focus cross from
         // the tile to the guide via D-pad spatial search. The tile
         // stays focusable (Button default), and the focus indicator
@@ -520,7 +520,7 @@ struct MultiviewTileView: View {
         // Previous attempt put the handler on the tile and guarded
         // on `store.relocatingTileID == tile.id`, but tvOS routes
         // D-pad events based on its own view of "which tile is
-        // focused" — after the context menu dismiss, focus often
+        // focused", after the context menu dismiss, focus often
         // ends up on the AUDIO tile (via `prefersDefaultFocus`), not
         // the tile the user asked to move. The tile-level handler
         // would then silently return early (wrong tile) and the
@@ -529,17 +529,17 @@ struct MultiviewTileView: View {
         // Moving the handler to the focusSection-level container
         // means any D-pad within the grid reaches the swap logic,
         // which consults `store.relocatingTileID` directly as the
-        // source of truth — no dependence on where focus technically
+        // source of truth, no dependence on where focus technically
         // is. The tile-level handler being PRESENT (even as a no-op)
         // would absorb the move event in SwiftUI's propagation path,
         // so we simply don't attach one.
-        // No `.onExitCommand` here — SwiftUI's onExitCommand is an
+        // No `.onExitCommand` here, SwiftUI's onExitCommand is an
         // absorbing handler (once attached, Menu presses are
         // consumed by this view and never reach ancestors, even if
         // the closure body is a no-op). Previously this view had a
         // `.onExitCommand` that cancelled relocate mode, but its
         // mere presence also swallowed Menu in the common case
-        // (focus on a non-relocating tile) — which meant the
+        // (focus on a non-relocating tile), which meant the
         // container's exit stack (chrome-summon, session.stop,
         // exitMultiviewKeepingAudioTile) never fired and the Back
         // button appeared dead. Relocate-cancel is now handled
@@ -966,7 +966,7 @@ struct MultiviewTileView: View {
             }
             // v1.6.15.x: defensive belt + suspenders. The user
             // reported a UI freeze if they channel-flip then open
-            // Options — root cause traced to `audioProgressStore`
+            // Options, root cause traced to `audioProgressStore`
             // being nil because the new tile's `.onAppear` doesn't
             // reliably fire after a `PlayerSession.exit() +
             // enterMultiview()` cycle (SwiftUI's diff sometimes
@@ -974,7 +974,7 @@ struct MultiviewTileView: View {
             // skips the remount, even though tile.id changed).
             // `.task(id: tile.id)` fires on initial appear AND
             // whenever the id changes, regardless of whether
-            // onAppear ran — guarantees the registration even
+            // onAppear ran, guarantees the registration even
             // when the diff swallows onAppear.
             .task(id: "\(tile.id)|\(tile.streamURL.absoluteString)|\(store.progressStoreRegistrationEpoch)") {
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
@@ -989,7 +989,7 @@ struct MultiviewTileView: View {
             // just duplicate information.
             //
             // On tvOS the corner `audioBadge` was removed in favour
-            // of `centerAudioIcon` — the icon in the tile centre
+            // of `centerAudioIcon`, the icon in the tile centre
             // also serves as the focus indicator (replacing the
             // accent ring + scale-up). It shows on any focused tile
             // while the `focusIndicatorVisible` state is awake, and
@@ -1152,7 +1152,7 @@ struct MultiviewTileView: View {
 
     #if !os(tvOS)
     /// iPadOS tile layout. The corner close `×` was removed per
-    /// user feedback — the button was visually noisy and the same
+    /// user feedback, the button was visually noisy and the same
     /// Remove action lives in the long-press context menu (see
     /// `menuButtons` → "Remove stream"). Closing a tile is
     /// intentional enough to warrant the long-press gesture; a
@@ -1161,7 +1161,7 @@ struct MultiviewTileView: View {
     @ViewBuilder
     private var tileContent: some View {
         if isSoleTile {
-            // N=1 short-circuit. The sole tile IS the player view —
+            // N=1 short-circuit. The sole tile IS the player view,
             // clipShape / scaleEffect / hoverEffect / per-tile
             // animations exist only to distinguish tiles in a
             // multiview grid, and wrapping the auto-PiP source
@@ -1172,7 +1172,7 @@ struct MultiviewTileView: View {
             // transition. Legacy `PlayerView` mounts the same
             // representable directly inside a plain ZStack (no
             // clip, no scale, no animation) and iOS's restore
-            // animation lands cleanly there — we match that.
+            // animation lands cleanly there, we match that.
             //
             // The black background underlay is kept so letterboxed
             // streams don't render over whatever's behind them.
@@ -1215,7 +1215,7 @@ struct MultiviewTileView: View {
 
     /// Gesture-receiving inner ZStack. Everything that should respond
     /// to tap-to-take-audio, long-press-to-open-menu, and drag-to-
-    /// rearrange lives in here — the close button does NOT, so its
+    /// rearrange lives in here, the close button does NOT, so its
     /// `Button` action isn't stolen by these parent gestures.
     private var tappableRegion: some View {
         ZStack {
@@ -1326,7 +1326,7 @@ struct MultiviewTileView: View {
                 debugLog("[MV-Tile] onDisappear id=\(tile.id)")
                 store.unregisterProgressStore(for: tile.id)
             }
-            // v1.6.15.x: same belt + suspenders as the tvOS body —
+            // v1.6.15.x: same belt + suspenders as the tvOS body,
             // see the matching `.task(id: tile.id)` block in
             // `tvOSBody` for the freeze-after-channel-flip rationale.
             .task(id: "\(tile.id)|\(tile.streamURL.absoluteString)|\(store.progressStoreRegistrationEpoch)") {
@@ -1345,7 +1345,7 @@ struct MultiviewTileView: View {
             // chrome renders title + Close at the top bar instead).
             //
             // For N>1: mutually-exclusive audio badge (centered, with
-            // channel name pill) OR bottom label strip — never both.
+            // channel name pill) OR bottom label strip, never both.
             // The audio tile gets the centered badge as its identity
             // marker; other tiles get the bottom name pill. Rendering
             // both on the audio tile produced a duplicate channel
@@ -1392,7 +1392,7 @@ struct MultiviewTileView: View {
                 store.remove(id: tile.id)
                 return
             }
-            // Move Mode — if a tile is currently pending relocation
+            // Move Mode, if a tile is currently pending relocation
             // (user chose "Move Tile" from its long-press menu), the
             // next tile tap commits the swap, or tapping the moving
             // tile itself cancels. See `menuButtons` → "Move Tile"
@@ -1424,13 +1424,13 @@ struct MultiviewTileView: View {
         // reliable long-press menu. UIKit's `UIDragInteraction`
         // (installed by `.onDrag`) sets up `requireToFail`
         // relationships that reliably starve *any* sibling SwiftUI
-        // long-press gesture on the same view — `.onLongPressGesture`,
+        // long-press gesture on the same view, `.onLongPressGesture`,
         // `.simultaneousGesture(LongPressGesture…)`, and
         // `.highPriorityGesture(LongPressGesture…)` all fail to fire
         // so long as `.onDrag` is declared alongside them. Since the
         // per-tile long-press menu is how iPad users Remove / go
         // Full-Screen / pick Audio Track / pick Subtitle Track /
-        // take audio — i.e. every non-trivial per-tile action — we
+        // take audio, i.e. every non-trivial per-tile action, we
         // prioritise it over drag-to-rearrange. Rearrangement is
         // preserved via the "Move Tile" action in `menuButtons`,
         // which enters relocate mode (`store.relocatingTileID`);
@@ -1450,16 +1450,16 @@ struct MultiviewTileView: View {
 
     // MARK: - Shape
 
-    /// Audio-active tile stroke overlay. v1.6.8 — drives the user's
+    /// Audio-active tile stroke overlay. v1.6.8, drives the user's
     /// chosen `MultiviewAudioFocusStyle`:
     ///
-    ///   • `.centerIcon` — returns nothing; the existing
+    ///   • `.centerIcon`, returns nothing; the existing
     ///     `TVCenterAudioFocusIcon` middle-of-tile speaker
     ///     indicator stays the only signal (legacy behaviour).
-    ///   • `.grayPersistent` — a 3pt muted-gray border on the
+    ///   • `.grayPersistent`, a 3pt muted-gray border on the
     ///     audio tile, always visible. Persistent "this tile owns
     ///     audio" cue.
-    ///   • `.themeFading` — a 3pt accent stroke that piggybacks
+    ///   • `.themeFading`, a 3pt accent stroke that piggybacks
     ///     on `MultiviewChromeState.focusIndicatorVisible` so it
     ///     fades in / out with the rest of the tile chrome on
     ///     the existing 5-second auto-hide timer. Visible while
@@ -1520,7 +1520,7 @@ struct MultiviewTileView: View {
     // visually noisy. Closing a tile is significant enough to
     // warrant the deliberate long-press gesture.
 
-    /// Audio-tile indicator — centered on the tile, visually matching
+    /// Audio-tile indicator, centered on the tile, visually matching
     /// tvOS's `CenterAudioIconView` (accent speaker capsule above a
     /// dark channel-name pill). Users on iOS complained the previous
     /// corner placement "hung off" the tile and looked out of place;
@@ -1528,7 +1528,7 @@ struct MultiviewTileView: View {
     ///
     /// INTENTIONALLY state-less: no local `@State`, no `Task`,
     /// no `withAnimation`. Visibility is a pure read of the existing
-    /// `chromeState.isVisible` — which also drives every other piece
+    /// `chromeState.isVisible`, which also drives every other piece
     /// of tile chrome, so the indicator fades in/out with the rest
     /// of the overlay on user-idle timing. A previous attempt to
     /// add per-tile state + a 2.5 s fade-out `Task` correlated with
@@ -1575,11 +1575,11 @@ struct MultiviewTileView: View {
     }
 
     #if os(tvOS)
-    /// Centre audio-focus icon — the new tvOS focus indicator that
+    /// Centre audio-focus icon, the new tvOS focus indicator that
     /// replaces the accent ring + scale-up treatment.
     ///
     /// - Visible only on the focused tile (reads
-    ///   `@Environment(\.isFocused)` — populated inside the Button's
+    ///   `@Environment(\.isFocused)`, populated inside the Button's
     ///   label hierarchy).
     /// - Further gated on `chromeState.focusIndicatorVisible` so the
     ///   icon fades after 5 s of idle along with every other piece of
@@ -1594,12 +1594,12 @@ struct MultiviewTileView: View {
     ///       to this stream."
     ///
     /// Rendered as a SwiftUI struct (not a computed property) so it
-    /// can read `@Environment(\.isFocused)` — environment values
+    /// can read `@Environment(\.isFocused)`, environment values
     /// aren't available inside computed-property view builders on
     /// the enclosing struct, but they propagate into child views.
     ///
     /// v1.6.8: gated on the user's `MultiviewAudioFocusStyle`
-    /// preference — the icon only renders for `.centerIcon`. Other
+    /// preference, the icon only renders for `.centerIcon`. Other
     /// styles use the stroke overlay (`audioFocusStrokeOverlay`)
     /// instead and skip this view entirely. The "Make Audio" hint
     /// (rendered for non-audio tiles via `CenterAudioIconView`'s
@@ -1652,7 +1652,7 @@ struct MultiviewTileView: View {
     /// The card is deliberately calmer than the old red one: the
     /// actual error message is the star (users asked for it), the
     /// status line shows the auto-reconnect countdown, and the error
-    /// state is no longer terminal — `scheduleAutoReconnect` keeps
+    /// state is no longer terminal, `scheduleAutoReconnect` keeps
     /// retrying on an escalating delay and `onRecovered` dismisses
     /// the card the moment a retry reaches steady playback.
     private func playbackErrorOverlay(_ message: String) -> some View {
@@ -1868,14 +1868,14 @@ struct MultiviewTileView: View {
     /// (raised by the coordinator's stale-frame watchdog once the picture has
     /// been wedged ~15s and the forced reload has NOT recovered it). Puts up a
     /// SOFT "Reconnecting…" card so a killed source shows feedback fast instead
-    /// of a frozen frame — the terminal buffer-relay + LAN/WAN failover +
+    /// of a frozen frame, the terminal buffer-relay + LAN/WAN failover +
     /// direct-fallback ladder can take ~60s to surface its own error.
     ///
     /// For the first grace window it stays passive (the relay / watchdog /
     /// failover keep working underneath; if they recover, frames resume,
     /// `streamStalled` drops, and this dismisses itself). If it is STILL soft-
     /// stalled after the grace, it actively drives `retryAction` so the card is
-    /// never "Reconnecting…" while nothing reconnects — the re-tune either
+    /// never "Reconnecting…" while nothing reconnects, the re-tune either
     /// re-primes the stream or surfaces a real error that upgrades to the
     /// terminal card. It never disturbs a real terminal-error card (that path
     /// clears via `onRecovered`).
@@ -2188,7 +2188,7 @@ struct MultiviewTileView: View {
             }
         }
 
-        // Move Mode — iPad replacement for drag-to-rearrange (which
+        // Move Mode, iPad replacement for drag-to-rearrange (which
         // we had to remove because UIKit's `UIDragInteraction`
         // starved the long-press gesture that opens this very
         // menu). Three UX states:
@@ -2197,7 +2197,7 @@ struct MultiviewTileView: View {
         //      orange ring via `ring` helper).
         //   2. This tile is the moving tile → "Cancel Move"
         //      (clears relocate; tapping the source tile on-grid
-        //      also cancels — see `tappableRegion.onTapGesture`).
+        //      also cancels, see `tappableRegion.onTapGesture`).
         //   3. *Another* tile is being moved → "Swap to Here"
         //      (commits the swap from the menu rather than
         //      requiring the user to dismiss then tap this tile).
@@ -2249,7 +2249,7 @@ struct MultiviewTileView: View {
         // SECURITY: `track.displayName` is mpv-sourced and therefore
         // attacker-influenced via stream metadata (title tag, track
         // lang). SwiftUI's `Button(_: String)` and `Button(_: LocalizedStringKey)`
-        // both apply Markdown to the label — so a title like
+        // both apply Markdown to the label, so a title like
         // `[Click](evil://)` would render a tappable link inside the
         // action sheet. Use the closure-based `Button { } label:`
         // form with `Text(verbatim:)` to disable interpretation.
@@ -2319,7 +2319,7 @@ struct MultiviewTileView: View {
 // MARK: - iPadOS drop delegate
 
 // NOTE: `MultiviewTileDropDelegate` was deleted alongside the
-// iPad `.onDrag`/`.onDrop` pair — see the gesture block in
+// iPad `.onDrag`/`.onDrop` pair, see the gesture block in
 // `tappableRegion` for why we removed drag-to-rearrange on iPad
 // (UIKit's `UIDragInteraction` starves the long-press menu, which
 // is the primary interaction). `MultiviewStore.swap(_:_:)` is
@@ -2342,7 +2342,7 @@ struct MultiviewTileView: View {
 ///   translucent capsule with outlined speaker icon + thin white
 ///   stroke. Says "press Select to route audio here."
 ///
-/// Both states honour `chromeState.focusIndicatorVisible` — after
+/// Both states honour `chromeState.focusIndicatorVisible`, after
 /// 5 s of remote idle the icon fades with the rest of the focus
 /// chrome so the tiles read as one flush display surface.
 private struct CenterAudioIconView: View {
@@ -2375,7 +2375,7 @@ private struct CenterAudioIconView: View {
     /// Background is the theme accent when this tile owns audio
     /// (strong presence, matches the app's accent language); a
     /// translucent black capsule when the tile is merely focused
-    /// (subdued — it's a hint, not a state).
+    /// (subdued, it's a hint, not a state).
     @ViewBuilder
     private var iconBackground: some View {
         if isAudioActive {
@@ -2445,17 +2445,17 @@ private struct CenterAudioIconView: View {
 ///
 /// Everything is now communicated through scale + shadow. No rings
 /// (neither the old accent focus ring nor the previous orange
-/// relocate ring) — users wanted a clean edge-to-edge grid without
+/// relocate ring), users wanted a clean edge-to-edge grid without
 /// any decorated borders that make it look like a "dev build".
 ///
 /// Three visual states, each progressively more pronounced lift:
 ///
-/// 1. **Idle** — flush, 1.0 scale, no shadow. The grid reads as one
+/// 1. **Idle**, flush, 1.0 scale, no shadow. The grid reads as one
 ///    continuous display.
-/// 2. **Focused** — 1.015 scale + soft 8 pt shadow while the focus
+/// 2. **Focused**, 1.015 scale + soft 8 pt shadow while the focus
 ///    indicator is awake. Just enough physical separation for the
 ///    eye to track where focus is without looking like a zoom.
-/// 3. **Relocating** — 1.04 scale + heavier 20 pt shadow regardless
+/// 3. **Relocating**, 1.04 scale + heavier 20 pt shadow regardless
 ///    of `isChromeVisible` (the user MUST see which tile they're
 ///    moving). This "lifts the tile off the table" visually, which
 ///    is the same grammar as iOS drag-and-drop and doesn't require
@@ -2467,11 +2467,11 @@ struct MultiviewTileButtonStyle: ButtonStyle {
     @Environment(\.isFocused) private var isFocused
     let isRelocating: Bool
     /// Whether the focus indicator should be visible. Distinct from
-    /// full chrome visibility — D-pad navigation wakes this without
+    /// full chrome visibility, D-pad navigation wakes this without
     /// summoning the transport bar. When false, the subtle focused
     /// lift is suppressed so the grid sits perfectly flush and reads
     /// as one continuous display surface. Ignored when
-    /// `isRelocating` is true — the relocating-tile lift always
+    /// `isRelocating` is true, the relocating-tile lift always
     /// renders so the user can see which tile is active during Move
     /// Tile mode even after the focus indicator would otherwise
     /// have idle-faded.
@@ -2479,7 +2479,7 @@ struct MultiviewTileButtonStyle: ButtonStyle {
 
     /// Mirror of the `multiviewTileCornersRoundedKey` preference so
     /// the iPad button-style clip shape matches the tile body's
-    /// rounding. v1.6.8 — recomputed per render, not a `static let`,
+    /// rounding. v1.6.8, recomputed per render, not a `static let`,
     /// so toggling "Rounded Tiles" updates a live multiview session
     /// without re-mount.
     @AppStorage(multiviewTileCornersRoundedKey)
@@ -2529,7 +2529,7 @@ struct MultiviewTileButtonStyle: ButtonStyle {
             .opacity(configuration.isPressed ? 0.85 : 1.0)
             .animation(.easeInOut(duration: 0.18), value: isFocused)
             .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
-            // Slightly snappier animation on relocate enter/exit —
+            // Slightly snappier animation on relocate enter/exit,
             // the lift needs to register instantly when the user
             // picks "Move Tile" so they associate the pop with the
             // action they just took.

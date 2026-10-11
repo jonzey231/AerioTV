@@ -4,39 +4,39 @@ import UIKit
 #endif
 
 // MARK: - Aerio Brand Colors
-// Key surface and accent colors are DYNAMIC — they read from ThemeManager.shared so
+// Key surface and accent colors are DYNAMIC, they read from ThemeManager.shared so
 // every view automatically reflects the user's chosen theme without needing to
 // observe ThemeManager directly.  Text/border/status colors remain static.
 extension Color {
     // MARK: Dynamic (theme-aware) surfaces
-    /// App-level dark background — changes with selected theme.
+    /// App-level dark background, changes with selected theme.
     static var appBackground:      Color { ThemeManager.shared.background }
-    /// Card / list row background — changes with selected theme.
+    /// Card / list row background, changes with selected theme.
     static var cardBackground:     Color { ThemeManager.shared.card }
-    /// Slightly elevated surface (drawers, sheets) — derived from card.
+    /// Slightly elevated surface (drawers, sheets), derived from card.
     static var elevatedBackground: Color { ThemeManager.shared.card }
-    /// Sheet / modal background — mirrors app background.
+    /// Sheet / modal background, mirrors app background.
     static var sheetBackground:    Color { ThemeManager.shared.background }
 
     // MARK: Dynamic accents
-    /// Primary accent — the brand/theme color used for highlights, icons, and tints.
+    /// Primary accent, the brand/theme color used for highlights, icons, and tints.
     static var accentPrimary:   Color { ThemeManager.shared.accent }
-    /// Secondary accent — slightly muted version of the primary.
+    /// Secondary accent, slightly muted version of the primary.
     static var accentSecondary: Color { ThemeManager.shared.accentSecondary }
-    /// Dim accent — low-opacity fill, e.g. icon badge backgrounds.
+    /// Dim accent, low-opacity fill, e.g. icon badge backgrounds.
     static var accentDim:       Color { ThemeManager.shared.accent.opacity(0.22) }
 
-    // MARK: Text — mode-aware for legibility on both dark and light grounds
+    // MARK: Text, mode-aware for legibility on both dark and light grounds
     /// Dark-mode ink for secondary/tertiary text and borders in light mode.
     /// A near-black slate (`#0F1B24`) so accent-tinted greys don't wash out
     /// on white; the near-white `E8F4F8` is invisible on a light ground.
     private static let lightInk = Color(hex: "0F1B24")
 
-    /// Primary text — near-white on dark grounds, near-black slate on light.
+    /// Primary text, near-white on dark grounds, near-black slate on light.
     static var textPrimary: Color {
         ThemeManager.resolve(dark: Color(hex: "E8F4F8"), light: lightInk)
     }
-    /// Secondary text — accent-tinted on dark; darker, higher-alpha ink on
+    /// Secondary text, accent-tinted on dark; darker, higher-alpha ink on
     /// light (accent-alpha greys wash out on white).
     #if os(tvOS)
     static var textSecondary: Color {
@@ -49,7 +49,7 @@ extension Color {
                              light: lightInk.opacity(0.60))
     }
     #endif
-    /// Tertiary text — accent-tinted at low opacity on dark; ink for hints on light.
+    /// Tertiary text, accent-tinted at low opacity on dark; ink for hints on light.
     #if os(tvOS)
     static var textTertiary:  Color {
         ThemeManager.resolve(dark: ThemeManager.shared.darkAccent.opacity(0.45),
@@ -95,7 +95,7 @@ extension Color {
         #endif
     }
 
-    // Borders — accent-tinted on dark; on light, blend toward ink at a higher
+    // Borders, accent-tinted on dark; on light, blend toward ink at a higher
     // alpha so dividers stay visible on white without the accent washing out.
     static var borderSubtle: Color {
         ThemeManager.resolve(dark: ThemeManager.shared.darkAccent.opacity(0.10),
@@ -108,13 +108,13 @@ extension Color {
 
     // Status
     static let statusLive    = Color(hex: "FF4757")
-    /// "Online" indicator — follows the accent so it matches the active theme.
+    /// "Online" indicator, follows the accent so it matches the active theme.
     static var statusOnline: Color { ThemeManager.shared.accent }
     static let statusWarning = Color(hex: "FFA502")
-    /// Offline indicator — dim accent tint, always complementary to the theme.
+    /// Offline indicator, dim accent tint, always complementary to the theme.
     static var statusOffline: Color { ThemeManager.shared.accent.opacity(0.22) }
 
-    // Server type colors — dynamic so they match the active theme
+    // Server type colors, dynamic so they match the active theme
     static var xtreamColor:      Color { ThemeManager.shared.accentSecondary }
     static var dispatcharrColor: Color { ThemeManager.shared.accent }
     static let plexColor        = Color(hex: "E5A00D")

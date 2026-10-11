@@ -3,7 +3,7 @@ import Foundation
 import UIKit
 #endif
 
-/// Runtime diagnostics for the playback pipeline — timing budgets,
+/// Runtime diagnostics for the playback pipeline, timing budgets,
 /// main-actor hop tracking, memory-warning hooks, and a heavyweight
 /// "something's seriously wrong" snapshot.
 ///
@@ -27,7 +27,7 @@ enum PlaybackDiagnostics {
     // and `handleFileLoaded`. They're public now so the API is
     // available to callers once they land; nobody calls them yet.
     // TODO(C.6): wire from `MPVPlayerView.Coordinator.setupMPV`
-    //            (line ~1277 `[MV-TIMING]` log) — replace that log
+    //            (line ~1277 `[MV-TIMING]` log), replace that log
     //            with reportSetupTiming + optional reportFirstFrame
     //            on the audio-reconfig event.
 
@@ -80,7 +80,7 @@ enum PlaybackDiagnostics {
     // `hopIn()` / `hopOut()` / `mainHopsInflight` are called by
     // the mpv Coordinator's event-loop hops in Phase C.6. Nobody
     // calls them yet; the counter stays at 0 and the snapshot
-    // logs `mainHopsInflight=0`. That's fine — the infrastructure
+    // logs `mainHopsInflight=0`. That's fine, the infrastructure
     // is ready so C.6 can drop in `defer { hopOut() }` without
     // another file change.
     // TODO(C.6): wrap every `Task { @MainActor in ... }` spawned
@@ -90,11 +90,11 @@ enum PlaybackDiagnostics {
     /// mpv event handler that hops to main for SwiftUI state updates
     /// should `increment()` at the start of the Task body and
     /// `decrement()` in a `defer`. If this number grows without
-    /// bound, main is starved — the watchdog surfaces it.
+    /// bound, main is starved, the watchdog surfaces it.
     ///
     /// Atomic via a DispatchQueue rather than a Swift `Mutex` so the
     /// increment/decrement calls can come from any thread (which is
-    /// the whole point — mpv fires events from its own queue, and
+    /// the whole point, mpv fires events from its own queue, and
     /// the hop to main is what this counter tracks).
     private static let hopQueue = DispatchQueue(label: "app.molinete.aerio.playbackdiag.hop")
     private nonisolated(unsafe) static var _hopsInflight: Int = 0
@@ -119,7 +119,7 @@ enum PlaybackDiagnostics {
     // MARK: - Memory warning hook
 
     #if canImport(UIKit)
-    /// Idempotency guard — the hook-install call site is
+    /// Idempotency guard, the hook-install call site is
     /// `AerioApp.AppEntryView.onAppear` which fires on every
     /// scene re-mount. Without the guard a dozen observers pile
     /// up over a long-running session and each memory warning
@@ -138,12 +138,12 @@ enum PlaybackDiagnostics {
     /// process-wide resource state. That gives us the minimum data
     /// to decide whether to (a) pause non-audio tiles, (b) eject
     /// the oldest tile, (c) show a "close some streams" banner.
-    /// Phase C doesn't yet act on memory pressure — it just logs.
+    /// Phase C doesn't yet act on memory pressure, it just logs.
     @MainActor
     static func installMemoryWarningHook() {
         guard !memoryHookInstalled else { return }
         memoryHookInstalled = true
-        // Observer-token discard is intentional — this hook lives for
+        // Observer-token discard is intentional, this hook lives for
         // the full app lifetime and `UIApplication.shared` outlives
         // the observer (no dangling-reference risk). Duplicate
         // installs are caught by `memoryHookInstalled` above.

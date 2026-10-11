@@ -377,15 +377,15 @@ final class RecordingCoordinator: ObservableObject {
     /// - Status: when the server's `custom_properties.status` differs from
     ///   our local `statusRaw`, adopt the server's value.
     /// - Pruning: if a local row has a `remoteRecordingID` but the server
-    ///   no longer reports it, delete the local row — the user removed it
+    ///   no longer reports it, delete the local row, the user removed it
     ///   elsewhere, so it has no business lingering in our UI.
     /// - Safety: rows with `remoteRecordingID == nil` (still mid-schedule)
     ///   are left alone. Rows for other servers are untouched.
     /// - Import: remote recordings that don't have a matching local row
     ///   (e.g. scheduled on the Dispatcharr web UI, or a row on a fresh
     ///   install) are imported as new local `Recording` entries. Without
-    ///   this the DVR tab — which is gated on `hasRecordings` in
-    ///   SwiftData — would stay hidden even when the server has
+    ///   this the DVR tab, which is gated on `hasRecordings` in
+    ///   SwiftData, would stay hidden even when the server has
     ///   recordings, making them unreachable from the app.
     /// - Failures: network errors are swallowed with a debug log; this is
     ///   called on every MyRecordingsView appear + refresh tick, so we
@@ -470,7 +470,7 @@ final class RecordingCoordinator: ObservableObject {
         var knownRemoteIDs = Set<Int>()
         for local in mine {
             guard let rid = local.remoteRecordingID else {
-                // Still being scheduled on the server — do not prune.
+                // Still being scheduled on the server, do not prune.
                 continue
             }
             knownRemoteIDs.insert(rid)
@@ -493,7 +493,7 @@ final class RecordingCoordinator: ObservableObject {
                 if applyRemoteMetadata(r, to: local, api: api) { didMutate = true }
                 if Self.applyStreamFacts(r, to: local) { didMutate = true }
             } else {
-                debugLog("🧹 DVR reconcile: server \(serverID) dropped remoteID \(rid) — deleting local row")
+                debugLog("🧹 DVR reconcile: server \(serverID) dropped remoteID \(rid), deleting local row")
                 modelContext.delete(local)
                 didMutate = true
             }
@@ -523,7 +523,7 @@ final class RecordingCoordinator: ObservableObject {
             _ = Self.applyStreamFacts(r, to: rec)
             modelContext.insert(rec)
             didMutate = true
-            debugLog("📥 DVR reconcile: imported remote recording \(r.id) (\(r.programTitle ?? "—")) from server \(serverID)")
+            debugLog("📥 DVR reconcile: imported remote recording \(r.id) (\(r.programTitle ?? "-")) from server \(serverID)")
         }
 
         if didMutate {
@@ -570,7 +570,7 @@ final class RecordingCoordinator: ObservableObject {
         updateRecordingState()
     }
 
-    /// Full variant with model updates — call this from views that have
+    /// Full variant with model updates, call this from views that have
     /// a modelContext when the app backgrounds.
     func handleAppBackgrounded(modelContext: ModelContext) async {
         for (id, session) in activeSessions {

@@ -180,7 +180,7 @@ struct TVSettingsSplitView<Detail: View>: View {
     }
 
     /// Land focus on the rail row for the current selection, retrying while
-    /// the row realizes (a lone FocusState write is dropped during layout —
+    /// the row realizes (a lone FocusState write is dropped during layout,
     /// the GroupSidebar pattern).
     private func assertRailFocus() {
         let target = items.first(where: { $0.route == selection })?.id ?? items.first?.id

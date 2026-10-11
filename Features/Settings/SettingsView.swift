@@ -32,7 +32,7 @@ struct SettingsView: View {
     /// change. Without this, child rows that pass `iconColor: .accentPrimary`
     /// (a computed property that reads `ThemeManager.shared.accent`)
     /// keep the old Color value because SettingsView never invalidates
-    /// — the rows are reconstructed only when SettingsView itself
+    /// the rows are reconstructed only when SettingsView itself
     /// re-renders. v1.6.8 user report: switching themes left
     /// stale-coloured icons on App Settings + iCloud rows. Adding
     /// the observer fixes the cascade by forcing re-render on every
@@ -109,7 +109,7 @@ struct SettingsView: View {
         //
         // MainTabView's `.onExitCommand { handleMenuPress() }` on the
         // outer TabView intercepts every Menu press before the inner
-        // NavigationStack — or any per-destination `.onExitCommand` —
+        // NavigationStack, or any per-destination `.onExitCommand`,
         // can react. (Same constraint that drives the VOD
         // `isVODDetailPushed` pattern.) So we don't attach a handler
         // here; we let MainTabView detect the pushed state and drive
@@ -121,8 +121,8 @@ struct SettingsView: View {
         //   • MainTabView's `handleMenuPress()` sees `isSubviewPushed`
         //     and flips `popRequested` instead of switching tabs.
         //   • The `.onChange(of: popRequested)` in
-        //     `settingsNavigationStack` pops the innermost level —
-        //     classic dismiss stack first, then navPath — and resets
+        //     `settingsNavigationStack` pops the innermost level,
+        //     classic dismiss stack first, then navPath, and resets
         //     the flag. Repeated Menu presses peel levels off one at
         //     a time until we're back at the Settings root, at which
         //     point MainTabView's fallthrough switches to Live TV.
@@ -263,7 +263,7 @@ struct SettingsView: View {
             }
             // MainTabView's Menu handler flips `popRequested` true
             // when a Settings subview is pushed. Pop the innermost
-            // level — classic stack first (LIFO), then navPath.
+            // level, classic stack first (LIFO), then navPath.
             .onChange(of: popRequested) { _, requested in
                 guard requested else { return }
                 SettingsFocusLog.log("menu handled by SettingsView.performOnePop (classic depth \(dismissStack.depth), navPath \(navPath.count), focusInDetail \(tvFocusInDetail))")
@@ -560,8 +560,8 @@ struct SettingsView: View {
                 // lesser extent iPad) caches cell content rendering at
                 // the UIKit (UITableView) layer. When the theme
                 // changes, parent view body re-evaluation isn't enough
-                // to force every cell — particularly section headers,
-                // footers, and `SettingsRow` subtitle text — to pick
+                // to force every cell, particularly section headers,
+                // footers, and `SettingsRow` subtitle text, to pick
                 // up the new accent-derived `Color.textSecondary` /
                 // `.textTertiary`. Keying the List's identity on the
                 // active theme name forces a full teardown + rebuild

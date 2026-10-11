@@ -2,7 +2,7 @@ import SwiftUI
 
 /// A single channel row inside the `AddToMultiviewSheet` picker.
 ///
-/// Visual (post-v1.6.12 — info parity with Live TV List rows):
+/// Visual (post-v1.6.12, info parity with Live TV List rows):
 /// ```
 /// 101  [logo]  CHANNEL NAME              [✓ / +]
 ///              Currently airing program · 18 min left
@@ -10,7 +10,7 @@ import SwiftUI
 /// ```
 ///
 /// Tapping fires `onTap`. When `isAlreadyAdded == true` the row
-/// shows a green check (still tappable — the parent dispatches
+/// shows a green check (still tappable, the parent dispatches
 /// tap-while-added as a removal). `isDisabled == true` (hard cap
 /// reached AND not already added) grays the row and blocks tap;
 /// rows that are already added remain tappable even at the cap so
@@ -23,10 +23,10 @@ import SwiftUI
 /// `GuideStore.programs[item.id].first(where: \.isLive)` when
 /// they're not. Without the fallback, Dispatcharr users would see
 /// the picker rows showing only the channel name with no program
-/// info — exactly the same bug the Live TV List had before
+/// info, exactly the same bug the Live TV List had before
 /// v1.6.10.
 ///
-/// Platform-agnostic — same layout on iPadOS and tvOS, with
+/// Platform-agnostic, same layout on iPadOS and tvOS, with
 /// platform-specific size constants. On tvOS the outer Button
 /// becomes focusable via `TVNoHighlightButtonStyle`; no custom
 /// focus ring needed.
@@ -35,7 +35,7 @@ struct CompactChannelRow: View {
     let item: ChannelDisplayItem
     let isAlreadyAdded: Bool
     let isDisabled: Bool
-    /// Single tap action — parent decides whether to add or remove
+    /// Single tap action, parent decides whether to add or remove
     /// based on `isAlreadyAdded`. Was `onAdd` pre-v1.6.12; renamed
     /// to keep callers honest about the semantic.
     let onTap: () -> Void
@@ -69,7 +69,7 @@ struct CompactChannelRow: View {
         let _ = nowNext.bind(item.id)
         Button(action: onTap) {
             HStack(alignment: .center, spacing: rowSpacing) {
-                // Channel number — monospaced, matches Live TV List
+                // Channel number, monospaced, matches Live TV List
                 // visual. Hidden if empty so M3U-only sources without
                 // numbers don't get a phantom whitespace column.
                 if !item.number.isEmpty {
@@ -129,7 +129,7 @@ struct CompactChannelRow: View {
         }
         #if os(tvOS)
         // tvOS: use the app's standard no-halo style so the whole
-        // row gets the same scale-up focus cue as Settings rows —
+        // row gets the same scale-up focus cue as Settings rows,
         // consistent with the rest of the tvOS app.
         .buttonStyle(TVNoHighlightButtonStyle())
         #else
@@ -178,7 +178,7 @@ struct CompactChannelRow: View {
     // MARK: - Platform sizing
 
     /// tvOS uses significantly larger rows (read from a couch, D-pad
-    /// nav) — bigger logo, larger type, more padding. iPad stays
+    /// nav), bigger logo, larger type, more padding. iPad stays
     /// compact so the sheet's detent heights don't explode.
     private var logoSize: CGFloat {
         #if os(tvOS)
@@ -298,7 +298,7 @@ struct CompactChannelRow: View {
             Image(systemName: "hand.raised.slash")
                 .scaledFont(.system(size: trailingIconSize))
                 .foregroundStyle(.secondary)
-                .accessibilityLabel("Cannot add — limit reached")
+                .accessibilityLabel("Cannot add, limit reached")
         } else {
             Image(systemName: "plus.circle")
                 .scaledFont(.system(size: trailingIconSize))

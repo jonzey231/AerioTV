@@ -75,7 +75,7 @@ struct DeveloperSettingsView: View {
     /// CarPlay, deep-link, add-sheet) through `PlayerSession.begin(...)`
     /// which mounts `MultiviewContainerView` from the first tile
     /// instead of the legacy `PlayerView`. **Default `true`** as of
-    /// Phase D — the unified view is now the canonical path. Users
+    /// Phase D, the unified view is now the canonical path. Users
     /// who hit a unified-path regression can flip this off for the
     /// legacy `PlayerView` fallback while we chase the bug.
     @AppStorage("playback.unified") private var unifiedPlayback = true
@@ -101,7 +101,7 @@ struct DeveloperSettingsView: View {
     /// PlaybackFeatureFlags.forceHLS, so a flip applies on the next tune.
     @AppStorage("developer.forceHLS") private var forceHLS = false
 
-    /// **Experimental** — iPhone-only. When on, the Live TV chrome is
+    /// **Experimental**, iPhone-only. When on, the Live TV chrome is
     /// compacted: Manage Groups moves into the nav bar toolbar, and the
     /// filter-pills + search strip can be hidden entirely via two new
     /// toggles inside the Manage Groups sheet. Default **off** so the
@@ -114,7 +114,7 @@ struct DeveloperSettingsView: View {
     @AppStorage("castForceHEVCTranscode") private var castForceHEVCTranscode = false
     @AppStorage("castTranscodeDownProfile") private var castTranscodeDownProfile = "720p60"
 
-    /// Companion toggles — previously only exposed inside the Manage
+    /// Companion toggles, previously only exposed inside the Manage
     /// Groups sheet, which made the parent "Compact Chrome" toggle
     /// seem to do nothing (#22 feedback: "I can't tell what iPhone
     /// Compact Chrome even does"). Exposed inline here so turning
@@ -340,7 +340,7 @@ struct DeveloperSettingsView: View {
 
 
                 // MARK: - Experimental UI (iPhone only)
-                // Veldmuus-proposal flag. Only show on actual iPhones — the
+                // Veldmuus-proposal flag. Only show on actual iPhones, the
                 // feature doesn't apply to iPad (its layout isn't cramped) or
                 // to Mac Catalyst (no UIDevice.phone idiom in the iOS-family
                 // sense). When toggled, the compact-chrome layout moves the
@@ -427,14 +427,14 @@ struct DeveloperSettingsView: View {
                         .padding(.vertical, 4)
                         .listRowBackground(Color.cardBackground)
 
-                        // Companion toggles — only meaningful when
+                        // Companion toggles, only meaningful when
                         // Compact Chrome is ON. Previously these were
                         // buried inside the Manage Groups sheet, which
                         // made the parent toggle seem inert ("I can't
                         // tell what iPhone Compact Chrome even does").
                         // Surfacing them here means turning Compact
                         // Chrome on immediately reveals its actual
-                        // controls — users can see at a glance what
+                        // controls, users can see at a glance what
                         // the feature does before toggling sub-options.
                         if compactChromeiPhone {
                             Toggle(isOn: $hideFilterBarCompact) {
@@ -556,7 +556,7 @@ struct DeveloperSettingsView: View {
                             }
                         }
 
-                        // Share — uses a UIKit sheet with proper iPad popover anchoring
+                        // Share, uses a UIKit sheet with proper iPad popover anchoring
                         // (iOS) or a LAN HTTP server + QR sheet (tvOS). Same
                         // relaxed guard as View above so the button appears
                         // the moment Debug Logging is on, not after the
@@ -643,7 +643,7 @@ struct DeveloperSettingsView: View {
     // MARK: - tvOS Body
     // Uses the shared TVSettings* components so focus highlights match the
     // rest of the tvOS UI. iOS-only rows (Share Log File via
-    // UIActivityViewController) are omitted — the log file can still be
+    // UIActivityViewController) are omitted, the log file can still be
     // retrieved via the companion iOS/iPad app or Files app sharing.
     #if os(tvOS)
     private var tvOSBody: some View {
@@ -1009,7 +1009,7 @@ struct DeveloperSettingsView: View {
         var presenter = rootVC
         while let next = presenter.presentedViewController { presenter = next }
 
-        // iPad requires a popover anchor — center it in the presenting view.
+        // iPad requires a popover anchor, center it in the presenting view.
         if let popover = activityVC.popoverPresentationController {
             popover.sourceView = presenter.view
             popover.sourceRect = CGRect(

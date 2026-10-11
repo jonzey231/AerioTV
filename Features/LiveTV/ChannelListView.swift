@@ -8,7 +8,7 @@ actor EPGCache {
     static let shared = EPGCache()
     private struct Entry { let programs: [EPGEntry]; let fetchedAt: Date }
     private var cache: [String: Entry] = [:]
-    private let ttl: TimeInterval = 1800  // 30 minutes — EPG loaded upfront on launch
+    private let ttl: TimeInterval = 1800  // 30 minutes, EPG loaded upfront on launch
 
     func get(_ key: String) -> [EPGEntry]? {
         guard let e = cache[key], Date().timeIntervalSince(e.fetchedAt) < ttl else { return nil }
@@ -161,13 +161,13 @@ struct ChannelListView: View {
     /// main user base is unaffected.
     @AppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
     /// Hide the group-pill row entirely. Only honored when compact chrome
-    /// is ON — otherwise ignored so the classic layout stays untouched.
+    /// is ON, otherwise ignored so the classic layout stays untouched.
     @AppStorage("ui.iphone.hideFilterBar") private var hideFilterBarCompact = false
     /// Collapse the always-visible nav-bar search drawer into an
     /// on-demand pull-down. Only honored when compact chrome is ON.
     @AppStorage("ui.iphone.hideSearchBar") private var hideSearchBarCompact = false
     /// v1.6.13.x: Drives whether the iPad nav-bar search drawer is
-    /// shown. Default `false` (hidden) — a magnifier toolbar button
+    /// shown. Default `false` (hidden), a magnifier toolbar button
     /// reveals it on demand. iPhone keeps the always-visible classic
     /// drawer and ignores this flag (its `.searchable` modifier
     /// doesn't bind to it). Reclaims ~50pt of vertical space, which
@@ -191,7 +191,7 @@ struct ChannelListView: View {
     /// We use `proxy.frame(in: .global).minY` rather than
     /// `safeAreaInsets.top` because a view inside a NavigationStack
     /// content area sees `safeAreaInsets.top == 0` (the chrome was
-    /// already consumed by the nav bar / tab bar above it) — that
+    /// already consumed by the nav bar / tab bar above it), that
     /// returns the wrong value and the padding push overshoots by
     /// the chrome height. The frame's absolute Y is the true
     /// position we need to compare against the mini-player's
@@ -226,7 +226,7 @@ struct ChannelListView: View {
     /// coords is a fixed `(top-padding + height)` regardless of any
     /// chrome above (status bar, top-tab bar, nav bar). The chip
     /// row's natural top in screen coords, however, IS that chrome
-    /// height — and varies by device (iPad Mini, iPad Pro, Mac
+    /// height, and varies by device (iPad Mini, iPad Pro, Mac
     /// Catalyst, etc). We read the chip row's natural top via a
     /// `GeometryReader` reading `proxy.frame(in: .global).minY` and
     /// compute push as `(mini_bottom_abs + gap) - natural_top_abs`,
@@ -234,7 +234,7 @@ struct ChannelListView: View {
     /// of device size.
     ///
     /// Returns 0 on iPhone (uses bottom MiniPlayerBar instead) or
-    /// when no measurement has been published yet — both of those
+    /// when no measurement has been published yet, both of those
     /// cases mean "no push, leave chip row at its natural top".
     ///
     /// v1.6.13.x: now driven by the ACTUAL mini-player bottom edge
@@ -242,7 +242,7 @@ struct ChannelListView: View {
     /// `iOSLegacyPlayerWrapper` and republished via
     /// `NowPlayingManager.miniPlayerBottomAbs`. Earlier attempts
     /// computed mini bottom from constants (`24 + 225`) and the
-    /// math was off on iPad iOS 18 — the TabView's top tab bar
+    /// math was off on iPad iOS 18, the TabView's top tab bar
     /// shifts the mini's effective frame down by an unknown
     /// amount that `.ignoresSafeArea()` doesn't penetrate. Using
     /// the geometry-observer reading guarantees the chip row
@@ -473,7 +473,7 @@ struct ChannelListView: View {
     // jump target for a guide long-press Left).
     @FocusState private var groupPillFocused: String?
     // #42 Part 1: auto-clears the pin if the Left release event is missed.
-    // (`leftHoldPinningAll` itself is declared unconditionally above — shared
+    // (`leftHoldPinningAll` itself is declared unconditionally above, shared
     // group-filter-bar code reads it to gate collection-pill focus.)
     @State private var leftHoldSafetyTask: Task<Void, Never>?
 
@@ -490,11 +490,11 @@ struct ChannelListView: View {
 
     /// Namespace for imperative focus reset. Used together with
     /// `resetFocus(in:)` and `.prefersDefaultFocus(...)` on the top
-    /// channel row — when the mini-player minimizes and the
+    /// channel row, when the mini-player minimizes and the
     /// `.forceGuideFocus` notification fires, calling
     /// `resetFocus(in: guideFocusNS)` forcibly moves focus back into
     /// the guide and lands it on the row marked as the default. The
-    /// plain `@FocusState` write alone wasn't strong enough — tvOS's
+    /// plain `@FocusState` write alone wasn't strong enough, tvOS's
     /// focus engine had already committed to the mini tile
     /// (spatial-search nearest focusable) by the time the write
     /// landed, and treated our claim as a rejected request.
@@ -689,7 +689,7 @@ struct ChannelListView: View {
                 // v1.6.13.x: iPhone keeps the classic always-visible
                 // nav-bar drawer search field (collapsing under
                 // compact chrome). iPad now omits `.searchable`
-                // entirely — the search UX moved to a button +
+                // entirely, the search UX moved to a button +
                 // inline TextField inside the chip row (see
                 // `groupFilterBar`'s iPad branch). The earlier
                 // attempt to use `.searchable(isPresented:)` to
@@ -783,7 +783,7 @@ struct ChannelListView: View {
                         // a pick, so it asks where during a remote session.
                         pickChannel(channel)
                     } else {
-                        // Channels not yet loaded — leave launchChannelID set so
+                        // Channels not yet loaded, leave launchChannelID set so
                         // the cold-path handler picks it up when they arrive.
                         debugLog("🔗 ChannelListView: warm deep link received but channel not loaded yet")
                     }
@@ -934,13 +934,13 @@ struct ChannelListView: View {
                     }
                     filterChannels()
                 }
-                // Cancel EPG prefetch the moment playback starts — network requests
+                // Cancel EPG prefetch the moment playback starts, network requests
                 // compete with the IPTV stream and cause buffering / stutter.
                 .onChange(of: nowPlaying.isActive) { _, active in
                     if active {
                         prefetchTask?.cancel()
                         prefetchTask = nil
-                        debugLog("📺 EPG prefetch: cancelled — playback started")
+                        debugLog("📺 EPG prefetch: cancelled, playback started")
                     }
                 }
         }
@@ -1659,10 +1659,10 @@ struct ChannelListView: View {
                 .allowsHitTesting(false)
                 .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { listHostTopAbs = $0 }
             #endif
-            // v1.6.18 — pills only live in the VStack on iPad and tvOS,
+            // v1.6.18, pills only live in the VStack on iPad and tvOS,
             // where they're always visible. The iPhone scroll-collapse
             // path moves the pills into `.safeAreaInset(.top)` on the
-            // List itself (further down) — see the comment at that
+            // List itself (further down), see the comment at that
             // attachment for the full rationale. Short version: pills
             // here in the VStack, conditionally rendered with the iPhone
             // `isChromeCollapsed` `if`, caused an infinite layout
@@ -1672,7 +1672,7 @@ struct ChannelListView: View {
             // hysteresis check, which un-collapsed the pills, repeat.
             // Pulling the iPhone pills out of the VStack and into a
             // List-level safe area inset means show/hide changes the
-            // List's TOP INSET only — the List's content offset and
+            // List's TOP INSET only, the List's content offset and
             // outer frame are stable, so the feedback loop can't form.
             #if os(iOS)
             if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
@@ -1695,7 +1695,7 @@ struct ChannelListView: View {
             #endif
 
             #if os(tvOS)
-            // On tvOS, List draws a white highlight over any focused row —
+            // On tvOS, List draws a white highlight over any focused row,
             // ScrollView + LazyVStack gives us full visual control.
             //
             // Wrapped in `ScrollViewReader` so a Menu-button press on
@@ -1749,7 +1749,7 @@ struct ChannelListView: View {
                             // `.forceGuideFocus` handler below, tvOS
                             // moves focus to whichever row has this
                             // flag set. Pre-1.6.18 we marked the
-                            // top row — minimizing the player into
+                            // top row, minimizing the player into
                             // the corner mini left focus on row 0
                             // regardless of what the user had been
                             // watching, which felt random and made
@@ -2008,13 +2008,13 @@ struct ChannelListView: View {
             )
             // Multiview staging: the dock card above the tab bar (HomeView,
             // Logan 2026-10-06) replaced the strip that was inset here.
-            // v1.6.18 — iPhone pills moved here from the VStack
+            // v1.6.18, iPhone pills moved here from the VStack
             // sibling above. When the user scrolls past 80pt the
             // pills tuck away to reclaim ~40% of vertical chrome;
             // expanding again near the top (< 20pt) brings them
             // back. By living in `.safeAreaInset(.top)` instead of
             // a VStack sibling, show/hide changes only the List's
-            // top safe-area inset — the List's outer frame and
+            // top safe-area inset, the List's outer frame and
             // content offset stay stable across the transition,
             // so the layout-recalibration → re-trigger feedback
             // loop that produced the v1.6.17 oscillation can't
@@ -2053,7 +2053,7 @@ struct ChannelListView: View {
             // iPhone-only: collapse the chrome (filter pills) when the
             // list scrolls past 80pt; expand again near the top (< 20pt).
             // Hysteresis prevents jitter at the boundary. iPad keeps the
-            // chrome visible — it has plenty of vertical space.
+            // chrome visible, it has plenty of vertical space.
             // The tab bar rides the same observer but with DIRECTION
             // tracking (2026-07-12, Android parity): hide on a deliberate
             // downward scroll, full bar back on any upward scroll.
@@ -2696,7 +2696,7 @@ struct ChannelListView: View {
             ChannelCollectionsStore.shared.activeFilterCollectionID = nil
             result = favoritesStore.favoriteItems
         } else if selectedGroup.hasPrefix("collection:") {
-            // #45: collection filter — show exactly the curated members. The
+            // #45: collection filter, show exactly the curated members. The
             // user explicitly chose them, so hidden-group exclusion is bypassed.
             // If the collection was deleted, fall through to showing everything.
             let cid = String(selectedGroup.dropFirst("collection:".count))
@@ -2729,7 +2729,7 @@ struct ChannelListView: View {
             // follow in number order. The previous implementation used
             // `.sort` with a localizedCaseInsensitiveCompare tiebreaker,
             // which silently switched non-favorites to alphabetical even
-            // though the user never asked for "By Name" — that was the
+            // though the user never asked for "By Name", that was the
             // bug the user reported.
             let favs = result.filter { favoritesStore.isFavorite($0.id) }
             let nonFavs = result.filter { !favoritesStore.isFavorite($0.id) }
@@ -2760,13 +2760,13 @@ struct ChannelListView: View {
     }
 
     /// Pre-warm the EPG cache for the first 20 visible channels so cards open instantly.
-    /// Skipped entirely when playback is active — network requests compete with the
+    /// Skipped entirely when playback is active, network requests compete with the
     /// IPTV stream and cause visible stuttering / rebuffer events.
     private func prefetchEPGForVisibleChannels(_ channels: [ChannelDisplayItem]) {
         prefetchTask?.cancel()
-        // Don't fetch EPG while a stream is playing — bandwidth contention causes stutter.
+        // Don't fetch EPG while a stream is playing, bandwidth contention causes stutter.
         guard !nowPlaying.isActive else {
-            debugLog("📺 EPG prefetch: skipped — playback active")
+            debugLog("📺 EPG prefetch: skipped, playback active")
             return
         }
         prefetchTask = Task(priority: .utility) {
@@ -2787,7 +2787,7 @@ struct ChannelListView: View {
             for (idx, item) in channels.prefix(20).enumerated() {
                 guard !Task.isCancelled else { return }
                 if consecutiveSlow >= maxConsecutiveSlow {
-                    debugLog("📺 EPG prefetch: CIRCUIT BREAKER tripped — \(maxConsecutiveSlow) consecutive slow fetches, aborting after \(idx)/20 channels")
+                    debugLog("📺 EPG prefetch: CIRCUIT BREAKER tripped, \(maxConsecutiveSlow) consecutive slow fetches, aborting after \(idx)/20 channels")
                     return
                 }
                 guard let fetch = makeFetchUpcoming(for: item) else { continue }
@@ -2940,7 +2940,7 @@ struct ChannelListView: View {
                     return entries
                 } catch {
                     let identifier = tvgID.isEmpty ? "channelID=\(channelID ?? 0)" : "tvgID=\(tvgID)"
-                    debugLog("📺 EPG fetch FAILED: \(identifier) — \(error.localizedDescription)")
+                    debugLog("📺 EPG fetch FAILED: \(identifier), \(error.localizedDescription)")
                     DebugLogger.shared.logEPG(event: "getUpcomingPrograms failed",
                                              channelID: tvgID.isEmpty ? item.id : tvgID, error: error)
                     return []
@@ -2976,7 +2976,7 @@ struct ChannelListView: View {
             let cacheKey = "m3u_\(tvgID)"
             return {
                 if let cached = await EPGCache.shared.get(cacheKey) { return cached }
-                // Cache miss — re-fetch and re-index the full XMLTV feed.
+                // Cache miss, re-fetch and re-index the full XMLTV feed.
                 guard !epgURL.isEmpty, let epgURLParsed = URL(string: epgURL),
                       let programs = try? await XMLTVParser.fetchAndParse(url: epgURLParsed)
                 else { return [] }
@@ -3031,7 +3031,7 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     /// collision-free integers server-side (`_xc_live_streams_setup` in
     /// `apps/output/views.py`): a lineup of 1.1/1.2/1.3/2/3/4 arrives as
     /// 1/5/6/2/3/4, and sorting on that scatters subchannels to the end of the
-    /// list — the "subchannels are not appearing" report. Dispatcharr does
+    /// list, the "subchannels are not appearing" report. Dispatcharr does
     /// emit the list `.order_by("effective_channel_number")` though, so the
     /// ROW ORDER still carries the truth the numbers lost.
     ///
@@ -3042,7 +3042,7 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     /// Dispatcharr-only: the channel's server-side UUID string.
     /// Needed as an EPG-matching key because Dispatcharr's Dummy
     /// EPG feature (see `apps/epg/api_views.py` in the Dispatcharr
-    /// repo — `EPGGridAPIView`) tags synthesized dummy program
+    /// repo, `EPGGridAPIView`) tags synthesized dummy program
     /// entries with `tvg_id = str(channel.uuid)`. Without this
     /// field, channels that rely on Dummy EPG (rather than an
     /// uploaded XMLTV source) appear blank in the guide even
@@ -3054,8 +3054,8 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     /// `RecordProgramSheet` can pass an explicit, type-safe int
     /// to `RecordingCoordinator.scheduleDispatcharrRecording`
     /// instead of doing `Int(channelID) ?? 0` against the string
-    /// `id`. The previous approach worked by accident — Dispatcharr's
-    /// `ChannelDisplayItem.id` happens to be `String(ch.id)` — but
+    /// `id`. The previous approach worked by accident, Dispatcharr's
+    /// `ChannelDisplayItem.id` happens to be `String(ch.id)`, but
     /// returned a silent `0` for any provider whose `id` is a UUID
     /// (M3U) or any future format change. `nil` for non-Dispatcharr
     /// providers; record-to-server is gated on this being non-nil.
@@ -3130,7 +3130,7 @@ struct ChannelDisplayItem: Identifiable, Equatable {
 struct EPGEntry: Identifiable, Equatable {
     /// Stable id incorporating start AND end time. Including end time
     /// guards against malformed EPG feeds where two adjacent programs
-    /// share the same title and start timestamp — without it, ForEach
+    /// share the same title and start timestamp, without it, ForEach
     /// would treat them as the same row and SwiftUI's contextMenu /
     /// preview pair could bind to the wrong program (the long-pressed
     /// row showed one title but the context-menu preview showed
@@ -3145,7 +3145,7 @@ struct EPGEntry: Identifiable, Equatable {
     let startTime: Date?
     let endTime: Date?
     /// XMLTV `<category>` tag (or empty when the EPG source doesn't
-    /// expose one — e.g., Dispatcharr's JSON API or Xtream Codes).
+    /// expose one, e.g., Dispatcharr's JSON API or Xtream Codes).
     /// Drives the per-program gradient tint on the List-view
     /// expanded-schedule rows, mirroring what the Guide view already
     /// shows via `GuideProgram.category`. Both views now read from
@@ -3207,7 +3207,7 @@ struct ChannelRow: View {
     @State private var isExpanded = false
     /// Observe `GuideStore.programs` so the expanded-schedule
     /// panel can read category-enriched programmes DIRECTLY
-    /// from the same dataset the Guide view already uses — no
+    /// from the same dataset the Guide view already uses, no
     /// intermediate `EPGCache` / `fetchUpcoming` hop. Two prior
     /// rounds of debugging tried to fix the "expanded rows
     /// don't tint" bug by patching the cache layer; both times
@@ -3233,20 +3233,20 @@ struct ChannelRow: View {
     /// `item.currentProgram` and silently fell back to
     /// `item.group` (the channel's category, e.g. "Sports") when
     /// that was nil. On Dispatcharr that fallback was the common
-    /// case — the heavy bulk current-program endpoint hadn't run
+    /// case, the heavy bulk current-program endpoint hadn't run
     /// yet, so every channel rendered as just its group name.
     /// Now we layer two sources:
     ///
-    ///   1. `item.currentProgram*` — the lightweight per-item
+    ///   1. `item.currentProgram*`, the lightweight per-item
     ///      payload populated by Xtream short-EPG and Dispatcharr's
     ///      current-programs cache when fresh. Cheapest source,
     ///      preferred when present.
-    ///   2. `guideStore.programs[item.id]` filtered to `.isLive` —
+    ///   2. `guideStore.programs[item.id]` filtered to `.isLive`,
     ///      the same dataset the Guide grid uses, populated by the
     ///      XMLTV parse and bulk EPG fetch. Reliable once the guide
     ///      has loaded.
     ///
-    /// Returns nil when neither source has anything — the row's
+    /// Returns nil when neither source has anything, the row's
     /// subtitle stays empty in that case (no more group-name
     /// fallback). Both the inline "now playing" line in the row
     /// and the progress bar consult this single tuple.
@@ -3285,7 +3285,7 @@ struct ChannelRow: View {
     @AppStorage("listScale") private var listScale: Double = 1.0
     /// Clamp to the slider range so a corrupted UserDefaults value
     /// (e.g., imported from an older build) can't blow up the row
-    /// layout. The 1e-3 margin is cosmetic — avoids reading exactly
+    /// layout. The 1e-3 margin is cosmetic, avoids reading exactly
     /// 0.85 as "slightly below 0.85" when the floating-point step
     /// lands on a binary-exact value.
     private var listScaleClamped: CGFloat {
@@ -3488,7 +3488,7 @@ struct ChannelRow: View {
     // #45: per-channel "Add to Collection" picker + new-collection name alert.
     // Used by the iOS row (iOSRow) as well as tvOS, so these stay unconditional.
     // They were previously mis-scoped inside `#if os(tvOS)`, which left iOSRow
-    // referencing undeclared state on iOS — masked until the iOSRow type-check
+    // referencing undeclared state on iOS, masked until the iOSRow type-check
     // timeout was relieved by extracting the dialog builders.
     @State private var showCollectionPicker = false
     @State private var showNewCollectionAlert = false
@@ -3526,7 +3526,7 @@ struct ChannelRow: View {
         // When the XMLTV parse lands and EPGCache is re-seeded
         // with category data, re-fetch our upcoming list so the
         // per-program gradient tint picks up the new data. Only
-        // fires work when this card is actually expanded — a
+        // fires work when this card is actually expanded, a
         // collapsed card has no rows to re-tint and would just
         // be burning a fetch. Posted by
         // `ChannelStore.primeXMLTVFromURL` after `seedEPGCache`.
@@ -3560,11 +3560,11 @@ struct ChannelRow: View {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(Color.accentPrimary.opacity(0.04))
                 }
-                // Category tint — a linear gradient that fades from ~30%
+                // Category tint, a linear gradient that fades from ~30%
                 // opacity on the leading edge down to 0 by the card's
                 // midline. This replaces the earlier 5 pt stripe, which
                 // users found visually cramped ("just a colored bar on
-                // the side" — #22 feedback). The fade keeps the right-
+                // the side", #22 feedback). The fade keeps the right-
                 // hand 60% of the card completely uncolored, so the
                 // channel name, program title, progress bar, and the
                 // chevron all stay legible against their original
@@ -3606,7 +3606,7 @@ struct ChannelRow: View {
             debugLog("🎮 Back pressed: collapsing expanded card for \(item.name)")
             withAnimation(.spring(response: 0.25)) { isExpanded = false }
         }
-        // tvOS: single .fullScreenCover(item:) — see `ChannelRowSheet`
+        // tvOS: single .fullScreenCover(item:), see `ChannelRowSheet`
         // doc for why we consolidated away from the dual-modifier
         // setup.
         .sheet(item: recordSheet) { sheet in
@@ -3799,7 +3799,7 @@ struct ChannelRow: View {
                                     .lineLimit(2)
                             }
                         }
-                        // No fallback to group/category name — see
+                        // No fallback to group/category name, see
                         // `liveProgram` doc on ChannelRow.
 
                         if let prog = liveProgram {
@@ -3829,7 +3829,7 @@ struct ChannelRow: View {
             // Reachable by pressing RIGHT on the D-pad from the main content.
             // SELECT toggles the inline guide panel.
             Button {
-                debugLog("🎮 Channel expand: \(item.name) — toggling schedule (expanded=\(!isExpanded))")
+                debugLog("🎮 Channel expand: \(item.name), toggling schedule (expanded=\(!isExpanded))")
                 toggleExpanded(animated: true)
             } label: {
                 Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
@@ -3949,7 +3949,7 @@ struct ChannelRow: View {
                 }
                 // No fallback: when no program info is available the
                 // subtitle slot stays empty rather than printing the
-                // channel's group/category name. v1.6.10 — see
+                // channel's group/category name. v1.6.10, see
                 // `liveProgram` doc.
 
                 if let prog = liveProgram {
@@ -4008,7 +4008,7 @@ struct ChannelRow: View {
             SystemMenuAnchor(items: { cardMenuItems }, onTap: onTap)
                 .padding(.trailing, (isWide ? 150 : 58) * s)
         }
-        // #45: per-channel "Add to Collection" — toggle membership in any
+        // #45: per-channel "Add to Collection", toggle membership in any
         // existing collection (a checkmark marks current members) or create a
         // new one with this channel already in it.
         .confirmationDialog("Add to Collection", isPresented: $showCollectionPicker, titleVisibility: .visible) {
@@ -4195,7 +4195,7 @@ struct ChannelRow: View {
         // EPG enrichment to the Guide view's per-cell prefetch),
         // so the gate hid the Record action permanently for users
         // who hadn't visited the Guide first. Now we always offer
-        // "Record" — when EPG is missing we fall back to a generic
+        // "Record", when EPG is missing we fall back to a generic
         // title + a 60-minute default duration that the user can
         // override in `RecordProgramSheet`.
         if item.streamURL != nil {
@@ -4255,7 +4255,7 @@ struct ChannelRow: View {
     /// which does per-channel EPG fetches that never populate
     /// GuideStore. Also catches the transient window on a first
     /// cold launch where a channel exists but XMLTV hasn't
-    /// parsed yet — in that case we still show SOMETHING rather
+    /// parsed yet, in that case we still show SOMETHING rather
     /// than an empty panel.
     /// Catch-up: this channel's ALREADY-AIRED programmes from the retained
     /// guide history, oldest first. Everything retained is listed (the
@@ -4385,7 +4385,7 @@ struct ChannelRow: View {
     /// an upcoming-program row. Replaces the SwiftUI `.contextMenu` that
     /// kept docking at the screen bottom on iPhone (#23 feedback).
     ///
-    /// Structured as a tiny VStack — header (title + time range) then
+    /// Structured as a tiny VStack, header (title + time range) then
     /// one or two actions (Set / Cancel Reminder, Record). `.buttonStyle(.plain)`
     /// + explicit padding match the visual weight of an iOS context
     /// menu without relying on the system-provided one. Dismissed by
@@ -4434,7 +4434,7 @@ struct ChannelRow: View {
     @ViewBuilder
     private func programActionPopover(for entry: EPGEntry) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header — program title + time range. Mirrors the old
+            // Header, program title + time range. Mirrors the old
             // context-menu preview's data without the extra padding
             // that made it look like a second card when docked at
             // the bottom.
@@ -4461,7 +4461,7 @@ struct ChannelRow: View {
 
             Divider()
 
-            // Actions — info + reminder + record. Program Info is
+            // Actions, info + reminder + record. Program Info is
             // always available (unlike reminder/record which gate on
             // future/live state) so it's the first button; users can
             // inspect a past-aired program's metadata too.
@@ -4475,7 +4475,7 @@ struct ChannelRow: View {
                     let end = entry.endTime ?? start.addingTimeInterval(3600)
                     activePopoverEntryID = nil
                     // Slight delay so the popover dismiss animation
-                    // finishes before the sheet presents — iOS
+                    // finishes before the sheet presents, iOS
                     // sometimes swallows the sheet without this,
                     // matching the pattern used for Record below.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
@@ -4538,7 +4538,7 @@ struct ChannelRow: View {
                     ) {
                         activePopoverEntryID = nil
                         // Slight delay so the popover dismiss animation
-                        // finishes before the sheet presents — without
+                        // finishes before the sheet presents, without
                         // this iOS sometimes swallows the sheet.
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                             activeSheet = .record(entry)
@@ -4763,16 +4763,16 @@ struct ChannelRow: View {
                         // (our expanded guidePanel inside a ChannelRow
                         // inside a List). Research turned up no SwiftUI
                         // API that controls the context-menu preview
-                        // position — Apple's own apps use UIKit
+                        // position, Apple's own apps use UIKit
                         // `UIContextMenuInteraction` directly. `.popover`
                         // with `.presentationCompactAdaptation(.popover)`
                         // gives us the native popover on iPhone (iOS 16.4+)
                         // and always anchors to the attached view via
-                        // `attachmentAnchor: .rect(.bounds)` — which is
+                        // `attachmentAnchor: .rect(.bounds)`, which is
                         // exactly "where the user long-pressed" per #23
                         // feedback.
                         epgEntryRow(row: rowEntry, isLast: rowEntry.id == futureLastID)
-                            // No horizontal outer padding — rows now
+                            // No horizontal outer padding, rows now
                             // extend to the card's inner edge, so the
                             // parent card's category gradient can't
                             // "bleed" through the gaps between rows
@@ -4784,7 +4784,7 @@ struct ChannelRow: View {
                             // than one run-on block.
                             .padding(.vertical, 2)
                             .background(
-                                // ZStack layering — the previous
+                                // ZStack layering, the previous
                                 // version used two chained `.background`
                                 // modifiers to stack solid-fill + gradient.
                                 // That was a SwiftUI ordering bug: stacked
@@ -4792,7 +4792,7 @@ struct ChannelRow: View {
                                 // back than the previous, so the "solid
                                 // fill to block parent gradient bleed"
                                 // modifier ended up IN FRONT of the per-
-                                // program gradient — hiding it completely.
+                                // program gradient, hiding it completely.
                                 // Three rounds of debugging chased the
                                 // data layer for something that was a
                                 // render ordering bug. ZStack has
@@ -4852,7 +4852,7 @@ struct ChannelRow: View {
                 // mechanics) and chain `.confirmationDialog` directly
                 // onto it. Previously the `.confirmationDialog` was
                 // inside a separate `#if os(tvOS) ... #endif` block
-                // AFTER the iOS/tvOS `#if/#else/#endif` branching —
+                // AFTER the iOS/tvOS `#if/#else/#endif` branching,
                 // the `#if` boundary broke the modifier chain (a
                 // free-floating `.modifier(...)` isn't a valid
                 // top-level ViewBuilder expression), so the tvOS
@@ -4964,7 +4964,7 @@ struct ChannelRow: View {
     // MARK: - Now Playing Helpers
 
     /// Compact time-remaining badge shown beside the current program title.
-    /// Uses a plain Date() snapshot — accurate when the row appears, no per-row
+    /// Uses a plain Date() snapshot, accurate when the row appears, no per-row
     /// TimelineView overhead that causes batch re-renders during scroll.
     private func nowPlayingTimeRemaining(end: Date) -> some View {
         let remaining = max(0, end.timeIntervalSince(Date()))
@@ -5399,7 +5399,7 @@ struct TVGroupPillButtonStyle: ButtonStyle {
 
 // MARK: - Cached Channel Logo Image
 
-/// In-memory logo cache — prevents AsyncImage from re-fetching on every scroll.
+/// In-memory logo cache, prevents AsyncImage from re-fetching on every scroll.
 final class LogoCache: @unchecked Sendable {
     static let shared = LogoCache()
     private let cache = NSCache<NSString, UIImage>()
@@ -5408,7 +5408,7 @@ final class LogoCache: @unchecked Sendable {
     func store(_ img: UIImage, for key: String) { cache.setObject(img, forKey: key as NSString) }
 }
 
-/// v1.6.23 — auth-aware logo fetcher. Dispatcharr-API channel logos
+/// v1.6.23, auth-aware logo fetcher. Dispatcharr-API channel logos
 /// live behind `/api/channels/logos/<id>/cache/`, which requires the
 /// server's `X-API-Key` (or `Authorization: ApiKey ...` / `Bearer`
 /// per the per-server auth mode added in v1.6.20). The previous
@@ -6055,12 +6055,12 @@ struct ChannelBadge: View {
 /// placed in a `.background` so the chip-row's mini-player
 /// push-down inset can be computed dynamically (no per-device
 /// hard-coded padding). The reduce keeps the latest value rather
-/// than summing siblings — only one reader is in play at a time
+/// than summing siblings, only one reader is in play at a time
 /// within any given branch of the body.
 ///
 /// We capture the absolute frame Y rather than `safeAreaInsets.top`
 /// because the chip-row VStack lives inside a NavigationStack
-/// content area — `safeAreaInsets.top` returns 0 in that context
+/// content area, `safeAreaInsets.top` returns 0 in that context
 /// (the chrome is consumed by the NavigationStack itself), but
 /// the absolute frame Y correctly reports the screen-space
 /// position to compare against the mini's `.ignoresSafeArea()`-
@@ -6079,7 +6079,7 @@ private struct NaturalTopPreference: PreferenceKey {
 #if os(iOS)
 /// v1.6.13.x: Per-idiom `.searchable` modifier so iPad gets the
 /// new button-revealed drawer (`isPresented:` binding) while iPhone
-/// keeps the classic always-visible drawer (no binding) — the
+/// keeps the classic always-visible drawer (no binding), the
 /// system needs the binding form to programmatically hide the
 /// drawer, but iPhone's pull-down-to-reveal idiom doesn't apply
 /// when a binding is present, so the two surfaces use distinct

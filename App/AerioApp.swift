@@ -7,7 +7,7 @@ import UIKit
 #if os(iOS)
 import Network
 #elseif os(tvOS)
-// Network (NWPathMonitor) is available — used by `TVLANProbe` below to
+// Network (NWPathMonitor) is available, used by `TVLANProbe` below to
 // re-probe the home-server on network-change transitions.
 import Network
 #endif
@@ -413,7 +413,7 @@ struct AerioApp: App {
     /// warmup can cost 2-3 seconds on iPad, and without this eager
     /// hit the cost lands on the MainActor the first time
     /// `ChannelStore.load` or `@Query var servers` touches the
-    /// context — producing a ~3.4s ping#3 hang on warm relaunch.
+    /// context, producing a ~3.4s ping#3 hang on warm relaunch.
     /// The warmup fetch runs off main (own `ModelContext`) so by
     /// the time UI code touches the shared context, SQLite is
     /// already open and hot.
@@ -542,7 +542,7 @@ struct AerioApp: App {
         // schema validation off the critical path. Uses a fresh
         // background `ModelContext`, never touches MainActor.
         // `ServerConnection` is a tiny table so the fetch itself
-        // costs microseconds — the expensive work is in what
+        // costs microseconds, the expensive work is in what
         // SwiftData does around it on first access.
         let containerRef = self.sharedModelContainer
         Task.detached(priority: .userInitiated) {
@@ -595,7 +595,7 @@ struct AerioApp: App {
                     // Permanent, not DEBUG-only: the hang lines are the only
                     // record of a stall in a field log (Logan 2026-09-12).
                     MainThreadWatchdog.shared.start()
-                    // Playback diagnostics — memory-warning subscriber
+                    // Playback diagnostics, memory-warning subscriber
                     // logs a snapshot of tile state + process metrics
                     // when iOS sends a pressure notification. Runs in
                     // both DEBUG and release so feedback reports have
@@ -681,10 +681,10 @@ struct AerioApp: App {
         // during single playback or guide browsing does nothing.
         //
         // Shortcuts (plan Phase 7):
-        //  ⌘1..⌘9  — take audio of tile N (1-indexed)
-        //  ⌘W     — exit multiview (clean teardown, stops playback)
-        //  ⌘N     — open the add-channel sheet
-        //  ⌘F     — toggle fullscreen-in-grid on the audio tile
+        //  ⌘1..⌘9 , take audio of tile N (1-indexed)
+        //  ⌘W    , exit multiview (clean teardown, stops playback)
+        //  ⌘N    , open the add-channel sheet
+        //  ⌘F    , toggle fullscreen-in-grid on the audio tile
         //
         // The add-sheet and fullscreen toggle use the same store APIs
         // as the on-screen buttons, so behavior stays consistent with
@@ -717,14 +717,14 @@ struct AerioApp: App {
                 #endif
                 // Start iCloud sync if enabled (pull happens during EPG loading)
                 SyncManager.shared.startObserving()
-                // Re-probe LAN on every foreground transition — covers
+                // Re-probe LAN on every foreground transition, covers
                 // the "user took the Apple TV / iPad / Mac to a
                 // different network and came back" case that the
                 // launch-only probe missed. `reprobe()` reuses the
                 // candidate snapshot from the most recent
                 // `probe(servers:)` call, so no modelContext access
                 // is required here. v1.6.8: now runs on iOS too,
-                // not just tvOS — see TVLANProbe header.
+                // not just tvOS, see TVLANProbe header.
                 TVLANProbe.shared.reprobe()
                 // v1.7.x: Direct Connect session warmup. Refresh the
                 // JWT access token (or re-login from Keychain
@@ -746,7 +746,7 @@ struct AerioApp: App {
                 // Flush any pending debounced iCloud pushes before the OS
                 // suspends us. Without this, preference changes (favorites,
                 // theme, etc.) made in the last 60 seconds get dropped when
-                // the user force-closes the app — the push is still sitting
+                // the user force-closes the app, the push is still sitting
                 // on the main queue waiting out its asyncAfter debounce. See
                 // GitHub issue #2.
                 SyncManager.shared.pushPreferencesImmediate()
@@ -755,14 +755,14 @@ struct AerioApp: App {
                 // tvOS has no PiP or background audio entitlement for IPTV streams.
                 //
                 // Previously posted `.stopPlaybackForBackground` which HomeView
-                // handled via `nowPlaying.stop()` — that path only stopped the
+                // handled via `nowPlaying.stop()`, that path only stopped the
                 // NowPlayingManager's single-stream state and left MultiviewStore
                 // tiles running, so multiview audio kept playing after a Home-press
                 // (user-reported regression; reproduces on both single and
                 // multiview on Apple TV).
                 //
                 // Fire the notification AND directly call `PlayerSession.exit()`
-                // — the unified teardown path that resets MultiviewStore, flips
+                // the unified teardown path that resets MultiviewStore, flips
                 // mode to `.idle`, clears NowPlayingInfoCenter, and stops the
                 // single-stream NowPlayingManager. The notification is kept so any
                 // other listeners (e.g., HomeView) still get a chance to tear down
@@ -773,7 +773,7 @@ struct AerioApp: App {
                     PlayerSession.shared.exit()
                 }
                 #endif
-                // Stop all active local recordings — iOS suspends URLSession
+                // Stop all active local recordings, iOS suspends URLSession
                 // data tasks within ~30s of backgrounding, so the recording
                 // would fail silently. Better to stop cleanly. The model
                 // context update happens inside RootView's own onChange.
@@ -795,7 +795,7 @@ struct AerioApp: App {
     /// Strategy per server:
     ///   - If a refresh token is cached in `DispatcharrTokenStore`,
     ///     try `/api/accounts/token/refresh/`. On success, swap in
-    ///     the new access token (refresh stays the same — Dispatcharr
+    ///     the new access token (refresh stays the same, Dispatcharr
     ///     does not rotate it).
     ///   - On `.refreshExpired` (24h+ idle session), clear the cache
     ///     entry and fall through to a fresh login.
@@ -841,7 +841,7 @@ struct AerioApp: App {
 
         // Build per-server credential snapshots on main (Keychain
         // reads are thread-safe but ServerConnection is a SwiftData
-        // @Model — pluck the values here, hand the primitives off
+        // @Model, pluck the values here, hand the primitives off
         // to the detached Task below).
         struct WarmupTarget: Sendable {
             let id: UUID
@@ -880,7 +880,7 @@ struct AerioApp: App {
 //
 // History:
 //   • Originally tvOS-only because tvOS doesn't expose a Wi-Fi SSID
-//     API — we fell back to "can we reach the configured localURL?"
+//     API, we fell back to "can we reach the configured localURL?"
 //     as the LAN detection signal.
 //   • v1.6.8: promoted to iOS / iPadOS / Mac Catalyst as well.
 //   • Later: SSID / location / Wi-Fi-info detection was removed
@@ -895,14 +895,14 @@ struct AerioApp: App {
 // state across the update.
 //
 // `ServerConnection.isOnLANNetwork` reads this probe's result and
-// nothing else — it is the only LAN signal on all platforms.
+// nothing else, it is the only LAN signal on all platforms.
 //
 // Reliability hardening (v1.6.7):
 //
 //   1. Retry: a single HEAD request can lose to transient DNS/ARP
 //      flakiness on first boot (the router's ARP cache doesn't yet
 //      know the Apple TV's MAC). Up to 3 attempts with a 500ms delay
-//      between — first success wins.
+//      between, first success wins.
 //
 //   2. Re-probe on foreground: old behaviour only probed at app
 //      launch and on servers.count change, which missed the
@@ -923,7 +923,7 @@ struct AerioApp: App {
 // The class is an `ObservableObject` singleton so `ServerDetailView`
 // can `@ObservedObject` it to drive the "Refresh LAN Detection"
 // button state + the last-probe labels. Callers remain
-// `TVLANProbe.shared.probe(servers:)` — the old static call sites
+// `TVLANProbe.shared.probe(servers:)`, the old static call sites
 // in `RootView.onAppear` + `onChange(servers.count)` are updated to
 // the new form.
 @MainActor
@@ -968,7 +968,7 @@ final class TVLANProbe: ObservableObject {
     private var currentProbeTask: Task<Void, Never>? = nil
 
     private let pathMonitor = NWPathMonitor()
-    /// Debounce timer for NWPath updates — network-change storms
+    /// Debounce timer for NWPath updates, network-change storms
     /// (Ethernet renegotiation, Wi-Fi roam) emit several .satisfied
     /// transitions in quick succession; we only want to probe once
     /// per storm.
@@ -993,7 +993,7 @@ final class TVLANProbe: ObservableObject {
 
     // MARK: Public entry points
 
-    /// Primary entry — called from RootView.onAppear, RootView
+    /// Primary entry, called from RootView.onAppear, RootView
     /// `onChange(servers.count)`, and the Settings "Refresh LAN
     /// Detection" button. Extracts candidate `localURL` values from
     /// the passed servers, remembers them for future `reprobe()`
@@ -1025,26 +1025,26 @@ final class TVLANProbe: ObservableObject {
         self.candidateURLs = candidates
 
         guard !candidates.isEmpty else {
-            // No `localURL` on any server — this is a CONFIG issue,
+            // No `localURL` on any server, this is a CONFIG issue,
             // not a network issue. Record a failed probe so the
             // Settings UI shows "No local URL configured" instead
             // of a stale pre-config true value.
             record(detected: false, host: nil, latencyMs: nil)
-            print("📡 tvOS LAN probe: SKIPPED — no local URL configured on any server (\(serversWithoutLocal) server(s) missing `localURL`). Set Settings → Server → Local URL to enable LAN routing.")
+            print("📡 tvOS LAN probe: SKIPPED, no local URL configured on any server (\(serversWithoutLocal) server(s) missing `localURL`). Set Settings → Server → Local URL to enable LAN routing.")
             return
         }
-        print("📡 tvOS LAN probe: starting — \(candidates.count) candidate local URL(s), \(serversWithoutLocal) server(s) without local URL")
+        print("📡 tvOS LAN probe: starting, \(candidates.count) candidate local URL(s), \(serversWithoutLocal) server(s) without local URL")
         startProbeTask(candidates: candidates)
     }
 
     /// Re-probe with the most recently remembered candidate set. Used
     /// by scenePhase `.active` and `NWPathMonitor`'s `.satisfied`
-    /// transition — neither has a fresh servers array handy, so we
+    /// transition, neither has a fresh servers array handy, so we
     /// reuse the snapshot from the last `probe(servers:)` call.
     func reprobe() {
         let candidates = self.candidateURLs
         guard !candidates.isEmpty else {
-            // First probe hasn't happened yet (rare — would mean
+            // First probe hasn't happened yet (rare, would mean
             // scenePhase .active fired before RootView.onAppear).
             // Skip silently; the imminent onAppear probe will hydrate
             // our candidate snapshot.
@@ -1089,7 +1089,7 @@ final class TVLANProbe: ObservableObject {
             lastDetected = false
         }
         // Cancel any probe that's still running. The newer call's
-        // result should win — a user tapping "Refresh" during a
+        // result should win, a user tapping "Refresh" during a
         // slow in-flight probe shouldn't wait for the old one to
         // time out before their explicit request takes effect.
         currentProbeTask?.cancel()
@@ -1114,7 +1114,7 @@ final class TVLANProbe: ObservableObject {
            !currentPath.usesInterfaceType(.wifi),
            !currentPath.usesInterfaceType(.wiredEthernet) {
             record(detected: false, host: nil, latencyMs: nil)
-            print("📡 LAN probe: off-LAN interface (cellular) — external URL, no probe")
+            print("📡 LAN probe: off-LAN interface (cellular), external URL, no probe")
             return
         }
 
@@ -1157,7 +1157,7 @@ final class TVLANProbe: ObservableObject {
                     let (_, response) = try await URLSession.shared.data(for: request)
                     let ms = Int(Date().timeIntervalSince(start) * 1000)
                     if let http = response as? HTTPURLResponse, http.statusCode < 500 {
-                        // SUCCESS — any 2xx/3xx/4xx response proves
+                        // SUCCESS, any 2xx/3xx/4xx response proves
                         // the TCP+HTTP path is alive. 5xx could be
                         // a hung upstream so we don't treat that as
                         // proof of LAN reachability.
@@ -1184,9 +1184,9 @@ final class TVLANProbe: ObservableObject {
 
         record(detected: !reachable.isEmpty, host: firstHost, latencyMs: firstLatency, reachableURLs: reachable)
         if reachable.isEmpty {
-            print("📡 tvOS LAN probe: FAILED after \(maxAttempts) attempts — [\(allLogs.joined(separator: ", "))]. Streams will use external URL.")
+            print("📡 tvOS LAN probe: FAILED after \(maxAttempts) attempts, [\(allLogs.joined(separator: ", "))]. Streams will use external URL.")
         } else {
-            print("📡 tvOS LAN probe: DETECTED \(reachable.count)/\(candidates.count) local URL(s) — [\(allLogs.joined(separator: ", "))]")
+            print("📡 tvOS LAN probe: DETECTED \(reachable.count)/\(candidates.count) local URL(s), [\(allLogs.joined(separator: ", "))]")
         }
     }
 
@@ -1239,7 +1239,7 @@ final class TVLANProbe: ObservableObject {
             guard let self else { return }
             // Re-probe on every usable-route update (`.satisfied`),
             // which fires on WiFi/cellular switches and other network
-            // changes, not just a cold "just came online" — that is how
+            // changes, not just a cold "just came online", that is how
             // leaving home WiFi triggers the LAN to WAN re-tune. Skip
             // offline / partial-connectivity states (nothing to reach).
             guard path.status == .satisfied else { return }
@@ -1337,7 +1337,7 @@ struct AppEntryView: View {
     /// the network fetch with the splash.
     ///
     /// `ChannelStore.refresh` is now idempotent (see HomeView.swift
-    /// — the guard short-circuits when a load is already in flight
+    /// the guard short-circuits when a load is already in flight
     /// for the same server), so MainTabView's later call is a no-op
     /// and the channel fetch we kicked off here gets to keep running
     /// without being cancelled + re-issued.
@@ -1389,7 +1389,7 @@ struct RootView: View {
 
     /// v1.6.12: drives the post-update "What's new" sheet. Set to
     /// `true` from `onAppear` only when `WhatsNewStore.shouldShow()`
-    /// returns true — i.e. user is on a release we have curated
+    /// returns true, i.e. user is on a release we have curated
     /// notes for, hasn't already acknowledged this version, and
     /// hasn't permanently opted out. Kept on a slight delay so the
     /// sheet rises after the splash → root transition settles.
@@ -1523,7 +1523,7 @@ struct RootView: View {
                 // One-time cleanup: purge EPGProgram rows belonging to any
                 // server that no longer exists. Fixes historical damage
                 // from an earlier build where server deletion didn't
-                // cascade EPG rows — users who deleted a server type and
+                // cascade EPG rows, users who deleted a server type and
                 // re-added the same server via a different type would end
                 // up with orphaned EPG data that left the guide empty.
                 pruneOrphanedEPGPrograms()
@@ -1537,7 +1537,7 @@ struct RootView: View {
                 // plaintext. Idempotent: `migrateToSynchronizable`
                 // skips keys already in iCloud Keychain. The
                 // `kvsToKeychainMigrationDoneV1` flag prevents the
-                // (cheap) walk on every launch — the migration only
+                // (cheap) walk on every launch, the migration only
                 // needs to run once per device, since
                 // `mergeRemoteServers` and `saveCredentialsSynced`
                 // both write to iCloud Keychain on every save going
@@ -1557,7 +1557,7 @@ struct RootView: View {
                 // that iCloud Keychain (kSecAttrSynchronizable) would
                 // carry credentials cross-device. That assumption broke
                 // for users who hadn't enabled iCloud Keychain on their
-                // Apple TV / second device — the server config synced,
+                // Apple TV / second device, the server config synced,
                 // but every API call returned 401 (Freyguy1975 v1.6.22
                 // report). v1.6.23's `serialize` re-includes the
                 // credentials; this republish forces an immediate
@@ -1621,7 +1621,7 @@ struct RootView: View {
                 debugLog("🟡 RootView.onChange(servers.count): count=\(count), isMergingRemote=\(isMergingRemote)")
                 // Re-probe LAN whenever servers change (e.g., iCloud
                 // sync delivers a server with localURL). Cross-
-                // platform as of v1.6.8 — see TVLANProbe header.
+                // platform as of v1.6.8, see TVLANProbe header.
                 TVLANProbe.shared.probe(servers: servers)
                 guard !isMergingRemote else {
                     debugLog("🟡 RootView.onChange(servers.count): SKIPPED (isMergingRemote)")
@@ -1712,7 +1712,7 @@ struct RootView: View {
     ///     and skips writing to iCloud Keychain when an iCloud item
     ///     already exists for the same key. So re-running can't
     ///     corrupt or downgrade an already-migrated credential.
-    ///   • Local Keychain items remain in place — we don't delete
+    ///   • Local Keychain items remain in place, we don't delete
     ///     them. `effectivePassword`/`effectiveApiKey` prefer the
     ///     iCloud copy while credential sync is enabled, but fall
     ///     back to the local copy when sync is off.
@@ -1744,7 +1744,7 @@ struct RootView: View {
     private func migrateCredentialsToICloudKeychainIfNeeded() {
         let flagKey = "kvsToKeychainMigrationDoneV1"
         if UserDefaults.standard.bool(forKey: flagKey) { return }
-        // Migration only does useful work when iCloud Sync is on —
+        // Migration only does useful work when iCloud Sync is on,
         // otherwise the local Keychain is the only intended store
         // and copying to iCloud Keychain would defy the user's
         // explicit "no iCloud" preference. The flag is still set
@@ -1784,7 +1784,7 @@ struct RootView: View {
     /// users who hadn't enabled iCloud Keychain on a second device
     /// (most common: Apple TV with iCloud Keychain disabled). The
     /// server metadata synced via KVS, the playlist rendered, every
-    /// API call returned 401 — and there was no UX recovery short of
+    /// API call returned 401, and there was no UX recovery short of
     /// re-typing the API key on every device. Field reports starting
     /// in v1.6.22 (Freyguy1975, multiple Apple TV deployments) made it
     /// clear the Keychain-only path is unreliable in practice.
@@ -1796,7 +1796,7 @@ struct RootView: View {
     /// successful run the `kvsCredentialRepublishDoneV1_6_23` flag
     /// prevents re-runs.
     ///
-    /// Safe when iCloud Sync is disabled — we early-out, since with
+    /// Safe when iCloud Sync is disabled, we early-out, since with
     /// Sync off we never write to KVS. If the user later enables Sync,
     /// the next natural push (fired on the toggle) carries the new
     /// credential-bearing shape.
@@ -1963,13 +1963,13 @@ struct RootView: View {
         // fetch + loop). We now push both the fetch AND the delete
         // loop to a background `ModelContext` and narrow the fetch
         // via a predicate so SQLite only returns the rows we're
-        // actually going to delete — which is almost always zero.
+        // actually going to delete, which is almost always zero.
         //
         // Note: the v1.6.7 XMLTV category-fix migration USED to live
         // here too, but moved into `GuideStore.loadFromCache` so the
         // purge + the SwiftData fetch happen on the same background
         // ModelContext in strict order. Running them as two separate
-        // detached tasks at different priorities raced — the higher-
+        // detached tasks at different priorities raced, the higher-
         // priority loadFromCache read the old rows before the
         // lower-priority prune could delete them, and those old
         // concatenated-category strings landed in GuideStore.programs
@@ -2016,7 +2016,7 @@ struct RootView: View {
 
         for remote in remoteServers {
             if let local = localByID[remote.id] {
-                // Existing server — update if remote is newer
+                // Existing server, update if remote is newer
                 let localDate = local.lastConnected ?? local.createdAt
                 let remoteDate = remote.lastConnected ?? remote.createdAt
                 if replace || remoteDate > localDate {
@@ -2040,7 +2040,7 @@ struct RootView: View {
                     }
                     // v1.7: adopt remote's credential type. Empty
                     // remote value (legacy v1.6.x sender) leaves the
-                    // local field alone — for an existing API-key
+                    // local field alone, for an existing API-key
                     // server that's exactly right, since the local
                     // raw is also "" and resolves to .apiKey.
                     if !remote.dispatcharrCredentialTypeRaw.isEmpty {
@@ -2105,7 +2105,7 @@ struct RootView: View {
                                            category: "Sync", level: .info)
                 }
             } else {
-                // New server from another device — insert locally.
+                // New server from another device, insert locally.
                 // Respect isActive from remote only on initial import of a fresh install,
                 // so the user's previously-active server is ready without manual selection.
                 // ... or when the user explicitly asked to mirror the cloud.
@@ -2247,14 +2247,14 @@ struct RootView: View {
             debugLog("🟢 RootView: merge changed nothing, skipping save")
         }
 
-        // Save credentials to Keychain (must stay on main thread — Security
+        // Save credentials to Keychain (must stay on main thread, Security
         // framework can trigger dispatch_assert_queue when called off-main).
         //
         // v1.6.8 (Codex D1): also write to the iCloud-synchronizable
         // Keychain so a credential merged in from one device propagates
         // to every other device on the same Apple ID without going
         // through the KVS plaintext path. The local-only write stays
-        // for the case where the user later disables iCloud Sync —
+        // for the case where the user later disables iCloud Sync,
         // they still need a copy of their credentials on this device.
         // `effectivePassword` / `effectiveApiKey` already resolve the
         // right copy for the current sync mode, so the dual write is

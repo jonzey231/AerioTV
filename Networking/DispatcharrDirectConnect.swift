@@ -2,7 +2,7 @@
 //  DispatcharrDirectConnect.swift
 //  Aerio
 //
-//  v1.7 — Dispatcharr Direct Connect (admin username + password login).
+//  v1.7, Dispatcharr Direct Connect (admin username + password login).
 //
 //  Lets users connect to Dispatcharr with their web-UI admin credentials
 //  instead of a 32-character API key. Equivalent to how Teamarr and
@@ -23,7 +23,7 @@
 //  TTLs: access = 30 minutes (1800s), refresh = 24 hours (86400s).
 //  Refresh response only returns a new access token; the existing
 //  refresh stays valid for its full 24h window. This sidesteps
-//  concurrent-refresh rotation races entirely — two parallel API calls
+//  concurrent-refresh rotation races entirely, two parallel API calls
 //  that both see 401 will both refresh, both get a valid new access,
 //  both retry. Idempotent.
 //
@@ -38,7 +38,7 @@ import Foundation
 
 // MARK: - Decodable response shapes
 
-/// Response from `/api/accounts/token/` — the JWT login endpoint.
+/// Response from `/api/accounts/token/`, the JWT login endpoint.
 struct DispatcharrJWTPair: Decodable {
     let access: String
     let refresh: String
@@ -229,7 +229,7 @@ enum DispatcharrDVRAccess: String {
 /// Per-server live JWT cache. Holds the access + refresh pair plus a
 /// best-effort expiry timestamp parsed from the access token's `exp`
 /// claim, so we can pre-emptively refresh before the server returns
-/// 401. The store is **process-scoped only** — neither access nor
+/// 401. The store is **process-scoped only**, neither access nor
 /// refresh is persisted; the username/password (which re-login uses)
 /// are the only durable credential, kept in Keychain by the existing
 /// `apiKey_` / `password_` pattern.
@@ -238,7 +238,7 @@ enum DispatcharrDVRAccess: String {
 /// the store can be read/written from any execution context without
 /// hopping to a specific actor. This matters because the call sites
 /// (header-emission inside `DispatcharrAPI.headers(for:)`) are
-/// nonisolated — building a header dictionary doesn't need an actor
+/// nonisolated, building a header dictionary doesn't need an actor
 /// hop, and forcing one would require every API call to become async
 /// and await the main actor purely for a dictionary lookup.
 ///
@@ -296,7 +296,7 @@ final class DispatcharrTokenStore: @unchecked Sendable {
     }
 
     /// Update only the access token after a successful refresh. The
-    /// refresh token stays the same — Dispatcharr does not rotate it
+    /// refresh token stays the same, Dispatcharr does not rotate it
     /// on `/api/accounts/token/refresh/`, only emits a new access.
     func storeRefreshedAccess(serverID: UUID, access: String) {
         let exp = Self.expiry(of: access) ?? Date(timeIntervalSinceNow: 1500)
@@ -446,7 +446,7 @@ enum DispatcharrDirectConnectError: Error, LocalizedError {
     /// names the offending field instead of Foundation's opaque
     /// "The data couldn't be read because it is missing".
     case unexpectedUserResponse(detail: String)
-    /// Generic transport failure — wraps the underlying URLError or
+    /// Generic transport failure, wraps the underlying URLError or
     /// HTTP status for telemetry.
     case transport(String)
 
@@ -455,7 +455,7 @@ enum DispatcharrDirectConnectError: Error, LocalizedError {
         case .invalidCredentials:
             // v1.7.x: spell out the Dashboard-vs-XC distinction.
             // Field reports show users typing their XC API password
-            // here (it's the more familiar one — they use it in
+            // here (it's the more familiar one, they use it in
             // Xtream Codes URLs all the time) and assuming AerioTV
             // is broken when it 401s. Calling out the exact admin
             // path turns the error into a self-resolving signal.
@@ -568,7 +568,7 @@ extension DispatcharrAPI {
         do {
             (data, response) = try await HTTPRouter.data(for: request)
         } catch {
-            debugLog("📺 Direct Connect login FAIL: transport error — \(error.localizedDescription)")
+            debugLog("📺 Direct Connect login FAIL: transport error, \(error.localizedDescription)")
             throw DispatcharrDirectConnectError.transport(error.localizedDescription)
         }
 
@@ -606,7 +606,7 @@ extension DispatcharrAPI {
             return pair
         } catch {
             let snippet = String(data: data.prefix(160), encoding: .utf8) ?? "<non-utf8>"
-            debugLog("📺 Direct Connect login FAIL: 200 OK but decode failed — \(error.localizedDescription); body=\(snippet)")
+            debugLog("📺 Direct Connect login FAIL: 200 OK but decode failed, \(error.localizedDescription); body=\(snippet)")
             throw DispatcharrDirectConnectError.unexpectedLoginResponse
         }
     }
@@ -674,7 +674,7 @@ extension DispatcharrAPI {
             user = try JSONDecoder().decode(DispatcharrUser.self, from: data)
         } catch {
             let snippet = String(data: data.prefix(160), encoding: .utf8) ?? "<non-utf8>"
-            debugLog("📺 Direct Connect users/me FAIL: decode failed — \(error); body=\(snippet)")
+            debugLog("📺 Direct Connect users/me FAIL: decode failed, \(error); body=\(snippet)")
             let detail: String
             if case let DecodingError.keyNotFound(key, _) = error {
                 detail = "missing field '\(key.stringValue)'"
@@ -733,7 +733,7 @@ extension DispatcharrAPI {
         ]
         switch auth {
         case .apiKey(let key):
-            // Same shape as the standard headers — match `authMode`.
+            // Same shape as the standard headers, match `authMode`.
             switch authMode {
             case .xapikey:
                 h["X-API-Key"] = key
@@ -784,7 +784,7 @@ extension DispatcharrAPI {
     ///
     ///   1. Read the saved username (passed by caller) + Keychain
     ///      password (`password_<serverID>`).
-    ///   2. POST `/api/accounts/token/` to log in fresh — Dispatcharr
+    ///   2. POST `/api/accounts/token/` to log in fresh, Dispatcharr
     ///      revoked the api_key but the credentials themselves are
     ///      still valid.
     ///   3. Cache the resulting JWT pair in `DispatcharrTokenStore`
@@ -806,7 +806,7 @@ extension DispatcharrAPI {
     /// Returns `nil` on any failure (no creds in Keychain, login
     /// rejected, users/me decode error, etc.). Callers fall back to
     /// surfacing the original 401 so the existing error path stays
-    /// intact — silent recovery is a best-effort upgrade, not a
+    /// intact, silent recovery is a best-effort upgrade, not a
     /// guarantee.
     ///
     /// - Parameters:
@@ -838,7 +838,7 @@ extension DispatcharrAPI {
             ?? KeychainHelper.load(key: pwKey)
             ?? ""
         guard !password.isEmpty else {
-            debugLog("📺 silentRebootstrapApiKey: SKIP no password in Keychain (server=\(serverID.uuidString.prefix(8))) — server is in API Key mode without saved credentials")
+            debugLog("📺 silentRebootstrapApiKey: SKIP no password in Keychain (server=\(serverID.uuidString.prefix(8))), server is in API Key mode without saved credentials")
             return nil
         }
         do {
@@ -867,10 +867,10 @@ extension DispatcharrAPI {
             let apiKeyKey = "apiKey_\(serverID.uuidString)"
             KeychainHelper.save(user.apiKey, for: apiKeyKey)
             KeychainHelper.save(user.apiKey, for: apiKeyKey, synchronizable: true)
-            debugLog("📺 silentRebootstrapApiKey: SUCCESS — fresh api_key persisted for server \(serverID.uuidString.prefix(8))")
+            debugLog("📺 silentRebootstrapApiKey: SUCCESS, fresh api_key persisted for server \(serverID.uuidString.prefix(8))")
             return user.apiKey
         } catch {
-            debugLog("📺 silentRebootstrapApiKey: FAIL — \(error.localizedDescription) (server=\(serverID.uuidString.prefix(8)))")
+            debugLog("📺 silentRebootstrapApiKey: FAIL, \(error.localizedDescription) (server=\(serverID.uuidString.prefix(8)))")
             return nil
         }
     }

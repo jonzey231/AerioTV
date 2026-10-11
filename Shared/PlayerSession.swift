@@ -55,7 +55,7 @@ extension View {
 
 /// Top-level playback-mode arbiter.
 ///
-/// `NowPlayingManager.shared` is single-stream by design — it tracks
+/// `NowPlayingManager.shared` is single-stream by design, it tracks
 /// one `playingItem`, one `playingHeaders`, one `isMinimized`.
 /// `MultiviewStore.shared` holds the tile collection.
 /// `PlayerSession.mode` decides which of the two is currently
@@ -105,7 +105,7 @@ final class PlayerSession: ObservableObject {
     /// - `MultiviewStore.shared.audioTileID` is that seed tile.
     /// - `mode == .multiview`.
     /// - `NowPlayingManager.shared` stays populated for the seed
-    ///   channel so CarPlay / lockscreen keep working — the bridge
+    ///   channel so CarPlay / lockscreen keep working, the bridge
     ///   gating in Phase 1d routes remote commands to whichever tile
     ///   holds audio.
     func enterMultiview(seeding current: ChannelDisplayItem?, server: ServerConnection?, isLive: Bool = true) {
@@ -114,7 +114,7 @@ final class PlayerSession: ObservableObject {
         // (or more) render passes; the ordering of unmount-old vs
         // mount-new is implementation-defined. If unmount runs first
         // the audio-session refcount hits 0, triggering
-        // `setActive(false) → setActive(true)` on the next mount —
+        // `setActive(false) → setActive(true)` on the next mount,
         // audible as a brief routing bounce. Pre-incrementing here
         // keeps the count ≥ 1 through the transition; we release the
         // float ~250 ms later, after both swaps have settled. The
@@ -211,7 +211,7 @@ final class PlayerSession: ObservableObject {
 
     /// Exit multiview and continue playing the audio tile's channel
     /// as a regular single-stream. This is what the "Exit" button
-    /// in the transport bar calls — after a multiview session the
+    /// in the transport bar calls, after a multiview session the
     /// user's expectation is "take me back to the channel I was
     /// listening to", not "drop me back to the guide".
     ///
@@ -255,7 +255,7 @@ final class PlayerSession: ObservableObject {
         let audioTile = store.tiles.first { $0.id == store.audioTileID }
 
         guard let audioTile else {
-            // No audio tile means no channel to fall back to — do a
+            // No audio tile means no channel to fall back to, do a
             // full teardown instead of leaving stale state behind.
             exit()
             return
@@ -264,16 +264,16 @@ final class PlayerSession: ObservableObject {
         // Unified-playback path: keep the audio tile as the sole
         // remaining tile and stay in `PlaybackContainerView`. Mode
         // stays `.multiview` even at N=1 because that's the whole
-        // point of the unified view — single-stream IS just
+        // point of the unified view, single-stream IS just
         // N=1 multiview. This preserves the `+` / Add Stream pill in
         // the N=1 chrome so the user can re-enter N>=2 without a
         // full teardown + channel re-resolve. Previously this path
         // always flipped to `.single` + swapped to `PlayerView`,
         // which left the user with no way to add another stream
         // except by exiting all the way to the guide and starting
-        // over — exactly the "no way to reuse multiview" pain point.
+        // over, exactly the "no way to reuse multiview" pain point.
         if PlaybackFeatureFlags.useUnifiedPlayback {
-            // Remove every tile except the audio tile — one mpv
+            // Remove every tile except the audio tile, one mpv
             // handle (the audio tile's) survives; everything else
             // dismantles via SwiftUI view disappear. The store's
             // `audioTileID` stays pointed at the same tile.
@@ -357,7 +357,7 @@ final class PlayerSession: ObservableObject {
         // v1.6.18: capture the audio tile's channel id BEFORE we
         // reset the store. NowPlayingManager.lastPlayedChannelID is
         // the persistent breadcrumb the Live TV guide reads for its
-        // default-focused row — without this capture, a full exit
+        // default-focused row, without this capture, a full exit
         // from multiview clears playingItem AND wipes the audio
         // tile id from MultiviewStore in the same beat, leaving the
         // guide with no signal at all and falling back to row 0.
@@ -396,13 +396,13 @@ final class PlayerSession: ObservableObject {
         #if os(iOS)
         // A headless CarPlay engine (cold-car playback with no view mounted)
         // isn't owned by any coordinator, so the store reset above won't stop
-        // it — kill it here so "Exit" from any surface silences audio.
+        // it, kill it here so "Exit" from any surface silences audio.
         HeadlessPlaybackController.shared.stop()
         #endif
         NowPlayingBridge.shared.teardown()
         // Clear single-stream state too. HomeView's mode branch is
         // `if .multiview { … } else if nowPlaying.isActive { single
-        // PlayerView }` — without this clear, the else-if revives
+        // PlayerView }`, without this clear, the else-if revives
         // single-stream playback of the seed channel after the user
         // tapped "Exit Multiview", which is the opposite of what the
         // button says. Stopping NowPlayingManager lets HomeView fall
@@ -606,7 +606,7 @@ final class PlayerSession: ObservableObject {
     }
 
     /// Enter `.single` mode. No-op if already there. Doesn't touch
-    /// `NowPlayingManager` — the caller is expected to have set up
+    /// `NowPlayingManager`, the caller is expected to have set up
     /// the single-stream playing item before or after this call.
     func beginSingle() {
         mode = .single
@@ -614,7 +614,7 @@ final class PlayerSession: ObservableObject {
 
     /// Return to `.idle`. Called when the user dismisses the single
     /// player (PlayerView's exit button / swipe-down). Doesn't
-    /// touch `NowPlayingManager` — `NowPlayingManager.stop()`
+    /// touch `NowPlayingManager`, `NowPlayingManager.stop()`
     /// clears its own state.
     func endSingle() {
         if mode == .single { mode = .idle }
@@ -622,7 +622,7 @@ final class PlayerSession: ObservableObject {
 
     // MARK: - Unified playback (Phase A skeleton)
 
-    /// Unified playback entry point — eventually replaces every
+    /// Unified playback entry point, eventually replaces every
     /// `NowPlayingManager.startPlaying(...)` + `enterMultiview(...)`
     /// caller with a single funnel that always treats playback as a
     /// `MultiviewStore`-driven tile list.
@@ -636,13 +636,13 @@ final class PlayerSession: ObservableObject {
     /// Phase C will swap the internals so `mode` goes straight to
     /// `.playing` (new case) without bouncing through `.single` /
     /// `.multiview`, and HomeView mounts `PlaybackContainerView` for
-    /// both cases. Callers don't need to change between phases —
+    /// both cases. Callers don't need to change between phases,
     /// that's the point of routing through `begin(...)` now.
     ///
     /// Returns `false` if stream resolution failed (no playable
     /// URL, no active server, cap reached). Callers can surface an
     /// error toast on `false`. Returns `true` even when an identical
-    /// channel is already playing — `add(...)` no-ops with
+    /// channel is already playing, `add(...)` no-ops with
     /// `.alreadyPresent` which we treat as success from a
     /// "user clicked channel, they see playback happening" POV.
     /// TEST (branch test/avplayer-hls-engine): non-nil presents the native
@@ -958,7 +958,7 @@ final class PlayerSession: ObservableObject {
 
         let store = MultiviewStore.shared
 
-        // Gate at the cap — `add(...)` will reject past `maxTiles` but
+        // Gate at the cap, `add(...)` will reject past `maxTiles` but
         // we want to bail earlier so the caller gets a clean false
         // before we start any side-effect writes. `.info` (not
         // `.warning`) because a user tapping Add while at 9/9 is
@@ -1009,7 +1009,7 @@ final class PlayerSession: ObservableObject {
         // the mini is up (N=1 + minimized). Expected UX is "swap the
         // mini's stream to the new channel", NOT "append a second
         // tile and turn the mini into a tiny 2-grid". Achieve this
-        // with a full teardown + fresh seed — the MultiviewContainer
+        // with a full teardown + fresh seed, the MultiviewContainer
         // stays mounted (HomeView's `.multiview` branch is driven
         // by `mode`, which stays `.multiview` across the reseed)
         // but the tile's mpv handle is swapped.
@@ -1055,21 +1055,21 @@ final class PlayerSession: ObservableObject {
                                          headers: resolved.headers,
                                          rewindSeconds: rewindSeconds)
             }
-            // Fresh session — delegate to the existing seed-tile path.
+            // Fresh session, delegate to the existing seed-tile path.
             // This ALSO mirrors into `NowPlayingManager.startPlaying`
             // so CarPlay / MPRemoteCommandCenter / lockscreen get
             // populated, and flips `mode = .multiview`. Phase C will
             // change this to `mode = .playing` + a direct seed call.
             enterMultiview(seeding: item, server: server, isLive: isLive)
             // `NowPlayingManager.startPlaying` isn't called by
-            // `enterMultiview` — the original single-mode path did it
+            // `enterMultiview`, the original single-mode path did it
             // on the PlayerView mount. Callers under the feature flag
             // are skipping the `.single` path entirely, so do the
             // mirror here. The bridge gating keeps the lockscreen
             // pointed at the audio tile regardless.
             //
             // Header fallback matches `ChannelListView.playerHeaders()`
-            // semantics — if `server` resolves but has no custom auth
+            // semantics, if `server` resolves but has no custom auth
             // headers (XC / M3U typically), we still want to populate
             // NowPlayingManager so the lockscreen shows the channel
             // name + artwork. Without the fallback, a non-Dispatcharr
@@ -1088,7 +1088,7 @@ final class PlayerSession: ObservableObject {
             )
             return true
         } else {
-            // Already playing — add as another tile.
+            // Already playing, add as another tile.
             let result = store.add(item, server: server)
             DebugLogger.shared.log(
                 "[MV-Mode] begin(add): \(item.name) result=\(result)",
@@ -1102,7 +1102,7 @@ final class PlayerSession: ObservableObject {
                 // the non-sheet callers going through `begin(...)`
                 // (channel list taps while multiview active, CarPlay
                 // flipping channel mid-multiview), treat the warning
-                // as implicit consent — they already tapped to play.
+                // as implicit consent, they already tapped to play.
                 _ = store.add(item, server: server, bypassWarning: true)
                 return true
             case .rejectedMax, .unresolvable:
@@ -1169,7 +1169,7 @@ final class PlayerSession: ObservableObject {
 // MARK: - Debug feature flag
 
 /// Runtime toggle for the Phase B–D migration. **Defaults to `true`**
-/// as of Phase D — the unified `PlayerSession.begin(...)` +
+/// as of Phase D, the unified `PlayerSession.begin(...)` +
 /// `PlaybackContainerView` path is now the canonical single-AND-multiview
 /// UI, and the legacy `NowPlayingManager.startPlaying` / `PlayerView`
 /// path is kept only as a fallback for the (increasingly few) code
@@ -1286,7 +1286,7 @@ enum PlaybackFeatureFlags {
     /// `true` (default) → the tvOS Live-TV transport uses the native-style
     /// circular tool row (frosted icon buttons, bottom-right) for BOTH engines,
     /// instead of the legacy labeled pill row. This is the "modern player
-    /// chrome" — deliberately decoupled from the AVPlayer engine so users get
+    /// chrome", deliberately decoupled from the AVPlayer engine so users get
     /// the native look on the stable mpv path. Same absent-key-means-default-on
     /// convention as `useUnifiedPlayback` so existing users are not regressed.
     static var useModernPlayerChrome: Bool {

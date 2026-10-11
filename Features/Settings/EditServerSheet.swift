@@ -37,7 +37,7 @@ struct EditServerSheet: View {
     /// immediately. Pre-fix the picker used a Binding that wrote
     /// `server.dispatcharrCredentialTypeRaw` directly, so flipping
     /// the picker and then tapping Cancel still persisted the new
-    /// mode — leaving servers in a half-configured state if the
+    /// mode, leaving servers in a half-configured state if the
     /// user explored the picker without intending to commit.
     /// `nil` means "user hasn't touched the picker"; non-nil means
     /// "staged change pending Save". Persisted in `commitEdits()`.
@@ -126,7 +126,7 @@ struct EditServerSheet: View {
     /// SwiftData write in one place so the no-op default (`""`
     /// raw) is preserved when the user picks `.apiKey` (forward-
     /// compat with older AerioTV builds receiving this server via
-    /// iCloud sync — they ignore unknown KVS keys).
+    /// iCloud sync, they ignore unknown KVS keys).
     private func commitCredentialModeIfStaged() {
         guard let pending = pendingCredentialType else { return }
         server.dispatcharrCredentialTypeRaw = (pending == .apiKey) ? "" : pending.rawValue
@@ -455,7 +455,7 @@ struct EditServerSheet: View {
                             .listRowBackground(Color.cardBackground)
                     }
 
-                    // Refresh Session button — only shown in
+                    // Refresh Session button, only shown in
                     // Username & Password mode. Forces an immediate
                     // /api/accounts/token/ login to refresh the JWT
                     // pair AND re-fetches /api/accounts/users/me/
@@ -598,7 +598,7 @@ struct EditServerSheet: View {
             }
 
             // v1.6.12: per-server VOD toggle. Only shown for server
-            // types that actually support VOD — M3U-only playlists
+            // types that actually support VOD, M3U-only playlists
             // don't carry it.
             if server.supportsVOD {
                 Section {
@@ -675,7 +675,7 @@ struct EditServerSheet: View {
     private var tvOSEditContent: some View { EmptyView() }
     #endif
 
-    // MARK: - XMLTV Edit Test Helpers (iOS only — tvOS editor omits the button)
+    // MARK: - XMLTV Edit Test Helpers (iOS only, tvOS editor omits the button)
 
     #if os(iOS)
     private var editXMLTVTrimmed: String {

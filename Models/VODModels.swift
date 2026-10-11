@@ -8,7 +8,7 @@ import SwiftData
 final class WatchProgress {
     /// VOD identifier (movie / episode ID). v1.6.8 (Codex A1):
     /// dropped the `@Attribute(.unique)` constraint so the same
-    /// `vodID` can coexist for different `serverID`s — two
+    /// `vodID` can coexist for different `serverID`s, two
     /// Dispatcharr servers will routinely use overlapping numeric
     /// IDs for unrelated content, and the prior global-uniqueness
     /// constraint was silently overwriting one server's resume
@@ -16,7 +16,7 @@ final class WatchProgress {
     /// same ID. Uniqueness is now enforced in code by
     /// `WatchProgressManager` via `(vodID, serverID)` lookups.
     /// Removing the constraint is a SwiftData lightweight migration
-    /// — existing data is preserved, the underlying SQLite index
+    /// existing data is preserved, the underlying SQLite index
     /// is just relaxed.
     var vodID: String
     var title: String
@@ -155,7 +155,7 @@ enum WatchlistManager {
 
 @MainActor
 enum WatchProgressManager {
-    /// Shared model context — set by the app on launch from the SwiftUI model container.
+    /// Shared model context, set by the app on launch from the SwiftUI model container.
     static var modelContext: ModelContext?
 
     /// Save or update watch progress. Call from main thread.
@@ -170,7 +170,7 @@ enum WatchProgressManager {
     /// `@Attribute(.unique)` constraint. Two servers can have
     /// independent resume positions for the same `vodID`. Legacy
     /// rows from before A1 (no `serverID` populated) are adopted by
-    /// the first save that supplies a `serverID` — the same row gets
+    /// the first save that supplies a `serverID`, the same row gets
     /// its `serverID` field set rather than a duplicate being
     /// inserted.
     static func save(vodID: String, title: String, positionMs: Int32, durationMs: Int32,
@@ -388,7 +388,7 @@ enum WatchProgressManager {
     /// Resolve the right row out of a `vodID`-matching set using
     /// `serverID`. Preference order:
     ///   1. Exact `serverID` match.
-    ///   2. Legacy nil-`serverID` row (pre-A1 data) — when
+    ///   2. Legacy nil-`serverID` row (pre-A1 data), when
     ///      `claimLegacy` is true the caller is responsible for
     ///      setting the row's `serverID` so it stops being legacy
     ///      on subsequent reads.
@@ -1060,7 +1060,7 @@ enum VODVersionLabeler {
     }
 }
 
-// MARK: - VOD Movie (display model — not persisted, fetched on demand)
+// MARK: - VOD Movie (display model, not persisted, fetched on demand)
 struct VODMovie: Identifiable, Hashable, Codable {
     let id: String
     let name: String
@@ -1131,7 +1131,7 @@ struct VODSeries: Identifiable, Hashable, Codable {
     /// Ingest time when the source reports one (Dispatcharr created_at).
     var addedAt: Date? = nil
 
-    // v1.6.12: same TMDB-derived metadata vocabulary as VODMovie —
+    // v1.6.12: same TMDB-derived metadata vocabulary as VODMovie,
     // tmdbID drives the "View on TMDB" deep-link, youtubeTrailer
     // drives the trailer button, country shows up in the meta row.
     // Default empty so existing initializers don't need updating;
@@ -1212,7 +1212,7 @@ struct VODEpisode: Identifiable, Hashable, Codable {
     }
 
     /// "8.0" / "" for nil-or-zero. Same convention as VODMovie /
-    /// VODSeries — the UI's empty-rating skip logic stays portable
+    /// VODSeries, the UI's empty-rating skip logic stays portable
     /// across all three.
     var displayRating: String {
         guard !rating.isEmpty, let r = Double(rating), r > 0 else { return "" }
@@ -1222,7 +1222,7 @@ struct VODEpisode: Identifiable, Hashable, Codable {
     /// Episode air date as locale-short for the row UI. Falls
     /// back to the raw `airDate` string when the input doesn't
     /// parse as `yyyy-MM-dd`. Returns empty when the field is
-    /// missing — callers should skip rendering rather than show
+    /// missing, callers should skip rendering rather than show
     /// a placeholder. v1.6.16.x: formatters are static so a
     /// 1000-episode series doesn't allocate two new
     /// `DateFormatter` instances per row on every SwiftUI body

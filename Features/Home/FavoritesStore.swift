@@ -142,7 +142,7 @@ final class FavoritesStore: ObservableObject {
 
 // MARK: - Channel Collections (issue #45)
 //
-// User-created, named groupings of channels — like Favorites, but you can
+// User-created, named groupings of channels, like Favorites, but you can
 // have many of them and rename them. Built on the same lightweight
 // UserDefaults persistence as `FavoritesStore` (no SwiftData): each
 // collection is just a name + an ordered list of channel IDs, and the whole
@@ -195,7 +195,7 @@ final class ChannelCollectionsStore: ObservableObject {
     /// The collection currently shown by the Live TV filter (nil = not viewing
     /// a collection). Set by ChannelListView's filter; read by the channel
     /// long-press menus to choose between "Remove from <collection>" and
-    /// "Remove from All Collections". Intentionally not @Published — the menus
+    /// "Remove from All Collections". Intentionally not @Published, the menus
     /// read it on demand when presented, so it needs no view invalidation.
     var activeFilterCollectionID: String?
 

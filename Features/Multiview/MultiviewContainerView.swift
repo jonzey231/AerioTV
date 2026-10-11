@@ -5,7 +5,7 @@ import SwiftUI
 ///   (replaced with a single expanded tile when `fullscreenTileID` is
 ///   set).
 /// - `MultiviewTransportBar` docked at the bottom.
-/// - Channel-picker sheet (placeholder here — the real one lands in
+/// - Channel-picker sheet (placeholder here, the real one lands in
 ///   Phase 5 as `AddToMultiviewSheet`).
 /// - Relocate-mode banner (tvOS only, when a tile is being moved).
 ///
@@ -30,7 +30,7 @@ struct MultiviewContainerView: View {
     /// Watched so the tvOS tile focus can be released the instant
     /// the user minimizes to the corner. The @FocusState binding
     /// below (`focusedTileID`) pins focus to the audio tile during
-    /// normal playback — on minimize we explicitly clear it so the
+    /// normal playback, on minimize we explicitly clear it so the
     /// tile drops out of the focus engine's consideration and focus
     /// flows to the guide beneath. Without this observer the
     /// binding stays stale and focus stays trapped in the corner.
@@ -81,7 +81,7 @@ struct MultiviewContainerView: View {
     /// When `true`, the exit-confirmation dialog is presented. Set by
     /// the second Menu/Back press (first press summons the chrome;
     /// second press prompts for confirmation instead of exiting
-    /// immediately — prevents accidental fat-thumb Menu-spams from
+    /// immediately, prevents accidental fat-thumb Menu-spams from
     /// nuking the user's carefully arranged multiview).
     ///
     /// The dialog's wording + action differ by tile count:
@@ -106,7 +106,7 @@ struct MultiviewContainerView: View {
     /// the tvOS bottom chrome / the iOS record button, so the user
     /// can schedule a recording without going back to the guide
     /// and long-pressing. Only effective when the audio tile has a
-    /// non-nil `currentProgram` (EPG data loaded) — the pill itself
+    /// non-nil `currentProgram` (EPG data loaded), the pill itself
     /// is gated on that condition.
     @State private var showRecordSheet: Bool = false
 
@@ -116,7 +116,7 @@ struct MultiviewContainerView: View {
 
     /// tvOS ONLY: the Switch Stream picker is a SECOND PAGE inside the
     /// Options-panel presentation (`showTVOptions`), not a separate overlay
-    /// — so it inherits the panel's proven focus trap and touches none of
+    /// so it inherits the panel's proven focus trap and touches none of
     /// the bottom-chrome focus/pin machinery. True = show the stream list
     /// in place of the options list while `showTVOptions` stays true.
     @State private var streamPickerVisible: Bool = false
@@ -128,7 +128,7 @@ struct MultiviewContainerView: View {
     /// the band-only scrub HUD over the video.
     @StateObject private var dpadScrub = DpadScrubController()
 
-    /// tvOS ONLY: repeat loop driven by `ScrubHoldDetector` — SwiftUI
+    /// tvOS ONLY: repeat loop driven by `ScrubHoldDetector`, SwiftUI
     /// move commands never autorepeat on a held d-pad edge, so holds
     /// are recognized in UIKit and this task steps the scrub every
     /// 150ms until release.
@@ -137,7 +137,7 @@ struct MultiviewContainerView: View {
 
     /// In-session Switch Stream selection, kept here (not in the picker,
     /// which is recreated each open) so re-opening the picker shows the
-    /// stream the user actually switched to — `/status.stream_id` goes
+    /// stream the user actually switched to, `/status.stream_id` goes
     /// stale right after a switch, so it can't be trusted on re-open.
     /// Keyed by channel uuid; a channel change makes it resolve to nil.
     @State private var switchedStreamChannelUUID: String?
@@ -191,7 +191,7 @@ struct MultiviewContainerView: View {
     @FocusState private var focusedChrome: ChromeFocusTarget?
 
     /// Tile-level focus state, keyed on tile id. Used ONLY to pin
-    /// focus to the relocating tile while Move-Tile mode is active —
+    /// focus to the relocating tile while Move-Tile mode is active,
     /// the context menu's "Move Tile" action dismisses the menu and
     /// tvOS re-evaluates focus, which (via `prefersDefaultFocus` on
     /// the audio tile) steals focus off the intended target. That
@@ -203,7 +203,7 @@ struct MultiviewContainerView: View {
     /// across subsequent swaps (the tile id doesn't change, only its
     /// array position, so the binding keeps tracking correctly).
     ///
-    /// When relocate ends, we don't clear `focusedTileID` — letting
+    /// When relocate ends, we don't clear `focusedTileID`, letting
     /// the focus engine reclaim normal navigation keeps the UX
     /// natural (user exits relocate and focus is right where it was).
     @FocusState private var focusedTileID: String?
@@ -213,7 +213,7 @@ struct MultiviewContainerView: View {
     /// so the first tvOS-focus pass when entering multiview lands on
     /// the seed / audio tile (the one the user was JUST watching)
     /// rather than letting the focus engine pick an arbitrary tile
-    /// — the add-sheet or the transport bar. Without this, the first
+    /// the add-sheet or the transport bar. Without this, the first
     /// thing that lights up can be "Add Tile", which reads as
     /// "do something new" when the user just wants to see their
     /// channel continue playing.
@@ -349,7 +349,7 @@ struct MultiviewContainerView: View {
 
     @ViewBuilder
     private var containerBody: some View {
-        // N=1 treatment — "this is effectively PlayerView" — is
+        // N=1 treatment, "this is effectively PlayerView", is
         // gated on the unified-playback feature flag. Without the
         // flag, legacy users can still hit N=1 (e.g. by removing a
         // tile from N=2 via its per-tile ×) and we MUST NOT change
@@ -381,7 +381,7 @@ struct MultiviewContainerView: View {
                     // container now pushes that flush layout all the
                     // way to the screen edges too.
                     //
-                    // v1.6.17 — iPhone-only safe-area carve-out.
+                    // v1.6.17, iPhone-only safe-area carve-out.
                     // Without this, the tiles slide under the notch /
                     // Dynamic Island in portrait and under the speaker
                     // cutout on the leading edge in landscape, eating
@@ -395,7 +395,7 @@ struct MultiviewContainerView: View {
                     // `Color.black.ignoresSafeArea()`), so what the
                     // user sees during multiview on a notched iPhone
                     // is "tiles render inside the safe boundary,
-                    // black fills the corners around them" — same
+                    // black fills the corners around them", same
                     // behaviour as iOS PiP or MapKit.
                     .modifier(MultiviewSafeAreaModifier(minimized: nowPlaying.isMinimized))
                     // v1.6.12 (GH #11 follow-up): disable the tile
@@ -461,7 +461,7 @@ struct MultiviewContainerView: View {
                 // iPhone / iPad keep the bar.
                 if !isSoleTile && Self.showsGridTransportBar {
                     // Transport bar spans edge-to-edge with its own
-                    // black background — no outer horizontal padding so
+                    // black background, no outer horizontal padding so
                     // it reads as an integrated strip docked at the
                     // bottom, not a floating capsule. At N=1 on the
                     // unified path the PlaybackChromeOverlay's
@@ -469,7 +469,7 @@ struct MultiviewContainerView: View {
                     //
                     // When the chrome is faded the transport bar
                     // collapses to height 0 (not just opacity 0) so
-                    // the grid can expand into the freed space —
+                    // the grid can expand into the freed space,
                     // previously this strip reserved ~80pt of
                     // permanent black at the bottom of the screen
                     // even while invisible, which the user flagged
@@ -516,7 +516,7 @@ struct MultiviewContainerView: View {
                     // v1.6.12 (GH #11 follow-up): while the TVOptions
                     // panel is open, disable focus on the transport
                     // bar so D-pad-down past the last panel row has
-                    // nowhere to escape — the panel's `.focusSection()`
+                    // nowhere to escape, the panel's `.focusSection()`
                     // is just a preference; the focus engine still
                     // honors directional moves to other focusable
                     // views unless those views are .disabled. With
@@ -553,7 +553,7 @@ struct MultiviewContainerView: View {
             }
             #endif
 
-            // N=1 chrome overlay — top bar (iOS) / bottom pill (tvOS).
+            // N=1 chrome overlay, top bar (iOS) / bottom pill (tvOS).
             // Only mounted for unified-path users at N=1; legacy
             // users get a bare no-op mount (overlay renders nothing)
             // so `showAddSheet` / `chromeState` observers keep
@@ -568,7 +568,7 @@ struct MultiviewContainerView: View {
                     showRecordSheet: $showRecordSheet,
                     showSwitchStream: $showSwitchStream
                 )
-                // (No `.disabled(showTVOptions)` here — on tvOS this
+                // (No `.disabled(showTVOptions)` here, on tvOS this
                 // overlay is empty by design; the actual chrome pills
                 // live in `PlaybackBottomChrome_tvOS` rendered above
                 // and that's where the focus-trap disable is wired.)
@@ -581,7 +581,7 @@ struct MultiviewContainerView: View {
             // panel doesn't show an "Add Stream" row (our `+` pill
             // peer-sibling covers that). Bound to the audio tile's
             // `PlayerProgressStore` via `store.audioProgressStore`
-            // — the chrome overlay can reach back into whichever
+            // the chrome overlay can reach back into whichever
             // tile currently holds audio through the registry we
             // added in Phase C.6a.
             //
@@ -589,7 +589,7 @@ struct MultiviewContainerView: View {
             // relocate banners. Dismissal: tap an option (panel's
             // own `onDismiss`), Menu button (`.onExitCommand` on
             // the panel), or wait for the 5s chrome fade (we do
-            // NOT hide it on fade — a panel open mid-fade would
+            // NOT hide it on fade, a panel open mid-fade would
             // blink; the Options panel has its own lifecycle).
             // v1.6.15.x diagnostic: the user reported a UI freeze if
             // they channel-flip via Siri Remote up/down then open
@@ -651,8 +651,8 @@ struct MultiviewContainerView: View {
                     // v1.6.12 (GH #11 follow-up): trap D-pad navigation
                     // inside the panel. Without `.focusSection()` tvOS
                     // lets focus escape down past the last row (Stream
-                    // Info) into whatever's behind / below the panel —
-                    // typically the chrome's Options pill — which left
+                    // Info) into whatever's behind / below the panel,
+                    // typically the chrome's Options pill, which left
                     // the panel still visible but unreachable. The
                     // matching pattern lives on PlayerView's panel
                     // instance; this brings the multiview path to
@@ -726,14 +726,14 @@ struct MultiviewContainerView: View {
         // `ChannelInfoBanner` overlay (which lives in HomeView's
         // outer ZStack, not in this container's environment) can
         // lock its visibility to the same auto-fade timer. Cross-
-        // platform — both iPhone/iPad (PlaybackChromeOverlay) and
+        // platform, both iPhone/iPad (PlaybackChromeOverlay) and
         // tvOS (inline pills) read the same `chromeState`.
         // `initial: true` (#42): fire on mount too, so a freshly-mounted
         // container (cold launch / suspend-resume remount, where chromeState
         // re-inits to false) force-clears any `chromeIsVisible` left stranded
         // `true` by the previous mount. Without this the mirror only updates
         // on a *change*, so a stale `true` survives the remount and strands
-        // the re-coupled ChannelInfoBanner — the v1.7.3 regression.
+        // the re-coupled ChannelInfoBanner, the v1.7.3 regression.
         .onChange(of: chromeState.isVisible, initial: true) { _, visible in
             nowPlaying.chromeIsVisible = visible
             debugLog("[MV-Chrome] chrome+info visible=\(visible) reason=\(chromeState.lastReason)")
@@ -742,7 +742,7 @@ struct MultiviewContainerView: View {
         // requested it (cold-launch auto-resume, channel-row tap).
         // Siri Remote up/down flips bump `streamStartedToken` but
         // NOT `chromeWakeToken`, so the channel-scroll path leaves
-        // chrome hidden — that way a follow-up up/down keeps flipping
+        // chrome hidden, that way a follow-up up/down keeps flipping
         // channels instead of landing on the chrome's Record pill.
         // The banner still appears on every flip via its own 5s
         // timer driven by `streamStartedToken`.
@@ -771,8 +771,8 @@ struct MultiviewContainerView: View {
             #if os(tvOS)
             let active = (note.object as? Bool) ?? false
             // Soleness is read FRESH here (not the body-captured `isSoleTile`)
-            // so a re-post from `MultiviewStore.remove` — fired after the tile
-            // array already shrank to one — is evaluated against the current
+            // so a re-post from `MultiviewStore.remove`, fired after the tile
+            // array already shrank to one, is evaluated against the current
             // count. That's how the become-sole-via-removal case summons the
             // outage chrome for the promoted tile (2026-07-13 review #162).
             let sole = PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1
@@ -792,7 +792,7 @@ struct MultiviewContainerView: View {
         // v1.6.15.x: bridge `showStreamInfo` → audio tile's
         // `isStreamInfoVisible`. The audio tile's coordinator only
         // runs the volatile stats timer (codec, bitrate, sync,
-        // drops) while this flag is true — keeping it off avoids
+        // drops) while this flag is true, keeping it off avoids
         // mpv lock contention when nothing is reading the values.
         // Without this bridge the StreamInfoCardView would render
         // with all-zeroes even after the user toggled it on, because
@@ -802,7 +802,7 @@ struct MultiviewContainerView: View {
         // path uses (PlayerView.swift onChange of showStreamInfo).
         .onChange(of: showStreamInfo) { _, visible in
             store.audioProgressStore?.isStreamInfoVisible = visible
-            // v1.6.18: see the matching note in PlayerView.swift —
+            // v1.6.18: see the matching note in PlayerView.swift,
             // ChannelInfoBanner reads this flag to suppress itself
             // while Stream Info is open so the two overlays don't
             // overlap on iPhone.
@@ -810,7 +810,7 @@ struct MultiviewContainerView: View {
         }
         #if os(tvOS)
         // Force focus onto the audio tile on mount.
-        // `prefersDefaultFocus` is only a HINT — tvOS often ignores
+        // `prefersDefaultFocus` is only a HINT, tvOS often ignores
         // it when the container mounts on top of an already-focused
         // view (the channel row the user just Select-pressed to
         // start playback). Without this explicit `@FocusState`
@@ -830,7 +830,7 @@ struct MultiviewContainerView: View {
             }
         }
         // When the user minimizes to the corner, tvOS won't release
-        // focus from the tile Button on its own — `.focusable(false)`
+        // focus from the tile Button on its own, `.focusable(false)`
         // via the tile isn't honoured reliably for a focused view.
         // Post `.forceGuideFocus` so the guide (ChannelListView /
         // EPGGuideView) can programmatically take focus with its
@@ -854,7 +854,7 @@ struct MultiviewContainerView: View {
                 // receives D-pad events immediately. Without this
                 // focus stayed on the tab bar above (UITabBarButton),
                 // and the user had to D-pad once just to "wake"
-                // focus before any subsequent press did anything —
+                // focus before any subsequent press did anything,
                 // the "must press down first" symptom from internal
                 // testing. The tiny `Task.yield()` lets tvOS's own
                 // post-expand focus pass complete first so our
@@ -868,7 +868,7 @@ struct MultiviewContainerView: View {
             }
         }
         // v1.6.15: re-assert focus on the new front tile whenever
-        // the tile id changes — covers the channel-flip path
+        // the tile id changes, covers the channel-flip path
         // (`changeChannel` → `PlayerSession.exit() + enterMultiview()`)
         // which clears tiles to a fresh id. Without this,
         // `focusedTileID` still pointed at the OLD id (now absent
@@ -894,7 +894,7 @@ struct MultiviewContainerView: View {
                 // Reset the Switch Stream sub-page so re-opening Options
                 // shows the options list, not a stale picker. (The picker
                 // lives INSIDE this panel presentation on tvOS, so closing
-                // the panel closes it too — no separate chrome wiring.)
+                // the panel closes it too, no separate chrome wiring.)
                 streamPickerVisible = false
                 // Panel dismissed with chrome still up: land focus back on
                 // the Options pill. Without this the focus engine re-picks
@@ -932,14 +932,14 @@ struct MultiviewContainerView: View {
             }
         )
         // v1.6.18: vertical swipe = channel flip (single-stream
-        // live only). Gated on chrome being VISIBLE — the user
+        // live only). Gated on chrome being VISIBLE, the user
         // taps once to summon chrome, then swipes up/down to
         // flip channels. Each flip refreshes the chrome fade
         // timer so the Tap → Swipe → Swipe → Swipe flow keeps
         // working without re-tapping. Inverted from the tvOS
         // gate (which flips on chrome HIDDEN, since on tvOS
         // chrome-visible up/down navigates between Options /
-        // Record / Add Stream pills) — on iOS chrome doesn't
+        // Record / Add Stream pills), on iOS chrome doesn't
         // have D-pad navigable elements above the tile, so
         // gating on visible-chrome is the cleanest way to keep
         // accidental swipes during normal viewing from changing
@@ -1022,12 +1022,12 @@ struct MultiviewContainerView: View {
         // indicator (accent ring + scale + shadow). The bottom
         // chrome (transport bar, Options/Add-Stream pills, scrubber)
         // stays hidden so the user can sweep focus between streams
-        // without the UI sliding in every keystroke — per user
+        // without the UI sliding in every keystroke, per user
         // request, chrome is summoned exclusively by Menu/Back
         // (handled in `.onExitCommand` below).
         //
         // Button actions (Select press on a tile, pill tap, etc.)
-        // still call `reportInteraction()` — they're the
+        // still call `reportInteraction()`, they're the
         // "I intend to use the chrome" signal. Plain D-pad moves
         // are just "I'm looking around".
         .onMoveCommand { direction in handleTVMoveCommand(direction) }
@@ -1075,12 +1075,12 @@ struct MultiviewContainerView: View {
                 // "press Menu, chrome appears but the pills won't focus;
                 // summon twice and it works." ROOT CAUSE (10-agent sweep,
                 // unanimous): the video tile is an ACTIVELY-held focus owner
-                // that is never released on summon — it is `.disabled` only
+                // that is never released on summon, it is `.disabled` only
                 // by `showTVOptions` (NOT by chrome visibility), its
                 // `focusedTileID` stays pinned to it (only cleared on
                 // minimize), and it keeps `.prefersDefaultFocus`. A bare
                 // `focusedChrome` write cannot pull focus off an actively
-                // held tile that sits in a sibling focus region — which is
+                // held tile that sits in a sibling focus region, which is
                 // exactly why simply re-asserting `focusedChrome` (even in a
                 // retry loop) never worked. So:
                 //   1. RELEASE the tile's hold (focusedTileID = nil) so the
@@ -1090,7 +1090,7 @@ struct MultiviewContainerView: View {
                 //      engine does NOT re-pick the tile, and
                 //   3. claim the pill on the NEXT runloop (Task.yield) so the
                 //      write lands AFTER the pills' `.disabled(false)`
-                //      realizes — the same deferral every other focus write
+                //      realizes, the same deferral every other focus write
                 //      in this file uses (onAppear seed, relocate reassert).
                 // Summoning chrome supersedes any in-flight D-pad
                 // scrub: drop it uncommitted (Menu = "never mind").
@@ -1135,7 +1135,7 @@ struct MultiviewContainerView: View {
         .onChange(of: showAddSheet) { _, presenting in
             // Flip `isPickerPresented` whenever the add-sheet opens
             // or closes. Every tile's `MultiviewTileView.shouldPause`
-            // reads this and pauses its mpv handle — stops live
+            // reads this and pauses its mpv handle, stops live
             // decode while the picker's channel list is rendering
             // so we don't OOM at 1.8+ GB RSS on Apple TV 4K.
             // Resumes on dismissal.
@@ -1171,7 +1171,7 @@ struct MultiviewContainerView: View {
         .onExitCommand { handleTVExitCommand() }
         // GH #11 fix: also listen for the .playerBackPress relay so
         // MainTabView's outer `.onExitCommand` (which fires after the
-        // user expands from mini back to fullscreen via Play/Pause —
+        // user expands from mini back to fullscreen via Play/Pause,
         // focus is still on the guide cell, so the container's own
         // .onExitCommand doesn't fire) routes through the same
         // chrome-cycle logic. Without this, post-expand Back goes
@@ -1255,7 +1255,7 @@ struct MultiviewContainerView: View {
             )
         }
         #endif
-        // Record sheet — presented by the Record pill in the tvOS
+        // Record sheet, presented by the Record pill in the tvOS
         // bottom chrome or the iOS top chrome's record button.
         // Populated from the audio tile's currently-playing program
         // via `ChannelDisplayItem`'s EPG fields. Closure-safe: if
@@ -1273,7 +1273,7 @@ struct MultiviewContainerView: View {
         #endif
         // Switch Stream picker. iOS presents it as a sheet. tvOS does NOT
         // use a third .fullScreenCover (stacking a third cover breaks the
-        // tvOS 27 focus engine — the unpresented cover steals focus from
+        // tvOS 27 focus engine, the unpresented cover steals focus from
         // the bottom chrome). tvOS instead renders it as an inline overlay
         // in the gridArea ZStack above, the same pattern as the Options
         // panel.
@@ -1422,14 +1422,14 @@ struct MultiviewContainerView: View {
 
     /// Content for the Record sheet. Resolves the audio tile and
     /// its `ChannelDisplayItem` at render time so the sheet always
-    /// reflects the current audio tile — if the user changed audio
+    /// reflects the current audio tile, if the user changed audio
     /// focus between tapping Record and the sheet animating in,
     /// they see the latest channel's program, not a stale snapshot.
     /// Renders `EmptyView` only when there's no audio tile or no
-    /// stream URL on it — both are unreachable in practice because
+    /// stream URL on it, both are unreachable in practice because
     /// the parent `canRecordCurrentProgram*` gate already requires
     /// a stream URL. v1.6.8 (B1 Phase 1): no longer falls through
-    /// to `EmptyView` when EPG metadata is missing — Dispatcharr
+    /// to `EmptyView` when EPG metadata is missing, Dispatcharr
     /// playlists routinely have no `currentProgram` populated, and
     /// the prior gate left users on those playlists with an
     /// invisible / empty record sheet. The fallback path uses
@@ -1472,7 +1472,7 @@ struct MultiviewContainerView: View {
                 // non-optional `String`; `ChannelDisplayItem` stores
                 // it as `String?`. Fall back to an empty string
                 // when EPG didn't provide a description (common for
-                // short/news programs) — the sheet renders an empty
+                // short/news programs), the sheet renders an empty
                 // description area cleanly.
                 programDescription: audio.item.currentProgramDescription ?? "",
                 channelID: audio.item.id,
@@ -1481,7 +1481,7 @@ struct MultiviewContainerView: View {
                 scheduledEnd: end,
                 // The chrome's Record pill is only enabled when the
                 // user is actively watching, so the recording is
-                // always "from now" — `isLive: true` drives the
+                // always "from now", `isLive: true` drives the
                 // "Record from Now" wording + the current-time seek.
                 // `hasEPG` only affects the title fallback above
                 // (use the program name when known, otherwise the
@@ -1498,7 +1498,7 @@ struct MultiviewContainerView: View {
 
     #if os(iOS)
     /// iOS sheet content for the Switch Stream picker. (tvOS presents the
-    /// picker as a page inside the Options panel — see the panel block.)
+    /// picker as a page inside the Options panel, see the panel block.)
     /// Resolves the audio tile's Dispatcharr ids at render time; EmptyView
     /// if absent so the sheet dismisses cleanly.
     @ViewBuilder
@@ -1575,13 +1575,13 @@ struct MultiviewContainerView: View {
                                 showTVOptions = false
                             }
                         },
-                        // Deliberately nil — `+` pill is a peer action
+                        // Deliberately nil, `+` pill is a peer action
                         // in `PlaybackChromeOverlay`. Listing "Add Stream"
                         // inside this panel would be a second path to
                         // the same action, which is the workflow the
                         // user explicitly asked us to remove.
                         onEnterMultiview: nil,
-                        // Switch Stream — only for an admin Dispatcharr
+                        // Switch Stream, only for an admin Dispatcharr
                         // channel with a pk + uuid. Flips to the picker
                         // PAGE in this same panel (no separate overlay).
                         onSwitchStream: canSwitchStreamForAudioTile ? {
@@ -1772,7 +1772,7 @@ struct MultiviewContainerView: View {
     /// Shared Menu/Back handler for the multiview container. Called
     /// from both the container's own `.onExitCommand` (when focus is
     /// inside the focusSection) and `.onReceive(.playerBackPress)`
-    /// (when focus is outside — typically the guide cell still
+    /// (when focus is outside, typically the guide cell still
     /// holding focus after Play/Pause re-expanded the mini player).
     /// Routing both inputs to the same method means the chrome cycle
     /// is identical regardless of where focus actually sits.
@@ -1786,7 +1786,7 @@ struct MultiviewContainerView: View {
     ///                            panel, tvOS lets focus escape to
     ///                            the chrome below. Back then bubbles
     ///                            past the panel's handler and lands
-    ///                            here — without this branch the
+    ///                            here, without this branch the
     ///                            press would fall through to
     ///                            "minimize" and the panel would stay
     ///                            stuck on-screen. Catching it
@@ -1803,7 +1803,7 @@ struct MultiviewContainerView: View {
     ///                            bottom UI (Options pill, Add
     ///                            Stream, transport bar). Per user
     ///                            request, D-pad moves do NOT summon
-    ///                            chrome — Menu is the dedicated
+    ///                            chrome, Menu is the dedicated
     ///                            summon gesture.
     ///   5a. Chrome visible at N=1 (unified single-stream)
     ///                          → MINIMIZE to the corner mini
@@ -1811,13 +1811,13 @@ struct MultiviewContainerView: View {
     ///                            guide with the stream still
     ///                            playing; further Menu on the guide
     ///                            expands it (single Back) or jumps to
-    ///                            the top channel (double Back) — #42 P3/P5.
+    ///                            the top channel (double Back), #42 P3/P5.
     ///   5b. Chrome visible at N≥2 → "Exit Multiview?" confirmation.
     ///                            Guard against accidental Menu-
     ///                            spams that would otherwise tear
     ///                            down a carefully arranged grid.
     /// A left/right hold crossed the 0.4s threshold: start the scrub
-    /// repeat loop. Eligibility mirrors the discrete-press paths —
+    /// repeat loop. Eligibility mirrors the discrete-press paths,
     /// chrome hidden (HUD scrub) or the timeline band focused. The
     /// press-down already delivered one discrete step via
     /// `.onMoveCommand` before recognition (can't be prevented; same
@@ -1949,7 +1949,7 @@ struct MultiviewContainerView: View {
             }
             // Keep chrome alive so the user lands on the Options pill
             // they just dismissed from rather than a fading bottom
-            // bar — same UX choice as the panel's own .onExitCommand
+            // bar, same UX choice as the panel's own .onExitCommand
             // for in-panel dismiss.
             chromeState.reportInteraction()
             return
@@ -1958,7 +1958,7 @@ struct MultiviewContainerView: View {
             // #42 Part 5: the close-mini-player gesture is removed. Menu/Back
             // while minimized is owned entirely by HomeView.handleMenuPress
             // (Part 3: single Back expands the mini, double Back jumps to the
-            // top channel) — the container no longer tears playback down here.
+            // top channel), the container no longer tears playback down here.
             // This branch is normally unreachable anyway (the container is
             // `.disabled` while minimized, and HomeView only relays
             // `.playerBackPress` from its non-minimized branch), so it is a
@@ -2005,7 +2005,7 @@ struct MultiviewContainerView: View {
             // #42 Part 4: only the N>=2 multiview grid uses Menu to SUMMON chrome.
             // At N=1 (single-stream) Select summons chrome (MultiviewTileView) and
             // chrome auto-fades after 5s, so Menu skips this branch and falls
-            // through to minimize below — a single Back returns to the guide +
+            // through to minimize below, a single Back returns to the guide +
             // mini-player in one press (Android-TV parity).
             DebugLogger.shared.log(
                 "[MV-Cmd]   → branch: legacy N=1 chrome hidden → summon chrome",
@@ -2076,7 +2076,7 @@ struct MultiviewContainerView: View {
 
     @ViewBuilder
     private var gridArea: some View {
-        // `isSoleTile` is N=1 — the tile is effectively the whole
+        // `isSoleTile` is N=1, the tile is effectively the whole
         // player. `MultiviewTileView` reads it to suppress its own
         // corner chrome (audio badge, label strip, close X) so the
         // container-level `PlaybackChromeOverlay` can paint a
@@ -2084,7 +2084,7 @@ struct MultiviewContainerView: View {
         // Gated on the unified-playback feature flag so legacy
         // multiview users who hit N=1 mid-session (by removing a
         // tile from N=2) keep ALL their per-tile chrome including
-        // the close × — otherwise they'd have no way to remove the
+        // the close ×, otherwise they'd have no way to remove the
         // last tile. User-facing fullscreen-within-grid
         // (fullscreenTileID set) is still technically N>1 behind
         // the scenes, so we leave `isSoleTile = false` there.
@@ -2145,7 +2145,7 @@ struct MultiviewContainerView: View {
                 // is what makes "Move Tile → D-pad → swap" actually
                 // work. The reassertion is asynchronous via a tiny
                 // Task.yield so it runs AFTER tvOS's own focus pass
-                // completes — otherwise our write can be overridden.
+                // completes, otherwise our write can be overridden.
                 .onChange(of: store.relocatingTileID) { oldID, newID in
                     handleRelocateEdge(from: oldID, to: newID)
                 }
@@ -2155,7 +2155,7 @@ struct MultiviewContainerView: View {
         }
     }
 
-    /// Short log-friendly name for `ProcessInfo.ThermalState` —
+    /// Short log-friendly name for `ProcessInfo.ThermalState`,
     /// `String(describing:)` on the raw enum prints "nominal" which
     /// is already what we want, but using a small function keeps
     /// future-proofing simple if Apple adds a new case.
@@ -2172,7 +2172,7 @@ struct MultiviewContainerView: View {
             //     explicitly short-circuit here to reach
             //     `nowPlaying.expand()`. Without this the handler
             //     would toggle pause on the tile while it's still
-            //     in the corner — confusing.
+            //     in the corner, confusing.
             //   - Full-screen state → toggle pause on the audio
             //     tile's mpv handle. Ported from the legacy
             //     PlayerView path (PlayerView.swift ~line 625).
@@ -2182,7 +2182,7 @@ struct MultiviewContainerView: View {
             //
             // In the full-screen case we also call
             // `reportInteraction()` so the scrubber/overlay reflects
-            // the new pause state immediately — matches the legacy
+            // the new pause state immediately, matches the legacy
             // `showControls = true` after a Play/Pause.
             if NowPlayingManager.shared.isMinimized {
                 DebugLogger.shared.log(
@@ -2330,7 +2330,7 @@ struct MultiviewContainerView: View {
                 )
                 store.swap(relocatingID, neighborID)
                 // Keep focus pinned on the relocating tile after
-                // the swap — its array index changed but its id
+                // the swap, its array index changed but its id
                 // didn't, so the `.focused($focusedTileID)`
                 // binding keeps working. Reasserting here covers
                 // the case where tvOS's post-swap focus pass
@@ -2509,7 +2509,7 @@ struct MultiviewContainerView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // v1.6.18: same safe-area carve-out as the chrome overlay
-        // — see PlaybackChromeOverlay.swift for the rationale. The
+        // see PlaybackChromeOverlay.swift for the rationale. The
         // `iOSStreamInfoTopInset` formula was designed against an
         // absolute screen-top reference; v1.6.17's iPhone safe-
         // area fix made the parent honor safe area, which would
@@ -2586,7 +2586,7 @@ struct MultiviewContainerView: View {
             HStack {
                 Spacer()
                 Label(
-                    "Device is hot — can't add more streams right now",
+                    "Device is hot, can't add more streams right now",
                     systemImage: "thermometer.high"
                 )
                 .scaledFont(.caption.weight(.semibold))
@@ -2606,7 +2606,7 @@ struct MultiviewContainerView: View {
         .accessibilityLabel("Device is hot, cannot add more streams")
         .allowsHitTesting(false)
         .onAppear {
-            // Announce on arrival — `.task` in the container already
+            // Announce on arrival, `.task` in the container already
             // posts the state change to the store, but VoiceOver
             // needs an explicit notification; the banner's visual
             // insertion doesn't trigger an announcement.
@@ -2674,7 +2674,7 @@ struct MultiviewContainerView: View {
 ///   action closure calls `reportInteraction()` before running)
 ///
 /// Focus rings and relocate rings are NOT part of the faded chrome
-/// — they stay visible because they're critical navigation
+/// they stay visible because they're critical navigation
 /// feedback, not decorative chrome.
 @MainActor
 final class MultiviewChromeState: ObservableObject {
@@ -2684,16 +2684,16 @@ final class MultiviewChromeState: ObservableObject {
     ///
     /// **Chrome** here means the heavy UI: bottom transport bar, the
     /// Options / Add-Stream pills, the N=1 scrubber, etc. It does NOT
-    /// include the per-tile focus ring — that's governed by
+    /// include the per-tile focus ring, that's governed by
     /// `focusIndicatorVisible` below so the user can navigate
     /// between tiles without the bottom bar swinging in every time.
     ///
-    /// Starts at `false` — the user sees a clean, flush stream on
+    /// Starts at `false`, the user sees a clean, flush stream on
     /// mount and only the explicit Menu-button press summons the
     /// chrome. Previously this was `true` with an auto-fade to
     /// hidden after 5 s, but that meant Menu pressed *during* the
     /// initial visible window fell through to the "chrome is up, so
-    /// this must be the 2nd press → minimize" branch — which looked
+    /// this must be the 2nd press → minimize" branch, which looked
     /// like Menu did nothing because the chrome was so subtle the
     /// user hadn't perceived it as "up" yet.
     @Published var isVisible: Bool = false
@@ -2703,7 +2703,7 @@ final class MultiviewChromeState: ObservableObject {
     /// move via `reportFocusActivity()`, fades back after 5s idle.
     ///
     /// Kept separate from `isVisible` so d-pad navigation doesn't
-    /// drag the transport bar in with it — the user asked for a
+    /// drag the transport bar in with it, the user asked for a
     /// less-jarring "highlight only" experience where the streams
     /// stay full-screen while focus moves between them, and only the
     /// Menu button summons the bottom UI.
@@ -2712,7 +2712,7 @@ final class MultiviewChromeState: ObservableObject {
     /// v1.6.12: when `true`, `isVisible` is pinned to `true` and the
     /// auto-hide task is suppressed regardless of how much time has
     /// passed since the last interaction. Used by `MultiviewContainerView`
-    /// while the TVOptions panel is open — without it the chrome
+    /// while the TVOptions panel is open, without it the chrome
     /// would fade out 5s after the panel was summoned, which left
     /// the panel hovering on a fully-faded background and the user
     /// unable to dismiss back to the chrome state. Toggle via
@@ -2725,7 +2725,7 @@ final class MultiviewChromeState: ObservableObject {
     /// the Options panel must NOT unpin a chrome that a live connection issue is
     /// still holding, and a recovering connection issue must NOT unpin a chrome
     /// the Options panel is still holding. `isPinned` is true while ANY reason
-    /// is active (2026-07-13 review — the pre-existing single-Bool pin leaked
+    /// is active (2026-07-13 review, the pre-existing single-Bool pin leaked
     /// across these owners and stranded the transport bar visible at N>=2).
     enum PinReason { case options, connectionIssue }
     private var pinReasons: Set<PinReason> = []
@@ -2742,7 +2742,7 @@ final class MultiviewChromeState: ObservableObject {
     /// actions 20+ times per second, and each `Task` cancel+create
     /// does a few allocations + a MainActor hop. Since the hide
     /// deadline is 5s out, a reschedule in the first 500ms after
-    /// a previous reschedule is redundant — the user still has
+    /// a previous reschedule is redundant, the user still has
     /// 4.5s of visible chrome either way.
     private var lastRescheduleAt: ContinuousClock.Instant?
 
@@ -2784,7 +2784,7 @@ final class MultiviewChromeState: ObservableObject {
     }
 
     /// Reveal chrome + reset the 5s timer. Safe to call as often as
-    /// wanted — the cancel+reschedule loop is the whole point, but
+    /// wanted, the cancel+reschedule loop is the whole point, but
     /// the 500ms coalesce guard stops D-pad/focus bursts from
     /// churning `Task` allocations.
     func reportInteraction(reason: String = "tap") {
@@ -2841,7 +2841,7 @@ final class MultiviewChromeState: ObservableObject {
     /// `lastRescheduleAt`. Without this, the follow-up `reportInteraction()`
     /// in the panel-close path would coalesce-early-return and leave the
     /// chrome with no hide task at all (it was cancelled when the pin went
-    /// on), stranding it visible forever — the "exit Switch Stream picker via
+    /// on), stranding it visible forever, the "exit Switch Stream picker via
     /// Menu, chrome never fades" bug.
     private func scheduleHide(delaySeconds: Double = playerChromeFadeSeconds) {
         lastRescheduleAt = ContinuousClock.now
@@ -2911,7 +2911,7 @@ final class MultiviewChromeState: ObservableObject {
     /// so the user can navigate between streams without the bottom
     /// UI sweeping in with the focus change.
     ///
-    /// Chrome visibility is a separate signal — `reportInteraction()`
+    /// Chrome visibility is a separate signal, `reportInteraction()`
     /// brings chrome in; Menu/Back (`onExitCommand`) also does. This
     /// method is the minimum "the user is pointing at something"
     /// signal for focus feedback only.
@@ -2957,7 +2957,7 @@ private struct MultiviewSafeAreaModifier: ViewModifier {
         // app, and the chrome overlay manages its own insets.
         content.ignoresSafeArea()
         #else
-        // tvOS — no notch, edge-to-edge is right for fullscreen; the corner
+        // tvOS, no notch, edge-to-edge is right for fullscreen; the corner
         // mini player must stay inside its proposed frame (see `minimized`).
         // One modifier with a dynamic edge set, NOT an if/else: a structural
         // branch here changes the SwiftUI identity of the whole player

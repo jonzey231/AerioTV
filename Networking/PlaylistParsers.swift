@@ -162,7 +162,7 @@ struct M3UParser {
         return channels
     }
 
-    // Compiled once — reused for every #EXTINF line (thousands of times for large playlists).
+    // Compiled once, reused for every #EXTINF line (thousands of times for large playlists).
     private static let attrRegex = try! NSRegularExpression(pattern: #"([\w-]+)="([^"]*)""#)
 
     static func parseExtINF(_ line: String) -> [String: String] {
@@ -274,9 +274,9 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
     private var currentDesc = ""
     /// Accumulated as a list instead of a single string because real
     /// XMLTV feeds (Schedules Direct, Zap2it via Dispatcharr) emit
-    /// one `<category>` element per tag — e.g. `<category>Episode
+    /// one `<category>` element per tag, e.g. `<category>Episode
     /// </category><category>Series</category><category>Reality
-    /// </category><category>Law</category>` — and the previous
+    /// </category><category>Law</category>`, and the previous
     /// `currentCategory += trimmed` form concatenated all four into
     /// the single string `"EpisodeSeriesRealityLaw"`. That surfaced
     /// in the Program Info modal as one absurd merged pill. Joining
@@ -292,7 +292,7 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
     /// parser trimmed each `foundCharacters` fragment before
     /// appending, which silently dropped word-internal boundaries
     /// when `Foundation.XMLParser` chose to yield text in multiple
-    /// chunks — e.g. `<title>Hello World</title>` could surface as
+    /// chunks, e.g. `<title>Hello World</title>` could surface as
     /// `"HelloWorld"` if the parser split on the space. Codex C1
     /// flagged this; accumulating raw text and trimming once at
     /// close time fixes it.
@@ -564,7 +564,7 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
         // Reset the per-element text accumulator on every new
         // element so the previous element's trailing content /
         // inter-element whitespace doesn't leak in. This is
-        // independent of `insideProgramme` — we want `currentText`
+        // independent of `insideProgramme`, we want `currentText`
         // clean even for structural elements like `<tv>` that
         // don't have consumed text.
         currentText = ""
@@ -626,14 +626,14 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
             let trimmed = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
             switch elementName {
             case "title":
-                // First non-empty `<title>` wins — XMLTV in the wild
+                // First non-empty `<title>` wins, XMLTV in the wild
                 // sometimes emits a second localised title element
                 // per programme; the first is the canonical one.
                 if currentTitle.isEmpty && !trimmed.isEmpty {
                     currentTitle = trimmed
                 }
             case "desc":
-                // Same "first wins" policy as title — localised
+                // Same "first wins" policy as title, localised
                 // `<desc lang="...">` duplicates would otherwise
                 // collide.
                 if currentDesc.isEmpty && !trimmed.isEmpty {

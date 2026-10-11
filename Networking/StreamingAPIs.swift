@@ -15,7 +15,7 @@ enum StreamFormat {
 /// return raw MPEG-TS from those endpoints despite the name.
 func classifyStreamURL(_ url: URL) -> StreamFormat {
     let ext  = url.pathExtension.lowercased()
-    // HLS — only trust the file extension, not the path
+    // HLS, only trust the file extension, not the path
     if ext == "m3u8" {
         return .hls
     }
@@ -898,7 +898,7 @@ final class HLSCapabilityStore: NSObject {
 }
 
 // MARK: - Shared Date Parser
-/// Cached Xtream date parser — avoids creating a DateFormatter per call.
+/// Cached Xtream date parser, avoids creating a DateFormatter per call.
 enum XtreamDateParser {
     private static let formatter: DateFormatter = {
         let f = DateFormatter()
@@ -966,20 +966,20 @@ enum APIError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidURL:           return "Invalid server URL"
-        case .unauthorized:         return "Invalid credentials — your API key was not found on the server. Go to Settings → your server → Admin API Key and verify it matches an Admin user's API Key in Dispatcharr → System → Users → Edit User → API & XC."
+        case .unauthorized:         return "Invalid credentials, your API key was not found on the server. Go to Settings → your server → Admin API Key and verify it matches an Admin user's API Key in Dispatcharr → System → Users → Edit User → API & XC."
         case .forbidden(let reason):
             if let reason, !reason.isEmpty {
-                return "Access denied (403) — the server said: \(reason)"
+                return "Access denied (403), the server said: \(reason)"
             }
-            return "Access denied (403) — the server refused this request. Your credentials may be fine: providers commonly return 403 when the plan does not cover this, or when they are rate-limiting or have blocked your IP."
+            return "Access denied (403), the server refused this request. Your credentials may be fine: providers commonly return 403 when the plan does not cover this, or when they are rate-limiting or have blocked your IP."
         case .serverError(let c):
             switch c {
-            case 404: return "Endpoint not found (404) — verify your server URL"
-            case 429: return "Rate limited (429) — too many requests, try again shortly"
-            case 500: return "Internal server error (500) — check your server logs"
-            case 502: return "Bad gateway (502) — your server's reverse proxy is failing"
-            case 503: return "Server temporarily unavailable (503) — your server may be starting up or restarting. Tap Try Again in a moment."
-            case 504: return "Gateway timeout (504) — your server is not responding in time"
+            case 404: return "Endpoint not found (404), verify your server URL"
+            case 429: return "Rate limited (429), too many requests, try again shortly"
+            case 500: return "Internal server error (500), check your server logs"
+            case 502: return "Bad gateway (502), your server's reverse proxy is failing"
+            case 503: return "Server temporarily unavailable (503), your server may be starting up or restarting. Tap Try Again in a moment."
+            case 504: return "Gateway timeout (504), your server is not responding in time"
             default:  return "Server error (\(c))"
             }
         case .decodingError(let e):
@@ -1006,7 +1006,7 @@ struct XtreamCodesAPI {
     let username: String
     let password: String
 
-    // Shared session — reused across all calls (avoid creating a new URLSession per request).
+    // Shared session, reused across all calls (avoid creating a new URLSession per request).
     // 20s per-request idle timeout: a dead Docker container / unreachable host
     // should surface an error well inside 20 seconds, not the 60s Apple default.
     // 300s resource timeout covers legitimately-large EPG / VOD payloads for
@@ -1097,7 +1097,7 @@ struct XtreamCodesAPI {
         let (data, response) = try await loggedData(from: url)
         try validate(response: response)
         try Self.requireJSONBody(data, action: "categories")
-        // Some panels return false/null/object for missing categories — treat as empty
+        // Some panels return false/null/object for missing categories, treat as empty
         return (try? decode([XtreamCategory].self, from: data)) ?? []
     }
 
@@ -1115,9 +1115,9 @@ struct XtreamCodesAPI {
         try validate(response: response)
         let data = try Data(contentsOf: tempURL, options: .mappedIfSafe)
         try Self.requireJSONBody(data, action: "the movie library")
-        // Some panels return false/null/object for empty or unavailable VOD — treat as empty
+        // Some panels return false/null/object for empty or unavailable VOD, treat as empty
         if let items = try? decode([XtreamVODItem].self, from: data) { return items }
-        DebugLogger.shared.log("XC get_vod_streams: non-array response (\(data.count) bytes) — treating as empty",
+        DebugLogger.shared.log("XC get_vod_streams: non-array response (\(data.count) bytes), treating as empty",
                                category: "VOD", level: .warning)
         return []
     }
@@ -1145,7 +1145,7 @@ struct XtreamCodesAPI {
         // replacement char at the truncated tail is harmless.
         // Strip a UTF-8 BOM before looking at the first character.
         // `.whitespacesAndNewlines` does NOT cover U+FEFF, and PHP panels
-        // emitting BOM'd JSON are a real thing — JSONSerialization decodes
+        // emitting BOM'd JSON are a real thing, JSONSerialization decodes
         // them fine, so this check must not reject them.
         let head = String(decoding: data.prefix(512), as: UTF8.self)
             .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FEFF}")))
@@ -1193,7 +1193,7 @@ struct XtreamCodesAPI {
         let (data, response) = try await loggedData(from: url)
         try validate(response: response)
         try Self.requireJSONBody(data, action: "categories")
-        // Some panels return false/null/object for missing categories — treat as empty
+        // Some panels return false/null/object for missing categories, treat as empty
         return (try? decode([XtreamCategory].self, from: data)) ?? []
     }
 
@@ -1211,9 +1211,9 @@ struct XtreamCodesAPI {
         try validate(response: response)
         let data = try Data(contentsOf: tempURL, options: .mappedIfSafe)
         try Self.requireJSONBody(data, action: "the series library")
-        // Some panels return false/null/object for empty or unavailable series — treat as empty
+        // Some panels return false/null/object for empty or unavailable series, treat as empty
         if let items = try? decode([XtreamSeriesItem].self, from: data) { return items }
-        DebugLogger.shared.log("XC get_series: non-array response (\(data.count) bytes) — treating as empty",
+        DebugLogger.shared.log("XC get_series: non-array response (\(data.count) bytes), treating as empty",
                                category: "VOD", level: .warning)
         return []
     }
@@ -1312,7 +1312,7 @@ struct XtreamCodesAPI {
         } catch {
             // Cancellation is the DEVICE giving up (a scrolled-away cell's
             // 15s race, a torn-down view), not the provider refusing. Counting
-            // it opened the 15-minute host breaker on slow-but-honest links —
+            // it opened the 15-minute host breaker on slow-but-honest links,
             // eight 14-second answers in a row read as eight "failures" and
             // silenced short-EPG for the whole host.
             let isDeviceSideCancel = error is CancellationError
@@ -1387,7 +1387,7 @@ struct XtreamCodesAPI {
         return URL(string: "\(base)/get.php?username=\(username)&password=\(password)&type=m3u_plus&output=ts")
     }
 
-    /// Standard Xtream Codes bulk XMLTV EPG feed — the full guide every
+    /// Standard Xtream Codes bulk XMLTV EPG feed, the full guide every
     /// other XC client consumes. The server renders programme names its
     /// own way here (dummy-EPG name settings, `<category>` tags, etc.),
     /// unlike the per-stream `get_short_epg` JSON. Routed through
@@ -1444,7 +1444,7 @@ struct XtreamCodesAPI {
             let status   = (result.1 as? HTTPURLResponse)?.statusCode
             let duration = Date().timeIntervalSince(start)
             // v1.6.8 (Codex D4): the manual `replacingOccurrences`
-            // redaction that used to live here was fragile — it
+            // redaction that used to live here was fragile, it
             // missed percent-encoded passwords and leaked the
             // username regardless. `logNetwork` already routes
             // through `DebugLogger.sanitize()` which handles the
@@ -1703,7 +1703,7 @@ struct XtreamStream: Decodable, Identifiable {
     }
 
 
-    /// Best format for iOS: always m3u8 (HLS) — AVPlayer handles it natively.
+    /// Best format for iOS: always m3u8 (HLS), AVPlayer handles it natively.
     var bestFormat: String { "m3u8" }
 }
 
@@ -1845,7 +1845,7 @@ extension KeyedDecodingContainer {
     /// number or a JSON string, returning it as a String. Returns nil for
     /// missing / null / empty. Used by `DispatcharrStream.StreamStats`
     /// numeric fields (`source_fps`, `ffmpeg_output_bitrate`), which arrive
-    /// inconsistently typed — the same DRF quirk that forced
+    /// inconsistently typed, the same DRF quirk that forced
     /// `DispatcharrChannel.channelNumber` to a tolerant decode. Tries
     /// String first (covers "1080", "59.94"), then Double (drops a
     /// trailing .0 for whole numbers), then Int.
@@ -1925,7 +1925,7 @@ struct XtreamSeriesItem: Decodable, Identifiable {
 // MARK: - Dispatcharr Native API
 struct DispatcharrAPI {
     enum Auth {
-        /// Bearer-with-API-key — the "bearer" shape inside
+        /// Bearer-with-API-key, the "bearer" shape inside
         /// `DispatcharrAuthHeaderMode.bearer`. Sends
         /// `Authorization: Bearer <api-key>`. Auth value is fixed
         /// for the lifetime of the API instance.
@@ -1933,7 +1933,7 @@ struct DispatcharrAPI {
         /// X-API-Key (or `ApiKey ...`, per `authMode`). Auth value
         /// is fixed for the lifetime of the API instance.
         case apiKey(String)
-        /// v1.7 Direct Connect — looks up a live JWT access token
+        /// v1.7 Direct Connect, looks up a live JWT access token
         /// from `DispatcharrTokenStore.shared` keyed by server ID at
         /// every request. Tokens are short-lived (30 min access, 24h
         /// refresh) and rotate as they expire, which is why the API
@@ -1954,11 +1954,11 @@ struct DispatcharrAPI {
     /// v1.6.20: per-server auth header shape, persisted on the
     /// `ServerConnection` after Test Connection auto-detects what the
     /// server accepts. Default `.xapikey` matches v1.6.16+ behavior
-    /// (preferred — full VOD episode visibility); `verifyConnection`
+    /// (preferred, full VOD episode visibility); `verifyConnection`
     /// auto-falls-back to `.both` then `.bearer` on HTTP 401 so users
     /// on Dispatcharr builds that reject X-API-Key alone get connected
     /// without intervention. Bearer auth (`auth == .bearer`) ignores
-    /// this field — that path is unambiguous.
+    /// this field, that path is unambiguous.
     let authMode: DispatcharrAuthHeaderMode
 
     /// v1.7.x: identifies which `ServerConnection` this API instance
@@ -1994,7 +1994,7 @@ struct DispatcharrAPI {
     }
 
 
-    // Shared session — reused across all calls (avoid creating a new URLSession per request).
+    // Shared session, reused across all calls (avoid creating a new URLSession per request).
     // 20s per-request idle timeout mirrors XtreamCodesAPI's session: lets
     // error states (dead container, firewalled host, etc.) surface well
     // inside the 20s mark instead of the 60s Apple default that makes the
@@ -2004,7 +2004,7 @@ struct DispatcharrAPI {
     // v1.6.20: a `RedirectPreservingDelegate` is wired here so URLSession
     // re-applies our auth headers across HTTP 301/302/307/308 redirects.
     // Apple's URLSession default-strips custom headers (including
-    // `X-API-Key` and `Authorization`) when a redirect crosses origin —
+    // `X-API-Key` and `Authorization`) when a redirect crosses origin,
     // a real-world hit for Dispatcharr deployments behind a reverse
     // proxy that 301s `/api` → `/api/`. Without re-applying, the
     // follow-up request lands at the auth wall stripped of credentials
@@ -2055,7 +2055,7 @@ struct DispatcharrAPI {
     private var decoder: JSONDecoder { Self.jsonDecoder }
 
     /// Headers for the current `authMode`. All other DispatcharrAPI
-    /// methods read this — only `verifyConnection` overrides it during
+    /// methods read this, only `verifyConnection` overrides it during
     /// auth-shape discovery (see `headers(for:)`).
     private var headers: [String: String] { headers(for: authMode) }
 
@@ -2079,7 +2079,7 @@ struct DispatcharrAPI {
     /// Builds the request header dictionary for an explicit auth mode.
     /// Used by `verifyConnection` to iterate header shapes against a
     /// Dispatcharr instance whose auth requirements aren't yet known
-    /// (different builds reject different shapes — see the
+    /// (different builds reject different shapes, see the
     /// `DispatcharrAuthHeaderMode` doc comment for the rationale).
     private func headers(for mode: DispatcharrAuthHeaderMode) -> [String: String] {
         var h: [String: String] = [
@@ -2089,7 +2089,7 @@ struct DispatcharrAPI {
         ]
         switch auth {
         case .bearer(let token):
-            // Bearer-token auth ignores `mode` — the header shape is
+            // Bearer-token auth ignores `mode`, the header shape is
             // unambiguous regardless of which Dispatcharr build we're
             // talking to.
             h["Authorization"] = "Bearer \(token)"
@@ -2097,7 +2097,7 @@ struct DispatcharrAPI {
             switch mode {
             case .xapikey:
                 // v1.6.16+ default. Preferred when the server accepts
-                // it — Dispatcharr's per-series episodes endpoint
+                // it, Dispatcharr's per-series episodes endpoint
                 // returns the full episode list under X-API-Key alone,
                 // whereas adding `Authorization` can route the request
                 // through user-scoped session auth that filters
@@ -2106,23 +2106,23 @@ struct DispatcharrAPI {
             case .both:
                 // Pre-1.6.16 shape. Some Dispatcharr builds REQUIRE
                 // the `Authorization` header and reject X-API-Key
-                // alone with HTTP 401 — that's the bug three users
+                // alone with HTTP 401, that's the bug three users
                 // hit in v1.6.19, regardless of API key validity.
                 // This shape gets those deployments connected. Cost:
                 // the same VOD-episode filtering that v1.6.16 was
                 // chasing may resurface for series whose upstream
                 // providers fall outside the session's m3u_accounts
-                // view. Acceptable trade — partial VOD beats no
+                // view. Acceptable trade, partial VOD beats no
                 // connection at all.
                 h["Authorization"] = "ApiKey \(key)"
                 h["X-API-Key"] = key
             case .bearer:
-                // Rare — reserved for token-based deployments that
+                // Rare, reserved for token-based deployments that
                 // don't speak ApiKey at all.
                 h["Authorization"] = "Bearer \(key)"
             }
         case .jwtSession(let serverID):
-            // v1.7 Direct Connect — read the current access token from
+            // v1.7 Direct Connect, read the current access token from
             // the store. If unset (e.g. cold launch before initial
             // login completes), we still emit Accept + UA so the
             // request shape is otherwise correct; the eventual 401
@@ -2139,7 +2139,7 @@ struct DispatcharrAPI {
     /// v1.7.x: drop-in wrapper for `HTTPRouter.data(for:using:)` that
     /// transparently refreshes the JWT access token on HTTP 401 and
     /// retries the request once. No-op for `.apiKey` / `.bearer` auth
-    /// modes — those return the original response unchanged. Migrate
+    /// modes, those return the original response unchanged. Migrate
     /// hot-path call sites (verifyConnection, getEPGGrid,
     /// enrichCategories, getAllEPGData) to this wrapper so that a
     /// session that's been idle past the 30-min access-token TTL
@@ -2203,7 +2203,7 @@ struct DispatcharrAPI {
         case .apiKey:
             // v1.7.x: silent api_key re-bootstrap. Only fires when:
             //   1. The instance was built with a serverID (production
-            //      callers via ServerConnection — static helpers like
+            //      callers via ServerConnection, static helpers like
             //      login() never have one).
             //   2. The server has a saved username (i.e. it was
             //      onboarded in Username & Password mode and creds
@@ -2247,7 +2247,7 @@ struct DispatcharrAPI {
 
         case .bearer:
             // Fixed-bearer mode (Test Connection / one-shot probe).
-            // No persistence to refresh against — surface the 401.
+            // No persistence to refresh against, surface the 401.
             return (data, response)
         }
     }
@@ -2259,10 +2259,10 @@ struct DispatcharrAPI {
         // So we try a few lightweight endpoints and consider it "verified" if we get JSON back.
 
         let candidatePaths = [
-            "/api/channels/groups/?page_size=1",   // lightweight — just 1 group to prove auth works
+            "/api/channels/groups/?page_size=1",   // lightweight, just 1 group to prove auth works
             "/api/channels/summary/",              // lightweight summary
             "/api/channels/channels/?page_size=1", // just 1 channel to prove auth works
-            "/api/channels/",                      // index document (links) — allow as last resort
+            "/api/channels/",                      // index document (links), allow as last resort
             "/api/core/version/",                  // v0.23.0+ moved version under /api/core/
             "/api/core/version",
             "/api/version/",                       // legacy path kept for older Dispatcharr builds
@@ -2272,7 +2272,7 @@ struct DispatcharrAPI {
         // v1.6.20: iterate over auth header shapes when the configured
         // `authMode` is rejected. Some Dispatcharr builds reject
         // `X-API-Key`-alone (v1.6.16+ default) with HTTP 401 even with
-        // a perfectly valid Admin API key — they require the legacy
+        // a perfectly valid Admin API key, they require the legacy
         // `Authorization: ApiKey <key>` header that pre-1.6.16 sent
         // alongside it. Three users on private deployments hit this
         // in v1.6.19. The fix: try the configured mode first, then
@@ -2305,7 +2305,7 @@ struct DispatcharrAPI {
         /// wrong", "server unreachable", "server is running but didn't
         /// route to the API") instead of dumping a raw HTML body.
         enum AttemptOutcome {
-            case html                 // 200 text/html — SPA shell, auth likely missing/invalid
+            case html                 // 200 text/html, SPA shell, auth likely missing/invalid
             case httpError(Int)       // 4xx/5xx
             case jsonDecodeFailed     // 200 JSON but shape didn't match any expected schema
             case other                // e.g., 2xx with non-JSON, non-HTML body
@@ -2316,12 +2316,12 @@ struct DispatcharrAPI {
         var lastContentType: String?
         var lastURL: URL?
         // Tracks whether we ever saw the URL produce non-API content
-        // (HTML, redirects, etc.) — distinguishes "wrong URL" from
+        // (HTML, redirects, etc.), distinguishes "wrong URL" from
         // "wrong header shape" in the diagnostic message.
         var sawNonAPIResponse = false
 
         modeLoop: for mode in candidateModes {
-            // Per-mode tally — we only escalate to the next header
+            // Per-mode tally, we only escalate to the next header
             // shape when this mode emitted at least one auth-style
             // failure (401/403). If the mode produced 200 HTML for
             // every probe, the URL points at the SPA, not the API,
@@ -2402,7 +2402,7 @@ struct DispatcharrAPI {
                             ))
                         }
                     }
-                    // Success — embed the working header shape so the
+                    // Success, embed the working header shape so the
                     // caller can persist it on the server.
                     var enriched = info
                     enriched.discoveredAuthMode = mode
@@ -2418,15 +2418,15 @@ struct DispatcharrAPI {
             }
 
             // Decide whether to try the next mode. Only iterate when
-            // this mode's failure mode was auth-shaped — otherwise
+            // this mode's failure mode was auth-shaped, otherwise
             // (URL pointing at SPA, 5xx, decoding mismatch, network
             // issue) the next mode is just going to repeat the same
             // outcome and waste round-trips against the user's server.
             if !modeAuthRejected {
-                debugLog("DispatcharrAPI verify: mode .\(mode.rawValue) failed without auth-error signal — stopping mode iteration")
+                debugLog("DispatcharrAPI verify: mode .\(mode.rawValue) failed without auth-error signal, stopping mode iteration")
                 break modeLoop
             }
-            debugLog("DispatcharrAPI verify: mode .\(mode.rawValue) was auth-rejected — trying next shape")
+            debugLog("DispatcharrAPI verify: mode .\(mode.rawValue) was auth-rejected, trying next shape")
             _ = modeNonAuthFailures  // silence unused-variable warning when we did break
         }
 
@@ -2457,7 +2457,7 @@ struct DispatcharrAPI {
             if case .html = $0 { return true }
             return false
         }
-        // Detect "every single probe was 401/403" — strongest possible
+        // Detect "every single probe was 401/403", strongest possible
         // wrong-API-key signal. v1.6.20 split this from the looser
         // "any auth error" path so we can distinguish "every shape we
         // tried got rejected" (almost certainly an invalid/non-admin
@@ -2495,7 +2495,7 @@ struct DispatcharrAPI {
                 correct deployment.
                 """
         } else if let authCode = firstAuthErrorCode {
-            // Mixed outcome — some auth errors, some not. Could be a
+            // Mixed outcome, some auth errors, some not. Could be a
             // misconfigured reverse proxy answering some routes and
             // not others, or a deployment quirk our auto-fallback
             // didn't anticipate. Surface what we saw.
@@ -2557,7 +2557,7 @@ struct DispatcharrAPI {
                 AerioTV can't fix this from the client side.
                 """
         } else {
-            // Genuine "other" outcome — non-HTML, non-auth-error,
+            // Genuine "other" outcome, non-HTML, non-auth-error,
             // non-JSON. Surface enough detail to diagnose without
             // pasting the entire HTML body.
             let ctString = lastContentType ?? "<unknown content-type>"
@@ -2585,7 +2585,7 @@ struct DispatcharrAPI {
     /// paginate / 30x our API key to a loopback, RFC-1918, or cloud-metadata
     /// host (confused-deputy SSRF + credential delivery). Reuses the in-tree
     /// artwork validator (#53); the configured server host is always allowed
-    /// (LAN-only Dispatcharr included). Returns nil to reject — which also
+    /// (LAN-only Dispatcharr included). Returns nil to reject, which also
     /// cleanly ends the pagination loops (same as an absent `next`).
     private func validatedServerSuppliedURL(_ raw: String?) -> URL? {
         guard let raw, let parsed = URL(string: raw) else { return nil }
@@ -2681,7 +2681,7 @@ struct DispatcharrAPI {
     /// Fetches current programs. Pass `channelUUIDs` to filter by specific channels, or nil for all.
     /// Note: the Dispatcharr endpoint expects `channel_uuids` (UUID strings), not integer IDs.
     func getCurrentPrograms(channelUUIDs: [String]? = nil) async throws -> [DispatcharrCurrentProgram] {
-        // This endpoint only accepts POST — GET returns 405.
+        // This endpoint only accepts POST, GET returns 405.
         let url = try buildURL(path: "/api/epg/current-programs/")
         // Explicit 20s timeout rather than URLSession's 60s default.
         // On large Dispatcharr instances this endpoint does a
@@ -2714,7 +2714,7 @@ struct DispatcharrAPI {
     }
 
     // MARK: - EPG Grid (guide view)
-    /// Fetches the EPG grid from `/api/epg/grid/` — returns -1h to +24h of programs.
+    /// Fetches the EPG grid from `/api/epg/grid/`, returns -1h to +24h of programs.
     /// The response is `{"data": [...]}` with program objects containing tvg_id, title,
     /// start_time, end_time, etc. One request replaces the multi-step approach.
     ///
@@ -2985,7 +2985,7 @@ struct DispatcharrAPI {
     // Fetches ALL programs from /api/epg/programs/ in a time window using large pages.
     // This replaces 40+ per-channel requests with ~3–5 paginated requests.
     func getBulkUpcomingPrograms(maxPages: Int = 10) async throws -> [DispatcharrCurrentProgram] {
-        // Fetch all programs with a large page size — no per-channel filter.
+        // Fetch all programs with a large page size, no per-channel filter.
         // The server returns programs sorted by start_time by default.
         var allItems: [DispatcharrCurrentProgram] = []
         var nextURL: URL? = try buildURL(path: "/api/epg/programs/?page_size=1000")
@@ -3024,7 +3024,7 @@ struct DispatcharrAPI {
     // DRF "next" link, causing fetchAllPages to loop through the full library while always
     // appending no_pagination=true. Rely on the next-link loop instead (same as getChannels).
     //
-    // page_size: 25. Previously 100 — but on large VOD libraries
+    // page_size: 25. Previously 100, but on large VOD libraries
     // (tens of thousands of entries), Dispatcharr's per-page
     // serialization was slow enough that individual requests timed
     // out client-side while uwsgi workers stayed pinned serializing
@@ -3039,12 +3039,12 @@ struct DispatcharrAPI {
     /// "Setting Up" stage. Hits `/api/vod/movies/?page_size=1` and
     /// reads the DRF wrapper's `count` field (total library size)
     /// instead of paginating the whole thing. The previous Setting
-    /// Up flow called `getVODMovies()` which paginates 25/page —
+    /// Up flow called `getVODMovies()` which paginates 25/page,
     /// for a 17 000-movie Dispatcharr library that's ~700
     /// sequential HTTP calls and 2–5 minutes of staring at "Loading
     /// VOD". XC's equivalent (`get_vod_streams`) returns the full
     /// list in one call, which is why XC users never saw this hang.
-    /// Returns 0 if the count field is missing — a non-zero return
+    /// Returns 0 if the count field is missing, a non-zero return
     /// Fetches the EPG sources configured on the Dispatcharr server
     /// from `/api/epg/sources/` (list permission is IsStandardUser,
     /// so any API key can read it). Catch-up depth: Dispatcharr's
@@ -3122,10 +3122,10 @@ struct DispatcharrAPI {
         let (data, response) = try await loggedData(for: request)
         try validate(response: response, data: data)
         // DRF paginated wrapper carries `count` even when results is
-        // [...one item...]. Tolerate flat-array responses too — some
+        // [...one item...]. Tolerate flat-array responses too, some
         // older Dispatcharr builds return an unwrapped list, in which
         // case we fall back to `.count` of whatever we can decode
-        // (defensive only — the modern API always wraps).
+        // (defensive only, the modern API always wraps).
         if let wrapped = try? Self.jsonDecoder.decode(DispatcharrResultsWrapper<DispatcharrVODMovie>.self, from: data) {
             return wrapped.count ?? wrapped.results.count
         }
@@ -3162,7 +3162,7 @@ struct DispatcharrAPI {
     /// **Latency note:** this endpoint is server-side throttled to 24h
     /// per movie. The first call for a movie that's never been
     /// visited synchronously triggers `refresh_movie_advanced_data`
-    /// upstream — that contacts the Xtream provider for the metadata
+    /// upstream, that contacts the Xtream provider for the metadata
     /// dictionary, which can take several seconds. Subsequent calls
     /// within 24h read the cached refresh and return immediately.
     /// Callers should treat this as best-effort enrichment: render
@@ -3186,7 +3186,7 @@ struct DispatcharrAPI {
     ///
     /// The raw response embeds the provider account's upstream
     /// credentials inside `m3u_account.profiles`, so it deliberately
-    /// bypasses `loggedData` — never let this body near the debug log.
+    /// bypasses `loggedData`, never let this body near the debug log.
     /// The decode keeps only display-safe fields.
     func getMovieProviders(movieID: Int) async throws -> [DispatcharrVODProviderRelation] {
         let url = try buildURL(path: "/api/vod/movies/\(movieID)/providers/")
@@ -3239,7 +3239,7 @@ struct DispatcharrAPI {
     /// v1.6.12: same lazy-refresh contract as `getMovieProviderInfo`,
     /// but for series. Hits `/api/vod/series/<id>/provider-info/`,
     /// which Dispatcharr names internally as `series_info()`. Same
-    /// 24h server-side throttle, same first-call latency caveat —
+    /// 24h server-side throttle, same first-call latency caveat,
     /// the FIRST call for a series that's never been visited
     /// triggers an upstream Xtream fetch via
     /// `refresh_series_advanced_data` and can take several seconds.
@@ -3267,7 +3267,7 @@ struct DispatcharrAPI {
     // instead of waiting for the entire library to load. Critical for large libraries
     // (e.g. 20 000+ movies = 200 sequential API calls at page_size=100). The
     // smaller page size trades more round-trips for shorter per-worker hold time
-    // on the Dispatcharr side — a single page_size=100 request was slow enough
+    // on the Dispatcharr side, a single page_size=100 request was slow enough
     // on big libraries to pin a uwsgi worker for 10+ seconds, which under
     // concurrent load would saturate Dispatcharr's pool and freeze the
     // container.
@@ -3276,10 +3276,10 @@ struct DispatcharrAPI {
     /// `&category=<url-encoded-name>` so Dispatcharr returns only
     /// movies tagged with that category. Confirmed in the API schema
     /// that `/api/vod/movies/` accepts `category` as a name filter
-    /// (the value is the category NAME, not its id — IDs are silently
+    /// (the value is the category NAME, not its id, IDs are silently
     /// ignored). Used by `VODStore` to fetch one stream per
     /// user-enabled category and tag each movie with its real
-    /// Dispatcharr category name at ingest time — fixes GH #1 where
+    /// Dispatcharr category name at ingest time, fixes GH #1 where
     /// `categoryName` was previously parsed from the movie's `genre`
     /// string and therefore never matched the category picker.
     /// `itemCap` overrides the default per-stream `vodPaginationItemCap`.
@@ -3346,7 +3346,7 @@ struct DispatcharrAPI {
     /// list surfaces before the user retypes.
     static let vodSearchItemCap = 300
 
-    /// Server-side search — uses DRF's ?search= filter so items not yet locally fetched are found.
+    /// Server-side search, uses DRF's ?search= filter so items not yet locally fetched are found.
     /// `m3uAccountID`: DRF's `m3u_account` filter (`m3u_relations__m3u_account__id`),
     /// the provider filter on Movies search results (Logan 2026-09-04).
     func searchVODMoviesStream(query: String, m3uAccountID: Int? = nil) -> AsyncThrowingStream<[DispatcharrVODMovie], Error> {
@@ -3375,7 +3375,7 @@ struct DispatcharrAPI {
     /// get their own 5,000-item budget.
     static let vodPaginationItemCap = 5_000
 
-    /// Generic paginated stream — yields `[T]` for each DRF results page.
+    /// Generic paginated stream, yields `[T]` for each DRF results page.
     ///
     /// **v1.6.21 changes:**
     ///
@@ -3574,7 +3574,7 @@ struct DispatcharrAPI {
     func getVODSeriesEpisodes(seriesID: Int) async throws -> [DispatcharrVODEpisode] {
         // v1.6.16: parallel page fetch. Pre-1.6.16 this used the
         // sequential `fetchAllPages` helper which walks `next` URLs
-        // one at a time — fine for a 75-episode series (1 page) but
+        // one at a time, fine for a 75-episode series (1 page) but
         // a disaster for One Piece (1000+ episodes, 10+ pages, 2+
         // minutes of round-trips). Dispatcharr's wrapper exposes
         // `count` on every page, so after the first page we know
@@ -3599,7 +3599,7 @@ struct DispatcharrAPI {
         debugLog("[VOD-Episodes] page=1 OK seriesID=\(seriesID) results=\(firstPage.results.count) reportedCount=\(firstPage.count.map(String.init) ?? "nil") next=\(firstPage.next != nil)")
 
         // Dispatcharr's pagination wrapper includes `count` (total
-        // items) — preferred path: compute the page count and fan
+        // items), preferred path: compute the page count and fan
         // out concurrent requests for pages 2..N.
         if let total = firstPage.count, total > allItems.count {
             let totalPages = Int(ceil(Double(total) / Double(pageSize)))
@@ -3642,11 +3642,11 @@ struct DispatcharrAPI {
             return allItems
         }
 
-        // Compatibility path: no `count` field — walk `next` URLs
+        // Compatibility path: no `count` field, walk `next` URLs
         // sequentially. This is the original `fetchAllPages` flow
         // preserved for older Dispatcharr versions that may strip
         // `count` from the response wrapper.
-        debugLog("[VOD-Episodes] no count — falling back to sequential next-walk seriesID=\(seriesID)")
+        debugLog("[VOD-Episodes] no count, falling back to sequential next-walk seriesID=\(seriesID)")
         var nextURLString = firstPage.next
         var pageIdx = 2
         while let nextURL = validatedServerSuppliedURL(nextURLString) {
@@ -3670,7 +3670,7 @@ struct DispatcharrAPI {
         return allItems
     }
 
-    /// Helper for `getVODSeriesEpisodes` — fetch a specific
+    /// Helper for `getVODSeriesEpisodes`, fetch a specific
     /// numbered page and return the raw wrapper. Kept private here
     /// because the parallel-fan-out logic is specific to the
     /// episodes endpoint; other paginated endpoints still use the
@@ -3759,14 +3759,14 @@ struct DispatcharrAPI {
 
     /// Build ordered live-stream URL attempts for a Dispatcharr channel.
     /// HLS first (adaptive bitrate, better buffering), then TS as fallback.
-    /// The /proxy/ts/channel/ endpoint doesn't exist in Dispatcharr — skip it.
+    /// The /proxy/ts/channel/ endpoint doesn't exist in Dispatcharr, skip it.
     func liveProxyURLAttempts(for channel: DispatcharrChannel) -> [URL] {
         guard let uuid = channel.uuid, !uuid.isEmpty else { return [] }
         var out: [URL] = []
-        // HLS preferred — adaptive bitrate handles network jitter better than raw TS
+        // HLS preferred, adaptive bitrate handles network jitter better than raw TS
         if let u = URL(string: baseURL + "/proxy/hls/stream/\(uuid).m3u8") { out.append(u) }
         if let u = URL(string: baseURL + "/proxy/hls/stream/\(uuid)") { out.append(u) }
-        // TS fallback — direct MPEG-TS stream
+        // TS fallback, direct MPEG-TS stream
         if let u = proxyTSStreamURL(uuid: uuid) { out.append(u) }
         return out
     }
@@ -3858,7 +3858,7 @@ struct DispatcharrAPI {
 
     // MARK: - Channel Groups
     func getChannelGroups() async throws -> [DispatcharrChannelGroup] {
-        // Omit page param — Dispatcharr returns all groups unpaginated when no page param is present.
+        // Omit page param, Dispatcharr returns all groups unpaginated when no page param is present.
         // fetchAllPages handles both flat-array and paginated responses transparently.
         try await fetchAllPages(DispatcharrChannelGroup.self, firstPath: "/api/channels/groups/")
     }
@@ -3872,11 +3872,11 @@ struct DispatcharrAPI {
 
     // MARK: - Recordings / DVR
     //
-    // Dispatcharr DVR maps to `apps/channels/api_urls.py` — recordings
+    // Dispatcharr DVR maps to `apps/channels/api_urls.py`, recordings
     // ViewSet at `/api/channels/recordings/`. Schedule with a POST, poll
     // with a GET, stop in-flight with POST /{id}/stop/, cancel or delete
     // with DELETE /{id}/, stream the file via GET /{id}/file/ (AllowAny,
-    // HTTP Range — safe to hand straight to MPV).
+    // HTTP Range, safe to hand straight to MPV).
     //
     // **Pre/post-roll gotcha:** If the POST body includes
     // `custom_properties.program` (a dict), Dispatcharr's serializer
@@ -3889,7 +3889,7 @@ struct DispatcharrAPI {
     // has chosen a custom buffer.
 
     /// Dispatcharr-native recording object. Only the fields we actually
-    /// consume are exposed here — `custom_properties` is a free-form
+    /// consume are exposed here, `custom_properties` is a free-form
     /// JSON dict, so we parse it via JSONSerialization on a per-instance
     /// basis rather than defining a rigid Codable shape that would
     /// break when the server adds new keys.
@@ -4033,7 +4033,7 @@ struct DispatcharrAPI {
     ///
     /// - Parameters:
     ///   - channelID: Dispatcharr integer channel ID (NOT the UUID some
-    ///     other code paths use — the DRF serializer rejects UUIDs).
+    ///     other code paths use, the DRF serializer rejects UUIDs).
     ///   - startTime: Effective start. If `applyServerOffsets` is false
     ///     this should already include the user's pre-roll adjustment.
     ///   - endTime: Effective end. Same rule for post-roll.
@@ -4163,7 +4163,7 @@ struct DispatcharrAPI {
         return try decodeRecordingArray(from: data)
     }
 
-    /// Fetches a single recording by ID — used for polling status during
+    /// Fetches a single recording by ID, used for polling status during
     /// an in-progress recording.
     func getRecording(id: Int) async throws -> Recording {
         let url = try buildURL(path: "/api/channels/recordings/\(id)/")
@@ -4188,7 +4188,7 @@ struct DispatcharrAPI {
 
     /// Deletes a recording. For scheduled rows this is a plain cancel;
     /// for completed rows Dispatcharr also removes the file from disk,
-    /// so there is no "keep but unschedule" path — the file is gone
+    /// so there is no "keep but unschedule" path, the file is gone
     /// after this call.
     func deleteRecording(id: Int) async throws {
         let url = try buildURL(path: "/api/channels/recordings/\(id)/")
@@ -4220,7 +4220,7 @@ struct DispatcharrAPI {
 
     /// Switches the channel's active upstream. Keyed by the channel UUID
     /// (the same `<uuid>` used in `/proxy/ts/stream/<uuid>`). Server-side
-    /// `@permission_classes([IsAdmin])` — a non-admin account gets 403.
+    /// `@permission_classes([IsAdmin])`, a non-admin account gets 403.
     /// Dispatcharr swaps the upstream in place behind the unchanged proxy
     /// connection (a mid-stream TS discontinuity, no EOF); libmpv follows
     /// it on its own, so the caller does NOT reload the player after this.
@@ -4237,7 +4237,7 @@ struct DispatcharrAPI {
         // to plus an `owner` flag. We confirm the switch by polling /status.url
         // against the url (the event-path bug leaves stream_id stale, so url is
         // the only trustworthy signal). `owner` tells us whether this request
-        // hit the channel's owner worker — only then does Dispatcharr rewrite
+        // hit the channel's owner worker, only then does Dispatcharr rewrite
         // the stream_id its Stats card reads, so we log it to explain any
         // lingering Stats staleness. Best-effort decode; nil just skips the gate.
         let decoded = try? Self.jsonDecoder.decode(DispatcharrChangeStreamResponse.self, from: data)
@@ -4265,7 +4265,7 @@ struct DispatcharrAPI {
 
     /// Reads `/proxy/ts/status/<uuid>` for the channel's live upstream.
     /// `url` is reliably updated on a stream switch; `streamID` is NOT (the
-    /// owner:false event path never rewrites it, so it stays stale ~20s) —
+    /// owner:false event path never rewrites it, so it stays stale ~20s),
     /// use it only to seed the current-stream mark before any in-session
     /// switch, never to confirm one.
     /// `/api/accounts/users/me/`, for the fields the session-limit
@@ -4336,7 +4336,7 @@ struct DispatcharrAPI {
 
     /// Playback URL for a completed recording. The endpoint is
     /// `AllowAny` on the server (no auth), supports HTTP Range, and
-    /// serves the raw media file — safe to hand directly to MPV.
+    /// serves the raw media file, safe to hand directly to MPV.
     func recordingPlaybackURL(id: Int) -> URL? {
         URL(string: baseURL + "/api/channels/recordings/\(id)/file/")
     }
@@ -4345,7 +4345,7 @@ struct DispatcharrAPI {
         let obj = try JSONSerialization.jsonObject(with: data)
         guard let dict = obj as? [String: Any], let rec = Recording(dict: dict) else {
             let snippet = String(data: data, encoding: .utf8).map { String($0.prefix(300)) } ?? "<non-utf8>"
-            DebugLogger.shared.log("DispatcharrAPI.Recording decode failed — payload: \(snippet)",
+            DebugLogger.shared.log("DispatcharrAPI.Recording decode failed, payload: \(snippet)",
                                    category: "Network", level: .error)
             throw APIError.decodingError(NSError(domain: "DispatcharrAPI",
                                                  code: -4,
@@ -4364,7 +4364,7 @@ struct DispatcharrAPI {
             rawArray = arr
         } else {
             let snippet = String(data: data, encoding: .utf8).map { String($0.prefix(300)) } ?? "<non-utf8>"
-            DebugLogger.shared.log("DispatcharrAPI.listRecordings decode failed — payload: \(snippet)",
+            DebugLogger.shared.log("DispatcharrAPI.listRecordings decode failed, payload: \(snippet)",
                                    category: "Network", level: .error)
             throw APIError.decodingError(NSError(domain: "DispatcharrAPI",
                                                  code: -5,
@@ -4385,7 +4385,7 @@ struct DispatcharrAPI {
     ///
     /// v1.6.20: pulled in alongside the auth-mode auto-detect work
     /// because one of the affected users runs Dispatcharr at
-    /// `http://dispatchar.domain.com:9191` — port preservation is the
+    /// `http://dispatchar.domain.com:9191`, port preservation is the
     /// kind of thing URLComponents handles correctly by definition,
     /// whereas `URL(string: a + b)` only happens to do so today.
     private func buildURL(path: String) throws -> URL {
@@ -4404,7 +4404,7 @@ struct DispatcharrAPI {
 
         // Parse the baseURL into its parts (scheme, host, port, any
         // pre-existing path). Fall back to the legacy string-concat
-        // path if URLComponents can't make sense of the input — keeps
+        // path if URLComponents can't make sense of the input, keeps
         // us no worse than v1.6.19 for genuinely malformed URLs.
         guard var components = URLComponents(string: baseURL) else {
             guard let url = URL(string: baseURL + path) else { throw APIError.invalidURL }
@@ -4482,7 +4482,7 @@ struct DispatcharrAPI {
         case 403: throw APIError.forbidden(Self.forbiddenReason(from: data))
         case 404:
             // Dispatcharr returns HTTP 404 + {"detail":"No User matches…"} when
-            // the API key doesn't exist in the database — this is an auth failure,
+            // the API key doesn't exist in the database, this is an auth failure,
             // not a missing endpoint.
             if let body = data,
                let text = String(data: body, encoding: .utf8),
@@ -4661,7 +4661,7 @@ actor AsyncSemaphore {
 /// they survive `301`/`302`/`307`/`308` hops.
 ///
 /// **Why this exists.** URLSession's default redirect handler strips
-/// the `Authorization` header on cross-origin redirects (intentional —
+/// the `Authorization` header on cross-origin redirects (intentional,
 /// otherwise a malicious server could `301` to attacker-controlled
 /// hosts and exfiltrate the credential). It also occasionally drops
 /// non-standard headers like `X-API-Key` depending on the redirect
@@ -4681,7 +4681,7 @@ actor AsyncSemaphore {
 /// v1.6.20 (Aerio): added as part of the auth-fallback work after
 /// three users on private Dispatcharr deployments hit HTTP 401 on
 /// Test Connection. We can't be certain redirects were the trigger
-/// for those specific reports — header-shape was the smoking gun —
+/// for those specific reports, header-shape was the smoking gun,
 /// but a stripped-on-redirect API key would produce indistinguishable
 /// symptoms, so this is belt-and-suspenders against the same class
 /// of failure.
@@ -4867,7 +4867,7 @@ struct DispatcharrEPGData: Decodable, Identifiable {
 }
 
 /// Current program for a channel as returned by `/api/epg/current-programs/` or `/api/epg/programs/`.
-/// Schema: ProgramData — fields include tvg_id, title, start_time, end_time, channel, channel_name.
+/// Schema: ProgramData, fields include tvg_id, title, start_time, end_time, channel, channel_name.
 struct DispatcharrCurrentProgram: Decodable, Identifiable {
     var id: String { "\(tvgID ?? channel.map(String.init) ?? "?")-\(title)-\(startTime?.toDate()?.timeIntervalSince1970 ?? 0)" }
 
@@ -5019,7 +5019,7 @@ enum DispatcharrDateValue: Decodable {
     case iso(String)
     case unix(Double)
 
-    // Cached formatters — creating DateFormatter is expensive; reuse across all calls.
+    // Cached formatters, creating DateFormatter is expensive; reuse across all calls.
     // nonisolated(unsafe) required because ISO8601DateFormatter/DateFormatter are not Sendable in Swift 6.
     nonisolated(unsafe) private static let iso8601Formatter = ISO8601DateFormatter()
     private static let djangoMicrosFormatter: DateFormatter = {
@@ -5273,7 +5273,7 @@ struct DispatcharrStream: Decodable, Identifiable {
     /// Quality stats Dispatcharr reports for a probed stream. Numeric
     /// fields decode through `decodeStringOrNumber` because DRF can emit
     /// them as JSON strings or numbers; codecs/resolution use the existing
-    /// flexible-string decode. All optional — any field can be absent.
+    /// flexible-string decode. All optional, any field can be absent.
     struct StreamStats: Decodable {
         let resolution: String?     // e.g. "1920x1080"
         let sourceFPS: String?      // number-or-string
@@ -5332,7 +5332,7 @@ struct DispatcharrChangeStreamResponse: Decodable {
 
 /// Subset of `GET /proxy/ts/status/<uuid>`. `url` is the live upstream
 /// (reliable across switches); `streamID` is the active stream pk (goes
-/// stale on the event path — seed-only, never a confirm signal). Both
+/// stale on the event path, seed-only, never a confirm signal). Both
 /// decode tolerantly (DRF may string-encode the id).
 /// `/api/accounts/users/me/`, limited to the session-limit fields.
 struct DispatcharrUserLimits: Decodable {
@@ -5430,7 +5430,7 @@ struct DispatcharrVODStreamOption: Decodable {
 }
 
 /// v1.8.17 VOD version switching: one `M3UMovieRelation` row from
-/// `/api/vod/movies/<id>/providers/` — a single provider's copy of a
+/// `/api/vod/movies/<id>/providers/`, a single provider's copy of a
 /// deduped movie. Only display-safe fields are decoded on purpose: the
 /// raw payload nests the account's upstream credentials under
 /// `m3u_account.profiles`, which must never be retained or logged.
@@ -5451,7 +5451,7 @@ struct DispatcharrVODProviderRelation: Decodable, Identifiable {
     }
 
     /// Server-computed quality summary. Every field is optional and the
-    /// whole object is frequently null — fall back to containerExtension.
+    /// whole object is frequently null, fall back to containerExtension.
     struct QualityInfo: Decodable {
         let quality: String?
         let resolution: String?
@@ -5611,8 +5611,8 @@ struct DispatcharrVODProviderMedia: Decodable {
 }
 
 // Dispatcharr embeds artwork as a nested "logo" object on every VOD item.
-// url  — full absolute URL (TMDB CDN or external); no auth required.
-// cacheURL — proxied through this Dispatcharr instance; requires ApiKey auth.
+// url , full absolute URL (TMDB CDN or external); no auth required.
+// cacheURL, proxied through this Dispatcharr instance; requires ApiKey auth.
 struct DispatcharrVODLogo: Decodable {
     let url: String?
     let cacheURL: String?
@@ -5626,7 +5626,7 @@ struct DispatcharrVODLogo: Decodable {
 /// v1.6.12: lean view onto Dispatcharr's `custom_properties` JSON
 /// blob. Dispatcharr stores TMDB-derived metadata (cast, director,
 /// trailers, backdrops, dates, etc.) under arbitrary keys inside this
-/// field on Movie / Series / Episode rows — see Dispatcharr's
+/// field on Movie / Series / Episode rows, see Dispatcharr's
 /// `apps/vod/tasks.py` (`refresh_movie_advanced_data`,
 /// `process_series_batch`). Only the keys we surface in the UI are
 /// decoded here; the giant `detailed_info` / `movie_data` sub-dicts
@@ -5643,7 +5643,7 @@ struct DispatcharrVODCustomProperties: Decodable {
     let trailer: String?
     let backdropPath: [String]?
     let posterPath: String?
-    /// Comma-separated cast list — sometimes under `cast`, sometimes
+    /// Comma-separated cast list, sometimes under `cast`, sometimes
     /// under `actors`. Whichever is non-nil, that's the one we keep.
     let cast: String?
     let director: String?
@@ -5669,12 +5669,12 @@ struct DispatcharrVODCustomProperties: Decodable {
     /// per-episode-specific value.
     let crew: String?
 
-    /// v1.6.17 — per-item category id (string in JSON, integer-shaped
+    /// v1.6.17, per-item category id (string in JSON, integer-shaped
     /// in practice, e.g. "1136"). The Series model has no top-level
     /// `category` field in Dispatcharr's schema; the only place a
     /// VOD item's category appears in the list response is here, in
     /// `custom_properties.category_id`. We use it to group items
-    /// client-side after a single unfiltered fetch — see the rationale
+    /// client-side after a single unfiltered fetch, see the rationale
     /// in `VODStore.loadMovies` / `loadSeries` for why we abandoned
     /// the documented `?category=` query parameter.
     let categoryID: String?
@@ -5724,7 +5724,7 @@ struct DispatcharrVODCustomProperties: Decodable {
 
         director = c.decodeFlexibleString(forKey: .director)
 
-        // episode_run_time: int or string — accept both.
+        // episode_run_time: int or string, accept both.
         if let i = try? c.decode(Int.self, forKey: .episodeRunTime) {
             episodeRunTime = i
         } else if let s = try? c.decode(String.self, forKey: .episodeRunTime),
@@ -5760,7 +5760,7 @@ struct DispatcharrVODCategory: Decodable, Identifiable {
     let name: String
     let categoryType: String   // "movie" or "series"
     /// Per-M3U-account enable state. Dispatcharr's `/api/vod/categories/`
-    /// endpoint returns ALL categories discovered from the provider —
+    /// endpoint returns ALL categories discovered from the provider,
     /// including ones the user has toggled off in the M3U Group Filter
     /// admin UI. The `enabled` bit inside each `m3u_accounts[]` entry
     /// tells us whether this category was selected for ingest on that
@@ -5833,7 +5833,7 @@ struct DispatcharrVODMovie: Decodable, Identifiable {
     /// (ISO 8601). Drives Recently Added; nil on builds that omit it.
     let createdAt: String?
 
-    // posterURL is the logo's direct URL (no auth needed — TMDB CDN or similar).
+    // posterURL is the logo's direct URL (no auth needed, TMDB CDN or similar).
     var posterURL: String? { logo?.url }
 
     enum CodingKeys: String, CodingKey {
@@ -5877,7 +5877,7 @@ struct DispatcharrVODMovie: Decodable, Identifiable {
         }
         streams = try? c.decode([DispatcharrVODStreamOption].self, forKey: .streams)
 
-        // v1.6.12 additions — defensive decode so a stale Dispatcharr
+        // v1.6.12 additions, defensive decode so a stale Dispatcharr
         // build that omits any of these doesn't fail the whole row.
         year             = try? c.decode(Int.self, forKey: .year)
         durationSecs     = try? c.decode(Int.self, forKey: .durationSecs)
@@ -5961,7 +5961,7 @@ struct DispatcharrVODSeries: Decodable, Identifiable {
 /// Unlike the list endpoint (which returns slim typed columns and a
 /// possibly-null `custom_properties`), this action flattens the
 /// per-relation `detailed_info` blob plus the per-movie
-/// `custom_properties` plus the typed columns into a single dict —
+/// `custom_properties` plus the typed columns into a single dict,
 /// see Dispatcharr's `apps/vod/api_views.py` `MovieViewSet.provider_info`.
 ///
 /// All fields are `Optional` and decoded with `try?` so an
@@ -6053,7 +6053,7 @@ struct DispatcharrVODMovieProviderInfo: Decodable {
 /// v1.6.12: response shape for `/api/vod/series/<id>/provider-info/`.
 /// Mirrors the movie provider-info action but keeps `custom_properties`
 /// nested (Dispatcharr's `series_info()` endpoint doesn't flatten the
-/// dict the way `MovieViewSet.provider_info` does — see
+/// dict the way `MovieViewSet.provider_info` does, see
 /// `apps/vod/api_views.py.SeriesViewSet.series_info`). The nested
 /// blob carries the same TMDB-derived keys we already decode for
 /// movies (cast, director, backdrop_path, youtube_trailer, country,
@@ -6129,7 +6129,7 @@ struct DispatcharrVODEpisode: Decodable, Identifiable {
     // v1.6.12: episode-specific TMDB columns + custom_properties.
     // The episode `customProperties` shape is leaner than movie's
     // (just `info`, `crew`, `movie_image`, `backdrop_path`,
-    // `season_number`) — we reuse the same struct because all of its
+    // `season_number`), we reuse the same struct because all of its
     // fields are optional and the keys we care about (backdrop) are
     // a superset.
     let airDate: String?
@@ -6183,13 +6183,13 @@ struct DispatcharrVODEpisode: Decodable, Identifiable {
             ?? (try? c.decode(String.self, forKey: .plot))
             ?? (try? c.decode(String.self, forKey: .overview))
         // v1.6.16.x: Dispatcharr's actual response uses a `providers`
-        // array, not `streams` — the field names match
+        // array, not `streams`, the field names match
         // `DispatcharrVODStreamOption` won't apply directly because
         // the wire shape nests differently (each provider object
         // has `id`, `episode`, `m3u_account`, no top-level
         // `stream_id`). API verification confirms the legacy
         // `streams` key never appears in current Dispatcharr
-        // builds. We accept the nil here — `proxyEpisodeURL`
+        // builds. We accept the nil here, `proxyEpisodeURL`
         // happily generates a working stream URL without
         // `preferredStreamID` (Dispatcharr picks the default
         // provider server-side). If a forked Dispatcharr build

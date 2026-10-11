@@ -22,7 +22,7 @@ struct OnDemandView: View {
 
     /// Pill pair used as the "Movies / Series" segment selector on
     /// both platforms. On both tvOS and iOS/iPadOS the pills sit
-    /// above the inner media grid as a plain VStack child — this
+    /// above the inner media grid as a plain VStack child, this
     /// keeps them clear of iPadOS 18+'s floating TabView capsule,
     /// which overlapped the pills when they were attached via
     /// `.safeAreaInset(edge: .top)` on MoviesView/TVShowsView.
@@ -47,7 +47,7 @@ struct OnDemandView: View {
 
     var body: some View {
         // ZStack with an explicit Color.appBackground at the back so
-        // the entire tab — pill area AND grid area — shares the same
+        // the entire tab, pill area AND grid area, shares the same
         // dark blue. Without this, the pill row region on tvOS used
         // the default TabView background (a lighter blue) while the
         // inner MoviesView/TVShowsView's own ZStack painted the dark
@@ -117,14 +117,14 @@ struct OnDemandView: View {
     /// reads as part of the app content, not the TabView's chrome.
     ///
     /// iPad needs extra top padding because iPadOS 18+'s floating
-    /// TabView capsule does NOT consume top safe area — content
+    /// TabView capsule does NOT consume top safe area, content
     /// placed at the view's safe-area top still ends up visually
     /// behind the floating capsule (see
     /// `https://developer.apple.com/documentation/swiftui/tabview`
     /// changelog for iOS 18). `72pt` is tuned to clear the floating
     /// bar's ~54pt capsule height plus an 18pt breathing gap, and
     /// works in both portrait and landscape. iPhone keeps zero
-    /// extra padding because its TabView lives at the bottom —
+    /// extra padding because its TabView lives at the bottom,
     /// top of content is just below the status bar, no collision.
     /// Split View on iPad drops to `.compact` horizontalSizeClass
     /// which (per Apple) falls back to a bottom tab bar, so we

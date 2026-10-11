@@ -249,7 +249,7 @@ final class GuideStore: ObservableObject {
     /// Singleton so non-guide views (MainTabView's initial-sync
     /// loading cover, specifically) can observe `isLoading` during
     /// the XMLTV parse. Previously GuideStore was a per-view
-    /// `@StateObject` in EPGGuideView — which meant MainTabView had
+    /// `@StateObject` in EPGGuideView, which meant MainTabView had
     /// no visibility into whether XMLTV had finished, so the loading
     /// cover would dismiss on the faster JSON bulk path and drop
     /// the user into a partially-populated guide while XMLTV was
@@ -434,7 +434,7 @@ final class GuideStore: ObservableObject {
     /// `performXMLTVFetch`. `Sendable` so the compiler lets us
     /// cross the `Task.detached` boundary; all field types are
     /// value types of `Sendable` primitives (`String`, `Date`, `Int`
-    /// — `GuideProgram` itself is a struct of these).
+    /// `GuideProgram` itself is a struct of these).
     fileprivate struct XMLTVMergeResult: Sendable {
         let dict: [String: [GuideProgram]]
         let matched: Int
@@ -531,14 +531,14 @@ final class GuideStore: ObservableObject {
     func invalidateBulkGuideReuse() {
         guard lastCompletedXMLTVPass != nil else { return }
         lastCompletedXMLTVPass = nil
-        debugLog("📺 GuideStore: bulk-guide reuse invalidated — the next XMLTV request will re-download")
+        debugLog("📺 GuideStore: bulk-guide reuse invalidated, the next XMLTV request will re-download")
     }
 
     /// Un-latch a server's EPG refusal state so the next fetch is a real
     /// attempt. The latches exist to stop the app re-asking a refusing
     /// provider hundreds of times per session (measured 155 xmltv.php
     /// repeats, 5,374 get_short_epg calls), but a 403 is NOT always
-    /// permanent — Cloudflare rate-limits lift, bans expire. Without a reset,
+    /// permanent, Cloudflare rate-limits lift, bans expire. Without a reset,
     /// one transient 403 silenced EPG for the rest of the process and even
     /// Settings → Refresh EPG Data could not recover; a user who purged their
     /// cache on that screen was left with an EMPTY guide until force-quit.
@@ -548,7 +548,7 @@ final class GuideStore: ObservableObject {
         let hadRefusal = Self.xmltvRefused.remove(serverKey) != nil
         let hadExhausted = Self.xtreamFallbackExhausted.remove(serverKey) != nil
         if hadRefusal || hadExhausted {
-            debugLog("📺 GuideStore: cleared EPG refusal latches for \(serverKey.prefix(8)) (refused=\(hadRefusal), fallbackExhausted=\(hadExhausted)) — next fetch is a real attempt")
+            debugLog("📺 GuideStore: cleared EPG refusal latches for \(serverKey.prefix(8)) (refused=\(hadRefusal), fallbackExhausted=\(hadExhausted)), next fetch is a real attempt")
         }
     }
 
@@ -565,14 +565,14 @@ final class GuideStore: ObservableObject {
         return keys
     }
 
-    /// Signature of the last seedEPGCache run — "serverID|channelCount|programCount".
+    /// Signature of the last seedEPGCache run, "serverID|channelCount|programCount".
     /// Warm relaunch fires `seedEPGCache` three times with identical
     /// inputs (MainTabView.task after loadFromCache, EPGGuideView.task
     /// after its loadFromCache, and the onChange handler when
     /// isEPGLoading flips false). The write is actor-serialized and
     /// idempotent, but iterating 2183 channel refs + snapshotting a
     /// 97k-entry dict three times is pure wasted CPU. If a caller
-    /// arrives with the same signature as the last run, we skip —
+    /// arrives with the same signature as the last run, we skip,
     /// the first call already populated the EPGCache with the same
     /// data. Synchronous set-before-suspend means concurrent callers
     /// on the same @MainActor won't race.
@@ -622,7 +622,7 @@ final class GuideStore: ObservableObject {
         // that caused the contamination this section exists to prevent.
         lastCompletedXMLTVPass = nil
         // The incoming playlist gets a fresh EPG attempt even if it was
-        // refusal-latched earlier in the session — see resetEPGRefusalLatches.
+        // refusal-latched earlier in the session, see resetEPGRefusalLatches.
         resetEPGRefusalLatches(forServerKey: serverID)
         // Per-cell prefetches belong to the outgoing playlist too. Their
         // merge path also re-checks display ownership (a task already past
@@ -641,7 +641,7 @@ final class GuideStore: ObservableObject {
         defer { GuideSignposts.signposter.endInterval("guide.commit", signpostState) }
         debugLog("[MEM] commitPrograms begin rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         guard displayedServerID == nil || displayedServerID == serverID else {
-            debugLog("📺 GuideStore: DISCARDED stale \(source) write for \(serverID.prefix(8)) — guide now displays \(displayedServerID!.prefix(8))")
+            debugLog("📺 GuideStore: DISCARDED stale \(source) write for \(serverID.prefix(8)), guide now displays \(displayedServerID!.prefix(8))")
             return false
         }
         // Inside a batch the write lands on the staging map; endBatch publishes
@@ -667,7 +667,7 @@ final class GuideStore: ObservableObject {
         // Android carried the same bug (fixed there 2026-08-20); Logan hit it
         // on the Streamer as "the guide shows for a second, then disappears".
         if !programs.isEmpty && !dict.contains(where: { !$0.value.isEmpty }) {
-            debugLog("📺 GuideStore: REJECTED empty \(source) write — keeping the existing guide")
+            debugLog("📺 GuideStore: REJECTED empty \(source) write, keeping the existing guide")
             return false
         }
         // Identical-content guard (Logan 2026-09-12). session8 shows the launch
@@ -754,7 +754,7 @@ final class GuideStore: ObservableObject {
         return result
     }
 
-    /// Phase 0 — load persisted EPG from SwiftData. Returns true if cache was fresh enough.
+    /// Phase 0, load persisted EPG from SwiftData. Returns true if cache was fresh enough.
     ///
     /// Scopes the query to the given `serverID` so EPG data from a
     /// previously-configured server (e.g. the user deleted an Xtream Codes
@@ -779,7 +779,7 @@ final class GuideStore: ObservableObject {
             MainThreadWatchdog.shared.notePublish("loadFromCache replay #\(replayCount)")
             return cached.isFresh
         }
-        // In-flight shortcut — see `inFlightLoadTask` doc comment.
+        // In-flight shortcut, see `inFlightLoadTask` doc comment.
         // Without this, two concurrent callers that both arrive
         // before the first fetch completes would each spawn their
         // own off-main fetch and pay for the 97k-row read twice.
@@ -791,12 +791,12 @@ final class GuideStore: ObservableObject {
         // Snapshot config + container for the off-main fetch. On the
         // torture playlist, `modelContext.fetch` returns ~97k
         // EPGProgram rows and we then wrap each one in a GuideProgram
-        // while bucketing by channelID — that's a 2-3 second main-
+        // while bucketing by channelID, that's a 2-3 second main-
         // thread hang. We move both the fetch and the dict build to
         // a background ModelContext (same pattern as saveToCache
         // below) so the initial-sync loading cover keeps advancing
         // instead of freezing. `EPGProgram` instances themselves
-        // never cross the thread boundary — they're read + converted
+        // never cross the thread boundary, they're read + converted
         // to plain `GuideProgram` structs on the bg context; only
         // the resulting Sendable dict (plus counts) comes back.
         let container = modelContext.container
@@ -1000,7 +1000,7 @@ final class GuideStore: ObservableObject {
         let result = await fetchTask.value
         // Only clear if we're still the registered in-flight task
         // for this serverID. If a caller with a different serverID
-        // overwrote us mid-fetch (extreme edge case — server switch
+        // overwrote us mid-fetch (extreme edge case, server switch
         // during initial sync), we leave their entry alone.
         if inFlightLoadTask?.serverID == serverID {
             inFlightLoadTask = nil
@@ -1050,7 +1050,7 @@ final class GuideStore: ObservableObject {
     /// row in SwiftData on a background context (matches the
     /// `pruneOrphanedEPGPrograms` pattern in `AerioApp.swift`). The
     /// `await … .value` form means callers can sequence a fresh
-    /// fetch right after — typical pattern is
+    /// fetch right after, typical pattern is
     /// `await purgeAllPrograms(...)` followed by
     /// `await ChannelStore.shared.forceRefresh(servers:)`.
     func purgeAllPrograms(modelContext: ModelContext) async {
@@ -1074,7 +1074,7 @@ final class GuideStore: ObservableObject {
     /// is `ServerDetailView`'s "EPG Cache" section.
     ///
     /// In-memory state is only flushed when the purged server is
-    /// the currently-active one — `programs` is a single dictionary
+    /// the currently-active one, `programs` is a single dictionary
     /// scoped to whichever server `ChannelStore` last loaded, so
     /// blowing it away while a different server is active would
     /// hide a fresh guide that has nothing to do with the user's
@@ -1089,7 +1089,7 @@ final class GuideStore: ObservableObject {
     ///   - isActiveServer: callers know whether this purge applies
     ///     to the currently-loaded server; only that case wipes the
     ///     in-memory `programs` dictionary.
-    ///   - modelContext: any `MainActor` context — used to grab the
+    ///   - modelContext: any `MainActor` context, used to grab the
     ///     `ModelContainer` so the actual delete can run on a
     ///     background context.
     func purgePrograms(
@@ -1166,12 +1166,12 @@ final class GuideStore: ObservableObject {
         let container = modelContext.container
         let snapshot = programs
         guard snapshot.contains(where: { !$0.value.isEmpty }) else {
-            debugLog("📺 GuideStore: skipped saveToCache — nothing to save (refusing to blank the cache)")
+            debugLog("📺 GuideStore: skipped saveToCache, nothing to save (refusing to blank the cache)")
             return
         }
         let signature = programsSignature(snapshot)
         if lastSavedSignature[serverID] == signature {
-            debugLog("📺 GuideStore.saveToCache: skipped — guide unchanged since the last save (server \(serverID))")
+            debugLog("📺 GuideStore.saveToCache: skipped, guide unchanged since the last save (server \(serverID))")
             return
         }
         lastSavedSignature[serverID] = signature
@@ -1296,7 +1296,7 @@ final class GuideStore: ObservableObject {
             let gp = GuideProgram(channelID: ch.id, title: title,
                                   description: desc, start: start, end: end, category: "")
             if result[ch.id] == nil || result[ch.id]?.isEmpty == true {
-                // No programs yet for this channel — seed it
+                // No programs yet for this channel, seed it
                 result[ch.id] = [gp]
                 mutated = true
             } else if !desc.isEmpty, var list = result[ch.id] {
@@ -1319,7 +1319,7 @@ final class GuideStore: ObservableObject {
         // Only fire @Published if we actually changed anything. On
         // warm relaunch where loadFromCache already populated 97k
         // programs with descriptions, the loop above does nothing
-        // useful — but the unconditional `programs = result`
+        // useful, but the unconditional `programs = result`
         // re-assignment still triggers SwiftUI invalidations on
         // three observers (MainTabView, EPGGuideView,
         // ChannelListView). Skipping the assignment when nothing
@@ -1332,7 +1332,7 @@ final class GuideStore: ObservableObject {
     /// Drops programs that ended more than an hour ago and empties their
     /// channel keys, so the resident `programs` dict tracks the live window
     /// instead of accumulating every aired program for the process lifetime
-    /// (audit P1 — the dominant steady-state EPG memory cost on Apple TV; the
+    /// (audit P1, the dominant steady-state EPG memory cost on Apple TV; the
     /// SwiftData cache already purges `endTime < hourAgo`, this mirrors it in
     /// memory). Only mutates @Published state when something was actually
     /// removed, so a no-op foreground doesn't churn the guide. Aired programs
@@ -1853,10 +1853,10 @@ final class GuideStore: ObservableObject {
         guard removedAny else { return }
         let total = trimmed.values.reduce(0) { $0 + $1.count }
         programs = trimmed
-        debugLog("📺 GuideStore.trimExpiredPrograms: trimmed resident EPG to live window — \(total) programs across \(trimmed.count) channels")
+        debugLog("📺 GuideStore.trimExpiredPrograms: trimmed resident EPG to live window, \(total) programs across \(trimmed.count) channels")
     }
 
-    /// Phase 2 — async: fetch upcoming programs to fill in the timeline beyond "now playing."
+    /// Phase 2, async: fetch upcoming programs to fill in the timeline beyond "now playing."
     /// Loads an initial batch quickly, then backfills remaining channels at lower priority.
     @discardableResult
     func fetchUpcoming(
@@ -1988,7 +1988,7 @@ final class GuideStore: ObservableObject {
 
             // Only when the provider has no usable bulk guide: walk channels
             // individually via get_short_epg. Also unbatched, for a different
-            // reason — the walk latches itself off after one run per session
+            // reason, the walk latches itself off after one run per session
             // (`xtreamFallbackExhausted`), so under the old batching only the
             // FIRST batch ever ran and the remaining batches no-opped. Passing
             // the full list means the walk's own 300-channel cap decides the
@@ -2169,7 +2169,7 @@ final class GuideStore: ObservableObject {
         // EPG feature (custom-pattern + standard no-EPG fallback)
         // synthesizes program entries whose `tvg_id` is NOT the
         // channel's real tvg_id but the channel's UUID string
-        // (`str(channel.uuid)` in Dispatcharr's Python source — see
+        // (`str(channel.uuid)` in Dispatcharr's Python source, see
         // `apps/epg/api_views.py::EPGGridAPIView`). Without this
         // mapping, every channel relying on Dummy EPG would appear
         // blank in the Aerio guide because the first-pass
@@ -2184,7 +2184,7 @@ final class GuideStore: ObservableObject {
             uniquingKeysWith: { first, _ in first }
         )
 
-        // Try the EPG grid endpoint first — returns -1h to +24h in one request with
+        // Try the EPG grid endpoint first, returns -1h to +24h in one request with
         // synthetic dummy programs for channels without EPG data.
         lastDispatcharrMaps = DispatcharrGridMaps(serverID: categoryServerID,
                                                   tvgIDToChannelIDs: tvgIDToChannelIDs,
@@ -2256,11 +2256,11 @@ final class GuideStore: ObservableObject {
             // (window-stripped) dict, and report failure so the caller runs its
             // fallback instead of treating the blank as fresh data.
             guard !gridPrograms.isEmpty else {
-                debugLog("📺 Dispatcharr: EPG grid returned 0 programmes — discarding batch, falling back")
+                debugLog("📺 Dispatcharr: EPG grid returned 0 programmes, discarding batch, falling back")
                 return false
             }
             shouldCommitBatch = true
-            return true // Grid endpoint succeeded — no need for fallback
+            return true // Grid endpoint succeeded, no need for fallback
         } catch {
             #if DEBUG
             debugLog("📺 Dispatcharr: EPG grid failed (\(error)), falling back to current+bulk approach")
@@ -3433,7 +3433,7 @@ final class GuideStore: ObservableObject {
     /// whole point. One `xmltv.php` request returns the programmes for the
     /// ENTIRE playlist, so it is a whole-playlist operation that must run once.
     /// It used to live at the top of the per-channel function, which
-    /// `fetchUpcoming` called once per 20-channel batch — so a single guide
+    /// `fetchUpcoming` called once per 20-channel batch, so a single guide
     /// load re-downloaded and re-parsed the complete feed once per batch.
     /// Measured 2026-08-11: 91 downloads of a 44 MB feed in five minutes on one
     /// provider, and 576 downloads of another's 33 MB feed (~19 GB) in a single
@@ -3551,7 +3551,7 @@ final class GuideStore: ObservableObject {
                             // Aerio integration fix: PR #13's tuple wrapping
                             // (the inner.addTask now returns `(progs, ok)`)
                             // breaks Swift's type inference on the
-                            // compactMap below — the closure has both
+                            // compactMap below, the closure has both
                             // `return nil` and `return GuideProgram(...)`
                             // branches, and the outer tuple makes
                             // `ElementOfResult` ambiguous between
@@ -3660,7 +3660,7 @@ final class GuideStore: ObservableObject {
         debugLog("📺 Dispatcharr category enrichment: \(byChannel.count)/\(currentByChannelID.count) channels got categories, \(repeatChannels.count) reruns")
         // v1.7.x diagnostic: print a sample of what came back. If this
         // line says `sample=` with an empty suffix or `nil`, Dispatcharr
-        // is returning empty categories arrays — the data simply isn't
+        // is returning empty categories arrays, the data simply isn't
         // there (XMLTV source dropped it, Dummy EPG, etc.).
         let sample = byChannel.first.map { "\($0.key.prefix(16))→\($0.value)" } ?? "<none>"
         debugLog("📺 enrich sample: \(sample)")
@@ -3792,10 +3792,10 @@ final class GuideStore: ObservableObject {
     /// must match a `<channel id="...">` earlier in the document, but
     /// the spec is silent on what that id looks like. In the wild we
     /// see three patterns:
-    ///   • tvg_id (e.g. "espn.us") — what most pure-XMLTV sources use
-    ///   • channel number (e.g. "5") — what Dispatcharr's `/output/epg`
+    ///   • tvg_id (e.g. "espn.us"), what most pure-XMLTV sources use
+    ///   • channel number (e.g. "5"), what Dispatcharr's `/output/epg`
     ///     uses by default when the `tvg_id_source` query param isn't set
-    ///   • Dispatcharr channel UUID — used for synthetic "Dummy EPG"
+    ///   • Dispatcharr channel UUID, used for synthetic "Dummy EPG"
     ///     entries on channels that have no upstream XMLTV mapping
     ///
     /// We build maps for all three (case-insensitive) and try them in
@@ -3831,7 +3831,7 @@ final class GuideStore: ObservableObject {
             categoryServerID: categoryServerID,
             replaceExisting: replaceExisting
         )
-        // In-flight coalescing — see `inFlightXMLTVTask` doc. On
+        // In-flight coalescing, see `inFlightXMLTVTask` doc. On
         // cold install two call sites hit this method with the
         // same URL back-to-back; without dedupe we pay the XMLTV
         // download + parse twice (~3 min each on the 98k-program
@@ -3841,7 +3841,7 @@ final class GuideStore: ObservableObject {
             return await inFlight.task.value
         }
 
-        // Recently-completed reuse — see `lastCompletedXMLTVPass`. Catches the
+        // Recently-completed reuse, see `lastCompletedXMLTVPass`. Catches the
         // sequential duplicates that in-flight coalescing structurally cannot.
         let requestedKeys = Self.channelMatchKeys(channels)
         if let done = lastCompletedXMLTVPass,
@@ -3851,7 +3851,7 @@ final class GuideStore: ObservableObject {
            windowEnd <= done.windowEnd + Self.xmltvReuseWindow,
            requestedKeys.isSubset(of: done.channelKeys) {
             let age = Int(Date().timeIntervalSince(done.at))
-            debugLog("📺 GuideStore.fetchXMLTVFromURL: reusing the bulk guide fetched \(age)s ago from \(url.host ?? "?") — these \(channels.count) channels were already merged from it, skipping the re-download")
+            debugLog("📺 GuideStore.fetchXMLTVFromURL: reusing the bulk guide fetched \(age)s ago from \(url.host ?? "?"), these \(channels.count) channels were already merged from it, skipping the re-download")
             return true
         }
 
@@ -3886,7 +3886,7 @@ final class GuideStore: ObservableObject {
         // switches playlists mid-parse, performXMLTVFetch's merge is DISCARDED
         // by commitPrograms but it still returns true (deliberately, so the
         // caller does not run its per-channel backstop for a playlist nobody
-        // is looking at). beginDisplaying cleared this latch — but that ran
+        // is looking at). beginDisplaying cleared this latch, but that ran
         // BEFORE this line, so recording on `success` alone would re-create a
         // pass whose data was never kept. Switching back within the reuse
         // window would then skip a real fetch. Only a merge that landed on the
@@ -3911,15 +3911,15 @@ final class GuideStore: ObservableObject {
     /// playlist a full XMLTV parse yields ~98k programs, each
     /// triggering an O(m) duplicate scan over the target channel's
     /// current list (m ≈ 45 programs/channel). That's ~4–5 million
-    /// comparison ops plus 98k `list.sort` calls — a 5+ second
+    /// comparison ops plus 98k `list.sort` calls, a 5+ second
     /// main-thread freeze at the end of cold-install setup
     /// (observed as `MAIN THREAD FROZEN >5s!` in the watchdog logs
     /// right before the initial-sync cover dismissed).
     ///
     /// Off-main, the merge becomes invisible to the user. The
-    /// `@Published programs` property fires exactly once — the
+    /// `@Published programs` property fires exactly once, the
     /// single `programs = result.dict` assignment after the
-    /// detached task returns — so SwiftUI invalidations land the
+    /// detached task returns, so SwiftUI invalidations land the
     /// same way they did with the old `beginBatch`/`endBatch`
     /// pattern, just without blocking the main thread in between.
     ///
@@ -3931,7 +3931,7 @@ final class GuideStore: ObservableObject {
     /// Dispatcharr XMLTV feed the stubs cover the same channels
     /// the XMLTV feed does, so the overwrite is a no-op. Channels
     /// with partial XMLTV coverage lose their stub until the next
-    /// per-cell prefetch lands — acceptable given the alternative
+    /// per-cell prefetch lands, acceptable given the alternative
     /// is a multi-second frozen UI.
     /// Returns `true` when the fetch+parse+merge completed and at
     /// least some programs landed in `programs`. Returns `false` on
@@ -4047,7 +4047,7 @@ final class GuideStore: ObservableObject {
             uniquingKeysWith: { first, _ in first }
         )
         let hostLabel = url.host ?? "?"
-        // Snapshot the current programs dict. Swift dict COW — this
+        // Snapshot the current programs dict. Swift dict COW, this
         // is an O(1) reference bump, not a full copy. The detached
         // task below mutates its own local copy; the first write
         // triggers the deep copy, off-main. `self.programs` itself
@@ -4063,7 +4063,7 @@ final class GuideStore: ObservableObject {
             var missed = 0
             // Collect currently-airing categories keyed by channel
             // id so we can push them back to ChannelStore after the
-            // loop — that makes the Live TV list view's "Tint
+            // loop, that makes the Live TV list view's "Tint
             // Channel Cards" stripe work off the same XMLTV source
             // as the guide itself.
             let now = Date()
@@ -4097,7 +4097,7 @@ final class GuideStore: ObservableObject {
                     continue
                 }
                 matched += 1
-                // deferSort: true — a 98k-iteration loop over ~2,100
+                // deferSort: true, a 98k-iteration loop over ~2,100
                 // channels means each channel gets ~46 inserts on
                 // average; sorting per insert is 46× more work than
                 // sorting each list once at the end.
@@ -4141,7 +4141,7 @@ final class GuideStore: ObservableObject {
         // The contract below already treats zero matches as "did not land"; it
         // just used to say so 22 lines too late to protect anything.
         guard result.matched > 0 else {
-            debugLog("📺 XMLTV \(hostLabel): 0 programs matched — guide left untouched, caller falls through to its backstop")
+            debugLog("📺 XMLTV \(hostLabel): 0 programs matched, guide left untouched, caller falls through to its backstop")
             return false
         }
         guard commitPrograms(result.dict, for: categoryServerID, source: "xmltv-merge") else {
@@ -4174,7 +4174,7 @@ final class GuideStore: ObservableObject {
     /// fetch) or returned from a per-channel fetch. Reset by
     /// `resetPrefetchCache()` after bulk refresh / pull-to-refresh so
     /// the set doesn't poison subsequent scroll cycles (GH #3:
-    /// "scroll past and back = empty" — the set persisted forever
+    /// "scroll past and back = empty", the set persisted forever
     /// even when the per-channel fetch had returned zero programs,
     /// so the user could never recover without switching views).
     private var fetchedChannelIDs: Set<String> = []
@@ -4185,7 +4185,7 @@ final class GuideStore: ObservableObject {
     /// fire `.onAppear` in bursts on Guide open (3-8 at once on tvOS,
     /// more on iOS), and without this gate every burst turned into
     /// that many concurrent `/api/epg/programs/?tvg_id=...` requests
-    /// — enough to pin every uwsgi worker on large Dispatcharr
+    /// enough to pin every uwsgi worker on large Dispatcharr
     /// instances and freeze the whole container.
     private var lastPrefetchTask: Task<Void, Never>?
 
@@ -4201,7 +4201,7 @@ final class GuideStore: ObservableObject {
     /// for this channel" from "a newer prefetchIfNeeded replaced me
     /// while I was running". Without this identity guard the task
     /// would remove whatever entry happened to be under the key,
-    /// including a newer submission's entry — which would then
+    /// including a newer submission's entry, which would then
     /// leak (no way to cancel it on disappear) and could run
     /// concurrently with a subsequent submission, defeating the
     /// serialization goal.
@@ -4215,7 +4215,7 @@ final class GuideStore: ObservableObject {
     /// per-cell `/api/epg/programs/` requests (overloaded large
     /// Dispatcharr instance, upstream EPG provider flaking, etc.),
     /// the prior behaviour was to fire a 5s-timeout request for every
-    /// visible cell — uselessly burning the server's uwsgi workers
+    /// visible cell, uselessly burning the server's uwsgi workers
     /// AND our radio for hundreds of guaranteed-to-fail requests.
     /// Once three per-cell fetches in a row time out we trip the
     /// breaker and stop firing until `resetPrefetchCache()` clears
@@ -4223,7 +4223,7 @@ final class GuideStore: ObservableObject {
     private var consecutivePrefetchTimeouts: Int = 0
     private var prefetchCircuitBreakerTripped: Bool = false
     /// Timestamp of the most recent breaker trip. `resetPrefetchCache`
-    /// consults this to apply a cooldown — if the breaker tripped
+    /// consults this to apply a cooldown, if the breaker tripped
     /// recently (within `prefetchBreakerCooldown`), a view-reappear-
     /// triggered reset keeps the breaker tripped instead of giving
     /// the server another round of 3 timeouts. Only a "long enough"
@@ -4236,17 +4236,17 @@ final class GuideStore: ObservableObject {
     /// pull-to-refresh so that subsequent per-cell `.onAppear`
     /// handlers are free to re-check. Without this, channels that
     /// were fetched during the previous session's scroll remain
-    /// flagged and the per-channel prefetch never retries — even
+    /// flagged and the per-channel prefetch never retries, even
     /// when the bulk fetch has since populated data.
     func resetPrefetchCache() {
         fetchedChannelIDs.removeAll(keepingCapacity: true)
-        // Also drop any pending debounce tasks — they're about to
+        // Also drop any pending debounce tasks, they're about to
         // fire against stale state. Active in-flight fetches stay
         // and finish naturally; the serial chain just drains.
         for entry in pendingPrefetchTasks.values { entry.task.cancel() }
         pendingPrefetchTasks.removeAll(keepingCapacity: true)
         // Breaker reset is gated on a cooldown. This function fires
-        // on every `.task(id: channels.count)` activation — which
+        // on every `.task(id: channels.count)` activation, which
         // includes view re-appear after backing out of playback, not
         // just genuine pull-to-refresh. Without the cooldown, we'd
         // un-trip the breaker every time the user stops a stream
@@ -4265,7 +4265,7 @@ final class GuideStore: ObservableObject {
     }
 
     /// Timeout detector shared with the fetch task. Matches
-    /// `VODStore.isTimeoutError` — kept locally so we don't
+    /// `VODStore.isTimeoutError`, kept locally so we don't
     /// introduce a new cross-file shared helper just yet. Marked
     /// `nonisolated` so it can be called from inside `withTaskGroup`
     /// closures (which run off the MainActor).
@@ -4284,7 +4284,7 @@ final class GuideStore: ObservableObject {
     /// channel. Called from the cell's `.onDisappear` so a row that
     /// scrolls off-screen before its 250ms timer elapses doesn't
     /// waste a server request. In-flight fetches (past the debounce)
-    /// are allowed to finish — their data is still useful when the
+    /// are allowed to finish, their data is still useful when the
     /// user scrolls back.
     func cancelPrefetch(channelID: String) {
         pendingPrefetchTasks[channelID]?.task.cancel()
@@ -4296,7 +4296,7 @@ final class GuideStore: ObservableObject {
     /// already populate its future programs.
     func prefetchIfNeeded(channel: ChannelDisplayItem, servers: [ServerConnection]) {
         guard !fetchedChannelIDs.contains(channel.id) else { return }
-        // Circuit breaker — don't fire more per-cell requests once
+        // Circuit breaker, don't fire more per-cell requests once
         // we've seen three consecutive timeouts. The serial chain
         // would otherwise keep working its way through the entire
         // visible channel list, each cell taking 5s to fail.
@@ -4327,7 +4327,7 @@ final class GuideStore: ObservableObject {
         let futureThreshold = Date().addingTimeInterval(30 * 60) // 30 min
         let hasUpcoming = (programs[channel.id] ?? []).contains { $0.end > futureThreshold }
         if hasUpcoming {
-            // Cache hit — bulk fetch covered us. Mark as fetched
+            // Cache hit, bulk fetch covered us. Mark as fetched
             // because no per-channel work is needed.
             fetchedChannelIDs.insert(channel.id)
             return
@@ -4364,7 +4364,7 @@ final class GuideStore: ObservableObject {
         // time. The task can outlive a playlist switch (beginDisplaying now
         // also cancels these, but a task already past its cancellation checks
         // still completes), and `mergeProgram` writes straight into `programs`
-        // where bare stream_id keys collide across playlists — the exact
+        // where bare stream_id keys collide across playlists, the exact
         // contamination the display-ownership gate exists to stop.
         let prefetchServerKey = server.id.uuidString
 
@@ -4376,14 +4376,14 @@ final class GuideStore: ObservableObject {
 
         // Tail of the serial chain as of this call. We capture it
         // here so each new prefetch awaits the previous one's
-        // completion before issuing its own network request —
+        // completion before issuing its own network request,
         // effectively max-concurrency=1 across all prefetches.
         let previousTail = lastPrefetchTask
 
         // Submission token for this specific prefetch. Used by the
         // cleanup block at the end of the Task to verify we're still
         // the entry under `pendingPrefetchTasks[channelID]` before
-        // removing it — a newer prefetchIfNeeded for the same
+        // removing it, a newer prefetchIfNeeded for the same
         // channel could have replaced us while our fetch was running.
         let submissionID = UUID()
 
@@ -4400,7 +4400,7 @@ final class GuideStore: ObservableObject {
             // Serial gate. Waiting on `previousTail.value` chains
             // this fetch behind every earlier-submitted prefetch.
             // If the tail was cancelled, its `value` resolves
-            // immediately — we don't care about its result here,
+            // immediately, we don't care about its result here,
             // just the ordering barrier.
             await previousTail?.value
             if Task.isCancelled { return }
@@ -4409,7 +4409,7 @@ final class GuideStore: ObservableObject {
             // a sleep task). Task-group result is now a tuple
             // (programs, didTimeout) so the circuit breaker below can
             // distinguish "server answered empty" from "server didn't
-            // answer" — we only count the latter against the breaker.
+            // answer", we only count the latter against the breaker.
             let fetchResult: ([GuideProgram], Bool) = await withTaskGroup(of: ([GuideProgram], Bool).self) { group in
                 group.addTask {
                     switch serverType {
@@ -4488,7 +4488,7 @@ final class GuideStore: ObservableObject {
                 // commitPrograms, applied to the one write path that does
                 // not go through it.
                 guard self.displayedServerID == nil || self.displayedServerID == prefetchServerKey else {
-                    debugLog("📺 GuideStore.prefetch: DISCARDED stale per-cell result for \(prefetchServerKey.prefix(8)) — guide now displays \(self.displayedServerID!.prefix(8))")
+                    debugLog("📺 GuideStore.prefetch: DISCARDED stale per-cell result for \(prefetchServerKey.prefix(8)), guide now displays \(self.displayedServerID!.prefix(8))")
                     return
                 }
                 // One write per prefetch (iPad log 2026-10-07 22:33:11 to
@@ -4509,7 +4509,7 @@ final class GuideStore: ObservableObject {
                 // Update the circuit breaker. A timeout here increments
                 // the consecutive counter; any other outcome (success,
                 // empty success, non-timeout error) resets it. Three in
-                // a row trips the breaker — subsequent prefetchIfNeeded
+                // a row trips the breaker, subsequent prefetchIfNeeded
                 // calls short-circuit until resetPrefetchCache clears
                 // it (pull-to-refresh / bulk re-fetch).
                 if didTimeout {
@@ -4517,7 +4517,7 @@ final class GuideStore: ObservableObject {
                     if self.consecutivePrefetchTimeouts >= 3 && !self.prefetchCircuitBreakerTripped {
                         self.prefetchCircuitBreakerTripped = true
                         self.prefetchBreakerTrippedAt = Date()
-                        debugLog("📺 GuideStore.prefetchIfNeeded: CIRCUIT BREAKER tripped — 3 consecutive per-cell timeouts, stopping per-cell prefetch for \(Int(self.prefetchBreakerCooldown))s cooldown")
+                        debugLog("📺 GuideStore.prefetchIfNeeded: CIRCUIT BREAKER tripped, 3 consecutive per-cell timeouts, stopping per-cell prefetch for \(Int(self.prefetchBreakerCooldown))s cooldown")
                         // Cancel every already-queued task in the
                         // serial chain. By the time we trip, the
                         // chain is usually dozens deep (every
@@ -4529,7 +4529,7 @@ final class GuideStore: ObservableObject {
                         // 5-second request against a server we've
                         // already decided is unresponsive. The
                         // `Task.isCancelled` checks inside the task
-                        // body catch the cancellation — cancelled
+                        // body catch the cancellation, cancelled
                         // tasks skip their fetch and return early.
                         let cancelledCount = self.pendingPrefetchTasks.count
                         for entry in self.pendingPrefetchTasks.values {
@@ -4543,7 +4543,7 @@ final class GuideStore: ObservableObject {
                 } else {
                     self.consecutivePrefetchTimeouts = 0
                 }
-                // Clear our slot in the pending map — but only if
+                // Clear our slot in the pending map, but only if
                 // we're still the registered task for this channel.
                 // A newer `.onAppear` may have replaced our entry
                 // while our fetch was running; in that case leaving
@@ -4562,7 +4562,7 @@ final class GuideStore: ObservableObject {
 
     // MARK: - Merge Helper
     /// Adds a program to the store, avoiding duplicates, and keeps
-    /// sorted by start time. MainActor-isolated wrapper — picks the
+    /// sorted by start time. MainActor-isolated wrapper, picks the
     /// right backing store (`_pendingPrograms` during a batch,
     /// `programs` otherwise) and delegates to the nonisolated static
     /// implementation so the logic can be shared with the
@@ -4609,7 +4609,7 @@ final class GuideStore: ObservableObject {
     ///
     /// `deferSort: true` lets bulk callers (the 98k-iteration XMLTV
     /// merge) postpone sorting each channel's list until after all
-    /// inserts land — one sort per channel instead of one per
+    /// inserts land, one sort per channel instead of one per
     /// insert. For the single-item callers (Dispatcharr JSON fallback,
     /// Xtream per-channel fetch) the default `false` preserves the
     /// pre-refactor contract of "list is sorted on return."
@@ -4777,7 +4777,7 @@ final class GuideStore: ObservableObject {
     /// dismissing the initial-sync loading cover. Prior version
     /// fire-and-forgot the detached work, which meant the cover
     /// could drop the user into Live TV while the seed was still
-    /// running — and the first read of `fetchUpcoming` returned
+    /// running, and the first read of `fetchUpcoming` returned
     /// the JSON bulk's category-less entries, leaving expanded
     /// schedule rows uncolored (user feedback: "still not getting
     /// per-program gradient"). Callers inside the Guide view that
@@ -4790,7 +4790,7 @@ final class GuideStore: ObservableObject {
             return
         }
 
-        // Dedupe — see `lastSeedEPGCacheSignature` doc. On warm
+        // Dedupe, see `lastSeedEPGCacheSignature` doc. On warm
         // relaunch three call sites fire this back-to-back with
         // identical inputs. The signature is set synchronously
         // BEFORE the `await Task.detached` suspension so concurrent
@@ -4833,7 +4833,7 @@ final class GuideStore: ObservableObject {
                         // Passing `category: $0.category` is the bridge
                         // that lets the List-view expanded panel render
                         // per-program gradient tints the same way the
-                        // Guide view does — both read from this same
+                        // Guide view does, both read from this same
                         // GuideStore dataset, so there's no risk of one
                         // view showing a category color the other doesn't.
                         EPGEntry(title: $0.title, description: $0.description,
@@ -5435,7 +5435,7 @@ struct EPGGuideView: View {
     // MainTabView's initial-sync loading cover (see HomeView's
     // `initialSyncKey`). Using `.shared` instead of instantiating per-view
     // also means the guide keeps its populated programs dictionary across
-    // view mounts — no more blank guide on a tab switch while XMLTV
+    // view mounts, no more blank guide on a tab switch while XMLTV
     // re-parses from scratch.
     //
     // 2026-10-03: the store itself is no longer observed. The grid
@@ -5464,7 +5464,7 @@ struct EPGGuideView: View {
     /// should land on. Set before each `.forceGuideFocus` reset to the
     /// currently-playing channel (single-stream) or the last-added
     /// tile's channel (multiview). Nil falls back to `channels.first`
-    /// — the historical default. Only set within the tvOS `.forceGuideFocus`
+    /// the historical default. Only set within the tvOS `.forceGuideFocus`
     /// handler; always nil on iOS, so the inline `focusTargetID`
     /// resolution falls through to `channels.first?.id`.
     @State private var guideFocusTargetChannelID: String? = nil
@@ -5570,7 +5570,7 @@ struct EPGGuideView: View {
 
     /// Namespace + imperative reset hook for the guide's focus
     /// scope. See ChannelListView's identical setup for the full
-    /// rationale — `resetFocus(in:)` is the only reliable way to
+    /// rationale, `resetFocus(in:)` is the only reliable way to
     /// pull focus back into the guide from a minimized mini-player
     /// tile, because tvOS's focus engine has already committed to
     /// the mini by the time a plain `@FocusState` write can fire.
@@ -5589,7 +5589,7 @@ struct EPGGuideView: View {
     // was removed 2026-09-11 (Logan).
     //
     // Before this was a computed property the grid was hardcoded to
-    // 3h forward regardless of the Settings picker — users saw
+    // 3h forward regardless of the Settings picker, users saw
     // only ~2.5 hours ahead and horizontal scroll felt broken
     // because there was nothing left to scroll to. The computed
     // form also means toggling Settings live updates the grid on
@@ -5704,7 +5704,7 @@ struct EPGGuideView: View {
     /// User-controllable guide scale (Settings → Network → Guide Display →
     /// Guide Size). Range 0.75…1.5, default 1.0. Multiplies the iOS/iPadOS/Mac
     /// layout constants below so the whole grid (column width, row height,
-    /// header height, pixels-per-hour, and per-cell font sizes — see
+    /// header height, pixels-per-hour, and per-cell font sizes, see
     /// `GuideProgramButton.cellContent`) scales together. tvOS uses fixed
     /// constants because the slider isn't exposed there.
     @AppStorage("guideScale") private var guideScaleRaw: Double = 1.0
@@ -5727,7 +5727,7 @@ struct EPGGuideView: View {
 
     private var totalGridWidth: CGFloat { pixelsPerHour * CGFloat(hoursBack + hoursForward) }
 
-    // Timer removed — time indicator uses TimelineView instead (avoids full view invalidation)
+    // Timer removed, time indicator uses TimelineView instead (avoids full view invalidation)
 
     // Time Format setting (Settings > Appearance): cached per mode inside
     // ClockFormat, so these stay cheap to read per label.
@@ -5898,7 +5898,7 @@ struct EPGGuideView: View {
     }
 
     // MARK: - Horizontal Scroll State
-    // Manual horizontal offset — only changes when user explicitly scrolls (drag/swipe).
+    // Manual horizontal offset, only changes when user explicitly scrolls (drag/swipe).
     // Focus changes do NOT cause horizontal movement.
     // Initial value positions "now" at the left edge of the visible area.
     // The literal defaults assume the legacy 1h-back window; the guide's
@@ -5958,7 +5958,7 @@ struct EPGGuideView: View {
             // guide back to the first channel. The `Color.clear`
             // anchor with `.id("guide.top")` is the first child of the
             // LazyVStack (above the ForEach), so `.scrollTo(..., anchor:
-            // .top)` pins it to the top of the scroll viewport — i.e.
+            // .top)` pins it to the top of the scroll viewport, i.e.
             // just below the fixed time-header bar (now a sibling above
             // the ScrollView, no longer a pinned section header), which
             // is exactly where the first channel row belongs.
@@ -5969,7 +5969,7 @@ struct EPGGuideView: View {
                 // tvOS 27's AttributeGraph aborts (precondition_failure,
                 // input_value_ref_slow, 0 app frames) when the pinned-
                 // section-header path reduces its DisplayList.Key /
-                // LazyPreference during scroll-recycle layout — confirmed
+                // LazyPreference during scroll-recycle layout, confirmed
                 // on-device 2026-06-16 (3 identical .ips, guide-scroll under
                 // cold-start load). A plain fixed bar above the ScrollView is
                 // visually identical (it reads `horizontalOffset` so the time
@@ -6140,7 +6140,7 @@ struct EPGGuideView: View {
             #if os(iOS)
             // Horizontal drag for scrubbing the guide timeline.
             // Uses `.simultaneousGesture` so it coexists with the
-            // outer `ScrollView(.vertical)`'s internal pan — the
+            // outer `ScrollView(.vertical)`'s internal pan, the
             // earlier approach (`HorizontalPanGestureView`, a
             // `PassthroughView` + `UIPanGestureRecognizer` overlay)
             // had been silently broken on iPad: `PassthroughView`'s
@@ -6155,7 +6155,7 @@ struct EPGGuideView: View {
             // primarily-vertical drag (row scrolling) doesn't steal
             // the horizontal offset, and `.simultaneousGesture`
             // explicitly tells SwiftUI not to race this against
-            // ScrollView's own pan — both fire in parallel.
+            // ScrollView's own pan, both fire in parallel.
             .simultaneousGesture(
                 DragGesture(minimumDistance: 10)
                     .onChanged { value in
@@ -6670,7 +6670,7 @@ struct EPGGuideView: View {
     // entirely. Specifically reported: a long-duration program
     // (3:00–5:30, overlapping the channel column) was unfocusable on
     // tvOS while a similar program on a different channel (3:00–5:00,
-    // same clamped start and offset) worked — likely due to subtle
+    // same clamped start and offset) worked, likely due to subtle
     // differences in how tvOS samples focus regions across rows in
     // the section.
     //
@@ -6687,7 +6687,7 @@ struct EPGGuideView: View {
     // Note on the removed "overflow left over the channel column"
     // comment: the previous layout claimed focused cells could
     // overflow left, but no `zIndex(1)` was ever applied to focused
-    // cells — they remained at the default `zIndex(0)`, under the
+    // cells, they remained at the default `zIndex(0)`, under the
     // channel column's `zIndex(0.5)`. Any leftward overflow was
     // therefore invisible (covered by the opaque channel column),
     // which means this simplification loses no visible behaviour.
@@ -6704,7 +6704,7 @@ struct EPGGuideView: View {
                 #if os(tvOS)
                 // Bind the channel cell (which contains a focusable
                 // `GuideChannelButton` on tvOS) to the row-level
-                // focus state. Normally left nil — used by the
+                // focus state. Normally left nil, used by the
                 // `.forceGuideFocus` notification handler on the
                 // outer ScrollView to claim focus from a minimized
                 // mini player.
@@ -6736,7 +6736,7 @@ struct EPGGuideView: View {
         }
         .frame(width: screenWidth, height: rowHeight, alignment: .leading)
         #if os(tvOS)
-        .focusSection() // each row is a distinct focus region — Down always moves to the next row
+        .focusSection() // each row is a distinct focus region, Down always moves to the next row
         #endif
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.accentPrimary.opacity(0.08)).frame(height: 1)
@@ -6749,7 +6749,7 @@ struct EPGGuideView: View {
             LiveCensus.rowDisappeared()
             // Cancel the debounced (not-yet-fired) prefetch for this
             // row. If it hasn't slept past its 250ms timer yet, no
-            // network request goes out — which is the whole point on
+            // network request goes out, which is the whole point on
             // fast scrolls where rows flicker on and off screen
             // faster than a human could read them.
             guideStore.cancelPrefetch(channelID: channel.id)
@@ -8458,7 +8458,7 @@ private struct GuideChannelButton: View {
     var body: some View {
         let _ = TabProbe.body("GuideChannelRow", key: channel.id)
         #if os(tvOS)
-        // Non-focusable label on tvOS — users select program cells to play.
+        // Non-focusable label on tvOS, users select program cells to play.
         // This prevents focus from jumping to the channel column when scrolling down.
         // tvOS long-press overlay lets users still manage favorites from here
         // without having to switch to List view.
@@ -8704,7 +8704,7 @@ private struct GuideProgramButton: View {
     var compact: Bool = false
     /// Fires the moment this cell takes focus (Channel Preview banner).
     #endif
-    // Access ReminderManager directly — @ObservedObject on a singleton
+    // Access ReminderManager directly, @ObservedObject on a singleton
     // would invalidate every program cell whenever any reminder changes.
     private var reminderManager: ReminderManager { .shared }
     /// Observed (unlike reminderManager above) so a cancelled/deleted
@@ -8722,7 +8722,7 @@ private struct GuideProgramButton: View {
     /// Multiview" for an already-staged channel.
     @ObservedObject private var multiviewStore = MultiviewStore.shared
     /// FavoritesStore lets us offer "Add/Remove from Favorites" from a
-    /// program cell's long-press menu — users expect that action to
+    /// program cell's long-press menu, users expect that action to
     /// work from anywhere they long-press in the guide, not just the
     /// channel column cell on the left.
     @EnvironmentObject private var favoritesStore: FavoritesStore
@@ -8731,7 +8731,7 @@ private struct GuideProgramButton: View {
     /// (without this, `cellBackground` would keep reading the old
     /// value through `CategoryColor.isEnabled` until SwiftUI
     /// re-rendered the cell for another reason, e.g. scroll or
-    /// focus change). The property is unused inside the body —
+    /// focus change). The property is unused inside the body,
     /// its purpose is to tie the cell's render cycle to the
     /// `AppStorage` value so SwiftUI invalidates the view on
     /// toggle. Zero-cost: reading `AppStorage` is the same lookup
@@ -9150,7 +9150,7 @@ private struct GuideProgramButton: View {
     ///
     /// Why: chaining two `.sheet(...)` modifiers on the same view
     /// (or two `.fullScreenCover(...)` on tvOS) is a known SwiftUI
-    /// foot-gun — presenting one rebuilds the view hierarchy while
+    /// foot-gun, presenting one rebuilds the view hierarchy while
     /// the other's binding is observed, which cascades back and
     /// visibly flashes any active `contextMenu` during the open
     /// animation. User report on iPad (v1.6.7 Debug): "Long press
@@ -9209,7 +9209,7 @@ private struct GuideProgramButton: View {
     /// ancestor `@Published` fire (VODStore still churning through
     /// its 779+479 categories on a slow server, for instance)
     /// cascades down to the cell, rebuilds the UIMenuElement array,
-    /// and UIKit's "menu appearing" animation fades each item in —
+    /// and UIKit's "menu appearing" animation fades each item in,
     /// which the user sees as the four menu rows dimming and
     /// brightening over and over while the menu sits open. We
     /// proved this via Equatable + `.equatable()` (didn't help
@@ -9288,7 +9288,7 @@ private struct GuideProgramButton: View {
                         onWatchCatchup(channelItem, prog)
                     }
                 }
-                // Favorite toggle first — most frequent action users take
+                // Favorite toggle first, most frequent action users take
                 // on a program cell that isn't "just play it."
                 Button(favoritesStore.isFavorite(channelItem.id)
                        ? "Remove from Favorites"
@@ -9357,7 +9357,7 @@ private struct GuideProgramButton: View {
                     }
                 }
             }
-            // #45: per-channel "Add to Collection" (guide tvOS menu) — toggle
+            // #45: per-channel "Add to Collection" (guide tvOS menu), toggle
             // membership in any existing collection (✓ = member) or create one.
             .confirmationDialog("Add to Collection", isPresented: $showCollectionPicker, titleVisibility: .visible) {
                 ForEach(ChannelCollectionsStore.shared.collections) { c in
@@ -9383,7 +9383,7 @@ private struct GuideProgramButton: View {
             } message: {
                 Text("Name the collection and choose where its pill appears in the Live TV row.")
             }
-            // tvOS: .fullScreenCover (single, item-driven) — see
+            // tvOS: .fullScreenCover (single, item-driven), see
             // `GuideCellSheet` doc for why we consolidated.
             .sheet(item: recordSheet) { sheet in
                 switch sheet {
@@ -9489,7 +9489,7 @@ private struct GuideProgramButton: View {
             } message: {
                 Text("Name the collection and choose where its pill appears in the Live TV row.")
             }
-            // iOS: single .sheet(item:) — see `GuideCellSheet` doc
+            // iOS: single .sheet(item:), see `GuideCellSheet` doc
             // for why presenting both Record + Program Info through
             // separate sheet modifiers was bad.
             .sheet(item: recordSheet) { sheet in
@@ -9684,7 +9684,7 @@ private struct GuideProgramButton: View {
     }
     #endif
 
-    // `programPreviewCard` removed — previously fed the iOS
+    // `programPreviewCard` removed, previously fed the iOS
     // `.contextMenu(menuItems:preview:)` preview slot (#23 fix in
     // v1.6.4). The header strip inside `guideProgramActionPopover`
     // now carries the same "what am I about to act on?" affordance
@@ -9719,7 +9719,7 @@ private struct GuideProgramButton: View {
     }
     #else
     private var cellBackground: Color {
-        // See tvOS branch above — same fallthrough behaviour when the
+        // See tvOS branch above, same fallthrough behaviour when the
         // feature is off or category doesn't match a known bucket.
         // Same `categoryColorsEnabled` dependency-tracking trick so
         // the iOS guide refreshes live on toggle.
@@ -9736,7 +9736,7 @@ private struct GuideProgramButton: View {
     #endif
 }
 
-// MARK: - Guide Empty Row Button (tvOS — channels without EPG data)
+// MARK: - Guide Empty Row Button (tvOS, channels without EPG data)
 #if os(tvOS)
 private struct GuideEmptyRowButton: View {
     let label: String
@@ -9775,7 +9775,7 @@ private struct GuideButtonStyle: ButtonStyle {
 // removed in favour of `.simultaneousGesture(DragGesture())`
 // attached to the ScrollView (see `guideContent` above). The
 // UIKit bridge claimed to "evaluate gesture recognizers before
-// hitTest routing," but on iPad that's simply not true — UIKit
+// hitTest routing," but on iPad that's simply not true, UIKit
 // only considers gesture recognizers whose attached view hit-
 // tests to the touch, and the `PassthroughView`'s `hitTest`
 // unconditionally returned nil. The gesture therefore never

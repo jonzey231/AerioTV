@@ -265,7 +265,7 @@ struct WelcomeView: View {
 // MARK: - tvOS Onboarding Components
 #if os(tvOS)
 
-/// Shared teal-tinted card background — matches the Settings pattern.
+/// Shared teal-tinted card background, matches the Settings pattern.
 private func tvOnboardingCardBG(_ focused: Bool) -> some View {
     RoundedRectangle(cornerRadius: 14, style: .continuous)
         .fill(focused ? Color.accentPrimary.opacity(0.18) : Color.cardBackground)
@@ -276,7 +276,7 @@ private func tvOnboardingCardBG(_ focused: Bool) -> some View {
         }
 }
 
-/// Non-interactive feature row — no card background, border, or checkmark
+/// Non-interactive feature row, no card background, border, or checkmark
 /// so it reads as informational text, not a focusable button.
 private struct TVFeatureRow: View {
     let icon: String
@@ -310,7 +310,7 @@ private struct TVFeatureRow: View {
     }
 }
 
-/// iCloud import/sync button for onboarding — toggles on/off with importing state.
+/// iCloud import/sync button for onboarding, toggles on/off with importing state.
 private struct TVOnboardingImportButton: View {
     let isEnabled: Bool
     var isImporting: Bool = false
@@ -379,7 +379,7 @@ private struct TVOnboardingImportButton: View {
     }
 }
 
-/// Segmented picker row — each option is a separate focusable button.
+/// Segmented picker row, each option is a separate focusable button.
 private struct TVOnboardingPickerRow: View {
     let icon: String
     let title: String
@@ -635,7 +635,7 @@ private struct TVOnboardingSkipButton: View {
 #endif
 
 // MARK: - Feature Bullet
-/// Non-interactive feature row — intentionally styled without card backgrounds,
+/// Non-interactive feature row, intentionally styled without card backgrounds,
 /// borders, or trailing chevrons/checkmarks so it reads as informational text,
 /// not a tappable button.
 private struct FeaturePill: View {

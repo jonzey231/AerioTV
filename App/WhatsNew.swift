@@ -5,11 +5,11 @@ import SwiftUI
 // One curated entry per release that should surface a What's New
 // pop-up. Entries are kept indefinitely so a user upgrading from an
 // older version directly to a newer one (e.g. 1.6.10 → 1.6.13) still
-// sees the latest highlights — the matching rule is "current bundle
+// sees the latest highlights, the matching rule is "current bundle
 // version has an entry **and** the user hasn't already seen this
 // version's prompt." Older versions just sit dormant in the array.
 //
-// Keep bullets short — under ~60 chars each — so the sheet stays
+// Keep bullets short, under ~60 chars each, so the sheet stays
 // glanceable on iPhone and readable from a couch on Apple TV.
 
 /// Per-version release-notes record consumed by `WhatsNewStore`.
@@ -20,7 +20,7 @@ struct WhatsNewRelease {
     /// Headline shown at the top of the sheet (e.g. "What's new in 1.6.12").
     let title: String
 
-    /// Bullet list — keep each line short (under ~60 chars).
+    /// Bullet list, keep each line short (under ~60 chars).
     let bullets: [String]
 
     /// Tap target on the "Read full release notes" link. `nil` hides the link.
@@ -32,11 +32,11 @@ struct WhatsNewRelease {
 // Persistence + decision logic for the What's New pop-up. Two
 // UserDefaults keys back the behavior:
 //
-// - `whatsNew.lastSeenVersion` — the version string the user last
+// - `whatsNew.lastSeenVersion`, the version string the user last
 //   acknowledged (or that we silently set on a fresh install). The
 //   pop-up surfaces only when the **current** version doesn't match
 //   this value.
-// - `whatsNew.permanentlyDisabled` — opt-out flag. Once set, the
+// - `whatsNew.permanentlyDisabled`, opt-out flag. Once set, the
 //   pop-up never appears again on this device, regardless of
 //   subsequent updates. Stored locally; not synced to iCloud, since
 //   this is a per-device UI preference and a user might want it
@@ -52,7 +52,7 @@ enum WhatsNewStore {
     private static let disabledKey = "whatsNew.permanentlyDisabled"
 
     /// Curated list of release-notes entries. Append a new entry per
-    /// release that warrants surfacing — keep older entries so that
+    /// release that warrants surfacing, keep older entries so that
     /// users who skipped a few versions still get the latest one's
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
@@ -556,8 +556,8 @@ enum WhatsNewStore {
             version: "1.6.19",
             title: "What's new in 1.6.19",
             bullets: [
-                "Stream Info now shows the same client-side stats on every server type — what your device is actually decoding. The Dispatcharr server-side fetch added in v1.6.18 is gone; mpv-derived numbers are more useful for confirming your local playback is healthy",
-                "Stream Info card is back to the larger 6-row layout — VIDEO codec + size, FPS + pixel format, hwdec mode, AUDIO codec + sample rate + channel count, CACHE + bitrate, SYNC + dropped-frame count"
+                "Stream Info now shows the same client-side stats on every server type, what your device is actually decoding. The Dispatcharr server-side fetch added in v1.6.18 is gone; mpv-derived numbers are more useful for confirming your local playback is healthy",
+                "Stream Info card is back to the larger 6-row layout, VIDEO codec + size, FPS + pixel format, hwdec mode, AUDIO codec + sample rate + channel count, CACHE + bitrate, SYNC + dropped-frame count"
             ],
             releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.19")
         ),
@@ -565,13 +565,13 @@ enum WhatsNewStore {
             version: "1.6.18",
             title: "What's new in 1.6.18",
             bullets: [
-                "Swipe up or down to change channels on iPhone and iPad — tap the player to show the chrome, then swipe to flip through live channels (mirrors the Apple TV Siri Remote up/down channel-flip)",
-                "Stream Info now shows live server-side stats from your Dispatcharr server when available (Dispatcharr API playlists only) — resolution, FPS, codec, output bitrate, and viewer count. Plain M3U / Xtream playlists still get the same five fields from the local player",
-                "Apple TV: returning to the guide after watching a channel now focuses on that channel's row — no more random scrolling to the top",
-                "iPhone portrait: Close / Options / Add buttons now hug the Dynamic Island instead of sitting too far below it — fixes a positioning regression introduced by the v1.6.17 multiview safe-area work",
-                "Channel info banner no longer covers the Stream Info card on iPhone — banner hides itself while Stream Info is open, then comes back when you close it",
+                "Swipe up or down to change channels on iPhone and iPad, tap the player to show the chrome, then swipe to flip through live channels (mirrors the Apple TV Siri Remote up/down channel-flip)",
+                "Stream Info now shows live server-side stats from your Dispatcharr server when available (Dispatcharr API playlists only), resolution, FPS, codec, output bitrate, and viewer count. Plain M3U / Xtream playlists still get the same five fields from the local player",
+                "Apple TV: returning to the guide after watching a channel now focuses on that channel's row, no more random scrolling to the top",
+                "iPhone portrait: Close / Options / Add buttons now hug the Dynamic Island instead of sitting too far below it, fixes a positioning regression introduced by the v1.6.17 multiview safe-area work",
+                "Channel info banner no longer covers the Stream Info card on iPhone, banner hides itself while Stream Info is open, then comes back when you close it",
                 "iPhone landscape: channel info banner now sits to the right of the Close button instead of below it (matching iPad), reclaiming the vertical room",
-                "Live channel audio no longer keeps playing underneath when you start a recording or open a movie / TV episode — the live stream now stops cleanly the moment the new playback begins",
+                "Live channel audio no longer keeps playing underneath when you start a recording or open a movie / TV episode, the live stream now stops cleanly the moment the new playback begins",
                 "Live TV List view on iPhone no longer jitters up and down when you scroll to the spot where the group filter pills snap out of view"
             ],
             releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.18")
@@ -580,11 +580,11 @@ enum WhatsNewStore {
             version: "1.6.17",
             title: "What's new in 1.6.17",
             bullets: [
-                "Multiview no longer leaves video tiles black after switching apps with 9 streams active — every tile now resumes cleanly when you return",
-                "On Demand tab now reliably shows your movies and TV shows on a wider range of Dispatcharr server configurations — fixed both the per-playlist VOD-toggle relaunch bug AND a stricter-Dispatcharr-build category-filter bug that was leaving the tab empty (Dispatcharr API playlists only)",
-                "New Sync Categories sub-page in Settings → iCloud Sync lets you opt out of syncing specific data types — Playlists, Watch Progress, Reminders, App Preferences, or Credentials — with a per-category Delete option that scrubs only that data from iCloud",
+                "Multiview no longer leaves video tiles black after switching apps with 9 streams active, every tile now resumes cleanly when you return",
+                "On Demand tab now reliably shows your movies and TV shows on a wider range of Dispatcharr server configurations, fixed both the per-playlist VOD-toggle relaunch bug AND a stricter-Dispatcharr-build category-filter bug that was leaving the tab empty (Dispatcharr API playlists only)",
+                "New Sync Categories sub-page in Settings → iCloud Sync lets you opt out of syncing specific data types, Playlists, Watch Progress, Reminders, App Preferences, or Credentials, with a per-category Delete option that scrubs only that data from iCloud",
                 "Reorder your Playlists in Settings: drag-to-reorder on iPhone/iPad (tap Edit), Move Up/Move Down via long-press on Apple TV. Order syncs across all your devices via iCloud",
-                "Multiview on iPhone now respects the notch and Dynamic Island — video tiles stay inside the safe area instead of sliding behind the cutout"
+                "Multiview on iPhone now respects the notch and Dynamic Island, video tiles stay inside the safe area instead of sliding behind the cutout"
             ],
             releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.17")
         ),
@@ -595,7 +595,7 @@ enum WhatsNewStore {
                 "Apple TV: opening Options right after channel-flipping no longer freezes the UI",
                 "Stream Info overlay redesigned: bottom-left on Apple TV, clears the Dynamic Island on iPhone, with a close button on iPad/iPhone",
                 "Channel info banner now correctly clears the player's close button on iPad and iPhone, and stays hidden when the player is minimized",
-                "VOD series episodes now load reliably on the first open — no more back-out-and-reopen workaround (Dispatcharr API playlists only)",
+                "VOD series episodes now load reliably on the first open, no more back-out-and-reopen workaround (Dispatcharr API playlists only)",
                 "Episode rows now show artwork, duration, air date, and TMDB rating (Dispatcharr API playlists only)",
                 "Movies and series open instantly on second visit"
             ],
@@ -661,7 +661,7 @@ enum WhatsNewStore {
     /// 3. The user hasn't already seen this version's prompt.
     /// 4. **Either** there's a recorded `lastSeenVersion` (so we know
     ///    this device has been running AerioTV before), **or** the
-    ///    caller has passed `isExistingUser: true` — meaning the
+    ///    caller has passed `isExistingUser: true`, meaning the
     ///    user has servers / completed onboarding from a prior
     ///    version, even though this is the first launch since we
     ///    started tracking `lastSeenVersion` (which itself only
@@ -676,7 +676,7 @@ enum WhatsNewStore {
     ///
     /// `isExistingUser` should be `true` when the device has any
     /// pre-existing app state that proves AerioTV ran here before
-    /// — the simplest signal is "any servers configured **or**
+    /// the simplest signal is "any servers configured **or**
     /// onboarding flag is set."
     static func shouldShow(isExistingUser: Bool) -> Bool {
         let defaults = UserDefaults.standard
@@ -688,7 +688,7 @@ enum WhatsNewStore {
         // No recorded marker. Distinguish fresh install vs upgrade.
         if isExistingUser {
             // Upgraded from a pre-tracking version. Show the prompt
-            // — caller will mark seen on dismiss.
+            // caller will mark seen on dismiss.
             return true
         }
         // Genuine fresh install. Set the marker silently so future
@@ -700,14 +700,14 @@ enum WhatsNewStore {
     /// User dismissed via "Dismiss". Mark the **current** version as
     /// seen so the prompt won't reappear until a *new* version with
     /// curated notes ships. The next update's notes will still
-    /// surface — `Dismiss` is per-version, not permanent.
+    /// surface, `Dismiss` is per-version, not permanent.
     static func markSeen() {
         guard let v = currentRelease?.version else { return }
         UserDefaults.standard.set(v, forKey: lastSeenKey)
     }
 
     /// User opted out via "Never show again". This is the **permanent
-    /// opt-out** for *all* future updates on this device — the
+    /// opt-out** for *all* future updates on this device, the
     /// `disabledKey` flag becomes the first guard in `shouldShow`,
     /// so subsequent releases skip the sheet regardless of what
     /// version we're on. The user can only re-enable by uninstalling
@@ -737,10 +737,10 @@ enum WhatsNewStore {
 //
 // On iOS the GitHub release link is a real `Link` (opens Safari).
 // On tvOS there's no system browser, so we hide the link entirely
-// rather than rendering a dead button — users on Apple TV can't act
+// rather than rendering a dead button, users on Apple TV can't act
 // on a URL anyway, and showing one as plain text invites confusion.
 //
-// The view is intentionally small — no scroll, no images, no
+// The view is intentionally small, no scroll, no images, no
 // per-bullet emojis. The "additional splash screen" framing in the
 // product spec means it should feel lighter than a settings page,
 // closer to a system-level "Welcome to <new version>" alert.

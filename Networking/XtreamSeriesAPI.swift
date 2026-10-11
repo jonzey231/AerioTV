@@ -34,7 +34,7 @@ extension XtreamCodesAPI {
         case 403:
             // Same split as the main XC validator: `.unauthorized` renders
             // Dispatcharr Admin-API-Key advice, which is nonsense on a plain
-            // Xtream panel — a 403 here is typically the provider's edge
+            // Xtream panel, a 403 here is typically the provider's edge
             // (rate limit, bot protection, IP ban) and the plain-text body
             // says so. Surface the server's own words instead.
             var reason: String? = nil

@@ -2,13 +2,13 @@
 //  HTTPRouter.swift
 //  Aerio
 //
-//  v1.6.10 — Routes outbound HTTP requests to the correct transport.
+//  v1.6.10, Routes outbound HTTP requests to the correct transport.
 //  URLSession is the default for every request and remains the right
 //  choice for TLS, IP literals, and TLDs that aren't on iOS's HSTS
 //  preload list. Plain-HTTP requests against HSTS-preloaded TLDs
 //  (`.app`, `.dev`, `.page`, `.new`, …) get redirected to
 //  `NWHTTPClient`, which uses Network.framework / NWConnection
-//  underneath ATS — the only path that actually reaches those
+//  underneath ATS, the only path that actually reaches those
 //  servers in plain HTTP.
 //
 //  Why this shim exists, condensed:
@@ -53,7 +53,7 @@ enum HTTPRouter {
 
     static func data(from url: URL,
                      using session: URLSession = .shared) async throws -> (Data, URLResponse) {
-        // Hard route: HSTS-preloaded TLD plain HTTP — URLSession will
+        // Hard route: HSTS-preloaded TLD plain HTTP, URLSession will
         // always refuse, so go straight to NWConnection.
         if shouldUseNWConnection(for: url) {
             return try await NWHTTPClient.data(from: url,
@@ -78,7 +78,7 @@ enum HTTPRouter {
                 // NWConnection ALSO failed. Throw the URLSession error;
                 // it's typically more localized / actionable.
                 debugLog("HTTPRouter: NWConnection fallback ALSO failed: \(error)")
-                throw error  // re-throws inner (NWConnection) error — see below
+                throw error  // re-throws inner (NWConnection) error, see below
             }
         }
     }
@@ -202,7 +202,7 @@ enum HTTPRouter {
         // response) = the REQUEST timeout. The RESOURCE timeout is the total
         // large-transfer budget (e.g. the Dispatcharr session's 300s); including
         // it in the max() let a simple GET to a dead/refused endpoint hang for the
-        // whole resource window instead of failing at the request bound — which
+        // whole resource window instead of failing at the request bound, which
         // stalled cold start for minutes and blocked VOD/On Demand (sequenced
         // after the DVR reconcile) when a server's Local URL pointed at a down port.
         return candidates.max() ?? NWHTTPClient.defaultTimeout
@@ -217,7 +217,7 @@ enum HTTPRouter {
         // through URLSession unconditionally.
         guard let scheme = url.scheme?.lowercased(), scheme == "http" else { return false }
         guard let host = url.host, !host.isEmpty else { return false }
-        // IP literals are never HSTS-preloaded — URLSession is fine.
+        // IP literals are never HSTS-preloaded, URLSession is fine.
         if isIPLiteral(host) { return false }
         // Domain on preloaded TLD → NWConnection is the only way.
         return isHostOnPreloadedTLD(host)
@@ -225,7 +225,7 @@ enum HTTPRouter {
 
     /// Returns `true` when a URLSession failure looks transport-level
     /// (vs application-level like 404/auth). These are cases where
-    /// retrying through NWConnection has a real chance of succeeding —
+    /// retrying through NWConnection has a real chance of succeeding,
     /// URLSession sometimes refuses connections that the underlying
     /// network actually permits, due to its HSTS cache, ATS heuristics,
     /// or in-process state we can't introspect.
@@ -250,7 +250,7 @@ enum HTTPRouter {
 
     /// Naive IPv4 / IPv6 detection. We only need to distinguish
     /// "domain that could be HSTS-preloaded" from "literal IP that
-    /// can't be" — host syntax is sufficient.
+    /// can't be", host syntax is sufficient.
     private static func isIPLiteral(_ host: String) -> Bool {
         // IPv6 literals arrive bracketed in URLs (`[::1]`); URL.host
         // strips brackets, so colon density catches them.
@@ -262,7 +262,7 @@ enum HTTPRouter {
 
     /// Returns true if `host`'s effective TLD is on iOS's HSTS preload
     /// list. We check the last label, which is sufficient for the
-    /// gTLDs Google preloaded — they're all single-label.
+    /// gTLDs Google preloaded, they're all single-label.
     private static func isHostOnPreloadedTLD(_ host: String) -> Bool {
         guard let lastDot = host.lastIndex(of: ".") else { return false }
         let tld = host[host.index(after: lastDot)...].lowercased()
@@ -273,8 +273,8 @@ enum HTTPRouter {
 
     /// gTLDs Google preloaded into the HSTS list at the TLD level.
     /// These are baked into Chromium's preload list and inherited by
-    /// every iOS release. The list barely changes — Google has
-    /// stopped adding TLD-wide preloads — so a static set is fine.
+    /// every iOS release. The list barely changes, Google has
+    /// stopped adding TLD-wide preloads, so a static set is fine.
     ///
     /// Source: Chromium `transport_security_state_static.json`,
     /// filtered to entries with `"include_subdomains": true` whose
@@ -282,7 +282,7 @@ enum HTTPRouter {
     /// https://hstspreload.org/.
     ///
     /// We intentionally do NOT include domain-level preloads
-    /// (`facebook.com`, `paypal.com`, etc.) — those are individual
+    /// (`facebook.com`, `paypal.com`, etc.), those are individual
     /// sites and the entry would balloon to thousands. For our use
     /// case (IPTV resellers picking cheap gTLDs) the TLD-level list
     /// is the right granularity.

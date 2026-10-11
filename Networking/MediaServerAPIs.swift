@@ -229,7 +229,7 @@ struct PlexAPI {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         let (data, response) = try await session.data(for: request)
         try validate(response: response)
-        // Plex live TV hub parsing — returns DVR channels
+        // Plex live TV hub parsing, returns DVR channels
         let result = try decode(PlexLiveTVResponse.self, from: data)
         return result.mediaContainer.hub?
             .flatMap { $0.metadata ?? [] }

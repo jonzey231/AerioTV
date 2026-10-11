@@ -16,7 +16,7 @@ import SwiftData
 /// the active server is Dispatcharr; it degrades gracefully otherwise.
 ///
 /// Presented by the player chrome host (`MultiviewContainerView`) as a
-/// `.sheet` on iOS and a `.fullScreenCover` on tvOS — the same modality
+/// `.sheet` on iOS and a `.fullScreenCover` on tvOS, the same modality
 /// the Record sheet uses. Self-contained: resolves the active server and
 /// builds its own `DispatcharrAPI`, mirroring `RecordProgramSheet`.
 // MARK: - Headless switch flow (shared)
@@ -199,15 +199,15 @@ struct SwitchStreamView: View {
     @Environment(\.dismiss) private var dismiss
     @Query private var servers: [ServerConnection]
 
-    /// Integer pk of the channel (DispatcharrChannel.id) — keys the
+    /// Integer pk of the channel (DispatcharrChannel.id), keys the
     /// member-streams list endpoint.
     let channelID: Int
-    /// Channel UUID — keys `change_stream` (same uuid as the proxy URL).
+    /// Channel UUID, keys `change_stream` (same uuid as the proxy URL).
     let channelUUID: String
     let channelName: String
     /// Optional close handler. iOS presents this as a `.sheet`, so the
     /// default `dismiss()` works. tvOS presents it as an inline OVERLAY
-    /// (not a `.fullScreenCover` — a third stacked cover breaks the tvOS
+    /// (not a `.fullScreenCover`, a third stacked cover breaks the tvOS
     /// 27 focus engine), where `dismiss()` is a no-op, so the container
     /// passes a closer that flips its `showSwitchStream` flag.
     var onClose: (() -> Void)? = nil
@@ -215,7 +215,7 @@ struct SwitchStreamView: View {
     /// The stream the user switched to earlier THIS session for this
     /// channel, if any. Survives picker re-opens (held by the container,
     /// keyed by channel) because `/status.stream_id` goes stale right
-    /// after a switch — the in-session value is the truthful "current".
+    /// after a switch, the in-session value is the truthful "current".
     /// nil falls back to the (fresh-read-correct) status stream id.
     var initialStreamID: Int? = nil
     /// Reports a confirmed switch back to the container so it can persist
@@ -361,7 +361,7 @@ struct SwitchStreamView: View {
                 // its client churn actively pushes our API calls onto a
                 // non-owner worker). Whether Dispatcharr's Stats page reflects
                 // the switch depends on the url-changing change_stream landing
-                // on the channel's OWNER worker — the only path that rewrites
+                // on the channel's OWNER worker, the only path that rewrites
                 // the Redis stream_id the Stats card reads. We keep the API
                 // connection pool clean so it stays pinned to that worker.
                 let targetURL = try await api.changeStream(channelUUID: channelUUID, streamID: stream.id)
@@ -380,7 +380,7 @@ struct SwitchStreamView: View {
                     close()
                 } else {
                     // The POST returned 200 but /status.url never matched
-                    // within the budget — the switch didn't take. Restore
+                    // within the budget, the switch didn't take. Restore
                     // the prior mark and tell the user rather than leave a
                     // misleading checkmark.
                     isSwitching = false

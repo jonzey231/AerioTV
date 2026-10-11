@@ -27,7 +27,7 @@ enum DeviceInfo {
     static var modelName: String {
         let identifier = rawHardwareIdentifier
         if let friendly = friendlyNameMap[identifier] { return friendly }
-        // Unknown identifier — return it raw so the user can still tell us
+        // Unknown identifier, return it raw so the user can still tell us
         // what their device is when reporting issues.
         return identifier
     }
@@ -172,9 +172,9 @@ enum DeviceInfo {
     }
 
     /// Human-readable "first installed" date for the About screen, or
-    /// "—" if the data container creation date can't be read.
+    /// "-" if the data container creation date can't be read.
     static var firstInstalledText: String {
-        guard let date = firstInstalledDate else { return "—" }
+        guard let date = firstInstalledDate else { return "-" }
         return date.formatted(date: .long, time: .omitted)
     }
 

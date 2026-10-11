@@ -12,7 +12,7 @@ import UIKit
 // shared store wasn't worth the indirection.
 //
 // Why this exists: VODDetailView's `.task { await loadDetail() }` is
-// auto-cancelled when the view leaves the hierarchy — fine in
+// auto-cancelled when the view leaves the hierarchy, fine in
 // principle. In practice, three things cancel the task before the
 // fetch completes:
 //   1. iCloud sync arriving mid-fetch and bumping `servers.count`,
@@ -26,7 +26,7 @@ import UIKit
 // the URLSession data task, which surfaces as
 // `NSURLErrorCancelled (-999)` and tanks the entire fetch. Pre-cache
 // the user lived through this as "first open never loads, second
-// open works in 5s" — the second-attempt working was Dispatcharr's
+// open works in 5s", the second-attempt working was Dispatcharr's
 // server-side cache being warm from the cancelled-but-partially-
 // completed first attempt.
 //
@@ -38,7 +38,7 @@ import UIKit
 @MainActor
 private enum SeriesDetailCache {
     /// Successfully-fetched series details, keyed by series id.
-    /// Lives for the app's lifetime — fine because the data is
+    /// Lives for the app's lifetime, fine because the data is
     /// small (a series of N episodes is ~N small structs) and
     /// there's no scenario where stale episode data is meaningfully
     /// wrong (the user can pull-to-refresh or restart the app).
@@ -52,7 +52,7 @@ private enum SeriesDetailCache {
     /// Returns cached series detail if present; otherwise spawns a
     /// detached fetch (or joins one already in flight), waits for
     /// it, caches + returns the result. The detached fetch is NOT
-    /// cancelled when the view that called this method goes away —
+    /// cancelled when the view that called this method goes away,
     /// it runs to completion in the background and populates the
     /// cache regardless. The view's await on the result MAY return
     /// early if the view's own `.task` is cancelled, but the cache
@@ -70,10 +70,10 @@ private enum SeriesDetailCache {
             debugLog("[VOD-Series-Cache] JOIN in-flight id=\(seriesID)")
             return await existingTask.value
         }
-        debugLog("[VOD-Series-Cache] MISS — spawning detached fetch id=\(seriesID)")
+        debugLog("[VOD-Series-Cache] MISS, spawning detached fetch id=\(seriesID)")
         // v1.6.16.x: register-before-detach. Pre-fix the assignment
         // `inFlightTasks[id] = task` happened AFTER `Task.detached`,
-        // which on a warm cache could complete in <1ms — fast
+        // which on a warm cache could complete in <1ms, fast
         // enough that the closure's `inFlightTasks.removeValue`
         // ran before the assignment, leaving a stale completed
         // task permanently in the dict. Net result: small memory
@@ -102,7 +102,7 @@ private enum SeriesDetailCache {
                         // loading episodes for a series whose first
                         // fetch returned empty (Dispatcharr
                         // intermittent state, account-filter mismatch,
-                        // etc.) — the next mount would short-circuit
+                        // etc.), the next mount would short-circuit
                         // on the cache hit and never re-query. Empty
                         // responses now bypass the cache entirely so
                         // every fresh open re-tries the network.
@@ -111,7 +111,7 @@ private enum SeriesDetailCache {
                         debugLog("[VOD-Series-Cache] STORED id=\(seriesID) seasons=\(result.seasons.count) episodes=\(result.seasons.reduce(0) { $0 + $1.episodes.count })")
                         #endif
                     } else if result != nil {
-                        debugLog("[VOD-Series-Cache] NOT storing empty result id=\(seriesID) seasons=0 — next open will re-fetch")
+                        debugLog("[VOD-Series-Cache] NOT storing empty result id=\(seriesID) seasons=0, next open will re-fetch")
                     } else {
                         debugLog("[VOD-Series-Cache] detached fetch returned nil id=\(seriesID)")
                     }
@@ -150,7 +150,7 @@ enum VODDetailCaches {
         MovieDetailCache.inFlightTasks.values.forEach { $0.cancel() }
         MovieDetailCache.inFlightTasks.removeAll()
         MovieDetailCache.entries.removeAll()
-        debugLog("🎬 VODDetailCaches: reset for playlist switch — dropped \(movieCount) movie and \(seriesCount) series detail entries")
+        debugLog("🎬 VODDetailCaches: reset for playlist switch, dropped \(movieCount) movie and \(seriesCount) series detail entries")
     }
 }
 
@@ -183,7 +183,7 @@ private enum MovieDetailCache {
             debugLog("[VOD-Movie-Cache] JOIN in-flight id=\(movieID)")
             return await existingTask.value
         }
-        debugLog("[VOD-Movie-Cache] MISS — spawning detached fetch id=\(movieID)")
+        debugLog("[VOD-Movie-Cache] MISS, spawning detached fetch id=\(movieID)")
         // See `SeriesDetailCache.loadIfNeeded` for the
         // register-before-cleanup ordering rationale. Same shape
         // here for symmetry.
@@ -202,7 +202,7 @@ private enum MovieDetailCache {
                     MovieDetailCache.entries[movieID] = result
                     debugLog("[VOD-Movie-Cache] STORED id=\(movieID)")
                 } else {
-                    debugLog("[VOD-Movie-Cache] NOT storing — fetch returned existing unchanged id=\(movieID)")
+                    debugLog("[VOD-Movie-Cache] NOT storing, fetch returned existing unchanged id=\(movieID)")
                 }
             }
             return result
@@ -344,7 +344,7 @@ struct VODDetailView: View {
                 // `.frame(maxWidth: .infinity)` on a deeper child
                 // (e.g. metaRow's value Text) propagates up through
                 // the leading-aligned VStack and bleeds the layout
-                // past the safe-area's leading edge — which clipped
+                // past the safe-area's leading edge, which clipped
                 // the first letter off every plot/genre/cast line
                 // in the v1.6.12 enrichment work.
                 VStack(alignment: .leading, spacing: 0) {
@@ -1235,7 +1235,7 @@ struct VODDetailView: View {
             // backdrop image loaded (~1.78 aspect → 498pt wide at
             // 280pt tall), `.aspectRatio(.fill)` reported that 498pt
             // as the view's preferred width. `.frame(maxWidth: .infinity)`
-            // accepts up to infinity, so the frame became 498pt —
+            // accepts up to infinity, so the frame became 498pt,
             // **wider than the iPhone viewport**. The parent VStack
             // adopted 498pt, and SwiftUI's positioning of a too-wide
             // leading-aligned frame inside a narrower ScrollView
@@ -1307,7 +1307,7 @@ struct VODDetailView: View {
                                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                             }
                         }
-                        // v1.6.12: runtime when known (movies only —
+                        // v1.6.12: runtime when known (movies only,
                         // series carry per-episode durations on the
                         // episode rows, not at the show level).
                         if let movie = fullMovie, !movie.duration.isEmpty {
@@ -1369,7 +1369,7 @@ struct VODDetailView: View {
             // trailer + a "View on TMDB" link when the underlying
             // VODMovie carries those identifiers (Dispatcharr's
             // /provider-info/ populates them; series don't have
-            // either today). Hidden entirely on tvOS — the system
+            // either today). Hidden entirely on tvOS, the system
             // has no browser, and there's no in-app trailer player
             // yet, so the buttons would be no-ops on Apple TV.
             #if !os(tvOS)
@@ -1416,7 +1416,7 @@ struct VODDetailView: View {
         // BEFORE padding so the .padding(.horizontal, 16) carves
         // 16pt margins out of the screen-wide column. Earlier
         // iterations applied `.padding(16)` to a VStack that was
-        // sizing to its natural content width — the padding was
+        // sizing to its natural content width, the padding was
         // applied but produced an outer frame narrower than the
         // screen, then the parent leading-aligned VStack pinned
         // that narrow frame to x=0 of the screen, putting the
@@ -1496,13 +1496,13 @@ struct VODDetailView: View {
     /// Horizontal row of pill-shaped links opening the YouTube
     /// trailer and the TMDB movie/TV page in Safari. Hidden when
     /// neither identifier is present so the row doesn't stake out
-    /// vertical space for two empty columns. iOS-only — see
+    /// vertical space for two empty columns. iOS-only, see
     /// `infoSection` for the platform gate rationale.
     ///
     /// v1.6.12: now reads from `fullSeries` as a fallback so series
     /// detail pages get the same treatment as movies. The TMDB URL
     /// branches on `item.type` because TMDB uses `/movie/<id>` for
-    /// films and `/tv/<id>` for shows — same `tmdb_id` namespace,
+    /// films and `/tv/<id>` for shows, same `tmdb_id` namespace,
     /// different web path.
     #if !os(tvOS)
     @ViewBuilder
@@ -1535,7 +1535,7 @@ struct VODDetailView: View {
         }
     }
 
-    /// Pill-styled label for the external-link row — keeps the
+    /// Pill-styled label for the external-link row, keeps the
     /// `Trailer` and `View on TMDB` chips visually consistent and
     /// centralises the styling so future links (IMDB, etc.) drop
     /// in with one extra `Link { externalLinkLabel(...) }` call.
@@ -1580,7 +1580,7 @@ struct VODDetailView: View {
     /// Build a YouTube watch URL from whatever shape Dispatcharr stores
     /// `youtube_trailer` in. Most providers send just the 11-char video
     /// key (`dQw4w9WgXcQ`), but a stray full URL or `youtu.be/<key>`
-    /// shows up occasionally — handle both rather than producing a
+    /// shows up occasionally, handle both rather than producing a
     /// malformed URL. Cross-platform: tvOS uses it for the QR code.
     private func trailerURL(from raw: String) -> URL? {
         let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2139,18 +2139,18 @@ struct VODDetailView: View {
             }
         }
 
-        // v1.6.18 — tear down any active live stream before mounting
+        // v1.6.18, tear down any active live stream before mounting
         // the VOD/episode fullScreenCover. The MainTabView-level
         // player overlay persists across tab navigation (so a
         // minimized live channel keeps playing while the user is
         // in On Demand), and fullScreenCover layers on top WITHOUT
         // unmounting underneath. Without this stop() call, the
         // live mpv keeps decoding audio while the VOD mpv also
-        // produces audio — two simultaneous streams. Same root
+        // produces audio, two simultaneous streams. Same root
         // cause as the recording-playback fix in MyRecordingsView
         // (v1.6.18 user report from NicolaiVdS, Apple TV).
         //
-        // v1.6.23 — `NowPlayingManager.stop()` only clears
+        // v1.6.23, `NowPlayingManager.stop()` only clears
         // single-stream state (`playingItem`, `isMinimized`); when the
         // active session is `.multiview`, the `MultiviewStore` tiles
         // and their mpv coordinators stay mounted under the VOD
@@ -2158,7 +2158,7 @@ struct VODDetailView: View {
         // the VOD on the GPU (jesmannstl, v1.6.23: live tile=666 KRCG
         // kept producing frames for 3+ minutes after VOD started, plus
         // visible VOD black-screen flickers). Route through
-        // `PlayerSession.shared.exit()` instead — that resets the tile
+        // `PlayerSession.shared.exit()` instead, that resets the tile
         // store, flips `mode = .idle`, tears down `NowPlayingBridge`,
         // and also calls `NowPlayingManager.shared.stop()` at the end
         // so the single-stream case is still handled. Safe in
@@ -2196,7 +2196,7 @@ struct VODDetailView: View {
     private func metaRow(label: String, value: String) -> some View {
         // v1.6.12 (second pass): the previous fix used
         // `.frame(maxWidth: .infinity, alignment: .leading)` on the
-        // value Text, which was the layout-cascade trigger — that
+        // value Text, which was the layout-cascade trigger, that
         // modifier propagates "ideal width = infinity" up through the
         // HStack → VStack → infoSection chain, and SwiftUI's eventual
         // clamp lands at a position that bleeds the leading edge past
@@ -2444,7 +2444,7 @@ struct VODDetailView: View {
             // v1.6.16: ALWAYS flip `isLoadingDetail` to true while
             // the series-detail fetch is in flight, even if the
             // list-time preview is present. The preview only carries
-            // metadata (poster, title, plot) — NO seasons / episodes.
+            // metadata (poster, title, plot), NO seasons / episodes.
             // Pre-1.6.16 the episode section silently rendered empty
             // while the fetch was running, which on Dispatcharr +
             // large series (One Piece, etc.) left the user staring
@@ -2490,13 +2490,13 @@ struct VODDetailView: View {
             // were awaiting the detached fetch. If so, the writes
             // below are no-ops (the @State storage is destroyed),
             // and the cache will be populated by the detached task
-            // anyway — the next view mount picks up the fast path.
+            // anyway, the next view mount picks up the fast path.
             let elapsedMs = Int(Date().timeIntervalSince(fetchStart) * 1000)
             if let enriched {
                 fullSeries = enriched
                 debugLog("[VOD-Series] fetchOK id=\(item.id) elapsed=\(elapsedMs)ms seasons=\(enriched.seasons.count) episodes=\(enriched.seasons.reduce(0) { $0 + $1.episodes.count })")
             } else {
-                debugLog("[VOD-Series] fetchNIL id=\(item.id) elapsed=\(elapsedMs)ms — fullSeries stays at preview (seasons=\(fullSeries?.seasons.count ?? 0))")
+                debugLog("[VOD-Series] fetchNIL id=\(item.id) elapsed=\(elapsedMs)ms, fullSeries stays at preview (seasons=\(fullSeries?.seasons.count ?? 0))")
             }
             isLoadingDetail = false
             if let idx = fullSeries?.seasons.indices.first {
@@ -2538,13 +2538,13 @@ private struct TVEpisodeRowButton: View {
                     Text("E\(ep.episodeNumber) · \(ep.title)")
                         .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                         .lineLimit(1)
-                    // v1.6.16.x: metadata strip — duration · air date ·
+                    // v1.6.16.x: metadata strip, duration · air date ·
                     // rating. Mirrors what Dispatcharr's web UI shows
                     // in its episode rows (Duration / Date columns)
                     // plus the per-episode TMDB rating which is
                     // valuable on tvOS where users browse with the
                     // Siri Remote and can't easily scrub plots.
-                    // Each piece is independently optional — empty
+                    // Each piece is independently optional, empty
                     // ones are skipped, separators only render
                     // between non-empty pieces, so a sparse row
                     // (e.g. only duration set) doesn't show a
@@ -2565,15 +2565,15 @@ private struct TVEpisodeRowButton: View {
                             .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                             .lineLimit(2)
                     }
-                    // Progress pill + timeline — only rendered when
+                    // Progress pill + timeline, only rendered when
                     // there's a WatchProgress row for this episode.
                     // Finished episodes get a muted "Watched" chip
-                    // (no timeline — the pill itself communicates
+                    // (no timeline, the pill itself communicates
                     // completion); in-progress episodes get the
                     // accent "Currently Watching" chip plus a thin
                     // accent-tinted progress bar + percentage so
                     // users can tell how far in they were without
-                    // resuming. Sizes are platform-specific —
+                    // resuming. Sizes are platform-specific,
                     // v1.6.8 feedback bumped the tvOS font +
                     // padding 50% larger for 10-foot readability.
                     if let progress {
@@ -2613,7 +2613,7 @@ private struct TVEpisodeRowButton: View {
                         )
 
                         // Linear timeline. Shown only for in-progress
-                        // episodes with a usable duration — some
+                        // episodes with a usable duration, some
                         // episode rows persist with `durationMs == 0`
                         // because playback was stopped before mpv
                         // reported a duration, and rendering a 0-based

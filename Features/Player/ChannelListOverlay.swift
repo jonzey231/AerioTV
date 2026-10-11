@@ -14,7 +14,7 @@ import SwiftUI
 // dismisses the overlay.
 //
 // Group selection here is OVERLAY-LOCAL: it seeds from the guide's active
-// group on open but never mutates the guide filter — browsing channels while
+// group on open but never mutates the guide filter, browsing channels while
 // watching must not silently re-filter the Live TV guide behind the player.
 //
 // Whole file is tvOS-only: it contributes nothing to the iOS build.
@@ -22,7 +22,7 @@ import SwiftUI
 // MARK: - ChannelPickRow (SHARED)
 
 /// A single focusable channel row for the player's Left overlays. THIS FILE
-/// OWNS this type — the Recently-Watched overlay (`RecentChannelsOverlay`)
+/// OWNS this type, the Recently-Watched overlay (`RecentChannelsOverlay`)
 /// reuses it verbatim and must NOT redefine it.
 ///
 /// Renders the channel logo, number, name, a now-airing line, a catch-up
@@ -61,7 +61,7 @@ struct ChannelPickRow: View {
 
     /// Title of the currently-airing programme: prefer the lightweight
     /// per-item payload, fall back to GuideStore's now-live entry. Nil when
-    /// neither source has anything (the now-line slot then stays empty — no
+    /// neither source has anything (the now-line slot then stays empty, no
     /// group-name fallback, matching `ChannelRow`).
     private var nowTitle: String? {
         if let t = item.currentProgram, !t.isEmpty { return t }
@@ -134,7 +134,7 @@ struct ChannelPickRow: View {
         .buttonStyle(ChannelPickRowButtonStyle())
     }
 
-    /// "Watching" pill — accent fill with app-background ink, matching the
+    /// "Watching" pill, accent fill with app-background ink, matching the
     /// selected group-pill treatment used across Live TV.
     private var watchingBadge: some View {
         HStack(spacing: 6) {
@@ -357,7 +357,7 @@ struct ChannelListOverlay: View {
                     .focusSection()
                     // Left from the channel list slides the group sidebar in
                     // (spec: "Left again = enter sidebar to select other
-                    // groups") — but only when it isn't already open. With the
+                    // groups"), but only when it isn't already open. With the
                     // sidebar open the rail is the left neighbour, so Left is
                     // normal focus traversal into it and never reaches here.
                     // Up/Down are consumed by row-to-row focus movement.

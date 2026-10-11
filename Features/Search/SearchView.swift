@@ -68,7 +68,7 @@ enum SearchResult: Identifiable {
 struct SearchView: View {
     /// tvOS in-place mode (Logan 2026-08-12, matching Android TV): the Search
     /// circle swaps the tab CONTENT for this screen while the nav bar and
-    /// action circles stay visible above it — never a sheet or cover. In this
+    /// action circles stay visible above it, never a sheet or cover. In this
     /// mode the NavigationStack chrome (title, Cancel, `.searchable`) is
     /// replaced by an inline field + the same scope chips and results.
     var embedsInTabChrome = false
@@ -172,7 +172,7 @@ struct SearchView: View {
     /// tvOS in-place layout: an inline search field row + the shared scope
     /// chips and results, rendered as tab content below the persistent nav
     /// chrome (which the caller keeps visible above this view). No
-    /// NavigationStack, no title, no Cancel — the nav bar IS the chrome, and
+    /// NavigationStack, no title, no Cancel, the nav bar IS the chrome, and
     /// Menu (routed by the caller through `onClose`) leaves the screen.
     private var embeddedBody: some View {
         ZStack {

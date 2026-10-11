@@ -70,7 +70,7 @@ final class ServerConnectionViewModel {
     /// only, dual, or bearer) discovered during `verifyConnection`.
     /// The Add/Edit Server view persists this onto the new
     /// `ServerConnection.dispatcharrAuthMode` field so subsequent API
-    /// calls and stream playback use the same shape — Aerio doesn't
+    /// calls and stream playback use the same shape, Aerio doesn't
     /// have to re-detect on every cold start, and Dispatcharr
     /// deployments that reject `X-API-Key`-alone with HTTP 401
     /// (the bug three users hit on private deployments in v1.6.19)
@@ -338,7 +338,7 @@ final class ServerConnectionViewModel {
     /// domain is on iOS's HSTS preload list (a list inherited from
     /// Chromium that gets baked into every iOS release), ATS blocks
     /// the connection with `NSURLErrorAppTransportSecurityRequiresSecureConnection`
-    /// (-1022) **regardless of `NSAllowsArbitraryLoads`** — the
+    /// (-1022) **regardless of `NSAllowsArbitraryLoads`**, the
     /// global Info.plist exemption beats the default ATS posture
     /// but doesn't override HSTS preloading for specific domains.
     /// IP-literal URLs (e.g. `http://192.168.1.10:9191`) work
@@ -388,7 +388,7 @@ final class ServerConnectionViewModel {
             switch dispatcharrCredentialType {
             case .apiKey:
                 try await withATSSchemeUpgrade(originalURL: normalizedURL) { url in
-                    // Default authMode `.xapikey` — v1.6.16+ behavior.
+                    // Default authMode `.xapikey`, v1.6.16+ behavior.
                     // verifyConnection auto-falls-back to `.both` and
                     // `.bearer` on HTTP 401, returning the working shape
                     // in `info.discoveredAuthMode` so the caller can
@@ -470,7 +470,7 @@ final class ServerConnectionViewModel {
                     self.pendingJWTPair = pair
 
                     // Fetch the authenticated user's record. Use the bearer
-                    // auth slot directly — we haven't persisted a server yet,
+                    // auth slot directly, we haven't persisted a server yet,
                     // so there's no UUID to key the JWT session against, and
                     // re-routing through `.jwtSession` would force us to wire
                     // up a placeholder UUID just for this single call.
@@ -500,7 +500,7 @@ final class ServerConnectionViewModel {
                     // same `discoveredDispatcharrAuthMode` discovery the
                     // legacy path runs. The api_key we just fetched is
                     // canonical for this user, so this can't fail with
-                    // a credential error — only with a transport error
+                    // a credential error, only with a transport error
                     // or an unrecognised-server-shape error, which are
                     // worth surfacing.
                     self.verifyStep = "server info"
@@ -520,8 +520,8 @@ final class ServerConnectionViewModel {
 
     /// Runs `attempt(url)` against the original URL first; if iOS's
     /// HSTS layer blocks it with `NSURLErrorAppTransportSecurityRequiresSecureConnection`,
-    /// retries with the URL upgraded to `https://` and — on success
-    /// — mutates `baseURL` so the persisted record uses the working
+    /// retries with the URL upgraded to `https://` and, on success
+    /// mutates `baseURL` so the persisted record uses the working
     /// scheme. v1.6.9 fix for `http://<domain>` Xtream / Dispatcharr
     /// URLs blocked by iOS's HSTS preload list. See
     /// `runVerifyAttempt` doc for the full rationale.
@@ -539,7 +539,7 @@ final class ServerConnectionViewModel {
         } catch let error as NSError where shouldRetryWithHTTPS(error: error) {
             // Only auto-upgrade real http:// domain URLs. IP literals
             // can't be HSTS-preloaded so falling here means something
-            // else is wrong — bubble the original error up.
+            // else is wrong, bubble the original error up.
             guard let upgraded = httpsUpgradedURL(originalURL) else { throw error }
             debugLog("ATS-UPGRADE: \(originalURL) failed (\(error.code) \(error.localizedDescription)) → retrying as \(upgraded)")
             do {
@@ -556,7 +556,7 @@ final class ServerConnectionViewModel {
             } catch {
                 debugLog("ATS-UPGRADE: HTTPS retry ALSO failed: \(error)")
                 // HTTPS retry also failed. Bubble whichever error is
-                // more informative — usually the HTTPS error has the
+                // more informative, usually the HTTPS error has the
                 // real reason (e.g. cert-mismatch, server-down).
                 throw error
             }
@@ -564,15 +564,15 @@ final class ServerConnectionViewModel {
     }
 
     /// True when the failure looks like "the server doesn't speak plain
-    /// HTTP on the URL the user typed" — in which case retrying with
+    /// HTTP on the URL the user typed", in which case retrying with
     /// HTTPS has a real chance of succeeding. Covers two scenarios:
     ///   • -1022 ATS-required-secure: the original v1.6.9 case. iOS
     ///     refuses the HTTP attempt outright.
     ///   • -1004 cannot-connect-to-host: server is HTTPS-only (only
     ///     listens on 443, not 80). Common with Cloudflare-fronted
-    ///     panels — the front-end serves HTTPS and never opens 80.
+    ///     panels, the front-end serves HTTPS and never opens 80.
     /// We deliberately do NOT include -1003 (DNS fail) or -1006 (cannot
-    /// resolve host) — those mean the host is unreachable at the name
+    /// resolve host), those mean the host is unreachable at the name
     /// layer, and HTTPS won't help. Same for genuine timeouts (-1001):
     /// HTTPS retry burns another 20s without any reason to expect a
     /// different outcome.
@@ -588,7 +588,7 @@ final class ServerConnectionViewModel {
 
     /// Returns `originalURL` with the scheme swapped from `http://`
     /// to `https://` when the host is a domain (not an IP literal).
-    /// Returns `nil` for any URL that shouldn't auto-upgrade — IP
+    /// Returns `nil` for any URL that shouldn't auto-upgrade, IP
     /// literals, already-HTTPS URLs, or unparseable strings.
     private func httpsUpgradedURL(_ originalURL: String) -> String? {
         guard originalURL.hasPrefix("http://") else { return nil }
@@ -606,7 +606,7 @@ final class ServerConnectionViewModel {
 
     /// Naive IPv4 / IPv6 detection. We only need to distinguish
     /// "domain that could be HSTS-preloaded" from "literal IP that
-    /// can't be" — the host syntax is sufficient for that. Doesn't
+    /// can't be", the host syntax is sufficient for that. Doesn't
     /// validate the address itself.
     private func isIPLiteral(_ host: String) -> Bool {
         // IPv6 literals arrive bracketed in URLs (`[::1]`); URLComponents

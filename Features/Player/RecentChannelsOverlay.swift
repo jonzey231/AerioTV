@@ -3,7 +3,7 @@ import SwiftUI
 #if os(tvOS)
 
 /// Hold-Up "Recently Watched" overlay (Remote Control initiative, Logan spec
-/// 2026-07-20) — the tvOS port of Android's `RecentChannelsOverlay.kt`.
+/// 2026-07-20), the tvOS port of Android's `RecentChannelsOverlay.kt`.
 ///
 /// Shows the recents LRU (`RecentChannelsStore.shared.resolved`, already
 /// most-recent-first and capped at 25) as a focusable list over the live
@@ -41,7 +41,7 @@ struct RecentChannelsOverlay: View {
 
     /// Drives initial focus. This overlay is placed in a ZStack over the
     /// player (not presented as a cover), so the focus engine won't auto-land
-    /// on a row for us — we seed it on appear.
+    /// on a row for us, we seed it on appear.
     @FocusState private var focusedID: String?
 
     init(onTune: @escaping (ChannelDisplayItem) -> Void,

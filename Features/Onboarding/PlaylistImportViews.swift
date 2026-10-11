@@ -322,7 +322,7 @@ struct M3UImportView: View {
         playlist.channelCount = previewChannels.count
         playlist.lastRefreshed = Date()
         modelContext.insert(playlist)
-        // Save and flush immediately — the @Query in RootView will detect
+        // Save and flush immediately, the @Query in RootView will detect
         // the new playlist via SwiftData's change notification.
         do {
             try modelContext.save()

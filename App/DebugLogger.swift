@@ -91,7 +91,7 @@ enum LogLevel: String, CaseIterable {
 final class DebugLogger: @unchecked Sendable {
     static let shared = DebugLogger()
 
-    // Serial queue for all file I/O — prevents data races.
+    // Serial queue for all file I/O, prevents data races.
     private let queue = DispatchQueue(label: "com.aerio.debuglogger", qos: .utility)
 
     // Maximum log file size before rotation (4 MB). A 9 MB file stalled
@@ -182,8 +182,8 @@ final class DebugLogger: @unchecked Sendable {
     //
     // Defence-in-depth for the debug log file. Every string path that
     // reaches `appendToFile` is now routed through `sanitize()` so no
-    // credential — embedded in a URL, a header, a JSON body snippet,
-    // or an error message — can land on disk. Patterns below are
+    // credential, embedded in a URL, a header, a JSON body snippet,
+    // or an error message, can land on disk. Patterns below are
     // ordered by risk; extending the list means adding one `NSRegular`
     // pattern plus one replacement line in `sanitize()`.
     //
@@ -194,11 +194,11 @@ final class DebugLogger: @unchecked Sendable {
     /// Xtream path-segment credentials: `/live/<user>/<pass>/<id>.ts`
     /// etc. Catches the three stream-type prefixes Xtream supports.
     /// Preserves `<user>` on purpose so operators can correlate log
-    /// lines with specific accounts when debugging — only the password
+    /// lines with specific accounts when debugging, only the password
     /// slot is redacted.
     private static let xtreamPathRegex = try! NSRegularExpression(
         pattern: #"/(movie|series|live)/([^/]+)/([^/]+)/"#)
-    /// Xtream query-param credentials — used by the `/player_api.php`
+    /// Xtream query-param credentials, used by the `/player_api.php`
     /// and `/get.php` endpoints: `?username=X&password=Y&action=…`.
     /// Separate from the path-segment regex above because Xtream's
     /// API and stream endpoints use different auth encodings.
@@ -208,7 +208,7 @@ final class DebugLogger: @unchecked Sendable {
     /// legacy Dispatcharr paths.
     private static let apiKeyRegex = try! NSRegularExpression(
         pattern: #"(api[_-]?key=)[^&\s]+"#, options: .caseInsensitive)
-    /// HTTP authorisation header values — defensive for the case where
+    /// HTTP authorisation header values, defensive for the case where
     /// URLSession stringifies a failed request (header + URL both land
     /// in `error.localizedDescription`). Covers the three schemes the
     /// app uses: `Authorization: Bearer …` (Dispatcharr JWT),
@@ -227,7 +227,7 @@ final class DebugLogger: @unchecked Sendable {
         pattern: #"(?i)(Token=)"[^"]+""#)
     /// JWT `access`/`refresh` pairs in JSON response bodies. Triggers
     /// primarily from `logDecodeError(payloadSnippet:)` when a login
-    /// response fails to decode — the raw JSON would otherwise include
+    /// response fails to decode, the raw JSON would otherwise include
     /// the tokens in plaintext. The 20-char minimum avoids false
     /// positives on short unrelated fields.
     private static let jwtInJsonRegex = try! NSRegularExpression(
@@ -443,7 +443,7 @@ final class DebugLogger: @unchecked Sendable {
     /// Log an EPG operation.
     ///
     /// v1.6.8 (Codex D4): `error.localizedDescription` on a URLSession
-    /// fetch failure can embed the full XMLTV URL — potentially an
+    /// fetch failure can embed the full XMLTV URL, potentially an
     /// Xtream `/xmltv.php?username=…&password=…` endpoint. Sanitize
     /// the composed message.
     func logEPG(event: String,
@@ -466,7 +466,7 @@ final class DebugLogger: @unchecked Sendable {
     /// Log a channel list load operation.
     ///
     /// v1.6.8 (Codex D4): sanitized for the same reason as `logEPG`
-    /// — the error description can expose the playlist URL.
+    /// the error description can expose the playlist URL.
     func logChannelLoad(serverType: String,
                         channelCount: Int? = nil,
                         duration: TimeInterval? = nil,
@@ -495,7 +495,7 @@ final class DebugLogger: @unchecked Sendable {
 
     /// Log a timed operation for performance tracking.
     ///
-    /// v1.6.8 (Codex D4): sanitised — callers sometimes include URLs
+    /// v1.6.8 (Codex D4): sanitised, callers sometimes include URLs
     /// or auth headers in the `detail` field.
     func logPerformance(operation: String, duration: TimeInterval, detail: String? = nil) {
         guard isEnabled else { return }
@@ -508,7 +508,7 @@ final class DebugLogger: @unchecked Sendable {
 
     /// Log a decoding / parsing error with the raw payload snippet.
     ///
-    /// v1.6.8 (Codex D4): **highest-risk sanitizer target** — the
+    /// v1.6.8 (Codex D4): **highest-risk sanitizer target**, the
     /// raw payload prefix can be the first 200 characters of a
     /// Dispatcharr login response which contains
     /// `{"access":"<jwt>","refresh":"<jwt>"}`. The JWT regex in

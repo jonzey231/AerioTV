@@ -6,7 +6,7 @@ import Network
 ///
 /// Multiple `MPVPlayerView.Coordinator` instances each manage their own
 /// mpv handle. They all need the shared `AVAudioSession` active, but
-/// the session is a process-global singleton — each coordinator calling
+/// the session is a process-global singleton, each coordinator calling
 /// `setActive(true/false)` on init / teardown races when two or more
 /// players are alive at once. Symptoms:
 /// - Audio silently goes away when the first coordinator teardown
@@ -21,7 +21,7 @@ import Network
 /// Both the count mutation and the `setActive(...)` call are serialised
 /// on a private queue so a pair of increment/decrement calls arriving
 /// on different threads can't interleave and leave the session in the
-/// wrong state. The `setActive` call itself is synchronous — it's a
+/// wrong state. The `setActive` call itself is synchronous, it's a
 /// short blocking call on iOS so holding the queue for its duration
 /// is acceptable.
 enum AudioSessionRefCount {
@@ -39,8 +39,8 @@ enum AudioSessionRefCount {
     ///
     /// `caller` is an optional string attributing the call to a
     /// specific tile / entry-point. Gets logged verbatim. Pass
-    /// something short and stable — e.g. `"tile=ABC"` or
-    /// `"enterMultiview-float"` — so the log trail tells us
+    /// something short and stable, e.g. `"tile=ABC"` or
+    /// `"enterMultiview-float"`, so the log trail tells us
     /// exactly which path raised the refcount when we're debugging
     /// audio-session deadlocks or the "2nd tile won't open"
     /// puzzle.
@@ -64,11 +64,11 @@ enum AudioSessionRefCount {
                 // live session on this box negotiates.
                 try? AVAudioSession.sharedInstance().setPreferredSampleRate(48_000)
                 try AVAudioSession.sharedInstance().setActive(true)
-                // Landed 0→1 — good entry-point to attribute audio
+                // Landed 0→1, good entry-point to attribute audio
                 // regressions (wrong category, deactivation bounce).
                 NSLog("[MV-Audio] session activated (refcount 0→1) caller=\(caller)")
             } catch {
-                // Intentionally swallowed — this mirrors the existing
+                // Intentionally swallowed, this mirrors the existing
                 // inline behavior in MPVPlayerView.swift:91-102. The
                 // session activation can fail in background / weird
                 // states; we let mpv try to play anyway.
@@ -115,7 +115,7 @@ enum AudioSessionRefCount {
                 )
                 NSLog("[MV-Audio] session deactivated (refcount →0) caller=\(caller)")
             } catch {
-                // Same tolerance as increment — log and move on.
+                // Same tolerance as increment, log and move on.
                 NSLog("AudioSessionRefCount.decrement: setActive(false) failed: \(error)")
             }
         }
@@ -137,7 +137,7 @@ enum AudioSessionRefCount {
 
     #if DEBUG
     /// For tests: reset the counter without touching `setActive`. Never
-    /// call from production code — the session state would go out of
+    /// call from production code, the session state would go out of
     /// sync with the ref count. DEBUG-only so the release binary
     /// doesn't ship a footgun.
     static func _resetForTesting() {

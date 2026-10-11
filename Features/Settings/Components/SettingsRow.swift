@@ -80,7 +80,7 @@ struct SettingsRow: View {
     /// theme changes. v1.6.8: parent SettingsView observes
     /// ThemeManager too, but SwiftUI's List + UITableView cell
     /// diff skips re-rendering a row's body unless one of its
-    /// observed inputs changes — and Settings rows are
+    /// observed inputs changes, and Settings rows are
     /// constructed with the same prop values across themes
     /// (icon name + title + subtitle string). Subscribing the
     /// row directly forces a body refresh on every theme push,

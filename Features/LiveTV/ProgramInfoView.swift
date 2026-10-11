@@ -4,7 +4,7 @@ import SwiftUI
 //
 // Minimal value type that carries everything `ProgramInfoView` needs
 // to render a program detail modal. Callers build one of these from
-// whichever richer program object they have on hand — `GuideProgram`
+// whichever richer program object they have on hand, `GuideProgram`
 // in the guide grid, `EPGEntry` + channel context in the list-view
 // expanded panel, or `ChannelDisplayItem.currentProgram*` fields for
 // the always-visible "now airing" card.
@@ -180,13 +180,13 @@ struct ProgramInfoTarget: Identifiable, Equatable {
 //   2. Expose the category tagging behind the v1.6.4 guide-cell tint
 //      so users can audit their EPG feed quality from inside the app.
 //      Matching colour between the info pill and the guide tint is
-//      intentional — the pill IS the legend for the grid.
+//      intentional, the pill IS the legend for the grid.
 //
 // Missing fields are surfaced, not hidden. A program whose XMLTV
 // entry has no `<desc>` shows a "No description…" placeholder
 // instead of a gap; a missing category renders a neutral-grey pill
 // labeled with the raw token. This matches Archie's "audit from
-// inside the app" requirement — a silent empty field teaches the
+// inside the app" requirement, a silent empty field teaches the
 // user nothing about why a program isn't tinted.
 struct ProgramInfoView: View {
     let target: ProgramInfoTarget
@@ -235,7 +235,7 @@ struct ProgramInfoView: View {
         ChannelStore.shared.activeServer?.authHeaders ?? [:]
     }
 
-    /// Display category — prefers the loaded value over the target's
+    /// Display category, prefers the loaded value over the target's
     /// initial value so a successful detail fetch wins. Empty string
     /// when neither source has data; the pills sections then hide
     /// entirely (matches the pre-v1.7.x behaviour for unenriched
@@ -256,11 +256,11 @@ struct ProgramInfoView: View {
         return f
     }()
 
-    /// Duration label — "45 min", "1 h 30 min", "2 h". Duration of 0
-    /// or negative (malformed EPG) falls back to "—".
+    /// Duration label, "45 min", "1 h 30 min", "2 h". Duration of 0
+    /// or negative (malformed EPG) falls back to "-".
     private var durationLabel: String {
         let seconds = end.timeIntervalSince(start)
-        guard seconds > 0 else { return "—" }
+        guard seconds > 0 else { return "-" }
         let totalMinutes = Int((seconds / 60).rounded())
         if totalMinutes < 60 {
             return "\(totalMinutes) min"
@@ -315,7 +315,7 @@ struct ProgramInfoView: View {
     /// time range; adds the date only when the program spans or
     /// starts on a different calendar day than today (late-night
     /// programs that start at 23:45 and end at 00:30 still read
-    /// as "today" here — that's fine, the date row is an
+    /// as "today" here, that's fine, the date row is an
     /// affordance for overnight / future recording scheduling
     /// more than strict precision).
     private var timeRangeLabel: String {
@@ -345,7 +345,7 @@ struct ProgramInfoView: View {
     /// "Metadata" pill row so users can see the content categories
     /// on their own without the format-indicator noise drowning
     /// them out. These are the words Archie specifically called out
-    /// as not being genres — "Episode", "Series", etc. The match
+    /// as not being genres, "Episode", "Series", etc. The match
     /// is case-insensitive and exact (not substring) so "Comedy"
     /// never accidentally lands in Metadata.
     private static let metadataTokens: Set<String> = [
@@ -379,7 +379,7 @@ struct ProgramInfoView: View {
         categoryTokens.filter { Self.metadataTokens.contains($0.lowercased()) }
     }
 
-    /// Category tokens that are actual genres — everything not
+    /// Category tokens that are actual genres, everything not
     /// claimed by `metadataPills`. These are the tokens the category
     /// colour palette tries to resolve into buckets (Sports, News,
     /// Drama, etc.) for the pill tint.
@@ -568,12 +568,12 @@ struct ProgramInfoView: View {
     //   • `target.programID` is nil (XMLTV / Xtream / M3U sources
     //     that don't carry Dispatcharr's per-program primary key).
     //   • `ChannelStore.shared.activeServer` is missing or isn't a
-    //     `dispatcharrAPI` server. Defensive — the modal is only
+    //     `dispatcharrAPI` server. Defensive, the modal is only
     //     reached via channel rows whose server is by definition
     //     the active one, but a server switch mid-presentation
     //     shouldn't crash the lookup.
     //   • The fetch fails (timeout, 401, decode error). Pills just
-    //     don't appear — same outcome as if the program genuinely
+    //     don't appear, same outcome as if the program genuinely
     //     had no categories. No banner, no error state. The user
     //     can dismiss + reopen to retry.
     @MainActor
@@ -594,7 +594,7 @@ struct ProgramInfoView: View {
             return
         }
         guard let pid = target.programID else {
-            debugLog("📺 ProgramInfo lazy-load SKIP: programID is nil (target wasn't built from a Dispatcharr-grid program — XMLTV/Xtream/dummy source, or the construction site didn't thread programID)")
+            debugLog("📺 ProgramInfo lazy-load SKIP: programID is nil (target wasn't built from a Dispatcharr-grid program, XMLTV/Xtream/dummy source, or the construction site didn't thread programID)")
             return
         }
         guard let server = ChannelStore.shared.activeServer else {
@@ -627,7 +627,7 @@ struct ProgramInfoView: View {
             let detail = try await api.getProgramDetail(id: pid)
             let cats = detail.categories.joined(separator: ",")
             debugLog("📺 ProgramInfo lazy-load OK: pid=\(pid) returned \(detail.categories.count) categories: '\(cats.prefix(80))'")
-            // Only assign if we got something — avoids triggering a
+            // Only assign if we got something, avoids triggering a
             // pointless re-render on empty results, and leaves the
             // door open for a future retry path.
             if categoryNeeded, !cats.isEmpty {
@@ -645,7 +645,7 @@ struct ProgramInfoView: View {
             if detail.isPreviouslyShown { enrichedRepeat = true }
         } catch {
             debugLog("📺 ProgramInfo lazy-load FAIL: pid=\(pid) error=\(error.localizedDescription)")
-            // Swallow — the modal stays usable without pills.
+            // Swallow, the modal stays usable without pills.
         }
     }
 
@@ -758,7 +758,7 @@ struct ProgramInfoView: View {
                     .textSelection(.enabled)
             }
 
-            // Metadata pills — XMLTV format indicators. Rendered as
+            // Metadata pills, XMLTV format indicators. Rendered as
             // neutral grey pills regardless of palette state because
             // they're not genres (no tint mapping applies).
             if !metadataPills.isEmpty {
@@ -772,7 +772,7 @@ struct ProgramInfoView: View {
                 }
             }
 
-            // Genre pills — tokens that may resolve to a palette
+            // Genre pills, tokens that may resolve to a palette
             // bucket (Sports, Drama, etc.). Unresolved tokens still
             // render as neutral grey pills so the user can audit
             // what their feed tagged.
@@ -954,17 +954,17 @@ struct ProgramInfoView: View {
 // the cell the user long-pressed to open the modal. Resolution
 // order matches `CategoryColor.backgroundColor`:
 //
-//   1. User-defined custom category (from Settings) — hex wins.
-//   2. Built-in bucket whose aliases contain the token — bucket's
+//   1. User-defined custom category (from Settings), hex wins.
+//   2. Built-in bucket whose aliases contain the token, bucket's
 //      current (possibly user-overridden) colour wins.
-//   3. Neither — neutral grey pill so the token is still visible,
+//   3. Neither, neutral grey pill so the token is still visible,
 //      teaching the user that this tag doesn't resolve to any
 //      colour in their palette. Part of the "audit EPG quality"
 //      goal.
 //
 // The label is always the RAW token from the XMLTV feed, not the
 // resolved bucket's display name. Users asked for "how did my feed
-// tag this program" — showing the bucket name would hide the raw
+// tag this program", showing the bucket name would hide the raw
 // data behind Aerio's canonicalisation.
 struct CategoryPill: View {
     let rawToken: String
@@ -1026,7 +1026,7 @@ struct CategoryPill: View {
 // or a tvOS vertical stack.
 //
 // Uses the Swift 5.7+ `Layout` protocol. iOS 16+ / tvOS 16+ / macOS
-// 13+ — well under Aerio's deployment floor.
+// 13+, well under Aerio's deployment floor.
 struct CategoryPillsLayout: Layout {
     var spacing: CGFloat = 6
 

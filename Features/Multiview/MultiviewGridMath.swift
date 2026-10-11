@@ -111,24 +111,24 @@ enum MultiviewLayoutMode: String, CaseIterable, Identifiable, Sendable {
 /// taller than it is wide takes the portrait path instead: the hero shapes
 /// transpose (big tile on top, followers underneath) and the uniform grids
 /// re-shape to stack, so a 2-up splits top/bottom rather than left/right.
-/// See "MARK: - Portrait". Rotation needs no extra plumbing — the caller
+/// See "MARK: - Portrait". Rotation needs no extra plumbing, the caller
 /// (`MultiviewLayoutView`) already re-runs this math from a `GeometryReader`,
 /// so a new container size picks the matching table on the spot.
 ///
 /// All rects are computed against the container origin (0,0) and sized
 /// so that adjacent rect edges are separated by `spacing`. Negative or
-/// zero containers return an empty array (defensive — avoids NaN
+/// zero containers return an empty array (defensive, avoids NaN
 /// propagation into SwiftUI).
 enum MultiviewGridMath {
 
     /// Minimum sensible tile dimension. If the container is smaller
     /// than `3 × minTile + 2 × spacing` on either axis we still
-    /// produce rects, but they may render tiny — the caller (the
+    /// produce rects, but they may render tiny, the caller (the
     /// container view) is responsible for not presenting multiview at
     /// compact widths.
     static let minTileDimension: CGFloat = 80
 
-    /// Default visual spacing between tiles. Zero gutter — tiles
+    /// Default visual spacing between tiles. Zero gutter, tiles
     /// sit flush against each other so the grid reads as one
     /// continuous display surface rather than a tiled card collection.
     /// Per user request (2026-04-17): the previous 6pt gutter visually
@@ -142,7 +142,7 @@ enum MultiviewGridMath {
     /// when the tile is at an edge).
     ///
     /// Used by tvOS relocate-mode to let the Siri Remote arrow keys
-    /// swap the tile with its ACTUAL visual neighbor — not just the
+    /// swap the tile with its ACTUAL visual neighbor, not just the
     /// next entry in the list, which for N=5/7/8 breaks the user's
     /// mental model. The math cheats by querying the rect table: the
     /// neighbor in a direction is the tile whose centroid is closest
@@ -153,7 +153,7 @@ enum MultiviewGridMath {
     ///   - count: total tile count
     ///   - direction: .left / .right / .up / .down (uses a string
     ///     enum below so we're SwiftUI-`MoveCommandDirection`-free
-    ///     at this layer — the caller converts)
+    ///     at this layer, the caller converts)
     /// - Returns: neighbor index if one exists in that direction
     enum NeighborDirection { case left, right, up, down }
 
@@ -164,7 +164,7 @@ enum MultiviewGridMath {
         container: CGSize = CGSize(width: 1920, height: 1080),
         spacing: CGFloat = defaultSpacing
     ) -> Int? {
-        // Use a fixed reference container for topology — absolute
+        // Use a fixed reference container for topology, absolute
         // pixel sizes cancel out since we only compare relative
         // positions. 1920×1080 is arbitrary but matches a common
         // tvOS screen so the rect math produces well-shaped rects.
@@ -189,7 +189,7 @@ enum MultiviewGridMath {
         // `spacing=0` this is 1 px of subpixel slop, which is fine.
         let eps = spacing + 1
 
-        // Perpendicular-axis overlap must be strictly POSITIVE — mere
+        // Perpendicular-axis overlap must be strictly POSITIVE, mere
         // boundary-point contact doesn't count. Without this, a 2×2
         // grid with `spacing=0` treats the top-right tile as a
         // right-neighbour of the bottom-left tile, because they share
@@ -198,7 +198,7 @@ enum MultiviewGridMath {
         //
         // Using `> 1` (instead of `> 0`) tolerates floating-point
         // rounding in layout math while still rejecting exact-
-        // boundary contact — the "real" overlap between two tiles in
+        // boundary contact, the "real" overlap between two tiles in
         // the same row is always > 1 px regardless of container size
         // (smallest case is a 9-grid third-height tile sharing its
         // full-height edge with a neighbour, which is hundreds of px).
@@ -418,7 +418,7 @@ enum MultiviewGridMath {
     /// Build a landscape table in an axis-swapped container, flip every rect
     /// back, and re-sort into reading order.
     ///
-    /// Geometry transposes cleanly — a hero on the left becomes a hero on top.
+    /// Geometry transposes cleanly, a hero on the left becomes a hero on top.
     /// The ORDER does not: transposing walks a grid column-major, so tile 2 of
     /// a 5-up would land bottom-left instead of top-right. Sorting by (y, x)
     /// restores the reading order the landscape table had, which is what keeps
@@ -452,7 +452,7 @@ enum MultiviewGridMath {
     /// Pick the `cols × rows` split that renders the most video.
     ///
     /// Candidates are scored by the area a 16:9 frame actually paints inside
-    /// one cell, letterboxing included — the metric that matters, because a
+    /// one cell, letterboxing included, the metric that matters, because a
     /// cell far off the source aspect is mostly black bars. On a 393×780 phone
     /// that resolves 2 tiles to 1×2 and 4 tiles to 1×4; a squarer iPad
     /// container still resolves 4 to 2×2.
@@ -484,7 +484,7 @@ enum MultiviewGridMath {
         [CGRect(origin: .zero, size: c)]
     }
 
-    /// Two tiles side-by-side, full height. Landscape priority — a
+    /// Two tiles side-by-side, full height. Landscape priority, a
     /// 2×1 vertical split would waste width on a widescreen display.
     private static func layout2(_ c: CGSize, spacing: CGFloat) -> [CGRect] {
         let w = (c.width - spacing) / 2
@@ -514,7 +514,7 @@ enum MultiviewGridMath {
 
     /// 3×3 grid's top-left 2×2 merged into one big tile, then 4 small
     /// tiles fill the right column (2) and the bottom row's left two
-    /// cells. The 3×3 corner (col=2, row=2) stays empty — the
+    /// cells. The 3×3 corner (col=2, row=2) stays empty, the
     /// asymmetry reads as "focused stream with 4 followers".
     ///
     /// Tile order: big → (2,0) → (2,1) → (0,2) → (1,2)
@@ -539,7 +539,7 @@ enum MultiviewGridMath {
         uniformGrid(cols: 3, rows: 2, in: c, spacing: spacing)
     }
 
-    /// 3×3 with bottom-left and bottom-right empty — centers the 7th
+    /// 3×3 with bottom-left and bottom-right empty, centers the 7th
     /// tile at (col=1, row=2). Tiles 1–6 follow reading order through
     /// the top two rows, tile 7 is the centered bottom.
     private static func layout7(_ c: CGSize, spacing: CGFloat) -> [CGRect] {

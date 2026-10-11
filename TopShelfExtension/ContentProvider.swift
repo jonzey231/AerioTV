@@ -2,7 +2,7 @@
 import Security
 import os.log
 
-/// Top Shelf content provider — shows Continue Watching VOD (poster art)
+/// Top Shelf content provider, shows Continue Watching VOD (poster art)
 /// and Top Channels (hdtv logo cards) by reading data from a **shared
 /// keychain item** written by the main Aerio app.
 ///
@@ -10,7 +10,7 @@ import os.log
 /// the wildcard `47DTJ3Q67T.*` keychain-access-groups entitlement already
 /// granted by the provisioning profile, so no portal changes are needed.
 ///
-/// Image URLs are passed straight through from the source data — we tried
+/// Image URLs are passed straight through from the source data, we tried
 /// pre-processing them into aspect-fit padded files locally (both in the
 /// extension's Caches dir and the main app's Caches dir) and conclusively
 /// proved that tvOS's Top Shelf host process (PineBoard) cannot read from
@@ -82,7 +82,7 @@ class ContentProvider: TVTopShelfContentProvider {
 
         var sections: [TVTopShelfItemCollection<TVTopShelfSectionedItem>] = []
 
-        // ── Top Channels first (hdtv 16:9 cards — more forgiving than
+        // ── Top Channels first (hdtv 16:9 cards, more forgiving than
         //    `.square` or `.poster` for typical IPTV channel logos which
         //    vary wildly in aspect ratio) ──
         if !channelEntries.isEmpty {
@@ -94,7 +94,7 @@ class ContentProvider: TVTopShelfContentProvider {
 
                 let item = TVTopShelfSectionedItem(identifier: "channel-\(id)")
                 if let program = entry["currentProgram"], !program.isEmpty {
-                    item.title = "\(name) — \(program)"
+                    item.title = "\(name), \(program)"
                 } else {
                     item.title = name
                 }

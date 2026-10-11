@@ -40,7 +40,7 @@ struct MultiviewCommands: Commands {
 
             Divider()
 
-            // ⌘1..⌘9 — take audio of tile N (1-indexed, so ⌘1 is
+            // ⌘1..⌘9, take audio of tile N (1-indexed, so ⌘1 is
             // tile[0]). Each button is only active when that tile
             // index exists. `Button.disabled` is driven off a
             // fresh-computed bound value; this re-computes when any
@@ -61,7 +61,7 @@ struct MultiviewCommands: Commands {
     private func openAddSheet() {
         guard PlayerSession.shared.mode == .multiview else { return }
         DebugLogger.shared.log("[MV-Cmd] ⌘N openAddSheet", category: "Playback", level: .info)
-        // There's no global "present add sheet" API — the sheet is
+        // There's no global "present add sheet" API, the sheet is
         // owned by `MultiviewContainerView`'s `@State`. We post a
         // Notification that the container listens for; the container
         // flips its local state on receipt. This is the least-

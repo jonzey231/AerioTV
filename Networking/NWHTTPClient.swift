@@ -2,7 +2,7 @@
 //  NWHTTPClient.swift
 //  Aerio
 //
-//  v1.6.10 — Network.framework-based HTTP/1.1 client used to bypass iOS's
+//  v1.6.10, Network.framework-based HTTP/1.1 client used to bypass iOS's
 //  built-in HSTS preload list for IPTV reseller domains on TLDs Google
 //  baked into Chromium (`.app`, `.dev`, `.page`, `.new`, …). Apple's ATS
 //  posture only governs URLSession / NSURLSession; CFNetwork and the
@@ -15,19 +15,19 @@
 //    URLSession refuses these regardless of `NSAllowsArbitraryLoads`
 //    because HSTS preload lives one layer below ATS in URLSession's
 //    own resolver. Other clients handle the URL format because they
-//    don't use URLSession for that fetch — they go straight to BSD
+//    don't use URLSession for that fetch, they go straight to BSD
 //    sockets or, on Apple platforms, NWConnection.
 //
 //  Design constraints:
 //    • Drop-in `data(for:)` / `data(from:)` API matching URLSession's
 //      shape so the existing `loggedData` helpers in StreamingAPIs.swift
 //      can swap dispatcher with a one-line change.
-//    • HTTP/1.1 only — sufficient for every Xtream-Codes / Dispatcharr
+//    • HTTP/1.1 only, sufficient for every Xtream-Codes / Dispatcharr
 //      panel we've seen. Servers that strictly require HTTP/2 are
 //      vanishingly rare in this market and overwhelmingly serve TLS
 //      (which URLSession handles natively, no NWConnection needed).
 //    • Supports plain HTTP and TLS. When TLS is requested the
-//      framework's default options apply — full cert validation; we
+//      framework's default options apply, full cert validation; we
 //      don't pin or bypass.
 //    • Follows 301/302/303/307/308 redirects up to 5. Most panels
 //      chain through one or two reverse-proxy 302s before delivering
@@ -36,7 +36,7 @@
 //      encoding bodies. Modern panels behind nginx default to
 //      chunked; legacy panels still use Content-Length.
 //    • Caps body at 50 MB. Large XMLTV EPG payloads for big
-//      providers can approach that — anything bigger is almost
+//      providers can approach that, anything bigger is almost
 //      certainly a misconfiguration and we'd rather error than
 //      OOM the device.
 //
@@ -76,7 +76,7 @@ enum NWHTTPClient {
 
     /// Per-request soft deadline. Mirrors URLSessionConfiguration's
     /// `timeoutIntervalForRequest = 20` used by the Xtream/Dispatcharr
-    /// shared session — same UX the user is used to.
+    /// shared session, same UX the user is used to.
     static let defaultTimeout: TimeInterval = 20
 
     /// Hard cap on response body size. v1.6.10 raised from 50 MB to
@@ -153,7 +153,7 @@ enum NWHTTPClient {
         )
 
         // Build TCP options explicitly. We deliberately leave
-        // `enableFastOpen` at its default (false) — TFO requires both
+        // `enableFastOpen` at its default (false), TFO requires both
         // client and server kernel support and intermediate firewalls
         // sometimes drop SYN+data packets, leading to silent stalls
         // that look exactly like the "connection timed out" symptom.
@@ -251,7 +251,7 @@ enum NWHTTPClient {
 
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(Data, HTTPURLResponse), Error>) in
             // Soft deadline. If the exchange doesn't complete within
-            // `timeout` seconds, cancel — the receive loop sees the
+            // `timeout` seconds, cancel, the receive loop sees the
             // cancellation and resumes with .timedOut.
             let timeoutTask = Task { [weak connection] in
                 if state.bodySink != nil {
@@ -259,7 +259,7 @@ enum NWHTTPClient {
                     // far longer than one `timeout` to finish, but a stalled
                     // connection (no bytes flowing) must still be cut. Wake every
                     // `timeout` and cancel only when nothing arrived since the
-                    // last wake — the receive loop stamps `lastActivityAt`.
+                    // last wake, the receive loop stamps `lastActivityAt`.
                     while !Task.isCancelled {
                         try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                         if Task.isCancelled { return }
@@ -329,7 +329,7 @@ enum NWHTTPClient {
                     }
                 case .waiting(let error):
                     // .waiting fires when the connection can't open
-                    // immediately — DNS still in flight, no route, etc.
+                    // immediately, DNS still in flight, no route, etc.
                     // Most reasons resolve themselves; surface as a
                     // failure only after a few seconds so we don't kill
                     // a connection that would have worked. The 20s soft
@@ -414,7 +414,7 @@ enum NWHTTPClient {
                 // .untilClose we now have the whole payload; if it was
                 // .contentLength we'd already have finished above; if
                 // .chunked we expect a 0-length chunk before close, but
-                // some panels close abruptly on the terminator — accept
+                // some panels close abruptly on the terminator, accept
                 // what we have.
                 finish(state: state, url: url, resumeOnce: resumeOnce)
                 return
@@ -486,7 +486,7 @@ enum NWHTTPClient {
         var lines: [String] = []
         lines.append("\(method) \(pathPart) HTTP/1.1")
 
-        // Host header — required by RFC, and reverse proxies route on
+        // Host header, required by RFC, and reverse proxies route on
         // it. Include port when non-default.
         let hostHeader: String = {
             guard let host = url.host else { return "" }
@@ -503,7 +503,7 @@ enum NWHTTPClient {
         var merged: [String: String] = [
             "User-Agent": userAgent(),
             "Accept": "*/*",
-            "Accept-Encoding": "identity",   // no gzip — keeps decoder simple
+            "Accept-Encoding": "identity",   // no gzip, keeps decoder simple
             "Connection": "close"            // one-shot per request
         ]
         for (k, v) in headers { merged[k] = v }
@@ -579,7 +579,7 @@ enum NWHTTPClient {
             state.framing = .contentLength(n)
         } else {
             // 1xx/204/304 carry no body. Anything else without framing
-            // is "until close" per HTTP/1.1 — sometimes seen on legacy
+            // is "until close" per HTTP/1.1, sometimes seen on legacy
             // panels.
             if state.statusCode == 204 || state.statusCode == 304 || (100...199).contains(state.statusCode) {
                 state.framing = .contentLength(0)
@@ -628,7 +628,7 @@ enum NWHTTPClient {
 
     private static func appendBody(state: State, bytes: Data) throws {
         if state.sinkActive, let sink = state.bodySink {
-            // Streaming: hand bytes off and count them, never buffer — so the
+            // Streaming: hand bytes off and count them, never buffer, so the
             // maxBodyBytes cap can't trip on an open-ended body.
             sink(bytes)
             state.sunkBytes += bytes.count
@@ -687,7 +687,7 @@ enum NWHTTPClient {
                     state.chunkedRemaining -= take
                     if state.chunkedRemaining > 0 { return }
                 }
-                // chunkedRemaining is 0 — drain the trailing \r\n.
+                // chunkedRemaining is 0, drain the trailing \r\n.
                 if state.chunkBuffer.count < 2 { return }
                 let crlf = state.chunkBuffer.prefix(2)
                 guard crlf == Data([0x0D, 0x0A]) else {
@@ -735,8 +735,8 @@ enum NWHTTPClient {
     ///
     /// `@unchecked Sendable`: we hand-coordinate access through the
     /// per-request `DispatchQueue` (every state mutation either runs
-    /// inside an `NWConnection` callback — which the framework
-    /// serializes on that queue — or inside our own `queue.async`
+    /// inside an `NWConnection` callback, which the framework
+    /// serializes on that queue, or inside our own `queue.async`
     /// block in `resumeOnce`). The compiler can't verify this, but
     /// it's a stronger guarantee than typical Sendable structs.
     fileprivate final class State: @unchecked Sendable {

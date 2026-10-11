@@ -4,7 +4,7 @@ import SwiftUI
 /// FIFO ring of recently-played channels, keyed by channel ID.
 ///
 /// Used by the multiview add-sheet's "Recent" section (and could be
-/// used elsewhere later — it's a general-purpose "last N channels the
+/// used elsewhere later, it's a general-purpose "last N channels the
 /// user touched" list). Persists channel IDs only; hydration into
 /// `ChannelDisplayItem`s happens at read-time via `ChannelStore` so
 /// that EPG refreshes / renames are reflected without touching the
@@ -90,7 +90,7 @@ final class RecentChannelsStore: ObservableObject {
     // MARK: - Public API
 
     /// Push a channel to the front. No-op for empty / whitespace IDs
-    /// (defensive — `ChannelDisplayItem.id` should always be valid,
+    /// (defensive, `ChannelDisplayItem.id` should always be valid,
     /// but an empty-string push would dedup to itself and silently
     /// corrupt the order).
     func push(_ item: ChannelDisplayItem) {
@@ -114,7 +114,7 @@ final class RecentChannelsStore: ObservableObject {
     /// evaluations (the add-sheet's "Recent" section + search
     /// filtering), so it re-runs on every keystroke. With N channels
     /// and M recents (M ≤ 20), the original Dictionary-build approach
-    /// was O(N) in construction — linear in the full channel list,
+    /// was O(N) in construction, linear in the full channel list,
     /// even though we only want to resolve 20 IDs. The loop below is
     /// O(M × N_avg_to_hit) with a tiny constant; for realistic M=20
     /// and N=5000 it's ~10× faster in practice because we bail out

@@ -225,10 +225,10 @@ final class VODService {
     /// to the public TMDB CDN at `image.tmdb.org`. Three input shapes
     /// are accepted:
     ///
-    /// - **Full URL** (`http(s)://…`) — passed through unchanged.
+    /// - **Full URL** (`http(s)://…`), passed through unchanged.
     /// - **Bare TMDB path** (single-segment leading slash, common
-    ///   image extension) — prepended with `https://image.tmdb.org/t/p/<size>`.
-    /// - **Anything else** — treated as Dispatcharr-relative and joined
+    ///   image extension), prepended with `https://image.tmdb.org/t/p/<size>`.
+    /// - **Anything else**, treated as Dispatcharr-relative and joined
     ///   with the server `base`, mirroring `resolveURL`.
     ///
     /// The TMDB CDN is anonymous and CORS-open; no API key needed for
@@ -286,7 +286,7 @@ final class VODService {
     /// Best-available release date string for a Dispatcharr VOD item.
     /// Tries (in order): `customProperties.releaseDate`,
     /// `customProperties.firstAirDate`, then the typed `year` column
-    /// stringified. Empty when nothing usable is present — the detail
+    /// stringified. Empty when nothing usable is present, the detail
     /// view's `releaseYear` computed property handles that gracefully.
     private static func bestReleaseDate(custom: DispatcharrVODCustomProperties?,
                                         year: Int?) -> String {
@@ -343,7 +343,7 @@ final class VODService {
     /// (instant) and replace it with this when the network fetch
     /// returns.
     ///
-    /// Xtream is a no-op — it already populates everything from
+    /// Xtream is a no-op, it already populates everything from
     /// `getVODInfo`. M3U returns the existing movie unchanged.
     static func fetchMovieDetail(existing: VODMovie, from server: ServerSnapshot) async -> VODMovie {
         switch server.type {
@@ -354,7 +354,7 @@ final class VODService {
         }
     }
 
-    // MARK: - Xtream Codes — Movies
+    // MARK: - Xtream Codes, Movies
 
     private static func xcMovies(server: ServerSnapshot) async throws -> ([VODMovie], [VODCategory]) {
         let api = XtreamCodesAPI(baseURL: server.baseURL,
@@ -399,7 +399,7 @@ final class VODService {
         return (movies, vodCats)
     }
 
-    // MARK: - Xtream Codes — Series
+    // MARK: - Xtream Codes, Series
 
     private static func xcSeries(server: ServerSnapshot) async throws -> ([VODSeries], [VODCategory]) {
         let api = XtreamCodesAPI(baseURL: server.baseURL,
@@ -473,7 +473,7 @@ final class VODService {
         )
     }
 
-    // MARK: - Dispatcharr — Movies
+    // MARK: - Dispatcharr, Movies
 
     private static func dispatcharrMovies(server: ServerSnapshot) async throws -> ([VODMovie], [VODCategory]) {
         let api = DispatcharrAPI(baseURL: server.baseURL, auth: .apiKey(server.apiKey), userAgent: server.userAgent, authMode: server.dispatcharrAuthMode)
@@ -530,7 +530,7 @@ final class VODService {
         return (movies, cats.isEmpty ? [VODCategory(id: "movies", name: "Movies", itemCount: raw.count)] : cats)
     }
 
-    // MARK: - Dispatcharr — Series
+    // MARK: - Dispatcharr, Series
 
     private static func dispatcharrSeries(server: ServerSnapshot) async throws -> ([VODSeries], [VODCategory]) {
         let api = DispatcharrAPI(baseURL: server.baseURL, auth: .apiKey(server.apiKey), userAgent: server.userAgent, authMode: server.dispatcharrAuthMode)
@@ -545,7 +545,7 @@ final class VODService {
             let allGenres = genre.isEmpty ? ["Uncategorized"] : genre.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
             for g in allGenres { genreCounts[g, default: 0] += 1 }
 
-            // v1.6.12: same TMDB enrichment story as movies — pull
+            // v1.6.12: same TMDB enrichment story as movies, pull
             // backdrop / cast / director / date from custom_properties.
             let cp = s.customProperties
             let backdropPath = cp?.backdropPath?.first(where: { !$0.isEmpty })
@@ -578,7 +578,7 @@ final class VODService {
 
     /// v1.6.12: enrich an existing `VODMovie` with data from
     /// Dispatcharr's `provider-info` action. The list endpoint
-    /// (`/api/vod/movies/`) is intentionally slim — `description`,
+    /// (`/api/vod/movies/`) is intentionally slim, `description`,
     /// `genre`, `duration_secs`, and `custom_properties` are all
     /// frequently empty/null even when the admin UI shows full data
     /// for the same movie. The rich data lives behind a per-movie
@@ -600,7 +600,7 @@ final class VODService {
         // Backdrop: prefer provider-info's first non-empty backdrop_path
         // entry (TMDB CDN slug), fall back to the list-time backdrop
         // (which would only be set if list-time custom_properties was
-        // already populated — rarely true but possible).
+        // already populated, rarely true but possible).
         let backdropPath = info.backdropPath?.first(where: { !$0.isEmpty })
         let resolvedBackdrop = backdropPath.flatMap { resolveImageURL($0, base: base) }
         let backdropURL = resolvedBackdrop ?? existing.backdropURL
@@ -630,7 +630,7 @@ final class VODService {
             return existing.genre
         }()
 
-        // Cast — provider-info uses `actors` (Xtream-style key).
+        // Cast, provider-info uses `actors` (Xtream-style key).
         let cast: String = {
             if let a = info.actors, !a.isEmpty { return a }
             return existing.cast
@@ -679,7 +679,7 @@ final class VODService {
         // already be set on `existing` from the list endpoint; prefer
         // provider-info values when non-empty since /provider-info/
         // is the canonical merge of typed columns + relation blobs.
-        // `youtubeTrailer` only lands here — it's not part of the
+        // `youtubeTrailer` only lands here, it's not part of the
         // list shape.
         enriched.tmdbID = {
             if let id = info.tmdbID, !id.isEmpty { return id }
@@ -699,7 +699,7 @@ final class VODService {
         return enriched
     }
 
-    /// v1.6.12: series detail now mirrors the movie path — fetch
+    /// v1.6.12: series detail now mirrors the movie path, fetch
     /// `/provider-info/` for rich metadata, fetch episodes, merge
     /// everything onto the list-time `existing` series so empty
     /// fields don't blow away values we already had.
@@ -707,7 +707,7 @@ final class VODService {
     /// Pre-v1.6.12 this method returned a `VODSeries` with literally
     /// empty strings for every metadata field, on the assumption
     /// that the UI would `??`-fall-back to `item.series`. That was
-    /// wrong — `VODDetailView` reads `fullSeries?.cast`, which
+    /// wrong, `VODDetailView` reads `fullSeries?.cast`, which
     /// returned the empty string (not nil), short-circuiting the
     /// `??` chain. The new approach explicitly merges the
     /// provider-info payload onto `existing`, then attaches
@@ -719,7 +719,7 @@ final class VODService {
     /// every field provider-info doesn't supply.
     ///
     /// **Latency note:** the same first-call provider-info
-    /// throttle as movies — first call against a cold series can
+    /// throttle as movies, first call against a cold series can
     /// take several seconds while Dispatcharr fetches metadata
     /// from the upstream Xtream provider, then 24h cached.
     private static func dispatcharrSeriesDetail(seriesID: String,
@@ -731,7 +731,7 @@ final class VODService {
 
         // v1.6.16.x: provider-info FIRST, episodes SECOND.
         //
-        // Pre-1.6.16.x ran these concurrently with `async let` —
+        // Pre-1.6.16.x ran these concurrently with `async let`,
         // worked fine for series whose episodes were already
         // cached server-side, but for series Dispatcharr hadn't
         // scraped yet (Spiral, Theodosia, Adults), the episodes
@@ -740,7 +740,7 @@ final class VODService {
         // The OpenAPI schema is explicit about why: `/api/vod/
         // series/{id}/provider-info/` is described as "Get
         // detailed series information, refreshing from provider
-        // if needed" — that's the lazy-scrape trigger. Without
+        // if needed", that's the lazy-scrape trigger. Without
         // calling it first, the episodes endpoint returns an
         // empty array because Dispatcharr's per-series episode
         // table hasn't been populated from the upstream Xtream
@@ -776,7 +776,7 @@ final class VODService {
             // the TMDB still URL there for each episode (typically
             // a w185 path on `image.tmdb.org`). Pre-1.6.16.x we
             // hardcoded `posterURL: nil` because the field was
-            // unreliable — but that was an artifact of the
+            // unreliable, but that was an artifact of the
             // concurrent-fetch race causing `episodes` to return
             // empty arrays. Now that provider-info runs first and
             // primes the per-episode cache, `movie_image` is
@@ -784,7 +784,7 @@ final class VODService {
             // in the row instead of a blank placeholder.
             // v1.6.16.x: episode poster with series-poster fallback.
             // Some series (e.g. Kroll Show on the test server)
-            // have `custom_properties: null` on every episode —
+            // have `custom_properties: null` on every episode,
             // Dispatcharr's TMDB scraper hasn't fetched per-episode
             // stills for that title, even though the series-level
             // metadata is fully populated. Pre-fallback the episode

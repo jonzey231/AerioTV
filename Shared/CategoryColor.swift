@@ -6,7 +6,7 @@ import SwiftUI
 // per-category user-customisable colour overrides.
 //
 // The bucket taxonomy is Sports / Movies / Kids / News with priority
-// order Kids > Sports > News > Movie — a "Kids Sports" program colours
+// order Kids > Sports > News > Movie, a "Kids Sports" program colours
 // as Kids, a "News drama" as News, etc. The priority is applied in
 // `CategoryColor.bucket(for:)` (outer match order below).
 //
@@ -15,7 +15,7 @@ import SwiftUI
 // any of the four via Settings → Guide Display → tap a colour row.
 // Overrides are persisted as hex strings in UserDefaults under
 // `"categoryColor.<bucket>"` keys (see `storageKey` below) and read
-// live on every render — so flipping a colour in Settings repaints
+// live on every render, so flipping a colour in Settings repaints
 // the guide without an app restart.
 //
 // The category-string → bucket matcher casefolds the input, splits on
@@ -32,21 +32,21 @@ import SwiftUI
 //
 // IMPORTANT: tinting requires EPG data that actually includes
 // categories. Coverage by server type:
-//   • Dispatcharr — works out of the box. AerioTV fetches
+//   • Dispatcharr, works out of the box. AerioTV fetches
 //     `{baseURL}/output/epg` (Dispatcharr's XMLTV output endpoint,
 //     which preserves `<category>` tags from the upstream source)
 //     instead of the `/api/epg/*` JSON endpoints (which strip
 //     categories). See `EPGGuideView.fetchDispatcharr()`.
-//   • M3U + XMLTV — works out of the box (we parse the XMLTV
+//   • M3U + XMLTV, works out of the box (we parse the XMLTV
 //     source directly via `XMLTVParser`).
-//   • Xtream Codes — no category data available today; its
+//   • Xtream Codes, no category data available today; its
 //     `get_short_epg` response doesn't include a genre field.
 enum ProgramCategory: String, CaseIterable {
     case sports
     case movie
     case kids
     case news
-    // Added after #22 feedback pass — real XMLTV feeds (Dispatcharr's
+    // Added after #22 feedback pass, real XMLTV feeds (Dispatcharr's
     // Zap2it / Schedules Direct passthrough in particular) lean on
     // these as distinct genres. Without dedicated buckets, ~10k+
     // programs per user were falling through to the neutral tint.
@@ -98,7 +98,7 @@ enum ProgramCategory: String, CaseIterable {
     /// 6-character uppercase hex string (e.g. `"3949AB"`).
     var storageKey: String { "categoryColor.\(rawValue)" }
 
-    /// Material-Design 600-shade hex — the default when the user
+    /// Material-Design 600-shade hex, the default when the user
     /// hasn't picked a custom colour. Each bucket picks a distinct
     /// hue so adjacent categories (e.g., Drama + Comedy on a TBS-
     /// style channel) don't blur together visually.
@@ -108,13 +108,13 @@ enum ProgramCategory: String, CaseIterable {
         case .movie:       return "5E35B1" // Deep Purple 600
         case .kids:        return "039BE5" // Light Blue 600
         case .news:        return "43A047" // Green 600
-        case .documentary: return "6D4C41" // Brown 600 — editorial weight
-        case .drama:       return "C62828" // Red 800 — dramatic contrast
-        case .comedy:      return "F9A825" // Yellow 800 — warm / upbeat
-        case .reality:     return "EC407A" // Pink 400 — high-vis tabloid
-        case .educational: return "00897B" // Teal 600 — calm / studious
-        case .scifi:       return "00838F" // Cyan 800 — "cool blue" genre cliché
-        case .music:       return "D81B60" // Pink 600 — distinct from reality
+        case .documentary: return "6D4C41" // Brown 600, editorial weight
+        case .drama:       return "C62828" // Red 800, dramatic contrast
+        case .comedy:      return "F9A825" // Yellow 800, warm / upbeat
+        case .reality:     return "EC407A" // Pink 400, high-vis tabloid
+        case .educational: return "00897B" // Teal 600, calm / studious
+        case .scifi:       return "00838F" // Cyan 800, "cool blue" genre cliché
+        case .music:       return "D81B60" // Pink 600, distinct from reality
         }
     }
 
@@ -174,7 +174,7 @@ enum ProgramCategory: String, CaseIterable {
             return ["science fiction", "sci-fi", "scifi", "fantasy",
                     "supernatural", "horror"]
         case .comedy:
-            // Keep this bucket LAST among TV-genre buckets —
+            // Keep this bucket LAST among TV-genre buckets,
             // "Dark comedy" / "Comedy drama" should fall here,
             // while "Sitcom" alone still matches via alias.
             return ["comedy", "sitcom", "stand-up", "stand up"]
@@ -182,7 +182,7 @@ enum ProgramCategory: String, CaseIterable {
             return ["drama", "crime drama", "crime", "mystery", "thriller",
                     "romance", "suspense"]
         case .movie:
-            // Second-to-last — "Film Documentary" would now colour
+            // Second-to-last, "Film Documentary" would now colour
             // as Documentary (comes first), which is the intended
             // behaviour. "Movie" / "Feature Film" still hit here
             // for generic-tagged films.
@@ -203,7 +203,7 @@ enum CategoryColor {
     static let defaultBuckets: [ProgramCategory] = [.sports, .movie, .kids, .news]
 
     /// The additional buckets exposed under "Add more categories"
-    /// (per user feedback pass — many XMLTV feeds heavily tag
+    /// (per user feedback pass, many XMLTV feeds heavily tag
     /// Documentary / Drama / Comedy / etc. that the original 4
     /// buckets didn't cover). Hidden by default so the stock
     /// Palette stays compact; users who want more granularity
@@ -241,8 +241,8 @@ enum CategoryColor {
     // Users can define their own `<string, hex>` mappings under
     // Settings → Guide Display → Add More Categories → Custom.
     // Custom entries are checked BEFORE the built-in bucket
-    // matching (so a user can, e.g., colour "Horror" — which isn't
-    // a built-in bucket — distinctly). Stored as a JSON array of
+    // matching (so a user can, e.g., colour "Horror", which isn't
+    // a built-in bucket, distinctly). Stored as a JSON array of
     // `{match, hex}` objects in UserDefaults so the whole list
     // can be mirrored via `SyncManager` in a single round-trip.
     struct CustomCategory: Identifiable, Codable, Equatable, Hashable {
@@ -292,7 +292,7 @@ enum CategoryColor {
     /// Clear every per-category custom colour, reverting all
     /// buckets to Jellyfin defaults. Invoked by the Settings
     /// "Reset to Defaults" button. The master enable toggle is
-    /// deliberately NOT changed — if the user had disabled
+    /// deliberately NOT changed, if the user had disabled
     /// category colouring entirely, this just resets the palette
     /// without suddenly turning colouring back on under them.
     /// Multiplier on every category tint alpha. True Black Background
@@ -325,7 +325,7 @@ enum CategoryColor {
     /// Only buckets the user has flipped on via Settings participate
     /// in step 2. Kids stays first so "Kids Sports" colours as Kids;
     /// Movie stays last so a feature film that's also tagged
-    /// "Documentary" colours as Documentary (intentional — the
+    /// "Documentary" colours as Documentary (intentional, the
     /// documentary genre is almost always the more useful signal).
     static func bucket(for raw: String) -> ProgramCategory? {
         guard !raw.isEmpty else { return nil }
@@ -357,7 +357,7 @@ enum CategoryColor {
         return nil
     }
 
-    /// Custom category match — returns the hex colour if the raw
+    /// Custom category match, returns the hex colour if the raw
     /// category string matches a user-defined entry. Checked BEFORE
     /// the built-in bucket matcher so a user who adds "Horror"
     /// sees horror programmes coloured even though Horror isn't a

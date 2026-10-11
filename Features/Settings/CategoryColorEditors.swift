@@ -17,7 +17,7 @@ struct CategoryColorPickerRow: View {
     /// `@AppStorage`. When the user picks a new colour in the
     /// system picker, SwiftUI writes it here (as hex), which in
     /// turn triggers every observer of the same key to re-render
-    /// — including every `GuideProgramButton.cellBackground`
+    /// including every `GuideProgramButton.cellBackground`
     /// via the existing `@AppStorage` wiring on the cell.
     @AppStorage private var storedHex: String
 
@@ -71,7 +71,7 @@ struct CategoryColorPickerRow: View {
                 }
             }
         }
-        // Palette picks are deliberate user actions — push to iCloud
+        // Palette picks are deliberate user actions, push to iCloud
         // right away instead of waiting for the 60-second debounced
         // preferences push. Same rationale as FavoritesStore: force-
         // quitting the app inside the debounce window would otherwise
@@ -182,7 +182,7 @@ struct MoreCategoriesView: View {
                         .scaledFont(.bodyMedium)
                         .foregroundColor(.textPrimary)
                     // "Customize color" shown regardless of toggle
-                    // state — the user reported that hiding it on
+                    // state, the user reported that hiding it on
                     // off made the nav-link feel like it "disappeared"
                     // after flipping the toggle off. Users are free
                     // to edit the color even when the bucket isn't
@@ -207,8 +207,8 @@ struct MoreCategoriesView: View {
 //
 // Standalone color picker for one additional bucket, reached via
 // the "Customize color" label inside MoreCategoriesView. Mirrors
-// the CategoryColorPickerRow behaviour — same hex + color well +
-// reset + sync — but in its own screen so the toggles list above
+// the CategoryColorPickerRow behaviour, same hex + color well +
+// reset + sync, but in its own screen so the toggles list above
 // stays scannable.
 struct SingleCategoryColorEditor: View {
     let category: ProgramCategory
@@ -509,10 +509,10 @@ struct CustomCategoryEditor: View {
 // `isSubviewPushed` / `popRequested`).
 //
 // Pop sources we have to cover:
-//   1. `navPath` pushes — Appearance, Network, DVR, Developer,
+//   1. `navPath` pushes, Appearance, Network, DVR, Developer,
 //      Edit Server. `navPath.count > 0` detects these;
 //      `navPath.removeLast()` pops them.
-//   2. Classic `NavigationLink(destination:)` pushes — ServerDetailView
+//   2. Classic `NavigationLink(destination:)` pushes, ServerDetailView
 //      (from the Settings root via TVSettingsNavRow) and
 //      MyRecordingsView (pushed from inside DVRSettingsView via
 //      TVSettingsNavRow). These bypass `navPath` entirely, so we track

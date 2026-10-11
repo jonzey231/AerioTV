@@ -4,9 +4,9 @@ import SwiftUI
 // MARK: - User-configurable multiview appearance
 //
 // v1.6.8: three new prefs surfaced in `Settings → Multiview`:
-//   • Audio Focus Indicator — how the active-audio tile is marked.
-//   • Padding Between Tiles — flush-meeting tiles vs. small gaps.
-//   • Tile Corners            — square-edge tiles vs. rounded.
+//   • Audio Focus Indicator, how the active-audio tile is marked.
+//   • Padding Between Tiles, flush-meeting tiles vs. small gaps.
+//   • Tile Corners           , square-edge tiles vs. rounded.
 //
 // Defaults preserve pre-v1.6.8 behaviour (`.centerIcon`, no padding,
 // square corners) so existing users see no visual change unless they
@@ -16,12 +16,12 @@ import SwiftUI
 
 /// How the audio-active tile is highlighted in multiview.
 ///
-/// • `centerIcon` (default, pre-v1.6.8 behaviour) — a speaker icon
+/// • `centerIcon` (default, pre-v1.6.8 behaviour), a speaker icon
 ///   in the centre of the active tile fades in / out with the rest
 ///   of the tile chrome.
-/// • `grayPersistent` — a muted gray border around the active tile
+/// • `grayPersistent`, a muted gray border around the active tile
 ///   that's always visible, regardless of chrome auto-hide state.
-/// • `themeFading` — an accent-colored border that rides the
+/// • `themeFading`, an accent-colored border that rides the
 ///   existing 5-second focus-indicator auto-hide, so it appears
 ///   when the user is interacting with the grid and fades when
 ///   they're just watching.
@@ -124,7 +124,7 @@ final class MultiviewStore: ObservableObject {
     /// where the warning fires.
     let softLimit = 4
 
-    /// Hard cap — the grid renders at most 3×3 = 9 tiles.
+    /// Hard cap, the grid renders at most 3×3 = 9 tiles.
     let maxTiles = 9
 
     // MARK: - Published state
@@ -157,7 +157,7 @@ final class MultiviewStore: ObservableObject {
     /// If non-nil, the grid renders this single tile at full size
     /// and hides the rest. Set by the per-tile "Full Screen" menu
     /// action; cleared by the Menu button / an Esc key. Does NOT
-    /// exit multiview — exiting fullscreen brings the grid back.
+    /// exit multiview, exiting fullscreen brings the grid back.
     @Published var fullscreenTileID: String?
 
     /// Issue #27: if non-nil, the grid renders this tile large with the
@@ -191,7 +191,7 @@ final class MultiviewStore: ObservableObject {
     /// remap kicks in so arrow keys swap `relocatingTileID` with
     /// its neighbor at the pressed direction. Click commits
     /// (clears this to nil), Menu cancels. On iPadOS this stays nil
-    /// — iPad uses `.onDrag`/`.onDrop` instead.
+    /// iPad uses `.onDrag`/`.onDrop` instead.
     @Published var relocatingTileID: String?
 
     /// Set to `true` when `AVPictureInPictureController` on the audio
@@ -318,7 +318,7 @@ final class MultiviewStore: ObservableObject {
     /// headroom. Resumes on sheet dismissal (pick or cancel).
     ///
     /// `MPVPlayerView.Coordinator.applyPauseIfChanged(...)` already
-    /// handles property-toggle semantics correctly — toggling this
+    /// handles property-toggle semantics correctly, toggling this
     /// flag translates to a single `mpv_set_property(pause, true/false)`
     /// per tile, not a re-seed.
     @Published var isPickerPresented: Bool = false
@@ -336,7 +336,7 @@ final class MultiviewStore: ObservableObject {
     /// thermal state. The add-sheet / transport bar use this to
     /// surface a "too hot to add more streams" banner without
     /// re-asking `ProcessInfo` every render pass. `.serious` is
-    /// intentionally NOT blocking — per the plan, `.serious` is a
+    /// intentionally NOT blocking, per the plan, `.serious` is a
     /// soft warning (we already show the perf-warning alert at tile
     /// 5+) and only `.critical` refuses new adds. If the heuristic
     /// ever widens to include `.serious`, update the comment on
@@ -416,16 +416,16 @@ final class MultiviewStore: ObservableObject {
     // `.onDisappear` cleanup means the dictionary never holds a
     // reference to a torn-down tile. We don't weak-ref the store
     // because SwiftUI's `@StateObject` retains it for the view's
-    // lifetime — a weak ref would just race ahead of onDisappear
+    // lifetime, a weak ref would just race ahead of onDisappear
     // without buying anything.
     //
-    // The dictionary is NOT `@Published` — every tile mount / remount
+    // The dictionary is NOT `@Published`, every tile mount / remount
     // would otherwise fire `objectWillChange` on `MultiviewStore`,
     // invalidating every chrome/tile view that observes the store.
     // Non-audio tile re-registration is a pure no-op for chrome state,
     // so we don't want to pay the invalidation cost. Instead, we bump
     // `audioProgressStoreRevision` *only* when the entry that
-    // `audioProgressStore` resolves to has actually changed — which
+    // `audioProgressStore` resolves to has actually changed, which
     // is the only delta chrome observers care about.
     private var progressStoresByTileID: [String: PlayerProgressStore] = [:]
 
@@ -462,7 +462,7 @@ final class MultiviewStore: ObservableObject {
     /// Called by `MultiviewTileView.onAppear`. Replaces any existing
     /// entry for this tile id (e.g. view re-render mid-session).
     /// Only fires `objectWillChange` when the registered tile is the
-    /// audio tile — every other register is a quiet dictionary write.
+    /// audio tile, every other register is a quiet dictionary write.
     func registerProgressStore(_ store: PlayerProgressStore, for tileID: String) {
         // De-duplicated at the sink (review 2026-09-11 section 6
         // proposal 3): MultiviewTileView registers from BOTH onAppear and
@@ -512,7 +512,7 @@ final class MultiviewStore: ObservableObject {
     // MARK: - Resolver
 
     /// Allowlist of URL schemes this app will hand to mpv. Anything
-    /// outside this list is rejected as `.unresolvable` — without an
+    /// outside this list is rejected as `.unresolvable`, without an
     /// explicit `protocol_whitelist` mpv will happily open `file://`,
     /// `udp://`, or other local/exotic schemes, which is a way for a
     /// malicious M3U or EPG entry to exfiltrate local files or probe
@@ -537,7 +537,7 @@ final class MultiviewStore: ObservableObject {
         server: ServerConnection?
     ) -> (url: URL, headers: [String: String])? {
         guard let url = item.streamURLs.first else { return nil }
-        // Reject schemes outside the allowlist — see `allowedSchemes`
+        // Reject schemes outside the allowlist, see `allowedSchemes`
         // above for the full rationale. mpv would otherwise open
         // `file://` / `udp://` / etc.
         guard let scheme = url.scheme?.lowercased(),
@@ -563,7 +563,7 @@ final class MultiviewStore: ObservableObject {
         /// This channel is already a tile. No-op.
         case alreadyPresent
 
-        /// `ChannelDisplayItem.streamURLs` was empty — can't build a
+        /// `ChannelDisplayItem.streamURLs` was empty, can't build a
         /// playable URL. Show an error; probably a misconfigured
         /// channel on the server.
         case unresolvable
@@ -602,7 +602,7 @@ final class MultiviewStore: ObservableObject {
         }
         // Resolve stream
         guard let resolved = Self.resolveStream(item, server: server) else {
-            // NOTE: never log `item.streamURLs` — XC URLs carry auth
+            // NOTE: never log `item.streamURLs`, XC URLs carry auth
             // credentials in the path. Name-only is safe.
             DebugLogger.shared.log(
                 "[MV-Tile] add rejected: unresolvable channel=\(item.name)",
@@ -655,7 +655,7 @@ final class MultiviewStore: ObservableObject {
             }
         }
         // Commit. `resolved.url` + `resolved.headers` are
-        // DELIBERATELY NOT LOGGED — they contain auth credentials.
+        // DELIBERATELY NOT LOGGED, they contain auth credentials.
         let tile = MultiviewTile(
             id: UUID().uuidString,
             item: item,
@@ -768,7 +768,7 @@ final class MultiviewStore: ObservableObject {
     /// hidden for VOD tiles; playback uses the tile's own `streamURL`.
     /// Catch-up unification (task #147): replace whatever is playing
     /// with a single catch-up tile. Catch-up is always a solo, full
-    /// teardown-and-reseed session — no mixing with live tiles in v1.
+    /// teardown-and-reseed session, no mixing with live tiles in v1.
     func seedCatchup(_ pb: CatchupPlayback) {
         reset()
         // Catch-up is mpv-only: the aeriocu relay + window re-tune seek
@@ -1126,7 +1126,7 @@ final class MultiviewStore: ObservableObject {
             category: "Playback", level: .info
         )
         if removedWasAudio {
-            // Newest remaining (last in the list) — matches the
+            // Newest remaining (last in the list), matches the
             // "last-added gets audio" default.
             audioTileID = tiles.last?.id
             DebugLogger.shared.log(
@@ -1171,7 +1171,7 @@ final class MultiviewStore: ObservableObject {
 
     /// Swap two tiles by id. Used by both iPadOS `.onDrop` and the
     /// tvOS relocate-mode D-pad remap. Audio tile assignment does
-    /// NOT change — audio follows content, not position.
+    /// NOT change, audio follows content, not position.
     func swap(_ aID: String, _ bID: String) {
         guard let aIdx = tiles.firstIndex(where: { $0.id == aID }),
               let bIdx = tiles.firstIndex(where: { $0.id == bID }),
@@ -1199,7 +1199,7 @@ final class MultiviewStore: ObservableObject {
     // MARK: - Reset
 
     /// Clear the entire store. Called by `PlayerSession.exit()` when
-    /// the user leaves multiview — the per-tile Coordinators own
+    /// the user leaves multiview, the per-tile Coordinators own
     /// their own mpv handle teardown via SwiftUI view dismantling,
     /// so wiping `tiles` is enough to trigger cleanup.
     func reset() {
@@ -1228,7 +1228,7 @@ final class MultiviewStore: ObservableObject {
         // Engine lock is per-session: clear it so the next session
         // re-resolves (and honors a freshly-toggled Developer flag).
         clearEngineLock()
-        // Intentionally NOT resetting `warningLastShownAt` — it's
+        // Intentionally NOT resetting `warningLastShownAt`, it's
         // a 2h throttle across multiview sessions, not per-session.
     }
 

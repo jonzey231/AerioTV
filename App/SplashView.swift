@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - Splash View
 // Single SwiftUI layout for all platforms. Sizing adapts via compile-time
-// platform flags (#if os) and — on iOS/iPadOS — the horizontal size class
+// platform flags (#if os) and, on iOS/iPadOS, the horizontal size class
 // so iPhones and iPads each get proportionate logo/text sizes.
 
 struct SplashView: View {

@@ -48,12 +48,12 @@ struct SyncStage: Identifiable, Equatable {
 ///
 /// Two presentation modes are supported via `Mode`:
 ///
-/// - `.onboarding(server:)` — the view drives its own fetches against
+/// - `.onboarding(server:)`, the view drives its own fetches against
 ///   a newly-added `ServerConnection`, flipping stages as each phase
 ///   completes. The user dismisses via a "Continue to Live TV" button
 ///   once every stage is done.
 ///
-/// - `.initialLaunch(stages:onContinueAnyway:)` — the parent
+/// - `.initialLaunch(stages:onContinueAnyway:)`, the parent
 ///   (`MainTabView`) derives stage states from its observable stores
 ///   and passes them in. This view runs no fetches itself; it simply
 ///   renders the provided stages and the long-wait banner if the
@@ -72,7 +72,7 @@ struct ServerSyncView: View {
         /// After app launch, while `MainTabView`'s stores hydrate.
         /// The parent supplies pre-derived stages and an escape-hatch
         /// callback for the "Skip" button. v1.6.10: dropped the
-        /// `serverName` parameter — the loading screen no longer
+        /// `serverName` parameter, the loading screen no longer
         /// renders the playlist name (the "Setting Up" headline is
         /// enough context, and the playlist label was visually noisy
         /// on multi-server installs where the displayed name was
@@ -100,7 +100,7 @@ struct ServerSyncView: View {
     // MARK: Onboarding-only state
 
     // 4-stage progress: EPG (channels + guide), VOD (movies & series),
-    // DVR (recordings — Dispatcharr only, else skipped in-place), and
+    // DVR (recordings, Dispatcharr only, else skipped in-place), and
     // Preferences (iCloud pull when sync is enabled, else skipped in-place).
     @State private var onboardingStages: [SyncStage] = [
         SyncStage(id: "epg",          label: "Loading EPG"),
@@ -115,14 +115,14 @@ struct ServerSyncView: View {
 
     /// Wall-clock timestamp when the cover first appeared. Compared
     /// against `Date()` on every tick rather than incrementing a
-    /// counter — a counter was susceptible to a double-fire bug if
+    /// counter, a counter was susceptible to a double-fire bug if
     /// `onAppear` ran twice (two tick-timers → counter advanced at
     /// 2 Hz → banner appeared at wall-clock 5s instead of 10s).
     @State private var startedAt: Date? = nil
     /// Driven by the wall-clock check below. Separate from
     /// `startedAt` so body observes a simple @Published bool.
     @State private var isTakingTooLong: Bool = false
-    /// 1 Hz tick used only to re-evaluate the wall-clock comparison —
+    /// 1 Hz tick used only to re-evaluate the wall-clock comparison,
     /// the tick's own count is not the source of truth.
     @State private var elapsedTimer: Timer?
 
@@ -207,7 +207,7 @@ struct ServerSyncView: View {
                 // above. Constraining to a readable max width + letting the
                 // outer VStack's default .center alignment position it keeps
                 // the card visually aligned with the rest of the setup screen.
-                // iPhone / iPad keep the existing 32pt padding — the screen
+                // iPhone / iPad keep the existing 32pt padding, the screen
                 // isn't wide enough there for the stretch to look wrong.
                 #if os(tvOS)
                 .frame(maxWidth: 720)
@@ -218,7 +218,7 @@ struct ServerSyncView: View {
 
                 Spacer()
 
-                // Bottom actions — differ by mode
+                // Bottom actions, differ by mode
                 bottomActions
 
                 Spacer().frame(height: 20)
@@ -356,7 +356,7 @@ struct ServerSyncView: View {
 
     private func startLongWaitTimerIfNeeded() {
         guard case .initialLaunch = mode else { return }
-        // Invalidate any stale timer before creating a new one —
+        // Invalidate any stale timer before creating a new one,
         // SwiftUI can fire `onAppear` more than once in a view's
         // lifetime and each fire would otherwise create a fresh
         // Timer while leaving the previous one running.
@@ -403,7 +403,7 @@ struct ServerSyncView: View {
         let snap = server.snapshot
         let epgURLString = server.effectiveEPGURL
 
-        // Stage 1: EPG (channels + guide — a live server is useless without channels,
+        // Stage 1: EPG (channels + guide, a live server is useless without channels,
         // so we roll the old "Connecting/Groups/Channels/EPG" stages together here).
         updateStage("epg", status: .loading)
         let channelCount = await loadChannels(snap: snap)
@@ -450,14 +450,14 @@ struct ServerSyncView: View {
             updateStage("vod", status: .done(vodCount > 0 ? "\(vodCount) titles" : "No VOD available"))
         }
 
-        // Stage 3: DVR — reconcile Dispatcharr recordings (server-side scheduler).
+        // Stage 3: DVR, reconcile Dispatcharr recordings (server-side scheduler).
         // XC and M3U servers have no DVR API; mark the stage done with a note.
         updateStage("dvr", status: .loading)
         let dvrDetail = await loadDVR(server: server)
         guard !Task.isCancelled else { return }
         updateStage("dvr", status: .done(dvrDetail))
 
-        // Stage 4: Preferences — iCloud Key-Value Store pull when sync is on.
+        // Stage 4: Preferences, iCloud Key-Value Store pull when sync is on.
         // When sync is off, complete in-place with "Sync off" so the user sees
         // an honest status instead of a silently-skipped stage.
         updateStage("preferences", status: .loading)
@@ -563,7 +563,7 @@ struct ServerSyncView: View {
             // `getVODMovies()` + `getVODSeries()`, which paginate the
             // entire library 25-items-per-page. On a server with
             // 10–20k movies that's hundreds of sequential HTTP calls
-            // and 2–5 minutes of staring at "Loading VOD" — making
+            // and 2–5 minutes of staring at "Loading VOD", making
             // users think the second Dispatcharr server they added
             // had hung. Now we probe `?page_size=1` and read the
             // DRF wrapper's total-count field, which finishes in a

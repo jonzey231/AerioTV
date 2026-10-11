@@ -55,7 +55,7 @@ private struct PendingVODAdd {
 /// confirmation alert; on Continue, it calls `add(...)` again with
 /// `bypassWarning: true` and bumps `warningLastShownAt`.
 ///
-/// On iPad: presented as a `.sheet` with two detents — fraction 0.45
+/// On iPad: presented as a `.sheet` with two detents, fraction 0.45
 /// for a peek (can still see the grid) and `.large` for full-screen
 /// search. tvOS uses a full-screen cover via the parent (sheets on
 /// tvOS are platform-styled differently and cover the whole screen
@@ -123,7 +123,7 @@ struct AddToMultiviewSheet: View {
     /// empty array means "loaded, but the series has no episodes".
     @State private var drilledEpisodes: [VODEpisode]? = nil
 
-    /// Search query on iPad. tvOS skips the search field — typing via
+    /// Search query on iPad. tvOS skips the search field, typing via
     /// Siri Remote is painful and the category grouping below is
     /// usually enough.
     @State private var searchText: String = ""
@@ -154,7 +154,7 @@ struct AddToMultiviewSheet: View {
     /// v1.7.x: persisted across picker presentations and across app
     /// launches. Freyguy1975 (Discord 2026-05-03) flagged that
     /// re-tapping the category every time you re-open the picker to
-    /// add another stream from the same group was tedious — common
+    /// add another stream from the same group was tedious, common
     /// with multi-game watch parties (e.g. building a 4-tile baseball
     /// grid from a "Baseball"-filtered list). Storage key is
     /// local-only; the value is intentionally NOT added to
@@ -254,7 +254,7 @@ struct AddToMultiviewSheet: View {
     private var iPadOSBody: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // v1.6.12: group filter pill bar — same vocabulary as
+                // v1.6.12: group filter pill bar, same vocabulary as
                 // Live TV's filter row. Placed above the List (not in
                 // the toolbar) so the chips stay visible while the
                 // search bar is focused; collapsed entirely when there
@@ -510,7 +510,7 @@ struct AddToMultiviewSheet: View {
     #if os(tvOS)
     /// Full-screen tvOS picker. Built from scratch (no
     /// `NavigationStack`, no `List`) because SwiftUI's default sheet
-    /// on tvOS renders small + centred — titles truncate, rows
+    /// on tvOS renders small + centred, titles truncate, rows
     /// cram, and the whole thing looks like an iPad form sheet
     /// stranded on a 4K TV. This layout uses the entire screen:
     /// big title, a prominent Close button top-right, a
@@ -546,7 +546,7 @@ struct AddToMultiviewSheet: View {
                 // chips before the (much longer) channel list, mirroring
                 // Live TV's tvOS layout. `.focusSection()` keeps focus
                 // grouped here when the user moves up from the channels
-                // — without it, swiping up jumps straight to the Close
+                // without it, swiping up jumps straight to the Close
                 // button instead of the chips. Channel-only: VOD
                 // sources have no group chips.
                 if pickerSource == .channels, groupChips.count > 1 {
@@ -561,7 +561,7 @@ struct AddToMultiviewSheet: View {
                     // SwiftUI can lazily materialise them as the
                     // user scrolls. A previous revision grouped
                     // each section into a `VStack` child, which
-                    // defeated lazy-loading entirely — the parent
+                    // defeated lazy-loading entirely, the parent
                     // `LazyVStack` saw each section as a single
                     // opaque child and instantiated all 700+
                     // `CompactChannelRow`s up-front, each with its
@@ -798,7 +798,7 @@ struct AddToMultiviewSheet: View {
     // MARK: - Sections
 
     #if os(tvOS)
-    /// Section header used inside the flat `LazyVStack` — rendered
+    /// Section header used inside the flat `LazyVStack`, rendered
     /// as a single `Text` so lazy loading isn't defeated by wrapping
     /// it in a container. The `.padding(.top, 20)` reinstates the
     /// visual gap between sections that the old 32pt `LazyVStack`
@@ -811,7 +811,7 @@ struct AddToMultiviewSheet: View {
             .padding(.bottom, 4)
     }
 
-    /// Row factory — each returned view is a direct child of the
+    /// Row factory, each returned view is a direct child of the
     /// flat `LazyVStack`, so SwiftUI can lazy-materialise them.
     private func tvChannelRow(_ item: ChannelDisplayItem) -> some View {
         CompactChannelRow(
@@ -844,11 +844,11 @@ struct AddToMultiviewSheet: View {
     /// removes the corresponding tile from multiview (deselect)
     /// rather than being a no-op. Pre-v1.6.12 the user had to
     /// dismiss the picker, find the tile in the grid, and remove it
-    /// from the per-tile menu — confusingly indirect for what is
+    /// from the per-tile menu, confusingly indirect for what is
     /// just "I changed my mind." Now the picker is a true toggle:
     /// tap to add, tap again to remove.
     ///
-    /// No toast on remove — the row's trailing icon flips from green
+    /// No toast on remove, the row's trailing icon flips from green
     /// check back to the `+` and the live tile count in the header
     /// drops by one, both immediately visible and far less noisy than
     /// a transient capsule. Adds still show their own error/warning
@@ -1218,7 +1218,7 @@ struct AddToMultiviewSheet: View {
         }
     }
 
-    /// Groups eligible to appear in the filter pill bar — the
+    /// Groups eligible to appear in the filter pill bar, the
     /// store-ordered list with user-hidden groups removed. A group
     /// only shows if at least one channel in `channelStore.channels`
     /// belongs to it; `orderedGroups` is already maintained that way
@@ -1234,7 +1234,7 @@ struct AddToMultiviewSheet: View {
             .filter { !hiddenGroups.contains($0) }
     }
 
-    /// Pills shown in the filter bar — leading "All" sentinel plus
+    /// Pills shown in the filter bar, leading "All" sentinel plus
     /// every visible group. Computed (not stored) so the bar updates
     /// automatically when the channel store finishes its initial
     /// load while the picker is open (Dispatcharr cold launch can
@@ -1250,7 +1250,7 @@ struct AddToMultiviewSheet: View {
     /// the group step.
     ///
     /// Matches across name / group / channel number, case-insensitive.
-    /// `String.contains` is a literal substring match — no regex
+    /// `String.contains` is a literal substring match, no regex
     /// injection surface even though `searchText` is user input.
     private func applyFilters(_ items: [ChannelDisplayItem]) -> [ChannelDisplayItem] {
         var result = items
@@ -1333,7 +1333,7 @@ struct AddToMultiviewSheet: View {
             return
         }
 
-        // Thermal refusal — the container banner is the primary
+        // Thermal refusal, the container banner is the primary
         // signal; this toast gives the immediate feedback at the
         // moment of the blocked tap. Threshold is `.critical` only
         // (matches `isThermallyStressed`); `.serious` is warning-not-
@@ -1352,8 +1352,8 @@ struct AddToMultiviewSheet: View {
     private func commitAdd(_ item: ChannelDisplayItem, bypassWarning: Bool) {
         // Auto-seed when this sheet was presented from single-mode
         // `PlayerView` (tile list is empty, `PlayerSession.mode` is
-        // not yet `.multiview`). Seeding tile 0 here — at commit time,
-        // *after* the user has picked — is the whole point of the
+        // not yet `.multiview`). Seeding tile 0 here, at commit time,
+        // *after* the user has picked, is the whole point of the
         // sheet-first flow: the current stream keeps playing under
         // the sheet while the user browses, and the mode flip / view
         // swap happens exactly once in response to a deliberate pick
@@ -1369,7 +1369,7 @@ struct AddToMultiviewSheet: View {
            let currentItem = NowPlayingManager.shared.playingItem,
            let server = channelStore.activeServer {
             DebugLogger.shared.log(
-                "[MV-Mode] commitAdd from single — seeding tile 0 with current=\(currentItem.name) before picked=\(item.name)",
+                "[MV-Mode] commitAdd from single, seeding tile 0 with current=\(currentItem.name) before picked=\(item.name)",
                 category: "Playback", level: .info
             )
             PlayerSession.shared.enterMultiview(seeding: currentItem, server: server)

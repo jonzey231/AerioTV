@@ -9,14 +9,14 @@ import Combine
 /// **Threading rules**:
 ///  - KVS writes MUST happen on the literal main **dispatch queue** (GCD).
 ///    Swift's `@MainActor` cooperative executor is NOT the same as the main
-///    dispatch queue — `MainActor.assumeIsolated` may execute on a thread that
+///    dispatch queue, `MainActor.assumeIsolated` may execute on a thread that
 ///    fails KVS's internal `dispatch_assert_queue(main_queue)`.
 ///  - Therefore all KVS `set` / `removeObject` calls are wrapped in
 ///    `DispatchQueue.main.async { }` so they run in a clean GCD context.
 ///  - KVS reads in `remoteDidChange` happen on the notification's delivery
 ///    thread (KVS's own internal queue).
 ///  - The initial sync flow (ping → delayed read) runs on the main queue.
-///  - Never call `synchronize()` — it deadlocks on real devices.
+///  - Never call `synchronize()`, it deadlocks on real devices.
 
 @MainActor
 final class SyncManager: ObservableObject {
@@ -29,7 +29,7 @@ final class SyncManager: ObservableObject {
     private let reminderKVSKey = "syncedReminders"
 
     /// Background queue used ONLY for the initial sync flow (ping → sleep → read).
-    // initQueue removed — all KVS access must be on main dispatch queue.
+    // initQueue removed, all KVS access must be on main dispatch queue.
 
     // MARK: - Notification Observers
     private var kvsObserver: NSObjectProtocol?
@@ -156,14 +156,14 @@ final class SyncManager: ObservableObject {
         // Time Format (Settings > Appearance): "system" | "12" | "24".
         ClockFormat.defaultsKey,
         "bgRefreshType",
-        // Guide Display palette overrides — one hex string per
+        // Guide Display palette overrides, one hex string per
         // category bucket. Missing keys fall through to the defaults
         // in `ProgramCategory.defaultHex`, so clients running older
         // builds that don't know about these keys are safe.
         "categoryColor.sports", "categoryColor.movie",
         "categoryColor.kids",   "categoryColor.news",
         // Additional buckets added with the "Add more categories"
-        // disclosure section. Same safety property as above —
+        // disclosure section. Same safety property as above,
         // older clients ignore unknown keys.
         "categoryColor.documentary", "categoryColor.drama",
         "categoryColor.comedy",      "categoryColor.reality",
@@ -181,7 +181,7 @@ final class SyncManager: ObservableObject {
     ]
     /// Data-typed keys (Codable JSON blobs). `customCategoryColors.v1`
     /// holds the user-defined `[CustomCategory]` list from
-    /// `CategoryColor.loadCustomCategories()` — it needs its own
+    /// `CategoryColor.loadCustomCategories()`, it needs its own
     /// sync lane because it's stored as Data in UserDefaults, not
     /// a plain String/Bool/Number.
     private let syncDataKeys: [String] = [
@@ -266,7 +266,7 @@ final class SyncManager: ObservableObject {
             debugLog("🔵 SyncManager.startObserving: sync disabled, skipping")
             return
         }
-        // Skip if already observing — avoids remove-then-re-add churn on every foreground.
+        // Skip if already observing, avoids remove-then-re-add churn on every foreground.
         guard kvsObserver == nil else { return }
         debugLog("🔵 SyncManager.startObserving: registering KVS observer")
 
@@ -306,7 +306,7 @@ final class SyncManager: ObservableObject {
         isObservingDefaults = true
         debugLog("🔵 SyncManager: registering UserDefaults observer")
 
-        // Block-based observer on .main queue — same fix as KVS observer.
+        // Block-based observer on .main queue, same fix as KVS observer.
         udObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
             object: nil,
@@ -366,7 +366,7 @@ final class SyncManager: ObservableObject {
                 let prefs     = NSUbiquitousKeyValueStore.default.dictionary(forKey: prefKey)
                 let wp        = NSUbiquitousKeyValueStore.default.array(forKey: wpKey) as? [[String: Any]]
                 let reminders = NSUbiquitousKeyValueStore.default.array(forKey: rKey) as? [[String: Any]]
-                debugLog("🔵 SyncManager: initial KVS check — servers=\(servers != nil), prefs=\(prefs != nil), watchProgress=\(wp != nil), reminders=\(reminders != nil)")
+                debugLog("🔵 SyncManager: initial KVS check, servers=\(servers != nil), prefs=\(prefs != nil), watchProgress=\(wp != nil), reminders=\(reminders != nil)")
 
                 Task { @MainActor [weak self] in
                     self?.handleImportResult(servers: servers, prefs: prefs, watchProgress: wp, reminders: reminders)
@@ -378,7 +378,7 @@ final class SyncManager: ObservableObject {
             let timeout = DispatchWorkItem { [weak self] in
                 Task { @MainActor in
                     guard let self, self.isSyncEnabled, self.isImporting else { return }
-                    debugLog("🔵 SyncManager: import timeout — pushing local state")
+                    debugLog("🔵 SyncManager: import timeout, pushing local state")
                     self.isImporting = false
                     self.startObservingDefaults()
                     self.scheduleInitialPush()
@@ -406,13 +406,13 @@ final class SyncManager: ObservableObject {
         }
     }
 
-    /// Wipe all iCloud-side state for this app — payloads in
+    /// Wipe all iCloud-side state for this app, payloads in
     /// iCloud KVS plus the synchronizable copies of credentials in
     /// iCloud Keychain. **Local data on this device is preserved**:
     /// SwiftData servers, the local-only Keychain copies of
     /// passwords/API keys, and UserDefaults all stay intact, so
     /// the app keeps working on this device. The intent is "wipe
-    /// the cloud and start fresh" — useful when a user wants to
+    /// the cloud and start fresh", useful when a user wants to
     /// clear stale or corrupted sync state across their fleet
     /// without losing access on any individual device.
     ///
@@ -436,7 +436,7 @@ final class SyncManager: ObservableObject {
     /// **Note on sync state:** the iCloud-Sync toggle is left
     /// alone. After `clearAllICloudData` returns, if Sync is still
     /// enabled the next natural push (or a manual "Sync Now") will
-    /// repopulate the cloud with this device's local state — which
+    /// repopulate the cloud with this device's local state, which
     /// is exactly what users typically want from "start fresh."
     /// To fully detach, the caller should also flip the toggle off
     /// after invoking this.
@@ -450,7 +450,7 @@ final class SyncManager: ObservableObject {
         watchProgressPushDebounce?.cancel(); watchProgressPushDebounce = nil
         reminderPushDebounce?.cancel(); reminderPushDebounce = nil
 
-        // KVS removal — must run on the literal main dispatch queue.
+        // KVS removal, must run on the literal main dispatch queue.
         // We're already on @MainActor but `dispatch_assert_queue(main)`
         // checks the GCD queue identity, not the actor, so we hop
         // explicitly. Synchronize after to push the deletes out
@@ -470,7 +470,7 @@ final class SyncManager: ObservableObject {
             debugLog("🔵 SyncManager.clearAllICloudData: KVS payloads cleared")
         }
 
-        // iCloud Keychain — only the synchronizable copies. Local
+        // iCloud Keychain, only the synchronizable copies. Local
         // copies are intentionally preserved so this device keeps
         // working without re-auth.
         var keychainCleared = 0
@@ -498,7 +498,7 @@ final class SyncManager: ObservableObject {
     /// Wipes a single category's iCloud payload without touching the rest.
     /// Used by the per-row "Delete from iCloud" buttons in the granular
     /// Sync Categories Settings sub-section. Local data on this device is
-    /// preserved — only the cloud copy is removed.
+    /// preserved, only the cloud copy is removed.
     @MainActor
     func clearCloudCategory(_ category: SyncCategory, localServers: [ServerConnection]) {
         debugLog("🔵 SyncManager.clearCloudCategory: starting category=\(category.rawValue)")
@@ -575,7 +575,7 @@ final class SyncManager: ObservableObject {
             // so deleting only the Keychain left those credentials sitting in
             // iCloud. Re-push the server blob with credentials explicitly
             // stripped (the Keychain is already gone above, so a re-serialize
-            // omits them anyway — this is belt-and-suspenders). Cancel any
+            // omits them anyway, this is belt-and-suspenders). Cancel any
             // pending server push first so it can't re-write creds afterward.
             pushDebounce?.cancel(); pushDebounce = nil
             nonisolated(unsafe) let capturedServers = localServers.map { $0 }
@@ -614,7 +614,7 @@ final class SyncManager: ObservableObject {
             importTimeoutWork?.cancel()
             isImporting = false
             startObservingDefaults()
-            debugLog("🔵 SyncManager: no remote data — will push local state")
+            debugLog("🔵 SyncManager: no remote data, will push local state")
             // Schedule push for next run-loop iteration so KVS writes
             // happen in a clean GCD context (via DispatchQueue.main.async).
             scheduleInitialPush()
@@ -626,7 +626,7 @@ final class SyncManager: ObservableObject {
     private func scheduleInitialPush() {
         Task { @MainActor [weak self] in
             guard let self, self.isSyncEnabled else { return }
-            debugLog("🔵 SyncManager: initial push — posting syncManagerNeedsPush")
+            debugLog("🔵 SyncManager: initial push, posting syncManagerNeedsPush")
             NotificationCenter.default.post(
                 name: .syncManagerNeedsPush,
                 object: nil,
@@ -647,14 +647,14 @@ final class SyncManager: ObservableObject {
             debugLog("🔵 SyncManager.pushServers: skipped (enabled=\(isSyncEnabled), merging=\(isMerging))")
             return
         }
-        // v1.6.17 — granular per-category gate.
+        // v1.6.17, granular per-category gate.
         guard SyncCategory.servers.isEnabled else {
             debugLog("🔵 SyncManager.pushServers: category disabled by user")
             return
         }
 
         // Snapshot server data on the calling thread (SwiftData requires main-actor access)
-        // but keep it lightweight — defer Keychain reads to the async block.
+        // but keep it lightweight, defer Keychain reads to the async block.
         debugLog("🔵 SyncManager.pushServers: capturing \(servers.count) servers")
         nonisolated(unsafe) let capturedServers = servers.map { $0 }
         let key = kvsKey
@@ -768,7 +768,7 @@ final class SyncManager: ObservableObject {
         var dict: [String: Any] = [:]
         let ud = UserDefaults.standard
 
-        // v1.6.17 — the per-category sync toggles ALWAYS round-trip through
+        // v1.6.17, the per-category sync toggles ALWAYS round-trip through
         // the prefs lane so a fresh device picks them up on its first import,
         // and so a flip on iPhone reaches iPad even if "App Preferences" sync
         // is otherwise off. The remaining prefs are gated by the user's
@@ -896,7 +896,7 @@ final class SyncManager: ObservableObject {
             debugLog("🔵 SyncManager.doMerge: no server data")
             return
         }
-        // v1.6.17 — granular per-category gate. When the user opts out of
+        // v1.6.17, granular per-category gate. When the user opts out of
         // server sync on this device, ignore remote server payloads (their
         // local server list stays authoritative for this device).
         guard SyncCategory.servers.isEnabled else {
@@ -928,7 +928,7 @@ final class SyncManager: ObservableObject {
 
         let ud = UserDefaults.standard
 
-        // v1.6.17 — the per-category sync toggle states ALWAYS apply, even
+        // v1.6.17, the per-category sync toggle states ALWAYS apply, even
         // when the user has "App Preferences" sync turned off. Otherwise a
         // user who disabled "App Preferences" sync on iPhone could never
         // re-enable it from iPad (the iPhone would never receive the flip).
@@ -1012,12 +1012,12 @@ final class SyncManager: ObservableObject {
 
     func syncCredentials(for server: ServerConnection) {
         guard isSyncEnabled else { return }
-        // v1.6.17 — when the user opts out of credential sync, leave any
+        // v1.6.17, when the user opts out of credential sync, leave any
         // existing keychain entries on this device alone (don't migrate
         // them to synchronizable). Note: existing already-synchronizable
         // entries from prior versions can still appear on other devices
         // until "Delete Credentials from iCloud" is invoked from
-        // Settings — this only affects what we migrate going forward.
+        // Settings, this only affects what we migrate going forward.
         guard SyncCategory.credentials.isEnabled else {
             debugLog("🔵 SyncManager.syncCredentials: category disabled by user")
             return
@@ -1032,7 +1032,7 @@ final class SyncManager: ObservableObject {
             server.saveCredentialsToKeychain()
             return
         }
-        // v1.6.17 — granular per-category gate. Fall back to local-only
+        // v1.6.17, granular per-category gate. Fall back to local-only
         // keychain saves so a credential change doesn't leak across
         // devices when the user opted out.
         guard SyncCategory.credentials.isEnabled else {
@@ -1110,7 +1110,7 @@ final class SyncManager: ObservableObject {
         // credential type. Empty (= "" = .apiKey, the legacy default)
         // is omitted so older clients don't see an unfamiliar key
         // and stay perfectly back-compat. Only ".usernamePassword"
-        // values ride along on the wire — and a v1.6.x client
+        // values ride along on the wire, and a v1.6.x client
         // receiving this key just ignores it during deserialize and
         // treats the server as a regular Dispatcharr API server,
         // which still works because we ALSO sync the API key (fetched
@@ -1183,12 +1183,12 @@ final class SyncManager: ObservableObject {
         // would carry credentials across devices. Field reports in
         // v1.6.22 (Freyguy1975, multiple Apple TV deployments) showed
         // that path fails silently for any user who hasn't enabled
-        // iCloud Keychain on the receiving device — the server
+        // iCloud Keychain on the receiving device, the server
         // metadata syncs via KVS, the device renders the playlist,
         // every API call returns 401, and there's no UX recovery short
         // of re-entering the API key. The KVS payload is still
         // encrypted in transit by Apple, scoped to this app's iCloud
-        // container, and only readable by the user's own devices —
+        // container, and only readable by the user's own devices,
         // it's a weaker store than Keychain but acceptable as a
         // fallback for users who declined the Keychain path.
         //
@@ -1202,7 +1202,7 @@ final class SyncManager: ObservableObject {
         //
         // Gated on `SyncCategory.credentials.isEnabled` so users who
         // explicitly opted credentials out of sync don't get them
-        // shipped via KVS either — same gate as the Keychain write
+        // shipped via KVS either, same gate as the Keychain write
         // in `saveCredentialsSynced`.
         if SyncCategory.credentials.isEnabled {
             let pw  = server.effectivePassword
@@ -1321,7 +1321,7 @@ final class SyncManager: ObservableObject {
         let streamURL: String?
         let serverID: String?
         /// Parent series ID for episode-type progress entries (nil for
-        /// movies). Carried through iCloud sync as of v1.6.8 — see
+        /// movies). Carried through iCloud sync as of v1.6.8, see
         /// `serializeWatchProgress` comment for context.
         let seriesID: String?
     }
@@ -1347,7 +1347,7 @@ final class SyncManager: ObservableObject {
     /// Push all local watch progress entries to KVS (debounced).
     func pushWatchProgress(_ entries: [WatchProgress], immediate: Bool = false) {
         guard isSyncEnabled, !isMerging else { return }
-        // v1.6.17 — granular per-category gate.
+        // v1.6.17, granular per-category gate.
         guard SyncCategory.watchProgress.isEnabled else {
             debugLog("🔵 SyncManager.pushWatchProgress: category disabled by user")
             return
@@ -1393,7 +1393,7 @@ final class SyncManager: ObservableObject {
     /// duplicate keys. v1.6.8 (Codex A1) dropped the
     /// `@Attribute(.unique)` constraint on `WatchProgress.vodID`
     /// because two different servers will routinely use the same
-    /// numeric ID for unrelated content — uniqueness moved into
+    /// numeric ID for unrelated content, uniqueness moved into
     /// `(vodID, serverID)`. The merge path was never updated to
     /// match: any user with resume progress on the same `vodID`
     /// across two servers (i.e., two Dispatcharr instances pulling
@@ -1401,18 +1401,18 @@ final class SyncManager: ObservableObject {
     /// `pullFromCloud` the first time iCloud KVS pushed those
     /// entries down. Keys are now composite (`serverID|vodID`) and
     /// dictionary construction uses `uniquingKeysWith:` so neither
-    /// path can ever trap on a duplicate again — if two payloads
+    /// path can ever trap on a duplicate again, if two payloads
     /// share a composite key (corrupted state, double-push race),
     /// the most recently updated wins.
     private func mergeRemoteWatchProgress(_ remoteEntries: [[String: Any]]?, replace: Bool = false) {
-        // nil means the cloud has no watch-progress key at all — nothing to
+        // nil means the cloud has no watch-progress key at all, nothing to
         // apply in either mode. An EMPTY array during a replace is meaningful
         // ("the authoritative device has no progress"), so it falls through
         // to the delete pass below instead of returning early.
         guard let remoteEntries else { return }
         guard replace || !remoteEntries.isEmpty else { return }
         guard let context = WatchProgressManager.modelContext else { return }
-        // v1.6.17 — granular per-category gate. Local watch progress
+        // v1.6.17, granular per-category gate. Local watch progress
         // stays authoritative on this device when the user opts out.
         guard SyncCategory.watchProgress.isEnabled else {
             debugLog("🔵 SyncManager.mergeRemoteWatchProgress: category disabled by user, ignoring \(remoteEntries.count) remote entries")
@@ -1428,7 +1428,7 @@ final class SyncManager: ObservableObject {
         // deterministically. Helper takes the two strings directly
         // because `remotes` is `[SyncedWatchProgress]` (the DTO)
         // while `locals` is `[WatchProgress]` (SwiftData model)
-        // — both expose `vodID` + `serverID` but aren't the same
+        // both expose `vodID` + `serverID` but aren't the same
         // type.
         func compositeKey(_ vodID: String, _ serverID: String?) -> String {
             "\(serverID ?? "")|\(vodID)"
@@ -1498,7 +1498,7 @@ final class SyncManager: ObservableObject {
     /// Push local reminders to iCloud KVS (debounced).
     func pushReminders(immediate: Bool = false) {
         guard isSyncEnabled, !isMerging else { return }
-        // v1.6.17 — granular per-category gate.
+        // v1.6.17, granular per-category gate.
         guard SyncCategory.reminders.isEnabled else {
             debugLog("🔵 SyncManager.pushReminders: category disabled by user")
             return
@@ -1549,7 +1549,7 @@ final class SyncManager: ObservableObject {
     /// Merge remote reminders from iCloud into local ReminderManager.
     private func mergeRemoteReminders(_ remoteEntries: [[String: Any]]?) {
         guard let remoteEntries else { return }
-        // v1.6.17 — granular per-category gate.
+        // v1.6.17, granular per-category gate.
         guard SyncCategory.reminders.isEnabled else {
             debugLog("🔵 SyncManager.mergeRemoteReminders: category disabled by user, ignoring \(remoteEntries.count) remote entries")
             return
@@ -1581,9 +1581,9 @@ final class SyncManager: ObservableObject {
 
     /// Reads ALL KVS keys and merges remote data into local state.
     /// Called every time the app enters the foreground so changes made
-    /// on other devices are picked up immediately — even when no KVS
+    /// on other devices are picked up immediately, even when no KVS
     /// `didChangeExternally` notification was delivered (common on tvOS).
-    /// Timestamp of last pull — used to throttle so we don't re-merge on
+    /// Timestamp of last pull, used to throttle so we don't re-merge on
     /// every scenePhase == .active (which fires frequently on tvOS).
     nonisolated(unsafe) private static var lastPullTime: TimeInterval = 0
 
@@ -1753,7 +1753,7 @@ extension Notification.Name {
     static let aerioOpenVOD = Notification.Name("aerioOpenVOD")
     /// Posted by HomeView's tvOS Menu-button handler when the user is
     /// already on the Live-TV tab with nothing playing. The channel
-    /// list listens for this and scrolls to the first row — same UX
+    /// list listens for this and scrolls to the first row, same UX
     /// vocabulary as Apple's TV / Music apps where Menu on a long
     /// list means "take me back to the top".
     static let guideScrollToTop = Notification.Name("guideScrollToTop")
@@ -1797,7 +1797,7 @@ extension Notification.Name {
     /// entries into EPGCache via `GuideStore.seedEPGCache`. Any
     /// open expanded schedule panels listen for this and re-fetch
     /// their `upcomingPrograms` so the newly-landed category data
-    /// drives the per-program tint gradient — without this, a
+    /// drives the per-program tint gradient, without this, a
     /// schedule panel that was expanded BEFORE the XMLTV parse
     /// completed would stay visually uncolored until the user
     /// collapsed and re-opened it.
@@ -1807,7 +1807,7 @@ extension Notification.Name {
     /// and programmatically moves its own `@FocusState` to the
     /// first channel row, because the tvOS focus engine does NOT
     /// release focus from a SwiftUI Button that becomes
-    /// `.focusable(false)` on an ancestor's state change — the
+    /// `.focusable(false)` on an ancestor's state change, the
     /// focus stays trapped in the corner unless something else
     /// explicitly claims it. This notification is that explicit
     /// claim. Body has no userInfo.
@@ -1829,7 +1829,7 @@ extension Notification.Name {
 
     /// v1.6.12 (GH #11): a Back/Menu press caught by `MainTabView`'s
     /// outer `.onExitCommand` while a single-stream player is active
-    /// AND not minimized — i.e. the player is full-screen but focus
+    /// AND not minimized, i.e. the player is full-screen but focus
     /// is somewhere outside its view hierarchy (typically the guide,
     /// which still holds focus after Play/Pause re-expanded the mini
     /// player). Posted by `handleMenuPress` and consumed by
@@ -1840,7 +1840,7 @@ extension Notification.Name {
     /// Without this hand-off the outer handler would call
     /// `nowPlaying.minimize()` immediately and the user would skip
     /// the chrome-reveal step, dropping straight to the mini player
-    /// on the first Back press after un-minimizing — exactly the
+    /// on the first Back press after un-minimizing, exactly the
     /// regression GH #11 reported. Body has no userInfo.
     static let playerBackPress = Notification.Name("playerBackPress")
 }

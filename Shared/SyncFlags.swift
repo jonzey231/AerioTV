@@ -1,24 +1,24 @@
 //  SyncFlags.swift
 //  Aerio
 //
-//  v1.6.17 — granular per-data-type iCloud sync controls.
+//  v1.6.17, granular per-data-type iCloud sync controls.
 //
 //  Background: prior to v1.6.17 the iCloud Sync section in Settings was
 //  one master toggle that pushed/pulled every data type SyncManager
-//  knows about. Users wanted finer control — e.g. "sync my servers
+//  knows about. Users wanted finer control, e.g. "sync my servers
 //  across devices but keep my watch progress local-only." This file
 //  defines the data-type matrix that the new "Sync Categories"
 //  Settings sub-section binds to.
 //
 //  Storage: per-category state lives in `UserDefaults` under
 //  "syncEnabled.<rawValue>". We default missing keys to `true` so
-//  existing v1.6.16 users see no behavioral change on upgrade — every
+//  existing v1.6.16 users see no behavioral change on upgrade, every
 //  category is on until they actively turn one off.
 //
 //  Round-trip: the toggle prefs themselves ride the existing prefs
 //  sync lane (see `SyncManager.syncBoolKeys`) so a flip on one device
 //  propagates. There's a bootstrapping subtlety in
-//  `SyncManager.doApplyPreferences` — see the inline note there.
+//  `SyncManager.doApplyPreferences`, see the inline note there.
 
 import Foundation
 import Combine
@@ -99,7 +99,7 @@ enum SyncCategory: String, CaseIterable, Identifiable {
     var defaultsKey: String { "syncEnabled.\(rawValue)" }
 
     /// Reads the user's choice. Defaults to `true` when no value
-    /// has been written — keeps every v1.6.16 user on the existing
+    /// has been written, keeps every v1.6.16 user on the existing
     /// "everything syncs" behavior on first launch of v1.6.17.
     var isEnabled: Bool {
         let ud = UserDefaults.standard

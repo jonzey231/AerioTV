@@ -29,10 +29,10 @@ struct SyncableReminder: Equatable {
 /// On iOS, reminders fire 5 minutes before a program's start time.
 /// When the app is in the foreground, an in-app banner is shown instead.
 /// On tvOS, UNNotificationContent properties are unavailable, so reminders
-/// are tracked in state only (no push banner) — useful if a future tvOS
+/// are tracked in state only (no push banner), useful if a future tvOS
 /// version or companion app consumes them.
 ///
-/// Supports iCloud sync via SyncManager — when reminders change locally,
+/// Supports iCloud sync via SyncManager, when reminders change locally,
 /// posts `.remindersDidChange` so SyncManager pushes to KVS. When remote
 /// reminders arrive, `mergeRemote(_:)` schedules local notifications.
 @MainActor
@@ -178,13 +178,13 @@ final class ReminderManager: NSObject, ObservableObject, @unchecked Sendable {
         let localKeys = Set(activeReminders.keys)
         let remoteKeys = Set(remoteReminders.keys)
 
-        // New from remote — schedule local notifications
+        // New from remote, schedule local notifications
         for key in remoteKeys.subtracting(localKeys) {
             guard let remote = remoteReminders[key] else { continue }
             scheduleFromSync(key: key, reminder: remote)
         }
 
-        // Removed on remote — cancel locally
+        // Removed on remote, cancel locally
         for key in localKeys.subtracting(remoteKeys) {
             if let info = activeReminders.removeValue(forKey: key) {
                 #if os(iOS)
@@ -195,7 +195,7 @@ final class ReminderManager: NSObject, ObservableObject, @unchecked Sendable {
             }
         }
 
-        // Present on both — most recent updatedAt wins
+        // Present on both, most recent updatedAt wins
         for key in localKeys.intersection(remoteKeys) {
             guard let remote = remoteReminders[key],
                   let local = activeReminders[key],

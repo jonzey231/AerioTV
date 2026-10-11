@@ -467,7 +467,7 @@ struct MoviesView: View {
     private let gridRowSpacing: CGFloat = 16
     #endif
 
-    /// Auth headers for the active Dispatcharr server — used by AuthPosterImage.
+    /// Auth headers for the active Dispatcharr server, used by AuthPosterImage.
     /// Cached: `authHeaders` reads the Keychain (API key) and sysctl
     /// (default User-Agent) every call, and every poster cell asked for it
     /// on every layout pass (Time Profiler 2026-09-04: a third of main
@@ -579,7 +579,7 @@ struct MoviesView: View {
                     .environment(\.vodPushHandler, pushRouter)
             }
             #if os(iOS)
-            // No .navigationTitle on iOS — OnDemandView hosts the
+            // No .navigationTitle on iOS, OnDemandView hosts the
             // Movies / Series pill selector above this view and the
             // pills serve as the section identifier. A title here
             // would duplicate the header.
@@ -2921,7 +2921,7 @@ struct VODPosterCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // Poster image — uses authenticated fetch so Dispatcharr /media/ images load correctly
+            // Poster image, uses authenticated fetch so Dispatcharr /media/ images load correctly
             // The 2:3 box is the SIZE ANCHOR and never changes: the image is
             // an overlay on it. With the image as the cell's only child, the
             // placeholder colour had no height until the art arrived and the
@@ -2976,7 +2976,7 @@ struct VODPosterCard: View {
                 }
             }
 
-            // Text footer — fixed height so every card in the grid row is the same total
+            // Text footer, fixed height so every card in the grid row is the same total
             // height regardless of title length or whether a year is present.
             // tvOS centres the title and year under the poster, like the
             // cast cards (Logan 2026-09-05); iOS keeps leading.

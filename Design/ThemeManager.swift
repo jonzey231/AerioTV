@@ -211,7 +211,7 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
     private init() {
         selectedTheme    = AppTheme(rawValue: storedTheme) ?? .aerio
         liquidGlassStyle = LiquidGlassStyle(rawValue: storedGlassStyle) ?? .tinted
-        // Absent stored value resolves to .dark — the single most important
+        // Absent stored value resolves to .dark, the single most important
         // upgrade-safety property (existing users must not flip to light).
         appearanceMode   = AppearanceMode(rawValue: storedAppearanceMode) ?? .dark
         useCustomAccent  = UserDefaults.standard.bool(forKey: "useCustomAccent")
@@ -262,7 +262,7 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
         storedGlassStyle = style.rawValue
     }
 
-    /// Sets the appearance mode. Orthogonal to theme selection — picking a
+    /// Sets the appearance mode. Orthogonal to theme selection, picking a
     /// theme never changes the mode, and setting the mode never changes the
     /// theme. Writes both the @Published value (so views re-render) and the
     /// synced @AppStorage backing.
@@ -285,7 +285,7 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
     /// mode. For `.system` it returns a dynamic color that follows the
     /// device trait so system chrome (status bar, etc.) and surfaces stay
     /// in lock-step. The `dark`/`light` arguments must be concrete
-    /// (mode-independent) colors — pass `darkAccent`/`lightAccent`, not the
+    /// (mode-independent) colors, pass `darkAccent`/`lightAccent`, not the
     /// already-resolved `accent`, to avoid nested dynamic resolution.
     static func resolve(dark: Color, light: Color) -> Color {
         switch shared.appearanceMode {

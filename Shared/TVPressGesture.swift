@@ -337,9 +337,9 @@ final class PressCatcherView: UIView {
 /// Detects a LONG-press (>= 0.5s) of the Left d-pad while the guide is on
 /// screen and invokes `onLongPressLeft`. A short Left passes straight through
 /// (so the guide's `onMoveCommand` still scrolls the EPG timeline). The Left
-/// long-press recognizer is installed on the host's WINDOW — the only ancestor
+/// long-press recognizer is installed on the host's WINDOW, the only ancestor
 /// reliably in the focused program cell's `UIPress` responder chain (a sibling
-/// `.overlay`/`.background` view is not) — and is removed when the guide leaves
+/// `.overlay`/`.background` view is not), and is removed when the guide leaves
 /// the hierarchy, so it lives only while the guide (which mounts this view) is
 /// shown. Modeled on PlayerView's `.leftArrow` long-press recognizer.
 
@@ -477,7 +477,7 @@ final class LeftHoldHostView: UIView, UIGestureRecognizerDelegate {
 /// with the Android TV "hold Right to close the mini player" gesture). Modeled
 /// on GuideLongPressLeftDetector: the recognizer is installed on the host's
 /// WINDOW (the only ancestor reliably in the focused cell's `UIPress` responder
-/// chain) but ONLY while `isEnabled` is true — i.e. while a mini-player is
+/// chain) but ONLY while `isEnabled` is true, i.e. while a mini-player is
 /// active. When no mini is up the recognizer is removed, so ordinary Right
 /// navigation in the guide (including hold-to-fast-scroll) is completely
 /// untouched. A short Right always passes through to `onMoveCommand`.
@@ -513,8 +513,8 @@ struct GuideLongPressRightDetector: UIViewRepresentable {
 /// Right (including hold-to-fast-scroll) is untouched when no mini is up. It fires
 /// `onRightHoldBegan` on the 0.5s threshold (close the mini) and `onRightHoldEnded`
 /// on release. The recognizer is kept attached from `.began` until release even
-/// though `isEnabled` flips false when the mini closes — NOT to "hold focus" (a
-/// window recognizer cannot suppress the tvOS focus engine; see #42 Part 2) — but
+/// though `isEnabled` flips false when the mini closes, NOT to "hold focus" (a
+/// window recognizer cannot suppress the tvOS focus engine; see #42 Part 2), but
 /// so the `.ended` event reliably fires `onRightHoldEnded`. The actual "don't
 /// scroll the guide right during the hold" is done in EPGGuideView, which pins its
 /// timeline (gates onMoveCommand(.right)) between the Began/Ended notifications. A
@@ -542,7 +542,7 @@ final class RightHoldHostView: UIView, UIGestureRecognizerDelegate {
     }
 
     /// Attach the recognizer when enabled + windowed; remove it otherwise, but
-    /// NEVER mid-hold — so the `.ended` release still fires `onRightHoldEnded`
+    /// NEVER mid-hold, so the `.ended` release still fires `onRightHoldEnded`
     /// (which unpins the guide timeline) after the mini closes. Idempotent.
     func syncRecognizer() {
         if isEnabled, let window, recognizer == nil {
@@ -618,7 +618,7 @@ final class RightHoldHostView: UIView, UIGestureRecognizerDelegate {
 
     /// Hold released (or safety fired): fire `onRightHoldEnded` exactly once
     /// (unpins the guide timeline), then reset the recognizer and re-arm fresh if
-    /// a mini is still minimized — so a recognizer left mid-recognition (a missed
+    /// a mini is still minimized, so a recognizer left mid-recognition (a missed
     /// release) is always cleared rather than stuck.
     private func endHold() {
         holdSafety?.cancel(); holdSafety = nil

@@ -144,7 +144,7 @@ func performSetActiveServer(_ server: ServerConnection,
 
 struct ServerDetailView: View {
     let server: ServerConnection
-    /// See SettingsView for the rationale — observing ThemeManager
+    /// See SettingsView for the rationale, observing ThemeManager
     /// makes every accent-tinted row in this detail page reactive to
     /// theme changes (icons, status pills, action buttons).
     @ObservedObject private var theme = ThemeManager.shared
@@ -172,12 +172,12 @@ struct ServerDetailView: View {
     @State private var showRefreshAllConfirmation = false
     @State private var isRefreshingAll = false
     /// Cross-platform LAN-probe observer. `TVLANProbe` is the
-    /// (legacy-named) cross-platform reachability checker — see
+    /// (legacy-named) cross-platform reachability checker, see
     /// `AerioApp.swift` for the rationale. Observing the singleton
     /// lets ServerDetailView surface the last probe result on every
     /// platform so users can see WHY the app thinks it's on LAN, plus
     /// drive the "Refresh LAN Detection" button. The probe is the sole
-    /// LAN signal — there is no SSID / location dependence.
+    /// LAN signal, there is no SSID / location dependence.
     @ObservedObject private var tvLANProbe = TVLANProbe.shared
     @State private var lanRefreshAcked = false
     /// Unified playlist page (2026-07): edit is a top-right toolbar
@@ -525,7 +525,7 @@ struct ServerDetailView: View {
                 // the others. The SwiftData delete is filtered by
                 // `EPGProgram.serverID == server.id`, and we only
                 // call `ChannelStore.forceRefresh` when the purged
-                // playlist is the active one — purging a non-active
+                // playlist is the active one, purging a non-active
                 // playlist just clears the cache, and the next time
                 // the user activates it the normal load path will
                 // refetch fresh EPG data.
@@ -1254,7 +1254,7 @@ struct ServerDetailView: View {
                 _ = try await api.verifyConnection()
             case .dispatcharrAPI:
                 // Re-verify with the persisted auth mode as the
-                // starting hint — verifyConnection auto-falls-back if
+                // starting hint, verifyConnection auto-falls-back if
                 // the server now wants a different shape (e.g. user
                 // upgraded Dispatcharr to a build with stricter auth).
                 let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,

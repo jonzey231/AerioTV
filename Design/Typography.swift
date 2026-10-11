@@ -443,7 +443,7 @@ struct SectionHeaderStyle: ViewModifier {
 ///
 /// We can't put `@ObservedObject` on a `ViewModifier`, so the older
 /// `.sectionHeaderStyle()` extension would freeze its `Color` argument
-/// inside SwiftUI List cells — the cell content didn't refresh on theme
+/// inside SwiftUI List cells, the cell content didn't refresh on theme
 /// changes (Mac Catalyst especially). Wrapping the styled `Text` in a
 /// `View` struct lets us subscribe to `ThemeManager.objectWillChange`,
 /// which forces a body re-evaluation that picks up the fresh accent.
@@ -452,7 +452,7 @@ private struct ThemeReactiveSectionHeader<Content: View>: View {
     let content: Content
     var body: some View {
         // Read theme.accent so SwiftUI's dependency tracker registers
-        // the property — opacity is applied here (not via the static
+        // the property, opacity is applied here (not via the static
         // `Color.textSecondary` accessor) so the resulting `Color`
         // changes structurally on every theme push, ensuring the
         // .foregroundColor modifier re-applies inside cached cells.

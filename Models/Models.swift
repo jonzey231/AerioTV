@@ -11,7 +11,7 @@ import os
 /// `ServerConnection.dispatcharrAuthMode` for SwiftData stability.
 ///
 ///  - `.xapikey`: send `X-API-Key: <key>` only. Preferred when it works
-///    — preserves full VOD episode visibility (some Dispatcharr builds
+///    preserves full VOD episode visibility (some Dispatcharr builds
 ///    filter the per-series episode list when `Authorization` is also
 ///    present, by routing the request through user-scoped session auth
 ///    that limits visible m3u_accounts).
@@ -20,7 +20,7 @@ import os
 ///    for stream playback. Some Dispatcharr builds reject X-API-Key
 ///    alone with HTTP 401; this is the fallback that gets those
 ///    deployments connected.
-///  - `.bearer`: send `Authorization: Bearer <key>` only. Rare —
+///  - `.bearer`: send `Authorization: Bearer <key>` only. Rare,
 ///    reserved for token-based deployments.
 enum DispatcharrAuthHeaderMode: String, Codable {
     case xapikey
@@ -28,7 +28,7 @@ enum DispatcharrAuthHeaderMode: String, Codable {
     case bearer
 }
 
-/// v1.7 — which credential the user provided when adding a Dispatcharr
+/// v1.7, which credential the user provided when adding a Dispatcharr
 /// Direct Connect server.
 ///
 ///  - `.apiKey`: the user pasted a personal API key from Dispatcharr's
@@ -43,7 +43,7 @@ enum DispatcharrAuthHeaderMode: String, Codable {
 ///    access TTL is refreshed silently against `/api/accounts/token/refresh/`
 ///    on 401; if the 24h refresh has also expired, Aerio re-logs in from
 ///    the Keychain-stored credentials. This is the equivalent of the
-///    Dispatcharr web UI's session — same auth flow Teamarr and Enhanced
+///    Dispatcharr web UI's session, same auth flow Teamarr and Enhanced
 ///    Channel Manager use.
 ///
 /// Stored as raw string on `ServerConnection` for SwiftData stability.
@@ -64,7 +64,7 @@ enum ServerType: String, Codable, CaseIterable {
         switch self {
         case .m3uPlaylist: return "M3U + EPG"
         case .xtreamCodes: return "Xtream Codes"
-        // v1.7: renamed from "Dispatcharr API" — Direct Connect is a clearer
+        // v1.7: renamed from "Dispatcharr API", Direct Connect is a clearer
         // mental model now that we support both API-key auth AND admin
         // username+password (the same credentials you use on the Dispatcharr
         // web UI). The SwiftData enum case stays `dispatcharrAPI` /
@@ -148,7 +148,7 @@ final class ServerConnection {
     /// a SwiftData schema migration for existing installs.
     var homeSSID: String = ""
     /// Per-server custom User-Agent override. Only consumed for Dispatcharr
-    /// servers — set on every outbound `URLRequest` and on MPV playback so
+    /// servers, set on every outbound `URLRequest` and on MPV playback so
     /// the value shows up in Dispatcharr's admin Stats panel. Empty string
     /// means "use the computed default from `DeviceInfo.defaultUserAgent`".
     var customUserAgent: String = ""
@@ -165,7 +165,7 @@ final class ServerConnection {
     /// Dispatcharr and M3U. Empty = no custom tint source.
     var xtreamXMLTVURL: String = ""
     /// Preferred destination for new recordings on this server. Only
-    /// meaningful for `.dispatcharrAPI` — XC/M3U servers ignore this and
+    /// meaningful for `.dispatcharrAPI`, XC/M3U servers ignore this and
     /// always record locally. Stored as rawValue for SwiftData stability.
     var defaultRecordingDestinationRaw: String = RecordingDestination.dispatcharrServer.rawValue
 
@@ -173,11 +173,11 @@ final class ServerConnection {
     /// `VODStore` skips this server during `loadMovies` / `loadSeries`
     /// even if the server type technically supports VOD.
     ///
-    /// Use case: a user runs two Dispatcharr instances — one as
+    /// Use case: a user runs two Dispatcharr instances, one as
     /// their "main" server, one as a "sandbox" for trialing new IPTV
     /// providers. Both have huge VOD libraries that overlap (same
     /// upstream Xtream account). Without this toggle, Aerio fetches
-    /// VOD from both — adding minutes to launch (e.g. 17k movies ×
+    /// VOD from both, adding minutes to launch (e.g. 17k movies ×
     /// 2 servers paginated 25/page = ~1400 sequential HTTP calls
     /// against Dispatcharr) and triggering the cross-server
     /// duplicate-merge code path that's caused us trouble
@@ -206,7 +206,7 @@ final class ServerConnection {
     /// v1.6.20: per-server Dispatcharr auth header shape, auto-detected
     /// during Test Connection and persisted so subsequent API calls and
     /// stream playback use the same shape. Empty string means
-    /// "not yet detected" — `authHeaders` and `DispatcharrAPI` fall back
+    /// "not yet detected", `authHeaders` and `DispatcharrAPI` fall back
     /// to the historical dual header shape (`Authorization: ApiKey` +
     /// `X-API-Key`) which is what shipped before v1.6.20.
     ///
@@ -214,9 +214,9 @@ final class ServerConnection {
     /// HTTP 401 on Test Connection in v1.6.19 even with valid Admin API
     /// keys. v1.6.16's "X-API-Key alone" change (which fixed a VOD
     /// episodes filtering bug on the user's main server) is rejected by
-    /// some Dispatcharr builds — they require the `Authorization` header
+    /// some Dispatcharr builds, they require the `Authorization` header
     /// or refuse the request. Auto-detection tries X-API-Key first
-    /// (preferred — full VOD episode visibility) and falls back to dual
+    /// (preferred, full VOD episode visibility) and falls back to dual
     /// or bearer on 401 so the user gets connected without needing to
     /// know which header shape their server speaks.
     ///
@@ -393,8 +393,8 @@ final class ServerConnection {
 
     /// Resolves a credential from Keychain. When iCloud credential sync is
     /// enabled, prefer the synchronizable copy so remote updates win over a
-    /// stale local-only cache. Otherwise — including when iCloud Sync is
-    /// off or the Credentials sync category is disabled — keep the historical
+    /// stale local-only cache. Otherwise, including when iCloud Sync is
+    /// off or the Credentials sync category is disabled, keep the historical
     /// local-first order so this device still works offline / local-only.
     private func resolvedCredential(for key: String, fallback: String) -> String {
         Self.resolveCredential(key: key, fallback: fallback)
@@ -694,7 +694,7 @@ final class ServerConnection {
     /// v1.7. New Direct Connect users (`usernamePassword` mode) also
     /// have an api_key in Keychain because the login flow fetches it
     /// from `/api/accounts/users/me/` during Test Connection and
-    /// persists it — we deliberately do this so long-lived
+    /// persists it, we deliberately do this so long-lived
     /// connections (mpv stream playback, logo fetches, recording
     /// playback) keep working with a durable credential and don't
     /// have to refresh-token mid-stream.
@@ -793,7 +793,7 @@ final class ServerConnection {
 
     /// Whether this device is currently on the home/LAN network.
     /// True when `TVLANProbe` has confirmed the server's local URL is
-    /// reachable. This is the SOLE LAN signal on every platform — there
+    /// reachable. This is the SOLE LAN signal on every platform, there
     /// is no longer any SSID / Wi-Fi-info / location dependence.
     ///
     /// The probe HEAD-checks `localURL` at app launch, on scenePhase
@@ -1011,7 +1011,7 @@ enum RecordingStatus: String, Codable {
     case cancelled
 }
 
-/// A DVR recording — either scheduled on a Dispatcharr server or captured
+/// A DVR recording, either scheduled on a Dispatcharr server or captured
 /// locally via `LocalRecordingSession`. Persisted as the single source of
 /// truth for both destinations.
 /// SwiftData mirror of a recording (local DVR capture or
@@ -1043,7 +1043,7 @@ final class Recording {
     /// Channel the recording was scheduled from.
     var channelID: String
     var channelName: String
-    /// Program metadata at schedule time (frozen — EPG may change later).
+    /// Program metadata at schedule time (frozen, EPG may change later).
     var programTitle: String
     var programDescription: String
     /// Original EPG start/end before any pre/post-roll adjustment.
@@ -1052,7 +1052,7 @@ final class Recording {
     /// User-chosen buffer for this recording (may differ from DVR defaults).
     var preRollMinutes: Int
     var postRollMinutes: Int
-    /// Destination.rawValue — stored as String so SwiftData handles enum
+    /// Destination.rawValue, stored as String so SwiftData handles enum
     /// migrations cleanly.
     var destinationRaw: String
     var statusRaw: String

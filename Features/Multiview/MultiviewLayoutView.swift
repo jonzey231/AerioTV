@@ -109,7 +109,7 @@ struct MultiviewLayoutView<Content: View>: View {
     var body: some View {
         GeometryReader { geom in
             if tiles.count == 1, !keepGridAtOne, let sole = tiles.first {
-                // N=1 short-circuit — critical for auto-PiP restore.
+                // N=1 short-circuit, critical for auto-PiP restore.
                 //
                 // At N=1 the sole tile IS the player view. Wrapping it
                 // in `.frame(width:height:).position(x:y:)` inside an
@@ -121,7 +121,7 @@ struct MultiviewLayoutView<Content: View>: View {
                 // "zoom + PiP-icon placeholder" transition. Legacy
                 // `PlayerView` mounts the representable flat inside a
                 // plain ZStack (no position/frame/animation wrapper)
-                // and iOS's restore lands cleanly there — we match
+                // and iOS's restore lands cleanly there, we match
                 // that shape at N=1.
                 //
                 // At N>=2 the grid math (position + frame + implicit
@@ -139,7 +139,7 @@ struct MultiviewLayoutView<Content: View>: View {
                 let layout = tileLayout(in: geom.size)
                 ZStack(alignment: .topLeading) {
                     // Zip is safe: if tiles.count > 9 the math clamps to 9
-                    // and zip will truncate — we'd rather drop a tile
+                    // and zip will truncate, we'd rather drop a tile
                     // visually than index-OOB crash. The store itself caps
                     // at 9 via `MultiviewStore.maxTiles`.
                     ForEach(Array(zip(layout.tiles, layout.rects).enumerated()), id: \.element.0.id) { _, pair in
@@ -159,7 +159,7 @@ struct MultiviewLayoutView<Content: View>: View {
                 // layout transition. With stable ids and ForEach
                 // keyed on `\.element.0.id`, the only thing the
                 // animation should react to is **order changes** and
-                // **membership changes** — both of which the
+                // **membership changes**, both of which the
                 // id-array captures exactly. This eliminates the
                 // path where a swap would trigger a per-tile
                 // transition that occasionally got mis-diffed as
@@ -181,7 +181,7 @@ struct MultiviewLayoutView<Content: View>: View {
 // MARK: - Preview
 
 #if DEBUG
-/// Preview scaffolding — cycles tile count 1→9 with colored swatches
+/// Preview scaffolding, cycles tile count 1→9 with colored swatches
 /// so the rect table can be eyeballed without wiring MPVPlayerView.
 private struct MultiviewLayoutPreviewHost: View {
     @State private var count: Int = 1

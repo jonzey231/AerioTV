@@ -8,14 +8,14 @@ import Darwin
 /// ticker (per-tile) and the refcount helpers to surface the sort
 /// of resource-pressure signals that show up as weird
 /// `MPV_ERROR_LOADING_FAILED` / TLS-handshake failures on the 2nd
-/// concurrent stream but not the 1st — the symptom we couldn't
+/// concurrent stream but not the 1st, the symptom we couldn't
 /// explain until we had numbers to look at.
 ///
 /// iOS/tvOS default per-process FD limit is 256. A single live
 /// mpv tile eats roughly 5–7 FDs (1 TCP socket, 1 TLS session, a
 /// couple of pipes for the demux→decode handoff, a videotoolbox
 /// IOSurface handle, a CoreAudio bus). With 9 tiles that's ~60 FDs
-/// which is well under the cap — but if something is leaking
+/// which is well under the cap, but if something is leaking
 /// (EPG fetches, guide pre-fetch, cloud-kv observers…) we could
 /// be pressed against it in a way that invisibly starves the next
 /// stream open. The `openFileDescriptorCount()` readout catches
@@ -53,7 +53,7 @@ enum ProcessMetrics {
     // MARK: - File descriptors
 
     /// Current open file descriptor count, approximate (capped).
-    /// Iterates `fstat(fd:)` over FDs 0..< `Self.fdScanCap` — cheap
+    /// Iterates `fstat(fd:)` over FDs 0..< `Self.fdScanCap`, cheap
     /// enough for a 15s stats tick on iOS (soft limit 256) and
     /// reasonable on tvOS (soft limit 2560, but we still cap at 256
     /// for the scan because iterating 2560 `fstat` syscalls per
@@ -62,7 +62,7 @@ enum ProcessMetrics {
     /// state).
     ///
     /// A returned count of exactly `Self.fdScanCap` means "at or
-    /// above cap" — still a useful signal that the app is nearing
+    /// above cap", still a useful signal that the app is nearing
     /// the iOS default limit. For deeper diagnosis of FD leaks,
     /// use Instruments; this counter is just a heartbeat.
     ///

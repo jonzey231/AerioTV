@@ -8,12 +8,12 @@ struct AddServerView: View {
     @State private var viewModel = ServerConnectionViewModel()
     /// false = type picker shown first; true = form fields revealed
     @State private var typeChosen = false
-    /// Local Network section is optional — collapsed by default
+    /// Local Network section is optional, collapsed by default
     @State private var lanExpanded = false
 
     var onSave: ((ServerConnection) -> Void)? = nil
 
-    /// Server that was just saved — triggers the sync loading screen.
+    /// Server that was just saved, triggers the sync loading screen.
     @State private var savedServer: ServerConnection?
 
     // DVR onboarding (Dispatcharr only)
@@ -243,7 +243,7 @@ struct AddServerView: View {
                         }
                     }
 
-                // v1.7 Direct Connect — credential mode picker. Default
+                // v1.7 Direct Connect, credential mode picker. Default
                 // matches viewModel.dispatcharrCredentialType so legacy
                 // .apiKey selection is the initial state for new
                 // installs (matching v1.6.x behaviour).
@@ -276,7 +276,7 @@ struct AddServerView: View {
                         .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.top, -2)
                     // v1.7.x: explicit framing of what saving credentials
-                    // unlocks — the silent auto-refresh path that mirrors
+                    // unlocks, the silent auto-refresh path that mirrors
                     // how Enhanced Channel Manager and Teamarr handle
                     // their server-to-server connection to Dispatcharr.
                     infoBox(icon: "checkmark.shield.fill",
@@ -355,7 +355,7 @@ struct AddServerView: View {
     @ViewBuilder
     private var advancedXMLTVSection: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header — the disclosure toggle
+            // Header, the disclosure toggle
             Button {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                     xmltvAdvancedExpanded.toggle()
@@ -506,7 +506,7 @@ struct AddServerView: View {
 
     /// Fetches the user's XMLTV URL and runs it through XMLTVParser so we
     /// can tell them whether it's valid BEFORE save. Caps the download at
-    /// ~5 MB by cancelling after a short timeout — we only need to prove
+    /// ~5 MB by cancelling after a short timeout, we only need to prove
     /// the response parses as XMLTV with at least one programme.
     @MainActor
     private func testXMLTVURL() async {
@@ -538,7 +538,7 @@ struct AddServerView: View {
     @ViewBuilder
     private var lanWANSection: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Collapsible header — always visible
+            // Collapsible header, always visible
             Button {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                     lanExpanded.toggle()
@@ -809,7 +809,7 @@ struct AddServerView: View {
             SyncManager.shared.saveCredentialsSynced(for: server)
         }
         // Show the sync loading screen when adding from Settings (onSave != nil).
-        // During onboarding, skip the sync view — the app root auto-detects the new server
+        // During onboarding, skip the sync view, the app root auto-detects the new server
         // and transitions to MainTabView, which handles initial data loading itself.
         if onSave != nil {
             savedServer = server

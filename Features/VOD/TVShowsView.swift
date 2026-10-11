@@ -60,7 +60,7 @@ struct TVShowsView: View {
     private let gridRowSpacing: CGFloat = 16
     #endif
 
-    /// Auth headers for the active Dispatcharr server — used by AuthPosterImage.
+    /// Auth headers for the active Dispatcharr server, used by AuthPosterImage.
     private var dispatcharrHeaders: [String: String] {
         guard let s = servers.first(where: { $0.supportsVOD && $0.type == .dispatcharrAPI && $0.isActive })
                    ?? servers.first(where: { $0.supportsVOD && $0.type == .dispatcharrAPI })
@@ -133,7 +133,7 @@ struct TVShowsView: View {
                 VODDetailView(item: item, isPlaying: $isPlaying)
             }
             #if os(iOS)
-            // No .navigationTitle on iOS — OnDemandView hosts the
+            // No .navigationTitle on iOS, OnDemandView hosts the
             // Movies / Series pill selector above this view and the
             // pills serve as the section identifier. A title here
             // would duplicate the header.

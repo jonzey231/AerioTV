@@ -8,7 +8,7 @@
 //
 // Why GameController (not UIResponder.pressesBegan):
 //   tvOS's focus engine consumes many UIPress events before they reach
-//   any SwiftUI handler — e.g. the dpad presses that move focus never
+//   any SwiftUI handler, e.g. the dpad presses that move focus never
 //   fire `.onMoveCommand` on your views (SwiftUI rewrites those as focus
 //   transitions, not command events). GameController's valueChangedHandler
 //   runs in parallel with the focus engine and sees the raw hardware input
@@ -23,7 +23,7 @@
 //   [REMOTE] controller_attached name=..., vendor=...
 //
 // To correlate with "what the UI did in response", grep the same
-// timespan in the log for side effects — watchdog hangs, tile
+// timespan in the log for side effects, watchdog hangs, tile
 // state changes, store mutations, SwiftUI lifecycle prints.
 //
 
@@ -65,7 +65,7 @@ enum RemoteInputLogger {
             }
         }
 
-        log("installed — waiting for controllers")
+        log("installed, waiting for controllers")
     }
 
     // MARK: - Attach
@@ -86,7 +86,7 @@ enum RemoteInputLogger {
     }
 
     private static func attachMicro(_ pad: GCMicroGamepad) {
-        // Don't let the dpad auto-snap to cardinals — we want the raw analog
+        // Don't let the dpad auto-snap to cardinals, we want the raw analog
         // value so we can see glide speed and partial flicks.
         pad.reportsAbsoluteDpadValues = true
 
@@ -124,7 +124,7 @@ enum RemoteInputLogger {
     // MARK: - Dpad dedupe
 
     /// The Siri Remote touchpad fires valueChanged at up to ~60Hz with
-    /// sub-pixel drift. Log only meaningful movement — thresholded at
+    /// sub-pixel drift. Log only meaningful movement, thresholded at
     /// ±0.25, and only when state crosses a cardinal boundary or flicks
     /// to center. That keeps the log readable during swipes.
     private static func logDpad(x: Float, y: Float) {
@@ -164,7 +164,7 @@ enum RemoteInputLogger {
     /// current thread / environment.
     @MainActor
     private static func focusSummaryMain() -> String {
-        // UIWindowScene.focusSystem is the canonical tvOS 15+ API —
+        // UIWindowScene.focusSystem is the canonical tvOS 15+ API,
         // `UIScreen.focusedItem` is deprecated, and UIScreen doesn't conform
         // to UIFocusEnvironment so it can't be passed to
         // `UIFocusSystem.focusSystem(for:)` anyway.

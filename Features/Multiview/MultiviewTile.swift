@@ -26,7 +26,7 @@ enum TilePlaybackKind: Equatable {
 /// `item.id` (the channel ID). This pins the tile's SwiftUI identity
 /// to the existing channel so SwiftUI diffs the same `MPVPlayerView`
 /// instance (and its Coordinator, which owns the running mpv handle)
-/// into tile position 0 — no re-seed, no black flash. See the plan's
+/// into tile position 0, no re-seed, no black flash. See the plan's
 /// "Entering multiview from single" section.
 ///
 /// For every subsequent tile added via the channel picker, `id` is a
@@ -41,12 +41,12 @@ struct MultiviewTile: Identifiable, Equatable {
     /// tile 0 on seed-from-single; fresh UUID otherwise.
     let id: String
 
-    /// The channel metadata — name, logo, number, EPG status.
+    /// The channel metadata, name, logo, number, EPG status.
     let item: ChannelDisplayItem
 
     /// Resolved playback URL (first entry of `item.streamURLs`). The
     /// list contains format fallbacks (`.m3u8` → `.ts` → direct);
-    /// `streamURLs.first` is the platform-preferred entry already —
+    /// `streamURLs.first` is the platform-preferred entry already,
     /// see `XtreamCodesAPI.streamURLs(for:)` at
     /// `Networking/StreamingAPIs.swift:250`.
     let streamURL: URL
@@ -57,7 +57,7 @@ struct MultiviewTile: Identifiable, Equatable {
     /// Snapshotted at add-time from `ServerConnection.authHeaders` at
     /// `Models/Models.swift:181`.
     ///
-    /// SECURITY — do NOT log `MultiviewTile` wholesale (`print(tile)`,
+    /// SECURITY, do NOT log `MultiviewTile` wholesale (`print(tile)`,
     /// `NSLog("%@", tile)`, crash-log captures, SwiftUI debug
     /// previews). These headers can contain API keys. Log `tile.id` or
     /// `tile.item.name` if you need to identify a tile in diagnostics.

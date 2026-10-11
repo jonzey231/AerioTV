@@ -31,7 +31,7 @@ import OpenGLES
 //
 // `MPVLibraryWarmup.warmUp()` creates and immediately destroys one
 // mpv handle on a background queue during app launch. The handle
-// does nothing visible — no window, no file loaded — but the
+// does nothing visible, no window, no file loaded, but the
 // `mpv_initialize` call triggers all the one-time process-wide
 // init. By the time the user's first tap hits `Coordinator.setupMPV`,
 // the cheap fast-path is already active and `mpv_initialize`
@@ -43,13 +43,13 @@ import OpenGLES
 // instance.
 enum MPVLibraryWarmup {
     /// `nonisolated(unsafe)` because the flag is only flipped once
-    /// (false → true) and the check is a benign race — worst case,
+    /// (false → true) and the check is a benign race, worst case,
     /// two warm-ups run concurrently and one wastes a few ms of CPU.
     private nonisolated(unsafe) static var hasStarted = false
     private nonisolated(unsafe) static var isComplete = false
 
     /// Trigger libmpv process-wide init on a background queue.
-    /// Safe to call from any thread, as many times as you want —
+    /// Safe to call from any thread, as many times as you want,
     /// only the first call does anything.
     ///
     /// v1.7.x Phase 5: deferred and de-prioritized to reduce
@@ -115,7 +115,7 @@ enum MPVLibraryWarmup {
     }
 
     /// `true` once the background warm-up has completed. Diagnostics
-    /// only — most callers never need to read this directly.
+    /// only, most callers never need to read this directly.
     static var completed: Bool { isComplete }
 
     /// Synchronously wait up to `timeout` seconds for the warm-up to
@@ -132,7 +132,7 @@ enum MPVLibraryWarmup {
     /// no synchronization to `MPVLibraryWarmup`. The first multiview
     /// tile mounted within ~3 s of app launch would race the
     /// background warm-up's process-wide ffmpeg / codec / protocol
-    /// registration — `mpv_initialize` returned success on the
+    /// registration, `mpv_initialize` returned success on the
     /// tile's own handle, but `loadfile` arrived before the global
     /// registration finished and the load failed with
     /// `MPV_ERROR_LOADING_FAILED` (-13). Subsequent tiles ran after
@@ -142,10 +142,10 @@ enum MPVLibraryWarmup {
     /// hardware.
     @discardableResult
     static func waitUntilComplete(timeout: TimeInterval = 5.0) -> Bool {
-        // Fast path — already done.
+        // Fast path, already done.
         if isComplete { return true }
         // Defensive: if `warmUp()` was somehow never called (shouldn't
-        // happen — `RootView.onAppear` triggers it), kick it now so
+        // happen, `RootView.onAppear` triggers it), kick it now so
         // the wait isn't pointless. Idempotent.
         warmUp()
         let deadline = Date().addingTimeInterval(timeout)
@@ -281,7 +281,7 @@ private final class MPVMetalHostLayer: CAMetalLayer {
 class MPVPlayerViewController: UIViewController {
     weak var coordinator: MPVPlayerViewRepresentable.Coordinator?
 
-    /// AVSampleBufferDisplayLayer — vsync-synchronized frame presentation.
+    /// AVSampleBufferDisplayLayer, vsync-synchronized frame presentation.
     /// Used on both iOS (PiP-compatible) and tvOS (tear-free).
     let sampleBufferLayer = AVSampleBufferDisplayLayer()
 
@@ -294,7 +294,7 @@ class MPVPlayerViewController: UIViewController {
     #endif
 
     #if os(iOS)
-    /// PiP controller — created lazily on first request via
+    /// PiP controller, created lazily on first request via
     /// `ensurePiPController()`. Nil until the single-stream
     /// makeUIViewController path builds it.
     ///
@@ -315,7 +315,7 @@ class MPVPlayerViewController: UIViewController {
     /// Called from `makeUIViewController` during single-stream
     /// mount so `canStartPictureInPictureAutomaticallyFromInline`
     /// has a live controller to fire against when the app
-    /// backgrounds. The manual PiP menu entry has been removed —
+    /// backgrounds. The manual PiP menu entry has been removed,
     /// PiP is auto-only.
     ///
     /// Paired with `tearDownPiPController()` for the Audio-Only
@@ -336,14 +336,14 @@ class MPVPlayerViewController: UIViewController {
         )
         let pip = AVPictureInPictureController(contentSource: contentSource)
         pip.delegate = coordinator
-        // Always auto-start PiP when the app backgrounds. No user toggle —
+        // Always auto-start PiP when the app backgrounds. No user toggle,
         // PiP is the only way to keep video alive when the app leaves the
         // foreground, and removing the toggle eliminates a footgun where
         // users turned it off and then wondered why swipe-home killed
         // their stream. iOS only honours this on an already-instantiated
         // controller, which is why the single-stream path in
         // `makeUIViewController` below eagerly calls this method.
-        // Multiview auto-PiP is still deferred — eager-create during a
+        // Multiview auto-PiP is still deferred, eager-create during a
         // multi-tile mount correlates 1:1 with an app freeze.
         pip.canStartPictureInPictureAutomaticallyFromInline = true
         pipController = pip
@@ -354,7 +354,7 @@ class MPVPlayerViewController: UIViewController {
     }
 
     /// Release the PiP controller entirely. Used by the Audio-Only
-    /// suppression path — without a live controller, iOS has no
+    /// suppression path, without a live controller, iOS has no
     /// handle on our sample-buffer layer and can't engage auto-PiP
     /// on swipe-home. The sample buffer layer itself (and mpv) stay
     /// alive; only the PiP controller goes away.
@@ -435,7 +435,7 @@ class MPVPlayerViewController: UIViewController {
         sampleBufferLayer.frame = view.bounds
         view.layer.addSublayer(sampleBufferLayer)
 
-        // PiP controller is NOT created here — see `ensurePiPController()`
+        // PiP controller is NOT created here, see `ensurePiPController()`
         // above for the lazy-init rationale.
 
         #if DEBUG
@@ -571,7 +571,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
     /// keep the old behavior (error state is terminal).
     var onRecovered: (@MainActor @Sendable () -> Void)? = nil
     /// Identity of this coordinator when used as a multiview tile.
-    /// `nil` means single-stream mode (the default) — the Coordinator
+    /// `nil` means single-stream mode (the default), the Coordinator
     /// behaves exactly like it did before multiview existed and
     /// unconditionally drives `NowPlayingBridge`.
     ///
@@ -582,12 +582,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
     var tileID: String? = nil
 
     /// Multiview: `true` when this tile currently owns audio. Drives
-    /// the mpv `mute` property — `false` sends `mute=1`, `true` sends
+    /// the mpv `mute` property, `false` sends `mute=1`, `true` sends
     /// `mute=0`. In single-stream mode (tileID == nil) we ignore this
     /// field; single mode is always audio-active by construction.
     ///
     /// SwiftUI feeds a new value via `updateUIViewController` whenever
-    /// `MultiviewStore.audioTileID` changes — the Coordinator tracks
+    /// `MultiviewStore.audioTileID` changes, the Coordinator tracks
     /// the last-applied value and skips redundant mpv calls.
     var isAudioActive: Bool = true
 
@@ -605,7 +605,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
     /// and passed through to the Coordinator so `setupMPV` (which
     /// runs on a background queue and can't reach
     /// `MultiviewStore.shared`) can pick the matching audio strategy
-    /// at pre-init time. Defaults to 1 — single-stream callers don't
+    /// at pre-init time. Defaults to 1, single-stream callers don't
     /// need to set it because the audio-strategy branch only fires
     /// for `initialIsAudioActive == false`, which never happens in
     /// single-stream mode.
@@ -653,7 +653,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // setCategory + setActive(true); subsequent increments no-op;
         // decrements are matched at teardown. The refcount itself
         // swallows session errors with an NSLog (matches the old
-        // behavior at this site — session activation can fail in
+        // behavior at this site, session activation can fail in
         // odd backgrounding states and we let mpv try anyway).
         AudioSessionRefCount.increment()
 
@@ -674,7 +674,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         let vc = MPVPlayerViewController()
         vc.coordinator = context.coordinator
 
-        // Wire up PiP (iOS only). PiP is auto-only — the manual
+        // Wire up PiP (iOS only). PiP is auto-only, the manual
         // overflow-menu entry was removed; users swipe home to
         // engage PiP, gated by the Settings → Appearance →
         // Picture-in-Picture toggle.
@@ -689,21 +689,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         //
         // iOS fires `pictureInPictureControllerWillStartPictureInPicture`
         // before `didEnterBackground`, and that delegate synchronously
-        // sets `progressStore.isPiPActive = true` — so the background
+        // sets `progressStore.isPiPActive = true`, so the background
         // handler's first-branch check against isPiPActive correctly
         // short-circuits the vid=no path for the PiP case.
         //
         // Eager-create fires on two entry points:
         //   (a) Legacy PlayerView single-stream path (tileID == nil).
-        //   (b) Unified-player N=1 — a tileID is set, but there's
+        //   (b) Unified-player N=1, a tileID is set, but there's
         //       exactly one tile in MultiviewStore, which is the case
         //       when the user launches playback from the Guide /
         //       Channels list without having added a second tile.
         //       This is the default user path and MUST support PiP.
         //
-        // We gate (b) on `tiles.count <= 1` so the dangerous case —
+        // We gate (b) on `tiles.count <= 1` so the dangerous case,
         // mounting a 2nd tile while the 1st is still loadfile-
-        // cascading — still skips. The 1st tile's mount happens in
+        // cascading, still skips. The 1st tile's mount happens in
         // isolation (no parallel mpv activity), so eager-create there
         // is safe; only concurrent multi-tile mounts cause the freeze.
         #if os(iOS)
@@ -734,10 +734,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // IMPORTANT: single-stream mode (tileID == nil) MUST NOT
         // touch mpv's `mute` or `pause` properties from here. Those
         // are driven by the user's on-screen controls + the mpv
-        // event stream — any write from SwiftUI's update pass is a
+        // event stream, any write from SwiftUI's update pass is a
         // potential race against mpv's initialization sequence (mpv
         // is created on the render queue; our writes dispatch via
-        // mpvQueue — safe at steady state, but startup ordering is
+        // mpvQueue, safe at steady state, but startup ordering is
         // fragile and not worth the risk for a mode that has no
         // multiview logic anyway).
         //
@@ -903,7 +903,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         var nowPlayingArtworkURL: URL?
         private var nowPlayingConfigured = false
 
-        // Multiview tile identity. `nil` = single-stream mode — this
+        // Multiview tile identity. `nil` = single-stream mode, this
         // coordinator unconditionally drives NowPlayingBridge. Non-nil
         // = one tile in a multiview grid; the coordinator only drives
         // the bridge when it's the audio tile. See
@@ -914,7 +914,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // read on MainActor via `shouldDriveNowPlayingBridge`). If
         // SwiftUI rebinds the representable with a different tileID
         // (e.g. tile reorder), the tile's `.id(...)` modifier forces
-        // SwiftUI to build a fresh coordinator — so treating this as
+        // SwiftUI to build a fresh coordinator, so treating this as
         // immutable-per-coordinator-lifetime matches the model.
         let tileID: String?
 
@@ -945,7 +945,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// + install `MPRemoteCommandCenter` handlers, `false` when it
         /// should stay silent because another coordinator (the audio
         /// tile) is authoritative. In single-stream mode (tileID == nil)
-        /// this is always `true` — preserves pre-multiview behavior.
+        /// this is always `true`, preserves pre-multiview behavior.
         ///
         /// The check is run on MainActor because `PlayerSession` and
         /// `MultiviewStore` are both `@MainActor`-isolated.
@@ -958,9 +958,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // stale media notification survived into remote mode.
             if AerioCastController.shared.isCasting { return false }
             #endif
-            // Single-mode coordinator — always authoritative.
+            // Single-mode coordinator, always authoritative.
             guard let tileID else { return true }
-            // Multiview coordinator — only the audio tile drives the
+            // Multiview coordinator, only the audio tile drives the
             // bridge. If the session somehow isn't in .multiview mode
             // (race during teardown, or coordinator lingers post-exit),
             // stay quiet. The single-mode coordinator (if any) will
@@ -971,7 +971,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         // MARK: - Multiview property application
 
-        /// Initial state captured at Coordinator init — used by
+        /// Initial state captured at Coordinator init, used by
         /// `setupMPV()` to set the `mute` / `pause` options BEFORE
         /// `mpv_initialize` so the first frame already has the right
         /// audio-focus and pause state. Without this, a non-audio
@@ -983,7 +983,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         /// Last value we wrote to mpv's `mute` property (via the
         /// `applyAudioFocus` path). Seeded with the initial value in
-        /// `init` so the first `updateUIViewController` is a no-op —
+        /// `init` so the first `updateUIViewController` is a no-op,
         /// `setupMPV` already applied the initial mute state as an
         /// option. Only genuine runtime transitions (audio tile
         /// change) flip mpv's mute at runtime.
@@ -992,7 +992,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// Last value we wrote to mpv's `pause` property through the
         /// multiview PiP path. Parallel to `lastAppliedAudioFocus`.
         /// We intentionally do NOT consult the normal pause-observer
-        /// state here — pausing from PiP is orthogonal to the user's
+        /// state here, pausing from PiP is orthogonal to the user's
         /// play/pause button, and we want to drive the pause property
         /// back off on PiP-exit regardless of the last event the
         /// observer saw.
@@ -1015,13 +1015,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// re-enters the path before the previous mpvQueue dispatch
         /// completes, etc.). Re-writing `aid=auto` when the property
         /// is already `auto` causes mpv to re-run track selection
-        /// and tear down + re-open its AudioUnit — which on iOS
+        /// and tear down + re-open its AudioUnit, which on iOS
         /// produces an audible "bonk" / brief audio dropout. These
         /// secondary guards record the last value the mpvQueue
         /// dispatch actually wrote and skip the
         /// `mpv_set_property*` call when the new value matches.
         ///
-        /// `nil` means "we have not written this property yet" —
+        /// `nil` means "we have not written this property yet",
         /// the next write goes through unconditionally.
         private var lastWrittenAID: String?
         private var lastWrittenMute: Int32?
@@ -1053,7 +1053,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// regression we're closing here.
         ///
         /// Flipped false by the `progressStore.$isAudioOnly` sink
-        /// when the user opts into Audio Only — otherwise iOS
+        /// when the user opts into Audio Only, otherwise iOS
         /// auto-engages PiP on swipe-home even though the user
         /// explicitly asked for audio only (the PiP window would
         /// shadow the NowPlaying lockscreen/Dynamic Island UI).
@@ -1063,7 +1063,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// state. Set true in `didEnterBackground`, false in
         /// `willEnterForeground`. v1.6.8: read by `renderAndPresent`
         /// to decide whether to auto-pause mpv when the sample-buffer
-        /// layer enters `.failed` status — see the screen-lock fix
+        /// layer enters `.failed` status, see the screen-lock fix
         /// in that function for the full rationale.
         fileprivate var isInBackground: Bool {
             get { withPlaybackStateLock { $0.isInBackground } }
@@ -1080,7 +1080,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         /// Weak reference to the backing UIViewController. Needed
         /// by `updateAutoPiPEligibility()` to tear down and rebuild
-        /// the PiP controller on Audio-Only toggles — the strong
+        /// the PiP controller on Audio-Only toggles, the strong
         /// reference lives on the VC, so clearing the Coordinator's
         /// weak ref alone wouldn't actually release the controller
         /// or stop iOS from engaging auto-PiP.
@@ -1096,7 +1096,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// Wall-clock timestamp when `applyPauseIfChanged(true)` last
         /// set `pause=yes`. Consulted on the next unpause transition to
         /// decide whether a `loadfile replace` snap-to-live is worth
-        /// doing. Brief pauses (picker open/close during a tile-add —
+        /// doing. Brief pauses (picker open/close during a tile-add,
         /// typically <2s) fall BEHIND live by less than the cache-secs
         /// buffer and don't need the reload; long pauses do.
         ///
@@ -1426,17 +1426,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //   Used when `tiles.count <= 6`. Audio packets keep
             //   decoding continuously on every tile, just muted at
             //   output. When the user switches audio focus the new
-            //   tile's audio is already at the right PTS — `mute=no`
+            //   tile's audio is already at the right PTS, `mute=no`
             //   resumes audio instantly at the current video
             //   position, no fast-forward, no AudioUnit re-init.
             //   This is the Apple-TV typical-multiview path; cost
             //   is N AudioUnits running silently (cheap on tvOS
-            //   hardware — Apple TV 4K A15 handles 6 muted decoders
+            //   hardware, Apple TV 4K A15 handles 6 muted decoders
             //   without underruns in field testing).
             //
             // **silence + decoder-off** (`aid=no` + `mute=yes`)
             //   Used when `tiles.count >= 7`. Disables the audio
-            //   track entirely — mpv stops decoding audio and
+            //   track entirely, mpv stops decoding audio and
             //   closes the AudioUnit. This is the v1.6.12 fix for
             //   "Audio device underrun" spam across many
             //   concurrent muted tiles, each fighting the shared
@@ -1531,7 +1531,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         ///
         /// This is a mpv-property toggle, not a re-seed. A paused
         /// live stream's decoder holds the last frame and resumes
-        /// within ~1-2 seconds when pause goes back to 0 — no
+        /// within ~1-2 seconds when pause goes back to 0, no
         /// buffering penalty, no network re-handshake.
         @MainActor
         fileprivate func applyPauseIfChanged(_ paused: Bool) {
@@ -1772,7 +1772,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             get { withPlaybackStateLock { $0.wakeupRetain } }
             set { withPlaybackStateLock { $0.wakeupRetain = newValue } }
         }
-        private var mpvGL: OpaquePointer?  // mpv_render_context — owned by renderQueue
+        private var mpvGL: OpaquePointer?  // mpv_render_context, owned by renderQueue
         private let mpvQueue = DispatchQueue(label: "com.aerio.mpv", qos: .userInteractive)
 
         private func withPlaybackStateLock<T>(_ body: (inout PlaybackState) -> T) -> T {
@@ -1788,7 +1788,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
         }
 
-        /// Atomically marks shutdown and returns the mpv handle. Idempotent —
+        /// Atomically marks shutdown and returns the mpv handle. Idempotent,
         /// returns nil on every call after the first so concurrent callers
         /// (e.g. stop() racing an unexpected MPV_EVENT_SHUTDOWN) can never
         /// both capture the handle.
@@ -1983,7 +1983,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
         }
 
-        // OpenGL ES render — GPU renders to CVPixelBuffer via IOSurface-backed FBO (zero copy)
+        // OpenGL ES render, GPU renders to CVPixelBuffer via IOSurface-backed FBO (zero copy)
         private let renderQueue = DispatchQueue(label: "com.aerio.mpv.render", qos: .userInteractive)
         private weak var sampleBufferLayer: AVSampleBufferDisplayLayer?  // vsync-synchronized display
         // Cached renderer for the off-main render/diagnostics paths.
@@ -1996,7 +1996,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private nonisolated(unsafe) var cachedRenderer: AVSampleBufferVideoRenderer?
         private var eaglContext: EAGLContext?
         private var textureCache: CVOpenGLESTextureCache?
-        // v1.7.x Step 5 — triple-buffered FBO ring.
+        // v1.7.x Step 5, triple-buffered FBO ring.
         //
         // Prior single-buffer architecture (one CVPixelBuffer + one
         // GL texture + one FBO, recreated per resolution) produced
@@ -2018,7 +2018,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // window, the layer renders black for that VSync. Step 4a's
         // DisplayImmediately made it 5x worse (1 per 2.4s vs 1 per
         // ~12s baseline) by removing AVSBDL's implicit hold time
-        // before composing — confirming the race hypothesis.
+        // before composing, confirming the race hypothesis.
         //
         // Triple-buffered ring breaks the race: mpv writes to
         // slot[renderBufferIndex], we hand that slot's pixel buffer
@@ -2043,7 +2043,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var renderBufferIndex: Int = 0
         private var fboWidth: Int = 0
         private var fboHeight: Int = 0
-        /// Detected stream FPS — used for diagnostics.
+        /// Detected stream FPS, used for diagnostics.
         private var detectedFps: Double = 0
 
         #if os(tvOS)
@@ -2241,7 +2241,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// under concurrent-tile-load pressure (9 tiles hit the server
         /// simultaneously and some get throttled). Before this counter
         /// existed the tile would show "Decoder unavailable" permanently
-        /// even though expanding to full-screen — a single request —
+        /// even though expanding to full-screen, a single request,
         /// would succeed. Now we retry up to 3 times with exponential
         /// backoff + random jitter (so 9 tiles don't all retry at the
         /// same wall-clock moment and trigger the same thundering-herd
@@ -2356,7 +2356,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         }
 
         /// v1.7.x Phase 4: retry budget is URL-aware. Live streams
-        /// keep the historical 3 retries (~7s total budget — fits
+        /// keep the historical 3 retries (~7s total budget, fits
         /// transient 503/network blips). Recording URLs get 5
         /// retries (~93s total budget) since in-progress recordings
         /// can be locked or queued behind a server warmup window.
@@ -2406,7 +2406,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var lastProgressSave: Date = .distantPast  // Debounce VOD progress saves to every 10s
         private var hasAttemptedResume = false  // Only auto-seek once per playback session
         private var playbackEnded = false      // Guard against seek-after-EOF
-        // renderPending: accessed from mpv callback thread + render thread — use lock
+        // renderPending: accessed from mpv callback thread + render thread, use lock
         private var renderPending = false
         private var renderLock = os_unfair_lock()
 
@@ -2425,11 +2425,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var didEnqueueFirstVideoFrame = false   // true once a real frame has been enqueued to the display layer
 
         // Stream info refresh timer (2s interval for volatile stats).
-        // Runs on its own low-priority queue — NEVER on renderQueue (would block frame delivery).
+        // Runs on its own low-priority queue, NEVER on renderQueue (would block frame delivery).
         private var streamInfoTimer: DispatchSourceTimer?
         private let statsQueue = DispatchQueue(label: "com.aerio.mpv.stats", qos: .utility)
 
-        // Frame timing — jitter & tearing diagnostics
+        // Frame timing, jitter & tearing diagnostics
         private var lastRenderTime: CFAbsoluteTime = 0       // When last frame finished rendering
         private var lastEnqueueTime: CFAbsoluteTime = 0      // When last frame was enqueued to display layer
         private var frameIntervals: [Double] = []             // Recent inter-frame intervals (ms)
@@ -2446,7 +2446,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var layerFailedFrameCount: Int64 = 0          // Foreground sample-buffer-renderer .failed events
         private var makeSampleBufferNilCount: Int64 = 0       // CMSampleBuffer construction failures
 
-        // v1.7.x Issue A round 3 diagnostics — track AVSBDL state
+        // v1.7.x Issue A round 3 diagnostics, track AVSBDL state
         // transitions, since Archie's 2026-05-08 screen recording
         // showed single-VSync solid-black flashes during libmpv
         // render stalls even though our renderer.status stayed at
@@ -2458,7 +2458,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var lastObservedLayerStatus: AVQueuedSampleBufferRenderingStatus = .unknown
         private var lastObservedRequiresFlush: Bool = false
 
-        // v1.7.x Issue A diagnostics — UHD / 10-bit HEVC blue screen
+        // v1.7.x Issue A diagnostics, UHD / 10-bit HEVC blue screen
         // (pre-first-frame) and periodic black flashes (mid-stream).
         // The blue screen correlates with the
         // videotoolbox → videotoolbox-copy fallback (~1.5s gap before
@@ -2490,7 +2490,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var videoReconfigCount: Int64 = 0
         private var lastHwdecCurrentObserved: String = ""
 
-        // v1.7.x Step 7 — audio reconfig + callback-gap correlation.
+        // v1.7.x Step 7, audio reconfig + callback-gap correlation.
         //
         // Codex's CODEX_UHD_STUTTER_AVSYNC_NEXT_STEPS_2026-05-08.md
         // recommends correlating MPV_EVENT_AUDIO_RECONFIG with
@@ -2520,14 +2520,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var audioHealthCheckScheduled = false
         private var audioStereoFallbackApplied = false
 
-        // v1.7.x Step 7 — callback-gap severity counters.
+        // v1.7.x Step 7, callback-gap severity counters.
         //
         // Cumulative tallies of the gap classifications already
         // emitted at line ~2455 (mild 50-100ms, moderate 100-300ms,
         // severe 300ms+). Surfaced in FRAME SUMMARY so we can see
         // whether gaps are clustered (one bad reconfigure window) or
         // chronic (steady-state decoder issue). The 22:04 test had
-        // ~5 moderate-class gaps in a 5-second window — strongly
+        // ~5 moderate-class gaps in a 5-second window, strongly
         // clustered, suggesting episodic root cause rather than
         // continuous instability.
         private var callbackGapMildCount: Int64 = 0
@@ -2550,7 +2550,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var hwdecErrorTotal: Int64 = 0
         private var vtNullBufferTotal: Int64 = 0
 
-        // FBO lifecycle timing — answers "is the user-visible black
+        // FBO lifecycle timing, answers "is the user-visible black
         // flash a window where the FBO doesn't exist yet?" If
         // fboDestroyedAt is recent (< 50ms) when a video-reconfig
         // fires, we know the layer is presenting nothing for the
@@ -2617,7 +2617,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // watchdog is doing real work.
         private var watchdogReenqueueCount: Int64 = 0
 
-        // v1.7.x Step 6 — backpressure skip counter. Incremented
+        // v1.7.x Step 6, backpressure skip counter. Incremented
         // each time `renderAndPresent` early-returns because
         // AVSampleBufferDisplayLayer's renderer reported
         // `isReadyForMoreMediaData == false`. Exposed in FRAME
@@ -2626,27 +2626,27 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // (typical for fast hardware decoders on UHD content),
         // and we're correctly rate-limiting via mpv's
         // `framedrop=vo` policy by NOT calling
-        // mpv_render_context_render — mpv's internal queue
+        // mpv_render_context_render, mpv's internal queue
         // fills, framedrop drops the late frames at the VO
         // boundary, and the upstream demuxer/decoder pipeline
         // is rate-limited to AVSBDL's consumption rate.
         private var backpressureSkipCount: Int64 = 0
 
-        // v1.7.x Issue A round 6 — black-frame detector (Step 3a).
+        // v1.7.x Issue A round 6, black-frame detector (Step 3a).
         //
         // The 2026-05-08 fully-applied Step 2 test confirmed mpv's
         // VideoToolbox path occasionally emits a frame whose backing
-        // CVPixelBuffer is uniformly zero — luminance avg=0, std=0
-        // mathematically — interspersed in an otherwise smooth frame
+        // CVPixelBuffer is uniformly zero, luminance avg=0, std=0
+        // mathematically, interspersed in an otherwise smooth frame
         // stream (late=0/2954, vo_drops=0, dec_drops=0). 17 such
         // frames in 76s of UHD HEVC HDR playback (~1 every 4.5s).
         // Surrounded by normal content frames (avg 25-130). The bug
-        // is inside libmpv's render or VT codepath — from outside
+        // is inside libmpv's render or VT codepath, from outside
         // libmpv we can't reach it. This detector catches them on
         // input, before we wrap them into a CMSampleBuffer for the
         // display layer. The CADisplayLink watchdog above already
         // handles "queue stale" by re-enqueueing the last good
-        // CMSampleBuffer with a fresh PTS — so suppressing here just
+        // CMSampleBuffer with a fresh PTS, so suppressing here just
         // means the user sees the previous frame held for one mpv-
         // frame-interval (~16ms) instead of a literal black flash.
         //
@@ -2801,7 +2801,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // v1.7.x Issue A round 2: localize mid-stream black flashes.
         // Archie 2026-05-08 native-UHD test showed late=3 frames
         // including FRAME #226 with render=8.1ms interval=211.8ms
-        // — mpv didn't ASK us to render for 200ms, then the actual
+        // mpv didn't ASK us to render for 200ms, then the actual
         // render call returned in 8ms. That isolates the stall to
         // libmpv's internal pipeline (decoder/demuxer/render-context),
         // not our render or present path. lastScheduleRenderTime
@@ -2905,7 +2905,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             self.metalHDRMode = false
             #endif
             // Seed the `lastApplied*` debounce with the initial
-            // values — setupMPV applies them via mpv_set_option
+            // values, setupMPV applies them via mpv_set_option
             // BEFORE mpv_initialize, so there's no need for
             // updateUIViewController to re-issue them afterwards.
             // (Subsequent state changes via the Representable still
@@ -3218,12 +3218,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 DispatchQueue.main.async { self.progressStore.audioSyncMs = clamped }
             }
 
-            // Background/foreground handling — disable video output to prevent GPU crashes
+            // Background/foreground handling, disable video output to prevent GPU crashes
             NotificationCenter.default.addObserver(self, selector: #selector(didEnterBackground),
                                                    name: UIApplication.didEnterBackgroundNotification, object: nil)
             NotificationCenter.default.addObserver(self, selector: #selector(willEnterForeground),
                                                    name: UIApplication.willEnterForegroundNotification, object: nil)
-            // Audio route change — log AirPlay connect/disconnect
+            // Audio route change, log AirPlay connect/disconnect
             NotificationCenter.default.addObserver(self, selector: #selector(audioRouteChanged),
                                                    name: AVAudioSession.routeChangeNotification, object: nil)
             // Live Rewind: a second multiview tile invalidates this
@@ -3245,7 +3245,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             // Issue #26: apply the chosen aspect mode to the display layer
             // whenever it changes (and once on subscribe for the persisted
-            // initial value). Cross-platform — the AVSampleBufferDisplayLayer
+            // initial value). Cross-platform, the AVSampleBufferDisplayLayer
             // and its videoGravity exist on iOS and tvOS alike.
             // Fill is suppressed for non-solo multiview tiles and while
             // PiP owns the video, so the three inputs combine here.
@@ -3265,7 +3265,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             #if os(iOS)
             // Audio-Only suppresses auto-PiP. Without this, swiping home
-            // with Audio-Only on triggers iOS's auto-PiP engagement —
+            // with Audio-Only on triggers iOS's auto-PiP engagement,
             // the PiP floating window appears with the stream video,
             // shadowing NowPlayingBridge's lockscreen / Dynamic Island
             // audio UI. Reconciling on every isAudioOnly change keeps
@@ -3294,7 +3294,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// Writes `canStartPictureInPictureAutomaticallyFromInline` on
         /// the stored PiP controller and the matching
         /// `pipAutoEligible` flag so `didEnterBackground` routes to the
-        /// correct branch. Idempotent — safe to call from
+        /// correct branch. Idempotent, safe to call from
         /// `makeUIViewController` (initial mount) and from the
         /// `progressStore.$isAudioOnly` sink (subsequent toggles).
         /// No-op before `pipController` has been assigned, so
@@ -3303,16 +3303,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         ///
         /// Not marked `@MainActor` so the Combine sink (nonisolated
         /// closure, even with `.receive(on: DispatchQueue.main)`)
-        /// can call it directly. Both callers — `makeUIViewController`
+        /// can call it directly. Both callers, `makeUIViewController`
         /// via `UIViewControllerRepresentable`'s main-thread
-        /// contract, and the sink via the main-scheduler delivery —
+        /// contract, and the sink via the main-scheduler delivery,
         /// guarantee main-thread execution at runtime, which is all
         /// AVPictureInPictureController needs.
         fileprivate func updateAutoPiPEligibility() {
             let audioOnly = progressStore.isAudioOnly
             guard let vc = viewController else {
                 #if DEBUG
-                debugLog("[MPV-PIP] updateAutoPiPEligibility: viewController=nil audioOnly=\(audioOnly) — deferred (VC not wired yet)")
+                debugLog("[MPV-PIP] updateAutoPiPEligibility: viewController=nil audioOnly=\(audioOnly), deferred (VC not wired yet)")
                 #endif
                 pipController = nil
                 pipAutoEligible = false
@@ -3320,8 +3320,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
             // MPVPlayerViewController is @MainActor-isolated (it's a
             // UIViewController subclass). Both callers of this method
-            // — makeUIViewController (main-threaded by SwiftUI
-            // contract) and the `.receive(on: main)` sink — guarantee
+            // makeUIViewController (main-threaded by SwiftUI
+            // contract) and the `.receive(on: main)` sink, guarantee
             // main-thread execution at runtime. `assumeIsolated` is
             // the Swift 5.9+ bridge that lets us call @MainActor APIs
             // without async hops while still satisfying strict
@@ -3331,7 +3331,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     // HARD suppress: destroy the PiP controller entirely.
                     // Setting canStartPictureInPictureAutomaticallyFromInline
                     // at runtime does NOT prevent iOS from engaging
-                    // auto-PiP once armed — confirmed in device logs
+                    // auto-PiP once armed, confirmed in device logs
                     // where the sink wrote `false` to the flag and
                     // iOS still fired
                     // `pictureInPictureControllerWillStartPictureInPicture`
@@ -3346,7 +3346,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     #endif
                     // Re-assert the now-playing bridge. Tearing down the
                     // AVPictureInPictureController implicitly revokes iOS's
-                    // "this app is a video-playback host" signal — which is
+                    // "this app is a video-playback host" signal, which is
                     // the same signal iOS consults when deciding whether to
                     // surface the lockscreen / Dynamic Island now-playing
                     // controls for our app. Without a fresh
@@ -3355,7 +3355,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     // AFTER the teardown, the lockscreen / Dynamic Island
                     // stays blank on swipe-home even though our audio
                     // keeps playing. `NowPlayingBridge.configure(...)` is
-                    // idempotent — re-running it is the documented way to
+                    // idempotent, re-running it is the documented way to
                     // reclaim the now-playing route.
                     //
                     // Gated on `nowPlayingConfigured` so we only re-assert
@@ -3392,7 +3392,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// Re-invoke `NowPlayingBridge.configure(...)` with the same
         /// metadata + command callbacks that the 2s stability-check
         /// timer used at stream start. Used by the Audio-Only
-        /// teardown path in `updateAutoPiPEligibility()` — destroying
+        /// teardown path in `updateAutoPiPEligibility()`, destroying
         /// the `AVPictureInPictureController` revokes iOS's
         /// remote-control-route assignment, and the lockscreen /
         /// Dynamic Island now-playing UI stays blank until an app
@@ -3407,7 +3407,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// `MainActor.assumeIsolated`).
         @MainActor
         fileprivate func reassertNowPlayingBridge() {
-            // Duration is only meaningful for VOD — for live streams we
+            // Duration is only meaningful for VOD, for live streams we
             // always pass `nil` so the lockscreen shows the live
             // indicator instead of a bogus scrubber.
             var dur: Double? = nil
@@ -3459,7 +3459,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // flag is honoured even if any of the policy branches
             // below short-circuit before the end of the function.
             isInBackground = true
-            // Background-audio discipline — audio plays with the app closed
+            // Background-audio discipline, audio plays with the app closed
             // ONLY when:
             //   (1) PiP is engaged (iOS drives the floating window),
             //   (2) Audio-Only mode is on (lockscreen + Dynamic Island
@@ -3470,7 +3470,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //
             // The synchronous `progressStore.isPiPActive = true` write in
             // `pictureInPictureControllerWillStartPictureInPicture`
-            // guarantees branch (1) catches auto-PiP — that delegate fires
+            // guarantees branch (1) catches auto-PiP, that delegate fires
             // before this notification in the iOS background transition
             // sequence.
 
@@ -3482,7 +3482,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 return
             }
 
-            // (1.5) Auto-PiP eligible — iOS may still be inspecting
+            // (1.5) Auto-PiP eligible, iOS may still be inspecting
             //       frames to decide whether to engage PiP. Without
             //       this branch, the `vid=no` safeguard below starves
             //       the engagement and PiP silently fails to appear
@@ -3492,7 +3492,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //       synchronously, so subsequent lifecycle events go
             //       through branch (1). When iOS decides NOT to engage
             //       (e.g. hardware limits, low power mode), we leak a
-            //       few frames of background rendering — acceptable
+            //       few frames of background rendering, acceptable
             //       edge case; auto-PiP is the happy path on every
             //       PiP-capable iPhone.
             //
@@ -3500,13 +3500,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //       is in multi-tile multiview (count > 1), iOS gets
             //       confused by the multiple AVSampleBufferDisplayLayers
             //       in the hierarchy and doesn't reliably engage PiP
-            //       for any of them — and the per-tile vid-stays-alive
+            //       for any of them, and the per-tile vid-stays-alive
             //       path leaks GPU + audio for the audio tile while
             //       the other 8 tiles disable cleanly, leaving a
             //       lopsided "audio plays but tiles black on return"
             //       repro that's difficult to recover from. With the
             //       gate, multi-tile multiview falls through to the
-            //       default pause-on-background branch — every tile
+            //       default pause-on-background branch, every tile
             //       suspends symmetrically, audio stops cleanly, and
             //       foregrounding restores everything via the
             //       symmetric vid=auto + unpause path.
@@ -3526,7 +3526,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
             #if DEBUG
             if pipAutoEligible, multiviewActive {
-                debugLog("[MPV-BG] Background: pipAutoEligible=true but multiview tiles=\(multiviewTileCount) — falling through to default pause-on-background path")
+                debugLog("[MPV-BG] Background: pipAutoEligible=true but multiview tiles=\(multiviewTileCount), falling through to default pause-on-background path")
             }
             #endif
 
@@ -3576,10 +3576,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
             #endif
 
-            // (4) Default — no mode permits background audio. Disable video
+            // (4) Default, no mode permits background audio. Disable video
             //     (GPU-crash safeguard) AND pause mpv so audio stops. The
             //     pause goes through mpvQueue to match every other mpv
-            //     property write in this file — writing `pause` directly
+            //     property write in this file, writing `pause` directly
             //     from the main thread during a background transition
             //     races mpv's event loop and the audio-session teardown.
             //     `autoPausedOnBackground` tells the foreground handler to
@@ -3615,7 +3615,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // @MainActor` (async) and the unpause was queued on
             // `mpvQueue` (separate serial queue, also async). On
             // multi-tile multiview foregrounding, those two async
-            // hops raced — mpv's first post-unpause frame could
+            // hops raced, mpv's first post-unpause frame could
             // arrive at the renderer BEFORE flush() ran, get
             // dropped, and the tile would stay black for the whole
             // session.
@@ -3631,7 +3631,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                    layer.sampleBufferRenderer.status == .failed {
                     #if DEBUG
                     let err = layer.sampleBufferRenderer.error?.localizedDescription ?? "?"
-                    debugLog("[MPV-BG] Foreground: sampleBufferRenderer FAILED (\(err)) — flushing to recover")
+                    debugLog("[MPV-BG] Foreground: sampleBufferRenderer FAILED (\(err)), flushing to recover")
                     #endif
                     layer.sampleBufferRenderer.flush()
                 }
@@ -3668,9 +3668,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Restart the stale-frame clock on foreground. While backgrounded
             // with video disabled (vid=no), no frames enqueue, so lastEnqueueTime
             // freezes at the pre-background frame; on foreground staleAge would
-            // equal the whole background duration and — because the background
+            // equal the whole background duration and, because the background
             // pause/unpause bypasses applyPauseIfChanged so lastAppliedPause is
-            // never set — falsely trip the 15s soft "Reconnecting…" report and
+            // never set, falsely trip the 15s soft "Reconnecting…" report and
             // the forced-reload watchdog. Repriming here mirrors the resume
             // branch of applyPauseIfChanged (2026-07-13 review). Repriming the
             // anchor alone is enough: if a soft card was already up when we
@@ -3679,7 +3679,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             lastEnqueueTime = CACurrentMediaTime()
 
             // Undo the defensive pause applied in branch (4), but only if
-            // we applied it — never clobber a user-initiated pause. Goes
+            // we applied it, never clobber a user-initiated pause. Goes
             // through mpvQueue to match the background-entry write.
             if takeAutoPausedOnBackground() {
                 mpvQueue.async { [weak self] in
@@ -3792,7 +3792,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         /// Called from viewDidLoad. Stores the sample-buffer layer
         /// reference AND kicks off `start()` on the render queue so
-        /// mpv's ~2 s init (mostly one-time process-wide work — see
+        /// mpv's ~2 s init (mostly one-time process-wide work, see
         /// `MPVLibraryWarmup`) runs in parallel with SwiftUI's
         /// first layout pass (~100-300 ms on a complex grid) rather
         /// than serially after it.
@@ -3802,7 +3802,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// because that's when the real `CGSize` becomes available.
         /// `setupFBO` dispatches to the same serial `renderQueue`
         /// as `start()`, so FIFO ordering guarantees
-        /// `setupMPV` completes before `setupFBO` runs — no change
+        /// `setupMPV` completes before `setupFBO` runs, no change
         /// in correctness, we just pull the trigger earlier.
         @MainActor
         func setupRenderer(layer: CALayer) {
@@ -3820,7 +3820,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         }
 
         /// Dispatch `start()` on the render queue exactly once.
-        /// Idempotent — safe to call from both `setupRenderer`
+        /// Idempotent, safe to call from both `setupRenderer`
         /// (early) and `handleResize` (late) so a Coordinator that
         /// somehow misses the early path still starts.
         private func kickstartIfNeeded() {
@@ -3855,7 +3855,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // fboDestroyedAt at the moment we delete so
             // [MPV-RECONFIG] can correlate "FBO=DESTROYED" /
             // "RECENTLY_REBUILT" with subsequent reconfig events
-            // — answers whether user-visible black flashes are
+            // answers whether user-visible black flashes are
             // the rebuild gap.
             if !fboSlots.isEmpty {
                 #if DEBUG
@@ -3874,7 +3874,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             // Allocate the ring. Each slot gets a distinct
             // IOSurface-backed CVPixelBuffer + matching GL texture
-            // (zero-copy — shares the IOSurface with mpv) + an FBO
+            // (zero-copy, shares the IOSurface with mpv) + an FBO
             // with that texture bound as the color attachment.
             let attrs: [CFString: Any] = [
                 kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
@@ -3968,7 +3968,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             requestRender(reason: "fbo")
         }
 
-        /// Handle rotation/resize — creates or recreates the GL FBO.
+        /// Handle rotation/resize, creates or recreates the GL FBO.
         /// Uses video native dimensions when known to avoid oversized render buffers
         /// (e.g., 720p content rendered into a 1080p buffer wastes 2.25x pixels).
         func handleResize(size: CGSize) {
@@ -3999,7 +3999,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // shared GPU budget, but a UHD stream like Sky Sports
                 // Main Event UHD (3840×2160) was still being
                 // downscaled to 1920×1080. Half the pixels thrown
-                // away for nothing — the user picked UHD, they should
+                // away for nothing, the user picked UHD, they should
                 // get UHD.
                 //
                 // Now: solo (MultiviewStore.shared.tiles.count <= 1)
@@ -4039,7 +4039,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         applyDisplayCriteriaIfNeeded(fps: fpsVal)
                     }
                 }
-                // tvOS pixels/sec budget — multi-tile only.
+                // tvOS pixels/sec budget, multi-tile only.
                 // tvOS solo bypasses this so the user gets native
                 // UHD on Apple TV 4K. tvOS multi-tile keeps the
                 // 40M pixels/sec budget so the A15 can sustain
@@ -4073,7 +4073,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     h = targetH
                 }
             } else {
-                // Video dimensions unknown yet — use a small initial buffer.
+                // Video dimensions unknown yet, use a small initial buffer.
                 // Pre-keyframe frames are broken anyway (PPS errors, software fallback).
                 // Resizes to native resolution on PLAYBACK_RESTART.
                 #if os(tvOS)
@@ -4088,7 +4088,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             renderWidth = w
             renderHeight = h
 
-            // Backstop — `setupRenderer` already called this at
+            // Backstop, `setupRenderer` already called this at
             // viewDidLoad time, but if something skipped that path
             // we still need mpv to start. Idempotent.
             kickstartIfNeeded()
@@ -4160,7 +4160,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// Display-link tick. Runs on the main thread.
         ///
         /// Read `lastEnqueueTime` (touched from renderQueue but
-        /// CFAbsoluteTime is a Double — torn reads are at worst a
+        /// CFAbsoluteTime is a Double, torn reads are at worst a
         /// single tick of false positive/negative on Apple silicon,
         /// not a correctness issue). If the layer hasn't received a
         /// fresh enqueue in `watchdogStaleThreshold` seconds, copy
@@ -4231,7 +4231,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                   renderer.isReadyForMoreMediaData else { return }
 
             // Pull the cached buffer under the lock. Don't hold the
-            // lock through the CMSampleBuffer copy — it's quick but
+            // lock through the CMSampleBuffer copy, it's quick but
             // not free.
             os_unfair_lock_lock(&watchdogLock)
             let cached = lastEnqueuedSampleBuffer
@@ -4362,7 +4362,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// kCMSampleAttachmentKey_DisplayImmediately attachment set.
         /// CMSampleBufferCreateCopyWithNewTiming preserves the format
         /// description and image buffer reference, so the GPU
-        /// resources are reused — no extra upload, no extra alloc on
+        /// resources are reused, no extra upload, no extra alloc on
         /// the GPU side. The DisplayImmediately attachment tells
         /// AVSBDL to present the frame ASAP rather than scheduling
         /// it against any internal clock.
@@ -4395,7 +4395,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         // MARK: - Background OpenGL ES Render + Display via AVSampleBufferDisplayLayer
 
-        /// Called from mpv's update callback — schedules render on background thread.
+        /// Called from mpv's update callback, schedules render on background thread.
         func scheduleRender() {
             // v1.7.x Issue A: log silences in the mpv update-callback
             // stream. Normal callback cadence on a smooth stream is
@@ -4404,21 +4404,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // we can tell subtle hiccups apart from severe stalls
             // without making one noisy or the other invisible:
             //
-            //   mild     50-100ms — subtle, may be perceptible as a
+            //   mild     50-100ms, subtle, may be perceptible as a
             //                       brief frame hold; likely
             //                       responsible for the "black
             //                       flashes" Archie reports that
             //                       didn't trip the previous 100ms
             //                       gate.
-            //   moderate 100-300ms — definite stall, user-visible.
-            //   severe   300ms+   — multi-second stalls (e.g., the
+            //   moderate 100-300ms, definite stall, user-visible.
+            //   severe   300ms+  , multi-second stalls (e.g., the
             //                       initial demux warmup or the
             //                       videotoolbox-copy fallback
             //                       chain).
             //
             // Each line means libmpv's internal pipeline stalled
             // (decoder waiting for input, demuxer paused for cache,
-            // render-context blocked) — not our render or present
+            // render-context blocked), not our render or present
             // path. The first gap of a session is suppressed
             // (lastScheduleRenderTime starts at 0).
             let now = CFAbsoluteTimeGetCurrent()
@@ -4440,16 +4440,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     // properties at the moment of the gap. Step 7 also
                     // read mpv's `video-pts`, but that property is
                     // populated by mpv's internal video-output module
-                    // — which doesn't run in our setup (we use
+                    // which doesn't run in our setup (we use
                     // `vo=libmpv` and render via mpv_render_context_*).
                     // `video-pts` therefore returned 0.000s for the
                     // entire 22:21 session and our self-computed
                     // `a-v = audio_pts - video_pts` was structurally
                     // bogus (just `audio_pts - 0`). mpv's `avsync`
-                    // property IS computed internally — it's mpv's
+                    // property IS computed internally, it's mpv's
                     // own audio_position - video_position, updated as
                     // mpv emits frames to us via mpv_render_context_render
-                    // — so we use that as the canonical sync metric
+                    // so we use that as the canonical sync metric
                     // here. Codex's CODEX_VIDEO_PTS_AVSYNC_DIAGNOSIS
                     // documented this exact bug class.
                     //
@@ -4501,7 +4501,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
         }
 
-        /// Runs on renderQueue — GPU renders mpv frame to CVPixelBuffer via OpenGL FBO,
+        /// Runs on renderQueue, GPU renders mpv frame to CVPixelBuffer via OpenGL FBO,
         /// then enqueues to AVSampleBufferDisplayLayer. Zero CPU pixel copies.
         private func renderAndPresent() {
             os_unfair_lock_lock(&renderLock)
@@ -4511,7 +4511,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             guard let mpvGL, let eaglContext else { return }
             guard !fboSlots.isEmpty else { return }
 
-            // v1.7.x Step 6 — apply backpressure on
+            // v1.7.x Step 6, apply backpressure on
             // AVSampleBufferDisplayLayer's renderer. When the
             // renderer reports `isReadyForMoreMediaData == false`,
             // its internal queue is saturated. Apple's documented
@@ -4528,7 +4528,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // detector hits over 2400+ frames, watchdog-recovered
             // cleanly). But the ring also removed implicit rate
             // limiting that the single-buffer architecture had been
-            // providing — mpv's videotoolbox-copy decoder is faster
+            // providing, mpv's videotoolbox-copy decoder is faster
             // than the source rate, and with three slots to write
             // into, mpv ran at decoder speed (~70fps for a 30fps
             // source). Symptoms over a 45s playback window:
@@ -4552,7 +4552,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // rate. The watchdog at line ~2349 already follows the
             // same pattern (refuses re-enqueue when not ready);
             // this unifies the policy across the main path and the
-            // watchdog path — both refuse to push when AVSBDL is
+            // watchdog path, both refuse to push when AVSBDL is
             // full.
             // Ask libmpv what needs doing. (Aerio fix on PR #14:
             // MPV_RENDER_UPDATE_FRAME imports as a C enum, convert via
@@ -4604,8 +4604,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Tell mpv to render into our FBO (GPU handles color conversion, scaling, OSD).
             // withUnsafeMutablePointer ensures the data pointers outlive the render call.
             var fboData = mpv_opengl_fbo(fbo: Int32(fbo), w: Int32(w), h: Int32(h), internal_format: 0)
-            var flipY: CInt = 0  // Don't flip — CVPixelBuffer and AVSampleBufferDisplayLayer share the same top-down row order
-            var blockForTarget: CInt = 0  // Don't block — AVSampleBufferDisplayLayer manages timing
+            var flipY: CInt = 0  // Don't flip, CVPixelBuffer and AVSampleBufferDisplayLayer share the same top-down row order
+            var blockForTarget: CInt = 0  // Don't block, AVSampleBufferDisplayLayer manages timing
             withUnsafeMutablePointer(to: &fboData) { fboPtr in
                 withUnsafeMutablePointer(to: &flipY) { flipPtr in
                     withUnsafeMutablePointer(to: &blockForTarget) { blockPtr in
@@ -4620,7 +4620,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 }
             }
 
-            // Flush GPU work (non-blocking — just ensures commands are submitted)
+            // Flush GPU work (non-blocking, just ensures commands are submitted)
             glFlush()
 
             // Codex VO-handshake fix: this mpv_render_context_render call has
@@ -4690,7 +4690,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
 
             // v1.6.8 lock-cycle fix: when the sample-buffer layer
-            // is in `.failed` state, skip the enqueue entirely —
+            // is in `.failed` state, skip the enqueue entirely,
             // iOS will reject every buffer we hand it, and the
             // render callback would otherwise spin uselessly,
             // logging a 🔴 LAYER FAILED line per frame for the
@@ -4723,7 +4723,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // already wired up.
             //
             // Foreground failures (rare; e.g. transient decoder
-            // glitch with the screen on) just skip the enqueue —
+            // glitch with the screen on) just skip the enqueue,
             // we don't pause mpv because the user is watching
             // and a brief blank frame is preferable to a
             // surprise pause they didn't ask for.
@@ -4838,7 +4838,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         mpv_set_property(mpvHandle, "pause", MPV_FORMAT_FLAG, &pauseFlag)
                     }
                     #if DEBUG
-                    debugLog("[MPV-BG] Background: sampleBufferRenderer FAILED — auto-paused mpv to stop wasted decode work")
+                    debugLog("[MPV-BG] Background: sampleBufferRenderer FAILED, auto-paused mpv to stop wasted decode work")
                     #endif
                 } else if !isInBackground {
                     // v1.7.x diagnostic: foreground sample-buffer-layer
@@ -4853,7 +4853,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     if layerFailedFrameCount == 1 || layerFailedFrameCount % 30 == 0 {
                         let err = cachedRenderer?.error?.localizedDescription ?? "nil"
                         #if DEBUG
-                        debugLog("[MPV-LAYER] \(streamTag) FOREGROUND layer .failed (frame #\(layerFailedFrameCount), enqueue skipped) — error=\(err)")
+                        debugLog("[MPV-LAYER] \(streamTag) FOREGROUND layer .failed (frame #\(layerFailedFrameCount), enqueue skipped), error=\(err)")
                         #endif
                         DebugLogger.shared.log(
                             "🔴 [MPV-LAYER] foreground .failed tile=\(tileID ?? "single") frame=\(layerFailedFrameCount) error=\(err)",
@@ -4943,7 +4943,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // v1.7.x Issue A: split present-time out of the existing
             // renderMs (which only covers mpv_render_context_render +
             // glFlush, ending at renderEnd). presentMs is everything
-            // between renderEnd and enqueueTime — i.e., the failed-
+            // between renderEnd and enqueueTime, i.e., the failed-
             // layer check + makeSampleBuffer + AVSBDL.enqueue. Lets
             // us tell layer-side stalls (CoreMedia/AVSBDL) apart from
             // libmpv-side stalls. If render is slow → mpv. If present
@@ -4957,7 +4957,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // printed every frame for the first 120 frames (~4 seconds
             // of playback at 30fps), which on Apple TV 4K with 2
             // concurrent tiles meant ~60 print()s per second during
-            // startup — enough allocation churn to visibly stutter the
+            // startup, enough allocation churn to visibly stutter the
             // UI and audio on thermally-throttled hardware. Now:
             //   - Gated on #if DEBUG so release builds do zero work.
             //   - First-frame ramp cut from 120 → 30 (1 second, enough
@@ -4970,7 +4970,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // The old definition flagged `intervalMs < expected * 0.3`
             // (i.e. frames arriving faster than expected) as an anomaly,
             // but live MPEG-TS streams coalesce frames in bursts via
-            // the packetizer — sub-10ms intervals are the rule, not an
+            // the packetizer, sub-10ms intervals are the rule, not an
             // exception, and the old threshold generated hundreds of
             // ⚠️ lines per minute per tile. At 9 tiles that's thousands
             // of string allocations + stdout writes per minute, enough
@@ -5139,7 +5139,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Only the coordinator that currently owns the bridge
             // tears it down. In multiview, if an ordinary (non-audio)
             // tile is dismantled, its coordinator must NOT call
-            // teardown — otherwise it nukes the audio tile's
+            // teardown, otherwise it nukes the audio tile's
             // lockscreen info. Single-mode (tileID == nil) and audio
             // tiles both satisfy `shouldDriveNowPlayingBridge()` and
             // correctly tear down.
@@ -5154,7 +5154,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // drops to 0 and restores the idle timer + deactivates the
             // audio session. Otherwise it's a no-op.
             //
-            // `AudioSessionRefCount` is NOT @MainActor — it's
+            // `AudioSessionRefCount` is NOT @MainActor, it's
             // internally serialised on a private dispatch queue, so we
             // call it synchronously to keep its inc/dec pair tightly
             // correlated with coordinator lifetime. Routing it through
@@ -5162,7 +5162,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // coordinator's increment could race the old coordinator's
             // decrement across actor hops. The idle-timer refcount
             // still needs @MainActor because UIApplication is main-
-            // thread-only — that one stays in the Task wrapper.
+            // thread-only, that one stays in the Task wrapper.
             AudioSessionRefCount.decrement()
             Task { @MainActor in IdleTimerRefCount.decrement() }
         }
@@ -5204,7 +5204,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Request error-level logs in release builds so we can detect
             // GL interop failures (10-bit HEVC) and fall back dynamically.
             //
-            // DEBUG builds default to `warn` — enough to catch real
+            // DEBUG builds default to `warn`, enough to catch real
             // issues without flooding the log. A previous iteration
             // raised several subsystems (ffmpeg, stream, stream_lavf,
             // http, demux, tls) to `info` while diagnosing a
@@ -5213,7 +5213,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // a thermally-throttled Apple TV (dozens of mpv-event
             // callbacks per second routing through DebugLogger +
             // print). If another HTTP/TLS investigation comes up,
-            // re-enable selectively at that point — don't leave
+            // re-enable selectively at that point, don't leave
             // info-level on for everyone permanently.
             // Catch-up timeshift: the server advertises an ESTIMATED
             // Content-Length (Dispatcharr computes it from bitrate *
@@ -5347,7 +5347,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //
             // videotoolbox-copy decodes to a CPU-readable buffer,
             // which we then upload to GL. Cost: roughly 1-2ms per
-            // frame at 1080p, 3-4ms at UHD on Apple silicon —
+            // frame at 1080p, 3-4ms at UHD on Apple silicon,
             // negligible against a 33ms frame budget. No decode-
             // quality difference, no codec compatibility difference.
             //
@@ -5360,7 +5360,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //
             // The log-handler fallback below stays in as a safety
             // net (claimHwdecFallbackIfNeeded is idempotent), but
-            // the seek-to-current-time inside it has been removed —
+            // the seek-to-current-time inside it has been removed,
             // it was the no-op that created the second 2-second
             // window, and the fallback shouldn't normally fire now
             // that we start in copy mode.
@@ -5379,7 +5379,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Allow up to 90 consecutive VT decode failures before
             // falling back to software. Live MPEG-TS streams join
             // mid-GOP without SPS/PPS so VT errors until the next
-            // keyframe — at 30fps, 90 frames covers a ~3s GOP, which
+            // keyframe, at 30fps, 90 frames covers a ~3s GOP, which
             // is the upper bound for well-behaved broadcast streams.
             // Dropped from the previous 600 because that was
             // effectively "never fallback" (20 seconds of dropped
@@ -5418,7 +5418,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #endif
 
             // Initial buffer before playback starts:
-            // Live: 0 — start decoding the instant any data arrives.
+            // Live: 0, start decoding the instant any data arrives.
             //        Previously 0.5s, which was a guaranteed 500ms
             //        floor on every channel tap's first frame. mpv
             //        still waits for the first decodable keyframe
@@ -5468,13 +5468,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // `stream-lavf-o=reconnect=...`: libavformat-level HTTP
             // reconnect for mid-stream drops. Not a first-frame win
             // but critical for retry behavior on intermittent
-            // network — faster recovery instead of burning the
+            // network, faster recovery instead of burning the
             // 5-second premature-end retry path.
             //
             // `network-timeout=10`: explicit 10s timeout so a
             // genuinely-dead host fails over to the next URL in the
             // fallback list within 10s instead of mpv's 60s default.
-            // `audio-wait-open=no` — REMOVED. This option was
+            // `audio-wait-open=no`, REMOVED. This option was
             // rejected by MPVKit's bundled mpv build (the
             // `setOption` diagnostic wrapper logged it as
             // `option "audio-wait-open"="no" rejected`). In theory
@@ -5510,7 +5510,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 "stream-lavf-o",
                 "reconnect=1,reconnect_streamed=1,reconnect_delay_max=2"
             )
-            // `network-timeout=30` — raised from 10s. The tighter
+            // `network-timeout=30`, raised from 10s. The tighter
             // timeout triggered `tls: IO error: Operation timed out`
             // on a user's WAN route when their LAN probe hadn't
             // completed in time and the app fell back to the
@@ -5521,7 +5521,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // cold starts while still failing over faster than
             // mpv's `stream-lavf-o=reconnect_delay_max` reconnect
             // storm (which is 2s per attempt). Retry behaviour on
-            // a truly dead host is unchanged — URL-list failover
+            // a truly dead host is unchanged, URL-list failover
             // still fires within 30s.
             setOption(mpv, "network-timeout", "30")
 
@@ -5546,14 +5546,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             // ────────────────────────────────────────────────────────
             // Live low-latency tuning. Layered on top of `profile=fast`
-            // (which disables mobile-inappropriate post-processing) —
+            // (which disables mobile-inappropriate post-processing),
             // we deliberately do NOT use `profile=low-latency` wholesale
             // because its `audio-buffer=0` + `stream-buffer-size=4k`
             // settings are too aggressive for IPTV over cellular /
             // flaky Wi-Fi and cause underruns. The curated subset below
             // targets the demux / probe stage, which is where the
             // majority of mpv's "tap → first frame" latency lives per
-            // upstream profiling (see issue #4213). Live-only — VOD
+            // upstream profiling (see issue #4213). Live-only, VOD
             // benefits from more thorough probing for reliable seek.
             //
             // `demuxer-lavf-analyzeduration=1.5`: cap libavformat's
@@ -5562,7 +5562,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // but field testing 2026-05-08 (Step 7-8 instrumentation
             // on Sky Sports Main Event UHD HEVC HDR) showed `fps_detected
             // =0.0/container=0.0/display=0.0` for the entire 2-minute
-            // playback session — mpv literally never characterized the
+            // playback session, mpv literally never characterized the
             // stream's frame rate because 100ms wasn't enough samples
             // for a 30fps source (would need ~3-4 frames minimum =
             // 100-130ms minimum, with no GOP-boundary tolerance).
@@ -5588,14 +5588,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //
             // (Note: `demuxer-lavf-o-add=fflags=+nobuffer` would also
             // be a free win here, but MPVKit's bundled libmpv build
-            // rejects the option — logged as `option not found`.
+            // rejects the option, logged as `option not found`.
             // Left out entirely rather than silently fail. The cache
             // layer above handles the "don't buffer before playing"
             // intent on its own.)
             //
             // `cache-pause-initial=no`: do NOT wait to fully prefill
             // the cache before playback starts. Default behaviour
-            // prefills to `cache-secs` (5s) before the first frame —
+            // prefills to `cache-secs` (5s) before the first frame,
             // that's a guaranteed 5s floor. `no` starts playing at
             // the first decodable keyframe and lets the cache fill
             // behind the playhead.
@@ -5622,12 +5622,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 setOption(mpv, "video-latency-hacks", "yes")
             }
 
-            // v1.7.x Issue A round 4 — render-stall mitigations.
+            // v1.7.x Issue A round 4, render-stall mitigations.
             // Each option is independently revertable; remove the
             // corresponding setOption line to restore prior
             // behaviour.
             //
-            // framedrop=vo — drop late frames at the VO layer so
+            // framedrop=vo, drop late frames at the VO layer so
             //   the render call doesn't back up. Without this, when
             //   a frame is delivered late to the renderer it stays
             //   queued and forces subsequent frames into the same
@@ -5635,7 +5635,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //   HEVC stuttering, fixed by --profile=fast", which
             //   includes framedrop tuning).
             //
-            // video-sync=audio — explicit, even though it matches
+            // video-sync=audio, explicit, even though it matches
             //   mpv's default. We set it explicitly because some
             //   profiles can override it. We must NOT use display-
             //   resample on iOS with vo=libmpv: display-resample
@@ -5645,7 +5645,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //   resample causing extra mistimed frames in this
             //   exact configuration.
             //
-            // video-timing-offset=0 — pairs with our existing
+            // video-timing-offset=0, pairs with our existing
             //   BLOCK_FOR_TARGET_TIME=0 in the render-param array.
             //   When BLOCK_FOR_TARGET_TIME=0 is set without
             //   video-timing-offset=0, mpv stages frames slightly
@@ -5684,13 +5684,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // channels stay at mpv defaults and recover the v1.7.2
             // cadence; HDR channels still get the correct colors.
 
-            // v1.7.x Issue A round 5 — anti-flash mitigations
+            // v1.7.x Issue A round 5, anti-flash mitigations
             // targeting the FFmpeg-VideoToolbox bridge's silent-
             // failure path. Per the 2026-05-08 research pass
             // (Agent B), the FFmpeg VT bridge does not propagate
             // VT decode-error callbacks back as hard libav errors
             // when reference frames go missing on a live MPEG-TS
-            // mid-GOP join — it returns the buffer as-is, which
+            // mid-GOP join, it returns the buffer as-is, which
             // on a reference miss is a zero/black IOSurface.
             // mpv's libav layer reports the frame as successfully
             // decoded; our render pipeline faithfully presents the
@@ -5700,7 +5700,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // events per 16s of steady-state playback, with no
             // pipeline-side metric flagging anything wrong.
             //
-            // demuxer-lavf-o=fflags=+discardcorrupt —
+            // demuxer-lavf-o=fflags=+discardcorrupt,
             //   tells libavformat to drop corrupt MPEG-TS packets
             //   at the demuxer level, before they reach the parser
             //   that hands slices to VT. Targets the root cause
@@ -5717,14 +5717,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //   has existed since pre-0.30 mpv. Safe in our config
             //   because we don't set demuxer-lavf-o anywhere else.
             //
-            // vd-lavc-threads=1 — single-threaded libavcodec
+            // vd-lavc-threads=1, single-threaded libavcodec
             //   parsing for the HW decode path. Removes a race
             //   where the FFmpeg parser hands VT a slice whose
             //   reference frames are still being assembled by a
             //   parallel parse thread. HW decode (videotoolbox-
             //   copy) does the actual decode work inside Apple's
-            //   VT process anyway — the lavc thread just shepherds
-            //   NALU to VT — so single-threaded parsing has no
+            //   VT process anyway, the lavc thread just shepherds
+            //   NALU to VT, so single-threaded parsing has no
             //   meaningful throughput cost on Apple silicon.
             //
             // Each option is independently revertable. Pair stays
@@ -5738,12 +5738,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Without this, a brand-new non-audio tile briefly
             // plays sound between mpv_initialize() and the first
             // SwiftUI updateUIViewController → applyAudioFocusIfChanged
-            // cycle — audible as a bleep of overlapping audio every
+            // cycle, audible as a bleep of overlapping audio every
             // time the user adds a tile.
             //
             // For single-mode (tileID == nil) these options are
             // tile defaults (initialIsAudioActive=true, initialShouldPause=false)
-            // which happen to match mpv's own defaults — safe no-ops.
+            // which happen to match mpv's own defaults, safe no-ops.
             //
             // Non-audio tiles. Pre-init audio strategy MUST match
             // what `applyAudioFocusIfChanged` does at runtime. The
@@ -5778,7 +5778,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // sets `mute=yes`, so the audio decoder runs on every
             // tile from the first frame, just silenced. When the
             // user later switches audio focus, applyAudioFocusIfChanged
-            // writes `mute=no` and audio resumes instantly — no
+            // writes `mute=no` and audio resumes instantly, no
             // late audio-decoder cold-start, no AudioUnit reopen
             // race.
             //
@@ -5808,7 +5808,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 checkError(mpv_set_option_string(mpv, "pause", "yes"))
             }
 
-            // HTTP headers for the stream — set as PRE-INIT options
+            // HTTP headers for the stream, set as PRE-INIT options
             // so they're baked into mpv's config before any
             // `loadfile` can run. These are also re-asserted
             // post-init below (~line 1183) as properties; mpv
@@ -5818,7 +5818,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // the 1st tile's mpv is already running on a different
             // queue. We observed `MPV_ERROR_LOADING_FAILED` on
             // added tiles that disappeared once headers were
-            // committed pre-init — the load pipeline is async and
+            // committed pre-init, the load pipeline is async and
             // appears to race with post-init property writes if
             // the first loadfile enqueue beats them to mpvQueue.
             // Pre-init is guaranteed to be in-config before
@@ -5857,10 +5857,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if DEBUG
             markPhase("pre_init_options")
             debugLog("[MPV-DIAG] setupMPV: options set, calling mpv_initialize...")
-            // Header forensics — log each key + value length so we can
+            // Header forensics, log each key + value length so we can
             // confirm what mpv actually sees per tile (and catch the
             // case where a 2nd tile's headers get mangled / cleared).
-            // Values are NEVER logged — API keys live in there.
+            // Values are NEVER logged, API keys live in there.
             let uaLen = headers["User-Agent"]?.count ?? 0
             let uaPreview = headers["User-Agent"]?.prefix(40) ?? "none"
             debugLog("[MPV-DIAG]   hdr UA=\(uaPreview) (\(uaLen)b)")
@@ -5881,7 +5881,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             if initResult < 0 {
                 let errStr = String(cString: mpv_error_string(initResult))
-                logStore.append("✗ MPV: initialization failed — \(errStr)")
+                logStore.append("✗ MPV: initialization failed, \(errStr)")
                 #if DEBUG
                 debugLog("[MPV-ERR] mpv_initialize failed: \(errStr)")
                 #endif
@@ -6030,7 +6030,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             markPhase("CVOpenGLESTextureCacheCreate")
             #endif
 
-            // OpenGL render API — GPU handles color conversion, scaling, OSD.
+            // OpenGL render API, GPU handles color conversion, scaling, OSD.
             // get_proc_address resolves GL function pointers from the loaded OpenGLES.framework.
             let apiType = UnsafeMutableRawPointer(mutating: (MPV_RENDER_API_TYPE_OPENGL as NSString).utf8String)
             var glInitParams = mpv_opengl_init_params(
@@ -6055,7 +6055,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             if renderCreateResult < 0 {
                 let errStr = String(cString: mpv_error_string(renderCreateResult))
-                logStore.append("✗ MPV: render context creation failed — \(errStr)")
+                logStore.append("✗ MPV: render context creation failed, \(errStr)")
                 #if DEBUG
                 debugLog("[MPV-ERR] mpv_render_context_create failed: \(errStr)")
                 #endif
@@ -6128,7 +6128,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // CPU/GPU means the audio output ringbuffer is more
                 // likely to drain before mpv's decoder catches up.
                 // Raise the live-stream minimum from 5s → 10s on
-                // tvOS to absorb those hitches — each audio-device
+                // tvOS to absorb those hitches, each audio-device
                 // underrun that DOES occur freezes video for 1-4s,
                 // so the extra 5s of buffer is worth the slightly
                 // longer initial startup.
@@ -6171,7 +6171,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             if isLive {
                 // Live: small demuxer buffer prevents A-V desync from runaway video queues.
-                // 50MiB was far too large — video piled up 4000+ packets while audio starved.
+                // 50MiB was far too large, video piled up 4000+ packets while audio starved.
                 mpv_set_property_string(mpv, "demuxer-max-bytes", "8MiB")
                 // Dead-server detection (ATV field test 2026-07-12): with the
                 // default network timeout (~60s) a killed Dispatcharr left the
@@ -6181,12 +6181,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // fast and let the reload ladder -> error card -> auto-retry
                 // take over. Live-only: VOD/recordings keep the tolerant default.
                 mpv_set_property_string(mpv, "network-timeout", "8")
-                // cache-pause stays "yes" initially — switched to "no" after playback-restart
+                // cache-pause stays "yes" initially, switched to "no" after playback-restart
                 // so mpv builds an initial 2s buffer before starting playback.
                 mpv_set_property_string(mpv, "cache-secs", String(format: "%.1f", cachingSecs))
                 mpv_set_property_string(mpv, "demuxer-max-back-bytes", "0")
                 mpv_set_property_string(mpv, "demuxer-donate-buffer", "no")
-                // v1.7.x Step 9 — soften the runtime startup overrides.
+                // v1.7.x Step 9, soften the runtime startup overrides.
                 // These post-init `mpv_set_property_string` calls
                 // were setting the demuxer-analysis options to MORE
                 // aggressive values than the pre-init options at
@@ -6204,7 +6204,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 //   broadcast-grade MPEG-TS means after the first
                 //   PAT/PMT pair. fps detection happens INSIDE
                 //   find_stream_info, so skipping it = no fps.
-                //   Now `auto` — let mpv complete the analysis.
+                //   Now `auto`, let mpv complete the analysis.
                 //
                 // - `analyzeduration=0` would have been "use
                 //   libavformat default = 5s" but combined with
@@ -6257,7 +6257,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // that stay in `.serious` thermal state for minutes
             // after any load, and the throttled CPU starves the
             // audio pipeline at the existing 1.5s buffer. iPad
-            // keeps 1.5s — it hasn't shown the same underrun
+            // keeps 1.5s, it hasn't shown the same underrun
             // cadence and a larger audio buffer trades A-V sync
             // latency for resilience (don't pay it if we don't
             // need to).
@@ -6266,7 +6266,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #else
             mpv_set_property_string(mpv, "audio-buffer", "1.5")
             #endif
-            // Correct A-V sync for live TS streams — drop late video frames
+            // Correct A-V sync for live TS streams, drop late video frames
             // rather than letting the video queue grow unbounded.
             mpv_set_property_string(mpv, "hr-seek-framedrop", "yes")
 
@@ -6285,7 +6285,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // `totalSetupMs` is needed by BOTH the DEBUG-only diag
             // prints AND the always-on `[MV-TIMING]` DebugLogger
             // line below, so it has to live outside the `#if DEBUG`
-            // block — otherwise release builds fail to compile with
+            // block, otherwise release builds fail to compile with
             // "Cannot find 'totalSetupMs' in scope" at the
             // `[MV-TIMING]` usage site. `setupStartTime` itself is
             // unconditional (declared at line ~616, assigned
@@ -6301,13 +6301,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // One dense line per tile setup, surfaced in both DEBUG
             // print *and* DebugLogger so it survives in release
             // crash/feedback reports. Collected fields:
-            //   tile         — which tile (or "single")
-            //   setup_ms     — mpv_create → here
-            //   headers      — count of HTTP headers committed (UA +
+            //   tile        , which tile (or "single")
+            //   setup_ms    , mpv_create → here
+            //   headers     , count of HTTP headers committed (UA +
             //                  Authorization/X-API-Key/Accept for
             //                  Dispatcharr; UA-only for XC/M3U)
-            //   cache_s      — demuxer-readahead-secs
-            //   rss_mb/fd/thermal — process-wide resource snapshot
+            //   cache_s     , demuxer-readahead-secs
+            //   rss_mb/fd/thermal, process-wide resource snapshot
             //                       AT tile-setup-complete. The
             //                       delta across N tile adds is
             //                       the real signal for whether
@@ -6474,7 +6474,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             loadFailureRetryCount = 0
             sameURLRetryCount = 0
             debugLog("[REWIND] relay failed (\(reason)); falling back to direct stream")
-            logStore.append("↻ MPV: relay failed — retrying direct stream")
+            logStore.append("↻ MPV: relay failed, retrying direct stream")
             cachedRenderer?.flush(removingDisplayedImage: false)
             let retryURL = urls[currentIndex]
             DispatchQueue.global(qos: .userInitiated)
@@ -6611,7 +6611,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             // The STREAM-PROBE diagnostic that briefly lived here (2026-08-11,
             // the crx.watch 403 investigation) is deliberately GONE. It found
-            // what it was built to find — the provider's Cloudflare ban page —
+            // what it was built to find, the provider's Cloudflare ban page,
             // but as written it was dangerous to leave in: live TS endpoints
             // ignore `Range`, so its URLSession dataTask never completed,
             // buffered the stream into memory without bound, and held a second
@@ -6682,7 +6682,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             // log line. UHD 10-bit HEVC streams emit
                             // bursts of these around the videotoolbox
                             // → videotoolbox-copy fallback and around
-                            // every mid-stream reconfig — strong
+                            // every mid-stream reconfig, strong
                             // candidates for the user-visible black
                             // flashes Archie reported 2026-05-08.
                             if text.contains("PPS id out of range")
@@ -6725,7 +6725,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             // stream open. With the videotoolbox-copy
                             // default this branch shouldn't normally
                             // fire at all, and even if it does, the
-                            // hwdec property write alone is enough —
+                            // hwdec property write alone is enough,
                             // mpv will pick up the new mode on the
                             // next decode without our help.
                             if text.contains("Initializing texture for hardware decoding failed") && self.claimHwdecFallbackIfNeeded() {
@@ -6870,7 +6870,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         self.queryTracks()
                         // Update render buffer to match video's native dimensions.
                         // iOS: correct PiP aspect ratio. tvOS: avoid oversized buffer
-                        // (e.g., 720p stream was rendering into 1920×1080 — 2.25x wasted pixels).
+                        // (e.g., 720p stream was rendering into 1920×1080, 2.25x wasted pixels).
                         if let mpv = self.activeMPVHandle() {
                             var dw: Int64 = 0; var dh: Int64 = 0
                             mpv_get_property(mpv, "dwidth", MPV_FORMAT_INT64, &dw)
@@ -6928,7 +6928,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             var avsync: Double = 0
                             mpv_get_property(mpv, "avsync", MPV_FORMAT_DOUBLE, &avsync)
                             let t = self.streamTag
-                            debugLog("\(t) [MPV-DIAG] Event: playback-restart — cache=\(String(format: "%.2f", cacheDur))s, avsync=\(String(format: "%.4f", avsync))s")
+                            debugLog("\(t) [MPV-DIAG] Event: playback-restart, cache=\(String(format: "%.2f", cacheDur))s, avsync=\(String(format: "%.4f", avsync))s")
                             debugLog("\(t) [MPV-STREAM] video=\(info.videoCodec) \(info.width)×\(info.height) \(info.pixelFormat), hwdec=\(info.hwdec)")
                             debugLog("\(t) [MPV-STREAM] audio=\(info.audioCodec) \(info.sampleRate)Hz \(info.channels)ch")
                             #endif
@@ -7031,7 +7031,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         }
 
         /// v1.7.x Issue A diagnostic. mpv emits MPV_EVENT_VIDEO_RECONFIG
-        /// every time the video pipeline rebuilds — at startup (initial
+        /// every time the video pipeline rebuilds, at startup (initial
         /// config), at hwdec changes (videotoolbox → videotoolbox-copy
         /// fallback), at decoder reset after error storms, and on
         /// MPEG-TS PMT changes mid-stream. UHD 10-bit HEVC streams
@@ -7041,12 +7041,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         ///
         /// What gets logged on every reconfig:
         ///   - Time gap since the previous reconfig (bursty == bad).
-        ///   - Resolution / pixfmt / colormatrix / codec / hwdec — so
+        ///   - Resolution / pixfmt / colormatrix / codec / hwdec, so
         ///     we can tell if the trigger is a real format change or
         ///     a same-format decoder rebuild.
         ///   - "*CHANGED-from=" marker when hwdec actually flipped.
         ///   - FBO presentation state at the moment of reconfig
-        ///     (DESTROYED, RECENTLY_REBUILT(Xms), or active(WxH)) —
+        ///     (DESTROYED, RECENTLY_REBUILT(Xms), or active(WxH)),
         ///     answers "did the user see black because the FBO was
         ///     gone?"
         ///   - Per-window decoder-error counts since the last
@@ -7159,7 +7159,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 anyAttemptStarted = true
                 playbackStartTime = Date()
                 logStore.append("✓ MPV started")
-                DebugLogger.shared.logPlayback(event: "playing — first frame")
+                DebugLogger.shared.logPlayback(event: "playing, first frame")
 
                 #if DEBUG
                 let totalStartMs = setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
@@ -7235,7 +7235,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         #endif
                         return
                     }
-                    // Verify still playing — route through mpvQueue to avoid race with stop()
+                    // Verify still playing, route through mpvQueue to avoid race with stop()
                     let capturedDur = dur  // Bind to let for Sendable compliance
                     mpvQ.async { [weak self] in
                         guard let self, let mpv = self.activeMPVHandle() else {
@@ -7256,7 +7256,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             // multiview tile still reaches this path
                             // (every coordinator's stability check
                             // fires after 2s) but must NOT publish
-                            // now-playing info — the audio tile owns
+                            // now-playing info, the audio tile owns
                             // the lockscreen. If the gate fails we
                             // deliberately leave `nowPlayingConfigured`
                             // false so a later `handleFileLoaded`
@@ -7318,14 +7318,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #endif
 
             // `MPV_END_FILE_REASON_STOP` fires when WE intentionally
-            // stopped the current playback — e.g. our own
+            // stopped the current playback, e.g. our own
             // `loadfile replace` issued by `applyPauseIfChanged` to
             // snap live streams to the live edge on unpause. Do NOT
             // treat this as a failure. Before this guard existed,
             // the STOP event fell through to the EOF branch below,
             // which read `elapsed < 0.5s` as "instant end" or
             // `elapsed < 5s` as "premature end" and triggered a
-            // retry storm — stacking mpv commands, flooding the
+            // retry storm, stacking mpv commands, flooding the
             // proxy, and eventually firing `onFatalError` which
             // painted the red "Decoder unavailable" overlay over
             // a stream that was actually playing correctly after
@@ -7335,7 +7335,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // bookkeeping noise from the handoff.
             if reason == MPV_END_FILE_REASON_STOP {
                 #if DEBUG
-                debugLog("[MPV-DIAG] end-file STOP (intentional — no retry)")
+                debugLog("[MPV-DIAG] end-file STOP (intentional, no retry)")
                 #endif
                 return
             }
@@ -7361,7 +7361,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // tile-load pressure, mpv reports
                 // `MPV_ERROR_LOADING_FAILED` (-13). Before this retry
                 // existed, the tile would show "Decoder unavailable"
-                // permanently even though the stream was fine — proven
+                // permanently even though the stream was fine, proven
                 // by the fact that expanding a failed tile to
                 // full-screen (a single request) always worked. We
                 // retry up to N times with exponential backoff plus
@@ -7386,7 +7386,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // backoff lets the server stabilize without forcing
                 // the user to manually re-tap the row.
                 //
-                // v1.7.x — extend retry to MPV_ERROR_UNKNOWN_FORMAT
+                // v1.7.x, extend retry to MPV_ERROR_UNKNOWN_FORMAT
                 // (-17, "When trying to load the file, the file
                 // format could not be determined, or the file was
                 // too broken to open it"). Freyguy1975 reported on
@@ -7394,7 +7394,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // on Apple TV consistently produced a transient red
                 // "Decoder unavailable / Playback error: unrecognized
                 // file format" overlay on either the new tile, the
-                // existing tile, or both — clearing if he removed
+                // existing tile, or both, clearing if he removed
                 // and re-added. The user-visible "unrecognized file
                 // format" string maps to UNKNOWN_FORMAT, NOT
                 // LOADING_FAILED, so the previous retry path missed
@@ -7457,13 +7457,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         ? "LOADING_FAILED"
                         : "UNKNOWN_FORMAT"
                     logStore.append(
-                        "⏳ MPV: \(retryKind) \(errLabel.lowercased()) — retry \(retryNum)/\(maxR) in \(String(format: "%.1f", delay))s"
+                        "⏳ MPV: \(retryKind) \(errLabel.lowercased()), retry \(retryNum)/\(maxR) in \(String(format: "%.1f", delay))s"
                     )
                     #if DEBUG
-                    debugLog("[MPV-DIAG] \(streamTag) \(errLabel) — retry \(retryNum)/\(maxR) in \(String(format: "%.2f", delay))s (\(retryKind))")
+                    debugLog("[MPV-DIAG] \(streamTag) \(errLabel), retry \(retryNum)/\(maxR) in \(String(format: "%.2f", delay))s (\(retryKind))")
                     #endif
                     // Task #149: native catch-up retries must NOT replay
-                    // urls[currentIndex] — that URL is session-bound and
+                    // urls[currentIndex], that URL is session-bound and
                     // the first seek already revoked its session, so every
                     // replay 401s straight back into this branch until the
                     // budget burns out and the red card paints (ATV log
@@ -7561,13 +7561,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 return
             }
 
-            // EOF handling — same premature-end logic as VLC
+            // EOF handling, same premature-end logic as VLC
             if isLive, let startTime = playbackStartTime {
                 let elapsed = Date().timeIntervalSince(startTime)
                 if elapsed < 0.5 {
-                    logStore.append("⚠️ MPV: instant end (<0.5s) — skipping to next URL")
+                    logStore.append("⚠️ MPV: instant end (<0.5s), skipping to next URL")
                     #if DEBUG
-                    debugLog("[MPV-DIAG] Instant end (\(String(format: "%.0f", elapsed * 1000))ms) — failing over")
+                    debugLog("[MPV-DIAG] Instant end (\(String(format: "%.0f", elapsed * 1000))ms), failing over")
                     #endif
                     sameURLRetryCount = 0
                     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -7576,16 +7576,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 } else if elapsed < 5.0, sameURLRetryCount < maxSameURLRetries {
                     sameURLRetryCount += 1
                     let retryNum = sameURLRetryCount
-                    logStore.append("⚠️ MPV: premature end (<5s) — retrying same URL (\(retryNum)/\(maxSameURLRetries))")
+                    logStore.append("⚠️ MPV: premature end (<5s), retrying same URL (\(retryNum)/\(maxSameURLRetries))")
                     #if DEBUG
-                    debugLog("[MPV-DIAG] Premature end (\(String(format: "%.1f", elapsed))s) — retrying same URL (\(retryNum)/\(maxSameURLRetries))")
+                    debugLog("[MPV-DIAG] Premature end (\(String(format: "%.1f", elapsed))s), retrying same URL (\(retryNum)/\(maxSameURLRetries))")
                     #endif
                     let retryURL = urls[currentIndex]
                     DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.8) { [weak self] in
                         self?.play(url: retryURL)
                     }
                 } else {
-                    DebugLogger.shared.logPlayback(event: "ended — triggering failover")
+                    DebugLogger.shared.logPlayback(event: "ended, triggering failover")
                     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                         self?.failoverOrError("Stream ended")
                     }
@@ -7791,7 +7791,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         playbackStartTime = Date()
                         logStore.append("✓ MPV time advanced: \(ms)ms")
                         #if DEBUG
-                        debugLog("[MPV-DIAG] First time change: \(ms)ms — playback started")
+                        debugLog("[MPV-DIAG] First time change: \(ms)ms, playback started")
                         #endif
                     }
 
@@ -7989,7 +7989,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // is behind audio, negative means video is ahead. With
             // `vo=libmpv` we don't have a working `video-pts`
             // property (the 22:21 field test found it returns 0.000s
-            // throughout the session — populated only by mpv's
+            // throughout the session, populated only by mpv's
             // internal VO module which we replace), so we rely on
             // mpv's own `avsync` for the canonical sync metric. See
             // also the MPV-CALLBACK-GAP block in `scheduleRender`.
@@ -8070,7 +8070,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // rationale. `audio_pts` is still included because it's
             // the only useful absolute time anchor on this path.
             debugLog("[\(ts)] \(t) [MPV-AUDIO] audio_pts=\(String(format: "%.2f", audioPts))s avsync=\(String(format: "%+.4f", avsync))s(positive=video_behind, mpv-internal) underruns=\(audioUnderrunCount) audio_reconfigs=\(audioReconfigCount) buf_events=\(bufferEventCount) buf_time=\(String(format: "%.1f", totalBufferingDuration))s")
-            // One-line per-stream summary — the "tl;dr" that's
+            // One-line per-stream summary, the "tl;dr" that's
             // easiest to grep when scanning 9 concurrent tiles'
             // logs. Mirrors the key numbers from the verbose lines
             // above so `grep STREAM-SUMMARY` gives a quick overview.
@@ -8105,7 +8105,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // `task_vm_info_data_t.phys_footprint` (the same counter
             // Xcode's memory graph uses) instead of `resident_size`,
             // which undercounts IOSurface-backed textures on iOS/tvOS
-            // — critical when we're trying to tell whether the 2nd
+            // critical when we're trying to tell whether the 2nd
             // tile's `Failed to open` is a memory-pressure symptom.
             //
             // FD count is the real new signal: each live mpv tile
@@ -8120,7 +8120,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             DebugLogger.shared.log("tile=\(tile) \(metricsLine)",
                                     category: "MPV-Perf", level: .perf)
 
-            // Update Now Playing elapsed time — only the authoritative
+            // Update Now Playing elapsed time, only the authoritative
             // coordinator (single-mode, or the current audio tile in
             // multiview) writes; non-audio tiles stay quiet to avoid
             // thrashing MPNowPlayingInfoCenter on every stats tick.
@@ -8153,7 +8153,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 }
             } else if isLive && anyAttemptStarted && !hasPerformedWarmupRetry {
                 hasPerformedWarmupRetry = true
-                logStore.append("⏳ MPV: proxy warming up — retrying in 2s…")
+                logStore.append("⏳ MPV: proxy warming up, retrying in 2s…")
                 #if DEBUG
                 debugLog("[MPV-DIAG] Warmup retry: waiting 2s before retry")
                 #endif
@@ -8198,31 +8198,31 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         ///
         /// Taxonomy of what's in here:
         ///   - `non-existing SPS/PPS`, `no frame!`, `non-existing
-        ///     SPS ... referenced in buffering period` — MPEG-TS
+        ///     SPS ... referenced in buffering period`, MPEG-TS
         ///     mid-GOP join; mpv recovers on the next keyframe.
         ///   - `Error while decoding frame (hardware decoding)`,
         ///     `hardware accelerator failed to decode picture`,
-        ///     `vt decoder cb: output image buffer is null` — VT
+        ///     `vt decoder cb: output image buffer is null`, VT
         ///     per-frame hiccups under N-way concurrent decode
         ///     pressure; `hwdec-software-fallback=90` catches
         ///     persistent cases and switches the tile to SW decode.
         ///   - `Invalid video timestamp`, `Invalid audio PTS`,
-        ///     `Reset playback due to audio timestamp reset` —
+        ///     `Reset playback due to audio timestamp reset`,
         ///     MPEG-TS packet-loss recovery, mpv resyncs on its own.
         ///   - `Audio/Video desynchronisation detected!` and the
         ///     multi-line "Possible reasons include..." block that
-        ///     follows — fires once per playback-restart while mpv
+        ///     follows, fires once per playback-restart while mpv
         ///     resyncs its A/V clock.
-        ///   - `Increasing reorder buffer` — routine h264 decoder
+        ///   - `Increasing reorder buffer`, routine h264 decoder
         ///     buffer-size adjustment message.
-        ///   - `mpegts: Packet corrupt` — single-packet drop
+        ///   - `mpegts: Packet corrupt`, single-packet drop
         ///     recovery, the demuxer skips the bad packet and
         ///     continues.
-        ///   - `co located POCs unavailable` — h264 POC reference
+        ///   - `co located POCs unavailable`, h264 POC reference
         ///     missing after mid-GOP join.
         ///
         /// `Audio device underrun detected` is deliberately NOT
-        /// here — we do want to see those, they're the one audio
+        /// here, we do want to see those, they're the one audio
         /// signal that actually matters. The `audioUnderrunCount`
         /// increment above still fires regardless of this filter.
         private static let noisyRecoverySubstrings: [String] = [
@@ -8263,7 +8263,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             for needle in noisyRecoverySubstrings where text.contains(needle) {
                 return true
             }
-            // Also filter standalone blank `warn:` lines — mpv's
+            // Also filter standalone blank `warn:` lines, mpv's
             // cplayer module emits a blank warn line around every
             // multi-line warning (sandwich markers). Dropping the
             // bread along with the filling.
@@ -8337,7 +8337,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let b = Double(ptr[off + 0])
                     let g = Double(ptr[off + 1])
                     let r = Double(ptr[off + 2])
-                    // Rec. 601 luma — close enough for "is it black".
+                    // Rec. 601 luma, close enough for "is it black".
                     // (Stream is BT.2020 but we render to BGRA in
                     // mpv's render shaders, so by the time we sample
                     // here it's standard sRGB-style values.)
@@ -8367,12 +8367,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             )
             guard status == noErr, let desc = formatDesc else { return nil }
 
-            // Duration is .invalid — mpv with video-sync=audio delivers frames
+            // Duration is .invalid, mpv with video-sync=audio delivers frames
             // at display refresh rate (~60fps) regardless of content FPS,
             // duplicating frames as needed. Declaring a content-based duration
             // (e.g. 33ms for 30fps) conflicts with the actual 16.5ms delivery
             // interval, confusing the display layer. With .invalid duration,
-            // each frame shows until the next one is enqueued — matching exactly
+            // each frame shows until the next one is enqueued, matching exactly
             // how mpv delivers them.
             var timingInfo = CMSampleTimingInfo(
                 duration: .invalid,
@@ -8600,7 +8600,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         }
 
         /// Start the 2-second refresh timer for volatile stream info fields.
-        /// Uses statsQueue (utility QoS) — never renderQueue — to avoid blocking frame delivery.
+        /// Uses statsQueue (utility QoS), never renderQueue, to avoid blocking frame delivery.
         private func startStreamInfoTimer() {
             streamInfoTimer?.cancel()
             let timer = DispatchSource.makeTimerSource(queue: statsQueue)
@@ -8697,7 +8697,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// Wrapper around `mpv_set_option_string` that logs the
         /// failing option name + value when mpv rejects it. The bare
         /// `checkError(mpv_set_option_string(...))` path only logs
-        /// "error setting option" with no context — when stacked
+        /// "error setting option" with no context, when stacked
         /// against 20+ option calls in `setupMPV()` that turns an
         /// actionable diagnostic into a coin flip. Use this helper
         /// for any new option added so a silent mpv-rejection is
@@ -8762,7 +8762,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             _ pictureInPictureController: AVPictureInPictureController,
             didTransitionToRenderSize newRenderSize: CMVideoDimensions
         ) {
-            // No action needed — mpv scales internally
+            // No action needed, mpv scales internally
         }
 
         func pictureInPictureController(
@@ -8781,7 +8781,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // NOTE (2026-04-21 rev 2): Reinstated
         // `restoreUserInterfaceForPictureInPictureStopWithCompletionHandler`.
         // The prior note (below, preserved for archaeology) concluded
-        // removing the delegate fixed the placeholder — but the user
+        // removing the delegate fixed the placeholder, but the user
         // confirmed the placeholder+zoom bug persists in every shipped
         // build since PiP was introduced (commit 791d813, 2026-04-07).
         // Other mpv-backed iOS players using the same
@@ -8796,7 +8796,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         //   * Without `restoreUserInterface`, iOS treats our app as a
         //     "legacy" PiP adopter and uses a conservative restore
         //     pipeline that PAINTS THE GENERIC PLACEHOLDER ICON over
-        //     the PiP window for the duration of the animation —
+        //     the PiP window for the duration of the animation,
         //     because the framework has no signal that our source
         //     layer is ready to be re-hosted.
         //   * With `restoreUserInterface` implemented, iOS marks the
@@ -8825,12 +8825,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         //      `completionHandler(true)` and NO UI work inside the
         //      delegate body. The method's mere presence + synchronous
         //      completion is the signal iOS needs.
-        //  (c) Keep `didStop` as a diagnostic log only — the flag is
+        //  (c) Keep `didStop` as a diagnostic log only, the flag is
         //      already cleared, and writing it again would re-trigger
         //      the SwiftUI re-render that we just finished avoiding.
         //
         // If this regresses again, capture a sysdiagnose during the
-        // maximize tap — the `mediaserverd` logs under
+        // maximize tap, the `mediaserverd` logs under
         // AVPictureInPictureController will show whether iOS is
         // classifying us as a first-class adopter. Missing
         // `restoreUserInterface` shows up as
@@ -8843,7 +8843,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// the source layer back in, the view hierarchy is stable.
         ///
         /// Previously this flag was cleared asynchronously from
-        /// `didStop` — which fires AFTER the restore animation — so
+        /// `didStop`, which fires AFTER the restore animation, so
         /// the SwiftUI re-render landed mid-animation and iOS fell
         /// back to the placeholder icon + zoom.
         func pictureInPictureControllerWillStopPictureInPicture(
@@ -8853,7 +8853,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Freeze the last-displayed frame on the sample-buffer
             // layer for the duration of iOS's restore animation.
             // Without this, the renderer keeps draining its queue
-            // during the transition — iOS then has to animate
+            // during the transition, iOS then has to animate
             // against a moving target and falls back to showing its
             // generic PiP-icon placeholder over the window. The
             // `removingDisplayedImage: false` variant preserves
@@ -8924,15 +8924,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #endif
             // Synchronous completion. No layout, no state writes, no
             // async hops. The source view is already in its restored
-            // position (it never moved during PiP — iOS merely
+            // position (it never moved during PiP, iOS merely
             // reparented the layer), and `willStop` already cleared
             // `isPiPActive`, so there's nothing for us to do except
             // tell iOS we're ready.
             completionHandler(true)
         }
 
-        /// Diagnostic hook for PiP-start failures. Purely logging —
-        /// doesn't change behaviour — but when PiP silently refuses to
+        /// Diagnostic hook for PiP-start failures. Purely logging,
+        /// doesn't change behaviour, but when PiP silently refuses to
         /// start (AirPlay active, audio session category mismatch,
         /// backgrounded before layer became ready) this is the only
         /// callback AVFoundation gives us. Prior to this we had no
@@ -8959,7 +8959,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Set `progressStore.isPiPActive = true` on the NEXT runloop
             // tick, NOT synchronously. `isPiPActive` is `@Published`, so a
             // synchronous write in here fires `objectWillChange` inside
-            // the `willStart` delegate callback — which triggers a SwiftUI
+            // the `willStart` delegate callback, which triggers a SwiftUI
             // re-render while iOS is mid-PiP-engagement-animation. iOS
             // observes the source view hierarchy moving during its own
             // transition and falls back to the generic placeholder-icon
@@ -8972,7 +8972,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // `pipAutoEligible` flag (set at controller-creation time,
             // checked by `didEnterBackground` branch (1.5) BEFORE any
             // `isPiPActive` read), so we don't need the sync write
-            // anymore — the async hop is safe.
+            // anymore, the async hop is safe.
             DispatchQueue.main.async { [weak self] in
                 self?.progressStore.isPiPActive = true
             }
@@ -8986,7 +8986,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Defensive: only write when we're still a live tile in
             // the store. Between coordinator dismantle and this
             // delegate firing, `PlayerSession.exit()` may have run
-            // `MultiviewStore.reset()` — in that case the tile is
+            // `MultiviewStore.reset()`, in that case the tile is
             // gone and the store's isPiPActive is already false;
             // writing `true` here would leak the flag into the next
             // multiview session.
@@ -8994,7 +8994,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if myTileID != nil {
                 Task { @MainActor in
                     guard let id = myTileID,
-                          // Also gate on mode — a tile's id pinning to
+                          // Also gate on mode, a tile's id pinning to
                           // `item.id` means the same id CAN exist in a
                           // brand-new multiview session. Without the
                           // mode check, a late-firing PiP delegate
@@ -9012,13 +9012,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
         }
 
-        /// Required by Apple's documented PiP adoption pattern — every
+        /// Required by Apple's documented PiP adoption pattern, every
         /// Apple sample (AVFoundationPiPPlayer, AdoptingPictureInPicture,
         /// createwithswift.com, Vonage reference) implements this hook
         /// even when the body is empty. Our prior implementation only
         /// had `willStart`, and AVF's internal state-machine treats a
         /// missing `didStart` as "the app is not a fully adopted PiP
-        /// participant" — which can tip heuristics toward the generic
+        /// participant", which can tip heuristics toward the generic
         /// placeholder-icon restore animation. Keeping the body
         /// minimal (just a log) matches Apple's sample pattern.
         func pictureInPictureControllerDidStartPictureInPicture(

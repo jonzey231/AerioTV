@@ -1,28 +1,28 @@
 import SwiftUI
 
-/// Playback chrome for the unified `MultiviewContainerView` — the
+/// Playback chrome for the unified `MultiviewContainerView`, the
 /// parts of the UI that sit *on top* of the tile grid (top bar on
 /// iOS, bottom pills on tvOS). Branches on `tiles.count == 1` so
 /// the N=1 case gets PlayerView-style top chrome while N>1 relies
 /// on the existing `MultiviewTransportBar` docked below.
 ///
-/// Phase C.4 scope — minimum-viable overlay:
+/// Phase C.4 scope, minimum-viable overlay:
 /// - iOS N=1: top bar with Close (×) on the right and `+` next to
 ///   it. Title shown between them. No AirPlay / overflow / scrubber
-///   yet — those are a Phase C.6 port of `PlayerView`'s rich chrome.
+///   yet, those are a Phase C.6 port of `PlayerView`'s rich chrome.
 /// - tvOS N=1: a single `+` pill at bottom-center. Options pill +
 ///   full per-tile controls come in Phase C.6.
 /// - N>1 on either platform: the overlay renders nothing; the
 ///   existing `MultiviewTransportBar` handles tile count + `+` + `×`.
 ///
 /// Chrome auto-fade is honoured via the injected `MultiviewChromeState`
-/// — same environment object the transport bar reads, so the top
+/// same environment object the transport bar reads, so the top
 /// bar fades in/out together with the bottom bar when the user goes
 /// idle.
 ///
 /// Focus-halo discipline: every tvOS button uses
 /// `TVNoHighlightButtonStyle` (`Components.swift:10`) which
-/// suppresses the default white system halo — the ButtonStyle reads
+/// suppresses the default white system halo, the ButtonStyle reads
 /// `@Environment(\.isFocused)` inside its label to paint its own
 /// focus ring. That was the pattern already used for PlayerView's
 /// Options pill; adopting it verbatim here avoids the regression
@@ -44,7 +44,7 @@ struct PlaybackChromeOverlay: View {
     /// Bound from the container. `true` while the tvOS Options panel
     /// is showing. Kept on the container (not here) so the panel's
     /// dismiss path in the container's `.onExitCommand` can reach
-    /// it — and so the panel's sleep-timer / stream-info bindings
+    /// it, and so the panel's sleep-timer / stream-info bindings
     /// (which are also container-owned @State) live next to the
     /// presentation flag.
     @Binding var showTVOptions: Bool
@@ -52,13 +52,13 @@ struct PlaybackChromeOverlay: View {
     /// Sleep-timer + stream-info state bound from the container.
     /// The iOS overflow menu (added in this phase) needs to read and
     /// write both. Declared here as bindings so the container remains
-    /// the single source of truth — same rationale as `showTVOptions`.
+    /// the single source of truth, same rationale as `showTVOptions`.
     @Binding var sleepTimerEnd: Date?
     @Binding var showStreamInfo: Bool
 
     /// Bound from the container. Tapping the iOS Record button flips
     /// this true; container presents `RecordProgramSheet` via
-    /// `.sheet` — matches the pattern used for `showAddSheet`.
+    /// `.sheet`, matches the pattern used for `showAddSheet`.
     @Binding var showRecordSheet: Bool
 
     /// Bound from the container. The iOS overflow menu's "Switch Stream"
@@ -107,7 +107,7 @@ struct PlaybackChromeOverlay: View {
     }
     #endif
 
-    // v1.6.15: removed `verticalSizeClass` + `isiPhonePortrait` —
+    // v1.6.15: removed `verticalSizeClass` + `isiPhonePortrait`,
     // they only existed to switch between the inline title layout
     // (iPad / iPhone landscape) and the three-line title row
     // (iPhone portrait), both of which are now gone. Channel info
@@ -118,14 +118,14 @@ struct PlaybackChromeOverlay: View {
         // chrome (Options pill + Add pill + live progress band) is
         // mounted inline inside `MultiviewContainerView`'s VStack
         // so the focus engine can route D-pad-down from the tile to
-        // the pills — a ZStack overlay doesn't give tvOS the
+        // the pills, a ZStack overlay doesn't give tvOS the
         // spatial separation it needs. See `PlaybackBottomChrome_tvOS`
         // in this file.
         #if !os(tvOS)
         if store.tiles.count == 1 {
             ZStack {
                 // Audio-Only foreground cover. Drawn BEHIND the top
-                // chrome so Close / Overflow / + remain tappable — the
+                // chrome so Close / Overflow / + remain tappable, the
                 // user needs access to the overflow menu to exit
                 // Audio-Only mode. Nothing renders unless the audio
                 // tile has its `isAudioOnly` flag set, so the default
@@ -152,7 +152,7 @@ struct PlaybackChromeOverlay: View {
             // pushed the Close / Overflow / + buttons too far down
             // in iPhone portrait. Anchoring this overlay at the
             // literal screen top restores the absolute positioning
-            // the formula was designed around — chrome y =
+            // the formula was designed around, chrome y =
             // dynamicTopInset (~71pt on Pro Max portrait), which
             // hugs the Dynamic Island instead of floating ~130pt
             // below it. Landscape was already fine because
@@ -169,7 +169,7 @@ struct PlaybackChromeOverlay: View {
     /// Title of the sole tile (or empty). v1.6.15: no longer used by
     /// the chrome bar (the new `ChannelInfoBanner` in HomeView
     /// covers that), but still consumed by the Audio-Only
-    /// foreground overlay — Audio-Only is a fullscreen "no video"
+    /// foreground overlay, Audio-Only is a fullscreen "no video"
     /// curtain that needs its own readout of which channel is
     /// muted-to-audio.
     private var soleTileTitle: String {
@@ -178,7 +178,7 @@ struct PlaybackChromeOverlay: View {
 
     #if !os(tvOS)
     /// Dynamic top inset for the N=1 chrome. Adapts to the device in
-    /// real time — no hardcoded "iPhone Pro Max needs X pt" branching,
+    /// real time, no hardcoded "iPhone Pro Max needs X pt" branching,
     /// no guessing based on user-agent. Every iPhone, iPad, and Mac
     /// Catalyst layout falls out of the public safe-area / status-bar
     /// APIs. See the comment at the `.padding(.top, dynamicTopInset)`
@@ -199,7 +199,7 @@ struct PlaybackChromeOverlay: View {
             return scene.windows.first?.safeAreaInsets.top ?? 0
         }()
 
-        // Status-bar frame height — an independent measurement that iOS
+        // Status-bar frame height, an independent measurement that iOS
         // updates alongside layout changes (orientation, status-bar
         // hiding, etc.). Identical to `windowInset` in most cases, but
         // picks up scenarios where the latter was zeroed by an ancestor
@@ -238,7 +238,7 @@ struct PlaybackChromeOverlay: View {
     ///
     /// The overflow menu only mounts when we can find the audio
     /// tile's `PlayerProgressStore` via `MultiviewStore.audioProgressStore`
-    /// — without it we can't bind tracks / speed / PiP toggle to
+    /// without it we can't bind tracks / speed / PiP toggle to
     /// real state. It's typically non-nil within one frame of
     /// `MultiviewTileView.onAppear` firing, so in practice the user
     /// just sees the menu appear as the tile becomes playable.
@@ -247,12 +247,12 @@ struct PlaybackChromeOverlay: View {
         VStack(spacing: 0) {
             // Button row. In iPhone portrait we deliberately drop the
             // inline title from this row and mount it on its own full-width
-            // row below — otherwise the channel name + program name get
+            // row below, otherwise the channel name + program name get
             // squeezed between Close and the Overflow/+ cluster and
             // truncate inside a ~160pt gap that can't hold them.
             HStack(alignment: .center, spacing: 12) {
                 closeButton_iOS
-                // v1.6.15: title removed from the chrome bar — the
+                // v1.6.15: title removed from the chrome bar, the
                 // new top-left `ChannelInfoBanner` (HomeView) shows
                 // channel logo, number, name, program title, and
                 // airing window in one place across iPhone, iPad,
@@ -337,7 +337,7 @@ struct PlaybackChromeOverlay: View {
                 addButton_iOS
             }
             .padding(.horizontal, 16)
-            // Dynamic top inset — not a hardcoded constant, and not a
+            // Dynamic top inset, not a hardcoded constant, and not a
             // device-specific bump. We read the two public signals iOS
             // exposes for "how far down the chrome should start":
             //
@@ -347,7 +347,7 @@ struct PlaybackChromeOverlay: View {
             //   • statusBarManager.statusBarFrame.height → usually matches
             //     the above but picks up some layouts where safeAreaInsets
             //     is zeroed (e.g., inside an ancestor using
-            //     `.ignoresSafeArea()`, which is exactly our situation —
+            //     `.ignoresSafeArea()`, which is exactly our situation,
             //     the container zeroes the safe area for its children)
             //
             // The max of the two is "what iOS thinks the top is right
@@ -550,7 +550,7 @@ struct PlaybackChromeOverlay: View {
     }
     #endif
 
-    /// Record button in the iOS top chrome — same 52×52 round pill
+    /// Record button in the iOS top chrome, same 52×52 round pill
     /// as Close / `+` / AirPlay, with a red record-dot icon to
     /// match the system recording vocabulary. Tapping presents
     /// `RecordProgramSheet` for the audio tile's current program,
@@ -558,7 +558,7 @@ struct PlaybackChromeOverlay: View {
     /// True when the audio tile has live EPG data so recording the
     /// currently-playing program is meaningful. Gates the iOS
     /// Record pill availability. v1.6.8 (B1 Phase 1): no longer
-    /// gates on EPG — Dispatcharr playlists don't populate
+    /// gates on EPG, Dispatcharr playlists don't populate
     /// `currentProgram` at load time, so the prior gate hid the
     /// pill permanently. We only need a stream URL to record;
     /// `RecordProgramSheet` handles the missing-EPG case by
@@ -596,7 +596,7 @@ struct PlaybackChromeOverlay: View {
     /// which keeps the chrome clean at boot and for channels
     /// without EPG data.
     ///
-    /// Non-focusable — it's informational. Hardware Play/Pause on
+    /// Non-focusable, it's informational. Hardware Play/Pause on
     /// tvOS, on-screen toggle on iOS still drives the Coordinator's
     /// `togglePauseAction`; the band is purely display.
     @ViewBuilder
@@ -925,12 +925,12 @@ struct RewindTransportBar_iOS: View {
 /// audio tile being registered, which happens asynchronously).
 ///
 /// Wiring notes:
-/// - Picture-in-Picture has no menu entry — PiP is swipe-home-only
+/// - Picture-in-Picture has no menu entry, PiP is swipe-home-only
 ///   (auto-PiP) and is gated by the Settings toggle. The
 ///   single-stream Coordinator builds the AVPictureInPictureController
 ///   eagerly in `makeUIViewController`; multiview currently does not
 ///   auto-PiP (known gap).
-/// - `toggleStreamInfo` is a cosmetic state flip for now — the
+/// - `toggleStreamInfo` is a cosmetic state flip for now, the
 ///   stream-info overlay is a later Phase C.6 port.
 /// - `toggleAudioOnly` mutates `progressStore.isAudioOnly` on the
 ///   audio tile's store. `PlaybackChromeOverlay` observes the same
@@ -1035,7 +1035,7 @@ private struct iPadOverflowAdapter: View {
 /// unified-player path looks the same to the user.
 ///
 /// We deliberately do NOT touch mpv's `vid` property from the
-/// foreground — parity with legacy behaviour. The video tile keeps
+/// foreground, parity with legacy behaviour. The video tile keeps
 /// decoding underneath us; this overlay simply hides it. The GPU
 /// cost is acceptable for the foreground case; the real power saving
 /// kicks in on swipe-home, where `Coordinator.didEnterBackground`
@@ -1104,13 +1104,13 @@ private struct AudioOnlyForegroundOverlay: View {
 ///
 /// Why not a ZStack overlay like iOS? On tvOS an overlay that
 /// fills the container puts the pills in the same "focus region"
-/// as the sole tile above them — the focus engine can't route
+/// as the sole tile above them, the focus engine can't route
 /// D-pad-down from the tile to the pills because spatially they
 /// occupy the same area. Worse, when the tile is made
 /// non-focusable to let pills take focus, the whole screen loses
 /// remote-input routing (the user reported: "D-pad, Select, and
 /// Menu buttons do nothing"). An inline VStack sibling gives the
-/// focus engine a clean spatial below-relationship — the tile
+/// focus engine a clean spatial below-relationship, the tile
 /// stays focusable, pills live below it, D-pad-down Just Works.
 ///
 /// The container controls visibility: this view renders its
@@ -1137,7 +1137,7 @@ struct PlaybackBottomChrome_tvOS: View {
     @Binding var showTVOptions: Bool
 
     /// Container presents `RecordProgramSheet` via fullScreenCover
-    /// when this flips true. Tapped from the Record pill — gives
+    /// when this flips true. Tapped from the Record pill, gives
     /// users a way to record the currently-playing program without
     /// having to go back to the guide and long-press.
     @Binding var showRecordSheet: Bool
@@ -1187,7 +1187,7 @@ struct PlaybackBottomChrome_tvOS: View {
     }
 
     /// Record pill availability (tvOS). v1.6.8 (B1 Phase 1): no
-    /// longer gates on EPG — see `canRecordCurrentProgram_iOS`
+    /// longer gates on EPG, see `canRecordCurrentProgram_iOS`
     /// for full rationale. We only need a stream URL.
     private var canRecordCurrentProgram: Bool {
         guard let audioID = store.audioTileID,
@@ -1407,7 +1407,7 @@ struct PlaybackBottomChrome_tvOS: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            // Live program progress band — program name + progress
+            // Live program progress band, program name + progress
             // bar + time remaining. Non-focusable; informational.
             // With a Live Rewind session rolling, the band becomes the
             // rewind timeline over [buffer tail .. live edge] instead.
@@ -1619,7 +1619,7 @@ struct PlaybackBottomChrome_tvOS: View {
         .accessibilityHint("Change audio track, subtitles, sleep timer, or stream info")
     }
 
-    /// Record pill — presents `RecordProgramSheet` for the audio
+    /// Record pill, presents `RecordProgramSheet` for the audio
     /// tile's currently-playing program. Saves the user a trip
     /// back to the guide + long-press when they're already watching
     /// something they want to record. Shown only when the audio
