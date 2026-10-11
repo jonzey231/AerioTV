@@ -456,13 +456,13 @@ then limit it with Dispatcharr's own network access settings.
 <summary><strong>Every Dispatcharr API path AerioTV uses</strong> (for a narrower set of rules than <code>/api/*</code>)</summary>
 
 If you would rather not bypass SSO for all of `/api/*`, these are the paths
-the app requests, taken from the code of both platforms. Wildcards cover ids
-and sub-routes under the same prefix.
+the app requests, taken from the code of both platforms. `<id>` is a
+numeric id or session token; reverse proxies usually need a wildcard there.
 
 **Login and account**
 1. `/api/accounts/token/` (username and password login)
 2. `/api/accounts/token/refresh/`
-3. `/api/accounts/users/*` (`/me/` for the API key and Catch-Up credentials)
+3. `/api/accounts/users/me/` (API key and Catch-Up credentials)
 
 **Server**
 4. `/api/core/version/`
@@ -470,33 +470,50 @@ and sub-routes under the same prefix.
 6. `/api/core/outputprofiles/`
 
 **Channels and guide**
-7. `/api/channels/channels/*` (list, detail, `/streams/` for Switch Stream)
-8. `/api/channels/groups/`
-9. `/api/channels/profiles/*`
-10. `/api/channels/logos/*` (logo images under `/<id>/cache/`)
-11. `/api/channels/summary/`
-12. `/api/epg/grid/`
-13. `/api/epg/programs/*`
-14. `/api/epg/current-programs/`
-15. `/api/epg/epgdata/`
-16. `/api/epg/sources/`
-17. `/api/m3u/accounts/`
+7. `/api/channels/channels/` (channel list)
+8. `/api/channels/channels/<id>/` (one channel)
+9. `/api/channels/channels/<id>/streams/` (Switch Stream)
+10. `/api/channels/groups/`
+11. `/api/channels/profiles/`
+12. `/api/channels/profiles/<id>/`
+13. `/api/channels/logos/<id>/cache/` (logo images)
+14. `/api/channels/summary/`
+15. `/api/epg/grid/`
+16. `/api/epg/programs/`
+17. `/api/epg/programs/<id>/`
+18. `/api/epg/current-programs/`
+19. `/api/epg/epgdata/`
+20. `/api/epg/sources/`
+21. `/api/m3u/accounts/`
 
 **DVR**
-18. `/api/channels/recordings/*` (list, detail, `/file/`, `/stop/`, `/comskip/`)
-19. `/api/channels/series-rules/*` (including `/evaluate/`)
+22. `/api/channels/recordings/`
+23. `/api/channels/recordings/<id>/`
+24. `/api/channels/recordings/<id>/file/`
+25. `/api/channels/recordings/<id>/stop/`
+26. `/api/channels/recordings/<id>/comskip/`
+27. `/api/channels/series-rules/`
+28. `/api/channels/series-rules/evaluate/`
 
 **VOD**
-20. `/api/vod/categories/`
-21. `/api/vod/movies/*` (including `/providers/` and `/provider-info/`)
-22. `/api/vod/series/*` (same sub-routes)
-23. `/api/vod/episodes/`
+29. `/api/vod/categories/`
+30. `/api/vod/movies/`
+31. `/api/vod/movies/<id>/providers/`
+32. `/api/vod/movies/<id>/provider-info/`
+33. `/api/vod/series/`
+34. `/api/vod/series/<id>/`
+35. `/api/vod/series/<id>/providers/`
+36. `/api/vod/series/<id>/provider-info/`
+37. `/api/vod/episodes/`
 
 **Playback sessions**
-24. `/api/proxy/hls/sessions/*` (Force HLS)
-25. `/api/catchup/sessions/*` (native Catch-Up, including `/position/`)
+38. `/api/proxy/hls/sessions/`
+39. `/api/proxy/hls/sessions/<token>/`
+40. `/api/catchup/sessions/`
+41. `/api/catchup/sessions/<id>/`
+42. `/api/catchup/sessions/<id>/position/`
 
-**Collapsed to prefixes (10 rules cover everything above):**
+**Collapsed to prefixes (10 rules cover all 42 paths):**
 `/api/accounts/*`, `/api/core/*`, `/api/channels/*`, `/api/epg/*`, `/api/m3u/*`,
 `/api/vod/*`, `/api/proxy/*`, `/api/catchup/*`, plus `/proxy/*` and
 `/timeshift/*`.
