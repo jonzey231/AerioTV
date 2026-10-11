@@ -334,8 +334,10 @@ struct PlaybackChromeOverlay: View {
                         onMenuClose: { chromeState.reportInteraction() }
                     )
                 }
-                // No "+" here: Add Channel lives in the tile's long-press
-                // menu (Android parity 2026-10-11).
+                // The "+" stays while one channel plays (Logan 2026-10-11);
+                // only the in-Multiview chrome dropped its add and layout
+                // buttons, which the tile menu covers.
+                addButton_iOS
             }
             .padding(.horizontal, 16)
             // Dynamic top inset, not a hardcoded constant, and not a
