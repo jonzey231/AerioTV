@@ -1572,6 +1572,13 @@ struct ChannelListView: View {
                     // Guide key rows (2026-09-14): the hold resolves through
                     // the effective map, which keeps this default (sidebar
                     // mode with no other Open sidebar row = open it here).
+                    // A hold on the pill row is a pill-row gesture, not a
+                    // guide one: it must not scroll the grid below it back
+                    // in time (Logan, Apple TV 2026-10-11).
+                    if groupPillFocused != nil {
+                        debugLog("[PRESS] guide hold-Left ignored: focus on pill \(groupPillFocused ?? "")")
+                        return
+                    }
                     var action = RemoteControlStore.shared.effectiveGuideAction(.leftLong)
                     debugLog("[PRESS] guide hold-Left action=\(action.wire) sidebarMode=\(guideSidebarSelectorActive)")
                     if action == .openGroupSidebar {
