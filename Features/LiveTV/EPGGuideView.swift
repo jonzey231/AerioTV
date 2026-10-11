@@ -10045,8 +10045,10 @@ struct MultiviewStagingBanner: View {
             // tvOS: use the app's themed focus style (accent stroke ring)
             // instead of leaving .plain, which lets the default white system
             // focus glow blob through and clashes with the capsule pill.
+            // Play is filled with the accent, so the accent ring vanished on
+            // it (Logan, Apple TV 2026-10-11); it rings in white instead.
             #if os(tvOS)
-            .buttonStyle(TVNoHighlightButtonStyle())
+            .buttonStyle(TVNoHighlightButtonStyle(isSelected: true))
             .tvFocusRingShape(.capsule)
             #else
             .buttonStyle(.plain)
