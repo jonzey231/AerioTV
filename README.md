@@ -420,7 +420,7 @@ UUID in the URL.
 
 Add these rules to the Dispatcharr resource in this order. The three
 "Pass to Auth" rules keep the API documentation behind SSO; the rest let
-AerioTV reach the server. Rules 7 through 12 are only needed when a
+AerioTV reach the server. Rules 6 through 11 are only needed when a
 Dispatcharr user connects through an Xtream Codes playlist instead of
 Direct Connect. Direct Connect never touches `/output/`, so there is no
 rule for it; see the note below the table.
