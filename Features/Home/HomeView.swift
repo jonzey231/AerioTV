@@ -8628,6 +8628,11 @@ struct MainTabView: View {
         #endif
     }
 
+    /// A minimized one-tile Multiview (Exit Multiview kept the audio tile).
+    private var miniIsOneTileMultiview: Bool {
+        playerSession.mode == .multiview && multiviewStore.tiles.count == 1
+    }
+
     private func handleMenuPress() {
         debugLog("🎮 [HMP] handleMenuPress | isActive=\(nowPlaying.isActive) isMinimized=\(nowPlaying.isMinimized) isVODDetailPushed=\(isVODDetailPushed) isSettingsSubviewPushed=\(isSettingsSubviewPushed) selectedTab=\(selectedTab.rawValue) playerSession.mode=\(playerSession.mode)")
         // TEST (branch test/avplayer-hls-engine): if this handler runs
@@ -8736,7 +8741,11 @@ struct MainTabView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
             }
-        } else if nowPlaying.isActive && nowPlaying.isMinimized {
+        } else if (nowPlaying.isActive || miniIsOneTileMultiview) && nowPlaying.isMinimized {
+            // A mini can also be a one-tile Multiview left over from Exit
+            // Multiview (collapse keeps the audio tile and never re-seeds
+            // NowPlaying's item, so isActive is false there). Apple TV log
+            // 2026-10-11 17:49: every Menu fell through to scroll-to-top.
             // #42 Part 3: with a mini-player active, a SINGLE Back restores it to
             // fullscreen; a DOUBLE Back jumps to the top channel (the long-press
             // route isn't viable — tvOS owns a held Menu). Debounce ~0.3s: the
