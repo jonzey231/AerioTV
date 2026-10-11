@@ -5695,6 +5695,10 @@ struct EPGGuideView: View {
     private var timeHeaderHeight: CGFloat { TextScale.grow(50, textScale) }
     private let pixelsPerHour: CGFloat = 600
     private let cellGap: CGFloat = 1        // hairline gap between program cells (Emby style)
+    /// Sticky label (Logan 2026-10-11): the airing cell never shows less than
+    /// this while its right edge is on screen (18 minutes at 600 pt/h), so a
+    /// program with a few minutes left still shows its title.
+    static let liveMinVisibleWidth: CGFloat = 180
     private let rowGap: CGFloat = 1         // hairline gap between rows
     #else
     /// User-controllable guide scale (Settings → Network → Guide Display →
@@ -7820,7 +7824,8 @@ struct EPGGuideView: View {
                 #if os(tvOS)
                 ForEach(Array(sortedProgs.enumerated()), id: \.element.id) { index, prog in
                     let nextStart: Date? = index + 1 < sortedProgs.count ? sortedProgs[index + 1].start : nil
-                    programCell(prog, channelItem: channel, nextProgramStart: nextStart)
+                    programCell(prog, channelItem: channel, nextProgramStart: nextStart,
+                                previous: index > 0 ? sortedProgs[index - 1] : nil)
                 }
                 #else
                 // iPad drag lag round 3 (Logan 2026-10-07): the row draws its
@@ -7883,7 +7888,8 @@ struct EPGGuideView: View {
     #endif
 
     // MARK: - Program Cell
-    private func programCell(_ prog: GuideProgram, channelItem: ChannelDisplayItem, nextProgramStart: Date? = nil) -> some View {
+    private func programCell(_ prog: GuideProgram, channelItem: ChannelDisplayItem, nextProgramStart: Date? = nil,
+                             previous: GuideProgram? = nil) -> some View {
         let clampedStart = max(prog.start, windowStart)
         let clampedEnd   = min(prog.end, windowEnd)
         // Clamp end to the next program's start to prevent overlap
@@ -7911,9 +7917,22 @@ struct EPGGuideView: View {
         // is what the focus-restore handlers drive. tvOS passes the binding;
         // iOS uses the no-binding init.
         #if os(tvOS)
-        return GuideCellClipReader(scroll: hScroll, cellX: x, cellWidth: width, columnWidth: columnWidth) { leadingClip in
+        // Sticky labels (Logan 2026-10-11): the airing cell keeps a minimum
+        // visible width, and the cell after it pins its text past that.
+        let now = Date()
+        let isLive = prog.start <= now && prog.end > now
+        let previousLive: (x: CGFloat, width: CGFloat)? = previous.flatMap { p in
+            guard p.start <= now, p.end > now else { return nil }
+            let pStart = max(p.start, windowStart)
+            let pEnd = min(min(p.end, windowEnd), max(prog.start, windowStart))
+            let pWidth = max(20, CGFloat(pEnd.timeIntervalSince(pStart) / totalDuration) * totalGridWidth - cellGap)
+            return (xOffset(for: pStart), pWidth)
+        }
+        return GuideCellPinReader(scroll: hScroll, cellX: x, cellWidth: width, isLive: isLive,
+                                  previousLive: previousLive,
+                                  minVisible: Self.liveMinVisibleWidth) { leadingClip, extra in
         GuideProgramButton(
-            prog: prog, channelItem: channelItem, width: width, rowHeight: rowHeight,
+            prog: prog, channelItem: channelItem, width: width + extra, rowHeight: rowHeight,
             leadingClip: leadingClip,
             shortTimeFormatter: shortTimeFormatter,
             onSelect: onSelectChannel,
@@ -10247,6 +10266,56 @@ struct GuideCellClipReader<Content: View>: View {
     }
 }
 
+/// Sticky program labels (Logan 2026-10-11). Titles already pin to the
+/// visible left edge through the leading clip; this adds the airing cell's
+/// minimum visible width. Pure geometry in grid points, shared by the iOS
+/// canvas rows and the tvOS cells.
+enum GuideStickyLabel {
+    /// Points the airing cell grows past its right edge so its visible part
+    /// (from `viewLeft`, the program area's left edge in grid x) is at least
+    /// `minVisible`. 0 when the cell is not airing, already that wide, or its
+    /// right edge is off screen. Whole points, so only the cell under the
+    /// left edge sees a new value on a frame.
+    static func `extension`(isLive: Bool, cellX: CGFloat, cellWidth: CGFloat,
+                            viewLeft: CGFloat, minVisible: CGFloat) -> CGFloat {
+        guard isLive else { return 0 }
+        let visible = cellX + cellWidth - max(viewLeft, cellX)
+        guard visible > 0, visible < minVisible else { return 0 }
+        return (minVisible - visible).rounded()
+    }
+}
+
+/// tvOS cell clip reader with the sticky-label rules: the leading clip
+/// (pinned text), the airing cell's extension, and for the cell right after
+/// an airing cell, a clip that pushes its text past that extension.
+struct GuideCellPinReader<Content: View>: View {
+    let scroll: GuideHScroll
+    let cellX: CGFloat
+    let cellWidth: CGFloat
+    let isLive: Bool
+    /// Grid x and width of the previous cell in the row when it is airing.
+    let previousLive: (x: CGFloat, width: CGFloat)?
+    let minVisible: CGFloat
+    @ViewBuilder let content: (_ clip: CGFloat, _ extra: CGFloat) -> Content
+    var body: some View {
+        let (clip, extra) = pins(viewLeft: -scroll.offset)
+        content(clip, extra)
+            .zIndex(extra > 0 ? 1 : 0)
+    }
+
+    private func pins(viewLeft: CGFloat) -> (CGFloat, CGFloat) {
+        let extra = GuideStickyLabel.extension(isLive: isLive, cellX: cellX, cellWidth: cellWidth,
+                                               viewLeft: viewLeft, minVisible: minVisible)
+        var edge = viewLeft
+        if let p = previousLive {
+            let pExtra = GuideStickyLabel.extension(isLive: true, cellX: p.x, cellWidth: p.width,
+                                                    viewLeft: viewLeft, minVisible: minVisible)
+            if pExtra > 0 { edge = max(edge, p.x + p.width + pExtra) }
+        }
+        return (min(max(0, edge - cellX), cellWidth).rounded(), extra)
+    }
+}
+
 #if !os(tvOS)
 // MARK: - Guide canvas row (iOS / iPadOS)
 
@@ -10650,6 +10719,11 @@ final class GuideCanvasRowView: UIView, GuideHScrollListener, UIContextMenuInter
     private static let infoSide: CGFloat = 18
     private static let infoInset: CGFloat = 4
     private static let infoMinVisibleWidth: CGFloat = 120
+    /// Sticky label (Logan 2026-10-11): while the airing cell's right edge is
+    /// on screen it never shows less than this much, so a program with a few
+    /// minutes left still shows its title. The extension draws over the start
+    /// of the next cell, whose text pins past it.
+    static let liveMinVisibleWidth: CGFloat = 72
 
     init(scroll: GuideHScroll) {
         self.scroll = scroll
@@ -10854,8 +10928,34 @@ final class GuideCanvasRowView: UIView, GuideHScrollListener, UIContextMenuInter
 
     /// Pixels of the cell hidden left of the program area (text pins to the
     /// visible edge), whole points, clamped to the width.
+    /// The pin edge is the program area's left edge, or the right edge of an
+    /// airing cell extended over this one (see `liveExtension`).
     private func leftClip(_ m: GuideCanvasCellModel) -> CGFloat {
-        min(max(0, -offset - m.x), m.width).rounded()
+        var edge = -offset
+        if !m.isLive, let cover = liveCoverEdge, cover > m.x { edge = max(edge, cover) }
+        return min(max(0, edge - m.x), m.width).rounded()
+    }
+
+    /// Points the airing cell grows past its right edge so its visible part
+    /// is at least `liveMinVisibleWidth`; 0 once it is wider or off screen.
+    private func liveExtension(_ m: GuideCanvasCellModel) -> CGFloat {
+        GuideStickyLabel.extension(isLive: m.isLive, cellX: m.x, cellWidth: m.width,
+                                   viewLeft: -offset, minVisible: Self.liveMinVisibleWidth)
+    }
+
+    /// Grid x where the extended airing cell of this row ends, if extended.
+    private var liveCoverEdge: CGFloat? {
+        for cell in cells.values where cell.model.isLive {
+            let ext = liveExtension(cell.model)
+            if ext > 0 { return cell.model.x + cell.model.width + ext }
+        }
+        return nil
+    }
+
+    /// Width the cell draws at most: its own, or the minimum visible width
+    /// for the airing cell (text is laid out once for that).
+    private func drawWidth(_ m: GuideCanvasCellModel) -> CGFloat {
+        m.isLive ? max(m.width, Self.liveMinVisibleWidth) : m.width
     }
 
     private func infoVisible(_ m: GuideCanvasCellModel, clip: CGFloat) -> Bool {
@@ -10863,14 +10963,25 @@ final class GuideCanvasRowView: UIView, GuideHScrollListener, UIContextMenuInter
     }
 
     private func textWidth(_ m: GuideCanvasCellModel, clip: CGFloat) -> CGFloat {
-        min(m.width - clip, max(viewportWidth, 1)) - 2 * Self.paddingH
+        let visible = m.width + liveExtension(m) - clip
+        // Lay out for the widest the pinned text can get while the airing
+        // cell stays extended, so a drag only crops the bitmap.
+        let w = m.isLive ? max(visible, Self.liveMinVisibleWidth) : visible
+        return min(w, max(viewportWidth, 1)) - 2 * Self.paddingH
     }
 
     private func layoutPins() {
         for cell in cells.values {
             let m = cell.model
+            let ext = liveExtension(m)
+            let frameWidth = m.width + ext
+            if cell.container.frame.width != frameWidth {
+                cell.container.frame.size.width = frameWidth
+            }
+            let z: CGFloat = ext > 0 ? 1 : 0
+            if cell.container.zPosition != z { cell.container.zPosition = z }
             let clip = leftClip(m)
-            let visibleTextWidth = max(0, m.width - clip - 2 * Self.paddingH)
+            let visibleTextWidth = max(0, frameWidth - clip - 2 * Self.paddingH)
             let shownWidth = min(cell.renderedWidth, visibleTextWidth)
             let frame = CGRect(x: clip + Self.paddingH, y: Self.paddingV,
                                width: shownWidth, height: max(0, rowHeight - 2 * Self.paddingV))
@@ -10883,7 +10994,7 @@ final class GuideCanvasRowView: UIView, GuideHScrollListener, UIContextMenuInter
             if showInfo {
                 // Bottom-right corner of the cell (Logan 2026-10-07): clear of
                 // the description, which the text layout keeps out of this box.
-                let f = CGRect(x: m.width - Self.infoInset - Self.infoSide,
+                let f = CGRect(x: frameWidth - Self.infoInset - Self.infoSide,
                                y: rowHeight - Self.infoInset - Self.infoSide,
                                width: Self.infoSide, height: Self.infoSide)
                 if cell.info.frame != f { cell.info.frame = f }
@@ -10938,7 +11049,7 @@ final class GuideCanvasRowView: UIView, GuideHScrollListener, UIContextMenuInter
     }
 
     private func makeSpec(_ m: GuideCanvasCellModel, clip: CGFloat, reserveInfo: Bool) -> GuideCanvasRenderSpec? {
-        guard let style, let palette, m.width >= Self.minWidthForText else { return nil }
+        guard let style, let palette, drawWidth(m) >= Self.minWidthForText else { return nil }
         let width = textWidth(m, clip: clip)
         let height = rowHeight - 2 * Self.paddingV
         guard width >= 4, height > 0 else { return nil }
@@ -11004,6 +11115,10 @@ final class GuideCanvasRowView: UIView, GuideHScrollListener, UIContextMenuInter
 
     private func cell(atX x: CGFloat) -> Cell? {
         let gx = x + originX
+        // The extended airing cell is drawn on top, so it wins the overlap.
+        if let live = cells.values.first(where: {
+            $0.model.isLive && gx >= $0.model.x && gx < $0.model.x + $0.model.width + liveExtension($0.model)
+        }) { return live }
         return cells.values.first { gx >= $0.model.x && gx < $0.model.x + $0.model.width }
     }
 
@@ -11013,7 +11128,7 @@ final class GuideCanvasRowView: UIView, GuideHScrollListener, UIContextMenuInter
         let m = cell.model
         if !cell.info.isHidden {
             // 40 pt target around the bottom-right info glyph.
-            let cellRight = m.x - originX + m.width
+            let cellRight = m.x - originX + m.width + liveExtension(m)
             let target = CGRect(x: cellRight - 40, y: rowHeight - 40, width: 40, height: 40)
             if target.contains(pt) {
                 onInfo(m.prog)
