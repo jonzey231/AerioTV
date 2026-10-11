@@ -4322,11 +4322,21 @@ final class LiveChannelRetention: ObservableObject {
     static let shared = LiveChannelRetention()
 
     struct Entry {
+        /// Which pipeline is being kept: the TS remuxer's ingest (rewind
+        /// window included) or a direct-HLS AVPlayer kept playing muted.
+        enum Engine: String { case remuxTS, directHLS }
         let key: String            // resolved stream URL - the channel identity
         let channelID: String      // guide channel id (solo tile id) - the Jump target
         let channelName: String
-        let remuxer: TSHLSRemuxer
-        let localURL: URL          // loopback playlist URL (already READY)
+        let remuxer: TSHLSRemuxer? // remuxTS only
+        let localURL: URL?         // remuxTS only: loopback playlist URL (already READY)
+        let direct: RetainedDirectHLS? // directHLS only
+        var engine: Engine { direct != nil ? .directHLS : .remuxTS }
+        /// Ends whichever pipeline this entry holds.
+        @MainActor func stopSession() {
+            remuxer?.stop()
+            direct?.stop()
+        }
         var lastActiveAt: Date
         var videoParams: (width: Int, height: Int, fps: Double, tenBit: Bool)?
         /// When the channel went into the background (card "since" line).
@@ -4369,7 +4379,7 @@ final class LiveChannelRetention: ObservableObject {
         guard Self.isEnabled else { remuxer.stop(); return }
         // Replace a stale entry for the same channel outright.
         if let idx = entries.firstIndex(where: { $0.key == key || $0.channelID == channelID }) {
-            entries[idx].remuxer.stop()
+            entries[idx].stopSession()
             entries.remove(at: idx)
         }
         remuxer.setRetained(true)
@@ -4398,7 +4408,7 @@ final class LiveChannelRetention: ObservableObject {
             }
         }
         let entry = Entry(key: key, channelID: channelID, channelName: channelName, remuxer: remuxer,
-                          localURL: localURL, lastActiveAt: Date(), videoParams: nil)
+                          localURL: localURL, direct: nil, lastActiveAt: Date(), videoParams: nil)
         remuxer.onVideoParameters = { [weak self] w, h, fps, tenBit in
             Task { @MainActor in
                 guard let self, let idx = self.entries.firstIndex(where: { $0.key == key }) else { return }
@@ -4411,18 +4421,56 @@ final class LiveChannelRetention: ObservableObject {
             category: "Playback", level: .info)
     }
 
-    /// A tile tuning this channel takes the running remuxer back, if
+    /// Take over a still-playing direct-HLS AVPlayer from a tile that is
+    /// going away (iPhone 2026-10-11 18:56:54: X on a direct-HLS channel
+    /// tore everything down because retention only held remuxers). The
+    /// player keeps playing MUTED with no layer, so its server session
+    /// stays alive; same cap, eviction, CarPlay and memory rules as a
+    /// kept remuxer. A failed or server-ended item releases it.
+    func retainDirectHLS(key: String, channelID: String, channelName: String, player: AVPlayer) {
+        guard Self.isEnabled, player.currentItem != nil else {
+            player.pause()
+            player.replaceCurrentItem(with: nil)
+            return
+        }
+        if let idx = entries.firstIndex(where: { $0.key == key || $0.channelID == channelID }) {
+            entries[idx].stopSession()
+            entries.remove(at: idx)
+        }
+        player.isMuted = true
+        let held = RetainedDirectHLS(player: player)
+        held.watch { [weak self] why in
+            DebugLogger.shared.log(
+                "[AVP-RETAIN] retained '\(channelName)' \(why) engine=directHLS; released, no reconnect",
+                category: "Playback", level: .info)
+            self?.drop(key: key)
+        }
+        if player.rate == 0 { player.play() }
+        entries.append(Entry(key: key, channelID: channelID, channelName: channelName,
+                             remuxer: nil, localURL: nil, direct: held,
+                             lastActiveAt: Date(), videoParams: nil))
+        DebugLogger.shared.log(
+            "[AVP-RETAIN] keeping '\(channelName)' live in background engine=directHLS (\(entries.count) retained, cap \(Self.maxChannels - 1))",
+            category: "Playback", level: .info)
+    }
+
+    /// A tile tuning this channel takes the running pipeline back, if
     /// kept. Channel id is the PRIMARY match: the URL key can drift
     /// between the flip-away snapshot and a fresh tune's resolution,
     /// and a missed adopt leaves a stale duplicate ingesting upstream
     /// (field find 2026-08-27: ESPNU playing AND listed as retained).
-    func adopt(key: String, channelID: String) -> Entry? {
-        guard let idx = entries.firstIndex(where: { $0.channelID == channelID || $0.key == key }) else { return nil }
+    /// Only an entry of the tile's engine is adopted; one of the other
+    /// engine is stale and evictForNewActive drops it.
+    func adopt(key: String, channelID: String, engine: Entry.Engine = .remuxTS) -> Entry? {
+        guard let idx = entries.firstIndex(where: {
+            ($0.channelID == channelID || $0.key == key) && $0.engine == engine
+        }) else { return nil }
         var e = entries.remove(at: idx)
         e.lastActiveAt = Date()
-        e.remuxer.setRetained(false)
+        e.remuxer?.setRetained(false)
+        e.direct?.unwatch()
         DebugLogger.shared.log(
-            "[AVP-RETAIN] adopting '\(e.channelName)' (window intact; \(entries.count) still retained)",
+            "[AVP-RETAIN] adopting '\(e.channelName)' engine=\(e.engine.rawValue) (\(e.engine == .directHLS ? "player still playing" : "window intact"); \(entries.count) still retained)",
             category: "Playback", level: .info)
         return e
     }
@@ -4438,7 +4486,7 @@ final class LiveChannelRetention: ObservableObject {
         // ingests alongside the fresh session.
         if let id = activeChannelID, let idx = entries.firstIndex(where: { $0.channelID == id }) {
             let e = entries.remove(at: idx)
-            e.remuxer.stop()
+            e.stopSession()
             LiveUpstreamReleases.note(e.key)
             DebugLogger.shared.log(
                 "[AVP-RETAIN] dropped stale entry for now-active '\(e.channelName)'",
@@ -4448,7 +4496,7 @@ final class LiveChannelRetention: ObservableObject {
         while entries.count > keep {
             if let idx = entries.indices.min(by: { entries[$0].lastActiveAt < entries[$1].lastActiveAt }) {
                 let e = entries.remove(at: idx)
-                e.remuxer.stop()
+                e.stopSession()
                 LiveUpstreamReleases.note(e.key)
                 DebugLogger.shared.log(
                     "[AVP-RETAIN] evicted oldest '\(e.channelName)' (over cap)",
@@ -4479,7 +4527,7 @@ final class LiveChannelRetention: ObservableObject {
 
     func drop(key: String) {
         guard let idx = entries.firstIndex(where: { $0.key == key }) else { return }
-        entries[idx].remuxer.stop()
+        entries[idx].stopSession()
         LiveUpstreamReleases.note(key)
         entries.remove(at: idx)
     }
@@ -4490,10 +4538,56 @@ final class LiveChannelRetention: ObservableObject {
             "[AVP-RETAIN] stopping all \(entries.count) retained channels (\(reason))",
             category: "Playback", level: .info)
         entries.forEach {
-            $0.remuxer.stop()
+            $0.stopSession()
             LiveUpstreamReleases.note($0.key)
         }
         entries.removeAll()
+    }
+}
+
+/// A direct-HLS AVPlayer held by LiveChannelRetention: playing muted with
+/// no layer, watched for a failed or ended item until a tile adopts it.
+@MainActor
+final class RetainedDirectHLS {
+    let player: AVPlayer
+    private var tokens: [NSObjectProtocol] = []
+    private var onEnd: ((String) -> Void)?
+
+    init(player: AVPlayer) { self.player = player }
+
+    func watch(onEnd: @escaping (String) -> Void) {
+        unwatch()
+        self.onEnd = onEnd
+        guard let item = player.currentItem else { return }
+        let nc = NotificationCenter.default
+        tokens.append(nc.addObserver(forName: AVPlayerItem.failedToPlayToEndTimeNotification,
+                                     object: item, queue: .main) { [weak self] note in
+            let err = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?
+                .localizedDescription ?? "unknown"
+            MainActor.assumeIsolated { self?.fire("died (\(err))") }
+        })
+        tokens.append(nc.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification,
+                                     object: item, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.fire("ended by the server") }
+        })
+    }
+
+    private func fire(_ why: String) {
+        let cb = onEnd
+        unwatch()
+        cb?(why)
+    }
+
+    func unwatch() {
+        tokens.forEach { NotificationCenter.default.removeObserver($0) }
+        tokens.removeAll()
+        onEnd = nil
+    }
+
+    func stop() {
+        unwatch()
+        player.pause()
+        player.replaceCurrentItem(with: nil)
     }
 }
 
@@ -4885,6 +4979,9 @@ struct AVPlayerMultiviewTile: View {
     /// the chrome. Dropped when a second tile joins (grid chrome has no
     /// scrubber; the spill ring keeps running, disk-bounded).
     @State private var liveRewindArmed = false
+    /// Solo live direct-HLS session (not Force HLS) that Kept Live may
+    /// hand to LiveChannelRetention when the tile goes away or flips.
+    @State private var directHLSRetainable = false
     /// Identity of the session THIS tile is actually running, snapshotted
     /// at start(). stop() retains under these - NEVER under the struct's
     /// current streamURL/channelID, which a channel-flip onChange has
@@ -6766,6 +6863,27 @@ struct AVPlayerMultiviewTile: View {
             } else {
                 forceHLSStartedAt = nil
             }
+            // Kept Live on the direct-HLS engine (iPhone 2026-10-11
+            // 18:56:54): same solo-live gate as the remux path's rewind
+            // arm. A kept AVPlayer for this channel is adopted as is: no
+            // re-tune, the item keeps its position and buffer.
+            directHLSRetainable = MultiviewStore.shared.tiles.count == 1
+                && UserDefaults.standard.bool(forKey: "liveRewindEnabled")
+            sessionRetainKey = sourceURL.absoluteString
+            sessionRetainChannelID = channelID
+            sessionRetainName = channelName
+            if directHLSRetainable {
+                if let entry = LiveChannelRetention.shared.adopt(key: sourceURL.absoluteString,
+                                                                 channelID: channelID,
+                                                                 engine: .directHLS),
+                   let held = entry.direct, held.player.currentItem != nil {
+                    startPlayer(url: sourceURL, requestHeaders: headers, adoptedPlayer: held.player)
+                    LivePrewarm.shared.cancel(reason: "retained direct HLS player adopted")
+                    debugLog("[AVP-RETAIN] tile resuming adopted player engine=directHLS channel=\(channelName)")
+                    return
+                }
+                LiveChannelRetention.shared.evictForNewActive(activeChannelID: channelID)
+            }
             startPlayer(url: sourceURL, requestHeaders: headers)
             // No remux ingest here to adopt a warm one; release it now.
             LivePrewarm.shared.cancel(reason: "tile playing direct HLS")
@@ -6792,8 +6910,8 @@ struct AVPlayerMultiviewTile: View {
                 // ingesting from a recent flip, adopt it - the rewind
                 // window (including the time away) comes back intact.
                 if let entry = LiveChannelRetention.shared.adopt(key: sourceURL.absoluteString,
-                                                                 channelID: channelID) {
-                    let mux = entry.remuxer
+                                                                 channelID: channelID),
+                   let mux = entry.remuxer, let adoptedURL = entry.localURL {
                     mux.onError = { error in
                         debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(channelName)")
                         failOrFallback("\(error)")
@@ -6818,7 +6936,7 @@ struct AVPlayerMultiviewTile: View {
                     // change (fresh tile: nil -> URL; flip-back: other
                     // channel's port -> this one's), so no direct start here
                     // - that would double-start the player.
-                    readyLocalURL = entry.localURL
+                    readyLocalURL = adoptedURL
                     // A warm ingest for this channel would now be a
                     // duplicate upstream connection; release it.
                     LivePrewarm.shared.cancel(reason: "retained window adopted instead")
@@ -7169,7 +7287,10 @@ struct AVPlayerMultiviewTile: View {
     }
 
     /// No AirPlay LAN item gets a configured join offset.
-    private func startPlayer(url: URL, requestHeaders: [String: String]) {
+    /// `adoptedPlayer`: a direct-HLS AVPlayer handed back by Kept Live.
+    /// Its item is already playing, so no new asset and no join offset
+    /// (writing one on a playing live item seeks it backward).
+    private func startPlayer(url: URL, requestHeaders: [String: String], adoptedPlayer: AVPlayer? = nil) {
         // Segments exist by now, so the remuxer has already decided
         // whether this program is audio-only (GH #90).
         let audioOnlyNow = remuxer?.isAudioOnlyProgram ?? false
@@ -7195,7 +7316,7 @@ struct AVPlayerMultiviewTile: View {
             asset.resourceLoader.setDelegate(HLSResourceLoaderRegistry.shared,
                                              queue: HLSResourceLoaderRegistry.shared.queue)
         }
-        let playerItem = AVPlayerItem(asset: asset)
+        let playerItem = adoptedPlayer?.currentItem ?? AVPlayerItem(asset: asset)
         // Live-edge point: trust the server, do not force an offset. The
         // Dispatcharr HLS output now pins the join point itself, correctly for
         // each mode: #EXT-X-START ~3 target durations back on the standard
@@ -7254,7 +7375,9 @@ struct AVPlayerMultiviewTile: View {
         // buffer fills at link speed and does not gate the start.
         let isForceHLSDirect = isLiveTune && !isLANItem && PlaybackFeatureFlags.forceHLS
             && (forceHLSSession != nil || (url.query ?? "").contains("output_format=hls"))
-        if isLiveTune, isLANItem {
+        if adoptedPlayer != nil {
+            debugLog("[AVP-RETAIN] adopted item keeps its live offset channel=\(channelName)")
+        } else if isLiveTune, isLANItem {
             debugLog("[AVP-AIRPLAY] LAN item: no configured join offset (default start point; the LAN publication delay holds it back) channel=\(channelName)")
         } else if isForceHLSDirect {
             let offset = min(18.0, max(Self.forceHLSLiveOffset, learned) + streamBufferSeconds)
@@ -7323,7 +7446,7 @@ struct AVPlayerMultiviewTile: View {
         // during startup - churn that lets audio start while video
         // decode lags seconds behind (field 2026-08-28). 15s bounds it;
         // the disk window makes deeper buffering pointless anyway.
-        if isLoopbackVOD || (catchup != nil && isLoopback) {
+        if adoptedPlayer == nil, isLoopbackVOD || (catchup != nil && isLoopback) {
             playerItem.preferredForwardBufferDuration = 15
         }
         // NO first-play buffering override. The 2026-09-11 17:15 device
@@ -7339,7 +7462,7 @@ struct AVPlayerMultiviewTile: View {
         // under the automatic policy. Automatic waiting is what actually
         // starts a live remux stream; leave it alone.
         debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : (isForceHLSDirect ? "\(Int(Self.forceHLSForwardBuffer))s (Force HLS)" : "automatic")) channel=\(channelName)")
-        let avPlayer = AVPlayer(playerItem: playerItem)
+        let avPlayer = adoptedPlayer ?? AVPlayer(playerItem: playerItem)
         // FORCE-HLS: automaticallyWaitsToMinimizeStalling stays ON for server
         // HLS items. Turning it off (tested 2026-10-05, iPhone) started 2 ms
         // after open but parked AVPlayer at the live edge with no buffer: the
@@ -7729,6 +7852,7 @@ struct AVPlayerMultiviewTile: View {
     /// `keepForceHLS`: the tile is going away or flipping (not an internal
     /// retry), so a healthy Force HLS channel may be Kept Live.
     private func stop(allowRetain: Bool = true, keepForceHLS: Bool = false) {
+        let firstFrameSeenAtStop = firstFrameSeen
         tileStopped = true
         audioOnlyProgram = false
         if progressStore.isAudioOnlyProgram { progressStore.isAudioOnlyProgram = false }
@@ -7780,9 +7904,31 @@ struct AVPlayerMultiviewTile: View {
             sessionRetainKey = nil
             sessionRetainChannelID = nil
         }
+        // Kept Live on the direct-HLS engine: only when the tile goes away
+        // or flips (keepForceHLS), never on an internal retry, which wants
+        // a fresh player. The AVPlayer keeps playing muted in retention.
+        var retainedPlayer: AVPlayer?
+        if directHLSRetainable {
+            directHLSRetainable = false
+            if keepForceHLS, allowRetain, LiveChannelRetention.isEnabled, tileError == nil,
+               firstFrameSeenAtStop, remuxer == nil, mkvServer == nil,
+               !isVOD, !isDVR, catchup == nil,
+               let p = player, p.currentItem?.status == .readyToPlay,
+               sessionRetainKey != nil, sessionRetainChannelID != nil {
+                retainedPlayer = p
+            }
+        }
         driver?.teardown()
         driver = nil
-        player?.pause()
+        if let p = retainedPlayer, let key = sessionRetainKey, let chID = sessionRetainChannelID {
+            LiveChannelRetention.shared.retainDirectHLS(
+                key: key, channelID: chID,
+                channelName: sessionRetainName ?? channelName, player: p)
+            sessionRetainKey = nil
+            sessionRetainChannelID = nil
+        } else {
+            player?.pause()
+        }
         let releasedPlayer = player
         player = nil
         #if os(iOS)
