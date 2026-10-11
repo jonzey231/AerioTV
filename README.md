@@ -431,7 +431,7 @@ Direct Connect.
 | 3 | Pass to Auth | Path | `/api/schema/*` | keeps the API docs behind SSO |
 | 4 | Bypass Auth | Path | `/api/*` | channels, EPG, VOD, recordings, logos, native Catch-Up sessions |
 | 5 | Bypass Auth | Path | `/proxy/*` | live streams, VOD streams, Catch-Up playback, stream switching |
-| 6 | Bypass Auth | Path | `/output/*` | M3U output |
+| 6 | Bypass Auth | Path | `/output/*` | M3U playlist and XMLTV output (AerioTV uses the M3U route) |
 | 7 | Bypass Auth | Path | `/player_api.php` | Xtream Codes only |
 | 8 | Bypass Auth | Path | `/xmltv.php` | Xtream Codes only |
 | 9 | Bypass Auth | Path | `/get.php` | Xtream Codes only |
@@ -440,9 +440,11 @@ Direct Connect.
 | 12 | Bypass Auth | Path | `/series/*` | Xtream Codes only |
 | 13 | Bypass Auth | Path | `/timeshift/*` | Xtream Codes Catch-Up; also the Direct Connect Catch-Up fallback on Dispatcharr builds without native catch-up sessions |
 
-Anyone who knows a stream UUID can play that stream through rules 5 and 6,
-which is how Dispatcharr's proxy works with or without a reverse proxy. A
-geo or IP rule on the resource narrows that further if you want it.
+Anyone who knows a stream UUID can play that stream through rule 5, which
+is how Dispatcharr's proxy works with or without a reverse proxy. Rule 6
+serves the playlist and guide, which Dispatcharr limits with its own network
+access settings. A geo or IP rule on the resource narrows either further if
+you want it.
 
 </details>
 
