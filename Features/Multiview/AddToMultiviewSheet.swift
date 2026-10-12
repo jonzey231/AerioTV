@@ -166,18 +166,14 @@ struct AddToMultiviewSheet: View {
     @AppStorage("multiviewPickerLastGroup")
     private var selectedGroup: String = "All"
 
-    /// Picker-only toggles (Android parity, same keys and wording):
-    /// "Show Subtitles" adds the airing program's subtitle line under
-    /// the title in every channel row (Teamarr carries "Team 1 vs
-    /// Team 2" there); "Show Descriptions" adds the description,
-    /// two lines max. Per device, default off, not synced.
+    /// Settings > Player > Multiview "Show Subtitles" / "Show
+    /// Descriptions" (Android parity, same keys): the airing program's
+    /// subtitle line (Teamarr carries "Team 1 vs Team 2" there) and its
+    /// description, two lines max, under each channel row. Default off.
     @AppStorage("multiviewPickerShowSubtitles")
     private var showSubtitles: Bool = false
     @AppStorage("multiviewPickerShowDescriptions")
     private var showDescriptions: Bool = false
-    #if os(iOS)
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    #endif
 
     /// User-hidden groups loaded from the same `UserDefaults` key
     /// `ChannelListView` uses (`hiddenChannelGroups`). The picker
@@ -278,7 +274,7 @@ struct AddToMultiviewSheet: View {
                 // Movies / Series / Recordings) sits above the group
                 // filter. The group filter is channel-only (VOD has no
                 // group chips), so it's hidden for the other sources.
-                iPadSourceAndTogglesRow
+                iPadSourcePillBar
                 if pickerSource == .channels, groupChips.count > 1 {
                     iPadGroupFilterBar
                 }
@@ -392,59 +388,6 @@ struct AddToMultiviewSheet: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
         }
-    }
-
-    /// Source pills plus the Show Subtitles / Show Descriptions toggle
-    /// pills. Regular width (iPad): one row, toggles right-aligned.
-    /// Compact width (iPhone): toggles wrap onto their own row below.
-    @ViewBuilder
-    private var iPadSourceAndTogglesRow: some View {
-        if horizontalSizeClass == .compact {
-            VStack(alignment: .leading, spacing: 0) {
-                iPadSourcePillBar
-                HStack(spacing: 8) {
-                    iPadToggleChips
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
-            }
-        } else {
-            HStack(spacing: 0) {
-                iPadSourcePillBar
-                HStack(spacing: 8) { iPadToggleChips }
-                    .padding(.trailing, 16)
-                    .fixedSize()
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var iPadToggleChips: some View {
-        iPadToggleChip("Show Subtitles", isOn: $showSubtitles)
-        iPadToggleChip("Show Descriptions", isOn: $showDescriptions)
-    }
-
-    private func iPadToggleChip(_ title: String, isOn: Binding<Bool>) -> some View {
-        Button {
-            withAnimation(.spring(response: 0.25)) { isOn.wrappedValue.toggle() }
-        } label: {
-            Text(title)
-                .scaledFont(.labelMedium)
-                .lineLimit(1)
-                .foregroundColor(isOn.wrappedValue ? .appBackground : .textSecondary)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .background(
-                    isOn.wrappedValue
-                        ? AnyView(Capsule().fill(Color.accentPrimary))
-                        : AnyView(Capsule().fill(Color.elevatedBackground))
-                )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(title)
-        .accessibilityValue(isOn.wrappedValue ? "On" : "Off")
-        .accessibilityAddTraits(isOn.wrappedValue ? .isSelected : [])
     }
 
     /// Phase 1 (Step 4): the iPad content list, switched by source.
@@ -601,14 +544,8 @@ struct AddToMultiviewSheet: View {
                 // / Series / Recordings). Sits directly under the
                 // header so D-pad Down from Close lands here first, then
                 // the (channel-only) group filter, then the list.
-                HStack(spacing: 12) {
-                    tvSourcePillBar
-                    Spacer(minLength: 12)
-                    tvToggleChip("Show Subtitles", isOn: $showSubtitles)
-                    tvToggleChip("Show Descriptions", isOn: $showDescriptions)
-                }
-                    .padding(.leading, 80 - tvPillInset)
-                    .padding(.trailing, 80)
+                tvSourcePillBar
+                    .padding(.horizontal, 80 - tvPillInset)
                     .padding(.bottom, 12)
                     .focusSection()
 
@@ -743,23 +680,6 @@ struct AddToMultiviewSheet: View {
     /// outer row padding drops by the same amount so pills keep their
     /// on-screen alignment with the title and the channel rows.
     private var tvPillInset: CGFloat { 16 }
-
-    /// Show Subtitles / Show Descriptions toggle pill (tvOS). Same
-    /// focus vocabulary as the source pills; selected = on.
-    private func tvToggleChip(_ title: String, isOn: Binding<Bool>) -> some View {
-        Button {
-            withAnimation(.spring(response: 0.25)) { isOn.wrappedValue.toggle() }
-        } label: {
-            Text(title)
-                .scaledFont(.system(size: 22, weight: .medium))
-                .lineLimit(1)
-        }
-        .buttonStyle(PickerGroupPillButtonStyle(isSelected: isOn.wrappedValue))
-        .padding(.vertical, 10)
-        .fixedSize()
-        .accessibilityLabel(title)
-        .accessibilityValue(isOn.wrappedValue ? "On" : "Off")
-    }
 
     /// Phase 1 (Step 4): tvOS content, switched by source. Each branch
     /// emits flat `LazyVStack` siblings (section header + rows) so lazy

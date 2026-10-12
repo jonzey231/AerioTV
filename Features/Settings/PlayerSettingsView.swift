@@ -185,6 +185,9 @@ struct PlayerSettingsView: View {
     @AppStorage(multiviewLogoPositionKey)
     private var tileLogoPositionRaw: String = MultiviewLogoPosition.topLeft.rawValue
     @AppStorage(multiviewLogoSizeKey) private var tileLogoSize: Int = multiviewLogoSizeDefault
+    /// Add to Multiview picker rows (Android parity, same keys).
+    @AppStorage("multiviewPickerShowSubtitles") private var pickerShowSubtitles: Bool = false
+    @AppStorage("multiviewPickerShowDescriptions") private var pickerShowDescriptions: Bool = false
 
     private var tileLogoPositionOptions: [SettingsChoice<String>] {
         MultiviewLogoPosition.allCases.map { SettingsChoice($0.rawValue, $0.displayName) }
@@ -527,6 +530,28 @@ struct PlayerSettingsView: View {
                         label: { "\($0)%" }
                     )
                 }
+
+                Toggle(isOn: $pickerShowSubtitles) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show Subtitles")
+                            .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                        Text("Show the program subtitle in the Add to Multiview picker")
+                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                    }
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+
+                Toggle(isOn: $pickerShowDescriptions) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show Descriptions")
+                            .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                        Text("Show the program description in the Add to Multiview picker")
+                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                    }
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
             } header: {
                 // Phase 3: the audio focus and tile corner copy now lives
                 // on those pickers' own pages, so the section footer that
@@ -784,6 +809,24 @@ struct PlayerSettingsView: View {
                             segmentLabel: { "\($0)%" }
                         )
                     }
+
+                    TVSettingsToggleRow(
+                        icon: "text.below.photo",
+                        iconColor: theme.accent,
+                        title: "Show Subtitles",
+                        subtitle: "Show the program subtitle in the Add to Multiview picker",
+                        isOn: $pickerShowSubtitles,
+                        onChange: { _ in }
+                    )
+
+                    TVSettingsToggleRow(
+                        icon: "text.alignleft",
+                        iconColor: theme.accent,
+                        title: "Show Descriptions",
+                        subtitle: "Show the program description in the Add to Multiview picker",
+                        isOn: $pickerShowDescriptions,
+                        onChange: { _ in }
+                    )
                 }
             }
             .padding(.horizontal, 80)
