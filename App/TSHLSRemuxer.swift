@@ -151,6 +151,168 @@ final class HLSResourceLoaderRegistry: NSObject, AVAssetResourceLoaderDelegate, 
                         didCancel loadingRequest: AVAssetResourceLoadingRequest) {}
 }
 
+/// GH #93: in-progress server recordings (Dispatcharr DVR HLS) through a
+/// locally rewritten media playlist. Device 2026-10-12 (f1729e2): Watch
+/// from Beginning ran audio from media time 0 while the video output
+/// delivered its first frame only at 10.24 s; Resume at ~675 s showed
+/// picture at once. The difference is the head of the playlist: it opens
+/// with #EXT-X-DISCONTINUITY before seg_00000, and seg_00000's audio
+/// starts 1.26 s before its video. This loader fetches the real playlist
+/// (same auth headers), drops any #EXT-X-DISCONTINUITY that comes before
+/// the first segment, and makes every URI absolute so the segments still
+/// load straight from the server over plain HTTP (AVFoundation only
+/// takes playlists from a resource loader, see HLSResourceLoaderRegistry).
+/// Developer A/B switch: UserDefaults "dvrPlaylistRewriteDisabled" = true.
+final class DVRPlaylistRewriteLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
+    static let scheme = "aeriodvr"
+    static let secureScheme = "aeriodvrs"
+    static var disabled: Bool { UserDefaults.standard.bool(forKey: "dvrPlaylistRewriteDisabled") }
+
+    let queue = DispatchQueue(label: "com.aerio.dvr-playlist-loader")
+    private let headers: [String: String]
+    /// Seconds for #EXT-X-START:TIME-OFFSET (PRECISE). 0 = Watch from
+    /// Beginning, >0 = Resume; nil keeps the server's own start point
+    /// (live edge). Replaces the client-side start seek, which raced the
+    /// live-edge prebuffer (device 2026-10-12, build 9520249: the seek to
+    /// 0 "landed" but loaded stayed at [1222.62-1234.87] and no further
+    /// media request followed).
+    let startOffset: Double?
+    private let lock = NSLock()
+    private var fetches = 0
+    private var lastLoggedDropped = -1
+
+    init(headers: [String: String], startOffset: Double?) {
+        self.headers = headers
+        self.startOffset = startOffset
+    }
+
+    /// http(s) -> custom scheme; nil when the URL is not plain http(s).
+    static func customURL(for url: URL) -> URL? {
+        guard var c = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return nil }
+        switch c.scheme?.lowercased() {
+        case "http": c.scheme = scheme
+        case "https": c.scheme = secureScheme
+        default: return nil
+        }
+        return c.url
+    }
+
+    static func realURL(for url: URL) -> URL? {
+        guard var c = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return nil }
+        switch c.scheme?.lowercased() {
+        case scheme: c.scheme = "http"
+        case secureScheme: c.scheme = "https"
+        default: return nil
+        }
+        return c.url
+    }
+
+    /// Pure rewrite. Returns the new text, how many leading
+    /// discontinuities were dropped, the segment count and the tags seen
+    /// before the first segment (for the log).
+    static func rewrite(_ text: String, base: URL, startOffset: Double? = nil) -> (text: String, dropped: Int, segments: Int, head: [String]) {
+        var out: [String] = []
+        var seenSegment = false
+        var dropped = 0
+        var segments = 0
+        var head: [String] = []
+        func resolve(_ ref: String) -> String {
+            guard let abs = URL(string: ref, relativeTo: base)?.absoluteURL else { return ref }
+            if abs.path.lowercased().hasSuffix(".m3u8"), let custom = customURL(for: abs) {
+                return custom.absoluteString
+            }
+            return abs.absoluteString
+        }
+        for raw in text.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty { out.append(line); continue }
+            if line.hasPrefix("#") {
+                if startOffset != nil, line.hasPrefix("#EXT-X-START") {
+                    head.append(String(line.prefix(80)) + " (replaced)")
+                    continue
+                }
+                if line == "#EXTM3U", let off = startOffset {
+                    out.append(line)
+                    out.append(String(format: "#EXT-X-START:TIME-OFFSET=%.3f,PRECISE=YES", off))
+                    continue
+                }
+                if !seenSegment {
+                    if line == "#EXT-X-DISCONTINUITY" { dropped += 1; head.append(line + " (dropped)"); continue }
+                    if !line.hasPrefix("#EXTINF") { head.append(String(line.prefix(80))) }
+                }
+                if line.hasPrefix("#EXTINF") { seenSegment = true }
+                if let r = line.range(of: "URI=\""),
+                   let end = line[r.upperBound...].firstIndex(of: "\"") {
+                    let ref = String(line[r.upperBound..<end])
+                    out.append(line.replacingCharacters(in: r.upperBound..<end, with: resolve(ref)))
+                } else {
+                    out.append(line)
+                }
+                continue
+            }
+            segments += 1
+            out.append(resolve(line))
+        }
+        return (out.joined(separator: "\n"), dropped, segments, head)
+    }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+        guard let url = loadingRequest.request.url, let real = Self.realURL(for: url) else { return false }
+        var req = URLRequest(url: real, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
+            guard let self else { return }
+            if let error {
+                debugLog("[AVP-DVR] playlist rewrite fetch failed: \(error.localizedDescription)")
+                loadingRequest.finishLoading(with: error)
+                return
+            }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard status == 200, let data, let text = String(data: data, encoding: .utf8),
+                  text.hasPrefix("#EXTM3U") else {
+                // Not a playlist (finalized recording answering with the
+                // SPA's HTML, or an HTTP error): hand the bytes through
+                // untouched so AVPlayer fails exactly as it did before and
+                // the completed-file migration still runs.
+                debugLog("[AVP-DVR] playlist rewrite passthrough: HTTP \(status), \(data?.count ?? 0) bytes, not a playlist")
+                if status != 200 {
+                    loadingRequest.finishLoading(with: NSError(domain: NSURLErrorDomain, code: NSURLErrorBadServerResponse,
+                                                               userInfo: [NSLocalizedDescriptionKey: "DVR playlist HTTP \(status)"]))
+                    return
+                }
+                if let data { loadingRequest.dataRequest?.respond(with: data) }
+                loadingRequest.finishLoading()
+                return
+            }
+            let result = Self.rewrite(text, base: real, startOffset: self.startOffset)
+            self.lock.lock()
+            self.fetches += 1
+            let n = self.fetches
+            let logIt = n <= 2 || result.dropped != self.lastLoggedDropped
+            self.lastLoggedDropped = result.dropped
+            self.lock.unlock()
+            if logIt {
+                debugLog("[AVP-DVR] playlist rewrite #\(n): start=\(self.startOffset.map { String(format: "%.3f", $0) } ?? "server") dropped \(result.dropped) leading DISCONTINUITY, segments=\(result.segments), head=[\(result.head.joined(separator: " | "))]")
+            }
+            let body = Data(result.text.utf8)
+            if let info = loadingRequest.contentInformationRequest {
+                info.contentType = "public.m3u8-playlist"
+                info.contentLength = Int64(body.count)
+                info.isByteRangeAccessSupported = false
+            }
+            loadingRequest.dataRequest?.respond(with: body)
+            loadingRequest.finishLoading()
+        }.resume()
+        return true
+    }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        didCancel loadingRequest: AVAssetResourceLoadingRequest) {}
+}
+
+nonisolated(unsafe) private var dvrPlaylistLoaderKey: UInt8 = 0
+
 /// Thread-safe scalar slot.
 /// Mutable flag with reference semantics for SwiftUI views (see
 /// AVPlayerMultiviewTile.resumeFlag).
@@ -5617,6 +5779,32 @@ struct AVPlayerMultiviewTile: View {
     /// the audio-only lead-in. Test lever, confirmed by [AVP-VIDEO].
     static let dvrStartSeekTolerance = CMTime(seconds: 2, preferredTimescale: 600)
 
+    /// GH #93: 3 s after play, the loaded ranges must cover the clock. If
+    /// not, replace the item once with a fresh one on the same rewritten
+    /// playlist URL.
+    static func armDVRNoMediaWatchdog(_ avPlayer: AVPlayer, item: AVPlayerItem, url: URL,
+                                      options: [String: Any], loader: DVRPlaylistRewriteLoader) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            guard avPlayer.currentItem === item else { return }
+            let now = item.currentTime()
+            let covered = item.loadedTimeRanges.contains { CMTimeRangeContainsTime($0.timeRangeValue, time: now) }
+            guard !covered else {
+                debugLog("[AVP-DVR] media loaded at \(String(format: "%.1f", now.seconds))s; watchdog satisfied")
+                return
+            }
+            let loaded = item.loadedTimeRanges.map {
+                String(format: "%.2f-%.2f", $0.timeRangeValue.start.seconds, CMTimeRangeGetEnd($0.timeRangeValue).seconds)
+            }.joined(separator: ",")
+            debugLog("[AVP-DVR] no media loaded at \(String(format: "%.1f", now.seconds))s (loaded=[\(loaded)]); reloading item")
+            let asset = AVURLAsset(url: url, options: options)
+            asset.resourceLoader.setDelegate(loader, queue: loader.queue)
+            objc_setAssociatedObject(asset, &dvrPlaylistLoaderKey, loader, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            let fresh = AVPlayerItem(asset: asset)
+            avPlayer.replaceCurrentItem(with: fresh)
+            avPlayer.play()
+        }
+    }
+
     /// Held DVR start: play, then prove the rate took two seconds later.
     static func playAndVerify(_ avPlayer: AVPlayer, item: AVPlayerItem) {
         avPlayer.play()
@@ -7356,7 +7544,32 @@ struct AVPlayerMultiviewTile: View {
         }
         var driverJoinOffset = 0.0
         var driverOffsetFloor = 0.0
-        let asset = AVURLAsset(url: url, options: options)
+        // GH #93: in-progress recording over the server's HLS goes through
+        // the playlist rewrite (see DVRPlaylistRewriteLoader).
+        var assetURL = url
+        var dvrLoader: DVRPlaylistRewriteLoader?
+        if isDVR, adoptedPlayer == nil, !DVRPlaylistRewriteLoader.disabled,
+           url.host != "127.0.0.1", url.host != "localhost",
+           url.path.lowercased().hasSuffix(".m3u8"),
+           let custom = DVRPlaylistRewriteLoader.customURL(for: url) {
+            assetURL = custom
+            // Same resume rule as below: 0 = from the beginning, >2 s =
+            // resume there, nil = server start point (live edge).
+            let startMs = progressStore.explicitResumeMs ?? resumePositionMs
+            let startOffset: Double? = startMs.flatMap { ms in
+                ms == 0 ? 0 : (ms > 2_000 ? Double(ms) / 1000.0 : nil)
+            }
+            dvrLoader = DVRPlaylistRewriteLoader(headers: requestHeaders, startOffset: startOffset)
+            debugLog("[AVP-DVR] playlist rewrite on (leading DISCONTINUITY dropped locally) title=\(channelName)")
+        } else if isDVR {
+            debugLog("[AVP-DVR] playlist rewrite off (\(DVRPlaylistRewriteLoader.disabled ? "developer switch" : "not a server HLS URL")) title=\(channelName)")
+        }
+        let asset = AVURLAsset(url: assetURL, options: options)
+        if let dvrLoader {
+            asset.resourceLoader.setDelegate(dvrLoader, queue: dvrLoader.queue)
+            // resourceLoader holds its delegate weakly; the asset owns it.
+            objc_setAssociatedObject(asset, &dvrPlaylistLoaderKey, dvrLoader, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
         if url.scheme == HLSDelivery.scheme {
             asset.resourceLoader.setDelegate(HLSResourceLoaderRegistry.shared,
                                              queue: HLSResourceLoaderRegistry.shared.queue)
@@ -7571,7 +7784,7 @@ struct AVPlayerMultiviewTile: View {
         // item is ready, so firing it here is safe and race-free.
         let resumeMs = progressStore.explicitResumeMs ?? resumePositionMs
         var deferDVRStartPlay = false
-        if isDVR, resumeMs == 0 {
+        if isDVR, resumeMs == 0, dvrLoader == nil {
             // "Watch from Beginning" on an in-progress recording: without
             // a seek, a live-shaped playlist starts at the live edge.
             // The pre-ready queued seek alone is NOT enough: when the item
@@ -7636,7 +7849,7 @@ struct AVPlayerMultiviewTile: View {
             }
             debugLog("[AVP-MV] DVR from-beginning seek queued (play held until it lands) title=\(channelName)")
         }
-        if isVOD || isDVR, let ms = resumeMs, ms > 2_000 {
+        if isVOD || (isDVR && dvrLoader == nil), let ms = resumeMs, ms > 2_000 {
             let t = CMTime(value: CMTimeValue(ms), timescale: 1_000)
             // EXACT seek: infinite tolerance snapped to the nearest
             // segment boundary - up to ~6s drift per version switch with
@@ -7646,7 +7859,18 @@ struct AVPlayerMultiviewTile: View {
             avPlayer.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
             debugLog("[AVP-MV] VOD resume seek to \(ms / 1000)s (exact) title=\(channelName)")
         }
-        if !shouldPause, !deferDVRStartPlay { avPlayer.play() }
+        if !shouldPause, !deferDVRStartPlay {
+            if let dvrLoader {
+                // Start point comes from #EXT-X-START in the rewritten
+                // playlist; no client seek. Prove the rate took, and
+                // reload the item once if nothing is loaded at the clock.
+                Self.playAndVerify(avPlayer, item: playerItem)
+                Self.armDVRNoMediaWatchdog(avPlayer, item: playerItem, url: assetURL,
+                                           options: options, loader: dvrLoader)
+            } else {
+                avPlayer.play()
+            }
+        }
         // Loopback VOD: keep a spinner up until the clock actually
         // moves. The first segment build on a resumed 4K title over
         // slow Wi-Fi can take close to a minute, and the screen was
