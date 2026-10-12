@@ -1075,6 +1075,11 @@ final class AerioCastController: NSObject, ObservableObject {
     /// The in-flight load request; retained so its delegate callbacks
     /// (which report receiver-side load failure) stay alive.
     private var loadRequest: GCKRequest?
+    /// The last proxy load (URL and content), for the composite load retry.
+    private var lastProxyLoad: (url: URL, content: Content)?
+    /// Composite receiver-load retries used since the last fresh load.
+    private var compositeLoadRetries = 0
+    private static let compositeLoadMaxRetries = 2
 
     /// Live path (casting rework P2): start (or re-point) the local cast
     /// HLS proxy at the channel's raw TS URL, wait until the playlist has
@@ -1116,6 +1121,16 @@ final class AerioCastController: NSObject, ObservableObject {
         // new load request: it unloads the old media and shows its own loading
         // state for the new channel. Cast Connect (the native Android TV app)
         // keeps its in-place setChannel tune; only this path changed.
+        // iPad log 2026-10-11 22:44:39 to 22:44:42: Add Channel turned the
+        // ESPN2 HD cast into a composite 28 ms after its load went out; the
+        // flip stopped that channel's proxy, the receiver failed the ESPN2
+        // load (code 310), and because that request was still the tracked
+        // one, its failure stopped the NEW composite proxy and surfaced
+        // "The TV could not start this channel". A superseded load's
+        // failure is not this load's failure: forget it here.
+        loadRequest = nil
+        lastProxyLoad = nil
+        compositeLoadRetries = 0
         let isFlip = webReceiverHasLoadedMedia
         flipToken &+= 1
         let token = flipToken
@@ -1406,6 +1421,7 @@ final class AerioCastController: NSObject, ObservableObject {
         let request = client.loadMedia(with: requestBuilder.build())
         request.delegate = self
         loadRequest = request
+        lastProxyLoad = (playlistURL, content)
         // The next load on this session is a flip: tear down and load afresh.
         webReceiverHasLoadedMedia = true
     }
@@ -1483,6 +1499,7 @@ final class AerioCastController: NSObject, ObservableObject {
     /// still nothing 10 s after that surfaces the cast-failure notice.
     /// Android parity: AerioCastSender (963e5ed6).
     private static let staleReceiverSeconds: UInt64 = 10
+    private static let compositeStaleReceiverSeconds: UInt64 = 8
     private var staleCheckTask: Task<Void, Never>?
     /// Channel whose load was already re-issued once.
     private var staleReloadedMediaID: String?
@@ -1491,13 +1508,17 @@ final class AerioCastController: NSObject, ObservableObject {
         staleCheckTask?.cancel()
         staleWatchTask?.cancel()
         staleCheckTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: Self.staleReceiverSeconds * 1_000_000_000)
+            // Composite: 8 s (1 s cuts; the receiver has segments at once).
+            let wait = content.mediaID == MultiviewCompositeSession.castMediaID
+                ? Self.compositeStaleReceiverSeconds : Self.staleReceiverSeconds
+            try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
             guard !Task.isCancelled else { return }
             let counts = await Task.detached { CastHLSProxySession.shared.receiverRequestCounts() }.value
             guard !Task.isCancelled, let self, self.isCasting,
                   self.castingContent?.mediaID == content.mediaID,
                   let counts else { return }
-            let secs = Self.staleReceiverSeconds
+            let secs = content.mediaID == MultiviewCompositeSession.castMediaID
+                ? Self.compositeStaleReceiverSeconds : Self.staleReceiverSeconds
             if counts.segments > 0 {
                 let first = counts.firstSegmentAt.map { $0.timeIntervalSince(counts.markedAt) } ?? 0
                 debugLog("[Cast] receiver healthy: first segment \(String(format: "%.1f", first)) s after load "
@@ -1918,6 +1939,27 @@ extension AerioCastController: GCKRequestDelegate {
             guard let inFlight = self.loadRequest, ObjectIdentifier(inFlight) == failedID else { return }
             self.loadRequest = nil
             debugLog("[CAST-HLS] receiver load failed: \(errorText)")
+            // Composite: the proxy is still up and publishing; re-issue the
+            // load (2 s apart) and surface only once the retries are spent.
+            if let last = self.lastProxyLoad,
+               last.content.mediaID == MultiviewCompositeSession.castMediaID,
+               self.castingContent?.mediaID == last.content.mediaID,
+               self.compositeLoadRetries < Self.compositeLoadMaxRetries {
+                self.compositeLoadRetries += 1
+                let attempt = self.compositeLoadRetries
+                debugLog("[CAST-HLS] composite load failed; re-issuing the load (attempt \(attempt) of \(Self.compositeLoadMaxRetries))")
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    guard let self, self.isCasting, self.loadRequest == nil,
+                          self.castingContent?.mediaID == last.content.mediaID,
+                          let live = GCKCastContext.sharedInstance().sessionManager.currentCastSession
+                    else { return }
+                    await Task.detached { CastHLSProxySession.shared.markReceiverLoad() }.value
+                    self.loadProxyPlaylist(last.url, content: last.content, on: live)
+                    self.armStaleReceiverCheck(playlistURL: last.url, content: last.content, afterReload: false)
+                }
+                return
+            }
             Task.detached { CastHLSProxySession.shared.stop() }
             self.surfaceCastFailure("The TV could not start this channel")
         }

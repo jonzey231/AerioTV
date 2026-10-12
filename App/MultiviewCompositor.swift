@@ -228,6 +228,20 @@ final class MultiviewCompositeTaps: @unchecked Sendable {
         for (id, e) in snapshot where tapped.contains(id) { e.item.audioMix = nil }
     }
 
+    /// Tile watchdog: reconnect the tile's ingest in place on its remuxer.
+    @MainActor func reconnectIngest(tileID: String, completion: @escaping @MainActor (Bool, String) -> Void) {
+        lock.lock()
+        let remuxer = entries[tileID]?.remuxer
+        lock.unlock()
+        guard let remuxer else { completion(false, "no remuxer for the tile"); return }
+        remuxer.reconnectIngestInPlace { result in
+            switch result {
+            case .started: completion(true, "")
+            case .refused(let why): completion(false, why)
+            }
+        }
+    }
+
     /// Why a tile has no pixels (the no-pixels diagnostic line).
     func sourceDescription(tileID: String) -> String {
         lock.lock()
@@ -442,6 +456,8 @@ final class MultiviewCompositeSession: ObservableObject {
         guard Self.eligible(count: tiles.count) else { return false }
         tileIDs = tiles.map(\.id)
         channelNames = tiles.map(\.item.name)
+        watchdogRestarts.removeAll()
+        watchdogLastRestart.removeAll()
         let focus = store.audioTileID.flatMap { id in tileIDs.contains(id) ? id : nil } ?? tileIDs[0]
         // Initial layout: the app's stored Multiview layout preference
         // (Settings > Player > Multiview); the sheet's Layout row then
@@ -603,6 +619,36 @@ final class MultiviewCompositeSession: ObservableObject {
 
     /// Last sampled playing state per tile (stall recovery detection).
     private var playingState: [String: Bool] = [:]
+    /// Tile watchdog (Android MultiviewCompositor.kt 1056d9f7): restarts so
+    /// far per tile while it stays stalled, and when the last one fired.
+    private var watchdogRestarts: [String: Int] = [:]
+    private var watchdogLastRestart: [String: Date] = [:]
+    private static let watchdogThresholds: [Double] = [20, 40, 60]
+
+    /// A tile with no new tapped picture and no ingest growth for 20, then
+    /// 40, then 60 s restarts its source; the cast itself never stops.
+    private func runTileWatchdog(_ comp: MultiviewCompositor) {
+        for (n, id) in tileIDs.enumerated() {
+            let stalled = comp.tileStallSeconds(id)
+            if stalled < 2 {
+                watchdogRestarts[id] = nil
+                watchdogLastRestart[id] = nil
+                continue
+            }
+            let k = watchdogRestarts[id] ?? 0
+            let threshold = Self.watchdogThresholds[min(k, Self.watchdogThresholds.count - 1)]
+            let sinceRestart = watchdogLastRestart[id].map { Date().timeIntervalSince($0) } ?? .infinity
+            guard min(stalled, sinceRestart) >= threshold else { continue }
+            watchdogRestarts[id] = k + 1
+            watchdogLastRestart[id] = Date()
+            let reason = String(format: "no new picture or ingest for %.0f s (restart %d, threshold %.0f s)", stalled, k + 1, threshold)
+            debugLog("[MV-CAST] tile watchdog restart tile=\(n) reason=\(reason) id=\(id)")
+            MultiviewCompositeTaps.shared.reconnectIngest(tileID: id) { [weak comp] ok, detail in
+                if ok { comp?.tileSourceRestarted(tileID: id) }
+                else { debugLog("[MV-CAST] tile watchdog restart tile=\(n) refused: \(detail)") }
+            }
+        }
+    }
 
     private func failed(_ reason: StopReason, detail: String) {
         guard transport != nil else { return }
@@ -696,9 +742,11 @@ final class MultiviewCompositeSession: ObservableObject {
                 MultiviewCompositeTaps.shared.attachAudioTaps()
                 if ProcessInfo.processInfo.thermalState == .critical {
                     self.failed(.thermal, detail: "thermal state critical")
-                } else if comp.secondsSinceLastCompose() > MultiviewCompositor.maxBehindSeconds {
-                    self.failed(.renderStall, detail: String(format: "no composed frame for %.1f s", comp.secondsSinceLastCompose()))
+                } else if comp.composeLoopDeadSeconds() > MultiviewCompositor.deadLoopSeconds {
+                    self.failed(.renderStall, detail: String(format: "compose loop dead for %.1f s", comp.composeLoopDeadSeconds()))
+                    return
                 }
+                self.runTileWatchdog(comp)
             }
         }
     }
@@ -777,6 +825,29 @@ enum MultiviewCompositeOverlay {
         format.opaque = false
         let img = UIGraphicsImageRenderer(size: canvas, format: format).image { draw($0.cgContext) }
         return img.cgImage.map { CIImage(cgImage: $0) }
+    }
+
+    /// A stalled tile: black, its channel name, "Reconnecting".
+    static func reconnecting(rect: CGRect, name: String) -> CIImage? {
+        render { ctx in
+            ctx.setFillColor(UIColor.black.cgColor)
+            ctx.fill(rect)
+            let k = max(0.5, min(rect.width / 640, 2))
+            let para = NSMutableParagraphStyle()
+            para.alignment = .center
+            para.lineBreakMode = .byTruncatingTail
+            let nameAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 22 * k, weight: .semibold),
+                .foregroundColor: UIColor.white, .paragraphStyle: para]
+            let subAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 16 * k, weight: .regular),
+                .foregroundColor: UIColor(white: 0.75, alpha: 1), .paragraphStyle: para]
+            let w = rect.width - 24 * k
+            let h1 = 30 * k, h2 = 22 * k
+            let top = rect.midY - (h1 + h2) / 2
+            (name as NSString).draw(in: CGRect(x: rect.minX + 12 * k, y: top, width: w, height: h1), withAttributes: nameAttrs)
+            ("Reconnecting" as NSString).draw(in: CGRect(x: rect.minX + 12 * k, y: top + h1, width: w, height: h2), withAttributes: subAttrs)
+        }
     }
 
     /// White where each tile's rounded shape is (the clip mask).
@@ -1486,6 +1557,13 @@ final class MultiviewCompositor: @unchecked Sendable {
     private var lagSeconds: [String: Double] = [:]
     private var stopped = false
     private var lastComposeHost: CFTimeInterval = 0
+    /// Every compose tick, stamped before any guard (render-stall rule:
+    /// the loop itself is dead, not a starved source).
+    private var lastTickHost: CFTimeInterval = 0
+    /// Any tile delivered a new picture (lock copy of lastAnyPixelsHost).
+    private var lastAnyPixelsShared: CFTimeInterval = 0
+    /// Per tile: last new picture or ingest byte (tile watchdog).
+    private var tileProgressHost: [String: CFTimeInterval] = [:]
     /// Focused-tile PCM from the player's audio tap, newest arrival.
     private var tapPCMAt: [String: CFTimeInterval] = [:]
     private var style: MultiviewCompositeStyle
@@ -1670,7 +1748,7 @@ final class MultiviewCompositor: @unchecked Sendable {
             makeEncoder()
             t0 = CACurrentMediaTime()
             lastAnyPixelsHost = t0
-            lock.lock(); lastComposeHost = t0; focusChangedHost = t0; lock.unlock()
+            lock.lock(); lastComposeHost = t0; lastTickHost = t0; lastAnyPixelsShared = t0; focusChangedHost = t0; lock.unlock()
             lastStatsAt = t0
             lastOutputAt = t0
             let timer = DispatchSource.makeTimerSource(queue: composeQueue)
@@ -1736,11 +1814,35 @@ final class MultiviewCompositor: @unchecked Sendable {
         gone.forEach { $0.stop() }
     }
 
-    /// Wall seconds since the compose tick last ran (render-stall rule).
+    /// Wall seconds since the compose tick last ran (diagnostics).
     func secondsSinceLastCompose() -> Double {
         lock.lock(); defer { lock.unlock() }
         return isStoppedLocked ? 0 : CACurrentMediaTime() - lastComposeHost
     }
+
+    /// Render-stall rule (iPad log 2026-10-11 22:39:51): one tile starved
+    /// on a bursty feed must not end the cast. Only a dead compose loop
+    /// (no tick at all) with no tile delivering a picture counts.
+    func composeLoopDeadSeconds() -> Double {
+        lock.lock(); defer { lock.unlock() }
+        if isStoppedLocked { return 0 }
+        let now = CACurrentMediaTime()
+        return min(now - lastTickHost, now - lastAnyPixelsShared)
+    }
+
+    /// Seconds since the tile last showed a new picture or received an
+    /// ingest byte (the tile watchdog and the Reconnecting notice).
+    func tileStallSeconds(_ id: String) -> Double {
+        lock.lock(); defer { lock.unlock() }
+        if isStoppedLocked { return 0 }
+        return CACurrentMediaTime() - (tileProgressHost[id] ?? lastTickHost)
+    }
+
+    /// A tile with no progress for this long draws as black with its name
+    /// and "Reconnecting" (Android NOTICE_RECONNECTING).
+    static let reconnectingNoticeSeconds: Double = 5
+    /// Render-stall stop: the compose loop dead this long.
+    static let deadLoopSeconds: Double = 20
 
     private var isStoppedLocked: Bool { stopped }
 
@@ -1798,8 +1900,9 @@ final class MultiviewCompositor: @unchecked Sendable {
     // MARK: Compose + encode (compose queue)
 
     private func tick() {
-        guard !isStopped, let pool else { return }
         let host = CACurrentMediaTime()
+        lock.lock(); lastTickHost = host; lock.unlock()
+        guard !isStopped, let pool else { return }
         if session == nil {
             // Encoder lost (invalidated on app background or a media
             // services reset): rebuild at most once a second; the
@@ -1855,6 +1958,7 @@ final class MultiviewCompositor: @unchecked Sendable {
                     debugLog("[MV-CAST] composite frame source tile=\(n) first pixel buffer \(CVPixelBufferGetWidth(pb))x\(CVPixelBufferGetHeight(pb)) id=\(id) after \(String(format: "%.1f", host - (tileSince[id] ?? host))) s")
                 }
                 latest[id] = pb
+                lock.lock(); tileProgressHost[id] = host; lock.unlock()
                 noPixelsLogged.remove(id)
             } else {
                 let since = tileSince[id] ?? host
@@ -1867,6 +1971,7 @@ final class MultiviewCompositor: @unchecked Sendable {
         logAVOffset(focus: focus, compositePTS: pts, host: host)
         if gotPixels {
             lastAnyPixelsHost = host
+            lock.lock(); lastAnyPixelsShared = host; lock.unlock()
             if noPictureLogged {
                 noPictureLogged = false
                 debugLog("[MV-CAST] composite tile pictures flowing again\(backgrounded ? " (background)" : "")")
@@ -1944,6 +2049,8 @@ final class MultiviewCompositor: @unchecked Sendable {
         let logoMap = logos
         let focusAt = focusChangedHost
         let mode = self.mode
+        let progress = tileProgressHost
+        let tickAt = lastTickHost
         lock.unlock()
         // Round 3 (Logan 2026-10-07): the composite draws what the local
         // Multiview draws for the user's settings: tile padding, square or
@@ -1978,6 +2085,14 @@ final class MultiviewCompositor: @unchecked Sendable {
         for (i, rect) in rects.enumerated() where i < tiles.count {
             let id = tiles[i]
             let tileArea = MultiviewCompositeLayout.flipped(rect)
+            if host - (progress[id] ?? tickAt) >= Self.reconnectingNoticeSeconds, latest[id] != nil || progress[id] != nil {
+                // A stalled tile (Android NOTICE_RECONNECTING): black with
+                // its name and "Reconnecting"; the other tiles keep going.
+                if let notice = reconnectingNotice(rect: rect, name: nameMap[id] ?? "") {
+                    videos = notice.composited(over: videos)
+                }
+                continue
+            }
             guard let pb = latest[id] else { continue }
             let src = CIImage(cvPixelBuffer: pb)
             let w = src.extent.width, h = src.extent.height
@@ -2009,6 +2124,18 @@ final class MultiviewCompositor: @unchecked Sendable {
             }
         }
         return image.cropped(to: full)
+    }
+
+    private var noticeCache: [String: CIImage] = [:]
+
+    /// Cached per rect and name (compose queue).
+    private func reconnectingNotice(rect: CGRect, name: String) -> CIImage? {
+        let key = "\(rect)|\(name)"
+        if let c = noticeCache[key] { return c }
+        let img = MultiviewCompositeOverlay.reconnecting(rect: rect, name: name)
+        if noticeCache.count > 32 { noticeCache.removeAll() }
+        noticeCache[key] = img
+        return img
     }
 
     /// Indicator opacity `since` seconds after the last focus change: the
@@ -2281,7 +2408,7 @@ final class MultiviewCompositor: @unchecked Sendable {
 
     /// A tile's raw ingest bytes (its remuxer queue).
     func tileBytes(tileID: String, data: Data) {
-        lock.lock(); ingestBytes[tileID, default: 0] += data.count; lock.unlock()
+        lock.lock(); ingestBytes[tileID, default: 0] += data.count; tileProgressHost[tileID] = CACurrentMediaTime(); lock.unlock()
         decoder(tileID)?.feed(data)
         audioQueue.async { [weak self] in self?.handleTileBytes(tileID, [UInt8](data)) }
     }
