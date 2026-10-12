@@ -902,12 +902,44 @@ final class MultiviewStore: ObservableObject {
         DebugLogger.shared.log(
             "[MV-Tile] DVR recording finished mid-watch; migrating to /file/ at \(positionMs)ms tileID=\(tileID)",
             category: "Playback", level: .info)
+        dvrTilesAwaitingFinalize[tileID] = (original: tile, fileURL: fileURL)
         tiles[idx] = MultiviewTile(
             id: tile.id, item: tile.item, streamURL: fileURL,
             headers: tile.headers, addedAt: tile.addedAt, kind: .vod,
             vodID: tile.vodID, vodServerID: tile.vodServerID,
             vodType: tile.vodType,
             resumePositionMs: positionMs > 2_000 ? positionMs : nil)
+        return true
+    }
+
+    /// GH #93: the DVR tiles `migrateDVRTileToCompletedFile` moved onto
+    /// /file/, keyed by tile id, with the /file/ URL they were moved to.
+    /// Kept so a migration that fired before the server finished writing
+    /// the file can go back to the recording's HLS at the same position.
+    private var dvrTilesAwaitingFinalize: [String: (original: MultiviewTile, fileURL: URL)] = [:]
+
+    /// GH #93: the completed-file migration fired, but /file/ is not a
+    /// finished file yet (the reporter's log: "[MKV-VOD] prepare failed:
+    /// no Cues index (unseekable MKV)" on all three migrations, with the
+    /// file at 824 MB and then 1984 MB two minutes later, and the app
+    /// still listing the recording as in progress when reopened). The
+    /// mpv fallback that used to take over cannot seek a Cue-less MKV
+    /// and played from the start. Put the tile back on the recording's
+    /// HLS at the position it was migrated at; the next terminal stall
+    /// tries /file/ again. Returns false when this tile was not a DVR
+    /// migration still sitting on its /file/ URL.
+    func revertUnfinalizedDVRFileTile(tileID: String, reason: String) -> Bool {
+        guard let stash = dvrTilesAwaitingFinalize[tileID],
+              let idx = tiles.firstIndex(where: { $0.id == tileID }),
+              tiles[idx].streamURL == stash.fileURL else { return false }
+        dvrTilesAwaitingFinalize[tileID] = nil
+        let positionMs = tiles[idx].resumePositionMs ?? 0
+        DebugLogger.shared.log(
+            "[MV-Tile] DVR /file/ not finalized (\(reason)); back to in-progress HLS at \(positionMs)ms tileID=\(tileID)",
+            category: "Playback", level: .info)
+        var restored = stash.original
+        restored.resumePositionMs = positionMs > 2_000 ? positionMs : nil
+        tiles[idx] = restored
         return true
     }
 

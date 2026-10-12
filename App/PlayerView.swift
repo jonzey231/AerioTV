@@ -6311,10 +6311,47 @@ final class AVPlayerProgressDriver {
         }
     }
 
+    /// GH #93: an in-progress recording's playlist is live-shaped and its
+    /// seekable end is the last segment the server has published. A seek
+    /// that lands on (or past) that end leaves AVPlayer nothing to buffer
+    /// ahead, so it waits for the next segment while the chrome shows a
+    /// frozen frame. Keep every DVR seek this far behind the written end.
+    static let dvrSeekEdgeMarginSeconds: Double = 12
+
+    /// Clamps a DVR-window seek target into [start, end - margin]. Nil
+    /// when the item has no usable seekable range yet (caller seeks as
+    /// asked). Logs every clamp so a tester can see it happen.
+    static func dvrClampedSeekSeconds(_ requested: Double, player: AVPlayer) -> Double? {
+        guard let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue else { return nil }
+        let start = CMTimeGetSeconds(range.start)
+        let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+        guard start.isFinite, end.isFinite, end > start else { return nil }
+        let ceiling = max(start, end - dvrSeekEdgeMarginSeconds)
+        let target = min(max(requested, start), ceiling)
+        if target != requested {
+            debugLog("[AVP-DVR] seek clamped requested=\(String(format: "%.1f", requested))s -> \(String(format: "%.1f", target))s (written end \(String(format: "%.1f", end))s, margin \(Int(dvrSeekEdgeMarginSeconds))s)")
+        } else {
+            debugLog("[AVP-DVR] seek to \(String(format: "%.1f", target))s (written end \(String(format: "%.1f", end))s)")
+        }
+        return target
+    }
+
     private func wireCommands(_ player: AVPlayer) {
-        store.togglePauseAction = { [weak player] in
+        store.togglePauseAction = { [weak self, weak player] in
             guard let player else { return }
-            if player.timeControlStatus == .paused { player.play() } else { player.pause() }
+            let resuming = player.timeControlStatus == .paused
+            if let self, self.store.isDVRWindow {
+                // GH #93 instrumentation: position and buffered-ahead at
+                // every DVR pause/resume, so a post-resume freeze can be
+                // matched against what AVPlayer actually held.
+                let cur = player.currentTime().seconds
+                let ahead = player.currentItem?.loadedTimeRanges
+                    .map { $0.timeRangeValue }
+                    .first { CMTimeRangeContainsTime($0, time: player.currentTime()) }
+                    .map { CMTimeGetSeconds(CMTimeRangeGetEnd($0)) - cur } ?? 0
+                debugLog("[AVP-DVR] \(resuming ? "resume" : "pause") at \(String(format: "%.1f", cur))s, \(String(format: "%.1f", ahead))s buffered ahead")
+            }
+            if resuming { player.play() } else { player.pause() }
         }
         store.seekAction = { [weak self, weak player] ms in
             guard let player else { return }
@@ -6342,7 +6379,11 @@ final class AVPlayerProgressDriver {
                 if player.timeControlStatus == .paused { player.play() }
                 return
             }
-            let target = CMTime(value: CMTimeValue(ms), timescale: 1000)
+            var target = CMTime(value: CMTimeValue(ms), timescale: 1000)
+            if let self, self.store.isDVRWindow,
+               let clamped = Self.dvrClampedSeekSeconds(Double(ms) / 1000.0, player: player) {
+                target = CMTime(seconds: clamped, preferredTimescale: 600)
+            }
             player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
         }
         store.relativeSeekAction = { [weak self, weak player] deltaMs in
@@ -6356,7 +6397,10 @@ final class AVPlayerProgressDriver {
             let cur = player.currentTime().seconds
             guard cur.isFinite else { return }
             var target = cur + Double(deltaMs) / 1000.0
-            if let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
+            if let self, self.store.isDVRWindow,
+               let clamped = Self.dvrClampedSeekSeconds(target, player: player) {
+                target = clamped
+            } else if let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
                 let start = CMTimeGetSeconds(range.start)
                 let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
                 if start.isFinite, end.isFinite {

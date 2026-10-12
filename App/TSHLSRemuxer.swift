@@ -5607,6 +5607,9 @@ struct AVPlayerMultiviewTile: View {
     /// of the server's 4 s segments) and forward buffer (about two).
     private static let forceHLSLiveOffset: Double = 12
     private static let forceHLSForwardBuffer: Double = 8
+    /// Forward buffer for an in-progress recording played over the
+    /// server's direct HLS (GH #93). See startPlayer.
+    private static let dvrForwardBuffer: Double = 15
 
     /// Live tunes only: arm the remuxer's 2 s silence signal and its
     /// clean-close signal.
@@ -6177,6 +6180,17 @@ struct AVPlayerMultiviewTile: View {
         // current position. The store swap changes streamURL, which the
         // onChange restart picks up; a false return (unexpected URL
         // shape) falls through to the normal card.
+        // GH #93: the other half of the migration below. /file/ answered
+        // with an MKV that has no Cues yet, i.e. the server is still
+        // writing it. Go back to the in-progress HLS at the same position
+        // instead of letting mpv play the unseekable file from the start.
+        if !isDVR, tileError == nil, reason.contains("no Cues index"),
+           MultiviewStore.shared.revertUnfinalizedDVRFileTile(tileID: tileID, reason: reason) {
+            debugLog("[AVP-MV] DVR file not finalized; resuming the in-progress stream title=\(channelName)")
+            statusText = "Reloading..."
+            stop()
+            return
+        }
         if isDVR, tileError == nil {
             let pos = progressStore.currentMs
             debugLog("[AVP-MV] DVR terminal (\(reason)); attempting completed-file migration at \(pos)ms title=\(channelName)")
@@ -7458,6 +7472,19 @@ struct AVPlayerMultiviewTile: View {
         if adoptedPlayer == nil, isLoopbackVOD || (catchup != nil && isLoopback) {
             playerItem.preferredForwardBufferDuration = 15
         }
+        // In-progress DVR over the server's direct HLS (GH #93): the same
+        // hours-deep live-shaped window, played far behind its edge. The
+        // reporter's log shows AVPlayer ingesting it at 123 to 185 Mbps
+        // ("[AVP-STREAM] startup=485ms ... observed=123321kbps",
+        // "[AVP-PERF] ... observed=185244kbps") on every start and after
+        // every seek, and the picture held still for seconds while audio
+        // ran. The catch-up loopback note above is the same signature;
+        // 15 s bounds it. The recording only grows at its own bitrate,
+        // so a deeper buffer buys nothing.
+        let isDVRDirectHLS = isDVR && !isLoopback
+        if adoptedPlayer == nil, isDVRDirectHLS {
+            playerItem.preferredForwardBufferDuration = Self.dvrForwardBuffer
+        }
         // NO first-play buffering override. The 2026-09-11 17:15 device
         // session (session2.txt) is the counter-experiment: with
         // `automaticallyWaitsToMinimizeStalling = false` and a 2 s
@@ -7470,7 +7497,7 @@ struct AVPlayerMultiviewTile: View {
         // that played that session was the one whose second remuxer ran
         // under the automatic policy. Automatic waiting is what actually
         // starts a live remux stream; leave it alone.
-        debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : (isForceHLSDirect ? "\(Int(Self.forceHLSForwardBuffer))s (Force HLS)" : "automatic")) channel=\(channelName)")
+        debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : (isForceHLSDirect ? "\(Int(Self.forceHLSForwardBuffer))s (Force HLS)" : (isDVRDirectHLS && adoptedPlayer == nil ? "\(Int(Self.dvrForwardBuffer))s (DVR direct HLS)" : "automatic"))) channel=\(channelName)")
         let avPlayer = adoptedPlayer ?? AVPlayer(playerItem: playerItem)
         // FORCE-HLS: automaticallyWaitsToMinimizeStalling stays ON for server
         // HLS items. Turning it off (tested 2026-10-05, iPhone) started 2 ms
@@ -7534,6 +7561,7 @@ struct AVPlayerMultiviewTile: View {
         // the container preloaded; AVPlayer queues the seek until the
         // item is ready, so firing it here is safe and race-free.
         let resumeMs = progressStore.explicitResumeMs ?? resumePositionMs
+        var deferDVRStartPlay = false
         if isDVR, resumeMs == 0 {
             // "Watch from Beginning" on an in-progress recording: without
             // a seek, a live-shaped playlist starts at the live edge.
@@ -7545,18 +7573,34 @@ struct AVPlayerMultiviewTile: View {
             // re-issue the seek at readiness, when it sticks. The DVR
             // playlist never rolls anything off, so position 0 is always
             // in the window.
+            // GH #93: play() is HELD until the readiness seek lands.
+            // Playing first started the item at the live edge, so the
+            // reporter heard edge audio and saw the edge frame ("first
+            // frame rendered ... clock at 2857.15s") before the seek to 0
+            // threw it away and the picture had to rebuild from the start
+            // while audio raced ahead. Nothing renders until we are at 0.
+            deferDVRStartPlay = true
             avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+            let startPaused = shouldPause
             var readyObs: NSKeyValueObservation?
             readyObs = playerItem.observe(\.status, options: [.new]) { item, _ in
                 guard item.status != .unknown else { return }
                 if item.status == .readyToPlay {
-                    avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+                    let issued = Date()
+                    avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { finished in
+                        debugLog("[AVP-DVR] from-beginning seek landed finished=\(finished) in \(Int(Date().timeIntervalSince(issued) * 1000))ms pos=\(String(format: "%.1f", avPlayer.currentTime().seconds))s; \(startPaused ? "staying paused" : "starting playback")")
+                        if !startPaused { avPlayer.play() }
+                    }
                     debugLog("[AVP-MV] DVR from-beginning seek re-issued at readyToPlay")
+                } else if !startPaused {
+                    // Failed item: let the normal failure path see a
+                    // player that was asked to play.
+                    avPlayer.play()
                 }
                 readyObs?.invalidate()
                 readyObs = nil
             }
-            debugLog("[AVP-MV] DVR from-beginning seek queued title=\(channelName)")
+            debugLog("[AVP-MV] DVR from-beginning seek queued (play held until it lands) title=\(channelName)")
         }
         if isVOD || isDVR, let ms = resumeMs, ms > 2_000 {
             let t = CMTime(value: CMTimeValue(ms), timescale: 1_000)
@@ -7568,7 +7612,7 @@ struct AVPlayerMultiviewTile: View {
             avPlayer.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
             debugLog("[AVP-MV] VOD resume seek to \(ms / 1000)s (exact) title=\(channelName)")
         }
-        if !shouldPause { avPlayer.play() }
+        if !shouldPause, !deferDVRStartPlay { avPlayer.play() }
         // Loopback VOD: keep a spinner up until the clock actually
         // moves. The first segment build on a resumed 4K title over
         // slow Wi-Fi can take close to a minute, and the screen was
