@@ -1431,11 +1431,22 @@ struct MultiviewContainerView: View {
             Button(exitConfirmationPrimary, role: .destructive) {
                 performConfirmedExit()
             }
+            #if os(iOS)
+            // iOS presents a confirmationDialog as a popover anchored to
+            // its source (iPad always; iPhone on iOS 26 and later), and
+            // UIKit hides the .cancel action in a popover: tapping outside
+            // is the cancel. Logan 2026-10-12: Cancel must be visible as
+            // on Apple TV, so iOS lists it as a plain action (no role).
+            Button("Cancel") {
+                chromeState.reportInteraction()
+            }
+            #else
             Button("Cancel", role: .cancel) {
                 // Keep chrome alive so the user isn't left staring
                 // at faded pills after they back out.
                 chromeState.reportInteraction()
             }
+            #endif
         } message: {
             Text(exitConfirmationMessage)
         }
