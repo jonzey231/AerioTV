@@ -558,7 +558,11 @@ struct MultiviewContainerView: View {
             // users get a bare no-op mount (overlay renders nothing)
             // so `showAddSheet` / `chromeState` observers keep
             // working without introducing visible UI.
-            if unifiedPath {
+            // iOS: never mount the chrome inside the iPad mini. hideNow()
+            // on minimize only started a fade, so the shrunken X, AirPlay,
+            // "...", + and the engine badge flashed in the mini (Logan,
+            // iPad 2026-10-11 21:24). The mini draws its own X in HomeView.
+            if unifiedPath && !(isIOSMinimized) {
                 PlaybackChromeOverlay(
                     store: store,
                     showAddSheet: $showAddSheet,
@@ -839,6 +843,8 @@ struct MultiviewContainerView: View {
         .onChange(of: nowPlaying.isMinimized) { _, minimized in
             if minimized {
                 #if os(iOS)
+                // The overlay is unmounted while minimized (see the
+                // chrome mount above); hideNow() keeps the state tidy.
                 // The iPad mini draws its own X (HomeView iOSMultiviewWrapper);
                 // hide the full-screen chrome so an untappable shrunken copy
                 // is not left in the mini.
@@ -1424,6 +1430,16 @@ struct MultiviewContainerView: View {
 
     /// Primary-button label for the exit-confirmation dialog. Short
     /// imperative verb matching the title's phrasing.
+    /// iOS only: the container sits inside the iPad docked mini. The
+    /// chrome overlay is not mounted in that state.
+    private var isIOSMinimized: Bool {
+        #if os(iOS)
+        return nowPlaying.isMinimized
+        #else
+        return false
+        #endif
+    }
+
     private var exitConfirmationPrimary: String {
         if PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1 {
             return "Exit"
