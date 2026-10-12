@@ -1395,7 +1395,12 @@ struct DVRView: View {
     private func menuItems(for rec: Recording) -> some View {
         Button { showInfo(rec) } label: { Label("Program Info", systemImage: "info.circle") }
         if rec.isCompleted || rec.status == .stopped || rec.status == .interrupted {
-            Button { actions.play(rec) } label: { Label("Play", systemImage: "play.fill") }
+            // Same wording as the hero card's primary button: "Resume" when
+            // the recording has saved progress (GH #93 follow-up, Logan
+            // 2026-10-12: the long-press menu had no Resume).
+            Button { actions.play(rec) } label: {
+                Label(progressFraction(rec) > 0 ? "Resume" : "Play", systemImage: "play.fill")
+            }
             if rec.destination == .dispatcharrServer, rec.remoteRecordingID != nil {
                 Button { actions.playServer(rec, fromStart: true) } label: {
                     Label("Watch from Beginning", systemImage: "backward.end.fill")
@@ -1412,6 +1417,11 @@ struct DVRView: View {
         }
         if rec.isInProgress {
             if rec.destination == .dispatcharrServer, rec.dispatcharrFileURL != nil {
+                if progressFraction(rec) > 0 {
+                    Button { actions.playServer(rec) } label: {
+                        Label("Resume", systemImage: "play.fill")
+                    }
+                }
                 Button { actions.playServer(rec, liveEdge: true) } label: {
                     Label("Start at Live", systemImage: "play.fill")
                 }

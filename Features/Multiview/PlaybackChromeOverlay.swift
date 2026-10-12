@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Playback chrome for the unified `MultiviewContainerView`, the
 /// parts of the UI that sit *on top* of the tile grid (top bar on
@@ -28,6 +29,20 @@ import SwiftUI
 /// Options pill; adopting it verbatim here avoids the regression
 /// we hit in an earlier iteration where the tvOS focus halo fought
 /// with our custom chrome.
+extension MultiviewStore {
+    /// The audio tile's paused state as a publisher. The transport bars
+    /// read `audioProgressStore?.isPaused` through this store, which does
+    /// not republish the nested progress store's changes, so the Play /
+    /// Pause glyph only flipped on the next unrelated redraw (GH #93
+    /// device 2026-10-12: "[AVP-DVR] pause at 34.7s" logged, icon stayed
+    /// Pause). Bars mirror this into @State so the glyph follows the
+    /// player's timeControlStatus at once.
+    var audioPausedPublisher: AnyPublisher<Bool, Never> {
+        guard let ps = audioProgressStore else { return Just(false).eraseToAnyPublisher() }
+        return ps.$isPaused.removeDuplicates().eraseToAnyPublisher()
+    }
+}
+
 struct PlaybackChromeOverlay: View {
     /// Live Rewind engine state (iOS unified chrome): drives the band
     /// swap; its 0.5s window publisher paces position re-render.
@@ -678,13 +693,14 @@ struct VODTransportBar_iOS: View {
     @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
     @State private var dragFraction: CGFloat? = nil
     @State private var settleTask: Task<Void, Never>? = nil
+    @State private var pausedMirror: Bool?
 
     var body: some View {
         let duration = Int64(max(Int32(1), store.audioProgressStore?.durationMs ?? 1))
         let posMs = Int64(store.audioProgressStore?.currentMs ?? 0)
         let current = min(posMs, duration)
         let fraction = dragFraction ?? CGFloat(Double(current) / Double(duration))
-        let isPaused = store.audioProgressStore?.isPaused ?? false
+        let isPaused = pausedMirror ?? store.audioProgressStore?.isPaused ?? false
 
         VStack(spacing: 6) {
             GeometryReader { geo in
@@ -763,6 +779,7 @@ struct VODTransportBar_iOS: View {
             }
             .padding(.top, 2)
         }
+        .onReceive(store.audioPausedPublisher) { pausedMirror = $0 }
     }
 
     private func vodButton(_ icon: String, action: @escaping () -> Void) -> some View {
@@ -791,6 +808,7 @@ struct RewindTransportBar_iOS: View {
     @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
     @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
     @State private var dragFraction: CGFloat? = nil
+    @State private var pausedMirror: Bool?
 
     var body: some View {
         let window = max(Int64(1), liveRewind.headWallMs - liveRewind.tailWallMs)
@@ -798,7 +816,7 @@ struct RewindTransportBar_iOS: View {
         let current = liveRewind.timeshifting ? min(posMs, window) : window
         let fraction = dragFraction ?? CGFloat(Double(current) / Double(window))
         let behindMs = window - current
-        let isPaused = store.audioProgressStore?.isPaused ?? false
+        let isPaused = pausedMirror ?? store.audioProgressStore?.isPaused ?? false
 
         VStack(spacing: 6) {
             // Timeline: tap/drag to scrub anywhere in the window.
@@ -902,6 +920,7 @@ struct RewindTransportBar_iOS: View {
             }
             .padding(.top, 2)
         }
+        .onReceive(store.audioPausedPublisher) { pausedMirror = $0 }
     }
 
     private func transportButton(_ icon: String, action: @escaping () -> Void) -> some View {
@@ -1173,6 +1192,8 @@ struct PlaybackBottomChrome_tvOS: View {
     // Skip Intervals setting for the Rewind / Forward cells.
     @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
     @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
+    /// Mirror of the audio tile's isPaused (see audioPausedPublisher).
+    @State private var pausedMirror: Bool?
 
     /// Pairs for this chrome, resolved from the current map and mode.
     /// Catch-up, VOD solo and a rolling Live Rewind all put short
@@ -1271,7 +1292,7 @@ struct PlaybackBottomChrome_tvOS: View {
         store.catchupTile != nil || store.vodSoloTile != nil || liveRewind.buffering
     }
 
-    private var isPausedNow: Bool { store.audioProgressStore?.isPaused ?? false }
+    private var isPausedNow: Bool { pausedMirror ?? store.audioProgressStore?.isPaused ?? false }
 
     /// The center anchor: Pause, or Play while paused.
     private var transportCenterCell: some View {
@@ -1285,6 +1306,7 @@ struct PlaybackBottomChrome_tvOS: View {
             chromeState.reportInteraction()
             store.audioProgressStore?.togglePauseAction?()
         }
+        .onReceive(store.audioPausedPublisher) { pausedMirror = $0 }
     }
 
     /// Everything LEFT of the center pill, in focus order: the dev engine

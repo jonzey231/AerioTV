@@ -5784,12 +5784,25 @@ struct AVPlayerMultiviewTile: View {
     /// playlist URL.
     static func armDVRNoMediaWatchdog(_ avPlayer: AVPlayer, item: AVPlayerItem, url: URL,
                                       options: [String: Any], loader: DVRPlaylistRewriteLoader) {
+        func mediaReqs() -> Int { (item.accessLog()?.events ?? []).reduce(0) { $0 + $1.numberOfMediaRequests } }
+        let reqsAtPlay = mediaReqs()
+        let clockAtPlay = item.currentTime().seconds
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             guard avPlayer.currentItem === item else { return }
             let now = item.currentTime()
-            let covered = item.loadedTimeRanges.contains { CMTimeRangeContainsTime($0.timeRangeValue, time: now) }
-            guard !covered else {
-                debugLog("[AVP-DVR] media loaded at \(String(format: "%.1f", now.seconds))s; watchdog satisfied")
+            let t = now.seconds
+            // Device 2026-10-12 (d0739d5): loaded=[2.02-63.25] at clock
+            // 2.0 s read as "not covered" and forced a reload loop. A range
+            // that starts up to 2 s after the playhead counts as covered.
+            let covered = item.loadedTimeRanges.contains {
+                let r = $0.timeRangeValue
+                let start = r.start.seconds
+                return CMTimeRangeContainsTime(r, time: now) || (start >= t && start - t <= 2)
+            }
+            let reqsNow = mediaReqs()
+            let advanced = t.isFinite && clockAtPlay.isFinite ? t - clockAtPlay : 0
+            if covered || reqsNow > reqsAtPlay || advanced > 1 {
+                debugLog("[AVP-DVR] media loaded at \(String(format: "%.1f", t))s; watchdog satisfied (covered=\(covered) mediaReqs \(reqsAtPlay)->\(reqsNow) clock +\(String(format: "%.1f", advanced))s)")
                 return
             }
             let loaded = item.loadedTimeRanges.map {
