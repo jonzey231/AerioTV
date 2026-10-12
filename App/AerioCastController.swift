@@ -3603,6 +3603,8 @@ struct MultiviewCompositePreviewGrid: View {
     /// Where the current touch went down: a long-press released without
     /// moving can end before its drag reports a location.
     @State private var touchDown: CGPoint?
+    /// The spatial event id of the touch `touchDown` belongs to.
+    @State private var touchID: SpatialEventCollection.Event.ID?
     /// The current touch already became a long-press (round 7, device log
     /// 2026-10-07 15:45:36.311: the release of the long-press that opened
     /// the tile menu also ended as a tap, which moved the audio focus to
@@ -3720,7 +3722,7 @@ struct MultiviewCompositePreviewGrid: View {
                     }
                     .onEnded { value in
                         // A tap still to come is covered by `pressEndedAt`.
-                        defer { dragging = false; dragPoint = nil; pressEndedAt = Date(); longPressFired = false }
+                        defer { dragging = false; dragPoint = nil; pressEndedAt = Date(); longPressFired = false; touchDown = nil }
                         guard case .second(true, let drag) = value else { return }
                         guard let drag, let from = lifted, dragging else {
                             // Long-press released before the drag reported:
@@ -3742,11 +3744,18 @@ struct MultiviewCompositePreviewGrid: View {
                     }
             )
             .simultaneousGesture(
-                DragGesture(minimumDistance: 0, coordinateSpace: .local)
-                    .onChanged { value in
-                        if touchDown != value.startLocation {
+                // The touch-down point, reported the moment the finger lands
+                // (iPad 2026-10-11: a DragGesture tracker did not report a
+                // new touch before the long-press threshold, so the lift
+                // used the previous touch's point and picked the other
+                // tile). Keyed by the event id so each touch records its own point.
+                SpatialEventGesture(coordinateSpace: .local)
+                    .onChanged { events in
+                        guard let e = events.first(where: { $0.phase == .active }) else { return }
+                        if touchID != e.id {
                             // A new touch.
-                            touchDown = value.startLocation
+                            touchID = e.id
+                            touchDown = e.location
                             longPressFired = false
                         }
                     }
