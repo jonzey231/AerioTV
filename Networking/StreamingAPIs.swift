@@ -7119,3 +7119,66 @@ extension DispatcharrAPI {
         }
     }
 }
+
+/// Program detail with stale-id recovery (Android parity, 2026-10-12).
+///
+/// Teamarr regenerates its programs on every EPG run, so Dispatcharr hands
+/// out new program ids each refresh and `/api/epg/programs/<old id>/`
+/// answers 404 for rows cached with the old id. On a 404 the program is
+/// re-resolved through `/api/epg/programs/?tvg_id=` (then `?channel=`) by
+/// its start time; the new id is remembered so the next lookup is direct.
+@MainActor
+enum DispatcharrProgramDetailResolver {
+    /// Old program id -> current id, for the session.
+    private static var aliases: [Int: Int] = [:]
+
+    static func currentID(_ pid: Int) -> Int { aliases[pid] ?? pid }
+
+    enum Outcome {
+        /// Detail loaded (possibly under a re-resolved id). `poster` is the
+        /// best art: detail first, then the listing entry's icon.
+        case found(detail: DispatcharrProgramDetail?, poster: String?)
+        /// 404 and no listing entry starts at that time.
+        case notFound
+        /// Transport or server failure: do not cache, try again later.
+        case failed
+    }
+
+    static func load(api: DispatcharrAPI, programID pid: Int, start: Date?,
+                     channelID: String?, title: String) async -> Outcome {
+        let id = currentID(pid)
+        do {
+            let detail = try await api.getProgramDetail(id: id)
+            return .found(detail: detail, poster: detail.bestPosterString)
+        } catch APIError.serverError(404) {
+            guard let start else {
+                debugLog("[PREVIEW-ART] program id \(id) 404, no start time to re-resolve (\(title))")
+                return .notFound
+            }
+            let ch = channelID.flatMap { cid in ChannelStore.shared.channels.first { $0.id == cid } }
+            var candidates: [DispatcharrCurrentProgram] = []
+            for tvg in [ch?.tvgID, ch?.uuid].compactMap({ $0 }).filter({ !$0.isEmpty }) {
+                candidates = (try? await api.getUpcomingPrograms(tvgIDs: [tvg])) ?? []
+                if !candidates.isEmpty { break }
+            }
+            if candidates.isEmpty, let dc = ch?.dispatcharrChannelID {
+                candidates = (try? await api.getUpcomingPrograms(channelIDs: [dc])) ?? []
+            }
+            guard let match = candidates.first(where: {
+                      guard let s = $0.startTime?.toDate() else { return false }
+                      return abs(s.timeIntervalSince(start)) < 1
+                  }),
+                  let newID = match.programID else {
+                debugLog("[PREVIEW-ART] program id \(id) 404, no listing entry at \(start) (\(title), candidates=\(candidates.count))")
+                return .notFound
+            }
+            aliases[pid] = newID
+            debugLog("[PREVIEW-ART] stale program id \(id) -> \(newID) (\(title))")
+            let detail = try? await api.getProgramDetail(id: newID)
+            return .found(detail: detail, poster: detail?.bestPosterString ?? match.icon)
+        } catch {
+            debugLog("[PREVIEW-ART] program id \(id) detail failed: \(error.localizedDescription) (\(title)); not cached")
+            return .failed
+        }
+    }
+}

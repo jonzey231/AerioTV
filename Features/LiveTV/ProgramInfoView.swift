@@ -623,30 +623,37 @@ struct ProgramInfoView: View {
                                   serverID: server.id,
                                   savedUsername: server.dispatcharrCredentialType == .usernamePassword
                                       ? server.username : nil)
-        do {
-            let detail = try await api.getProgramDetail(id: pid)
-            let cats = detail.categories.joined(separator: ",")
-            debugLog("📺 ProgramInfo lazy-load OK: pid=\(pid) returned \(detail.categories.count) categories: '\(cats.prefix(80))'")
-            // Only assign if we got something, avoids triggering a
-            // pointless re-render on empty results, and leaves the
-            // door open for a future retry path.
-            if categoryNeeded, !cats.isEmpty {
-                loadedCategory = cats
-            }
-            // Server-provided poster (SD proxy / XMLTV image / icon).
-            // resolveImageURL validates the host (SSRF guard) and maps
-            // bare TMDB slugs to the CDN, same as the VOD path.
-            if posterNeeded, let raw = detail.bestPosterString {
-                posterURL = VODService.resolveImageURL(raw, base: baseURL, size: "w500")
-                debugLog("📺 ProgramInfo poster: \(posterURL?.absoluteString ?? "rejected/none")")
-            }
-            // The bulk grid has no repeat field, but this endpoint does:
-            // surface REPEAT on Direct Connect (mikec79, 2026-08-19).
-            if detail.isPreviouslyShown { enrichedRepeat = true }
-        } catch {
-            debugLog("📺 ProgramInfo lazy-load FAIL: pid=\(pid) error=\(error.localizedDescription)")
-            // Swallow, the modal stays usable without pills.
+        // Stale Teamarr ids 404: re-resolve by start time (the channel is
+        // found by name, the only channel key this target carries).
+        let channelID = ChannelStore.shared.channels.first { $0.name == target.channelName }?.id
+        let outcome = await DispatcharrProgramDetailResolver.load(
+            api: api, programID: pid, start: target.start, channelID: channelID, title: target.title)
+        guard case .found(let loaded, let rawPoster) = outcome else {
+            debugLog("📺 ProgramInfo lazy-load FAIL: pid=\(pid) (404 without match or request failed)")
+            return
         }
+        if posterNeeded, loaded == nil, let raw = rawPoster {
+            posterURL = VODService.resolveImageURL(raw, base: baseURL, size: "w500")
+        }
+        guard let detail = loaded else { return }
+        let cats = detail.categories.joined(separator: ",")
+        debugLog("📺 ProgramInfo lazy-load OK: pid=\(pid) returned \(detail.categories.count) categories: '\(cats.prefix(80))'")
+        // Only assign if we got something, avoids triggering a
+        // pointless re-render on empty results, and leaves the
+        // door open for a future retry path.
+        if categoryNeeded, !cats.isEmpty {
+            loadedCategory = cats
+        }
+        // Server-provided poster (SD proxy / XMLTV image / icon).
+        // resolveImageURL validates the host (SSRF guard) and maps
+        // bare TMDB slugs to the CDN, same as the VOD path.
+        if posterNeeded, let raw = detail.bestPosterString {
+            posterURL = VODService.resolveImageURL(raw, base: baseURL, size: "w500")
+            debugLog("📺 ProgramInfo poster: \(posterURL?.absoluteString ?? "rejected/none")")
+        }
+        // The bulk grid has no repeat field, but this endpoint does:
+        // surface REPEAT on Direct Connect (mikec79, 2026-08-19).
+        if detail.isPreviouslyShown { enrichedRepeat = true }
     }
 
     /// Feed art, first link in the chain and the same one

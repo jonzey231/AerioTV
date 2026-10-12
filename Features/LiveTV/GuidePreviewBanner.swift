@@ -368,11 +368,13 @@ final class GuidePreviewArtCache: ObservableObject {
     /// (the icon Program Info shows; the bulk grid strips it), then TMDB.
     func state(for program: GuideProgram) -> ArtState {
         state(title: program.title, category: program.category,
-              programID: program.programID, posterURL: program.posterURL)
+              programID: program.programID, posterURL: program.posterURL,
+              start: program.start, channelID: program.channelID)
     }
 
     /// Same order for callers without a GuideProgram (the Record sheet).
-    func state(title: String, category: String, programID: Int?, posterURL: String? = nil) -> ArtState {
+    func state(title: String, category: String, programID: Int?, posterURL: String? = nil,
+               start: Date? = nil, channelID: String? = nil) -> ArtState {
         if let raw = posterURL, let u = URL(string: raw), u.scheme != nil { return .art(u) }
         if let pid = programID {
             switch detailEntries[pid] {
@@ -381,7 +383,10 @@ final class GuidePreviewArtCache: ObservableObject {
             case .none:
                 // Only a lookup that actually started is worth waiting for;
                 // no Dispatcharr server means the miss is known right now.
-                if fetchDetail(pid: pid, title: title) { return .pending }
+                if let failed = detailFailedAt[pid], Date().timeIntervalSince(failed) < Self.retryAfter {
+                    break  // recent transport failure: TMDB meanwhile, retry later
+                }
+                if fetchDetail(pid: pid, title: title, start: start, channelID: channelID) { return .pending }
             }
         }
         let key = LibraryMatcher.cleanTitle(title)
@@ -394,10 +399,13 @@ final class GuidePreviewArtCache: ObservableObject {
 
     private var detailEntries: [Int: URL?] = [:]
     private var detailInFlight: Set<Int> = []
+    /// Detail lookups that failed or 404ed without a match: not a cached
+    /// miss, just paused (the next EPG refresh brings fresh ids).
+    private var detailFailedAt: [Int: Date] = [:]
 
     /// Returns true when a lookup is open for `pid` (started now or earlier).
     @discardableResult
-    private func fetchDetail(pid: Int, title: String) -> Bool {
+    private func fetchDetail(pid: Int, title: String, start: Date?, channelID: String?) -> Bool {
         if detailInFlight.contains(pid) { return true }
         guard let server = ChannelStore.shared.activeServer, server.type == .dispatcharrAPI else {
             detailEntries[pid] = .some(nil)
@@ -413,13 +421,22 @@ final class GuidePreviewArtCache: ObservableObject {
                                  savedUsername: server.dispatcharrCredentialType == .usernamePassword
                                      ? server.username : nil)
         Task { @MainActor in
-            var found: URL? = nil
-            if let detail = try? await api.getProgramDetail(id: pid), let raw = detail.bestPosterString {
-                found = VODService.resolveImageURL(raw, base: baseURL, size: "w780")
+            // A 404 (stale Teamarr id) is re-resolved by start time; a
+            // failure is NOT cached as a miss (it used to pin "no icon"
+            // for the session), only paused for retryAfter.
+            switch await DispatcharrProgramDetailResolver.load(
+                api: api, programID: pid, start: start, channelID: channelID, title: title) {
+            case .found(_, let raw):
+                let found = raw.flatMap { VODService.resolveImageURL($0, base: baseURL, size: "w780") }
+                detailEntries[pid] = .some(found)
+                detailFailedAt[pid] = nil
+                debugLog("[PREVIEW-ART] \(title): Dispatcharr detail \(found == nil ? "no icon" : "icon")")
+            case .notFound:
+                detailFailedAt[pid] = Date()
+            case .failed:
+                detailFailedAt[pid] = Date()
             }
-            detailEntries[pid] = .some(found)
             detailInFlight.remove(pid)
-            debugLog("[PREVIEW-ART] \(title): Dispatcharr detail \(found == nil ? "no icon" : "icon")")
             version += 1
         }
         return true
