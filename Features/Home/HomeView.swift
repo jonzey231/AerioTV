@@ -4793,6 +4793,11 @@ struct MainTabView: View {
     /// Rule 3: the remote-controls sheet the session card opens.
     @State private var showRemoteControls = false
     #endif
+    #if os(tvOS)
+    /// Leave Multiview > Back to Guide: the Multiview plays hidden behind
+    /// the guide (PlayerSession.swift tvOS MultiviewBackgroundSession).
+    @ObservedObject private var mvBackground = MultiviewBackgroundSession.shared
+    #endif
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
     @State private var showInitialEPGLoading = false
     /// v1.6.23, set to `true` when the user explicitly Skips the
@@ -5625,6 +5630,7 @@ struct MainTabView: View {
                 .disabled(
                     playerSession.mode == .multiview
                     && !(multiviewStore.tiles.count == 1 && nowPlaying.isMinimized)
+                    && !mvBackground.isActive
                 )
                 #endif
 
@@ -5894,8 +5900,11 @@ struct MainTabView: View {
                 // the mini-player concept doesn't generalise to a
                 // grid, and the exit path there is the normal
                 // "Exit Multiview?" confirmation.
+                // Back to Guide: a background Multiview is hidden in place
+                // (never the corner mini), still mounted so it plays.
+                let mvInBackground = mvBackground.isActive
                 let isSoleStream = multiviewStore.tiles.count == 1
-                let minimized = isSoleStream && nowPlaying.isMinimized
+                let minimized = isSoleStream && nowPlaying.isMinimized && !mvInBackground
                 // Settings tab: the mini stashes at the trailing edge.
                 let stashed = minimized && selectedTab == .settings
                 GeometryReader { geo in
@@ -5957,7 +5966,9 @@ struct MainTabView: View {
                             // `.forceGuideFocus` `resetFocus`
                             // handler handle the "which guide row
                             // gets focus" question.
-                            .disabled(minimized)
+                            .disabled(minimized || mvInBackground)
+                            .opacity(mvInBackground ? 0 : 1)
+                            .allowsHitTesting(!mvInBackground)
                             .allowsHitTesting(!minimized)
                             .padding(.trailing, minimized ? 40 : 0)
                             .padding(.top, minimized ? miniTop : 0)
@@ -8799,6 +8810,10 @@ struct MainTabView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
             }
+        } else if mvBackground.isActive && selectedTab == .liveTV {
+            // Back to Guide: Back on the guide returns to the Multiview.
+            debugLog("🎮 [HMP]   → branch: Multiview in background → return to it")
+            mvBackground.returnToFullscreen()
         } else if (nowPlaying.isActive || miniIsOneTileMultiview) && nowPlaying.isMinimized {
             // A mini can also be a one-tile Multiview left over from Exit
             // Multiview (collapse keeps the audio tile and never re-seeds

@@ -35,6 +35,11 @@ struct CompactChannelRow: View {
     let item: ChannelDisplayItem
     let isAlreadyAdded: Bool
     let isDisabled: Bool
+    /// Picker toggles "Show Subtitles" / "Show Descriptions"
+    /// (`multiviewPickerShowSubtitles` / `multiviewPickerShowDescriptions`).
+    /// Subtitle carries "Team 1 vs Team 2" for Teamarr channels.
+    var showSubtitle: Bool = false
+    var showDescription: Bool = false
     /// Single tap action, parent decides whether to add or remove
     /// based on `isAlreadyAdded`. Was `onAdd` pre-v1.6.12; renamed
     /// to keep callers honest about the semantic.
@@ -49,18 +54,25 @@ struct CompactChannelRow: View {
     /// Currently-airing program for this row, picking the best
     /// available source. Mirrors `ChannelRow.liveProgram` so both
     /// surfaces converge on the same render path.
-    private var liveProgram: (title: String, description: String?, start: Date, end: Date)? {
+    private var liveProgram: (title: String, subtitle: String?, description: String?, start: Date, end: Date)? {
+        let guideLive = nowNext.live(for: item.id)
         if let title = item.currentProgram, !title.isEmpty,
            let start = item.currentProgramStart,
            let end = item.currentProgramEnd,
            end > Date() {
-            return (title, item.currentProgramDescription, start, end)
+            // The item-level snapshot has no subtitle; borrow it from the
+            // guide's live cell when that cell is the same program.
+            let sameProgram = guideLive.map { $0.title == title || $0.start == start } ?? false
+            let desc = (item.currentProgramDescription?.isEmpty == false)
+                ? item.currentProgramDescription
+                : (sameProgram ? guideLive?.description : nil)
+            return (title, sameProgram ? guideLive?.subTitle : nil, desc, start, end)
         }
         // GH #96: the item-level snapshot is written at load and goes stale
         // at the program boundary; an ended one falls through to the
         // guide's live now/next cell instead of showing a finished event.
-        if let p = nowNext.live(for: item.id) {
-            return (p.title, p.description, p.start, p.end)
+        if let p = guideLive {
+            return (p.title, p.subTitle, p.description, p.start, p.end)
         }
         return nil
     }
@@ -106,6 +118,20 @@ struct CompactChannelRow: View {
                                     .foregroundStyle(.tertiary)
                                     .lineLimit(1)
                             }
+                        }
+                        if showSubtitle, let sub = prog.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines), !sub.isEmpty {
+                            Text(verbatim: sub)
+                                .scaledFont(subtitleFont)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        if showDescription, let desc = prog.description?.trimmingCharacters(in: .whitespacesAndNewlines), !desc.isEmpty {
+                            Text(verbatim: desc)
+                                .scaledFont(subtitleFont)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(2)
+                                .truncationMode(.tail)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                         // Thin progress bar indicating how far through
                         // the program we are. Same visual treatment

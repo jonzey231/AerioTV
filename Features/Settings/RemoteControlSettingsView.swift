@@ -54,6 +54,11 @@ struct RemoteControlSettingsView: View {
     /// detector exists (omit rather than fake).
     private static let guideSlots: [RemoteSlot] = RemoteControlMap.guideKeySlots
 
+    /// AerioTV#98: dedicated Channel Up / Channel Down buttons (third-party
+    /// and CEC TV remotes, delivered as pageUp/pageDown presses) in the
+    /// guide. Default Page channels up / down.
+    private static let guideChannelSlots: [RemoteSlot] = [.channelUp, .channelDown]
+
     /// Dedicated playback / channel buttons some remotes expose. Task
     /// scope is the player context: these retarget what the button does
     /// while a channel is playing.
@@ -85,7 +90,9 @@ struct RemoteControlSettingsView: View {
         var out: [GuideRemoteAction] = []
         // Move focus first on the arrows (their built-in behavior).
         // Select's built-in behavior is Play, listed below.
-        if slot != .okShort && slot != .okLong { out.append(.navigate) }
+        // Channel buttons have no built-in move, so no Move focus choice.
+        if slot != .okShort && slot != .okLong
+            && slot != .channelUp && slot != .channelDown { out.append(.navigate) }
         out += [
             .play, .programInfo, .programDetails, .record,
             .openGroupSidebar,
@@ -173,10 +180,10 @@ struct RemoteControlSettingsView: View {
     /// 4. Guide-context Select / Left / Right rows.
     private var inTheGuideSection: some View {
         SettingsSection("In the TV Guide", style: .plain) {
-            ForEach(Self.guideSlots, id: \.self) { slot in
+            ForEach(Self.guideSlots + Self.guideChannelSlots, id: \.self) { slot in
                 guideSlotRow(slot)
             }
-            sectionFooter("What each button does while browsing the guide. Up and Down always navigate. Left or Right set to Play channel, Record, Program info or Program menu acts on every press. Any other Left action acts only from the program airing now, and any other Right action only from the last program in the row; elsewhere the arrow moves between programs. In Sidebar Menu mode, if no button is set to Open sidebar, holding Left opens it.")
+            sectionFooter("What each button does while browsing the guide. Up and Down always navigate. Channel Up and Channel Down, on remotes that have them, page the channel list by default. Left or Right set to Play channel, Record, Program info or Program menu acts on every press. Any other Left action acts only from the program airing now, and any other Right action only from the last program in the row; elsewhere the arrow moves between programs. In Sidebar Menu mode, if no button is set to Open sidebar, holding Left opens it.")
         }
     }
 

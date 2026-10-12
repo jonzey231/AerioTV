@@ -4902,8 +4902,15 @@ struct DispatcharrCurrentProgram: Decodable, Identifiable {
     let isPremiere: Bool
     let isFinale: Bool
     let isRepeat: Bool
+    /// Program art: top-level `icon`, else `custom_properties.icon`, else
+    /// the first `custom_properties.images` entry. Dispatcharr dummy-EPG
+    /// programs carry the poster only inside custom_properties
+    /// (AerioTV-Android #132 parity). nil when none is present.
+    let icon: String?
 
     enum CodingKeys: String, CodingKey {
+        case icon
+        case customProperties = "custom_properties"
         case programID = "id"
         case tvgID = "tvg_id"
         case channel
@@ -4944,6 +4951,44 @@ struct DispatcharrCurrentProgram: Decodable, Identifiable {
         isPremiere = (try? c.decodeIfPresent(Bool.self, forKey: .isPremiere)) ?? false
         isFinale = (try? c.decodeIfPresent(Bool.self, forKey: .isFinale)) ?? false
         isRepeat = (try? c.decodeIfPresent(Bool.self, forKey: .isRepeat)) ?? false
+        icon = DispatcharrProgramArtProps.resolve(
+            topLevel: try? c.decodeIfPresent(String.self, forKey: .icon),
+            props: c.decodeObjectOrJSONString(DispatcharrProgramArtProps.self, forKey: .customProperties))
+    }
+}
+
+/// The artwork fields of a program's `custom_properties` (dummy EPG and
+/// some XMLTV imports put the poster here instead of the top-level
+/// `icon`). `images` is either a list of URL strings or of `{url: ...}`.
+struct DispatcharrProgramArtProps: Decodable {
+    let icon: String?
+    let images: [String]
+
+    private struct ImageEntry: Decodable { let url: String? }
+    enum CodingKeys: String, CodingKey { case icon, images }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        icon = try? c.decodeIfPresent(String.self, forKey: .icon)
+        if let strings = try? c.decode([String].self, forKey: .images) {
+            images = strings
+        } else if let entries = try? c.decode([ImageEntry].self, forKey: .images) {
+            images = entries.compactMap { $0.url }
+        } else if let one = try? c.decode(String.self, forKey: .images) {
+            images = [one]
+        } else {
+            images = []
+        }
+    }
+
+    /// First non-empty of: top-level icon, custom_properties.icon,
+    /// custom_properties.images[0...].
+    static func resolve(topLevel: String?, props: DispatcharrProgramArtProps?) -> String? {
+        let candidates = [topLevel, props?.icon] + (props?.images.map { Optional($0) } ?? [])
+        for c in candidates {
+            if let t = c?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { return t }
+        }
+        return nil
     }
 }
 
@@ -4978,6 +5023,7 @@ struct DispatcharrProgramDetail: Decodable {
     enum CodingKeys: String, CodingKey {
         case id, categories, rating
         case icon, images
+        case customProperties = "custom_properties"
         case posterURL = "poster_url"
         case tmdbID = "tmdb_id"
         case isPreviouslyShown = "is_previously_shown"
@@ -4988,7 +5034,11 @@ struct DispatcharrProgramDetail: Decodable {
         id = try c.decode(Int.self, forKey: .id)
         categories = (try? c.decode([String].self, forKey: .categories)) ?? []
         rating = try? c.decode(String.self, forKey: .rating)
-        icon = try? c.decode(String.self, forKey: .icon)
+        // Empty top-level icon falls back to custom_properties.icon /
+        // .images (Dispatcharr dummy EPG, AerioTV-Android #132 parity).
+        icon = DispatcharrProgramArtProps.resolve(
+            topLevel: try? c.decode(String.self, forKey: .icon),
+            props: c.decodeObjectOrJSONString(DispatcharrProgramArtProps.self, forKey: .customProperties))
         imageURL = (try? c.decode([ImageEntry].self, forKey: .images))?
             .compactMap { $0.url }.first
         posterURL = try? c.decode(String.self, forKey: .posterURL)

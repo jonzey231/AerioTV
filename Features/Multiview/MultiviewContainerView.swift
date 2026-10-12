@@ -1402,9 +1402,20 @@ struct MultiviewContainerView: View {
             isPresented: $showExitConfirmation,
             titleVisibility: .visible
         ) {
-            // "Back to TV Guide" removed (Logan 2026-08-31, both
-            // platforms): with Add Channel in the tile menu the
-            // keep-staged-tiles exit just duplicated the Back flow.
+            // "Back to Guide" (2026-10-12, Android parity): the Multiview
+            // keeps playing in the background with its channels staged;
+            // the guide's long-press menu adds and removes tiles in place
+            // and the banner above the guide returns to it. Listed first.
+            // (The 2026-08-31 "Back to TV Guide" tore the players down and
+            // re-armed staging; this one keeps them running.)
+            if MultiviewBackgroundSession.canEnter {
+                Button("Back to Guide") {
+                    DebugLogger.shared.log(
+                        "[MV-Cmd] exit dialog: Back to Guide (tiles=\(store.tiles.count))",
+                        category: "Playback", level: .info)
+                    MultiviewBackgroundSession.shared.enter()
+                }
+            }
             Button(exitConfirmationPrimary, role: .destructive) {
                 performConfirmedExit()
             }
@@ -1425,7 +1436,7 @@ struct MultiviewContainerView: View {
         if PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1 {
             return "Exit Playback?"
         }
-        return "Exit Multiview?"
+        return "Leave Multiview?"
     }
 
     /// Primary-button label for the exit-confirmation dialog. Short

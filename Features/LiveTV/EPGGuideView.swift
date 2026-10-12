@@ -1446,7 +1446,7 @@ final class GuideStore: ObservableObject {
                                         episode: p.episode, isNew: p.isNew,
                                         isLiveBroadcast: p.isLiveBroadcast,
                                         isPremiere: p.isPremiere, isFinale: p.isFinale,
-                                        isRepeat: p.isRepeat)
+                                        isRepeat: p.isRepeat, posterURL: p.posterURL)
                 changed = true
             }
             if changed { dict[cid] = progs }
@@ -2303,7 +2303,7 @@ final class GuideStore: ObservableObject {
                                           season: prog.season, episode: prog.episode,
                                           isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
                                           isPremiere: prog.isPremiere, isFinale: prog.isFinale,
-                                          isRepeat: prog.isRepeat)
+                                          isRepeat: prog.isRepeat, posterURL: prog.icon)
                     mergeProgram(gp, for: cid)
                 }
             }
@@ -2343,7 +2343,7 @@ final class GuideStore: ObservableObject {
                                           season: prog.season, episode: prog.episode,
                                           isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
                                           isPremiere: prog.isPremiere, isFinale: prog.isFinale,
-                                          isRepeat: prog.isRepeat)
+                                          isRepeat: prog.isRepeat, posterURL: prog.icon)
                     mergeProgram(gp, for: cid)
                 }
             }
@@ -2574,7 +2574,7 @@ final class GuideStore: ObservableObject {
                                                   season: prog.season, episode: prog.episode,
                                                   isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
                                                   isPremiere: prog.isPremiere, isFinale: prog.isFinale,
-                                                  isRepeat: prog.isRepeat)
+                                                  isRepeat: prog.isRepeat, posterURL: prog.icon)
                             GuideStore.mergeProgramInto(&dict, program: gp, for: cid, deferSort: true)
                             touched.insert(cid)
                         }
@@ -3749,7 +3749,7 @@ final class GuideStore: ObservableObject {
                                              episode: p.episode, isNew: p.isNew,
                                              isLiveBroadcast: p.isLiveBroadcast,
                                              isPremiere: p.isPremiere, isFinale: p.isFinale,
-                                             isRepeat: p.isRepeat)
+                                             isRepeat: p.isRepeat, posterURL: p.posterURL)
                 }
             }
 
@@ -4438,7 +4438,7 @@ final class GuideStore: ObservableObject {
                                                     season: prog.season, episode: prog.episode,
                                                     isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
                                                     isPremiere: prog.isPremiere, isFinale: prog.isFinale,
-                                                    isRepeat: prog.isRepeat)
+                                                    isRepeat: prog.isRepeat, posterURL: prog.icon)
                             }
                             return (programs, false)
                         } catch {
@@ -5869,7 +5869,10 @@ struct EPGGuideView: View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
             VStack(spacing: 0) {
-                if multiviewStore.isStagingFromGuide {
+                // Back to Guide: the background Multiview's banner takes
+                // the staging banner's slot (they never coexist).
+                MultiviewBackgroundBannerSlot()
+                if multiviewStore.isStagingFromGuide && !MultiviewBackgroundSession.shared.isActive {
                     stagingBanner
                 }
                 guideContent
@@ -7191,8 +7194,8 @@ struct EPGGuideView: View {
     /// already-huge expression past the RELEASE Xcode type-checker's time
     /// budget (archive-only failure; the beta compiler managed it).
     private func pagePressCatcher(proxy: ScrollViewProxy) -> some View {
-        TVPagePressCatcher { (down: Bool) in
-            pageGuideFocus(down: down, proxy: proxy)
+        TVPagePressCatcher { (down: Bool, source: String) in
+            handleGuideChannelKey(down: down, source: source, proxy: proxy)
         }
         // GH Android #128 parity: stamp the moment the player leaves
         // fullscreen for the guide (chromeFocusHold mirrors
@@ -7307,6 +7310,22 @@ struct EPGGuideView: View {
     private func arrowPressOriginPID() -> String? {
         Date().timeIntervalSince(focusScratch.lastFocusChangeAt) < 0.25
             ? focusScratch.previousFocusedProgramID : focusedProgramID
+    }
+
+    /// AerioTV#98: Channel Up / Channel Down in the guide, routed through
+    /// the remote map (Settings > Remote Control > In the TV Guide). The
+    /// default Page channels up / down keeps the focus-following page
+    /// step; any other mapped action goes to the shared dispatcher.
+    private func handleGuideChannelKey(down: Bool, source: String, proxy: ScrollViewProxy) {
+        let slot: RemoteSlot = down ? .channelDown : .channelUp
+        let action = RemoteControlStore.shared.guideAction(slot)
+        debugLog("[PRESS] guide \(down ? "CHANNEL_DOWN" : "CHANNEL_UP") source=\(source) mapped action=\(action.wire)")
+        switch action {
+        case .pageUp:   pageGuideFocus(down: false, proxy: proxy)
+        case .pageDown: pageGuideFocus(down: true, proxy: proxy)
+        case .none, .navigate: break
+        default:        GuideRemoteDispatch.perform(action)
+        }
     }
 
     private func pageGuideFocus(down: Bool, proxy: ScrollViewProxy) {
@@ -9840,16 +9859,18 @@ private struct GuideMiniCloseRightHoldArm: View {
 /// isUserInteractionEnabled=false keeps this view itself out of hit-testing
 /// and the focus system entirely.
 private struct TVPagePressCatcher: UIViewRepresentable {
-    let onPage: (Bool) -> Void
+    /// (down, source): source is "press" for UIPress pageUp/pageDown, which
+    /// tvOS synthesizes from CEC channel keys and HID Channel/Page keys.
+    let onPage: (Bool, String) -> Void
 
     func makeUIView(context: Context) -> CatcherView { CatcherView(onPage: onPage) }
     func updateUIView(_ view: CatcherView, context: Context) { view.onPage = onPage }
 
     final class CatcherView: UIView {
-        var onPage: (Bool) -> Void
+        var onPage: (Bool, String) -> Void
         private var recognizers: [UITapGestureRecognizer] = []
 
-        init(onPage: @escaping (Bool) -> Void) {
+        init(onPage: @escaping (Bool, String) -> Void) {
             self.onPage = onPage
             super.init(frame: .zero)
             isUserInteractionEnabled = false
@@ -9871,8 +9892,14 @@ private struct TVPagePressCatcher: UIViewRepresentable {
             recognizers = [up, down]
         }
 
-        @objc private func firePageUp() { onPage(false) }
-        @objc private func firePageDown() { onPage(true) }
+        @objc private func firePageUp() {
+            debugLog("[PRESS] CHANNEL_UP began (UIPress pageUp)")
+            onPage(false, "press")
+        }
+        @objc private func firePageDown() {
+            debugLog("[PRESS] CHANNEL_DOWN began (UIPress pageDown)")
+            onPage(true, "press")
+        }
     }
 }
 #endif
@@ -10115,6 +10142,93 @@ struct MultiviewStagingBanner: View {
 
 }
 
+#if os(tvOS)
+/// Apple TV banner for a Multiview left with Back to Guide: same shape and
+/// pill sizes as the staging banner. Count and names follow the live tiles
+/// (Add / Remove from Multiview in the long-press menu change them in place).
+/// Return to Multiview expands it as it was; Stop ends it.
+struct MultiviewBackgroundBannerSlot: View {
+    @ObservedObject private var session = MultiviewBackgroundSession.shared
+    @ObservedObject private var store = MultiviewStore.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if session.isActive {
+                banner.transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: session.isActive)
+    }
+
+    private var banner: some View {
+        let count = store.tiles.count
+        let label = count == 1
+            ? "Multiview playing in background, 1 channel"
+            : "Multiview playing in background, \(count) channels"
+        return HStack(spacing: 12) {
+            Image(systemName: "rectangle.split.2x2")
+                .scaledFont(.system(size: 16, weight: .semibold))
+                .foregroundColor(.accentPrimary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .scaledFont(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.textPrimary)
+                    .lineLimit(1)
+                Text(store.tiles.map(\.item.name).joined(separator: ", "))
+                    .scaledFont(.system(size: 13))
+                    .foregroundColor(Color.contrastText(.textSecondary))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .layoutPriority(1)
+            Spacer()
+            Button {
+                session.returnToFullscreen()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "play.fill")
+                        .scaledFont(.system(size: 18, weight: .medium))
+                    Text("Return to Multiview")
+                        .scaledFont(.system(size: 22, weight: .medium))
+                        .lineLimit(1)
+                }
+                .fixedSize()
+                .foregroundColor(.white)
+                .padding(.horizontal, 26)
+                .padding(.vertical, 13)
+                .background(Capsule().fill(Color.accentPrimary))
+            }
+            .buttonStyle(TVNoHighlightButtonStyle(isSelected: true))
+            .tvFocusRingShape(.capsule)
+            Button {
+                session.stop()
+            } label: {
+                Text("Stop")
+                    .scaledFont(.system(size: 22, weight: .medium))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .foregroundColor(Color.contrastText(.accentPrimary))
+                    .padding(.horizontal, 26)
+                    .padding(.vertical, 13)
+                    .background(Capsule().stroke(Color.accentPrimary, lineWidth: 1))
+            }
+            .buttonStyle(TVNoHighlightButtonStyle())
+            .tvFocusRingShape(.capsule)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.accentPrimary.opacity(0.4))
+                .frame(height: 1)
+        }
+        .focusSection()
+    }
+}
+#endif
+
 /// Leaf wrapper that observes the store itself, so the List's body does not
 /// re-render on every Multiview store publish; only this slot does.
 struct MultiviewStagingBannerSlot: View {
@@ -10123,6 +10237,9 @@ struct MultiviewStagingBannerSlot: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            #if os(tvOS)
+            MultiviewBackgroundBannerSlot()
+            #endif
             if multiviewStore.isStagingFromGuide {
                 MultiviewStagingBanner(activeServer: activeServer)
                     .transition(.move(edge: .top).combined(with: .opacity))

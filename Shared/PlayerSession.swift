@@ -514,6 +514,9 @@ final class PlayerSession: ObservableObject {
         #if os(iOS)
         if MultiviewCompositeSession.shared.isActive { return nil }
         #endif
+        // A background Multiview stays a Multiview at one tile: its last
+        // channel reads Remove from Multiview, not the mini player seed.
+        if MultiviewBackgroundSession.shared.isActive { return nil }
         return store.tiles.first
     }
 
@@ -569,6 +572,18 @@ final class PlayerSession: ObservableObject {
             return .added
         }
         if let tile = store.tile(forChannelID: channel.id) {
+            // Removing the last tile of a running Multiview ends it (the
+            // same full stop as Exit Multiview / the dock card's Stop).
+            if mode == .multiview, store.tiles.count <= 1 {
+                DebugLogger.shared.log(
+                    "[MV-Tile] Remove from Multiview: \(channel.name) was the last tile, ending Multiview",
+                    category: "Playback", level: .info)
+                stop()
+                return .removed
+            }
+            DebugLogger.shared.log(
+                "[MV-Tile] Remove from Multiview: \(channel.name) remaining=\(store.tiles.count - 1) background=\(MultiviewBackgroundSession.shared.isActive)",
+                category: "Playback", level: .info)
             store.remove(id: tile.id)
             return .removed
         }
@@ -1939,3 +1954,74 @@ final class PlayWhereRouter: ObservableObject {
     }
     #endif
 }
+
+#if os(tvOS)
+/// Multiview in the background on Apple TV (Leave Multiview > Back to
+/// Guide). Same API as the iPhone/iPad `MultiviewBackgroundSession`: the
+/// tiles keep playing with the container hidden (HomeView), the guide
+/// takes focus, and a banner above the guide returns to the Multiview or
+/// stops it. tvOS has no pinch-in, so the dialog button is the only entry.
+@MainActor
+final class MultiviewBackgroundSession: ObservableObject {
+    static let shared = MultiviewBackgroundSession()
+    @Published private(set) var isActive = false
+    private var bag: Set<AnyCancellable> = []
+
+    private init() {
+        PlayerSession.shared.$mode
+            .sink { [weak self] mode in
+                guard let self, self.isActive, mode != .multiview else { return }
+                self.clear(reason: "multiview ended")
+            }
+            .store(in: &bag)
+        NowPlayingManager.shared.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, self.isActive, !NowPlayingManager.shared.isMinimized else { return }
+                self.clear(reason: "expanded")
+            }
+            .store(in: &bag)
+    }
+
+    static var canEnter: Bool {
+        PlayerSession.shared.mode == .multiview
+            && MultiviewStore.shared.tiles.count >= 2
+            && !shared.isActive
+    }
+
+    func enter() {
+        guard Self.canEnter else { return }
+        isActive = true
+        let store = MultiviewStore.shared
+        if let audio = store.tiles.first(where: { $0.id == store.audioTileID }) ?? store.tiles.first {
+            NowPlayingManager.shared.lastPlayedChannelID = audio.item.id
+        }
+        debugLog("[MV-BG] background enter (Back to Guide) tiles=\(store.tiles.count)")
+        NowPlayingManager.shared.applyMinimized()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+        }
+    }
+
+    /// Banner Return (or Back/Play on the guide): the fullscreen Multiview
+    /// as it was; the tiles never stopped.
+    func returnToFullscreen() {
+        guard isActive else { return }
+        isActive = false
+        debugLog("[MV-BG] return")
+        withAnimation(.spring(response: 0.35)) { NowPlayingManager.shared.expand() }
+    }
+
+    func stop() {
+        guard isActive else { return }
+        isActive = false
+        debugLog("[MV-BG] stop")
+        PlayerSession.shared.stop()
+    }
+
+    private func clear(reason: String) {
+        isActive = false
+        debugLog("[MV-BG] background cleared (\(reason))")
+    }
+}
+#endif

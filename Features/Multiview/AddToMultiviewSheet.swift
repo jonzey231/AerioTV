@@ -166,6 +166,19 @@ struct AddToMultiviewSheet: View {
     @AppStorage("multiviewPickerLastGroup")
     private var selectedGroup: String = "All"
 
+    /// Picker-only toggles (Android parity, same keys and wording):
+    /// "Show Subtitles" adds the airing program's subtitle line under
+    /// the title in every channel row (Teamarr carries "Team 1 vs
+    /// Team 2" there); "Show Descriptions" adds the description,
+    /// two lines max. Per device, default off, not synced.
+    @AppStorage("multiviewPickerShowSubtitles")
+    private var showSubtitles: Bool = false
+    @AppStorage("multiviewPickerShowDescriptions")
+    private var showDescriptions: Bool = false
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
+
     /// User-hidden groups loaded from the same `UserDefaults` key
     /// `ChannelListView` uses (`hiddenChannelGroups`). The picker
     /// honours this list so a user who hid a group in the main
@@ -265,7 +278,7 @@ struct AddToMultiviewSheet: View {
                 // Movies / Series / Recordings) sits above the group
                 // filter. The group filter is channel-only (VOD has no
                 // group chips), so it's hidden for the other sources.
-                iPadSourcePillBar
+                iPadSourceAndTogglesRow
                 if pickerSource == .channels, groupChips.count > 1 {
                     iPadGroupFilterBar
                 }
@@ -379,6 +392,59 @@ struct AddToMultiviewSheet: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
         }
+    }
+
+    /// Source pills plus the Show Subtitles / Show Descriptions toggle
+    /// pills. Regular width (iPad): one row, toggles right-aligned.
+    /// Compact width (iPhone): toggles wrap onto their own row below.
+    @ViewBuilder
+    private var iPadSourceAndTogglesRow: some View {
+        if horizontalSizeClass == .compact {
+            VStack(alignment: .leading, spacing: 0) {
+                iPadSourcePillBar
+                HStack(spacing: 8) {
+                    iPadToggleChips
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
+        } else {
+            HStack(spacing: 0) {
+                iPadSourcePillBar
+                HStack(spacing: 8) { iPadToggleChips }
+                    .padding(.trailing, 16)
+                    .fixedSize()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var iPadToggleChips: some View {
+        iPadToggleChip("Show Subtitles", isOn: $showSubtitles)
+        iPadToggleChip("Show Descriptions", isOn: $showDescriptions)
+    }
+
+    private func iPadToggleChip(_ title: String, isOn: Binding<Bool>) -> some View {
+        Button {
+            withAnimation(.spring(response: 0.25)) { isOn.wrappedValue.toggle() }
+        } label: {
+            Text(title)
+                .scaledFont(.labelMedium)
+                .lineLimit(1)
+                .foregroundColor(isOn.wrappedValue ? .appBackground : .textSecondary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(
+                    isOn.wrappedValue
+                        ? AnyView(Capsule().fill(Color.accentPrimary))
+                        : AnyView(Capsule().fill(Color.elevatedBackground))
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(isOn.wrappedValue ? "On" : "Off")
+        .accessibilityAddTraits(isOn.wrappedValue ? .isSelected : [])
     }
 
     /// Phase 1 (Step 4): the iPad content list, switched by source.
@@ -535,8 +601,14 @@ struct AddToMultiviewSheet: View {
                 // / Series / Recordings). Sits directly under the
                 // header so D-pad Down from Close lands here first, then
                 // the (channel-only) group filter, then the list.
-                tvSourcePillBar
-                    .padding(.horizontal, 80)
+                HStack(spacing: 12) {
+                    tvSourcePillBar
+                    Spacer(minLength: 12)
+                    tvToggleChip("Show Subtitles", isOn: $showSubtitles)
+                    tvToggleChip("Show Descriptions", isOn: $showDescriptions)
+                }
+                    .padding(.leading, 80 - tvPillInset)
+                    .padding(.trailing, 80)
                     .padding(.bottom, 12)
                     .focusSection()
 
@@ -551,7 +623,7 @@ struct AddToMultiviewSheet: View {
                 // sources have no group chips.
                 if pickerSource == .channels, groupChips.count > 1 {
                     tvGroupFilterBar
-                        .padding(.horizontal, 80)
+                        .padding(.horizontal, 80 - tvPillInset)
                         .padding(.bottom, 12)
                         .focusSection()
                 }
@@ -629,8 +701,12 @@ struct AddToMultiviewSheet: View {
                     .accessibilityAddTraits(selectedGroup == group ? .isSelected : [])
                 }
             }
-            .padding(.vertical, 4)
+            // Item 6: inset inside the scroll view so the focused pill's
+            // 1.05 scale and ring are never clipped at the leading edge.
+            .padding(.horizontal, tvPillInset)
+            .padding(.vertical, 10)
         }
+        .scrollClipDisabled()
     }
 
     /// Phase 1 (Step 4): source switcher pill bar for tvOS. Same
@@ -657,8 +733,32 @@ struct AddToMultiviewSheet: View {
                     .accessibilityAddTraits(pickerSource == source ? .isSelected : [])
                 }
             }
-            .padding(.vertical, 4)
+            .padding(.horizontal, tvPillInset)
+            .padding(.vertical, 10)
         }
+        .scrollClipDisabled()
+    }
+
+    /// Leading/trailing headroom inside the tvOS pill scroll views. The
+    /// outer row padding drops by the same amount so pills keep their
+    /// on-screen alignment with the title and the channel rows.
+    private var tvPillInset: CGFloat { 16 }
+
+    /// Show Subtitles / Show Descriptions toggle pill (tvOS). Same
+    /// focus vocabulary as the source pills; selected = on.
+    private func tvToggleChip(_ title: String, isOn: Binding<Bool>) -> some View {
+        Button {
+            withAnimation(.spring(response: 0.25)) { isOn.wrappedValue.toggle() }
+        } label: {
+            Text(title)
+                .scaledFont(.system(size: 22, weight: .medium))
+                .lineLimit(1)
+        }
+        .buttonStyle(PickerGroupPillButtonStyle(isSelected: isOn.wrappedValue))
+        .padding(.vertical, 10)
+        .fixedSize()
+        .accessibilityLabel(title)
+        .accessibilityValue(isOn.wrappedValue ? "On" : "Off")
     }
 
     /// Phase 1 (Step 4): tvOS content, switched by source. Each branch
@@ -817,7 +917,9 @@ struct AddToMultiviewSheet: View {
         CompactChannelRow(
             item: item,
             isAlreadyAdded: alreadyAdded(item),
-            isDisabled: multiviewStore.isAtMax
+            isDisabled: multiviewStore.isAtMax,
+            showSubtitle: showSubtitles,
+            showDescription: showDescriptions
         ) {
             tap(item)
         }
@@ -831,7 +933,9 @@ struct AddToMultiviewSheet: View {
                 CompactChannelRow(
                     item: item,
                     isAlreadyAdded: alreadyAdded(item),
-                    isDisabled: multiviewStore.isAtMax
+                    isDisabled: multiviewStore.isAtMax,
+                    showSubtitle: showSubtitles,
+                    showDescription: showDescriptions
                 ) {
                     tap(item)
                 }
@@ -855,7 +959,21 @@ struct AddToMultiviewSheet: View {
     /// toasts via `commitAdd`.
     private func tap(_ item: ChannelDisplayItem) {
         if alreadyAdded(item) {
-            multiviewStore.remove(id: item.id)
+            // Remove by the TILE id. Picker-added tiles carry a UUID id
+            // (only the seeded tile is pinned to the channel id), so the
+            // old `remove(id: item.id)` was a silent no-op for them and
+            // the green check could not be deselected.
+            guard let tile = multiviewStore.tiles.first(where: { $0.item.id == item.id }) else { return }
+            // The sole tile of a running Multiview stays: removing it
+            // would leave an empty player under the picker. The tile's
+            // own Remove or Exit Multiview ends the session.
+            if PlayerSession.shared.mode == .multiview, multiviewStore.tiles.count <= 1 {
+                debugLog("[MV-Tile] picker deselect ignored: \(item.name) is the last tile")
+                showToast("Last channel in the Multiview")
+                return
+            }
+            debugLog("[MV-Tile] picker deselect \(item.name) tile=\(tile.id) remaining=\(multiviewStore.tiles.count - 1)")
+            multiviewStore.remove(id: tile.id)
         } else {
             tryAdd(item)
         }
