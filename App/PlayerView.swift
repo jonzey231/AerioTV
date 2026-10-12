@@ -5287,6 +5287,11 @@ final class AVPlayerProgressDriver {
     /// NOT part of the post-stall resume gate: see armStallResumeGate).
     private var sessionHoldback = 0.0
     private var freezeTimer: Timer?
+    /// True while the owner wants this player running (not deliberately
+    /// paused). The freeze detector reports rate 0 + .paused as a freeze
+    /// only when this is set; the chrome's pause toggle keeps it current.
+    var expectPlaying = false
+    private var pausedWhileExpectedTicks = 0
     /// Escalation sink for a fatal/persistent stream error the errorLog
     /// surfaces (e.g. a rejected playlist or a failed blocking reload that
     /// never throws to `status`). The host wires this to its engine fallback.
@@ -5710,14 +5715,30 @@ final class AVPlayerProgressDriver {
                     "[AVP-FREEZE] waiting (%@) tick %d, pos %.1fs",
                     reason, freezeConsecutiveTicks, item.currentTime().seconds))
                 maybeNudgeOutOfWait(item: item, reason: reason)
+            } else if expectPlaying {
+                // Device 2026-10-12: a held DVR start left rate 0 with no
+                // wait reason and this detector said nothing for minutes.
+                pausedWhileExpectedTicks += 1
+                let t = pausedWhileExpectedTicks
+                if t <= 5 || t % 10 == 0 {
+                    debugLog(String(format:
+                        "[AVP-FREEZE] rate=0 while expected playing (status paused) tick %d, pos %.1fs",
+                        t, item.currentTime().seconds))
+                }
+                endWaitStreak()
             } else {
                 endWaitStreak()
                 freezeConsecutiveTicks = 0 // paused deliberately
+                pausedWhileExpectedTicks = 0
             }
             freezeLastMediaTime = .invalid
             return
         }
         endWaitStreak()
+        if pausedWhileExpectedTicks > 0 {
+            debugLog("[AVP-FREEZE] rate=0 while expected playing cleared after ~\(pausedWhileExpectedTicks)s")
+            pausedWhileExpectedTicks = 0
+        }
         let now = item.currentTime()
         defer { freezeLastMediaTime = now }
         guard freezeLastMediaTime.isValid else {
@@ -6351,6 +6372,7 @@ final class AVPlayerProgressDriver {
                     .map { CMTimeGetSeconds(CMTimeRangeGetEnd($0)) - cur } ?? 0
                 debugLog("[AVP-DVR] \(resuming ? "resume" : "pause") at \(String(format: "%.1f", cur))s, \(String(format: "%.1f", ahead))s buffered ahead")
             }
+            self?.expectPlaying = resuming
             if resuming { player.play() } else { player.pause() }
         }
         store.seekAction = { [weak self, weak player] ms in

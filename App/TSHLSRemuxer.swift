@@ -5420,6 +5420,7 @@ struct AVPlayerMultiviewTile: View {
         }
         #endif
         .onChange(of: shouldPause) { _, paused in
+            driver?.expectPlaying = !paused
             if paused { player?.pause() } else { player?.play() }
         }
         // In-place channel swap on the same tile id (the container
@@ -5607,9 +5608,6 @@ struct AVPlayerMultiviewTile: View {
     /// of the server's 4 s segments) and forward buffer (about two).
     private static let forceHLSLiveOffset: Double = 12
     private static let forceHLSForwardBuffer: Double = 8
-    /// Forward buffer for an in-progress recording played over the
-    /// server's direct HLS (GH #93). See startPlayer.
-    private static let dvrForwardBuffer: Double = 15
 
     /// Live tunes only: arm the remuxer's 2 s silence signal and its
     /// clean-close signal.
@@ -7472,19 +7470,6 @@ struct AVPlayerMultiviewTile: View {
         if adoptedPlayer == nil, isLoopbackVOD || (catchup != nil && isLoopback) {
             playerItem.preferredForwardBufferDuration = 15
         }
-        // In-progress DVR over the server's direct HLS (GH #93): the same
-        // hours-deep live-shaped window, played far behind its edge. The
-        // reporter's log shows AVPlayer ingesting it at 123 to 185 Mbps
-        // ("[AVP-STREAM] startup=485ms ... observed=123321kbps",
-        // "[AVP-PERF] ... observed=185244kbps") on every start and after
-        // every seek, and the picture held still for seconds while audio
-        // ran. The catch-up loopback note above is the same signature;
-        // 15 s bounds it. The recording only grows at its own bitrate,
-        // so a deeper buffer buys nothing.
-        let isDVRDirectHLS = isDVR && !isLoopback
-        if adoptedPlayer == nil, isDVRDirectHLS {
-            playerItem.preferredForwardBufferDuration = Self.dvrForwardBuffer
-        }
         // NO first-play buffering override. The 2026-09-11 17:15 device
         // session (session2.txt) is the counter-experiment: with
         // `automaticallyWaitsToMinimizeStalling = false` and a 2 s
@@ -7497,7 +7482,7 @@ struct AVPlayerMultiviewTile: View {
         // that played that session was the one whose second remuxer ran
         // under the automatic policy. Automatic waiting is what actually
         // starts a live remux stream; leave it alone.
-        debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : (isForceHLSDirect ? "\(Int(Self.forceHLSForwardBuffer))s (Force HLS)" : (isDVRDirectHLS && adoptedPlayer == nil ? "\(Int(Self.dvrForwardBuffer))s (DVR direct HLS)" : "automatic"))) channel=\(channelName)")
+        debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : (isForceHLSDirect ? "\(Int(Self.forceHLSForwardBuffer))s (Force HLS)" : "automatic")) channel=\(channelName)")
         let avPlayer = adoptedPlayer ?? AVPlayer(playerItem: playerItem)
         // FORCE-HLS: automaticallyWaitsToMinimizeStalling stays ON for server
         // HLS items. Turning it off (tested 2026-10-05, iPhone) started 2 ms
@@ -7589,7 +7574,20 @@ struct AVPlayerMultiviewTile: View {
                     let issued = Date()
                     avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { finished in
                         debugLog("[AVP-DVR] from-beginning seek landed finished=\(finished) in \(Int(Date().timeIntervalSince(issued) * 1000))ms pos=\(String(format: "%.1f", avPlayer.currentTime().seconds))s; \(startPaused ? "staying paused" : "starting playback")")
-                        if !startPaused { avPlayer.play() }
+                        guard !startPaused else { return }
+                        avPlayer.play()
+                        // Device 2026-10-12 (build 33ba890): the held start
+                        // must be proven to leave the player running. If
+                        // the rate is not 1 two seconds later, ask again.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            guard avPlayer.currentItem === item else { return }
+                            if avPlayer.rate == 1 {
+                                debugLog("[AVP-DVR] play took: rate=1 pos=\(String(format: "%.1f", avPlayer.currentTime().seconds))s")
+                            } else {
+                                debugLog("[AVP-DVR] play did not take, retrying (rate=\(avPlayer.rate) status=\(avPlayer.timeControlStatus.rawValue) pos=\(String(format: "%.1f", avPlayer.currentTime().seconds))s)")
+                                avPlayer.play()
+                            }
+                        }
                     }
                     debugLog("[AVP-MV] DVR from-beginning seek re-issued at readyToPlay")
                 } else if !startPaused {
@@ -7635,6 +7633,9 @@ struct AVPlayerMultiviewTile: View {
             isLive: !(isVOD || isDVR || catchup != nil), applyGravity: { _ in })
         // Where a stall-learned hold-back is recorded for the NEXT tune.
         driver?.liveHoldbackKey = holdbackKey
+        // Freeze detector: a player we asked to play that sits at rate 0
+        // is a freeze too (device 2026-10-12, held DVR start).
+        driver?.expectPlaying = !shouldPause
         // The driver re-applies the join offset only inside the first 30 s
         // and only with an empty buffer (writing it on a healthy playing
         // item is what seeks backward). Never wired for a LAN item, which
