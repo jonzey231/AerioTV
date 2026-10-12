@@ -3648,6 +3648,12 @@ struct MultiviewCompositePreviewGrid: View {
                     let focused = tile.id == store.audioTileID
                     let isLifted = tile.id == lifted
                     let isTarget = dragging && target == tile.id && target != lifted
+                    // Rings and badges hug the fitted picture, not the slot
+                    // (Logan 2026-10-11: rings floated above and below the
+                    // letterboxed picture). Same fit the compositor draws:
+                    // the tile's video aspect, 16:9 fallback.
+                    let v = MultiviewCompositeLayout.videoRect(
+                        in: r, aspect: store.tileVideoAspects[tile.id] ?? (16.0 / 9.0))
                     ZStack {
                         if live == nil {
                             // Until the first composed frame: the names.
@@ -3673,8 +3679,8 @@ struct MultiviewCompositePreviewGrid: View {
                         .opacity(isLifted ? 1 : 0))
                     .overlay(Rectangle().strokeBorder(Color.white, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
                         .opacity(isTarget ? 1 : 0))
-                    .frame(width: r.width, height: r.height)
-                    .offset(x: r.minX, y: r.minY)
+                    .frame(width: v.width, height: v.height)
+                    .offset(x: v.minX, y: v.minY)
                     .allowsHitTesting(false)
                     .accessibilityElement()
                     .accessibilityLabel("\(tile.item.name)\(focused ? ", audio" : "")")
