@@ -41,6 +41,20 @@ extension MultiviewStore {
         guard let ps = audioProgressStore else { return Just(false).eraseToAnyPublisher() }
         return ps.$isPaused.removeDuplicates().eraseToAnyPublisher()
     }
+
+    /// The audio tile's position and duration, as one tick per change.
+    /// Same gap as `audioPausedPublisher`: the iOS transport bar read
+    /// currentMs / durationMs through this store, which does not
+    /// republish them, so on an in-progress recording the playhead and
+    /// the written end froze at whatever they were when the chrome came
+    /// up (device 2026-10-12, 4b2f6a4). The driver writes both every
+    /// 0.5 s (durationMs from the seekable end for DVR windows).
+    var audioProgressTickPublisher: AnyPublisher<Void, Never> {
+        guard let ps = audioProgressStore else { return Empty().eraseToAnyPublisher() }
+        return ps.$currentMs.removeDuplicates().map { _ in () }
+            .merge(with: ps.$durationMs.removeDuplicates().map { _ in () })
+            .eraseToAnyPublisher()
+    }
 }
 
 struct PlaybackChromeOverlay: View {
@@ -694,8 +708,12 @@ struct VODTransportBar_iOS: View {
     @State private var dragFraction: CGFloat? = nil
     @State private var settleTask: Task<Void, Never>? = nil
     @State private var pausedMirror: Bool?
+    /// Bumped on every position / duration change of the audio tile so
+    /// the bar re-renders (see audioProgressTickPublisher).
+    @State private var progressTick: UInt = 0
 
     var body: some View {
+        let _ = progressTick
         let duration = Int64(max(Int32(1), store.audioProgressStore?.durationMs ?? 1))
         let posMs = Int64(store.audioProgressStore?.currentMs ?? 0)
         let current = min(posMs, duration)
@@ -780,6 +798,7 @@ struct VODTransportBar_iOS: View {
             .padding(.top, 2)
         }
         .onReceive(store.audioPausedPublisher) { pausedMirror = $0 }
+        .onReceive(store.audioProgressTickPublisher) { progressTick &+= 1 }
     }
 
     private func vodButton(_ icon: String, action: @escaping () -> Void) -> some View {
