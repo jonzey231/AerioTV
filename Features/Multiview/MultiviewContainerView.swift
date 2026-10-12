@@ -1409,6 +1409,42 @@ struct MultiviewContainerView: View {
         // built-in), and `reportInteraction()` keeps chrome alive
         // while the dialog is visible so the user isn't stranded
         // staring at faded chrome after they cancel.
+        #if os(tvOS)
+        // Apple TV (trace 2026-10-12 14:51): the system confirmationDialog
+        // presented right after the picker closed did not dismiss on Menu;
+        // the first press was eaten, the second reached tvOS and sent the
+        // app Home. The dialog is an in-app overlay on tvOS that owns Menu
+        // (Menu = Cancel), so Menu can never reach the system while it is up.
+        // Everything under it (grid, chrome) is disabled while it shows, so
+        // focus cannot leave the overlay's buttons.
+        .disabled(showExitConfirmation)
+        .overlay {
+            if showExitConfirmation {
+                TVExitConfirmationOverlay(
+                    title: exitConfirmationTitle,
+                    message: exitConfirmationMessage,
+                    primary: exitConfirmationPrimary,
+                    showsBackToGuide: MultiviewBackgroundSession.canEnter,
+                    onBackToGuide: {
+                        showExitConfirmation = false
+                        DebugLogger.shared.log(
+                            "[MV-Cmd] exit dialog: Back to Guide (tiles=\(store.tiles.count))",
+                            category: "Playback", level: .info)
+                        MultiviewBackgroundSession.shared.enter()
+                    },
+                    onPrimary: {
+                        showExitConfirmation = false
+                        performConfirmedExit()
+                    },
+                    onCancel: { source in
+                        showExitConfirmation = false
+                        debugLog("[PRESS] exit dialog cancelled (\(source))")
+                        chromeState.reportInteraction()
+                    }
+                )
+            }
+        }
+        #else
         .confirmationDialog(
             exitConfirmationTitle,
             isPresented: $showExitConfirmation,
@@ -1450,6 +1486,7 @@ struct MultiviewContainerView: View {
         } message: {
             Text(exitConfirmationMessage)
         }
+        #endif
     }
 
     /// Title for the exit-confirmation dialog. Phrased per tile
@@ -1948,6 +1985,13 @@ struct MultiviewContainerView: View {
     }
 
     private func handleMenuPress(source: String) {
+        // The exit dialog is up: Menu cancels it, nothing else.
+        if showExitConfirmation {
+            showExitConfirmation = false
+            debugLog("[PRESS] exit dialog cancelled (Menu via \(source))")
+            chromeState.reportInteraction()
+            return
+        }
         // GH #71: Menu while digits are buffered only clears the entry.
         if ChannelNumberEntry.shared.cancel() { return }
         DebugLogger.shared.log(
@@ -3090,6 +3134,64 @@ enum MultiviewRelocateInput {
             }
         }
         return consumed
+    }
+}
+#endif
+
+#if os(tvOS)
+/// Apple TV exit dialog ("Leave Multiview?" / "Exit Playback?"). In-app, so
+/// Menu is always consumed here (Menu = Cancel) and never reaches tvOS.
+private struct TVExitConfirmationOverlay: View {
+    let title: String
+    let message: String
+    let primary: String
+    let showsBackToGuide: Bool
+    let onBackToGuide: () -> Void
+    let onPrimary: () -> Void
+    let onCancel: (String) -> Void
+    @FocusState private var focused: Int?
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.6).ignoresSafeArea()
+            VStack(spacing: 18) {
+                Text(title)
+                    .scaledFont(.system(size: 38, weight: .bold))
+                    .foregroundColor(.white)
+                Text(message)
+                    .scaledFont(.system(size: 24))
+                    .foregroundColor(.white.opacity(0.75))
+                    .multilineTextAlignment(.center)
+                    .padding(.bottom, 12)
+                if showsBackToGuide {
+                    button("Back to Guide", tag: 0, destructive: false, action: onBackToGuide)
+                }
+                button(primary, tag: 1, destructive: true, action: onPrimary)
+                button("Cancel", tag: 2, destructive: false) { onCancel("Cancel button") }
+            }
+            .frame(maxWidth: 640)
+            .padding(48)
+            .background(RoundedRectangle(cornerRadius: 28, style: .continuous).fill(Color.cardBackground))
+            .focusSection()
+        }
+        .onExitCommand { onCancel("Menu") }
+        .onAppear { focused = showsBackToGuide ? 0 : 1 }
+    }
+
+    private func button(_ label: String, tag: Int, destructive: Bool,
+                        action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .scaledFont(.system(size: 26, weight: .semibold))
+                .foregroundColor(destructive ? .statusLive : .textPrimary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+                .background(Capsule().fill(Color.elevatedBackground))
+        }
+        // TvActionMenuDialog parity: capsule buttons, white focus ring.
+        .buttonStyle(TVNoHighlightButtonStyle(isSelected: true))
+        .tvFocusRingShape(.capsule)
+        .focused($focused, equals: tag)
     }
 }
 #endif
