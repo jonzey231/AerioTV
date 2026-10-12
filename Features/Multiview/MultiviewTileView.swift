@@ -517,6 +517,11 @@ struct MultiviewTileView: View {
         // change still refreshes the menu; the 0.5s position pump
         // deliberately does not.
         .contextMenu {
+            // Each build of the menu is logged: a menu rebuilt while it is
+            // open is how a Menu press failed to close it before (field
+            // trace 2026-09-13), so a rebuild here next to a stuck menu
+            // names the cause.
+            let _ = debugLog("[MV-Cmd] tile menu built tile=\(tile.id.prefix(8)) sole=\(isSoleTile)")
             if !isSoleTile { tileContextMenu }
         }
         // Relocate-mode D-pad swap is handled at the CONTAINER level
