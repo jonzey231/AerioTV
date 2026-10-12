@@ -735,6 +735,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var videoPacketSeen = false
     private var firstAudioPTSWithoutVideo: Double = -1
     private let audioOnlyVideoGraceSeconds = 3.0
+    /// Wall clock of the first audio PES seen without video. A Dispatcharr
+    /// burst can carry 3 s of audio PTS in its first 10 KB before the first
+    /// video packet (Apple TV 2026-10-11 22:49: audio-only called 106 ms after
+    /// first byte on a 1080p channel), so media time alone is not enough: the
+    /// no-video call also needs this much real time to have passed.
+    private var firstAudioWallWithoutVideo: Date?
+    private let audioOnlyWallFloorSeconds = 4.0
     /// Audio-only by the 3 s fallback: the PMT still declares a video PID,
     /// so segments lead with a rewritten PMT that drops it.
     private var audioOnlyDroppedVideo = false
@@ -1257,7 +1264,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                     || apts - firstAudioPTSWithoutVideo > 30 {
                     // First audio, or a wrap/jump: (re)start the window.
                     firstAudioPTSWithoutVideo = apts
-                } else if apts - firstAudioPTSWithoutVideo >= audioOnlyVideoGraceSeconds {
+                    firstAudioWallWithoutVideo = Date()
+                } else if apts - firstAudioPTSWithoutVideo >= audioOnlyVideoGraceSeconds,
+                          Date().timeIntervalSince(firstAudioWallWithoutVideo ?? Date()) >= audioOnlyWallFloorSeconds {
                     debugLog("[TS-REMUX] audio-only program detected: no video packets in \(Int(audioOnlyVideoGraceSeconds)) s (PMT video PID \(videoPID) silent, audio PID \(primaryAudioPID) type \(String(format: "0x%02X", primaryAudioType)))")
                     enterAudioOnly(dropVideoFromPMT: true)
                     handleAudioOnlyPacket(p, pid: pid, pusi: pusi)
