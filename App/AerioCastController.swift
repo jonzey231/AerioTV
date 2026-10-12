@@ -3173,6 +3173,9 @@ struct RemoteSessionSheet: View {
     /// Companion only: the client whose Options sheet (Stream Info, tracks,
     /// speed) the Options button opens.
     var companion: CompanionClient? = nil
+    /// Add Channel row (Logan 2026-10-11): above Layout in the Multiview
+    /// section; the only Multiview row for a single cast. nil hides it.
+    var onAddChannel: (() -> Void)? = nil
 
     @State private var contentHeight: CGFloat = 320
     @State private var liveWindow: RemoteSeekWindow?
@@ -3216,6 +3219,7 @@ struct RemoteSessionSheet: View {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
+        .modifier(RemoteAddChannelPresenter(host: .sheet))
         .sheet(isPresented: $showOptions) {
             if transport == .companion, let companion {
                 RemoteOptionsSheet(companion: companion)
@@ -3224,6 +3228,28 @@ struct RemoteSessionSheet: View {
             } else {
                 CastOptionsSheet(cast: AerioCastController.shared, airPlayItem: item, airPlay: true)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var addChannelRow: some View {
+        if let onAddChannel {
+            Button(action: onAddChannel) {
+                HStack {
+                    Text("Add Channel")
+                        .scaledFont(.subheadline)
+                        .foregroundStyle(.white)
+                    Spacer()
+                    Image(systemName: "plus")
+                        .scaledFont(.subheadline.weight(.semibold))
+                        .foregroundStyle(accent)
+                }
+                .padding(.horizontal, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(mode != .playing)
+            .accessibilityLabel("Add Channel")
         }
     }
 
@@ -3263,7 +3289,10 @@ struct RemoteSessionSheet: View {
                 NativeMultiviewPanel(state: native)
             } else if compositeMultiview {
                 MultiviewCompositePreviewGrid()
+                addChannelRow
                 MultiviewCompositeLayoutRow()
+            } else {
+                addChannelRow
             }
             programBlock
             Group {
@@ -3638,8 +3667,12 @@ struct MultiviewCompositePreviewGrid: View {
                     .overlay(Rectangle().strokeBorder(focused ? theme.accent : Color.gray,
                                                       lineWidth: focused ? 4 : 2)
                         .opacity(live == nil ? 1 : 0))
+                    // Lifted tile: the accent ring (tvOS Move Tile ring),
+                    // from the long-press threshold until release.
+                    .overlay(Rectangle().strokeBorder(theme.accent, lineWidth: 4)
+                        .opacity(isLifted ? 1 : 0))
                     .overlay(Rectangle().strokeBorder(Color.white, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
-                        .opacity(isLifted || isTarget ? 1 : 0))
+                        .opacity(isTarget ? 1 : 0))
                     .frame(width: r.width, height: r.height)
                     .offset(x: r.minX, y: r.minY)
                     .allowsHitTesting(false)
@@ -3663,15 +3696,18 @@ struct MultiviewCompositePreviewGrid: View {
                             // ignored (round 8: no tap ever moved the audio,
                             // Logan had to use Make Audio).
                             longPressFired = true
-                            guard let drag else { return }
-                            if lifted == nil || !dragging {
-                                if let id = hit(drag.startLocation) {
-                                    if lifted != id { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
-                                    lifted = id
-                                    dragging = true
-                                }
+                            // Lift at the long-press threshold (Logan
+                            // 2026-10-11): the drag reports nothing until
+                            // the finger moves, so the touch-down point
+                            // picks the tile and its ring shows at once.
+                            if lifted == nil || !dragging,
+                               let start = drag?.startLocation ?? touchDown,
+                               let id = hit(start) {
+                                if lifted != id { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
+                                lifted = id
+                                dragging = true
                             }
-                            dragPoint = drag.location
+                            if let drag { dragPoint = drag.location }
                         default:
                             break
                         }
@@ -3683,7 +3719,9 @@ struct MultiviewCompositePreviewGrid: View {
                         guard let drag, let from = lifted, dragging else {
                             // Long-press released before the drag reported:
                             // the menu for the tile under the finger.
-                            if let p = touchDown, let id = hit(p) { openMenu(id) }
+                            let buzzed = lifted != nil
+                            lifted = nil
+                            if let p = touchDown, let id = hit(p) { openMenu(id, haptic: !buzzed) }
                             return
                         }
                         if let to = hit(drag.location), to != from {
@@ -5306,6 +5344,9 @@ struct RemoteSessionCard: View {
     let onTap: () -> Void
     let onTogglePlayPause: () -> Void
     let onStop: () -> Void
+    /// Add Channel (Logan 2026-10-11): the + beside the X; nil hides it
+    /// (no Multiview possible, or at the tile cap).
+    var onAddChannel: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 12) {
@@ -5361,6 +5402,17 @@ struct RemoteSessionCard: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(isPlaying ? "Pause" : "Play")
             }
+            if let onAddChannel {
+                Button(action: onAddChannel) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 17, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
+                        .foregroundStyle(ThemeManager.shared.accent)
+                        .frame(width: 38, height: 40)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Add Channel")
+            }
             // X is accent-colored on Android too, and it always ends the
             // session (see HomeView: stop on the TV, then close the card).
             Button(action: onStop) {
@@ -5383,6 +5435,7 @@ struct RemoteSessionCard: View {
             debugLog("[Cast] card tap")
             onTap()
         }
+        .modifier(RemoteAddChannelPresenter(host: .card))
         .onAppear { debugLog("[Cast] card show") }
         .onDisappear { debugLog("[Cast] card hide") }
         .accessibilityElement(children: .contain)
@@ -5434,6 +5487,119 @@ struct RemoteSessionCard: View {
 
 }
 
+// MARK: - Remote session Add Channel (Logan 2026-10-11)
+
+/// "Add Channel" on the remote-session card and sheet (Cast, AirPlay,
+/// AerioTV Remote, where the receiver can take a Multiview). Opens the
+/// Multiview add-channel picker. A composite cast takes the pick as one
+/// more tile (the running-Multiview add path, e1dcbd2); a single-channel
+/// cast becomes a two-channel Multiview on the receiver through the same
+/// "Play on <receiver>" path the staged set uses. Android twin: same
+/// wording and placement.
+@MainActor
+final class RemoteAddChannel: ObservableObject {
+    static let shared = RemoteAddChannel()
+    enum Host { case card, sheet }
+
+    @Published private(set) var presentedOn: Host?
+    /// Single cast: the channel the receiver plays, staged as tile 1 while
+    /// the picker is open. nil while adding to a running composite.
+    private var singleItem: ChannelDisplayItem?
+    /// The store was seeded here (no local Multiview ran), so a cancel
+    /// clears it again.
+    private var seeded = false
+    private var baseline = 0
+    private var bag: AnyCancellable?
+
+    private init() {
+        bag = MultiviewStore.shared.$tiles
+            .map(\.count)
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] n in self?.tilesChanged(count: n) }
+    }
+
+    /// Whether the action shows. `single`: the channel of a single-channel
+    /// session, nil when none (or the session is a composite).
+    static func available(single: ChannelDisplayItem?) -> Bool {
+        let store = MultiviewStore.shared
+        if MultiviewCompositeSession.shared.isActive {
+            return MultiviewCompositeSession.eligible(count: store.tiles.count + 1)
+        }
+        guard single != nil else { return false }
+        return PlayWhereRouter.multiviewReceiverName(count: 2) != nil
+    }
+
+    func open(from host: Host, single: ChannelDisplayItem?) {
+        let store = MultiviewStore.shared
+        guard Self.available(single: single) else { return }
+        if MultiviewCompositeSession.shared.isActive {
+            singleItem = nil
+            seeded = false
+        } else {
+            guard let single else { return }
+            singleItem = single
+            seeded = false
+            if PlayerSession.shared.mode != .multiview {
+                store.reset()
+                store.isStagingFromGuide = false
+                if case .needsWarning = store.add(single, server: ChannelStore.shared.activeServer) {
+                    _ = store.add(single, server: ChannelStore.shared.activeServer, bypassWarning: true)
+                }
+                seeded = true
+            }
+        }
+        baseline = store.tiles.count
+        debugLog("[MV-CAST] Add Channel opened on \(host == .card ? "card" : "sheet") single=\(singleItem?.name ?? "-") tiles=\(baseline)")
+        presentedOn = host
+    }
+
+    /// Picker dismissed (Done, swipe, or after the pick).
+    func dismissed() {
+        guard presentedOn != nil else { return }
+        presentedOn = nil
+        if singleItem != nil, seeded, MultiviewStore.shared.tiles.count <= baseline,
+           PlayerSession.shared.mode != .multiview {
+            MultiviewStore.shared.reset()
+            debugLog("[MV-CAST] Add Channel cancelled: staged single cleared")
+        }
+        singleItem = nil
+        seeded = false
+    }
+
+    private func tilesChanged(count: Int) {
+        guard presentedOn != nil, let single = singleItem, count > baseline else { return }
+        // The pick turns the single cast into a two-channel Multiview on
+        // the receiver (native or the phone composite).
+        let channels = MultiviewStore.shared.tiles.map(\.item)
+        debugLog("[MV-CAST] Add Channel: \(single.name) + \(channels.last?.name ?? "?") -> Multiview on the receiver")
+        singleItem = nil
+        seeded = false
+        presentedOn = nil
+        PlayWhereRouter.shared.playMultiviewOnReceiver(channels: channels, focus: 0)
+    }
+}
+
+/// Presents the add-channel picker for `RemoteAddChannel` on one host.
+struct RemoteAddChannelPresenter: ViewModifier {
+    let host: RemoteAddChannel.Host
+    @ObservedObject private var flow = RemoteAddChannel.shared
+
+    func body(content: Content) -> some View {
+        content.sheet(isPresented: Binding(
+            get: { flow.presentedOn == host },
+            set: { if !$0 { flow.dismissed() } }
+        )) {
+            AddToMultiviewSheet(isPresented: Binding(
+                get: { flow.presentedOn == host },
+                set: { if !$0 { flow.dismissed() } }
+            ))
+            .presentationDetents([.fraction(0.45), .large])
+            .presentationDragIndicator(.visible)
+        }
+    }
+}
+
 // MARK: - Multiview dock card + sheet (Logan 2026-10-06)
 
 /// Derived visibility for the Multiview dock card, so HomeView observes one
@@ -5464,6 +5630,23 @@ final class MultiviewDockState: ObservableObject {
     /// receiver can run Multiview, the play-where prompt).
     static func play() {
         let store = MultiviewStore.shared
+        // One channel staged (Logan 2026-10-11, Android parity): the
+        // channel tap path (play-where prompt for a single live channel,
+        // then standard single-channel playback), not Multiview.
+        if let only = PlayerSession.shared.soleStagedChannel {
+            // The set is consumed either way (Play Here or Play on the
+            // receiver), so it clears now and the closure plays the channel.
+            let playingInMini = PlayerSession.shared.miniPlayerSeedTile?.item.id == only.id
+            clearStaging(reason: "Play with one channel staged (\(only.name))")
+            PlayWhereRouter.shared.request(title: only.name, item: .live(only)) {
+                if playingInMini {
+                    NowPlayingManager.shared.expand()
+                } else {
+                    _ = PlayerSession.shared.begin(item: only, server: ChannelStore.shared.activeServer)
+                }
+            }
+            return
+        }
         let items = store.tiles.map(\.item)
         let focus = store.tiles.firstIndex(where: { $0.id == store.audioTileID }) ?? 0
         DebugLogger.shared.log("[MV-Tile] staging mode: user tapped Play (count=\(items.count))",

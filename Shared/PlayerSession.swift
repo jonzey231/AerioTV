@@ -591,6 +591,12 @@ final class PlayerSession: ObservableObject {
     /// duplicate) and the player expands; otherwise the classic launch.
     func playLiveTVStaged(server: ServerConnection?) {
         let store = MultiviewStore.shared
+        // One channel staged (Logan 2026-10-11, Android parity): standard
+        // single-channel playback, not a one-tile Multiview.
+        if liveTVStagedCount == 1, mode != .multiview || miniPlayerSeedTile != nil {
+            playStagedSingleChannel(server: server)
+            return
+        }
         let extras = store.stagedExtras
         store.stagedExtras = []
         store.isStagingFromGuide = false
@@ -608,6 +614,37 @@ final class PlayerSession: ObservableObject {
         } else {
             enterMultiview(seeding: nil, server: server)
         }
+    }
+
+    /// The staged channel when exactly one is staged (mini player seed,
+    /// Kept Live seed, a lone staged tile or a lone extra), else nil.
+    var soleStagedChannel: ChannelDisplayItem? {
+        let store = MultiviewStore.shared
+        guard liveTVStagedCount == 1 else { return nil }
+        if let seed = miniPlayerSeedTile { return seed.item }
+        return store.tiles.first?.item ?? store.stagedExtras.first
+    }
+
+    /// Play a one-channel staged set the way tapping the channel does
+    /// (Logan 2026-10-11, Android parity): the staged set is cleared and
+    /// the channel goes through the normal single-channel path (begin),
+    /// so no Multiview chrome or Leave Multiview prompt. A channel already
+    /// playing in the mini player just expands.
+    func playStagedSingleChannel(server: ServerConnection?) {
+        let store = MultiviewStore.shared
+        guard let item = soleStagedChannel else { return }
+        let alreadyPlaying = miniPlayerSeedTile?.item.id == item.id
+        store.stagedExtras = []
+        store.isStagingFromGuide = false
+        DebugLogger.shared.log(
+            "[MV-Tile] staging mode: Play with one channel staged -> single playback \(item.name) (playing=\(alreadyPlaying))",
+            category: "Playback", level: .info)
+        if alreadyPlaying {
+            NowPlayingManager.shared.expand()
+            return
+        }
+        if mode != .multiview { store.reset() }
+        _ = begin(item: item, server: server ?? ChannelStore.shared.activeServer)
     }
 
     /// Banner Clear. Drops the staged extras; a playing mini player is

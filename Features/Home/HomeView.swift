@@ -6610,7 +6610,9 @@ struct MainTabView: View {
                 onStop: {
                     debugLog("[Remote] X: stop + close")
                     castController.stopCasting()
-                }
+                },
+                onAddChannel: content == nil ? nil : remoteAddChannel(.card, single: content?.mediaID == MultiviewCompositeSession.castMediaID
+                    ? nil : content.flatMap { c in ChannelStore.shared.channels.first(where: { $0.id == c.mediaID }) })
             )
             }
         case .companion:
@@ -6628,7 +6630,9 @@ struct MainTabView: View {
                 // X = stop playback on the TV AND close the card, same as the
                 // other two transports. "Disconnect" (leave the TV playing)
                 // lives in the controls sheet.
-                onStop: { companionClient.stopPlaybackAndDisconnect() }
+                onStop: { companionClient.stopPlaybackAndDisconnect() },
+                onAddChannel: companionClient.nowPlaying.isEmpty ? nil
+                    : remoteAddChannel(.card, single: companionControlledItem)
             )
         case .airPlay:
             let item = nowPlaying.playingItem
@@ -6671,12 +6675,21 @@ struct MainTabView: View {
                     onStop: {
                         debugLog("[Remote] X: stop + close")
                         airPlay.stop()
-                    }
+                    },
+                    onAddChannel: probing ? nil : remoteAddChannel(.card, single: composite ? nil : item)
                 )
             }
         case nil:
             EmptyView()
         }
+    }
+
+    /// Add Channel on the remote card / sheet (Logan 2026-10-11): nil hides
+    /// it. `single`: the single-channel session's channel (nil for a
+    /// composite, which adds a tile instead).
+    private func remoteAddChannel(_ host: RemoteAddChannel.Host, single: ChannelDisplayItem?) -> (() -> Void)? {
+        guard RemoteAddChannel.available(single: single) else { return nil }
+        return { RemoteAddChannel.shared.open(from: host, single: single) }
     }
 
     /// The channel the AerioTV Remote last sent ("disp:<uuid>"), resolved on
@@ -6762,7 +6775,9 @@ struct MainTabView: View {
                 seekWindow: (castComposite || native != nil) ? nil : { castController.remoteSeekWindow() },
                 onSeekTo: { castController.remoteSeek(to: $0) },
                 compositeMultiview: castComposite,
-                nativeMultiview: native
+                nativeMultiview: native,
+                onAddChannel: (content == nil || native != nil) ? nil
+                    : remoteAddChannel(.sheet, single: castComposite ? nil : item)
             )
         case .companion:
             // The Cast sheet layout (Logan 2026-10-11): only the glyph, the
@@ -6812,7 +6827,8 @@ struct MainTabView: View {
                     companionClient.disconnectLeavingTVPlaying()
                     showRemoteControls = false
                 },
-                companion: companionClient
+                companion: companionClient,
+                onAddChannel: (title.isEmpty && item == nil) ? nil : remoteAddChannel(.sheet, single: item)
             )
         case .airPlay:
             // Idle route -> the minimal idle sheet; probing = the playing
@@ -6854,7 +6870,9 @@ struct MainTabView: View {
                 },
                 seekWindow: composite ? nil : { airPlay.remoteSeekWindow() },
                 onSeekTo: { airPlay.seek(to: $0) },
-                compositeMultiview: composite
+                compositeMultiview: composite,
+                onAddChannel: (idle || airPlayIsProbing) ? nil
+                    : remoteAddChannel(.sheet, single: composite ? nil : item)
             )
         case nil:
             EmptyView()
