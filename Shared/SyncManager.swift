@@ -46,6 +46,20 @@ final class SyncManager: ObservableObject {
     /// Prevents re-entrant updates (remote change → local save → push cycle).
     private var isMerging = false
 
+    // MARK: - Preference last-writer-wins (2026-10-12)
+    /// A local synced write that has not been pushed yet. While set, no
+    /// cloud preferences blob is applied (a pull used to overwrite a fresh
+    /// Text Size step or remote map edit with the older cloud copy because
+    /// the local push waits up to 60 s).
+    private var prefsDirtySince: Date?
+    /// Blob key carrying the writer's modification time.
+    private static let prefsModifiedAtKey = "_prefsModifiedAt"
+    /// Modification time of the last blob this device pushed or applied.
+    private static let prefsLocalModifiedAtDefaultsKey = "syncPrefsLocalModifiedAt"
+    /// Snapshot of the last pushed blob, to tell a real synced change from
+    /// a non-synced UserDefaults write inside the post-stamp quiet window.
+    private var lastPushedPrefs: NSDictionary?
+
     /// True while waiting for the initial import after the user first enables sync.
     @Published private(set) var isImporting = false
 
@@ -729,8 +743,12 @@ final class SyncManager: ObservableObject {
         }
 
         debugLog("🔵 SyncManager.pushPrefs: building snapshot")
-        nonisolated(unsafe) let snapshot = buildPreferencesDict()
+        var built = buildPreferencesDict()
+        let modifiedAt = (prefsDirtySince ?? Date()).timeIntervalSince1970
+        built[Self.prefsModifiedAtKey] = modifiedAt
+        nonisolated(unsafe) let snapshot = built
         let key = prefKVSKey
+        if prefsDirtySince == nil { prefsDirtySince = Date(timeIntervalSince1970: modifiedAt) }
 
         prefPushDebounce?.cancel()
         let work = DispatchWorkItem {
@@ -739,6 +757,11 @@ final class SyncManager: ObservableObject {
                 mgr.lastPushTime = ProcessInfo.processInfo.systemUptime
                 NSUbiquitousKeyValueStore.default.set(snapshot, forKey: key)
                 debugLog("🔵 SyncManager: pushed preferences")
+                mgr.prefsDirtySince = nil
+                var plain = snapshot
+                plain[SyncManager.prefsModifiedAtKey] = nil
+                mgr.lastPushedPrefs = plain as NSDictionary
+                UserDefaults.standard.set(modifiedAt, forKey: SyncManager.prefsLocalModifiedAtDefaultsKey)
                 mgr.stampSyncDate()
             }
         }
@@ -923,10 +946,27 @@ final class SyncManager: ObservableObject {
             return
         }
 
+        // Last writer wins. An explicit Replace pull is a confirmed user
+        // action and always applies.
+        let cloudT = dict[Self.prefsModifiedAtKey] as? TimeInterval ?? 0
+        if !replace {
+            if let dirty = prefsDirtySince {
+                debugLog("[SYNC] prefs skipped: local blob newer (local=\(dirty.timeIntervalSince1970) cloud=\(cloudT)), unpushed change")
+                doPushPreferences(immediate: true)
+                return
+            }
+            let localT = UserDefaults.standard.double(forKey: Self.prefsLocalModifiedAtDefaultsKey)
+            if cloudT > 0, cloudT <= localT {
+                debugLog("[SYNC] prefs skipped: local blob newer (local=\(localT) cloud=\(cloudT))")
+                return
+            }
+        }
+
         isMerging = true
         defer { isMerging = false }
 
         let ud = UserDefaults.standard
+        if cloudT > 0 { ud.set(cloudT, forKey: Self.prefsLocalModifiedAtDefaultsKey) }
 
         // v1.6.17, the per-category sync toggle states ALWAYS apply, even
         // when the user has "App Preferences" sync turned off. Otherwise a
@@ -986,8 +1026,11 @@ final class SyncManager: ObservableObject {
             HiddenVODStore.shared.mergeRemote(blob)
         }
 
+        // What was just applied is the cloud state, not a local change.
+        lastPushedPrefs = buildPreferencesDict() as NSDictionary
+        prefsDirtySince = nil
         NotificationCenter.default.post(name: .syncManagerDidApplyPreferences, object: nil)
-        debugLog("🔵 SyncManager.doApplyPreferences: applied")
+        debugLog("[SYNC] prefs applied from cloud (\(dict.count - (cloudT > 0 ? 1 : 0)) keys)")
     }
 
     // MARK: - UserDefaults Observer
@@ -999,7 +1042,14 @@ final class SyncManager: ObservableObject {
         guard isSyncEnabled, !isMerging else { return }
 
         let now = ProcessInfo.processInfo.systemUptime
-        if now - lastStampTime < 3.0 { return }
+        // Only a change to a SYNCED value counts. This observer fires for
+        // every UserDefaults write; marking those dirty would block cloud
+        // changes for nothing. Inside the quiet window after our own stamp
+        // write a real synced change still counts (it used to be dropped).
+        let current = buildPreferencesDict() as NSDictionary
+        if let last = lastPushedPrefs, current.isEqual(last) { return }
+        if lastPushedPrefs == nil, now - lastStampTime < 3.0 { return }
+        if prefsDirtySince == nil { prefsDirtySince = Date() }
 
         udChangeCount += 1
         if udChangeCount <= 3 || udChangeCount % 50 == 0 {
