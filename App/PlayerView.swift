@@ -5116,6 +5116,20 @@ enum LiveEdgeHoldback {
 }
 
 
+/// Weak player -> display layer map so diagnostics that only hold the
+/// AVPlayer (the progress driver, the held DVR start) can read the layer
+/// actually showing it (GH #93 video probe).
+@MainActor
+enum AVPlayerDisplayLayerRegistry {
+    private static let map = NSMapTable<AVPlayer, AVPlayerLayer>.weakToWeakObjects()
+    static func register(_ layer: AVPlayerLayer, for player: AVPlayer?) {
+        guard let player else { return }
+        map.setObject(layer, forKey: player)
+    }
+    static func layer(for player: AVPlayer) -> AVPlayerLayer? { map.object(forKey: player) }
+}
+
+
 /// Bridges an `AVPlayer`'s playback state into the shared
 /// `PlayerProgressStore`, the SAME store the mpv path populates, so ONE
 /// custom control overlay can drive both engines. This is the AVPlayer
@@ -5292,6 +5306,14 @@ final class AVPlayerProgressDriver {
     /// only when this is set; the chrome's pause toggle keeps it current.
     var expectPlaying = false
     private var pausedWhileExpectedTicks = 0
+    // GH #93 video probe (DVR windows only): a video output on the item
+    // tells us which frame is actually due for display, independent of
+    // the audio-driven clock.
+    private var probeOutput: AVPlayerItemVideoOutput?
+    private weak var probeItem: AVPlayerItem?
+    private var probeLastFramePTS: Double = .nan
+    private var probeStaleSeconds = 0
+    private var probeTicks = 0
     /// Escalation sink for a fatal/persistent stream error the errorLog
     /// surfaces (e.g. a rejected playlist or a failed blocking reload that
     /// never throws to `status`). The host wires this to its engine fallback.
@@ -5690,7 +5712,55 @@ final class AVPlayerProgressDriver {
         #endif
     }
 
+    private func videoProbeTick() {
+        guard store.isDVRWindow, let item = player.currentItem else { return }
+        if probeItem !== item {
+            if let old = probeOutput, let oldItem = probeItem { oldItem.remove(old) }
+            let out = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
+            item.add(out)
+            probeOutput = out
+            probeItem = item
+            probeLastFramePTS = .nan
+            probeStaleSeconds = 0
+            probeTicks = 0
+        }
+        guard let out = probeOutput else { return }
+        probeTicks += 1
+        let itemTime = out.itemTime(forHostTime: CACurrentMediaTime())
+        var displayTime = CMTime.invalid
+        let hasBuffer = out.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &displayTime) != nil
+        let pts = displayTime.isValid ? displayTime.seconds : probeLastFramePTS
+        let videoTrack = item.tracks.first { $0.assetTrack?.mediaType == .video }
+        let fps = Double(videoTrack?.assetTrack?.nominalFrameRate ?? 0)
+        var framesPerSec = 0
+        if pts.isFinite, probeLastFramePTS.isFinite, fps > 0 {
+            framesPerSec = Int(((pts - probeLastFramePTS) * fps).rounded())
+        }
+        let advanced = pts.isFinite && (!probeLastFramePTS.isFinite || pts > probeLastFramePTS + 0.001)
+        if hasBuffer || advanced { probeStaleSeconds = 0 } else if player.rate > 0 { probeStaleSeconds += 1 }
+        if pts.isFinite { probeLastFramePTS = pts }
+        let layer = AVPlayerDisplayLayerRegistry.layer(for: player)
+        let clock = item.currentTime().seconds
+        if probeTicks <= 15 || probeTicks % 15 == 0 {
+            debugLog(String(format:
+                "[AVP-VIDEO] frames=%d/s framePTS=%@ readyForDisplay=%@ layerPlayerSame=%@ size=%.0fx%.0f videoTrackEnabled=%@ rate=%.2f clock=%.2f",
+                framesPerSec, pts.isFinite ? String(format: "%.2f", pts) : "none",
+                layer.map { $0.isReadyForDisplay ? "true" : "false" } ?? "nolayer",
+                layer.map { $0.player === player ? "true" : "false" } ?? "nolayer",
+                item.presentationSize.width, item.presentationSize.height,
+                videoTrack.map { $0.isEnabled ? "true" : "false" } ?? "notrack",
+                player.rate, clock))
+        }
+        if probeStaleSeconds > 0, probeStaleSeconds <= 5 || probeStaleSeconds % 10 == 0 {
+            debugLog(String(format:
+                "[AVP-VIDEO] no new frames for %ds while rate=%.0f (clock %.2f, last framePTS %@)",
+                probeStaleSeconds, player.rate, clock,
+                probeLastFramePTS.isFinite ? String(format: "%.2f", probeLastFramePTS) : "none"))
+        }
+    }
+
     private func freezeTick() {
+        videoProbeTick()
         if externalRenderSuspended {
             freezeLastMediaTime = .invalid
             freezeConsecutiveTicks = 0
@@ -6481,6 +6551,8 @@ final class AVPlayerProgressDriver {
         perfTimer = nil
         freezeTimer?.invalidate()
         freezeTimer = nil
+        if let out = probeOutput, let item = probeItem { item.remove(out) }
+        probeOutput = nil
         aspectCancellable?.cancel()
         aspectCancellable = nil
         onUnrecoverable = nil

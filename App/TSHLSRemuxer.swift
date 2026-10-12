@@ -5608,6 +5608,30 @@ struct AVPlayerMultiviewTile: View {
     /// of the server's 4 s segments) and forward buffer (about two).
     private static let forceHLSLiveOffset: Double = 12
     private static let forceHLSForwardBuffer: Double = 8
+    /// Device 2026-10-12 (f6a407c): an EXACT seek to 0 on the server's
+    /// in-progress HLS (leading #EXT-X-DISCONTINUITY, AC-3 audio first
+    /// PTS 1.400 s, H.264 first PTS 2.658 s) rendered two frames and
+    /// then the layer stopped while the clock ran. Target 0 sits 1.26 s
+    /// before the first video sample. Letting AVPlayer land up to 2 s
+    /// after 0 lets it start on the first video sample instead of in
+    /// the audio-only lead-in. Test lever, confirmed by [AVP-VIDEO].
+    static let dvrStartSeekTolerance = CMTime(seconds: 2, preferredTimescale: 600)
+
+    /// Held DVR start: play, then prove the rate took two seconds later.
+    static func playAndVerify(_ avPlayer: AVPlayer, item: AVPlayerItem) {
+        avPlayer.play()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            guard avPlayer.currentItem === item else { return }
+            let layer = AVPlayerDisplayLayerRegistry.layer(for: avPlayer)
+            let layerNote = layer.map { "layerPlayerSame=\($0.player === avPlayer) readyForDisplay=\($0.isReadyForDisplay)" } ?? "layer=none"
+            if avPlayer.rate == 1 {
+                debugLog("[AVP-DVR] play took: rate=1 pos=\(String(format: "%.1f", avPlayer.currentTime().seconds))s \(layerNote)")
+            } else {
+                debugLog("[AVP-DVR] play did not take, retrying (rate=\(avPlayer.rate) status=\(avPlayer.timeControlStatus.rawValue) pos=\(String(format: "%.1f", avPlayer.currentTime().seconds))s) \(layerNote)")
+                avPlayer.play()
+            }
+        }
+    }
 
     /// Live tunes only: arm the remuxer's 2 s silence signal and its
     /// clean-close signal.
@@ -7565,29 +7589,41 @@ struct AVPlayerMultiviewTile: View {
             // threw it away and the picture had to rebuild from the start
             // while audio raced ahead. Nothing renders until we are at 0.
             deferDVRStartPlay = true
-            avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+            avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: Self.dvrStartSeekTolerance)
             let startPaused = shouldPause
             var readyObs: NSKeyValueObservation?
             readyObs = playerItem.observe(\.status, options: [.new]) { item, _ in
                 guard item.status != .unknown else { return }
                 if item.status == .readyToPlay {
-                    let issued = Date()
-                    avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { finished in
-                        debugLog("[AVP-DVR] from-beginning seek landed finished=\(finished) in \(Int(Date().timeIntervalSince(issued) * 1000))ms pos=\(String(format: "%.1f", avPlayer.currentTime().seconds))s; \(startPaused ? "staying paused" : "starting playback")")
-                        guard !startPaused else { return }
-                        avPlayer.play()
-                        // Device 2026-10-12 (build 33ba890): the held start
-                        // must be proven to leave the player running. If
-                        // the rate is not 1 two seconds later, ask again.
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    // Device 2026-10-12 (f6a407c): re-issue ONLY when the
+                    // queued seek did not stick (that run sat at 675.8 s,
+                    // the edge, so it is still needed there). When the
+                    // item is already at the start, a second seek is pure
+                    // pipeline churn; start playback directly.
+                    let here = avPlayer.currentTime().seconds
+                    if here.isFinite, here < Self.dvrStartSeekTolerance.seconds + 0.5 {
+                        debugLog("[AVP-DVR] queued from-beginning seek already landed (pos=\(String(format: "%.2f", here))s); no re-issue")
+                        if !startPaused { Self.playAndVerify(avPlayer, item: item) }
+                        // Safety net for the 2026-08-31 stomp (live-edge
+                        // positioning AT readiness): if the item jumped to
+                        // the edge after all, seek back once.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                             guard avPlayer.currentItem === item else { return }
-                            if avPlayer.rate == 1 {
-                                debugLog("[AVP-DVR] play took: rate=1 pos=\(String(format: "%.1f", avPlayer.currentTime().seconds))s")
-                            } else {
-                                debugLog("[AVP-DVR] play did not take, retrying (rate=\(avPlayer.rate) status=\(avPlayer.timeControlStatus.rawValue) pos=\(String(format: "%.1f", avPlayer.currentTime().seconds))s)")
-                                avPlayer.play()
+                            let pos = avPlayer.currentTime().seconds
+                            if pos.isFinite, pos > 10 {
+                                debugLog("[AVP-DVR] start jumped to \(String(format: "%.1f", pos))s after readiness; seeking back to the beginning")
+                                avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: Self.dvrStartSeekTolerance)
                             }
                         }
+                        readyObs?.invalidate()
+                        readyObs = nil
+                        return
+                    }
+                    let issued = Date()
+                    avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: Self.dvrStartSeekTolerance) { finished in
+                        debugLog("[AVP-DVR] from-beginning seek landed finished=\(finished) in \(Int(Date().timeIntervalSince(issued) * 1000))ms pos=\(String(format: "%.1f", avPlayer.currentTime().seconds))s; \(startPaused ? "staying paused" : "starting playback")")
+                        guard !startPaused else { return }
+                        Self.playAndVerify(avPlayer, item: item)
                     }
                     debugLog("[AVP-MV] DVR from-beginning seek re-issued at readyToPlay")
                 } else if !startPaused {
@@ -8225,6 +8261,7 @@ struct AVPlayerLayerView: UIViewRepresentable {
     func makeUIView(context: Context) -> HostView {
         let view = HostView()
         view.playerLayer.player = player
+        AVPlayerDisplayLayerRegistry.register(view.playerLayer, for: player)
         view.playerLayer.videoGravity = videoGravity
         view.attachedAt = Date()
         view.readyObservation = view.playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { layer, _ in
@@ -8238,6 +8275,7 @@ struct AVPlayerLayerView: UIViewRepresentable {
     func updateUIView(_ view: HostView, context: Context) {
         if view.playerLayer.player !== player {
             view.playerLayer.player = player
+            AVPlayerDisplayLayerRegistry.register(view.playerLayer, for: player)
         }
         if view.playerLayer.videoGravity != videoGravity {
             view.playerLayer.videoGravity = videoGravity
