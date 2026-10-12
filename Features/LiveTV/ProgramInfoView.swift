@@ -222,6 +222,12 @@ struct ProgramInfoView: View {
     /// from TMDB-by-title when that opt-in is enabled and the server
     /// has no artwork. nil = no poster, render nothing.
     @State private var posterURL: URL? = nil
+    /// Android parity order: detail icon, feed icon, TMDB. The feed icon
+    /// shows while detail resolves and is replaced by detail art.
+    @State private var posterIsFeed = false
+    /// TMDB is allowed only after detail answered with no art (or no
+    /// Dispatcharr detail exists for this program at all).
+    @State private var detailAllowsTMDB = false
     // The loaded bitmap's aspect no longer drives the layout: art goes into
     // the height-locked ProgramArtSlot shared with the guide preview
     // banner, so nothing is cropped and nothing resizes as art lands
@@ -588,12 +594,13 @@ struct ProgramInfoView: View {
         // missing OR we don't yet have a poster (the detail call
         // carries both, so one request serves both needs).
         let categoryNeeded = target.category.isEmpty && loadedCategory == nil
-        let posterNeeded = posterURL == nil
+        let posterNeeded = posterURL == nil || posterIsFeed
         guard categoryNeeded || posterNeeded else {
             debugLog("📺 ProgramInfo lazy-load SKIP: category + poster already resolved")
             return
         }
         guard let pid = target.programID else {
+            detailAllowsTMDB = true
             debugLog("📺 ProgramInfo lazy-load SKIP: programID is nil (target wasn't built from a Dispatcharr-grid program, XMLTV/Xtream/dummy source, or the construction site didn't thread programID)")
             return
         }
@@ -602,6 +609,7 @@ struct ProgramInfoView: View {
             return
         }
         guard server.type == .dispatcharrAPI else {
+            detailAllowsTMDB = true
             debugLog("📺 ProgramInfo lazy-load SKIP: activeServer.type=\(server.type) (not dispatcharrAPI)")
             return
         }
@@ -632,9 +640,13 @@ struct ProgramInfoView: View {
             debugLog("📺 ProgramInfo lazy-load FAIL: pid=\(pid) (404 without match or request failed)")
             return
         }
-        if posterNeeded, loaded == nil, let raw = rawPoster {
-            posterURL = VODService.resolveImageURL(raw, base: baseURL, size: "w500")
+        if posterNeeded, loaded == nil, let raw = rawPoster,
+           let u = VODService.resolveImageURL(raw, base: baseURL, size: "w500") {
+            posterURL = u
+            posterIsFeed = false
         }
+        // Detail answered: TMDB may fill in only when it carried no art.
+        detailAllowsTMDB = rawPoster == nil
         guard let detail = loaded else { return }
         let cats = detail.categories.joined(separator: ",")
         debugLog("📺 ProgramInfo lazy-load OK: pid=\(pid) returned \(detail.categories.count) categories: '\(cats.prefix(80))'")
@@ -647,8 +659,10 @@ struct ProgramInfoView: View {
         // Server-provided poster (SD proxy / XMLTV image / icon).
         // resolveImageURL validates the host (SSRF guard) and maps
         // bare TMDB slugs to the CDN, same as the VOD path.
-        if posterNeeded, let raw = detail.bestPosterString {
-            posterURL = VODService.resolveImageURL(raw, base: baseURL, size: "w500")
+        if posterNeeded, let raw = detail.bestPosterString,
+           let u = VODService.resolveImageURL(raw, base: baseURL, size: "w500") {
+            posterURL = u
+            posterIsFeed = false
             debugLog("📺 ProgramInfo poster: \(posterURL?.absoluteString ?? "rejected/none")")
         }
         // The bulk grid has no repeat field, but this endpoint does:
@@ -671,6 +685,7 @@ struct ProgramInfoView: View {
         } else if let base = ChannelStore.shared.activeServer?.effectiveBaseURL, !base.isEmpty {
             posterURL = VODService.resolveImageURL(raw, base: base, size: "w500")
         }
+        posterIsFeed = posterURL != nil
         debugLog("📺 ProgramInfo feed poster: \(posterURL?.absoluteString ?? "rejected/none")")
     }
 
@@ -681,12 +696,14 @@ struct ProgramInfoView: View {
     /// required) since it keys off the title.
     @MainActor
     private func loadTMDBPosterIfNeeded() async {
-        guard posterURL == nil,
+        guard posterURL == nil, detailAllowsTMDB,
               TMDBPosters.isEnabled,
               let apiKey = TMDBPosters.apiKey,
               !target.title.trimmingCharacters(in: .whitespaces).isEmpty
         else { return }
         if let url = await TMDBService.posterURL(forTitle: target.title, apiKey: apiKey) {
+            // Detail art landed first: it outranks TMDB.
+            guard posterURL == nil else { return }
             posterURL = url
             debugLog("📺 ProgramInfo TMDB poster: \(url.absoluteString)")
         }

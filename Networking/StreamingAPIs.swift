@@ -2907,6 +2907,18 @@ struct DispatcharrAPI {
         return results
     }
 
+    /// One page of `/api/epg/programs/?<query>&page_size=50`, no paging,
+    /// 8 s timeout. Used by the stale-id re-resolve; empty on any failure.
+    func programListingPage(query: String) async -> [DispatcharrCurrentProgram] {
+        guard let url = try? buildURL(path: "/api/epg/programs/?\(query)&page_size=50") else { return [] }
+        var request = URLRequest(url: url, timeoutInterval: 8)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        guard let (data, response) = try? await HTTPRouter.data(for: request),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return [] }
+        if let list = try? Self.jsonDecoder.decode([DispatcharrCurrentProgram].self, from: data) { return list }
+        return (try? decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: data))?.results ?? []
+    }
+
     // MARK: - Upcoming programs (next N programs after the current one)
     // Per-channel fetch for on-demand use (e.g. user expands a single channel card).
     func getUpcomingPrograms(tvgIDs: [String]? = nil, channelIDs: [Int]? = nil, limit: Int = .max) async throws -> [DispatcharrCurrentProgram] {
@@ -7156,13 +7168,22 @@ enum DispatcharrProgramDetailResolver {
                 return .notFound
             }
             let ch = channelID.flatMap { cid in ChannelStore.shared.channels.first { $0.id == cid } }
-            var candidates: [DispatcharrCurrentProgram] = []
+            // One single-page query per key, timed, in order; the next key
+            // only on an empty answer. (getUpcomingPrograms follows up to
+            // two more pages per key with a 15 s timeout each, so the old
+            // tvg_id, uuid, channel chain could chain up to nine requests.)
+            var queries: [String] = []
             for tvg in [ch?.tvgID, ch?.uuid].compactMap({ $0 }).filter({ !$0.isEmpty }) {
-                candidates = (try? await api.getUpcomingPrograms(tvgIDs: [tvg])) ?? []
-                if !candidates.isEmpty { break }
+                let enc = tvg.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? tvg
+                queries.append("tvg_id=\(enc)")
             }
-            if candidates.isEmpty, let dc = ch?.dispatcharrChannelID {
-                candidates = (try? await api.getUpcomingPrograms(channelIDs: [dc])) ?? []
+            if let dc = ch?.dispatcharrChannelID { queries.append("channel=\(dc)") }
+            var candidates: [DispatcharrCurrentProgram] = []
+            for q in queries {
+                let t0 = Date()
+                candidates = await api.programListingPage(query: q)
+                debugLog("[PREVIEW-ART] re-resolve \(q.prefix(60)): \(candidates.count) entries in \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
+                if candidates.contains(where: { $0.startTime?.toDate().map { abs($0.timeIntervalSince(start)) < 1 } ?? false }) { break }
             }
             guard let match = candidates.first(where: {
                       guard let s = $0.startTime?.toDate() else { return false }
@@ -7174,7 +7195,9 @@ enum DispatcharrProgramDetailResolver {
             }
             aliases[pid] = newID
             debugLog("[PREVIEW-ART] stale program id \(id) -> \(newID) (\(title))")
+            let t0 = Date()
             let detail = try? await api.getProgramDetail(id: newID)
+            debugLog("[PREVIEW-ART] detail for \(newID) in \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
             return .found(detail: detail, poster: detail?.bestPosterString ?? match.icon)
         } catch {
             debugLog("[PREVIEW-ART] program id \(id) detail failed: \(error.localizedDescription) (\(title)); not cached")

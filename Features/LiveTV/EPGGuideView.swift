@@ -6017,12 +6017,20 @@ struct EPGGuideView: View {
                         #endif
                     }
                     .overlay(alignment: .topLeading) {
-                        TimelineView(.periodic(from: .now, by: 60)) { context in
-                            GuideHOffsetReader(scroll: hScroll) { liveOffset in
-                                timeIndicatorLine(screenWidth: geo.size.width, now: context.date,
-                                                  offset: liveOffset)
-                                    .allowsHitTesting(false)
+                        // The overlay spans the whole stack, which on iPad
+                        // includes the bottom-pill clearance spacer: with a
+                        // one-row group the now line ran down that empty
+                        // space (Logan 2026-10-12). Stop it at the rows.
+                        GeometryReader { stack in
+                            TimelineView(.periodic(from: .now, by: 60)) { context in
+                                GuideHOffsetReader(scroll: hScroll) { liveOffset in
+                                    timeIndicatorLine(screenWidth: geo.size.width, now: context.date,
+                                                      offset: liveOffset)
+                                        .allowsHitTesting(false)
+                                }
                             }
+                            .frame(height: max(0, stack.size.height - guideRowsBottomClearance),
+                                   alignment: .top)
                         }
                     }
                 }
@@ -8028,6 +8036,16 @@ struct EPGGuideView: View {
         GuidePreviewState.shared.set(live, ch)
     }
     #endif
+
+    /// Height under the last row that is not rows (iPad bottom-pill
+    /// clearance); the now line stops above it.
+    private var guideRowsBottomClearance: CGFloat {
+        #if os(iOS)
+        return PadTabPill.isActive ? PadTabPill.clearanceUnderSafeArea : 0
+        #else
+        return 0
+        #endif
+    }
 
     // MARK: - Time Indicator Line
     private func timeIndicatorLine(screenWidth: CGFloat, now: Date = Date(), offset: CGFloat) -> some View {

@@ -375,19 +375,26 @@ final class GuidePreviewArtCache: ObservableObject {
     /// Same order for callers without a GuideProgram (the Record sheet).
     func state(title: String, category: String, programID: Int?, posterURL: String? = nil,
                start: Date? = nil, channelID: String? = nil) -> ArtState {
-        if let raw = posterURL, let u = URL(string: raw), u.scheme != nil { return .art(u) }
+        // Android parity (2026-10-12): detail icon (stale ids re-resolved),
+        // then the feed icon, then TMDB ONLY when detail answered with no
+        // art and there is no feed icon. A pending or failed detail lookup
+        // never shows TMDB (a title match put a movie poster on a game).
+        let feed: URL? = posterURL.flatMap { URL(string: $0) }.flatMap { $0.scheme != nil ? $0 : nil }
         if let pid = programID {
             switch detailEntries[pid] {
             case .some(.some(let u)): return .art(u)
-            case .some(.none): break          // detail had no icon: fall through to TMDB
+            case .some(.none):
+                if let feed { return .art(feed) }   // detail had no icon
             case .none:
-                // Only a lookup that actually started is worth waiting for;
-                // no Dispatcharr server means the miss is known right now.
-                if let failed = detailFailedAt[pid], Date().timeIntervalSince(failed) < Self.retryAfter {
-                    break  // recent transport failure: TMDB meanwhile, retry later
-                }
-                if fetchDetail(pid: pid, title: title, start: start, channelID: channelID) { return .pending }
+                let failedRecently = detailFailedAt[pid].map { Date().timeIntervalSince($0) < Self.retryAfter } ?? false
+                let open = !failedRecently && fetchDetail(pid: pid, title: title, start: start, channelID: channelID)
+                if let feed { return .art(feed) }   // feed icon while resolving
+                if open { return .pending }
+                // No Dispatcharr server: no detail exists, TMDB below.
+                if failedRecently { return .none }
             }
+        } else if let feed {
+            return .art(feed)
         }
         let key = LibraryMatcher.cleanTitle(title)
         guard TMDBPosters.isEnabled, !key.isEmpty else { return .none }
