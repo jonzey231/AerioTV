@@ -7168,37 +7168,72 @@ enum DispatcharrProgramDetailResolver {
                 return .notFound
             }
             let ch = channelID.flatMap { cid in ChannelStore.shared.channels.first { $0.id == cid } }
-            // One single-page query per key, timed, in order; the next key
-            // only on an empty answer. (getUpcomingPrograms follows up to
-            // two more pages per key with a 15 s timeout each, so the old
-            // tvg_id, uuid, channel chain could chain up to nine requests.)
-            var queries: [String] = []
-            for tvg in [ch?.tvgID, ch?.uuid].compactMap({ $0 }).filter({ !$0.isEmpty }) {
-                let enc = tvg.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? tvg
-                queries.append("tvg_id=\(enc)")
+            // The channel's EPG keys: its tvg_id and (dummy EPG) its UUID.
+            let keys = Set([ch?.tvgID, ch?.uuid].compactMap { $0?.lowercased() }.filter { !$0.isEmpty })
+            func startsAtStart(_ d: Date?) -> Bool { d.map { abs($0.timeIntervalSince(start)) < 1 } ?? false }
+            func strict(_ p: DispatcharrCurrentProgram) -> Bool {
+                guard startsAtStart(p.startTime?.toDate()) else { return false }
+                if let t = p.tvgID?.lowercased(), keys.contains(t) { return true }
+                if let dc = ch?.dispatcharrChannelID, let pc = p.channel, pc == dc { return true }
+                return false
             }
-            if let dc = ch?.dispatcharrChannelID { queries.append("channel=\(dc)") }
-            var candidates: [DispatcharrCurrentProgram] = []
-            for q in queries {
+            var newID: Int?
+            var listingIcon: String?
+            var via = ""
+            // 1. The guide's own cached programs for this channel: after an
+            //    EPG refresh they already carry the fresh id.
+            if let cid = channelID,
+               let g = GuideStore.shared.programs[cid]?.first(where: {
+                   startsAtStart($0.start) && $0.programID != nil && $0.programID != id
+               }) {
+                newID = g.programID
+                listingIcon = g.posterURL
+                via = "guide cache"
+            }
+            // 2. One windowed grid fetch, matched on tvg_id and start.
+            if newID == nil, !keys.isEmpty || ch?.dispatcharrChannelID != nil {
                 let t0 = Date()
-                candidates = await api.programListingPage(query: q)
-                debugLog("[PREVIEW-ART] re-resolve \(q.prefix(60)): \(candidates.count) entries in \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
-                if candidates.contains(where: { $0.startTime?.toDate().map { abs($0.timeIntervalSince(start)) < 1 } ?? false }) { break }
+                let grid = (try? await api.getEPGGrid(start: start.addingTimeInterval(-60),
+                                                      end: start.addingTimeInterval(60))) ?? []
+                if let m = grid.first(where: strict), let gid = m.programID, gid != id {
+                    newID = gid; listingIcon = m.icon; via = "grid"
+                }
+                debugLog("[PREVIEW-ART] re-resolve grid: \(grid.count) rows in \(Int(Date().timeIntervalSince(t0) * 1000)) ms, match=\(newID.map(String.init) ?? "none")")
             }
-            guard let match = candidates.first(where: {
-                      guard let s = $0.startTime?.toDate() else { return false }
-                      return abs(s.timeIntervalSince(start)) < 1
-                  }),
-                  let newID = match.programID else {
-                debugLog("[PREVIEW-ART] program id \(id) 404, no listing entry at \(start) (\(title), candidates=\(candidates.count))")
+            // 3. Last resort: the listing, strictly matched. Dispatcharr 0.32
+            //    ignores ?tvg_id= and returns every channel's rows, so a
+            //    start-time-only match picked other channels' programs.
+            if newID == nil {
+                var queries: [String] = []
+                for tvg in [ch?.tvgID, ch?.uuid].compactMap({ $0 }).filter({ !$0.isEmpty }) {
+                    queries.append("tvg_id=\(tvg.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? tvg)")
+                }
+                if let dc = ch?.dispatcharrChannelID { queries.append("channel=\(dc)") }
+                for q in queries {
+                    let t0 = Date()
+                    let rows = await api.programListingPage(query: q)
+                    let tvgs = Set(rows.compactMap { $0.tvgID })
+                    if tvgs.count > 1 {
+                        debugLog("[PREVIEW-ART] listing ignored tvg_id filter (\(rows.count) rows, \(tvgs.count) tvg_ids)")
+                    }
+                    debugLog("[PREVIEW-ART] re-resolve \(q.prefix(60)): \(rows.count) rows in \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
+                    if let m = rows.first(where: strict), let lid = m.programID, lid != id {
+                        newID = lid; listingIcon = m.icon; via = "listing"
+                        break
+                    }
+                }
+            }
+            guard let newID else {
+                debugLog("[PREVIEW-ART] program id \(id) 404, no program on this channel at \(start) (\(title)); feed icon or nothing")
                 return .notFound
             }
+            debugLog("[PREVIEW-ART] re-resolved via \(via)")
             aliases[pid] = newID
             debugLog("[PREVIEW-ART] stale program id \(id) -> \(newID) (\(title))")
             let t0 = Date()
             let detail = try? await api.getProgramDetail(id: newID)
             debugLog("[PREVIEW-ART] detail for \(newID) in \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
-            return .found(detail: detail, poster: detail?.bestPosterString ?? match.icon)
+            return .found(detail: detail, poster: detail?.bestPosterString ?? listingIcon)
         } catch {
             debugLog("[PREVIEW-ART] program id \(id) detail failed: \(error.localizedDescription) (\(title)); not cached")
             return .failed

@@ -662,6 +662,34 @@ final class PlayerSession: ObservableObject {
         _ = begin(item: item, server: server ?? ChannelStore.shared.activeServer)
     }
 
+    /// Logan 2026-10-12: a running Multiview reduced to ONE channel (picker
+    /// deselects, then the picker closes; or a tile's Remove leaving one)
+    /// continues in the standard single-channel player, the same rule as
+    /// one staged channel and one background channel. The tile keeps
+    /// playing (no re-tune); NowPlaying is re-seeded with it, which is what
+    /// makes the session a standard single instead of a one-tile Multiview.
+    func collapseToStandardSingleIfOneTile(reason: String) {
+        let store = MultiviewStore.shared
+        guard mode == .multiview, store.tiles.count == 1, let tile = store.tiles.first,
+              tile.kind == .live, store.catchupTile == nil,
+              !MultiviewBackgroundSession.shared.isActive else { return }
+        #if os(iOS)
+        if MultiviewCompositeSession.shared.isActive { return }
+        if AerioCastController.shared.isCasting || CompanionClient.shared.isControlling { return }
+        #endif
+        // Already a standard single for this channel.
+        if NowPlayingManager.shared.playingItem?.id == tile.item.id,
+           !NowPlayingManager.shared.configuredAsMultiviewAdapter { return }
+        store.audioTileID = tile.id
+        store.fullscreenTileID = nil
+        store.spotlightTileID = nil
+        NowPlayingManager.shared.configuredAsMultiviewAdapter = false
+        NowPlayingManager.shared.startPlaying(tile.item, headers: tile.headers, isLive: true, wakeChrome: false)
+        DebugLogger.shared.log(
+            "[MV-Mode] one channel left (\(reason)): \(tile.item.name) continues in the standard player",
+            category: "Playback", level: .info)
+    }
+
     /// Banner Clear. Drops the staged extras; a playing mini player is
     /// left exactly as it was.
     func clearLiveTVStaged() {

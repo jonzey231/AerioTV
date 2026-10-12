@@ -290,6 +290,8 @@ struct AddToMultiviewSheet: View {
                 }
             }
             .onAppear { loadHiddenGroups() }
+            // Closing the picker with one channel left: standard player.
+            .onDisappear { PlayerSession.shared.collapseToStandardSingleIfOneTile(reason: "picker closed") }
             // v1.7.x: re-validate the persisted filter when channels
             // finish loading (Dispatcharr cold start can deliver
             // groups several seconds after the picker mounts) or
@@ -595,6 +597,8 @@ struct AddToMultiviewSheet: View {
         }
         .onExitCommand { isPresented = false }
         .onAppear { loadHiddenGroups() }
+        // Closing the picker with one channel left: standard player.
+        .onDisappear { PlayerSession.shared.collapseToStandardSingleIfOneTile(reason: "picker closed") }
         // v1.7.x: re-validate persisted filter when channels load
         // async or active-server changes mid-presentation. See iOS
         // body's matching modifier for the full rationale.

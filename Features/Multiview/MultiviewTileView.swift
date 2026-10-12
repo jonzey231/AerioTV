@@ -442,7 +442,7 @@ struct MultiviewTileView: View {
                     "[MV-Cmd] tvOS tile remove via error-overlay (Select) tile=\(tile.id)",
                     category: "Playback", level: .info
                 )
-                store.remove(id: tile.id)
+                store.remove(id: tile.id); PlayerSession.shared.collapseToStandardSingleIfOneTile(reason: "tile Remove")
                 return
             }
             // Commit a pending relocate first, otherwise take audio.
@@ -697,7 +697,7 @@ struct MultiviewTileView: View {
         // Remove, Move Tile, Playback, Switch Stream, Change Channel,
         // Add Channel, Full-Screen, Spotlight, Layout.
         Button(role: .destructive) {
-            store.remove(id: tile.id)
+            store.remove(id: tile.id); PlayerSession.shared.collapseToStandardSingleIfOneTile(reason: "tile Remove")
         } label: {
             Label("Remove", systemImage: "xmark.circle")
         }
@@ -1400,7 +1400,7 @@ struct MultiviewTileView: View {
                     "[MV-Cmd] iPad tile remove via error-overlay (tap) tile=\(tile.id)",
                     category: "Playback", level: .info
                 )
-                store.remove(id: tile.id)
+                store.remove(id: tile.id); PlayerSession.shared.collapseToStandardSingleIfOneTile(reason: "tile Remove")
                 return
             }
             // Move Mode, if a tile is currently pending relocation
@@ -1759,7 +1759,7 @@ struct MultiviewTileView: View {
                                 category: "Playback", level: .info
                             )
                             autoReconnectTask?.cancel()
-                            store.remove(id: tile.id)
+                            store.remove(id: tile.id); PlayerSession.shared.collapseToStandardSingleIfOneTile(reason: "tile Remove")
                         } label: {
                             Label("Remove", systemImage: "xmark.circle")
                                 .scaledFont(.footnote.weight(.semibold))
@@ -2091,7 +2091,7 @@ struct MultiviewTileView: View {
                             "[MV-Cmd] VOD finished overlay Remove tile=\(tile.id)",
                             category: "Playback", level: .info
                         )
-                        store.remove(id: tile.id)
+                        store.remove(id: tile.id); PlayerSession.shared.collapseToStandardSingleIfOneTile(reason: "tile Remove")
                     } label: {
                         Label("Remove", systemImage: "xmark.circle")
                             .scaledFont(.footnote.weight(.semibold))
@@ -2262,7 +2262,7 @@ struct MultiviewTileView: View {
         }
 
         Button("Remove", role: .destructive) {
-            store.remove(id: tile.id)
+            store.remove(id: tile.id); PlayerSession.shared.collapseToStandardSingleIfOneTile(reason: "tile Remove")
         }
 
         Button("Cancel", role: .cancel) {}
