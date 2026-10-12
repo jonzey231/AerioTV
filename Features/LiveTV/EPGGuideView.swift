@@ -5275,6 +5275,8 @@ extension GuideStore {
 /// from event handlers, never from a body, so nothing needs the invalidation.
 @MainActor
 final class GuideFocusScratch {
+    /// Corner clock frame in the window (for the [FOCUS] clock line).
+    var clockFrame: CGRect = .zero
     /// Task #185: channel of the previously focused programme, so the
     /// vertical-move corrective snap can tell a channel change from a
     /// same-row change (our own snap / restore, which must not loop).
@@ -7675,13 +7677,23 @@ struct EPGGuideView: View {
                 }
                 // Focus visual: focus reached the cell but nothing showed
                 // (trace 2026-09-06 01:16), so it read as a dead corner.
-                .background(clockFocused ? Color.accentPrimary.opacity(0.22) : Color.clear)
+                // `Color` here resolves to the ShapeStyle background, which
+                // by default IGNORES THE SAFE AREA: when the time strip sits
+                // against the top safe-area edge (layouts where nothing is
+                // above it), the focus fill ran up through the inset to the
+                // top of the screen at the column's width (TestFlight 1.8.42
+                // photo, 2026-10-12). Confine it to the clock cell.
+                .background(clockFocused ? Color.accentPrimary.opacity(0.22) : Color.clear,
+                            ignoresSafeAreaEdges: [])
                 .overlay(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(Color.accentPrimary, lineWidth: clockFocused ? 3 : 0)
                         .padding(3)
                 )
                 .animation(.easeInOut(duration: 0.12), value: clockFocused)
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                    focusScratch.clockFrame = frame
+                }
                 // Down out of the clock: the engine picks the cell whose
                 // frame overlaps the clock's column, which is the just-ended
                 // programme hidden under the channel column (trace
@@ -7689,6 +7701,10 @@ struct EPGGuideView: View {
                 // the ring vanished. Land on the row's cell at the anchor
                 // column instead, like the Android guide's clock Down.
                 .onChange(of: clockFocused) { _, focused in
+                    if focused {
+                        let f = focusScratch.clockFrame
+                        debugLog("[FOCUS] clock focused frame=\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height)) column=\(Int(channelColumnWidth)) stripTop=\(Int(f.minY))")
+                    }
                     if !focused { retargetAfterClockExit() }
                 }
                 #else
