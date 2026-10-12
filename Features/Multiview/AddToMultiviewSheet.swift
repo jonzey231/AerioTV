@@ -541,6 +541,9 @@ struct AddToMultiviewSheet: View {
                     .padding(.horizontal, 80)
                     .padding(.top, 40)
                     .padding(.bottom, 20)
+                    // Close is its own focus section so Up from the pill
+                    // rows or the list always has a target above.
+                    .focusSection()
 
                 // Phase 1 (Step 4): source switcher (Channels / Movies
                 // / Series / Recordings). Sits directly under the
@@ -593,6 +596,11 @@ struct AddToMultiviewSheet: View {
                     .padding(.horizontal, 80)
                     .padding(.bottom, 60)
                 }
+                // The list is one focus section: Up from its top row leaves
+                // the section for the nearest one above (group pills, source
+                // pills, then Close) instead of searching straight up from
+                // the focused row's x position, which can find nothing.
+                .focusSection()
             }
         }
         .onExitCommand { isPresented = false }
