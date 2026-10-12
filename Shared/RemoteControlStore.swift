@@ -151,7 +151,10 @@ final class RemoteControlStore: ObservableObject {
     private func reloadFromDefaults() {
         let ud = UserDefaults.standard
         let newMap = RemoteControlMap.fromData(ud.data(forKey: Self.mapKey))
-        if newMap != map { map = newMap }
+        if newMap != map {
+            debugLog("[PRESS] remote map replaced by iCloud sync: guide channelDown=\(newMap.guideAction(.channelDown).wire) (was \(map.guideAction(.channelDown).wire))")
+            map = newMap
+        }
         let selector = GroupSelectorMode(rawValue: ud.string(forKey: Self.groupSelectorKey) ?? "") ?? .pills
         let sidebar = (selector == .sidebar)
         if sidebar != useGroupSidebar { useGroupSidebar = sidebar }
@@ -210,5 +213,10 @@ final class RemoteControlStore: ObservableObject {
         // older client resolves to the shipped scheme; CUSTOM persists the full
         // materialized blob.
         UserDefaults.standard.set(newMap.toData(), forKey: Self.mapKey)
+        debugLog("[PRESS] remote map saved: preset=\(newMap.preset.wire) guide channelUp=\(newMap.guideAction(.channelUp).wire) channelDown=\(newMap.guideAction(.channelDown).wire)")
+        // Push at once, like the other synced keys here: written only
+        // locally, the next iCloud pull can hand back the old map before
+        // the debounced push runs, and the edit looks like it never applied.
+        SyncManager.shared.pushPreferencesImmediate()
     }
 }

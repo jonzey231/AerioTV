@@ -498,13 +498,25 @@ struct MultiviewContainerView: View {
                             #if os(tvOS)
                             session.closeAudioTile()
                             #else
-                            DebugLogger.shared.log(
-                                "[MV-Mode] X: close Multiview (tiles=\(store.tiles.count))",
-                                category: "Playback", level: .info)
-                            #if os(iOS)
-                            AppOrientationLock.release()
-                            #endif
-                            session.stop()
+                            // 2026-10-12: at 2 or more tiles the X asks
+                            // first (Back to Guide / Exit Multiview /
+                            // Cancel), the same dialog Apple TV shows on
+                            // Back. It used to call session.stop() here
+                            // with no dialog. At one tile it exits directly.
+                            if store.tiles.count >= 2 {
+                                DebugLogger.shared.log(
+                                    "[MV-Mode] X: exit dialog (tiles=\(store.tiles.count))",
+                                    category: "Playback", level: .info)
+                                showExitConfirmation = true
+                            } else {
+                                DebugLogger.shared.log(
+                                    "[MV-Mode] X: close Multiview (tiles=\(store.tiles.count))",
+                                    category: "Playback", level: .info)
+                                #if os(iOS)
+                                AppOrientationLock.release()
+                                #endif
+                                session.stop()
+                            }
                             #endif
                         }
                     )
@@ -1688,6 +1700,9 @@ struct MultiviewContainerView: View {
         // (Logan 2026-10-11, parity with Android, where Exit Multiview
         // clears the store). It used to collapse N>=2 to the audio tile,
         // which left a one-tile Multiview playing full screen.
+        #if os(iOS)
+        AppOrientationLock.release()
+        #endif
         session.stop()
     }
 

@@ -8810,11 +8810,8 @@ struct MainTabView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
             }
-        } else if mvBackground.isActive && selectedTab == .liveTV {
-            // Back to Guide: Back on the guide returns to the Multiview.
-            debugLog("🎮 [HMP]   → branch: Multiview in background → return to it")
-            mvBackground.returnToFullscreen()
-        } else if (nowPlaying.isActive || miniIsOneTileMultiview) && nowPlaying.isMinimized {
+        } else if (nowPlaying.isActive || miniIsOneTileMultiview) && nowPlaying.isMinimized
+                    && !mvBackground.isActive {
             // A mini can also be a one-tile Multiview left over from Exit
             // Multiview (collapse keeps the audio tile and never re-seeds
             // NowPlaying's item, so isActive is false there). Apple TV log
@@ -9819,6 +9816,10 @@ final class TabBarCollapseState: ObservableObject {
                     guard !self.collapsed else { return }
                     if !finished { debugLog("[TABBAR] show animation interrupted") }
                     Self.normalize(bar)
+                    // The dock cards' capsule frame may be from another
+                    // orientation (rotated while the bar was hidden):
+                    // measure again now that the bar is back.
+                    RemoteSessionCardMetrics.shared.measureTabBar()
                     debugLog("[TABBAR] shown: frame=\(Int(bar.frame.minX)),\(Int(bar.frame.minY)) \(Int(bar.frame.width))x\(Int(bar.frame.height)) hidden=\(bar.isHidden) window=\(bar.window != nil)")
                 })
                 UIView.animate(withDuration: 0.14, delay: 0.02, options: [.curveEaseOut, .beginFromCurrentState]) {
@@ -9945,7 +9946,11 @@ final class RemoteSessionCardMetrics: ObservableObject {
         }
     }
     func setWindowWidth(_ w: CGFloat) {
-        if abs(w - windowWidth) > 0.5 { windowWidth = w }
+        guard abs(w - windowWidth) > 0.5 else { return }
+        windowWidth = w
+        // Width or orientation changed: re-measure the capsule (stale
+        // insets are dropped inside measureTabBar).
+        measureTabBar()
     }
 
     /// Top edge of the system tab bar in WINDOW coordinates, 0 until measured.
@@ -9997,6 +10002,18 @@ final class RemoteSessionCardMetrics: ObservableObject {
         loggedMinimized = false
         lastExpandedTop = top
         if abs(top - tabBarTopInWindow) > 0.5 { tabBarTopInWindow = top }
+        // Never keep insets measured at another window width (log
+        // 2026-10-12: lead/trail 70 measured in landscape at 956 pt were
+        // still applied in portrait at 440 pt, squeezing the Kept Live
+        // card). Drop them; the cards use the 20 pt fallback until the
+        // capsule is measured at this width.
+        if insetsWindowWidth > 0, abs(window.bounds.width - insetsWindowWidth) > 0.5 {
+            debugLog("[TABBAR] insets dropped: measured at window=\(insetsWindowWidth), now window=\(window.bounds.width)")
+            insetsWindowWidth = 0
+            if barLeadingInset != 0 { barLeadingInset = 0 }
+            if barTrailingInset != 0 { barTrailingInset = 0 }
+            loggedBarFrame = .null
+        }
         measureBarInsets(bar, superview: superview, window: window)
     }
 
@@ -10029,6 +10046,10 @@ final class RemoteSessionCardMetrics: ObservableObject {
     /// layout margins. Measured from layer position and bounds
     /// (untransformed), only while expanded, and logged once per change.
     private var loggedBarFrame: CGRect = .null
+    /// Window width the published insets were measured at (0 = none).
+    private var insetsWindowWidth: CGFloat = 0
+    private var loggedNoCapsule: String?
+    private var noCapsuleRetries = 0
 
     private func measureBarInsets(_ bar: UITabBar, superview: UIView, window: UIWindow) {
         guard !TabBarCollapseState.shared.collapsed else { return }
@@ -10072,17 +10093,31 @@ final class RemoteSessionCardMetrics: ObservableObject {
             localWidth = best.rect.width
             source = String(describing: type(of: best.view))
         } else {
+            // No capsule view in the bar (landscape over a fullscreen
+            // player, log 2026-10-12: src=layoutMargins lead=70). The
+            // margins are not the capsule, so nothing is published for the
+            // dock; retry once the bar settles.
             let m = bar.layoutMargins
-            localMinX = m.left
-            localWidth = width - m.left - m.right
-            source = "layoutMargins"
+            let probe = "x=\(m.left) w=\(width - m.left - m.right) barW=\(width) window=\(window.bounds.width)"
+            if probe != loggedNoCapsule {
+                loggedNoCapsule = probe
+                debugLog("[TABBAR] capsule not found (\(probe)); layoutMargins not published")
+            }
+            if noCapsuleRetries < 8 {
+                noCapsuleRetries += 1
+                scheduleSettledRemeasure()
+            }
+            return
         }
+        noCapsuleRetries = 0
+        loggedNoCapsule = nil
         let minX = superview.convert(CGPoint(x: barOriginX + localMinX, y: 0), to: window).x
         let maxX = minX + localWidth
         let lead = max(0, minX)
         let trail = max(0, window.bounds.width - maxX)
         if abs(lead - barLeadingInset) > 0.5 { barLeadingInset = lead }
         if abs(trail - barTrailingInset) > 0.5 { barTrailingInset = trail }
+        insetsWindowWidth = window.bounds.width
         let chosen = CGRect(x: minX, y: 0, width: localWidth, height: height)
         if chosen != loggedBarFrame {
             loggedBarFrame = chosen

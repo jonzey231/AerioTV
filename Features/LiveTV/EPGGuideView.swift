@@ -7346,32 +7346,56 @@ struct EPGGuideView: View {
                   let i = channels.firstIndex(where: { $0.id == ch }) {
             curIdx = i
         } else {
+            debugLog("🧭 [GuideFocus] page\(down ? "Down" : "Up") skipped: no current row")
             return
         }
         let visibleRows = max(1, Int(UIScreen.main.bounds.height / rowHeight) - 2)
-        let target = min(max(down ? curIdx + visibleRows : curIdx - visibleRows, 0),
-                         channels.count - 1)
-        guard target != curIdx else { return }
+        let wanted = down ? curIdx + visibleRows : curIdx - visibleRows
+        let clampedIdx = min(max(wanted, 0), channels.count - 1)
+        // Item 15 (2026-10-12): the target must be a row with a focusable
+        // cell BETWEEN the current row and the clamped target. The old
+        // resolveFocusProgramID scan ran past the end and wrapped to row 0
+        // (off screen, not composed), so the focus write dropped and focus
+        // left the screen. Walk back from the target toward the current row.
+        var target = clampedIdx
+        var targetPID: String?
+        let step = down ? -1 : 1
+        while target != curIdx {
+            if let pid = focusTargetProgramID(forChannel: channels[target].id) { targetPID = pid; break }
+            target += step
+        }
+        guard target != curIdx, let targetPID else {
+            debugLog("🧭 [GuideFocus] page\(down ? "Down" : "Up") clamped at ch#\(curIdx): already at the \(down ? "last" : "first") channel with guide cells (wanted ch#\(wanted), count=\(channels.count))")
+            return
+        }
+        if target != wanted {
+            debugLog("🧭 [GuideFocus] page\(down ? "Down" : "Up") clamped: wanted ch#\(wanted) -> ch#\(target) (count=\(channels.count))")
+        }
+        let originPID = focusedProgramID
         focusScratch.pagePendingChannelIndex = target
         debugLog("🧭 [GuideFocus] page\(down ? "Down" : "Up") ch#\(curIdx) -> ch#\(target) rows=\(visibleRows)")
         Task { @MainActor in
             defer { if focusScratch.pagePendingChannelIndex == target { focusScratch.pagePendingChannelIndex = nil } }
             // Realize the target row FIRST: the rows live in a LazyVStack, so
             // a row a full page away is not composed and a focus write into
-            // it is silently dropped (the other half of the one-press bug).
-            // ForEach(channels) tags each row with channel.id for scrollTo.
+            // it is silently dropped. Scroll it in, then move focus.
             proxy.scrollTo(channels[target].id, anchor: down ? .bottom : .top)
             try? await Task.sleep(nanoseconds: 50_000_000)
-            // The row may compose without guide data; resolveFocusProgramID
-            // scans onward for the first cell that exists.
-            guard let targetPID = resolveFocusProgramID(preferringChannel: channels[target].id) else { return }
+            var landed = false
             for attempt in 0..<8 {
                 focusedProgramID = targetPID
                 try? await Task.sleep(nanoseconds: 70_000_000)
-                if focusedProgramID == targetPID { break }
+                if focusedProgramID == targetPID { landed = true; break }
                 if attempt == 3 {
-                    proxy.scrollTo(channels[target].id, anchor: down ? .bottom : .top)
+                    proxy.scrollTo(channels[target].id, anchor: .center)
                 }
+            }
+            if !landed {
+                // Never leave focus off screen: go back to the row it came from.
+                debugLog("🧭 [GuideFocus] page\(down ? "Down" : "Up") focus did not land on ch#\(target); restoring ch#\(curIdx)")
+                proxy.scrollTo(channels[curIdx].id, anchor: .center)
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                if let originPID { focusedProgramID = originPID }
             }
         }
     }
