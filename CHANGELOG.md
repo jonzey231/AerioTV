@@ -1,5 +1,76 @@
 # Changelog
 
+## v1.8.42 - 2026-10-11
+
+### Added
+
+- Multiview casting: 2 to 4 channels composited on the phone at 720p and sent
+  to Chromecast, AirPlay receivers and the AerioTV TV apps. The cast card and
+  sheet show a live preview of the Multiview with drag to reorder, a per-tile
+  menu (including Switch Stream), a Layout row and Add Channel. A stalled
+  channel shows Reconnecting instead of stopping the cast, and the cast keeps
+  playing in the background.
+- Multiview staging is a dock card with a sheet, and channels can be staged
+  on top of the channel already playing. One staged channel plays as a
+  normal single channel.
+- Play Here or Play on the receiver: with a Cast, AirPlay or AerioTV Remote
+  session active, every pick asks where to play.
+- Lock-screen card during a Multiview cast shows Multiview, the focused
+  channel, its program and logo.
+- Guide: long press a group pill to make it the default group; Manage Groups
+  sits left of the first pill.
+- Program Info Button (Settings > Live TV: Off, Current Programs, All
+  Programs) adds an info button to guide cells, and Show Channel Info Card
+  (Settings > Player) hides the pop-up on a channel change
+  (jonzey231/AerioTV-Android#127). Thanks @PsykoRider.
+- Remove from Recently Watched and Clear Recently Watched
+  (jonzey231/AerioTV-Android#130). Thanks @amigthea.
+- Catch-Up Time Offset per playlist (jonzey231/AerioTV-Android#129). Thanks
+  @fastgriz.
+- True Black Background for OLED screens (jonzey231/AerioTV-Android#105).
+  Thanks @gurabli.
+- Catch-up resumes where it left off (jonzey231/AerioTV-Android#116). Thanks
+  @clayts450.
+- Live TV Logo Size for guide, channel list and player channel list logos.
+- Separate Rounded Guide Logos and Rounded Program Cells toggles
+  (jonzey231/AerioTV#87).
+- Refresh Permissions on the playlist page.
+- Documentation: a Networking section in the README with access rules for
+  running Dispatcharr behind Pangolin SSO.
+
+### Changed
+
+- Guide opens at now and keeps the airing program wide enough to read; the
+  guide scrolls more smoothly on iPhone and iPad, and a release lands where
+  the finger lets go.
+- Apple TV: no bottom Multiview controls (Menu goes straight to Leave
+  Multiview), Move Tile swaps live without re-tuning, Back expands a one-tile
+  Multiview mini, and the AerioTV Remote uses the Cast sheet.
+- iPhone and iPad: Add Channel and Layout move to the tile menu, X exits
+  Multiview, Exit Multiview stops every channel, and pinch-in minimizes on
+  iPhone. The mini player has its own X.
+- Kept Live now keeps direct HLS channels, and its card matches the cast
+  card's size and shape.
+- Switch Stream follows the account's live Dispatcharr permissions, including
+  in Multiview tile menus (jonzey231/AerioTV-Android#125). Thanks @lpukatch.
+- The player info card shows only with the controls on iPhone and iPad.
+- Cast: 60 fps sources a receiver cannot hold are sent at 30 fps.
+
+### Fixed
+
+- Audio-only channels play with a logo card, also over Cast and AirPlay
+  (jonzey231/AerioTV#90), and video channels are no longer mistaken for
+  audio-only.
+- Guide refreshes at launch for every playlist type
+  (jonzey231/AerioTV-Android#124). Thanks @account-banned.
+- Apple TV: a held Left after opening the guide no longer scrolls it back in
+  time (jonzey231/AerioTV-Android#128). Thanks @FrankieBBBB.
+- Apple TV: Back from catch-up returns to the program that was played.
+- Duplicate guide programs after overlapping cache saves.
+- Crashes: deleting a playlist, an MKV playback crash, and a guide refresh
+  crash reported through TestFlight.
+- The Retrying overlay clears once a retried stream shows its first frame.
+
 ## v1.8.41 - 2026-10-04
 
 ### Added
