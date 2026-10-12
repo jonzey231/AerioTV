@@ -6758,7 +6758,10 @@ struct MainTabView: View {
                 onChannelDown: { castController.castChannel(-1) },
                 onSeek: { castController.remoteSeek(by: $0) },
                 onStop: {
-                    if native != nil { castController.stopNativeMultiview() } else { castController.stopCasting() }
+                    // Sheet Stop keeps the Chromecast connected on the idle
+                    // card (Android parity, Logan 2026-10-11); the card's X
+                    // is the disconnect.
+                    if native != nil { castController.stopNativeMultiview() } else { castController.stopPlaybackKeepingSession() }
                     showRemoteControls = false
                 },
                 onChangeDevice: {

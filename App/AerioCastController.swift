@@ -728,6 +728,31 @@ final class AerioCastController: NSObject, ObservableObject {
         GCKCastContext.sharedInstance().sessionManager.endSessionAndStopCasting(true)
     }
 
+    /// Stop Casting from the sheet: stop the receiver's media and the phone
+    /// side (composite, proxy) but KEEP the Cast session, so the card drops
+    /// to its idle "Select a Channel" state and the next pick plays on the
+    /// TV without reconnecting. Android parity (Logan 2026-10-11): the
+    /// card's X still disconnects (stopCasting).
+    func stopPlaybackKeepingSession() {
+        debugLog("[Cast] stop: playback ended, session kept (idle card)")
+        staleCheckTask?.cancel()
+        staleWatchTask?.cancel()
+        sleepTimerTask?.cancel()
+        sleepTimerTask = nil
+        sleepEndsAt = nil
+        switchingToTitle = nil
+        webReceiverHasLoadedMedia = false
+        // The proxy's own terminal hook would read the stop as an ingest
+        // failure and end the session; detach it first.
+        CastHLSProxySession.shared.onTerminalAfterReady = nil
+        MultiviewCompositeSession.shared.stop(detail: "cast stopped")
+        GCKCastContext.sharedInstance().sessionManager
+            .currentCastSession?.remoteMediaClient?.stop()
+        Task.detached { CastHLSProxySession.shared.stop() }
+        castingContent = nil
+        remoteIsPlaying = false
+    }
+
     /// Remote transport for the cast-remote cover. The web receiver has no
     /// custom control channel; plain RemoteMediaClient play/pause is the whole
     /// basic-cast transport surface (device-verified on Android 2026-07-15).
