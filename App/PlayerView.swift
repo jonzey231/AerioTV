@@ -5751,6 +5751,36 @@ final class AVPlayerProgressDriver {
                 videoTrack.map { $0.isEnabled ? "true" : "false" } ?? "notrack",
                 player.rate, clock))
         }
+        // GH #93: what the engine itself reports around the 10 s
+        // video hold-off, at 1, 5 and 11 s after the item started.
+        if [1, 5, 11].contains(probeTicks) {
+            let df = ISO8601DateFormatter()
+            df.formatOptions = [.withTime, .withFractionalSeconds, .withColonSeparatorInTime]
+            for (i, e) in (item.accessLog()?.events ?? []).enumerated() {
+                debugLog(String(format:
+                    "[AVP-VIDEO] t+%ds accessLog[%d] startup=%.3f playbackStart=%@ watched=%.2f mediaReqs=%d stalls=%d dropped=%d indicated=%.0f observed=%.0f switchBitrate=%.0f transfer=%.2fs uri=%@",
+                    probeTicks, i, e.startupTime,
+                    e.playbackStartDate.map { df.string(from: $0) } ?? "-",
+                    e.durationWatched, e.numberOfMediaRequests,
+                    e.numberOfStalls, e.numberOfDroppedVideoFrames,
+                    e.indicatedBitrate, e.observedBitrate, e.switchBitrate,
+                    e.transferDuration, DebugLogger.sanitize(e.uri ?? "-")))
+            }
+            let errs = item.errorLog()?.events ?? []
+            if errs.isEmpty { debugLog("[AVP-VIDEO] t+\(probeTicks)s errorLog empty") }
+            for (i, e) in errs.enumerated() {
+                debugLog("[AVP-VIDEO] t+\(probeTicks)s errorLog[\(i)] at=\(df.string(from: e.date ?? Date())) domain=\(e.errorDomain) code=\(e.errorStatusCode) comment=\(e.errorComment ?? "-") uri=\(DebugLogger.sanitize(e.uri ?? "-"))")
+            }
+            let loaded = item.loadedTimeRanges.map { r -> String in
+                let t = r.timeRangeValue
+                return String(format: "%.2f-%.2f", t.start.seconds, CMTimeRangeGetEnd(t).seconds)
+            }.joined(separator: ",")
+            let seekable = item.seekableTimeRanges.map { r -> String in
+                let t = r.timeRangeValue
+                return String(format: "%.2f-%.2f", t.start.seconds, CMTimeRangeGetEnd(t).seconds)
+            }.joined(separator: ",")
+            debugLog("[AVP-VIDEO] t+\(probeTicks)s loaded=[\(loaded)] seekable=[\(seekable)] waitsToMinimizeStalling=\(player.automaticallyWaitsToMinimizeStalling) fwdBuf=\(item.preferredForwardBufferDuration) likelyToKeepUp=\(item.isPlaybackLikelyToKeepUp) tracks=\(item.tracks.map { "\($0.assetTrack?.mediaType.rawValue ?? "?"):\($0.isEnabled)" }.joined(separator: ","))")
+        }
         if probeStaleSeconds > 0, probeStaleSeconds <= 5 || probeStaleSeconds % 10 == 0 {
             debugLog(String(format:
                 "[AVP-VIDEO] no new frames for %ds while rate=%.0f (clock %.2f, last framePTS %@)",
