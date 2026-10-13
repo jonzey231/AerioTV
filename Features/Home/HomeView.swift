@@ -4798,6 +4798,8 @@ struct MainTabView: View {
     #endif
     /// Rule 3: the remote-controls sheet the session card opens.
     @State private var showRemoteControls = false
+    /// Radio Mode card tap: the radio sheet (cast sheet style).
+    @State private var showRadioSheet = false
     #endif
     #if os(tvOS)
     /// Leave Multiview > Back to Guide: the Multiview plays hidden behind
@@ -6345,6 +6347,9 @@ struct MainTabView: View {
         .sheet(isPresented: $showRemoteControls) {
             remoteControlsSheet
         }
+        .sheet(isPresented: $showRadioSheet) {
+            RadioModeSheet()
+        }
         // The session ending (card X, TV death, sleep timer) must take the
         // sheet with it -- rule 4 means nothing is left behind to control.
         .onChange(of: activeRemoteTransport) { _, transport in
@@ -6569,10 +6574,7 @@ struct MainTabView: View {
                     artURL: ch.logoURL?.absoluteString,
                     isPlaying: true,
                     showTransport: false,
-                    onTap: {
-                        selectedTab = .liveTV
-                        radio.returnToVideo()
-                    },
+                    onTap: { showRadioSheet = true },
                     onTogglePlayPause: {},
                     onStop: { radio.stop(reason: "card Stop") }
                 )

@@ -2944,6 +2944,104 @@ struct CastButton: UIViewRepresentable {
 /// AirPlay moved to RemoteSessionSheet (2026-09-21 production layout). Local playback is torn down underneath;
 /// this drives the TV. One layout, two transports -- the callbacks decide.
 /// Inlined here (not its own file) so no pbxproj target surgery is needed.
+/// Radio Mode sheet (cast sheet style): channel logo and name, "Playing
+/// channel audio", a Play / Pause transport, "Switch to Video Mode" (back
+/// to the full player, no re-tune) and Stop.
+struct RadioModeSheet: View {
+    @ObservedObject private var radio = RadioModeSession.shared
+    @ObservedObject private var store = MultiviewStore.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var contentHeight: CGFloat = 360
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 14) {
+                if let ch = radio.channel {
+                    header(ch)
+                    if let ps = store.audioProgressStore {
+                        ProgressStoreReader(progress: ps) { p in
+                            Button { radio.togglePause() } label: {
+                                Image(systemName: p.isPaused ? "play.fill" : "pause.fill")
+                                    .font(.system(size: 30, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
+                                    .foregroundStyle(.black)
+                                    .frame(width: 72, height: 72)
+                                    .background(ThemeManager.shared.accent, in: Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(p.isPaused ? "Play" : "Pause")
+                        }
+                    }
+                    Button {
+                        dismiss()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { radio.returnToVideo() }
+                    } label: {
+                        Label("Switch to Video Mode", systemImage: "play.rectangle.fill")
+                            .scaledFont(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(ThemeManager.shared.accent)
+                    Button(role: .destructive) {
+                        dismiss()
+                        radio.stop(reason: "sheet Stop")
+                    } label: {
+                        Text("Stop")
+                            .scaledFont(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 18)
+            .padding(.bottom, 8)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                let r = (h * 2).rounded() / 2
+                if abs(r - contentHeight) > 0.5 { contentHeight = r }
+            }
+        }
+        .presentationDetents([.height(contentHeight + 24)])
+        .presentationDragIndicator(.visible)
+        .onChange(of: radio.isActive) { _, on in if !on { dismiss() } }
+    }
+
+    private func header(_ ch: ChannelDisplayItem) -> some View {
+        VStack(spacing: 6) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.white.opacity(0.08))
+                if let url = ch.logoURL {
+                    AsyncImage(url: url) { $0.resizable().scaledToFit() } placeholder: {
+                        Image(systemName: RadioModeSession.menuSymbol)
+                            .foregroundStyle(ThemeManager.shared.accent)
+                    }
+                    .frame(width: 56, height: 56)
+                } else {
+                    Image(systemName: RadioModeSession.menuSymbol)
+                        .font(.system(size: 26))  // glyph in a fixed box: not text, stays fixed
+                        .foregroundStyle(ThemeManager.shared.accent)
+                }
+            }
+            .frame(width: 68, height: 68)
+            Text(ch.name)
+                .scaledFont(.title3.weight(.bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            if let prog = ch.currentProgram, !prog.isEmpty {
+                Text(prog)
+                    .scaledFont(.subheadline)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+            Text("Playing channel audio")
+                .scaledFont(.footnote.weight(.semibold))
+                .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))
+        }
+    }
+}
+
 struct RemoteControlScreen: View {
     var title: String
     var subtitle: String?

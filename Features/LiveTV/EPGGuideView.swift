@@ -10217,7 +10217,7 @@ struct MultiviewStagingBanner: View {
 
 #if os(tvOS)
 /// Apple TV Radio Mode banner, the card's tvOS form: channel logo, name,
-/// "Playing channel audio", then Return to Channel (default focus; back to
+/// "Playing channel audio", then Switch to Video Mode (default focus; back to
 /// the video, no re-tune) and Stop. Foreground only on Apple TV.
 struct RadioModeBannerSlot: View {
     @ObservedObject private var radio = RadioModeSession.shared
@@ -10263,14 +10263,14 @@ struct RadioModeBannerSlot: View {
             .layoutPriority(1)
             Spacer()
             // Android TV parity: two capsules like the background Multiview
-            // banner; Return to Channel takes focus by default.
+            // banner; Switch to Video Mode takes focus by default.
             Button {
                 radio.returnToVideo()
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "play.fill")
                         .scaledFont(.system(size: 18, weight: .medium))
-                    Text("Return to Channel")
+                    Text("Switch to Video Mode")
                         .scaledFont(.system(size: 22, weight: .medium))
                         .lineLimit(1)
                 }

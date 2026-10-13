@@ -2176,7 +2176,10 @@ final class RadioModeSession: ObservableObject {
     }
     static func menuAction(for item: ChannelDisplayItem) {
         if shared.isRadioChannel(item.id) {
-            shared.returnToVideo()
+            // "Exit Radio Mode" from a channel menu ends playback, exactly
+            // like the card's Stop (iPhone 2026-10-12: returning to video
+            // from here left a playing tile with no card).
+            shared.stop(reason: "menu Exit")
         } else {
             shared.start(item: item, server: ChannelStore.shared.activeServer)
         }
@@ -2231,6 +2234,7 @@ final class RadioModeSession: ObservableObject {
         #endif
         // The state half of minimize: never the iPhone PiP hop.
         NowPlayingManager.shared.applyMinimized()
+        publishNowPlaying()
         #if os(tvOS)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
@@ -2263,6 +2267,7 @@ final class RadioModeSession: ObservableObject {
             } else if self.isActive, !NowPlayingManager.shared.isMinimized {
                 NowPlayingManager.shared.applyMinimized()
             }
+            if self.isActive { self.publishNowPlaying() }
         }
     }
 
@@ -2278,11 +2283,52 @@ final class RadioModeSession: ObservableObject {
         withAnimation(.spring(response: 0.35)) { NowPlayingManager.shared.expand() }
     }
 
+    // MARK: Transport + Now Playing
+
+    var isPaused: Bool { MultiviewStore.shared.audioProgressStore?.isPaused ?? false }
+
+    func togglePause() {
+        MultiviewStore.shared.audioProgressStore?.togglePauseAction?()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.publishPlaybackRate() }
+    }
+
+    private func setPaused(_ paused: Bool) {
+        guard isPaused != paused else { return }
+        togglePause()
+    }
+
+    private func publishPlaybackRate() {
+        guard isActive else { return }
+        NowPlayingBridge.shared.updateElapsed(0, rate: isPaused ? 0 : 1)
+    }
+
+    /// Lock screen / Control Center for Radio Mode. The AVPlayer tile path
+    /// never configures NowPlayingBridge (only mpv, Cast, CarPlay and the
+    /// Remote do), which is why the lock screen card was empty with dead
+    /// Play / Pause. Live stream: no elapsed, no duration.
+    private func publishNowPlaying() {
+        guard isActive, let ch = channel else { return }
+        let program = ch.currentProgram?.trimmingCharacters(in: .whitespacesAndNewlines)
+        NowPlayingBridge.shared.configure(
+            title: ch.name,
+            subtitle: (program?.isEmpty == false) ? program : "AerioTV",
+            artworkURL: ch.logoURL,
+            duration: nil,
+            isLive: true,
+            onPlay: { RadioModeSession.shared.setPaused(false) },
+            onPause: { RadioModeSession.shared.setPaused(true) },
+            onSeek: nil
+        )
+        publishPlaybackRate()
+        debugLog("[RADIO] now playing -> \(ch.name)")
+    }
+
     /// Card Stop: end Radio Mode and the audio.
     func stop(reason: String = "stop") {
         guard isActive else { return }
         isActive = false
         debugLog("[RADIO] stop (\(reason))")
+        NowPlayingBridge.shared.teardown()
         #if os(iOS)
         reattachLayer()
         #endif
