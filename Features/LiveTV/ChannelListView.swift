@@ -4122,6 +4122,11 @@ struct ChannelRow: View {
     private var cardMenuItems: [SystemMenuItem] {
         var items: [SystemMenuItem] = []
         items.append(.init(title: "Watch", systemImage: "play.fill") { onTap() })
+        if let radioTitle = RadioModeSession.menuTitle(for: item) {
+            items.append(.init(title: radioTitle, systemImage: RadioModeSession.menuSymbol) {
+                RadioModeSession.menuAction(for: item)
+            })
+        }
         let isFav = favoritesStore.isFavorite(item.id)
         items.append(.init(title: isFav ? "Remove from Favorites" : "Add to Favorites",
                            systemImage: isFav ? "star.slash" : "star") { favoritesStore.toggle(item) })
@@ -4189,6 +4194,11 @@ struct ChannelRow: View {
         #if os(iOS)
         Button { onTap() } label: { Label("Watch", systemImage: "play.fill") }
         #endif
+        if let radioTitle = RadioModeSession.menuTitle(for: item) {
+            Button { RadioModeSession.menuAction(for: item) } label: {
+                Label(radioTitle, systemImage: RadioModeSession.menuSymbol)
+            }
+        }
         Button { favoritesStore.toggle(item) } label: {
             Label(isFav ? "Remove from Favorites" : "Add to Favorites", systemImage: isFav ? "star.slash" : "star")
         }

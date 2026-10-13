@@ -4804,6 +4804,8 @@ struct MainTabView: View {
     /// the guide (PlayerSession.swift tvOS MultiviewBackgroundSession).
     @ObservedObject private var mvBackground = MultiviewBackgroundSession.shared
     #endif
+    /// Radio Mode: the one live tile plays hidden in place (audio only).
+    @ObservedObject private var radio = RadioModeSession.shared
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
     @State private var showInitialEPGLoading = false
     /// v1.6.23, set to `true` when the user explicitly Skips the
@@ -5636,7 +5638,7 @@ struct MainTabView: View {
                 .disabled(
                     playerSession.mode == .multiview
                     && !(multiviewStore.tiles.count == 1 && nowPlaying.isMinimized)
-                    && !mvBackground.isActive
+                    && !mvBackground.isActive && !radio.isActive
                 )
                 #endif
 
@@ -5908,7 +5910,7 @@ struct MainTabView: View {
                 // "Exit Multiview?" confirmation.
                 // Back to Guide: a background Multiview is hidden in place
                 // (never the corner mini), still mounted so it plays.
-                let mvInBackground = mvBackground.isActive
+                let mvInBackground = mvBackground.isActive || radio.isActive
                 let isSoleStream = multiviewStore.tiles.count == 1
                 let minimized = isSoleStream && nowPlaying.isMinimized && !mvInBackground
                 // Settings tab: the mini stashes at the trailing edge.
@@ -6474,7 +6476,7 @@ struct MainTabView: View {
             return ChannelStore.shared.channels.first(where: {
                 CompanionClient.androidChannelID(for: $0) == cid
             })?.id
-        case nil:
+        case nil, .radio?:
             return nil
         }
     }
@@ -6557,7 +6559,26 @@ struct MainTabView: View {
     @ViewBuilder
     private var remoteSessionCard: some View {
         if !playerFullscreen {
-            remoteSessionCardContent
+            if radio.isActive, let ch = radio.channel {
+                // Radio Mode: the cast card's slot and style (the dock rule
+                // already sizes this slot from the measured tab bar).
+                RemoteSessionCard(
+                    transport: .radio,
+                    title: ch.name,
+                    status: "Playing channel audio",
+                    artURL: ch.logoURL?.absoluteString,
+                    isPlaying: true,
+                    showTransport: false,
+                    onTap: {
+                        selectedTab = .liveTV
+                        radio.returnToVideo()
+                    },
+                    onTogglePlayPause: {},
+                    onStop: { radio.stop(reason: "card Stop") }
+                )
+            } else {
+                remoteSessionCardContent
+            }
         }
     }
 
@@ -6696,7 +6717,7 @@ struct MainTabView: View {
                     onAddChannel: probing ? nil : remoteAddChannel(.card, single: composite ? nil : item)
                 )
             }
-        case nil:
+        case nil, .radio?:
             EmptyView()
         }
     }
@@ -6894,7 +6915,7 @@ struct MainTabView: View {
                 onAddChannel: (idle || airPlayIsProbing) ? nil
                     : remoteAddChannel(.sheet, single: composite ? nil : item)
             )
-        case nil:
+        case nil, .radio?:
             EmptyView()
         }
     }
@@ -8469,8 +8490,8 @@ struct MainTabView: View {
             // Multiview composite (Logan 2026-10-07): the tiles feed the
             // receiver headless; the phone shows no player.
             // Multiview in the background: the same hide in place.
-            .opacity(airPlay.hostsHeadless || mvComposite.isActive || mvBackground.isActive ? 0 : 1)
-            .allowsHitTesting(!airPlay.hostsHeadless && !mvComposite.isActive && !mvBackground.isActive)
+            .opacity(airPlay.hostsHeadless || mvComposite.isActive || mvBackground.isActive || radio.isActive ? 0 : 1)
+            .allowsHitTesting(!airPlay.hostsHeadless && !mvComposite.isActive && !mvBackground.isActive && !radio.isActive)
             .zIndex(2)
         } else {
             // v1.6.17, iPhone branch. NO outer `.ignoresSafeArea()`.
@@ -8496,7 +8517,7 @@ struct MainTabView: View {
             // Multiview composite (Logan 2026-10-07): same hide in place
             // while the tiles feed the receiver headless.
             let hidden = nowPlaying.isMinimized || foregroundPiP.hidesHost || airPlay.hostsHeadless
-                || mvComposite.isActive || mvBackground.isActive
+                || mvComposite.isActive || mvBackground.isActive || radio.isActive
             MultiviewContainerView()
                 // After the user ended AirPlay, audio may still go to the
                 // receiver (Logan 2026-10-07): the chip offers the picker.
@@ -8817,7 +8838,7 @@ struct MainTabView: View {
                 NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
             }
         } else if (nowPlaying.isActive || miniIsOneTileMultiview) && nowPlaying.isMinimized
-                    && !mvBackground.isActive {
+                    && !mvBackground.isActive && !radio.isActive {
             // A mini can also be a one-tile Multiview left over from Exit
             // Multiview (collapse keeps the audio tile and never re-seeds
             // NowPlaying's item, so isActive is false there). Apple TV log

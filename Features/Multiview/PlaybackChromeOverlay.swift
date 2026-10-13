@@ -347,7 +347,9 @@ struct PlaybackChromeOverlay: View {
                         // A 30s fade grace self-heals instead; a close
                         // that DOES fire restores the normal 5s.
                         onMenuOpen: { chromeState.reportInteractionWithGrace(30) },
-                        onMenuClose: { chromeState.reportInteraction() }
+                        onMenuClose: { chromeState.reportInteraction() },
+                        onRadioMode: RadioModeSession.canEnterFromPlayer
+                            ? { RadioModeSession.shared.enterFromPlayer() } : nil
                     )
                 }
                 // The "+" stays while one channel plays (Logan 2026-10-11);
@@ -1011,6 +1013,8 @@ private struct iPadOverflowAdapter: View {
     /// under `#if os(iOS)`). See the type doc comment.
     var onMenuOpen: (() -> Void)? = nil
     var onMenuClose: (() -> Void)? = nil
+    /// Radio Mode (live single channel, local playback only); nil hides it.
+    var onRadioMode: (() -> Void)? = nil
 
     var body: some View {
         PlayerOverflowMenu(
@@ -1055,6 +1059,7 @@ private struct iPadOverflowAdapter: View {
             },
             recordAction: onRecord,
             switchStreamAction: onSwitchStream,
+            radioModeAction: onRadioMode,
             onMenuOpen: onMenuOpen,
             onMenuClose: onMenuClose
         )

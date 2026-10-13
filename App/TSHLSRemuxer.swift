@@ -6855,6 +6855,8 @@ struct AVPlayerMultiviewTile: View {
             debugLog("[MV-CAST] background: tile keeps playing for the composite channel=\(channelName)")
             return
         }
+        // Radio Mode: the audio keeps playing in the background.
+        if RadioModeSession.shared.keepsPlayingInBackground(tileID: tileID, player: player) { return }
         guard !progressStore.isPiPActive else { return }
         guard tileError == nil, player != nil || statusText != nil else { return }
         guard !backgroundSuspended, graceStartedAt == nil else { return }
@@ -6956,6 +6958,7 @@ struct AVPlayerMultiviewTile: View {
         // the keepalive holds the process, and quiescing would starve it.
         if airPlayDelivery.handleBackgroundEntry() { return }
         if MultiviewCompositeTaps.shared.currentTransport != nil { return }
+        if RadioModeSession.shared.isActive, MultiviewStore.shared.audioTileID == tileID, player != nil { return }
         guard !progressStore.isPiPActive else { return }
         guard tileError == nil, player != nil || statusText != nil else { return }
         backgroundResumeMs = progressStore.currentMs
@@ -8442,6 +8445,8 @@ struct AVPlayerLayerView: UIViewRepresentable {
         /// AirPlay (plan section 7): auto-start from inline is disarmed
         /// while a receiver is served from this tile, re-armed after.
         var airPlaySubscription: AnyCancellable?
+        /// Radio Mode: no auto PiP (no video while it is on).
+        var radioSubscription: AnyCancellable?
 
         func pictureInPictureControllerWillStartPictureInPicture(_ controller: AVPictureInPictureController) {
             // Synchronous, and iOS fires it BEFORE didEnterBackground -
@@ -8548,6 +8553,17 @@ struct AVPlayerLayerView: UIViewRepresentable {
                                 debugLog(serving ? "[AVP-PIP] auto-start from inline disarmed (AirPlay external)"
                                                  : "[AVP-PIP] auto-start from inline re-armed")
                             }
+                        // Radio Mode plays audio only: leaving the app must
+                        // not open a PiP window with the video.
+                        coordinator.radioSubscription = RadioModeSession.shared.$isActive
+                            .removeDuplicates()
+                            .sink { [weak pip] radio in
+                                guard let pip else { return }
+                                let want = !radio && !AirPlayTileDelivery.isServingReceiver
+                                guard pip.canStartPictureInPictureAutomaticallyFromInline != want else { return }
+                                pip.canStartPictureInPictureAutomaticallyFromInline = want
+                                debugLog("[AVP-PIP] auto-start from inline \(want ? "re-armed" : "disarmed (Radio Mode)")")
+                            }
                     }
                 }
             }
@@ -8557,6 +8573,7 @@ struct AVPlayerLayerView: UIViewRepresentable {
             existing.delegate = nil
             coordinator.controller = nil
             coordinator.airPlaySubscription = nil
+            coordinator.radioSubscription = nil
             coordinator.store?.isPiPActive = false
             MainActor.assumeIsolated { ForegroundPiPBridge.shared.unregister(existing) }
             debugLog("[AVP-PIP] controller disarmed (no longer solo)")

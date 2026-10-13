@@ -1671,6 +1671,8 @@ struct MultiviewContainerView: View {
                                 streamPickerVisible = true
                             }
                         } : nil,
+                        onRadioMode: RadioModeSession.canEnterFromPlayer
+                            ? { RadioModeSession.shared.enterFromPlayer() } : nil,
                         // Issue #48: live layout picker for the current tile
                         // count. Selecting a mode persists it and the grid
                         // reflows underneath while the panel stays open.

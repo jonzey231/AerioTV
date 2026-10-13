@@ -1,6 +1,8 @@
 import Foundation
 import SwiftUI
 import Combine
+import AVFoundation
+import MediaPlayer
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -1148,6 +1150,8 @@ final class PlayerSession: ObservableObject {
                 "[MV-Mode] begin(swap-from-mini): \(item.name)",
                 category: "Playback", level: .info
             )
+            // Radio Mode: the pick switches the audio and stays hidden.
+            if isLive { RadioModeSession.shared.noteSwitch(to: item) }
             exit()
             enterMultiview(seeding: item, server: server)
             let resolvedHeaders = server?.authHeaders ?? ["Accept": "*/*"]
@@ -2062,3 +2066,278 @@ final class MultiviewBackgroundSession: ObservableObject {
     }
 }
 #endif
+
+// MARK: - Radio Mode (Android#127 follow-up, Logan 2026-10-12)
+
+/// Radio Mode: a live channel's audio with no video on screen. Reuses the
+/// "hidden in place" pattern of MultiviewBackgroundSession: the one-tile
+/// container stays mounted and playing with opacity 0 (HomeView), the
+/// browse screens take over, and a dock card (iPhone / iPad) or a banner
+/// above the guide (Apple TV) returns to the video with no re-tune or
+/// stops it. Backgrounding keeps the audio on iPhone / iPad: the tile
+/// skips its background quiesce while Radio Mode owns it and detaches
+/// its AVPlayerLayer so iOS does not pause a video player in the
+/// background (reattached on return). Apple TV is foreground only.
+@MainActor
+final class RadioModeSession: ObservableObject {
+    static let shared = RadioModeSession()
+    @Published private(set) var isActive = false
+    /// Set while a tune started from Radio Mode is reseeding the tile, so
+    /// the transient idle / expand states of the swap do not end it.
+    private var switching = false
+    private var bag: Set<AnyCancellable> = []
+    #if os(iOS)
+    /// The layer detached for background audio, with the player it showed.
+    private weak var detachedLayer: AVPlayerLayer?
+    private weak var detachedPlayer: AVPlayer?
+    #endif
+
+    private init() {
+        PlayerSession.shared.$mode
+            .sink { [weak self] mode in
+                guard let self, self.isActive, !self.switching, mode == .idle else { return }
+                // exit() runs inside a channel swap too; only a session that
+                // stays idle has really ended.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    guard self.isActive, !self.switching, PlayerSession.shared.mode == .idle else { return }
+                    self.clear(reason: "playback ended")
+                }
+            }
+            .store(in: &bag)
+        NowPlayingManager.shared.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, self.isActive, !self.switching,
+                      PlayerSession.shared.mode != .idle,
+                      !NowPlayingManager.shared.isMinimized else { return }
+                self.clear(reason: "expanded")
+            }
+            .store(in: &bag)
+        #if os(iOS)
+        // Lock screen / Control Center Stop while Radio Mode is on (Play /
+        // Pause come from NowPlayingBridge as for any playback).
+        $isActive
+            .removeDuplicates()
+            .sink { active in
+                let cmd = MPRemoteCommandCenter.shared().stopCommand
+                cmd.removeTarget(nil)
+                cmd.isEnabled = active
+                if active {
+                    cmd.addTarget { _ in
+                        DispatchQueue.main.async { RadioModeSession.shared.stop(reason: "lock screen Stop") }
+                        return .success
+                    }
+                }
+            }
+            .store(in: &bag)
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { _ in MainActor.assumeIsolated { RadioModeSession.shared.didEnterBackground() } }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+        ) { _ in MainActor.assumeIsolated { RadioModeSession.shared.willEnterForeground() } }
+        #endif
+    }
+
+    /// Radio Mode is offered only for local playback: hidden while Cast,
+    /// AirPlay, the AerioTV Remote or CarPlay owns playback.
+    static var isAvailable: Bool {
+        #if os(iOS)
+        if AerioCastController.shared.isCasting { return false }
+        if CompanionClient.shared.isControlling { return false }
+        if AirPlayMonitor.shared.isExternal || AirPlayMonitor.shared.hostsHeadless { return false }
+        if NowPlayingManager.shared.isCarPlayConnected { return false }
+        if MultiviewCompositeSession.shared.isActive { return false }
+        #endif
+        if MultiviewBackgroundSession.shared.isActive { return false }
+        return true
+    }
+
+    /// The channel Radio Mode is playing (the one live tile), nil when off.
+    var channel: ChannelDisplayItem? {
+        guard isActive else { return nil }
+        return MultiviewStore.shared.tiles.first?.item
+    }
+
+    /// True when `channelID` is the channel playing in Radio Mode (the
+    /// long-press menu then offers "Exit Radio Mode").
+    func isRadioChannel(_ channelID: String) -> Bool {
+        channel?.id == channelID
+    }
+
+    // Channel long-press menus (guide grid, channel list): one item.
+    static let menuSymbol = "radio"
+    /// Nil hides the item (Cast / AirPlay / Remote / CarPlay active, or
+    /// the channel has no stream).
+    static func menuTitle(for item: ChannelDisplayItem) -> String? {
+        guard item.streamURL != nil else { return nil }
+        if shared.isRadioChannel(item.id) { return "Exit Radio Mode" }
+        return isAvailable ? "Radio Mode" : nil
+    }
+    static func menuAction(for item: ChannelDisplayItem) {
+        if shared.isRadioChannel(item.id) {
+            shared.returnToVideo()
+        } else {
+            shared.start(item: item, server: ChannelStore.shared.activeServer)
+        }
+    }
+
+    /// The one live tile currently playing, when the session is a plain
+    /// single live channel (not a Multiview grid, VOD, DVR or catch-up).
+    private static var soleLiveTile: MultiviewTile? {
+        let store = MultiviewStore.shared
+        guard PlayerSession.shared.mode == .multiview, store.tiles.count == 1,
+              let t = store.tiles.first, t.kind == .live else { return nil }
+        return t
+    }
+
+    /// Player options "Radio Mode": the playing channel goes audio only.
+    static var canEnterFromPlayer: Bool {
+        isAvailable && !shared.isActive && soleLiveTile != nil
+    }
+
+    /// Long-press "Radio Mode" on a channel: play it as radio. Re-uses the
+    /// playing tile when it is already this channel; otherwise tunes it
+    /// (minimized, so the video player never opens).
+    func start(item: ChannelDisplayItem, server: ServerConnection?) {
+        guard Self.isAvailable else { return }
+        if let t = Self.soleLiveTile, t.item.id == item.id {
+            enterFromPlayer()
+            return
+        }
+        if isActive {
+            switchTo(item: item, server: server)
+            return
+        }
+        // A grid or a non-live session is replaced, like any channel pick.
+        if PlayerSession.shared.mode == .multiview, Self.soleLiveTile == nil {
+            PlayerSession.shared.stop()
+        }
+        switching = true
+        isActive = true
+        debugLog("[RADIO] start \(item.name)")
+        NowPlayingManager.shared.requestStartMinimized()
+        _ = PlayerSession.shared.begin(item: item, server: server)
+        settleAfterTune()
+    }
+
+    /// From the player's options: keep the audio, hide the video.
+    func enterFromPlayer() {
+        guard Self.isAvailable, let t = Self.soleLiveTile else { return }
+        isActive = true
+        debugLog("[RADIO] start \(t.item.name)")
+        #if os(iOS)
+        AppOrientationLock.release(reason: "radio mode")
+        #endif
+        // The state half of minimize: never the iPhone PiP hop.
+        NowPlayingManager.shared.applyMinimized()
+        #if os(tvOS)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+        }
+        #endif
+    }
+
+    /// A channel picked in Radio Mode (guide, list, channel up/down)
+    /// switches the audio; PlayerSession.begin routes here first.
+    func noteSwitch(to item: ChannelDisplayItem) {
+        guard isActive else { return }
+        switching = true
+        debugLog("[RADIO] switch -> \(item.name)")
+        NowPlayingManager.shared.requestStartMinimized()
+        settleAfterTune()
+    }
+
+    private func switchTo(item: ChannelDisplayItem, server: ServerConnection?) {
+        // begin() takes the swap-from-mini path and calls noteSwitch.
+        _ = PlayerSession.shared.begin(item: item, server: server)
+    }
+
+    private func settleAfterTune() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            self.switching = false
+            // The tune ended up expanded or never started: not radio.
+            if self.isActive, PlayerSession.shared.mode == .idle {
+                self.clear(reason: "tune did not start")
+            } else if self.isActive, !NowPlayingManager.shared.isMinimized {
+                NowPlayingManager.shared.applyMinimized()
+            }
+        }
+    }
+
+    /// Card tap / "Exit Radio Mode": back to the full player with video,
+    /// same tile, no re-tune.
+    func returnToVideo() {
+        guard isActive else { return }
+        isActive = false
+        debugLog("[RADIO] stop (return to video)")
+        #if os(iOS)
+        reattachLayer()
+        #endif
+        withAnimation(.spring(response: 0.35)) { NowPlayingManager.shared.expand() }
+    }
+
+    /// Card Stop: end Radio Mode and the audio.
+    func stop(reason: String = "stop") {
+        guard isActive else { return }
+        isActive = false
+        debugLog("[RADIO] stop (\(reason))")
+        #if os(iOS)
+        reattachLayer()
+        #endif
+        PlayerSession.shared.stop()
+    }
+
+    private func clear(reason: String) {
+        guard isActive else { return }
+        isActive = false
+        debugLog("[RADIO] stop (\(reason))")
+        #if os(iOS)
+        reattachLayer()
+        #endif
+    }
+
+    #if os(iOS)
+    /// Called by the tile when the app goes to the background: true means
+    /// Radio Mode owns this tile and it must keep playing (skip quiesce).
+    func keepsPlayingInBackground(tileID: String, player: AVPlayer?) -> Bool {
+        guard isActive, MultiviewStore.shared.audioTileID == tileID else { return false }
+        guard let player else {
+            debugLog("[RADIO] background keepalive lost (no AVPlayer on the tile)")
+            return false
+        }
+        if let layer = AVPlayerDisplayLayerRegistry.layer(for: player), layer.player != nil {
+            // iOS pauses a player that is still attached to a layer when
+            // the app leaves the foreground; audio only needs no layer.
+            layer.player = nil
+            detachedLayer = layer
+            detachedPlayer = player
+        }
+        if player.rate == 0 { player.play() }
+        debugLog("[RADIO] background keepalive ok (rate=\(player.rate))")
+        return true
+    }
+
+    private func didEnterBackground() {
+        guard isActive else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            guard self.isActive, UIApplication.shared.applicationState == .background else { return }
+            let playing = (self.detachedPlayer?.rate ?? 0) > 0
+            debugLog("[RADIO] background keepalive \(playing ? "ok" : "lost") (2 s after background)")
+        }
+    }
+
+    private func willEnterForeground() {
+        reattachLayer()
+    }
+
+    private func reattachLayer() {
+        if let layer = detachedLayer, let player = detachedPlayer, layer.player == nil {
+            layer.player = player
+        }
+        detachedLayer = nil
+        detachedPlayer = nil
+    }
+    #endif
+}

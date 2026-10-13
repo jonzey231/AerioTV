@@ -3990,6 +3990,8 @@ struct PlayerOverflowMenu: View, Equatable {
     /// only reads nil-ness (on the main actor during view diffing), and the
     /// closure is only ever INVOKED from `body`, also on the main actor.
     nonisolated(unsafe) var switchStreamAction: (() -> Void)?
+    /// Radio Mode: presence gates the row (same contract as above).
+    nonisolated(unsafe) var radioModeAction: (() -> Void)? = nil
     var onMenuOpen: (() -> Void)?
     var onMenuClose: (() -> Void)?
 
@@ -4011,6 +4013,7 @@ struct PlayerOverflowMenu: View, Equatable {
         // Stream action gates whether the row shows, so compare its
         // nil-ness so eligibility changes still re-render the menu.
         (lhs.switchStreamAction == nil) == (rhs.switchStreamAction == nil) &&
+        (lhs.radioModeAction == nil) == (rhs.radioModeAction == nil) &&
         (lhs.setAudioSync == nil) == (rhs.setAudioSync == nil) &&
         lhs.versionOptions == rhs.versionOptions &&
         lhs.currentVersionOptionID == rhs.currentVersionOptionID &&
@@ -4238,6 +4241,16 @@ struct PlayerOverflowMenu: View, Equatable {
                 #if os(iOS)
                 Divider()
 
+                // Radio Mode: keep the audio, close the video player.
+                if let radioModeAction {
+                    Button {
+                        radioModeAction()
+                    } label: {
+                        Label(RadioModeSession.shared.isActive ? "Exit Radio Mode" : "Radio Mode",
+                              systemImage: RadioModeSession.menuSymbol)
+                    }
+                }
+
                 // Audio only
                 Button {
                     toggleAudioOnly?()
@@ -4318,6 +4331,8 @@ struct TVPlayerOptionsPanel: View {
     /// non-nil the panel shows a top "Switch Stream" row that opens the
     /// member-stream picker. nil hides it.
     var onSwitchStream: (() -> Void)?
+    /// Radio Mode (live single channel); nil hides the row.
+    var onRadioMode: (() -> Void)? = nil
     /// v1.8.17 VOD version switching: one pill per provider copy of the
     /// playing item (Dispatcharr Direct Connect VOD, >1 copy). Empty
     /// hides the section.
@@ -4360,6 +4375,7 @@ struct TVPlayerOptionsPanel: View {
                 subtitleSection
                 if !isLive { speedSection }
                 sleepTimerSection
+                if onRadioMode != nil { radioModeSection }
                 if !kept.channels.isEmpty { keptLiveSection }
                 if isLive || isRecording, onEnterMultiview != nil {
                     multiviewSection
@@ -4575,6 +4591,21 @@ struct TVPlayerOptionsPanel: View {
                 // the picker down with it, the "Switch Stream → blank
                 // screen / Options menu disappears" bug.
                 onSwitchStream?()
+            }
+        }
+    }
+
+    @ViewBuilder private var radioModeSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("Radio Mode")
+            optionPill(
+                id: "radio-mode",
+                text: RadioModeSession.shared.isActive ? "Exit Radio Mode" : "Radio Mode",
+                systemImage: RadioModeSession.menuSymbol,
+                isSelected: false
+            ) {
+                onDismiss?()
+                onRadioMode?()
             }
         }
     }

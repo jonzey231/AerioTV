@@ -5874,6 +5874,7 @@ struct EPGGuideView: View {
                 // Back to Guide: the background Multiview's banner takes
                 // the staging banner's slot (they never coexist).
                 MultiviewBackgroundBannerSlot()
+                RadioModeBannerSlot()
                 if multiviewStore.isStagingFromGuide && !MultiviewBackgroundSession.shared.isActive {
                     stagingBanner
                 }
@@ -9379,6 +9380,10 @@ private struct GuideProgramButton: View {
                         onWatchCatchup(channelItem, prog)
                     }
                 }
+                // Radio Mode: the channel's audio with no video.
+                if let radioTitle = RadioModeSession.menuTitle(for: channelItem) {
+                    Button(radioTitle) { RadioModeSession.menuAction(for: channelItem) }
+                }
                 // Favorite toggle first, most frequent action users take
                 // on a program cell that isn't "just play it."
                 Button(favoritesStore.isFavorite(channelItem.id)
@@ -9623,6 +9628,11 @@ private struct GuideProgramButton: View {
         } else if prog.isLive {
             items.append(.init(title: "Watch", systemImage: "play.fill") { onSelect(channelItem) })
         }
+        if let radioTitle = RadioModeSession.menuTitle(for: channelItem) {
+            items.append(.init(title: radioTitle, systemImage: RadioModeSession.menuSymbol) {
+                RadioModeSession.menuAction(for: channelItem)
+            })
+        }
         let isFav = favoritesStore.isFavorite(channelItem.id)
         items.append(.init(title: isFav ? "Remove from Favorites" : "Add to Favorites",
                            systemImage: isFav ? "star.slash" : "star") { favoritesStore.toggle(channelItem) })
@@ -9697,6 +9707,11 @@ private struct GuideProgramButton: View {
             }
         } else if prog.isLive {
             Button { onSelect(channelItem) } label: { Label("Watch", systemImage: "play.fill") }
+        }
+        if let radioTitle = RadioModeSession.menuTitle(for: channelItem) {
+            Button { RadioModeSession.menuAction(for: channelItem) } label: {
+                Label(radioTitle, systemImage: RadioModeSession.menuSymbol)
+            }
         }
         let isFav = favoritesStore.isFavorite(channelItem.id)
         Button { favoritesStore.toggle(channelItem) } label: {
@@ -10201,6 +10216,90 @@ struct MultiviewStagingBanner: View {
 }
 
 #if os(tvOS)
+/// Apple TV Radio Mode banner, the card's tvOS form: channel logo, name,
+/// "Playing channel audio", Select returns to the video (no re-tune),
+/// Stop ends it. Foreground only on Apple TV.
+struct RadioModeBannerSlot: View {
+    @ObservedObject private var radio = RadioModeSession.shared
+    @ObservedObject private var store = MultiviewStore.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if radio.isActive, let ch = radio.channel {
+                banner(ch).transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: radio.isActive)
+    }
+
+    private func banner(_ ch: ChannelDisplayItem) -> some View {
+        HStack(spacing: 12) {
+            Button {
+                radio.returnToVideo()
+            } label: {
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.black.opacity(0.25))
+                        if let url = ch.logoURL {
+                            AsyncImage(url: url) { $0.resizable().scaledToFit() } placeholder: {
+                                Image(systemName: RadioModeSession.menuSymbol)
+                                    .foregroundColor(.accentPrimary)
+                            }
+                            .frame(width: 44, height: 44)
+                        } else {
+                            Image(systemName: RadioModeSession.menuSymbol)
+                                .foregroundColor(.accentPrimary)
+                        }
+                    }
+                    .frame(width: 52, height: 52)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(ch.name)
+                            .scaledFont(.system(size: 22, weight: .semibold))
+                            .foregroundColor(.textPrimary)
+                            .lineLimit(1)
+                        Text("Playing channel audio")
+                            .scaledFont(.system(size: 17))
+                            .foregroundColor(Color.contrastText(.accentPrimary))
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(TVNoHighlightButtonStyle())
+            .tvFocusRingShape(.capsule)
+            .accessibilityLabel("Return to \(ch.name)")
+            Button {
+                radio.stop(reason: "banner Stop")
+            } label: {
+                Text("Stop")
+                    .scaledFont(.system(size: 22, weight: .medium))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .foregroundColor(Color.contrastText(.accentPrimary))
+                    .padding(.horizontal, 26)
+                    .padding(.vertical, 13)
+                    .background(Capsule().stroke(Color.accentPrimary, lineWidth: 1))
+            }
+            .buttonStyle(TVNoHighlightButtonStyle())
+            .tvFocusRingShape(.capsule)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.accentPrimary.opacity(0.4))
+                .frame(height: 1)
+        }
+        .focusSection()
+    }
+}
+
 /// Apple TV banner for a Multiview left with Back to Guide: same shape and
 /// pill sizes as the staging banner. Count and names follow the live tiles
 /// (Add / Remove from Multiview in the long-press menu change them in place).
@@ -10297,6 +10396,7 @@ struct MultiviewStagingBannerSlot: View {
         VStack(spacing: 0) {
             #if os(tvOS)
             MultiviewBackgroundBannerSlot()
+            RadioModeBannerSlot()
             #endif
             if multiviewStore.isStagingFromGuide {
                 MultiviewStagingBanner(activeServer: activeServer)
@@ -10725,6 +10825,11 @@ struct GuideCanvasRow: View {
             items.append(.init(title: "Watch", systemImage: "clock.arrow.circlepath") { onWatchCatchup(channelItem, prog) })
         } else if prog.isLive {
             items.append(.init(title: "Watch", systemImage: "play.fill") { onSelect(channelItem) })
+        }
+        if let radioTitle = RadioModeSession.menuTitle(for: channelItem) {
+            items.append(.init(title: radioTitle, systemImage: RadioModeSession.menuSymbol) {
+                RadioModeSession.menuAction(for: channelItem)
+            })
         }
         let isFav = favoritesStore.isFavorite(channelItem.id)
         let favorites = favoritesStore
