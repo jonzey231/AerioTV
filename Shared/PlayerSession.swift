@@ -2347,6 +2347,22 @@ final class RadioModeSession: ObservableObject {
         togglePause()
     }
 
+    /// Now Playing play / pause / toggle. iOS and iPadOS: pause and resume
+    /// (the lock screen). Apple TV: the Siri Remote Play/Pause is delivered
+    /// to this command while a Now Playing session is up, never to the
+    /// guide's key handler, so in the foreground it is the banner's Switch
+    /// to Video Mode.
+    func handlePlayPauseCommand(pause: Bool) {
+        #if os(tvOS)
+        if UIApplication.shared.applicationState == .active {
+            debugLog("[RADIO] play/pause command -> switch to video")
+            returnToVideo()
+            return
+        }
+        #endif
+        setPaused(pause)
+    }
+
     private func publishPlaybackRate() {
         guard isActive else { return }
         NowPlayingBridge.shared.updateElapsed(0, rate: isPaused ? 0 : 1)
@@ -2387,8 +2403,8 @@ final class RadioModeSession: ObservableObject {
             artworkURL: ch.logoURL,
             duration: nil,
             isLive: true,
-            onPlay: { RadioModeSession.shared.setPaused(false) },
-            onPause: { RadioModeSession.shared.setPaused(true) },
+            onPlay: { RadioModeSession.shared.handlePlayPauseCommand(pause: false) },
+            onPause: { RadioModeSession.shared.handlePlayPauseCommand(pause: true) },
             onSeek: nil,
             programLine: lines.sub
         )

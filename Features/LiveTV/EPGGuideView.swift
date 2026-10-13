@@ -5565,6 +5565,8 @@ struct EPGGuideView: View {
     /// mini closes. Gated in `onMoveCommand(.right)`; driven by the
     /// `.guideRightHold*` notifications with a 2.5s safety backstop.
     @State private var rightHoldPinningTimeline = false
+    /// The focused cell when a hold-Right began; restored on release.
+    @State private var rightHoldOriginPID: String?
     @State private var rightHoldSafetyTask: Task<Void, Never>?
     /// Timeline offset before the most recent Right-step. A hold-Right
     /// close-mini gesture delivers its press-down as a normal Right
@@ -6343,6 +6345,14 @@ struct EPGGuideView: View {
                 // Freeze the EPG timeline for the duration of the close-mini hold.
                 // A safety backstop clears the pin if the release event is missed.
                 rightHoldPinningTimeline = true
+                // The hold's action (Close mini / Radio Mode Stop) owns the
+                // rest of this press: every further Right is swallowed until
+                // key-up (the guide-open "held from before" veto, reused),
+                // and focus returns to where the hold began (Apple TV
+                // 2026-10-13: three more RIGHT moves after the stop).
+                rightHoldOriginPID = focusedProgramID
+                GuideArrowPressEdges.guideOpenedAt = Date()
+                debugLog("[PRESS] guide hold-Right: swallowing Right until release origin=\(focusedProgramID ?? "nil")")
                 // The hold's press-down already scrolled one step before
                 // recognition; put the timeline back where it was.
                 if let restore = focusScratch.preRightStepOffset {
@@ -6372,6 +6382,11 @@ struct EPGGuideView: View {
                     rightHoldPinningTimeline = false
                     rightHoldSafetyTask?.cancel()
                     rightHoldSafetyTask = nil
+                    if let origin = rightHoldOriginPID, focusedProgramID != origin {
+                        debugLog("[PRESS] guide hold-Right released: focus back to origin=\(origin)")
+                        focusedProgramID = origin
+                    }
+                    rightHoldOriginPID = nil
                 } else if focusScratch.pendingRightStep {
                     focusScratch.pendingRightStep = false
                     if !rightHoldPinningTimeline { performRightStep() }
