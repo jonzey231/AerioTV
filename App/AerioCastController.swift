@@ -4358,6 +4358,8 @@ struct RemoteTrackRows: View {
     /// nil selects Off.
     let onText: (String?) -> Void
     let onSpeed: (Double) -> Void
+    /// Radio Mode: Audio Track only (no video to caption, live has no speed).
+    var audioOnly: Bool = false
 
     var body: some View {
         NavigationLink {
@@ -4368,6 +4370,7 @@ struct RemoteTrackRows: View {
             OptionValueLabel(title: "Audio Track", icon: "music.note",
                              value: state.audio.first(where: { $0.selected })?.label)
         }
+        if !audioOnly {
         NavigationLink {
             OptionPickerList(title: "Subtitles",
                              choices: [(nil, "Off", state.textOff)]
@@ -4386,6 +4389,7 @@ struct RemoteTrackRows: View {
         } label: {
             OptionValueLabel(title: "Playback Speed", icon: "gauge.with.dots.needle.33percent",
                              value: RemoteOptionLabels.speed(state.speed))
+        }
         }
     }
 }
@@ -4577,7 +4581,8 @@ struct CastOptionsSheet: View {
                         RemoteTrackRows(state: airPlayOptions.state,
                                         onAudio: { airPlayOptions.selectAudio($0) },
                                         onText: { airPlayOptions.selectText($0) },
-                                        onSpeed: { airPlayOptions.setSpeed($0) })
+                                        onSpeed: { airPlayOptions.setSpeed($0) },
+                                        audioOnly: radio)
                     } else {
                         let s = cast.remoteState
                         Group {
@@ -4616,7 +4621,7 @@ struct CastOptionsSheet: View {
                     // read from the player the receiver is showing.
                     Section("Stream Info") {
                         if let airPlayInfo {
-                            AirPlayStreamInfoCard(info: airPlayInfo)
+                            AirPlayStreamInfoCard(info: airPlayInfo, radio: radio)
                                 .listRowInsets(EdgeInsets())
                                 .listRowBackground(Color.clear)
                         } else {
@@ -4889,17 +4894,23 @@ struct AirPlayStreamInfo: Equatable {
 struct AirPlayStreamInfoCard: View {
     @Environment(\.aerioTextScale) private var textScale
     let info: AirPlayStreamInfo
+    /// Radio Mode: local audio only, the video track is not decoded.
+    var radio: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            row(label: "TV", value: info.receiver)
+            if radio {
+                row(label: "MODE", value: "Radio Mode")
+            } else {
+                row(label: "TV", value: info.receiver)
+            }
             row(label: "SOURCE", value: info.source)
-            row(label: "VIA", value: info.delivery)
+            row(label: "VIA", value: radio ? "AVPlayer (local)" : info.delivery)
             if let composite = info.composite {
                 row(label: "COMPOSITE", value: composite)
             }
             row(label: "FORMAT", value: info.container)
-            row(label: "VIDEO", value: info.video)
+            row(label: "VIDEO", value: radio ? "\(info.video) (not decoded)" : info.video)
             row(label: "AUDIO", value: info.audio)
             row(label: "RATE", value: info.bitrate)
             row(label: "BUFFER", value: info.buffer)
