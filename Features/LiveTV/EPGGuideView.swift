@@ -8862,6 +8862,7 @@ private struct GuideProgramButton: View {
     #if !os(tvOS)
     /// Settings > Live TV > Program Info Button: "off" | "current" | "all".
     @AppStorage(GuideProgramInfoButton.key) private var programInfoButtonMode = GuideProgramInfoButton.defaultValue
+    @AppStorage(GuideProgramInfoButton.guideViewKey) private var programInfoInGuide = true
     #endif
 
     private var hasReminder: Bool {
@@ -9544,7 +9545,8 @@ private struct GuideProgramButton: View {
                     // enough to show text, so it never crowds a short slot.
                     // Behind Settings > Live TV > Program Info Button (Logan
                     // 2026-10-07): Off by default, Current Programs, or All.
-                    if GuideProgramInfoButton.shows(mode: programInfoButtonMode, isLive: prog.isLive),
+                    if programInfoInGuide,
+                       GuideProgramInfoButton.shows(mode: programInfoButtonMode, isLive: prog.isLive),
                        min(width - leadingClip, UIScreen.main.bounds.width) >= 120 {
                         Button {
                             presentProgramInfo(after: 0)
@@ -10429,6 +10431,11 @@ enum GuideProgramInfoButton {
     static let current = "current"
     static let all = "all"
     static let defaultValue = off
+    /// Which views carry the button (2026-10-13). Guide View defaults on so
+    /// the existing setting keeps its meaning; List View defaults off. The
+    /// Off / Current / All choice above applies to both.
+    static let guideViewKey = "guideProgramInfoButtonGuideView"
+    static let listViewKey = "guideProgramInfoButtonListView"
 
     static func shows(mode: String, isLive: Bool) -> Bool {
         switch mode {

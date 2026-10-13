@@ -167,6 +167,7 @@ final class SyncManager: ObservableObject {
         "defaultChannelGroup",
         // Guide Program Info Button (Settings > Live TV): off|current|all.
         "guideProgramInfoButton",
+        "guideProgramInfoButtonGuideView", "guideProgramInfoButtonListView",
         // Time Format (Settings > Appearance): "system" | "12" | "24".
         ClockFormat.defaultsKey,
         "bgRefreshType",

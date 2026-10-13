@@ -3309,6 +3309,18 @@ struct ChannelRow: View {
     /// colored stripe is drawn on the leading edge of the row.
     /// Default off so existing users don't see a surprise visual change.
     @AppStorage("tintChannelCards") private var tintChannelCards: Bool = false
+    #if os(iOS)
+    /// Settings > Live TV > Program Info Button > List View, with the same
+    /// Off / Current / All choice the guide cells use.
+    @AppStorage(GuideProgramInfoButton.listViewKey) private var programInfoInList = false
+    @AppStorage(GuideProgramInfoButton.key) private var programInfoButtonMode = GuideProgramInfoButton.defaultValue
+    /// A list row shows the program airing now, so "Current" and "All"
+    /// both show it.
+    private var showsProgramInfoButton: Bool {
+        programInfoInList && liveProgram != nil
+            && GuideProgramInfoButton.shows(mode: programInfoButtonMode, isLive: true)
+    }
+    #endif
 
     /// Currently-airing program for this row, picking the best
     /// available source. v1.6.10: previously the row showed
@@ -4050,6 +4062,24 @@ struct ChannelRow: View {
             // #18/#35 long-press discoverability; the guide's tappable
             // favorite star now covers that affordance.)
 
+            #if os(iOS)
+            // Program Info button (List View): the guide cell's glyph, size
+            // and behavior, just before the expand control.
+            if showsProgramInfoButton {
+                Button {
+                    presentLiveProgramInfo()
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 18, weight: .medium))  // glyph in a fixed box: not text, stays fixed
+                        .foregroundColor(.textSecondary)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Program Info")
+            }
+            #endif
+
             // -- Expand chevron --
             if item.currentProgram != nil || fetchUpcoming != nil {
                 Button {
@@ -4088,7 +4118,9 @@ struct ChannelRow: View {
         // expand button.
         .overlay(alignment: .leading) {
             SystemMenuAnchor(items: { cardMenuItems }, onTap: onTap)
-                .padding(.trailing, (isWide ? 150 : 58) * s)
+                // The Program Info button sits left of the expand strip and
+                // must stay outside the tap anchor.
+                .padding(.trailing, (isWide ? 150 : 58) * s + (showsProgramInfoButton ? 44 : 0))
         }
         // #45: per-channel "Add to Collection", toggle membership in any
         // existing collection (a checkmark marks current members) or create a
@@ -4156,22 +4188,9 @@ struct ChannelRow: View {
             })
         }
         let live = liveProgram
-        if let live {
+        if live != nil {
             items.append(.init(title: "Program Info", systemImage: "info.circle") {
-                let nowAiring = guideStore.liveProgram(for: item.id)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    activeSheet = .programInfo(
-                        ProgramInfoTarget(
-                            channelName: item.name, title: live.title, start: live.start, end: live.end,
-                            description: live.description ?? nowAiring?.description ?? "",
-                            category: item.currentProgramCategory ?? nowAiring?.category ?? "",
-                            programID: nowAiring?.programID,
-                            subTitle: live.subTitle ?? nowAiring?.subTitle,
-                            season: nowAiring?.season, episode: nowAiring?.episode,
-                            isNew: nowAiring?.isNew ?? false, isLiveBroadcast: nowAiring?.isLiveBroadcast ?? false,
-                            isPremiere: nowAiring?.isPremiere ?? false, isFinale: nowAiring?.isFinale ?? false,
-                            isRepeat: nowAiring?.isRepeat ?? false))
-                }
+                presentLiveProgramInfo(after: 0.35)
             })
         }
         if item.streamURL != nil {
@@ -4185,6 +4204,25 @@ struct ChannelRow: View {
             })
         }
         return items
+    }
+
+    /// Program Info for the row's current program (list button and menu).
+    private func presentLiveProgramInfo(after delay: Double = 0) {
+        guard let live = liveProgram else { return }
+        let nowAiring = guideStore.liveProgram(for: item.id)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            activeSheet = .programInfo(
+                ProgramInfoTarget(
+                    channelName: item.name, title: live.title, start: live.start, end: live.end,
+                    description: live.description ?? nowAiring?.description ?? "",
+                    category: item.currentProgramCategory ?? nowAiring?.category ?? "",
+                    programID: nowAiring?.programID,
+                    subTitle: live.subTitle ?? nowAiring?.subTitle,
+                    season: nowAiring?.season, episode: nowAiring?.episode,
+                    isNew: nowAiring?.isNew ?? false, isLiveBroadcast: nowAiring?.isLiveBroadcast ?? false,
+                    isPremiere: nowAiring?.isPremiere ?? false, isFinale: nowAiring?.isFinale ?? false,
+                    isRepeat: nowAiring?.isRepeat ?? false))
+        }
     }
     #endif
 
