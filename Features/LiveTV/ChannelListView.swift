@@ -6757,6 +6757,9 @@ final class ListScheduleCache: @unchecked Sendable {
                                                           start: start, end: end, now: now)
                 if end > now {
                     validUntil = min(validUntil, end)
+                    // An upcoming row leaves the list (moves to the header)
+                    // the moment it starts.
+                    if start > now { validUntil = min(validUntil, start) }
                 } else if catchupDays > 0 {
                     let expiry = end.addingTimeInterval(windowSeconds)
                     if expiry > now { validUntil = min(validUntil, expiry) }
@@ -6787,14 +6790,21 @@ final class ListScheduleCache: @unchecked Sendable {
 
         let future: [ListScheduleRow]
         if !source.isEmpty {
-            // Includes the currently-airing program (v1.6.10).
+            // Upcoming only (2026-10-13, Android parity): the program
+            // airing now lives in the row header, never repeated here.
+            // The airing program is not a row, but its end still moves it
+            // into the aired list.
+            for p in source where p.start <= now && p.end > now {
+                validUntil = min(validUntil, p.end)
+            }
             future = source
-                .filter { $0.end > now }
+                .filter { $0.end > now && $0.start > now }
                 .sorted { $0.start < $1.start }
                 .map { row(entry($0)) }
         } else {
             future = fallback
                 .filter { e in
+                    if let start = e.startTime, start <= now { return false }
                     guard let end = e.endTime else { return true }
                     return end > now
                 }
