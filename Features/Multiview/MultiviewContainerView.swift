@@ -520,7 +520,7 @@ struct MultiviewContainerView: View {
                                     "[MV-Mode] X: close Multiview (tiles=\(store.tiles.count))",
                                     category: "Playback", level: .info)
                                 #if os(iOS)
-                                AppOrientationLock.release()
+                                AppOrientationLock.release(reason: "Multiview X")
                                 #endif
                                 session.stop()
                             }
@@ -1733,7 +1733,7 @@ struct MultiviewContainerView: View {
         // clears the store). It used to collapse N>=2 to the audio tile,
         // which left a one-tile Multiview playing full screen.
         #if os(iOS)
-        AppOrientationLock.release()
+        AppOrientationLock.release(reason: "Exit Multiview")
         #endif
         session.stop()
     }

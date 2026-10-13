@@ -4158,6 +4158,9 @@ final class NowPlayingManager: ObservableObject {
     func minimize() {
         debugLog("🎮 NowPlaying.minimize: \(playingItem?.name ?? "nil")")
         #if os(iOS)
+        // GH #99: leaving fullscreen (swipe down, pinch, Back to mini)
+        // returns the home screen to its at-rest orientation.
+        AppOrientationLock.release(reason: "minimize")
         // iPhone has no docked mini (Logan 2026-09-14): every minimize is
         // foreground PiP, which hides the host and calls applyMinimized.
         if UIDevice.current.userInterfaceIdiom == .phone {
@@ -4174,6 +4177,9 @@ final class NowPlayingManager: ObservableObject {
 
     /// The state half of minimize, without the iPhone PiP routing.
     func applyMinimized() {
+        #if os(iOS)
+        AppOrientationLock.release(reason: "minimized")
+        #endif
         #if os(tvOS)
         // Only a minimize the user sees claims the guide; a scene that is
         // not active has no focus system to hand focus to.

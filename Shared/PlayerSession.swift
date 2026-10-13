@@ -350,6 +350,15 @@ final class PlayerSession: ObservableObject {
 
     func exit() {
         #if os(iOS)
+        // GH #99: any path that ENDS playback (Back, playback end, stop
+        // from a sheet) must give the home screen its at-rest orientation
+        // back. exit() also runs inside channel changes, where a forced
+        // landscape must survive, so release only if nothing started again.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            guard PlayerSession.shared.mode == .idle,
+                  !NowPlayingManager.shared.isActive else { return }
+            AppOrientationLock.release(reason: "session ended")
+        }
         // Foreground PiP belongs to this session: take the window down and
         // un-hide the host for whatever plays next (no-op on the PiP X path,
         // which is what called us).

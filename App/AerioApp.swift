@@ -265,7 +265,7 @@ enum AppOrientationLock {
         // restores it; the force-landscape toggle still pins `.landscape`.
         if UIDevice.current.userInterfaceIdiom == .pad {
             guard !autoRotateEnabled else { return .all }
-            return frozenMask ?? currentInterfaceOrientationMask ?? .all
+            return frozenMask ?? preForceMask ?? currentInterfaceOrientationMask ?? .all
         }
         // Off freezes the orientation the phone was in when the toggle was
         // turned off (owner decision 2026-10-02, matching iPad and Android),
@@ -273,8 +273,18 @@ enum AppOrientationLock {
         // moment so a fullscreen player releasing landscape returns to the
         // frozen orientation rather than reading the player's own.
         guard !autoRotateEnabled else { return .allButUpsideDown }
-        return frozenMask ?? currentInterfaceOrientationMask ?? .portrait
+        // GH #99: never read the scene's CURRENT orientation here. With
+        // Auto Rotate off and no toggle this launch (frozenMask nil), the
+        // release after a forced landscape read the scene while it was
+        // still landscape, so base became .landscapeLeft/Right and the
+        // home screen stayed landscape for good. Use the orientation the
+        // force started from, else portrait.
+        return frozenMask ?? preForceMask ?? .portrait
     }
+
+    /// GH #99: the at-rest orientation captured the moment the player
+    /// forced landscape, so the release returns to it (Auto Rotate off).
+    private static var preForceMask: UIInterfaceOrientationMask?
 
     /// The orientation Auto-Rotate was turned off in; nil while it is on or
     /// before any toggle this launch (then the launch orientation applies).
@@ -311,8 +321,16 @@ enum AppOrientationLock {
 
     /// Force the player into landscape, or release back to `base`. Updates
     /// the reported mask, then asks the active scene to rotate.
-    static func apply(landscape: Bool) {
+    static func apply(landscape: Bool, reason: String = "toggle") {
+        if landscape, !isForcingLandscape {
+            // Capture the at-rest orientation before we rotate away
+            // (iPhone at rest with Auto Rotate off is portrait unless the
+            // toggle froze another orientation, which frozenMask holds).
+            preForceMask = UIDevice.current.userInterfaceIdiom == .phone
+                ? .portrait : (currentInterfaceOrientationMask ?? .all)
+        }
         let target: UIInterfaceOrientationMask = landscape ? .landscape : base
+        debugLog("[ORIENT] lock=\(landscape ? "landscape" : "released(\(describe(target)))") reason=\(reason) autoRotate=\(autoRotateEnabled)")
         mask = target
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else { return }
@@ -326,9 +344,21 @@ enum AppOrientationLock {
     }
 
     /// Teardown convenience: always return to the natural orientation.
-    static func release() {
+    static func release(reason: String = "teardown") {
         guard isForcingLandscape else { return }
-        apply(landscape: false)
+        apply(landscape: false, reason: reason)
+    }
+
+    private static func describe(_ m: UIInterfaceOrientationMask) -> String {
+        switch m {
+        case .portrait: return "portrait"
+        case .landscape: return "landscape"
+        case .landscapeLeft: return "landscapeLeft"
+        case .landscapeRight: return "landscapeRight"
+        case .allButUpsideDown: return "allButUpsideDown"
+        case .all: return "all"
+        default: return "mask\(m.rawValue)"
+        }
     }
 
     /// Re-evaluate the at-rest mask after the Auto-Rotate toggle changes.

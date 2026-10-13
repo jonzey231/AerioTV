@@ -493,7 +493,7 @@ struct PlaybackChromeOverlay: View {
             // player, so it never fires on Close), and `exit()` also runs
             // on channel changes where landscape should persist, so release
             // explicitly at the close action.
-            AppOrientationLock.release()
+            AppOrientationLock.release(reason: "X")
             #endif
             PlayerSession.shared.stop()
         } label: {
@@ -547,8 +547,12 @@ struct PlaybackChromeOverlay: View {
     private var landscapeButton_iOS: some View {
         Button {
             chromeState.reportInteraction()
-            forcedLandscape.toggle()
-            AppOrientationLock.apply(landscape: forcedLandscape)
+            // GH #99: toggle from the lock itself, not this view's copy.
+            // The @State survived a release made elsewhere (exit paths),
+            // so the next tap "re-released" instead of rotating.
+            let next = !AppOrientationLock.isForcingLandscape
+            AppOrientationLock.apply(landscape: next, reason: "rotate button")
+            forcedLandscape = AppOrientationLock.isForcingLandscape
         } label: {
             ZStack {
                 Circle()
