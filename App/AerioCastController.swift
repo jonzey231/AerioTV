@@ -4243,12 +4243,6 @@ struct RemoteOptionsSheet: View {
                         OptionValueLabel(title: "Sleep Timer", icon: "timer",
                                          value: RemoteOptionLabels.sleep(companion.sleepEndsAt))
                     }
-                    Button {
-                        companion.setAudioOnly(!s.audioOnly)
-                    } label: {
-                        OptionValueLabel(title: "Audio Only", icon: "video.slash",
-                                         value: s.audioOnly ? "On" : "Off")
-                    }
                 }
                 if !s.streamInfo.isEmpty {
                     Section("Stream Info") {
@@ -4606,13 +4600,6 @@ struct CastOptionsSheet: View {
                             OptionValueLabel(title: "Sleep Timer", icon: "timer",
                                              value: RemoteOptionLabels.sleep(cast.sleepEndsAt))
                         }
-                        Button {
-                            cast.setRemoteAudioOnly(!s.audioOnly)
-                        } label: {
-                            OptionValueLabel(title: "Audio Only", icon: "video.slash",
-                                             value: s.audioOnly ? "On" : "Off")
-                        }
-                        .disabled(!receiverControls)
                     }
                 }
                 if isAirPlay {

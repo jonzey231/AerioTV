@@ -10693,6 +10693,8 @@ struct GuideCanvasRow: View {
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
     @AppStorage(LogoCorners.guideCellsKey) private var roundedGuideCorners = LogoCorners.guideCellsDefault
     @AppStorage(GuideProgramInfoButton.key) private var programInfoButtonMode = GuideProgramInfoButton.defaultValue
+    /// Settings > Live TV > Program Info Button > Guide View.
+    @AppStorage(GuideProgramInfoButton.guideViewKey) private var programInfoInGuide = true
     @AppStorage("guideScale") private var guideScaleRaw: Double = 1.0
     @AppStorage("ui.hiddenEpgBadges") private var hiddenEpgBadgesRaw = ""
     @Environment(\.aerioTextScale) private var textScale
@@ -10749,7 +10751,8 @@ struct GuideCanvasRow: View {
                     channelID: channel.id, channelName: channel.name,
                     dispatcharrChannelID: channel.dispatcharrChannelID,
                     title: p.title, start: p.start, end: p.end),
-                infoAllowed: GuideProgramInfoButton.shows(mode: programInfoButtonMode, isLive: live),
+                infoAllowed: programInfoInGuide
+                    && GuideProgramInfoButton.shows(mode: programInfoButtonMode, isLive: live),
                 timeText: timeText(p))
         }
     }

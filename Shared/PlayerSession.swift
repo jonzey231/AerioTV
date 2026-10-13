@@ -2085,6 +2085,11 @@ final class RadioModeSession: ObservableObject {
     /// Set while a tune started from Radio Mode is reseeding the tile, so
     /// the transient idle / expand states of the swap do not end it.
     private var switching = false
+    /// A stop that ends playback handles the surface itself (deferred,
+    /// outside the SwiftUI transaction), so the isActive sink skips it.
+    private var suppressReattach = false
+    /// Source suffix for the next "[RADIO] switch" line ("sheet").
+    private var pendingSwitchSource: String?
     private var bag: Set<AnyCancellable> = []
     #if os(iOS)
     /// The layer detached for background audio, with the player it showed.
@@ -2140,8 +2145,10 @@ final class RadioModeSession: ObservableObject {
                 let player = MultiviewStore.shared.audioTileID
                     .flatMap { MultiviewCompositeTaps.shared.player(tileID: $0) }
                 DispatchQueue.main.async {
-                    if active { RadioModeSession.shared.startSurfaceEnforcement() }
-                    else { RadioModeSession.shared.reattachVideoSurface(player: player) }
+                    let radio = RadioModeSession.shared
+                    if active { radio.startSurfaceEnforcement() }
+                    else if radio.suppressReattach { radio.suppressReattach = false }
+                    else { radio.reattachVideoSurface(player: player) }
                 }
             }
             .store(in: &bag)
@@ -2276,9 +2283,23 @@ final class RadioModeSession: ObservableObject {
     func noteSwitch(to item: ChannelDisplayItem) {
         guard isActive else { return }
         switching = true
-        debugLog("[RADIO] switch -> \(item.name)")
+        let src = pendingSwitchSource.map { " (\($0))" } ?? ""
+        pendingSwitchSource = nil
+        debugLog("[RADIO] switch -> \(item.name)\(src)")
         NowPlayingManager.shared.requestStartMinimized()
         settleAfterTune()
+    }
+
+    /// Sheet Channel Up / Down: the same in-place switch a guide pick uses
+    /// in Radio Mode (begin's swap path), never the video player's flip.
+    func step(_ direction: Int) {
+        guard isActive, let ch = channel else { return }
+        let list = ChannelStore.shared.channels
+        guard let idx = list.firstIndex(where: { $0.id == ch.id }) else { return }
+        let next = max(0, min(list.count - 1, idx + direction))
+        guard next != idx else { return }
+        pendingSwitchSource = "sheet"
+        switchTo(item: list[next], server: ChannelStore.shared.activeServer)
     }
 
     private func switchTo(item: ChannelDisplayItem, server: ServerConnection?) {
@@ -2395,6 +2416,18 @@ final class RadioModeSession: ObservableObject {
     /// Card Stop: end Radio Mode and the audio.
     func stop(reason: String = "stop") {
         guard isActive else { return }
+        #if os(iOS)
+        // iPhone 2026-10-13: re-enabling the video track on the stop path
+        // blocked the main thread 822 to 909 ms inside a SwiftUI update
+        // (a synchronous media-server call while Kept Live retained the
+        // player). Skip the sink's reattach; after teardown, reattach only
+        // a player Kept Live retained, on a later runloop turn.
+        let player = radioPlayer
+        suppressReattach = true
+        surfaceTimer?.invalidate()
+        surfaceTimer = nil
+        detachedItem = nil
+        #endif
         isActive = false
         debugLog("[RADIO] stop (\(reason))")
         NowPlayingBridge.shared.teardown()
@@ -2402,6 +2435,16 @@ final class RadioModeSession: ObservableObject {
         reattachLayer()
         #endif
         PlayerSession.shared.stop()
+        #if os(iOS)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard let player, player.currentItem != nil else {
+                debugLog("[RADIO] reattach skipped (player torn down)")
+                return
+            }
+            debugLog("[RADIO] reattach deferred (kept live)")
+            RadioModeSession.shared.reattachVideoSurface(player: player)
+        }
+        #endif
     }
 
     private func clear(reason: String) {

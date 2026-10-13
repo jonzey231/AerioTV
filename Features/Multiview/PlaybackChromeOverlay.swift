@@ -1042,21 +1042,6 @@ private struct iPadOverflowAdapter: View {
             setVideoScale: { [weak progressStore] in progressStore?.setVideoScale($0) },
             setSleepTimer: { newEnd in sleepTimerEnd = newEnd },
             toggleStreamInfo: { showStreamInfo.toggle() },
-            toggleAudioOnly: { [weak progressStore] in
-                // Flip the audio tile's flag. This drives:
-                //   (a) the menu icon ("music.note" ↔ "video.fill")
-                //       via the iAudioOnly binding passed on the next
-                //       re-render of iPadOverflowAdapter,
-                //   (b) AudioOnlyForegroundOverlay (observing the
-                //       same store) to fade the dark-wash cover in
-                //       or out, and
-                //   (c) didEnterBackground to keep audio alive when
-                //       the app backgrounds.
-                guard let store = progressStore else { return }
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    store.isAudioOnly.toggle()
-                }
-            },
             recordAction: onRecord,
             switchStreamAction: onSwitchStream,
             radioModeAction: onRadioMode,

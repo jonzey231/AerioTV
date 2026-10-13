@@ -6565,20 +6565,22 @@ struct MainTabView: View {
     @ViewBuilder
     private var remoteSessionCard: some View {
         if !playerFullscreen {
-            if radio.isActive, let ch = radio.channel {
-                // Radio Mode: the cast card's slot and style (the dock rule
-                // already sizes this slot from the measured tab bar).
-                RemoteSessionCard(
-                    transport: .radio,
-                    title: ch.name,
-                    status: "Playing in Radio Mode",
-                    artURL: ch.logoURL?.absoluteString,
-                    isPlaying: true,
-                    showTransport: false,
-                    onTap: { showRadioSheet = true },
-                    onTogglePlayPause: {},
-                    onStop: { radio.stop(reason: "card Stop") }
-                )
+            if radio.isActive, let ch = radio.channel, let ps = multiviewStore.audioProgressStore {
+                // Radio Mode: the cast card's slot and style, with its
+                // Play / Pause transport (Android's radio card has one).
+                ProgressStoreReader(progress: ps) { p in
+                    RemoteSessionCard(
+                        transport: .radio,
+                        title: ch.name,
+                        status: "Playing in Radio Mode",
+                        artURL: ch.logoURL?.absoluteString,
+                        isPlaying: !p.isPaused,
+                        showTransport: true,
+                        onTap: { showRadioSheet = true },
+                        onTogglePlayPause: { radio.togglePause() },
+                        onStop: { radio.stop(reason: "card Stop") }
+                    )
+                }
             } else {
                 remoteSessionCardContent
             }
@@ -6762,8 +6764,9 @@ struct MainTabView: View {
                     isPlaying: !p.isPaused,
                     item: ch,
                     onTogglePlayPause: { radio.togglePause() },
-                    onChannelUp: { nowPlaying.changeChannel(direction: 1) },
-                    onChannelDown: { nowPlaying.changeChannel(direction: -1) },
+                    // Radio Mode's own in-place switch, never the video flip.
+                    onChannelUp: { radio.step(1) },
+                    onChannelDown: { radio.step(-1) },
                     onSeek: { radio.seek(by: $0) },
                     onStop: {
                         showRadioSheet = false

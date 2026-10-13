@@ -3518,12 +3518,6 @@ private struct PlayerRootView: View {
             setVideoScale: { progressStore.setVideoScale($0) },
             setSleepTimer: { sleepTimerEnd = $0 },
             toggleStreamInfo: { withAnimation(.easeInOut(duration: 0.2)) { showStreamInfo.toggle() } },
-            toggleAudioOnly: {
-                withAnimation(.spring(response: 0.3)) { isAudioOnly.toggle() }
-                // Mirror to the store so the Coordinator's background
-                // handler can keep audio alive when the user opts in.
-                progressStore.isAudioOnly = isAudioOnly
-            },
             recordAction: nil,
             onMenuOpen: { controlsHideTask?.cancel() },
             onMenuClose: { if !progressStore.isPaused { scheduleControlsHide() } }
@@ -3978,7 +3972,6 @@ struct PlayerOverflowMenu: View, Equatable {
     var setVideoScale: ((VideoAspectMode) -> Void)?
     var setSleepTimer: ((Date?) -> Void)?
     var toggleStreamInfo: (() -> Void)?
-    var toggleAudioOnly: (() -> Void)?
     var recordAction: (() -> Void)?
     /// Switch Stream (Dispatcharr Direct Connect, admin only). When the
     /// caller supplies a non-nil closure the menu shows a "Switch Stream"
@@ -4249,16 +4242,6 @@ struct PlayerOverflowMenu: View, Equatable {
                         Label(RadioModeSession.shared.isActive ? "Exit Radio Mode" : "Radio Mode",
                               systemImage: RadioModeSession.menuSymbol)
                     }
-                }
-
-                // Audio only
-                Button {
-                    toggleAudioOnly?()
-                } label: {
-                    Label(
-                        isAudioOnly ? "Show Video" : "Audio Only",
-                        systemImage: isAudioOnly ? "video.fill" : "music.note"
-                    )
                 }
 
                 // Picture-in-Picture is automatic, no manual menu item.
