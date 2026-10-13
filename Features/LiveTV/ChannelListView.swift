@@ -345,6 +345,7 @@ struct ChannelListView: View {
     #if os(tvOS)
     /// The strip lives in the tab-bar band, so it hides with the bar.
     @ObservedObject private var tabBarScrollState = TVTabBarScrollState.shared
+    @ObservedObject private var radio = RadioModeSession.shared
 
     /// Pairs shown on the Live TV tab, resolved from the CURRENT map plus
     /// the current state (group selector mode, mini player up or not).
@@ -352,7 +353,8 @@ struct ChannelListView: View {
         RemoteControlHints.liveTVPairs(
             map: remoteStore.map,
             useGroupSidebar: remoteStore.useGroupSidebar,
-            miniActive: nowPlaying.isActive && nowPlaying.isMinimized
+            miniActive: nowPlaying.isActive && nowPlaying.isMinimized,
+            radioActive: radio.isActive
         )
     }
 
@@ -1557,7 +1559,8 @@ struct ChannelListView: View {
                             if groupPillFocused != nil { return true }
                             let action = RemoteControlStore.shared.guideAction(.rightLong)
                             if action == .closeMiniPlayer {
-                                return nowPlaying.isActive && nowPlaying.isMinimized
+                                return (nowPlaying.isActive && nowPlaying.isMinimized)
+                                    || RadioModeSession.shared.isActive
                             }
                             return action != .none && action != .navigate
                         }(),

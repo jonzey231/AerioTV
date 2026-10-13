@@ -7129,7 +7129,8 @@ struct EPGGuideView: View {
         let holdAction = RemoteControlStore.shared.effectiveGuideAction(holdSlot)
         let holdArmed = holdAction != .navigate && holdAction != .none
             && !(holdSlot == .rightLong && holdAction == .closeMiniPlayer
-                 && !(NowPlayingManager.shared.isActive && NowPlayingManager.shared.isMinimized))
+                 && !(NowPlayingManager.shared.isActive && NowPlayingManager.shared.isMinimized)
+                 && !RadioModeSession.shared.isActive)
         let wait: UInt64 = !holdArmed ? 0
             : (holdSlot == .leftLong && holdAction == .openGroupSidebar
                && RemoteControlStore.shared.useGroupSidebar) ? 370_000_000 : 550_000_000

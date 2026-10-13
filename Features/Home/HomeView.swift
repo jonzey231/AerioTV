@@ -8751,7 +8751,10 @@ struct MainTabView: View {
         // dispatches its action; Do Nothing suppresses the press.
         guard nowPlaying.isMinimized else { return }
         let action = RemoteControlStore.shared.guideAction(.playPause)
-        if action == .resumePlayer {
+        if action == .resumePlayer, radio.isActive {
+            debugLog("🎮 Play/Pause pressed: Radio Mode -> Switch to Video Mode")
+            radio.returnToVideo()
+        } else if action == .resumePlayer {
             debugLog("🎮 Play/Pause pressed: expand mini player to full screen")
             withAnimation(.spring(response: 0.35)) { nowPlaying.expand() }
         } else {

@@ -173,6 +173,11 @@ enum GuideRemoteDispatch {
             post(.guidePageStep, ["step": pageStepRows])
             return true
         case .resumePlayer:
+            // Radio Mode (banner up): Play/Pause = Switch to Video Mode.
+            if RadioModeSession.shared.isActive {
+                RadioModeSession.shared.returnToVideo()
+                return true
+            }
             guard NowPlayingManager.shared.isActive,
                   NowPlayingManager.shared.isMinimized else { return false }
             withAnimation(.spring(response: 0.35)) {
@@ -180,6 +185,11 @@ enum GuideRemoteDispatch {
             }
             return true
         case .closeMiniPlayer:
+            // Radio Mode: hold Right = Stop, like the banner's Stop.
+            if RadioModeSession.shared.isActive {
+                RadioModeSession.shared.stop(reason: "hold Right")
+                return true
+            }
             guard NowPlayingManager.shared.isActive,
                   NowPlayingManager.shared.isMinimized else { return false }
             // Full session teardown: on the unified path a bare
@@ -341,7 +351,8 @@ extension RemoteControlHints {
     ///   slots and only while the corner mini is actually up.
     static func liveTVPairs(map: RemoteControlMap,
                             useGroupSidebar: Bool,
-                            miniActive: Bool) -> [RemoteHintPair] {
+                            miniActive: Bool,
+                            radioActive: Bool = false) -> [RemoteHintPair] {
         var pairs: [RemoteHintPair] = []
         // Guide key rows (Logan 2026-09-14): every pair is read off the
         // effective map. Select / Hold Select / Left / Right appear only when
@@ -364,6 +375,20 @@ extension RemoteControlHints {
         }
         if let phrase = stripGuideAction(eff(.rightShort)) {
             pairs.append(RemoteHintPair(key: "Right", action: phrase))
+        }
+        if radioActive {
+            // Radio Mode (2026-10-13): Back has no mini to expand, so a
+            // single Back reaches the top channel (HomeView.handleMenuPress);
+            // the mapped Play/Pause and hold-Right slots run the banner's
+            // two actions (GuideRemoteDispatch.perform).
+            pairs.append(RemoteHintPair(key: "Back", action: "Top channel"))
+            if map.guideAction(.playPause) == .resumePlayer {
+                pairs.append(RemoteHintPair(key: "Play/Pause", action: "Switch to Video Mode"))
+            }
+            if eff(.rightLong) == .closeMiniPlayer {
+                pairs.append(RemoteHintPair(key: "Hold Right", action: "Stop"))
+            }
+            return pairs
         }
         pairs.append(RemoteHintPair(key: miniActive ? "Double Back" : "Back",
                                     action: "Top channel"))
