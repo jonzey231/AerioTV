@@ -2335,21 +2335,61 @@ final class RadioModeSession: ObservableObject {
     /// never configures NowPlayingBridge (only mpv, Cast, CarPlay and the
     /// Remote do), which is why the lock screen card was empty with dead
     /// Play / Pause. Live stream: no elapsed, no duration.
+    /// Last published (channel, program) so the 1 s tick republishes only
+    /// on a real change (program rollover in the guide, channel switch).
+    private var publishedNowPlayingKey: String?
+
+    /// The now-airing program title and episode subtitle for the radio channel.
+    private func nowAiringLines(_ ch: ChannelDisplayItem) -> (title: String?, sub: String?) {
+        #if os(iOS)
+        let live = GuideStore.shared.liveProgram(for: ch.id)
+        let title = RemoteSessionSheet.nowAiring(channelID: ch.id)?.title
+            ?? live?.title ?? ch.currentProgram
+        #else
+        let live = GuideStore.shared.liveProgram(for: ch.id)
+        let title = live?.title ?? ch.currentProgram
+        #endif
+        let t = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sub = live?.subTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ((t?.isEmpty == false) ? t : nil, (sub?.isEmpty == false) ? sub : nil)
+    }
+
     private func publishNowPlaying() {
         guard isActive, let ch = channel else { return }
-        let program = ch.currentProgram?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = nowAiringLines(ch)
+        publishedNowPlayingKey = "\(ch.id)|\(lines.title ?? "")|\(lines.sub ?? "")"
+        // Title = channel, subtitle (artist) = program, album = the
+        // program's episode subtitle. Live stream: the LIVE bar, no times.
         NowPlayingBridge.shared.configure(
             title: ch.name,
-            subtitle: (program?.isEmpty == false) ? program : "AerioTV",
+            subtitle: lines.title ?? "AerioTV",
             artworkURL: ch.logoURL,
             duration: nil,
             isLive: true,
             onPlay: { RadioModeSession.shared.setPaused(false) },
             onPause: { RadioModeSession.shared.setPaused(true) },
-            onSeek: nil
+            onSeek: nil,
+            programLine: lines.sub
         )
+        #if os(iOS)
+        // iOS draws Stop in the center when it is the only enabled
+        // transport command it sees; keep Stop registered but make sure
+        // Play / Pause / Toggle are enabled so the center is Pause / Play.
+        let cc = MPRemoteCommandCenter.shared()
+        cc.playCommand.isEnabled = true
+        cc.pauseCommand.isEnabled = true
+        cc.togglePlayPauseCommand.isEnabled = true
+        #endif
         publishPlaybackRate()
-        debugLog("[RADIO] now playing -> \(ch.name)")
+        debugLog("[RADIO] now playing -> \(ch.name) | \(lines.title ?? "AerioTV")")
+    }
+
+    /// 1 s tick: republish when the program (or channel) changed.
+    private func refreshNowPlayingIfChanged() {
+        guard isActive, let ch = channel else { return }
+        let lines = nowAiringLines(ch)
+        let key = "\(ch.id)|\(lines.title ?? "")|\(lines.sub ?? "")"
+        if key != publishedNowPlayingKey { publishNowPlaying() }
     }
 
     /// Card Stop: end Radio Mode and the audio.
@@ -2408,7 +2448,10 @@ final class RadioModeSession: ObservableObject {
         surfaceTimer?.invalidate()
         enforceNoVideoSurface()
         surfaceTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
-            MainActor.assumeIsolated { RadioModeSession.shared.enforceNoVideoSurface() }
+            MainActor.assumeIsolated {
+                RadioModeSession.shared.enforceNoVideoSurface()
+                RadioModeSession.shared.refreshNowPlayingIfChanged()
+            }
         }
     }
 
