@@ -4713,9 +4713,48 @@ struct ChannelRow: View {
     /// rewind badge and tap straight into catch-up playback; the rest are
     /// dimmed reference rows.
     @ViewBuilder
+    /// Program Info for one schedule entry (expanded row).
+    private func presentProgramInfo(for entry: EPGEntry) {
+        let start = entry.startTime ?? Date()
+        let end = entry.endTime ?? start.addingTimeInterval(3600)
+        activeSheet = .programInfo(
+            ProgramInfoTarget(
+                channelName: item.name, title: entry.title, start: start, end: end,
+                description: entry.description, category: entry.category,
+                programID: entry.programID, subTitle: entry.subTitle,
+                season: entry.season, episode: entry.episode,
+                isNew: entry.isNew, isLiveBroadcast: entry.isLiveBroadcast,
+                isPremiere: entry.isPremiere, isFinale: entry.isFinale, isRepeat: entry.isRepeat))
+    }
+
+    /// List View Program Info button on an expanded schedule entry: All
+    /// Programs on every entry, Current Programs only on the one airing now.
+    /// Same glyph, size and target as the collapsed row's button.
+    @ViewBuilder
+    private func scheduleProgramInfoButton(_ entry: EPGEntry) -> some View {
+        #if os(iOS)
+        let now = Date()
+        let airing = (entry.startTime.map { $0 <= now } ?? false) && (entry.endTime.map { $0 > now } ?? false)
+        if programInfoInList, GuideProgramInfoButton.shows(mode: programInfoButtonMode, isLive: airing) {
+            Button {
+                presentProgramInfo(for: entry)
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 18, weight: .medium))  // glyph in a fixed box: not text, stays fixed
+                    .foregroundColor(.textSecondary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Program Info")
+        }
+        #endif
+    }
+
     private func airedEntryRow(_ row: ListScheduleRow) -> some View {
         let entry = row.entry
         let replayable = row.replayable
+        return HStack(spacing: 0) {
         Button {
             debugLog("[CATCHUP] tap \(item.name) days=\(item.catchupDays) replayable=\(replayable) \(entry.title) \(entry.startTime.map { DVRFormat.dateRange($0, entry.endTime ?? $0) } ?? "")")
             if replayable { watchCatchup(entry) }
@@ -4754,6 +4793,8 @@ struct ChannelRow: View {
         }
         .buttonStyle(.plain)
         .disabled(!replayable)
+        scheduleProgramInfoButton(entry)
+        }
     }
 
     /// Aired rows above a "Previously aired" divider. On iOS this scrolls
@@ -5246,6 +5287,7 @@ struct ChannelRow: View {
                         .foregroundColor(.accentPrimary)
                         .padding(.trailing, 4)
                 }
+                scheduleProgramInfoButton(entry)
             }
             #if os(tvOS)
             .padding(.horizontal, 18)
