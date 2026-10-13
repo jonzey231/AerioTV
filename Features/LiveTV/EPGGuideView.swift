@@ -5299,6 +5299,19 @@ final class GuideFocusScratch {
     /// so a remapped short Left/Right can put the ring back where the press
     /// started (onMoveCommand runs after the engine already moved it).
     var previousFocusedProgramID: String?
+    /// Recent focus history (time, program id focused from then), newest
+    /// last, so a hold can recover the cell focused at its press-down even
+    /// when a repeat moved focus before the hold threshold fired.
+    var focusHistory: [(at: Date, pid: String?)] = []
+    /// The id that was focused before the oldest kept history entry.
+    var focusBeforeHistory: String?
+
+    /// The program focused at `instant`.
+    func focusedProgram(at instant: Date, fallback: String?) -> String? {
+        guard !focusHistory.isEmpty else { return fallback }
+        if let entry = focusHistory.last(where: { $0.at <= instant }) { return entry.pid }
+        return focusBeforeHistory
+    }
     /// A remapped short Left/Right action waiting out the hold threshold;
     /// cancelled when the same press turns into a hold.
     var pendingArrowAction: Task<Void, Never>?
@@ -6268,6 +6281,11 @@ struct EPGGuideView: View {
                 GuideGridSignal.shared.gridHasFocus = newValue != nil || focusedChannelID != nil
                 focusScratch.lastFocusChangeAt = Date()
                 focusScratch.previousFocusedProgramID = oldValue
+                if focusScratch.focusHistory.isEmpty { focusScratch.focusBeforeHistory = oldValue }
+                focusScratch.focusHistory.append((at: Date(), pid: newValue))
+                if focusScratch.focusHistory.count > 12 {
+                    focusScratch.focusBeforeHistory = focusScratch.focusHistory.removeFirst().pid
+                }
                 guard let pid = newValue else { focusScratch.lastFocusedChannel = nil; return }
                 let chID = channelID(ofProgram: pid)
                 #if os(tvOS)
@@ -6350,9 +6368,15 @@ struct EPGGuideView: View {
                 // key-up (the guide-open "held from before" veto, reused),
                 // and focus returns to where the hold began (Apple TV
                 // 2026-10-13: three more RIGHT moves after the stop).
-                rightHoldOriginPID = focusedProgramID
+                // Origin = the cell focused at the RIGHT press-down, not at
+                // the threshold (a repeat may have moved focus in between).
+                let downAt = GuideArrowPressEdges.downAt["RIGHT"] ?? Date()
+                rightHoldOriginPID = focusScratch.focusedProgram(at: downAt, fallback: focusedProgramID)
                 GuideArrowPressEdges.guideOpenedAt = Date()
-                debugLog("[PRESS] guide hold-Right: swallowing Right until release origin=\(focusedProgramID ?? "nil")")
+                debugLog("[PRESS] guide hold-Right: swallowing Right until release origin=\(rightHoldOriginPID ?? "nil") (at press-down) nowFocused=\(focusedProgramID ?? "nil")")
+                if let origin = rightHoldOriginPID, focusedProgramID != origin {
+                    focusedProgramID = origin
+                }
                 // The hold's press-down already scrolled one step before
                 // recognition; put the timeline back where it was.
                 if let restore = focusScratch.preRightStepOffset {
