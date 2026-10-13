@@ -2113,6 +2113,22 @@ final class RadioModeSession: ObservableObject {
                 self.clear(reason: "expanded")
             }
             .store(in: &bag)
+        // Channel Up / Down from the sheet swap the tile in place (no
+        // begin()): follow the tile's channel for the card, the log and
+        // the lock screen.
+        MultiviewStore.shared.$tiles
+            .map { $0.first?.item.id }
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] id in
+                guard let self, self.isActive, id != nil else { return }
+                DispatchQueue.main.async {
+                    guard self.isActive, let ch = self.channel else { return }
+                    if !self.switching { debugLog("[RADIO] switch -> \(ch.name)") }
+                    self.publishNowPlaying()
+                }
+            }
+            .store(in: &bag)
         #if os(iOS)
         // Lock screen / Control Center Stop while Radio Mode is on (Play /
         // Pause come from NowPlayingBridge as for any playback).
@@ -2345,6 +2361,43 @@ final class RadioModeSession: ObservableObject {
     }
 
     #if os(iOS)
+    // MARK: Remote session sheet transport (same controls as AirPlay)
+
+    private var radioPlayer: AVPlayer? {
+        guard isActive, let id = MultiviewStore.shared.audioTileID else { return nil }
+        return MultiviewCompositeTaps.shared.player(tileID: id)
+    }
+
+    /// The live rewind window the tile's playlist advertises (nil when the
+    /// channel has no seekable range: the sheet then shows the read-only
+    /// program bar, as Cast does for plain live).
+    func remoteSeekWindow() -> RemoteSeekWindow? {
+        guard let player = radioPlayer, let item = player.currentItem,
+              let range = item.seekableTimeRanges.last?.timeRangeValue else { return nil }
+        let lo = range.start.seconds, hi = range.end.seconds
+        let pos = player.currentTime().seconds
+        guard lo.isFinite, hi.isFinite, pos.isFinite, hi - lo >= 1 else { return nil }
+        return RemoteSeekWindow(start: lo, end: hi, position: min(max(pos, lo), hi),
+                                isLive: !item.duration.seconds.isFinite)
+    }
+
+    func seek(by seconds: Double) {
+        guard let player = radioPlayer else { return }
+        seek(to: player.currentTime().seconds + seconds)
+    }
+
+    func seek(to seconds: Double) {
+        guard let player = radioPlayer, let item = player.currentItem,
+              let range = item.seekableTimeRanges.last?.timeRangeValue else { return }
+        let lo = range.start.seconds, hi = range.end.seconds
+        guard lo.isFinite, hi.isFinite, seconds.isFinite else { return }
+        // Never closer than 1 s to the edge (same as the player's skip).
+        let target = min(max(seconds, lo), max(lo, hi - 1))
+        debugLog("[RADIO] seek to \(Int(target))s (window \(Int(lo))-\(Int(hi)))")
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
     /// Called by the tile when the app goes to the background: true means
     /// Radio Mode owns this tile and it must keep playing (skip quiesce).
     func keepsPlayingInBackground(tileID: String, player: AVPlayer?) -> Bool {

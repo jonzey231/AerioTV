@@ -2944,104 +2944,6 @@ struct CastButton: UIViewRepresentable {
 /// AirPlay moved to RemoteSessionSheet (2026-09-21 production layout). Local playback is torn down underneath;
 /// this drives the TV. One layout, two transports -- the callbacks decide.
 /// Inlined here (not its own file) so no pbxproj target surgery is needed.
-/// Radio Mode sheet (cast sheet style): channel logo and name, "Playing
-/// channel audio", a Play / Pause transport, "Switch to Video Mode" (back
-/// to the full player, no re-tune) and Stop.
-struct RadioModeSheet: View {
-    @ObservedObject private var radio = RadioModeSession.shared
-    @ObservedObject private var store = MultiviewStore.shared
-    @Environment(\.dismiss) private var dismiss
-    @State private var contentHeight: CGFloat = 360
-
-    var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            VStack(spacing: 14) {
-                if let ch = radio.channel {
-                    header(ch)
-                    if let ps = store.audioProgressStore {
-                        ProgressStoreReader(progress: ps) { p in
-                            Button { radio.togglePause() } label: {
-                                Image(systemName: p.isPaused ? "play.fill" : "pause.fill")
-                                    .font(.system(size: 30, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
-                                    .foregroundStyle(.black)
-                                    .frame(width: 72, height: 72)
-                                    .background(ThemeManager.shared.accent, in: Circle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(p.isPaused ? "Play" : "Pause")
-                        }
-                    }
-                    Button {
-                        dismiss()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { radio.returnToVideo() }
-                    } label: {
-                        Label("Switch to Video Mode", systemImage: "play.rectangle.fill")
-                            .scaledFont(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(ThemeManager.shared.accent)
-                    Button(role: .destructive) {
-                        dismiss()
-                        radio.stop(reason: "sheet Stop")
-                    } label: {
-                        Text("Stop")
-                            .scaledFont(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                    }
-                    .buttonStyle(.bordered)
-                }
-            }
-            .padding(.horizontal, 24)
-            .padding(.top, 18)
-            .padding(.bottom, 8)
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
-                let r = (h * 2).rounded() / 2
-                if abs(r - contentHeight) > 0.5 { contentHeight = r }
-            }
-        }
-        .presentationDetents([.height(contentHeight + 24)])
-        .presentationDragIndicator(.visible)
-        .onChange(of: radio.isActive) { _, on in if !on { dismiss() } }
-    }
-
-    private func header(_ ch: ChannelDisplayItem) -> some View {
-        VStack(spacing: 6) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.white.opacity(0.08))
-                if let url = ch.logoURL {
-                    AsyncImage(url: url) { $0.resizable().scaledToFit() } placeholder: {
-                        Image(systemName: RadioModeSession.menuSymbol)
-                            .foregroundStyle(ThemeManager.shared.accent)
-                    }
-                    .frame(width: 56, height: 56)
-                } else {
-                    Image(systemName: RadioModeSession.menuSymbol)
-                        .font(.system(size: 26))  // glyph in a fixed box: not text, stays fixed
-                        .foregroundStyle(ThemeManager.shared.accent)
-                }
-            }
-            .frame(width: 68, height: 68)
-            Text(ch.name)
-                .scaledFont(.title3.weight(.bold))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-            if let prog = ch.currentProgram, !prog.isEmpty {
-                Text(prog)
-                    .scaledFont(.subheadline)
-                    .foregroundStyle(.white.opacity(0.8))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-            }
-            Text("Playing channel audio")
-                .scaledFont(.footnote.weight(.semibold))
-                .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))
-        }
-    }
-}
-
 struct RemoteControlScreen: View {
     var title: String
     var subtitle: String?
@@ -3289,7 +3191,9 @@ struct RemoteSessionSheet: View {
     /// `.companion`: the AerioTV Remote driving the AerioTV TV app (Logan
     /// 2026-10-11: the Remote sheet is the Cast sheet; only the glyph, the
     /// "Controlling X" line and the Disconnect wording differ).
-    enum Transport { case cast, airPlay, companion }
+    /// `.radio`: Radio Mode (local audio-only playback, Logan 2026-10-13):
+    /// the same sheet; the Change Device slot is "Switch to Video Mode".
+    enum Transport { case cast, airPlay, companion, radio }
 
     var transport: Transport
     var mode: Mode
@@ -3341,6 +3245,8 @@ struct RemoteSessionSheet: View {
     /// Add Channel row (Logan 2026-10-11): above Layout in the Multiview
     /// section; the only Multiview row for a single cast. nil hides it.
     var onAddChannel: (() -> Void)? = nil
+    /// Radio only: back to the full player, no re-tune.
+    var onSwitchToVideo: () -> Void = {}
 
     @State private var contentHeight: CGFloat = 320
     @State private var liveWindow: RemoteSeekWindow?
@@ -3391,7 +3297,8 @@ struct RemoteSessionSheet: View {
             } else if transport == .cast {
                 CastOptionsSheet(cast: AerioCastController.shared)
             } else {
-                CastOptionsSheet(cast: AerioCastController.shared, airPlayItem: item, airPlay: true)
+                CastOptionsSheet(cast: AerioCastController.shared, airPlayItem: item, airPlay: true,
+                                 radio: transport == .radio)
             }
         }
     }
@@ -3516,6 +3423,7 @@ struct RemoteSessionSheet: View {
                 // AerioTV Remote: the same slot drops the link and leaves the
                 // TV playing (the Remote's Disconnect).
                 if transport == .companion { onDisconnect(); return }
+                if transport == .radio { onSwitchToVideo(); return }
                 debugLog("[Remote] Change \(transport == .cast ? "Cast" : "AirPlay") Device while playing: stopping, then opening the picker")
                 // The channel follows the user to the next receiver (Logan
                 // 2026-09-27: the switch to the Streamer connected and then
@@ -3586,6 +3494,7 @@ struct RemoteSessionSheet: View {
         case .cast: return RemoteSessionCard.Transport.cast.glyph
         case .airPlay: return RemoteSessionCard.Transport.airPlay.glyph
         case .companion: return RemoteSessionCard.Transport.companion.glyph
+        case .radio: return RemoteSessionCard.Transport.radio.glyph
         }
     }
 
@@ -3594,6 +3503,7 @@ struct RemoteSessionSheet: View {
         case .cast: return "Change Cast Device"
         case .airPlay: return "Change AirPlay Device"
         case .companion: return "Disconnect (leave TV playing)"
+        case .radio: return "Switch to Video Mode"
         }
     }
 
@@ -3602,6 +3512,7 @@ struct RemoteSessionSheet: View {
         case .cast: return "Stop Casting"
         case .airPlay: return "Stop AirPlay"
         case .companion: return "Stop and Disconnect"
+        case .radio: return "Stop"
         }
     }
 
@@ -4598,6 +4509,8 @@ struct CastOptionsSheet: View {
     /// 2026-10-07, the AirPlay composite sheet showed the Cast proxy's
     /// "Waiting for the cast proxy to report.").
     var airPlay: Bool = false
+    /// Radio Mode session (local audio only): footer wording only.
+    var radio: Bool = false
     private var isAirPlay: Bool { airPlay || airPlayItem != nil }
     @Environment(\.dismiss) private var dismiss
     @State private var showSwitchStream = false
@@ -4644,7 +4557,9 @@ struct CastOptionsSheet: View {
                             Label("Switch Stream", systemImage: "arrow.triangle.2.circlepath")
                         }
                     } footer: {
-                        Text("Swaps this channel's upstream. The TV keeps playing; the picture follows in a few seconds.")
+                        Text(radio
+                             ? "Audio keeps playing while the stream switches."
+                             : "Swaps this channel's upstream. The TV keeps playing; the picture follows in a few seconds.")
                     }
                 }
                 Section {

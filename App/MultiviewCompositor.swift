@@ -242,6 +242,12 @@ final class MultiviewCompositeTaps: @unchecked Sendable {
         }
     }
 
+    /// The registered AVPlayer of a tile (Radio Mode's sheet transport).
+    func player(tileID: String) -> AVPlayer? {
+        lock.lock(); defer { lock.unlock() }
+        return entries[tileID]?.player
+    }
+
     /// Why a tile has no pixels (the no-pixels diagnostic line).
     func sourceDescription(tileID: String) -> String {
         lock.lock()

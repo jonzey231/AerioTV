@@ -6348,8 +6348,9 @@ struct MainTabView: View {
             remoteControlsSheet
         }
         .sheet(isPresented: $showRadioSheet) {
-            RadioModeSheet()
+            radioSessionSheet
         }
+        .onChange(of: radio.isActive) { _, on in if !on { showRadioSheet = false } }
         // The session ending (card X, TV death, sleep timer) must take the
         // sheet with it -- rule 4 means nothing is left behind to control.
         .onChange(of: activeRemoteTransport) { _, transport in
@@ -6745,6 +6746,40 @@ struct MainTabView: View {
 
     /// Rule 3: the SAME RemoteControlScreen the deleted covers used, now in a
     /// sheet. Each transport passes the options surface it actually supports.
+    /// Radio Mode: the shared remote session sheet (Cast / AirPlay / Remote)
+    /// with the `.radio` transport, driven by the hidden local tile.
+    @ViewBuilder
+    private var radioSessionSheet: some View {
+        if let ch = radio.channel, let ps = multiviewStore.audioProgressStore {
+            ProgressStoreReader(progress: ps) { p in
+                RemoteSessionSheet(
+                    transport: .radio,
+                    mode: .playing,
+                    channelName: ch.name,
+                    statusText: "Playing channel audio",
+                    artURL: ch.logoURL?.absoluteString,
+                    channelID: ch.id,
+                    isPlaying: !p.isPaused,
+                    item: ch,
+                    onTogglePlayPause: { radio.togglePause() },
+                    onChannelUp: { nowPlaying.changeChannel(direction: 1) },
+                    onChannelDown: { nowPlaying.changeChannel(direction: -1) },
+                    onSeek: { radio.seek(by: $0) },
+                    onStop: {
+                        showRadioSheet = false
+                        radio.stop(reason: "sheet Stop")
+                    },
+                    seekWindow: { radio.remoteSeekWindow() },
+                    onSeekTo: { radio.seek(to: $0) },
+                    onSwitchToVideo: {
+                        showRadioSheet = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { radio.returnToVideo() }
+                    }
+                )
+            }
+        }
+    }
+
     @ViewBuilder
     private var remoteControlsSheet: some View {
         switch activeRemoteTransport {
