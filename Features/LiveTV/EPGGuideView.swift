@@ -10217,11 +10217,12 @@ struct MultiviewStagingBanner: View {
 
 #if os(tvOS)
 /// Apple TV Radio Mode banner, the card's tvOS form: channel logo, name,
-/// "Playing channel audio", Select returns to the video (no re-tune),
-/// Stop ends it. Foreground only on Apple TV.
+/// "Playing channel audio", then Return to Channel (default focus; back to
+/// the video, no re-tune) and Stop. Foreground only on Apple TV.
 struct RadioModeBannerSlot: View {
     @ObservedObject private var radio = RadioModeSession.shared
     @ObservedObject private var store = MultiviewStore.shared
+    @FocusState private var returnFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -10234,44 +10235,57 @@ struct RadioModeBannerSlot: View {
 
     private func banner(_ ch: ChannelDisplayItem) -> some View {
         HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.black.opacity(0.25))
+                if let url = ch.logoURL {
+                    AsyncImage(url: url) { $0.resizable().scaledToFit() } placeholder: {
+                        Image(systemName: RadioModeSession.menuSymbol)
+                            .foregroundColor(.accentPrimary)
+                    }
+                    .frame(width: 36, height: 36)
+                } else {
+                    Image(systemName: RadioModeSession.menuSymbol)
+                        .foregroundColor(.accentPrimary)
+                }
+            }
+            .frame(width: 44, height: 44)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(ch.name)
+                    .scaledFont(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.textPrimary)
+                    .lineLimit(1)
+                Text("Playing channel audio")
+                    .scaledFont(.system(size: 13))
+                    .foregroundColor(Color.contrastText(.textSecondary))
+                    .lineLimit(1)
+            }
+            .layoutPriority(1)
+            Spacer()
+            // Android TV parity: two capsules like the background Multiview
+            // banner; Return to Channel takes focus by default.
             Button {
                 radio.returnToVideo()
             } label: {
-                HStack(spacing: 12) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.black.opacity(0.25))
-                        if let url = ch.logoURL {
-                            AsyncImage(url: url) { $0.resizable().scaledToFit() } placeholder: {
-                                Image(systemName: RadioModeSession.menuSymbol)
-                                    .foregroundColor(.accentPrimary)
-                            }
-                            .frame(width: 44, height: 44)
-                        } else {
-                            Image(systemName: RadioModeSession.menuSymbol)
-                                .foregroundColor(.accentPrimary)
-                        }
-                    }
-                    .frame(width: 52, height: 52)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(ch.name)
-                            .scaledFont(.system(size: 22, weight: .semibold))
-                            .foregroundColor(.textPrimary)
-                            .lineLimit(1)
-                        Text("Playing channel audio")
-                            .scaledFont(.system(size: 17))
-                            .foregroundColor(Color.contrastText(.accentPrimary))
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 0)
+                HStack(spacing: 6) {
+                    Image(systemName: "play.fill")
+                        .scaledFont(.system(size: 18, weight: .medium))
+                    Text("Return to Channel")
+                        .scaledFont(.system(size: 22, weight: .medium))
+                        .lineLimit(1)
                 }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 8)
-                .contentShape(Rectangle())
+                .fixedSize()
+                .foregroundColor(.white)
+                .padding(.horizontal, 26)
+                .padding(.vertical, 13)
+                .background(Capsule().fill(Color.accentPrimary))
             }
-            .buttonStyle(TVNoHighlightButtonStyle())
+            .buttonStyle(TVNoHighlightButtonStyle(isSelected: true))
             .tvFocusRingShape(.capsule)
-            .accessibilityLabel("Return to \(ch.name)")
+            .focused($returnFocused)
+            .onAppear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { returnFocused = true }
+            }
             Button {
                 radio.stop(reason: "banner Stop")
             } label: {
