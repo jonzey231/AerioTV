@@ -2088,7 +2088,6 @@ final class RadioModeSession: ObservableObject {
     private var bag: Set<AnyCancellable> = []
     #if os(iOS)
     /// The layer detached for background audio, with the player it showed.
-    private weak var detachedLayer: AVPlayerLayer?
     private weak var detachedPlayer: AVPlayer?
     #endif
 
@@ -2132,6 +2131,20 @@ final class RadioModeSession: ObservableObject {
         #if os(iOS)
         // Lock screen / Control Center Stop while Radio Mode is on (Play /
         // Pause come from NowPlayingBridge as for any playback).
+        $isActive
+            .removeDuplicates()
+            .dropFirst()
+            .sink { active in
+                // didSet-time: isActive is about to change; read the player
+                // through the store, not radioPlayer (which gates on it).
+                let player = MultiviewStore.shared.audioTileID
+                    .flatMap { MultiviewCompositeTaps.shared.player(tileID: $0) }
+                DispatchQueue.main.async {
+                    if active { RadioModeSession.shared.startSurfaceEnforcement() }
+                    else { RadioModeSession.shared.reattachVideoSurface(player: player) }
+                }
+            }
+            .store(in: &bag)
         $isActive
             .removeDuplicates()
             .sink { active in
@@ -2361,6 +2374,60 @@ final class RadioModeSession: ObservableObject {
     }
 
     #if os(iOS)
+    // MARK: No video surface (iPhone 2026-10-13: PiP flashed on app switch)
+
+    private var surfaceTimer: Timer?
+    private weak var detachedItem: AVPlayerItem?
+
+    /// True when `player` is the radio tile's player.
+    func ownsPlayer(_ player: AVPlayer) -> Bool {
+        isActive && radioPlayer === player
+    }
+
+    /// While Radio Mode is on: the tile's layer shows nothing and the
+    /// item's video track is disabled, so nothing decodes or can be
+    /// handed to PiP. Re-applied every second so a channel switch (new
+    /// item, tracks arriving late) comes up with video off too.
+    private func enforceNoVideoSurface() {
+        guard let player = radioPlayer else { return }
+        if let layer = AVPlayerDisplayLayerRegistry.layer(for: player), layer.player != nil {
+            layer.player = nil
+        }
+        guard let item = player.currentItem else { return }
+        let video = item.tracks.filter { $0.assetTrack?.mediaType == .video }
+        guard !video.isEmpty else { return }
+        var changed = false
+        for t in video where t.isEnabled { t.isEnabled = false; changed = true }
+        if changed || detachedItem !== item {
+            detachedItem = item
+            debugLog("[RADIO] video surface detached (video tracks=\(video.count))")
+        }
+    }
+
+    private func startSurfaceEnforcement() {
+        surfaceTimer?.invalidate()
+        enforceNoVideoSurface()
+        surfaceTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+            MainActor.assumeIsolated { RadioModeSession.shared.enforceNoVideoSurface() }
+        }
+    }
+
+    /// Switch to Video Mode (and any end of Radio Mode): video track on,
+    /// layer back on the player. PiP comes back via the tile's coordinator.
+    private func reattachVideoSurface(player: AVPlayer?) {
+        surfaceTimer?.invalidate()
+        surfaceTimer = nil
+        detachedItem = nil
+        guard let player else { return }
+        player.currentItem?.tracks
+            .filter { $0.assetTrack?.mediaType == .video }
+            .forEach { $0.isEnabled = true }
+        if let layer = AVPlayerDisplayLayerRegistry.layer(for: player), layer.player == nil {
+            layer.player = player
+        }
+        debugLog("[RADIO] video surface reattached")
+    }
+
     // MARK: Remote session sheet transport (same controls as AirPlay)
 
     private var radioPlayer: AVPlayer? {
@@ -2406,13 +2473,10 @@ final class RadioModeSession: ObservableObject {
             debugLog("[RADIO] background keepalive lost (no AVPlayer on the tile)")
             return false
         }
-        if let layer = AVPlayerDisplayLayerRegistry.layer(for: player), layer.player != nil {
-            // iOS pauses a player that is still attached to a layer when
-            // the app leaves the foreground; audio only needs no layer.
-            layer.player = nil
-            detachedLayer = layer
-            detachedPlayer = player
-        }
+        // The layer is already detached and the video track off for the
+        // whole of Radio Mode (enforceNoVideoSurface).
+        enforceNoVideoSurface()
+        detachedPlayer = player
         if player.rate == 0 { player.play() }
         debugLog("[RADIO] background keepalive ok (rate=\(player.rate))")
         return true
@@ -2428,14 +2492,12 @@ final class RadioModeSession: ObservableObject {
     }
 
     private func willEnterForeground() {
-        reattachLayer()
+        // Still Radio Mode: the surface stays detached.
+        if isActive { enforceNoVideoSurface() }
     }
 
     private func reattachLayer() {
-        if let layer = detachedLayer, let player = detachedPlayer, layer.player == nil {
-            layer.player = player
-        }
-        detachedLayer = nil
+        // The $isActive sink reattaches on every end of Radio Mode.
         detachedPlayer = nil
     }
     #endif

@@ -8445,8 +8445,49 @@ struct AVPlayerLayerView: UIViewRepresentable {
         /// AirPlay (plan section 7): auto-start from inline is disarmed
         /// while a receiver is served from this tile, re-armed after.
         var airPlaySubscription: AnyCancellable?
-        /// Radio Mode: no auto PiP (no video while it is on).
+        /// Radio Mode: the controller is released while it is on and
+        /// rebuilt on this layer when it ends (no video surface at all).
         var radioSubscription: AnyCancellable?
+        weak var layer: AVPlayerLayer?
+
+        #if os(iOS)
+        /// Build the controller on `layer` (auto-start from inline unless
+        /// an AirPlay receiver is served from this tile).
+        @MainActor func arm() {
+            guard controller == nil, let layer,
+                  AVPictureInPictureController.isPictureInPictureSupported(),
+                  let pip = AVPictureInPictureController(playerLayer: layer) else { return }
+            pip.delegate = self
+            let external = AirPlayTileDelivery.isServingReceiver
+            pip.canStartPictureInPictureAutomaticallyFromInline = !external
+            controller = pip
+            ForegroundPiPBridge.shared.register(pip)
+            debugLog("[AVP-PIP] controller armed (auto-start from inline: \(external ? "disarmed, AirPlay external" : "on"))")
+            airPlaySubscription = AirPlayTileDelivery.serving
+                .dropFirst()
+                .removeDuplicates()
+                .sink { [weak pip] serving in
+                    guard let pip,
+                          pip.canStartPictureInPictureAutomaticallyFromInline == serving else { return }
+                    pip.canStartPictureInPictureAutomaticallyFromInline = !serving
+                    debugLog(serving ? "[AVP-PIP] auto-start from inline disarmed (AirPlay external)"
+                                     : "[AVP-PIP] auto-start from inline re-armed")
+                }
+        }
+
+        /// Stop any PiP window and drop the controller.
+        @MainActor func release(reason: String) {
+            guard let existing = controller else { return }
+            if existing.isPictureInPictureActive { existing.stopPictureInPicture() }
+            existing.canStartPictureInPictureAutomaticallyFromInline = false
+            existing.delegate = nil
+            controller = nil
+            airPlaySubscription = nil
+            store?.isPiPActive = false
+            ForegroundPiPBridge.shared.unregister(existing)
+            debugLog("[AVP-PIP] controller released (\(reason))")
+        }
+        #endif
 
         func pictureInPictureControllerWillStartPictureInPicture(_ controller: AVPictureInPictureController) {
             // Synchronous, and iOS fires it BEFORE didEnterBackground -
@@ -8502,7 +8543,7 @@ struct AVPlayerLayerView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> HostView {
         let view = HostView()
-        view.playerLayer.player = player
+        view.playerLayer.player = radioHoldsSurface ? nil : player
         AVPlayerDisplayLayerRegistry.register(view.playerLayer, for: player)
         view.playerLayer.videoGravity = videoGravity
         view.attachedAt = Date()
@@ -8515,7 +8556,11 @@ struct AVPlayerLayerView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: HostView, context: Context) {
-        if view.playerLayer.player !== player {
+        if radioHoldsSurface {
+            // Radio Mode: no video surface; Switch to Video Mode reattaches.
+            AVPlayerDisplayLayerRegistry.register(view.playerLayer, for: player)
+            if view.playerLayer.player != nil { view.playerLayer.player = nil }
+        } else if view.playerLayer.player !== player {
             view.playerLayer.player = player
             AVPlayerDisplayLayerRegistry.register(view.playerLayer, for: player)
         }
@@ -8529,54 +8574,44 @@ struct AVPlayerLayerView: UIViewRepresentable {
     /// Arm or disarm the PiP controller to match [pipStore]. The
     /// controller binds to the LAYER, so player swaps on the same host
     /// view (retry, version switch) keep the same controller.
+    /// True while Radio Mode owns this layer's player (the audio tile).
+    private var radioHoldsSurface: Bool {
+        #if os(iOS)
+        let p = player
+        return MainActor.assumeIsolated { RadioModeSession.shared.ownsPlayer(p) }
+        #else
+        return false
+        #endif
+    }
+
     private func syncPiP(_ view: HostView, _ coordinator: PiPCoordinator) {
         #if os(iOS)
         if let store = pipStore {
             coordinator.store = store
-            if coordinator.controller == nil,
-               AVPictureInPictureController.isPictureInPictureSupported() {
-                if let pip = AVPictureInPictureController(playerLayer: view.playerLayer) {
-                    pip.delegate = coordinator
-                    let external = MainActor.assumeIsolated { AirPlayTileDelivery.isServingReceiver }
-                    pip.canStartPictureInPictureAutomaticallyFromInline = !external
-                    coordinator.controller = pip
-                    MainActor.assumeIsolated { ForegroundPiPBridge.shared.register(pip) }
-                    debugLog("[AVP-PIP] controller armed (auto-start from inline: \(external ? "disarmed, AirPlay external" : "on"))")
-                    MainActor.assumeIsolated {
-                        coordinator.airPlaySubscription = AirPlayTileDelivery.serving
-                            .dropFirst()
-                            .removeDuplicates()
-                            .sink { [weak pip] serving in
-                                guard let pip,
-                                      pip.canStartPictureInPictureAutomaticallyFromInline == serving else { return }
-                                pip.canStartPictureInPictureAutomaticallyFromInline = !serving
-                                debugLog(serving ? "[AVP-PIP] auto-start from inline disarmed (AirPlay external)"
-                                                 : "[AVP-PIP] auto-start from inline re-armed")
-                            }
-                        // Radio Mode plays audio only: leaving the app must
-                        // not open a PiP window with the video.
-                        coordinator.radioSubscription = RadioModeSession.shared.$isActive
-                            .removeDuplicates()
-                            .sink { [weak pip] radio in
-                                guard let pip else { return }
-                                let want = !radio && !AirPlayTileDelivery.isServingReceiver
-                                guard pip.canStartPictureInPictureAutomaticallyFromInline != want else { return }
-                                pip.canStartPictureInPictureAutomaticallyFromInline = want
-                                debugLog("[AVP-PIP] auto-start from inline \(want ? "re-armed" : "disarmed (Radio Mode)")")
-                            }
-                    }
+            coordinator.layer = view.playerLayer
+            MainActor.assumeIsolated {
+                if coordinator.radioSubscription == nil {
+                    // Radio Mode: release on entry, rebuild on exit.
+                    coordinator.radioSubscription = RadioModeSession.shared.$isActive
+                        .removeDuplicates()
+                        .sink { [weak coordinator] radio in
+                            guard let coordinator else { return }
+                            if radio { coordinator.release(reason: "Radio Mode") } else { coordinator.arm() }
+                        }
+                }
+                if RadioModeSession.shared.isActive {
+                    coordinator.release(reason: "Radio Mode")
+                } else {
+                    coordinator.arm()
                 }
             }
-        } else if let existing = coordinator.controller {
+        } else if coordinator.controller != nil {
             // Tile count grew past solo: PiP is a fullscreen-only
             // affordance, mirror the mpv policy and drop it.
-            existing.delegate = nil
-            coordinator.controller = nil
-            coordinator.airPlaySubscription = nil
-            coordinator.radioSubscription = nil
-            coordinator.store?.isPiPActive = false
-            MainActor.assumeIsolated { ForegroundPiPBridge.shared.unregister(existing) }
-            debugLog("[AVP-PIP] controller disarmed (no longer solo)")
+            MainActor.assumeIsolated {
+                coordinator.release(reason: "no longer solo")
+                coordinator.radioSubscription = nil
+            }
         }
         #endif
     }
