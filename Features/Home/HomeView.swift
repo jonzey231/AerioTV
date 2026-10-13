@@ -6571,7 +6571,7 @@ struct MainTabView: View {
                 RemoteSessionCard(
                     transport: .radio,
                     title: ch.name,
-                    status: "Playing channel audio",
+                    status: "Playing in Radio Mode",
                     artURL: ch.logoURL?.absoluteString,
                     isPlaying: true,
                     showTransport: false,
@@ -6756,7 +6756,7 @@ struct MainTabView: View {
                     transport: .radio,
                     mode: .playing,
                     channelName: ch.name,
-                    statusText: "Playing channel audio",
+                    statusText: "Playing in Radio Mode",
                     artURL: ch.logoURL?.absoluteString,
                     channelID: ch.id,
                     isPlaying: !p.isPaused,

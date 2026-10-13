@@ -10217,7 +10217,7 @@ struct MultiviewStagingBanner: View {
 
 #if os(tvOS)
 /// Apple TV Radio Mode banner, the card's tvOS form: channel logo, name,
-/// "Playing channel audio", then Switch to Video Mode (default focus; back to
+/// "Playing in Radio Mode", then Switch to Video Mode (default focus; back to
 /// the video, no re-tune) and Stop. Foreground only on Apple TV.
 struct RadioModeBannerSlot: View {
     @ObservedObject private var radio = RadioModeSession.shared
@@ -10255,7 +10255,7 @@ struct RadioModeBannerSlot: View {
                     .scaledFont(.system(size: 15, weight: .semibold))
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
-                Text("Playing channel audio")
+                Text("Playing in Radio Mode")
                     .scaledFont(.system(size: 13))
                     .foregroundColor(Color.contrastText(.textSecondary))
                     .lineLimit(1)
