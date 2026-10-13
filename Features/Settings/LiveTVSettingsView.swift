@@ -32,8 +32,6 @@ struct LiveTVSettingsView: View {
     @AppStorage(LogoCorners.guideKey) private var roundedGuideCorners = LogoCorners.guideDefault
     @AppStorage(LogoCorners.guideCellsKey) private var roundedProgramCells = LogoCorners.guideCellsDefault
     /// Guide on-air cell "i" button: "off" (default), "current", "all".
-    @AppStorage(GuideProgramInfoButton.guideViewKey) private var programInfoInGuide = true
-    @AppStorage(GuideProgramInfoButton.listViewKey) private var programInfoInList = false
     @AppStorage(GuideProgramInfoButton.key) private var programInfoButton = GuideProgramInfoButton.defaultValue
 
     // MARK: List view / layout
@@ -238,34 +236,6 @@ struct LiveTVSettingsView: View {
                 .onChange(of: roundedProgramCells) { _, _ in
                     SyncManager.shared.pushPreferencesImmediate()
                 }
-                // Program Info Button (2026-10-13): where the button shows,
-                // then the existing choice, which applies to both views.
-                Toggle(isOn: $programInfoInGuide) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Guide View")
-                            .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                        Text("Program Info button on guide program cells.")
-                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
-                    }
-                }
-                .tint(theme.accent)
-                .listRowBackground(Color.cardBackground)
-                .onChange(of: programInfoInGuide) { _, _ in
-                    SyncManager.shared.pushPreferencesImmediate()
-                }
-                Toggle(isOn: $programInfoInList) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("List View")
-                            .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                        Text("Program Info button on channel list rows.")
-                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
-                    }
-                }
-                .tint(theme.accent)
-                .listRowBackground(Color.cardBackground)
-                .onChange(of: programInfoInList) { _, _ in
-                    SyncManager.shared.pushPreferencesImmediate()
-                }
                 SettingsChoicePicker(
                     "Program Info Button",
                     options: [
@@ -274,8 +244,9 @@ struct LiveTVSettingsView: View {
                         SettingsChoice(GuideProgramInfoButton.all, "All Programs", icon: "info.circle")
                     ],
                     selection: $programInfoButton,
-                    footer: "Adds an info button to guide program cells that opens Program Info in one tap. Current Programs shows it on programs airing now; All Programs shows it on every cell wide enough for it.",
-                    icon: "info.circle"
+                    footer: "Adds an info button that opens Program Info in one tap. Guide View puts it on guide program cells; List View puts it on channel list rows. Current Programs shows it on programs airing now; All Programs shows it on every cell wide enough for it.",
+                    icon: "info.circle",
+                    leadingSection: AnyView(ProgramInfoViewToggles())
                 )
                 .listRowBackground(Color.cardBackground)
                 .onChange(of: programInfoButton) { _, _ in
@@ -901,3 +872,38 @@ struct LiveTVSettingsView: View {
     }
     #endif
 }
+
+#if os(iOS)
+/// First card of the Program Info Button page: which views carry the button.
+/// Owns its @AppStorage so the toggles redraw inside the pushed page.
+private struct ProgramInfoViewToggles: View {
+    @AppStorage(GuideProgramInfoButton.guideViewKey) private var inGuide = true
+    @AppStorage(GuideProgramInfoButton.listViewKey) private var inList = false
+    @ObservedObject private var theme = ThemeManager.shared
+
+    var body: some View {
+        Toggle(isOn: $inGuide) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Guide View")
+                    .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                Text("Program Info button on guide program cells.")
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+            }
+        }
+        .tint(theme.accent)
+        .listRowBackground(Color.cardBackground)
+        .onChange(of: inGuide) { _, _ in SyncManager.shared.pushPreferencesImmediate() }
+        Toggle(isOn: $inList) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("List View")
+                    .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                Text("Program Info button on channel list rows.")
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+            }
+        }
+        .tint(theme.accent)
+        .listRowBackground(Color.cardBackground)
+        .onChange(of: inList) { _, _ in SyncManager.shared.pushPreferencesImmediate() }
+    }
+}
+#endif

@@ -74,6 +74,9 @@ struct SettingsChoicePicker<Value: Hashable>: View {
     /// preferences or save a model pass it here rather than using
     /// `.onChange`, so the write and its side effect stay together.
     var onChange: ((Value) -> Void)? = nil
+    /// iOS: an extra card shown first on the pushed page (e.g. toggles
+    /// that scope where the choice applies). Ignored on tvOS.
+    var leadingSection: AnyView? = nil
 
     @ObservedObject private var theme = ThemeManager.shared
 
@@ -83,7 +86,9 @@ struct SettingsChoicePicker<Value: Hashable>: View {
          footer: String? = nil,
          icon: String? = nil,
          iconColor: Color = .accentPrimary,
+         leadingSection: AnyView? = nil,
          onChange: ((Value) -> Void)? = nil) {
+        self.leadingSection = leadingSection
         self.title = title
         self.options = options
         self._selection = selection
@@ -122,7 +127,8 @@ struct SettingsChoicePicker<Value: Hashable>: View {
                                options: options,
                                selection: $selection,
                                footer: footer,
-                               onChange: onChange)
+                               onChange: onChange,
+                               leadingSection: leadingSection)
         } label: {
             HStack(spacing: 12) {
                 if let icon {
@@ -393,12 +399,16 @@ struct SettingsChoicePage<Value: Hashable>: View {
     @Binding var selection: Value
     var footer: String? = nil
     var onChange: ((Value) -> Void)? = nil
+    var leadingSection: AnyView? = nil
 
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var theme = ThemeManager.shared
 
     var body: some View {
         List {
+            if let leadingSection {
+                Section { leadingSection }
+            }
             Section {
                 ForEach(options) { option in
                     Button {
