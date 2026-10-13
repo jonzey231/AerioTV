@@ -143,7 +143,11 @@ struct GuidePreviewBanner: View {
         return (nowPlaying.isActive || oneTileMultiview) ? 422 : 0
     }
 
-    static let height: CGFloat = 212
+    /// 260 (was 212): a reserved second title line plus the channel line
+    /// under it (2026-10-12, Android parity: long Teamarr titles were cut
+    /// off beside the channel name). Fixed, not content-sized, so stepping
+    /// between programs never moves the mini player or the guide.
+    static let height: CGFloat = 260
     @Environment(\.aerioTextScale) private var textScale
     @Environment(\.aerioSubtextScale) private var subtextScale
 
@@ -256,17 +260,20 @@ struct GuidePreviewBanner: View {
 
     private func copy(for program: GuideProgram) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 14) {
-                Text(program.title)
-                    .scaledFont(.system(size: 36, weight: .bold))
-                    .foregroundColor(.textPrimary)
+            // Title wraps to two lines; the channel name sits on its own
+            // line under it (it used to share the title's line, and both
+            // truncated on long sports titles).
+            Text(program.title)
+                .scaledFont(.system(size: 36, weight: .bold))
+                .foregroundColor(.textPrimary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            if let channel {
+                Text(channel.name)
+                    .scaledFont(.system(size: 22, weight: .semibold))
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .lineLimit(1)
-                if let channel {
-                    Text(channel.name)
-                        .scaledFont(.system(size: 22, weight: .semibold))
-                        .foregroundColor(Color.contrastText(.accentPrimary))
-                        .lineLimit(1)
-                }
+                    .truncationMode(.tail)
             }
             if let sub = program.subTitle,
                !EPGText.subtitleIsRedundant(sub, title: program.title, description: program.description) {
@@ -304,7 +311,7 @@ struct GuidePreviewBanner: View {
                     Text(program.description)
                         .scaledFont(.system(size: 23).subtext())
                         .foregroundColor(Color.contrastText(.textPrimary.opacity(0.85)))
-                        .lineLimit(3)
+                        .lineLimit(2)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
