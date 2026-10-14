@@ -5029,6 +5029,10 @@ struct AVPlayerMultiviewTile: View {
     /// The owning tile's id; mute state derives from comparing this to
     /// the store's audioTileID LIVE (never from a captured snapshot,
     /// see the audio note below).
+    #if os(iOS)
+    /// Spinner while the video comes back after Radio Mode.
+    @ObservedObject private var radioSession = RadioModeSession.shared
+    #endif
     let tileID: String
     let streamURL: URL
     let headers: [String: String]
@@ -5410,7 +5414,21 @@ struct AVPlayerMultiviewTile: View {
             if audioOnlyProgram, tileError == nil {
                 audioOnlyPresentation
             }
-            if let statusText, tileError == nil {
+            // A tile the user paused sits still: no Reconnecting / Retrying
+            // spinner while its feed recovers silently underneath.
+            #if os(iOS)
+            if statusText == nil, tileError == nil, let p = player,
+               radioSession.videoWarmingPlayer === p {
+                VStack(spacing: 8) {
+                    ProgressView()
+                    Text("Loading...")
+                        .scaledFont(.caption)
+                        .foregroundColor(.white.opacity(0.8))
+                }
+            }
+            #endif
+            if let statusText, tileError == nil,
+               !(progressStore.userPaused && (statusText.hasPrefix("Reconnecting") || statusText.hasPrefix("Retrying"))) {
                 VStack(spacing: 8) {
                     ProgressView()
                     Text(statusText)
@@ -6140,6 +6158,13 @@ struct AVPlayerMultiviewTile: View {
     /// Deadline fired: the ingest has been silent for the whole budget.
     private func handleNoFirstByte(silentFor silentSeconds: Double) {
         guard !failoverInFlight else { return }
+        // A paused live tile is expected to sit still: no failover walk,
+        // no overlay. The ingest keeps its own retry path.
+        if progressStore.userPaused {
+            debugLog(String(format: "[FAILOVER] channel=%@ no bytes for %.0fs while user paused; no walk, no overlay",
+                            channelName, silentSeconds))
+            return
+        }
         guard let server = failoverServer(),
               let pk = dispatcharrChannelPK,
               let uuid = dispatcharrChannelUUID else {

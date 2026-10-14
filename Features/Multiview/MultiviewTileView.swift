@@ -727,7 +727,7 @@ struct MultiviewTileView: View {
                 Label("RW 60s", systemImage: "gobackward.60")
             }
             Button {
-                progressStore.togglePauseAction?()
+                progressStore.userTogglePause()
             } label: {
                 Label(progressStore.isPaused ? "Play" : "Pause",
                       systemImage: progressStore.isPaused ? "play.fill" : "pause.fill")

@@ -780,7 +780,7 @@ struct VODTransportBar_iOS: View {
                 }
                 .accessibilityLabel(SkipIntervals.backLabel(skipBackSeconds))
                 vodButton(isPaused ? "play.fill" : "pause.fill") {
-                    store.audioProgressStore?.togglePauseAction?()
+                    store.audioProgressStore?.userTogglePause()
                 }
                 vodButton(SkipIntervals.forwardSymbol(skipForwardSeconds)) {
                     if let ps = store.audioProgressStore {
@@ -905,7 +905,7 @@ struct RewindTransportBar_iOS: View {
                     if let ps = store.audioProgressStore {
                         ProgressStoreReader(progress: ps) { p in
                             transportButton(p.isPaused ? "play.fill" : "pause.fill") {
-                                p.togglePauseAction?()
+                                p.userTogglePause()
                             }
                         }
                     } else {
@@ -1315,7 +1315,7 @@ struct PlaybackBottomChrome_tvOS: View {
             a11yHint: "Pause playback"
         ) {
             chromeState.reportInteraction()
-            store.audioProgressStore?.togglePauseAction?()
+            store.audioProgressStore?.userTogglePause()
         }
     }
 

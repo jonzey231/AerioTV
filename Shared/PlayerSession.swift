@@ -2354,7 +2354,7 @@ final class RadioModeSession: ObservableObject {
     var isPaused: Bool { MultiviewStore.shared.audioProgressStore?.isPaused ?? false }
 
     func togglePause() {
-        MultiviewStore.shared.audioProgressStore?.togglePauseAction?()
+        MultiviewStore.shared.audioProgressStore?.userTogglePause()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.publishPlaybackRate() }
     }
 
@@ -2540,11 +2540,46 @@ final class RadioModeSession: ObservableObject {
         player.currentItem?.tracks
             .filter { $0.assetTrack?.mediaType == .video }
             .forEach { $0.isEnabled = true }
-        if let layer = AVPlayerDisplayLayerRegistry.layer(for: player), layer.player == nil {
+        let layer = AVPlayerDisplayLayerRegistry.layer(for: player)
+        if let layer, layer.player == nil {
             layer.player = player
         }
         debugLog("[RADIO] video surface reattached")
+        // iPad 2026-10-13: a re-enabled video track on a playing item came
+        // back lazily, 10 to 19 s of black. Seek to the current time (exact)
+        // so decode restarts now from the preceding keyframe; inside the
+        // buffer this is near instant. Spinner on the tile until ready.
+        guard let item = player.currentItem else { return }
+        let now = player.currentTime()
+        let started = Date()
+        videoWarmingPlayer = player
+        debugLog(String(format: "[RADIO] video kick: seek to %.1fs", now.seconds))
+        player.seek(to: now, toleranceBefore: .zero, toleranceAfter: .zero) { _ in }
+        guard let layer else { return }
+        readyObservation?.invalidate()
+        readyObservation = layer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self] l, _ in
+            guard l.isReadyForDisplay else { return }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                debugLog("[RADIO] video ready \(Int(Date().timeIntervalSince(started) * 1000))ms after kick")
+                self.readyObservation?.invalidate()
+                self.readyObservation = nil
+                if self.videoWarmingPlayer === player { self.videoWarmingPlayer = nil }
+            }
+        }
+        // Never leave the spinner up forever.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            guard let self, self.videoWarmingPlayer === player else { return }
+            debugLog("[RADIO] video not ready 15 s after kick; spinner cleared item=\(item.status.rawValue)")
+            self.videoWarmingPlayer = nil
+            self.readyObservation?.invalidate()
+            self.readyObservation = nil
+        }
     }
+
+    /// The player whose video is coming back after Radio Mode (spinner).
+    @Published private(set) var videoWarmingPlayer: AVPlayer?
+    private var readyObservation: NSKeyValueObservation?
 
     // MARK: Remote session sheet transport (same controls as AirPlay)
 

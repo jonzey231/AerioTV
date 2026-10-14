@@ -900,6 +900,23 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// Apple TV 2026-10-13 (SXM Alt Nation): pauses "resumed on their own".
     var userPaused = false
 
+    /// User Play / Pause from any control. While the tile is between
+    /// pipelines (reconnecting: no driver, so no togglePauseAction) a paused
+    /// tile can still be resumed: the flag clears and the pending pipeline
+    /// start plays when the reconnect lands (Apple TV 2026-10-13: Select on
+    /// Play did nothing while "Reconnecting").
+    func userTogglePause() {
+        if let toggle = togglePauseAction {
+            toggle()
+            return
+        }
+        if userPaused {
+            userPaused = false
+            debugLog(String(format: "[PLAYER] user resume at %.1fs (during reconnect)", Double(currentMs) / 1000))
+            if isPaused { isPaused = false }
+        }
+    }
+
     /// Record a user pause / resume with the position.
     func noteUserPause(_ paused: Bool, positionSeconds: Double) {
         userPaused = paused
@@ -6502,6 +6519,22 @@ final class AVPlayerProgressDriver {
             guard let player else { return }
             let resuming = player.timeControlStatus == .paused
             self?.store.noteUserPause(!resuming, positionSeconds: player.currentTime().seconds)
+            // Live, no rewind window: a long pause can outlive the sliding
+            // playlist; resume at the live edge instead of a dead position.
+            if resuming, let self, self.isLive, !self.liveRewindWindowActive,
+               let item = player.currentItem,
+               let range = item.seekableTimeRanges.last?.timeRangeValue {
+                let start = CMTimeGetSeconds(range.start)
+                let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+                let cur = player.currentTime().seconds
+                if start.isFinite, end.isFinite, cur.isFinite, cur < start + 1 || end - cur > 60 {
+                    debugLog(String(format: "[PLAYER] user resume -> live edge (buffer exhausted) pos=%.1fs window=%.1f-%.1fs", cur, start, end))
+                    player.seek(to: CMTime(seconds: max(start, end - 6), preferredTimescale: 600)) { _ in
+                        player.play()
+                    }
+                    return
+                }
+            }
             if let self, self.store.isDVRWindow {
                 // GH #93 instrumentation: position and buffered-ahead at
                 // every DVR pause/resume, so a post-resume freeze can be
@@ -6934,7 +6967,7 @@ struct UnifiedPlayerChrome: View {
     private var centerPlayPause: some View {
         Button {
             onInteract()
-            progress.togglePauseAction?()
+            progress.userTogglePause()
         } label: {
             Image(systemName: progress.isPaused ? "play.fill" : "pause.fill")
                 .font(.system(size: 30, weight: .bold))  // glyph in a fixed box: not text, stays fixed

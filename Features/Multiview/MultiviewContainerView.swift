@@ -2297,12 +2297,12 @@ struct MultiviewContainerView: View {
                 // mapped action on the bare player; the default (and any
                 // non-bare state: chrome up, N>1, replay) keeps the
                 // toggle below.
-            } else if let toggle = store.audioProgressStore?.togglePauseAction {
+            } else if let ps = store.audioProgressStore {
                 DebugLogger.shared.log(
-                    "[MV-Cmd] tvOS Play/Pause → toggle pause on audio tile",
+                    "[MV-Cmd] tvOS Play/Pause → toggle pause on audio tile\(ps.togglePauseAction == nil ? " (between pipelines)" : "")",
                     category: "Playback", level: .info
                 )
-                toggle()
+                ps.userTogglePause()
                 chromeState.reportInteraction()
             }
     }
