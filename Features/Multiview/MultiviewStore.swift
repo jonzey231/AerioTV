@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Combine
 
 // MARK: - User-configurable multiview appearance
 //
@@ -109,6 +110,25 @@ enum MultiviewLogoPosition: String, CaseIterable, Identifiable {
 /// invariants (e.g. "audio tile ID always references a tile in the
 /// list" and "removing the audio tile auto-promotes the newest
 /// remaining") stay enforced in one place.
+/// The guide's only MultiviewStore input, published alone and only on a
+/// real change, so tile / audio / progress-store writes (a session reset
+/// writes a dozen) do not re-evaluate every guide row (iPad 2026-10-14:
+/// Radio Mode Stop, 144 row bodies in one second, 361 ms main-thread hang).
+@MainActor
+final class GuideStagingState: ObservableObject {
+    static let shared = GuideStagingState()
+    @Published private(set) var isStaging = false
+    private var sub: AnyCancellable?
+    private init() {
+        sub = MultiviewStore.shared.$isStagingFromGuide
+            .removeDuplicates()
+            .sink { [weak self] v in
+                guard let self, self.isStaging != v else { return }
+                self.isStaging = v
+            }
+    }
+}
+
 @MainActor
 final class MultiviewStore: ObservableObject {
 
@@ -264,11 +284,11 @@ final class MultiviewStore: ObservableObject {
     }
 
     func clearEngineLock() {
-        sessionEngine = .mpv
-        sessionRouteURL = nil
-        sessionRouteTileID = nil
+        if sessionEngine != .mpv { sessionEngine = .mpv }
+        if sessionRouteURL != nil { sessionRouteURL = nil }
+        if sessionRouteTileID != nil { sessionRouteTileID = nil }
         sessionRouteSourceURL = nil
-        sessionHeaders = [:]
+        if !sessionHeaders.isEmpty { sessionHeaders = [:] }
     }
 
     /// One-way downgrade: a runtime AVPlayer failure (codec gate, fatal
@@ -1235,12 +1255,14 @@ final class MultiviewStore: ObservableObject {
     /// their own mpv handle teardown via SwiftUI view dismantling,
     /// so wiping `tiles` is enough to trigger cleanup.
     func reset() {
-        tiles = []
-        audioTileID = nil
-        fullscreenTileID = nil
-        spotlightTileID = nil
-        relocatingTileID = nil
-        isPiPActive = false
+        // Equal-value guards: an equal @Published write still notifies
+        // every observer (project rule), and a reset writes all of these.
+        if !tiles.isEmpty { tiles = [] }
+        if audioTileID != nil { audioTileID = nil }
+        if fullscreenTileID != nil { fullscreenTileID = nil }
+        if spotlightTileID != nil { spotlightTileID = nil }
+        if relocatingTileID != nil { relocatingTileID = nil }
+        if isPiPActive { isPiPActive = false }
         // Clear the progress-store registry so the chrome overlay
         // doesn't keep a dangling reference to a torn-down tile's
         // `PlayerProgressStore`. SwiftUI unmount triggers
@@ -1253,9 +1275,9 @@ final class MultiviewStore: ObservableObject {
         // the tile's `.task(id: tile.id)`, so without this bump the audio tile's
         // store stays unregistered and the Options panel never mounts.
         progressStoreRegistrationEpoch &+= 1
-        tileEngines = [:]
-        vodVersionOptions = []
-        vodCurrentVersionID = nil
+        if !tileEngines.isEmpty { tileEngines = [:] }
+        if !vodVersionOptions.isEmpty { vodVersionOptions = [] }
+        if vodCurrentVersionID != nil { vodCurrentVersionID = nil }
         vodVersionSelectionKey = nil
         // Engine lock is per-session: clear it so the next session
         // re-resolves (and honors a freshly-toggled Developer flag).

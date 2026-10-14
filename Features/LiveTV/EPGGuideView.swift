@@ -5471,7 +5471,11 @@ struct EPGGuideView: View {
     /// singleton; observation cost is the same as having the cells
     /// observe it directly, with the bonus that the top-level
     /// banner can react to `tiles.count` changes too.
-    @ObservedObject private var multiviewStore = MultiviewStore.shared
+    /// Not observed (iPad 2026-10-14: every MultiviewStore publish, e.g. a
+    /// session reset, re-evaluated the whole guide 8 times in a second).
+    /// Rendering reads `staging`, which publishes only the staging flag.
+    private var multiviewStore: MultiviewStore { .shared }
+    @ObservedObject private var staging = GuideStagingState.shared
     @EnvironmentObject private var channelStore: ChannelStore
     @Environment(\.modelContext) private var modelContext
     /// Settings > Appearance > Text Size. Row and time-header heights grow
@@ -5774,7 +5778,7 @@ struct EPGGuideView: View {
                                 channels: { channels },
                                 onResolve: { jumpToChannelByNumber($0) })
             .animation(.easeInOut(duration: 0.2), value: stagingToast)
-            .animation(.easeInOut(duration: 0.2), value: multiviewStore.isStagingFromGuide)
+            .animation(.easeInOut(duration: 0.2), value: staging.isStaging)
         #if os(tvOS)
             .ignoresSafeArea(.all, edges: [.leading, .trailing, .bottom])
         #endif
@@ -5890,7 +5894,7 @@ struct EPGGuideView: View {
                 // the staging banner's slot (they never coexist).
                 MultiviewBackgroundBannerSlot()
                 RadioModeBannerSlot()
-                if multiviewStore.isStagingFromGuide && !MultiviewBackgroundSession.shared.isActive {
+                if staging.isStaging && !MultiviewBackgroundSession.shared.isActive {
                     stagingBanner
                 }
                 guideContent
@@ -8852,7 +8856,8 @@ private struct GuideProgramButton: View {
     /// `isStagingFromGuide` flag flips, and so the long-press menu
     /// label reads "Remove from Multiview" instead of "Add to
     /// Multiview" for an already-staged channel.
-    @ObservedObject private var multiviewStore = MultiviewStore.shared
+    /// Not observed: the cell reads the staging flag only in its tap actions.
+    private var multiviewStore: MultiviewStore { .shared }
     /// FavoritesStore lets us offer "Add/Remove from Favorites" from a
     /// program cell's long-press menu, users expect that action to
     /// work from anywhere they long-press in the guide, not just the
@@ -10726,7 +10731,11 @@ struct GuideCanvasRow: View {
     let onWatchCatchup: (ChannelDisplayItem, GuideProgram) -> Void
 
     @ObservedObject private var recordingCoordinator = RecordingCoordinator.shared
-    @ObservedObject private var multiviewStore = MultiviewStore.shared
+    /// Not observed (iPad 2026-10-14: every MultiviewStore publish, e.g. a
+    /// session reset, re-evaluated the whole guide 8 times in a second).
+    /// Rendering reads `staging`, which publishes only the staging flag.
+    private var multiviewStore: MultiviewStore { .shared }
+    @ObservedObject private var staging = GuideStagingState.shared
     @ObservedObject private var theme = ThemeManager.shared
     @EnvironmentObject private var favoritesStore: FavoritesStore
     @AppStorage(CategoryColor.enabledKey) private var categoryColorsEnabled: Bool = true
@@ -10776,7 +10785,7 @@ struct GuideCanvasRow: View {
     }
 
     private func models(now: Date) -> [GuideCanvasCellModel] {
-        _ = multiviewStore.isStagingFromGuide
+        _ = staging.isStaging
         let reminders = ReminderManager.shared
         return slots.map { slot in
             let p = slot.prog

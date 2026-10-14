@@ -4298,6 +4298,10 @@ final class NowPlayingManager: ObservableObject {
         #endif
         playingItem = nil
         isMinimized = false
+        // Same pass as the two writes above (iPad 2026-10-14): left to the
+        // unmounting mini's geometry callback, the 0 landed as one more
+        // nowPlaying publish and one more guide pass after a Stop.
+        miniPlayerBottomAbs = 0
         pendingMinimize?.cancel()
         pendingMinimize = nil
         // #42: authoritative reset of the chrome mirror on every playback
