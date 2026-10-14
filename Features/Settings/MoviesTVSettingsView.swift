@@ -136,10 +136,10 @@ struct MoviesTVSettingsView: View {
             Section {
                 Toggle(isOn: $tmdbPostersEnabled) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Fetch Posters from TMDB")
+                        Text("Use TMDB for Movies and TV Shows")
                             .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
-                        Text("Fill in program artwork your provider doesn't supply, using The Movie Database.")
+                        Text("Posters, backdrops, descriptions, cast and crew, episode details and recommendations from The Movie Database, plus program artwork your provider does not supply.")
                             .scaledFont(.labelSmall.subtext())
                             .foregroundColor(Color.contrastText(.textTertiary))
                     }
@@ -184,7 +184,7 @@ struct MoviesTVSettingsView: View {
                     .listRowBackground(Color.cardBackground)
                 }
             } header: {
-                Text("Posters").sectionHeaderStyle()
+                Text("The Movie Database").sectionHeaderStyle()
             } footer: {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("If iCloud Sync is enabled, your key is saved to your iCloud Keychain and syncs to your other devices. Get a free key at themoviedb.org under Settings, then API; paste either the API Key or the Read Access Token. With a key, artwork and details for Movies and TV Shows come from TMDB first and your provider fills any gaps.")
@@ -268,12 +268,12 @@ struct MoviesTVSettingsView: View {
                                          icon: "arrow.clockwise")
                 }
 
-                SettingsSection("Posters", style: .plain) {
+                SettingsSection("The Movie Database", style: .plain) {
                     TVSettingsToggleRow(
                         icon: "photo.on.rectangle.angled",
                         iconColor: theme.accent,
-                        title: "Fetch Posters from TMDB",
-                        subtitle: "Fill in program artwork your provider doesn't supply, using The Movie Database.",
+                        title: "Use TMDB for Movies and TV Shows",
+                        subtitle: "Posters, backdrops, descriptions, cast and crew, episode details and recommendations from The Movie Database, plus program artwork your provider does not supply.",
                         isOn: $tmdbPostersEnabled
                     ) { _ in }
 
