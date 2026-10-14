@@ -139,7 +139,7 @@ struct MoviesTVSettingsView: View {
                         Text("Use TMDB for Movies and TV Shows")
                             .scaledFont(.bodyMedium)
                             .foregroundColor(.textPrimary)
-                        Text("Posters, backdrops, descriptions, cast and crew, episode details and recommendations from The Movie Database, plus program artwork your provider does not supply.")
+                        Text("Posters, backdrops, descriptions, cast and crew, episode details, and recommendations from The Movie Database, plus program artwork your provider does not supply.")
                             .scaledFont(.labelSmall.subtext())
                             .foregroundColor(Color.contrastText(.textTertiary))
                     }
@@ -273,7 +273,7 @@ struct MoviesTVSettingsView: View {
                         icon: "photo.on.rectangle.angled",
                         iconColor: theme.accent,
                         title: "Use TMDB for Movies and TV Shows",
-                        subtitle: "Posters, backdrops, descriptions, cast and crew, episode details and recommendations from The Movie Database, plus program artwork your provider does not supply.",
+                        subtitle: "Posters, backdrops, descriptions, cast and crew, episode details, and recommendations from The Movie Database, plus program artwork your provider does not supply.",
                         isOn: $tmdbPostersEnabled
                     ) { _ in }
 
