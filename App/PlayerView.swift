@@ -899,6 +899,11 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// carry on. Cleared by a user resume and by a new tune.
     /// Apple TV 2026-10-13 (SXM Alt Nation): pauses "resumed on their own".
     var userPaused = false
+    /// When the user last resumed (any control). The live stall overlay
+    /// starts its frozen clock here and holds Reconnecting for a moment
+    /// while the buffer is healthy (Apple TV 2026-10-13: a resume after a
+    /// long pause flashed Reconnecting for 0.5 s with 254 s loaded ahead).
+    var userResumedAt: Date?
 
     /// User Play / Pause from any control. While the tile is between
     /// pipelines (reconnecting: no driver, so no togglePauseAction) a paused
@@ -912,6 +917,7 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
         }
         if userPaused {
             userPaused = false
+            userResumedAt = Date()
             debugLog(String(format: "[PLAYER] user resume at %.1fs (during reconnect)", Double(currentMs) / 1000))
             if isPaused { isPaused = false }
         }
@@ -920,6 +926,7 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// Record a user pause / resume with the position.
     func noteUserPause(_ paused: Bool, positionSeconds: Double) {
         userPaused = paused
+        if !paused { userResumedAt = Date() }
         debugLog(String(format: "[PLAYER] user %@ at %.1fs", paused ? "pause" : "resume",
                         positionSeconds.isFinite ? positionSeconds : 0))
     }

@@ -273,6 +273,9 @@ struct ChannelListView: View {
     }
 
     #if os(iOS)
+    /// Radio Mode on/off re-evaluates the header clearance below.
+    @ObservedObject private var radioSession = RadioModeSession.shared
+
     /// iPad corner mini: trailing room the phone header row keeps free so
     /// search, sort and List / Guide sit left of the mini instead of under
     /// it. Mirrors HomeView's iPad mini geometry (400 pt wide, 24 pt
@@ -281,7 +284,11 @@ struct ChannelListView: View {
     private var iPadMiniHeaderTrailingClearance: CGFloat {
         guard UIDevice.current.userInterfaceIdiom == .pad,
               nowPlaying.isActive, nowPlaying.isMinimized,
-              nowPlaying.miniPlayerBottomAbs > 0 else { return 0 }
+              nowPlaying.miniPlayerBottomAbs > 0,
+              // Radio Mode (iPad 2026-10-13): the session sits minimized in
+              // the docked container but hidden (opacity 0), so there is no
+              // mini on screen to clear; its card shows in the cast slot.
+              !radioSession.isActive else { return 0 }
         return 400 + 24 + 12
     }
     #endif

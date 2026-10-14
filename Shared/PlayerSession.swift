@@ -2450,33 +2450,35 @@ final class RadioModeSession: ObservableObject {
         guard isActive else { return }
         #if os(iOS)
         // iPhone 2026-10-13: re-enabling the video track on the stop path
-        // blocked the main thread 822 to 909 ms inside a SwiftUI update
-        // (a synchronous media-server call while Kept Live retained the
-        // player). Skip the sink's reattach; after teardown, reattach only
-        // a player Kept Live retained, on a later runloop turn.
-        let player = radioPlayer
+        // blocked the main thread 822 to 909 ms inside a SwiftUI update.
+        // iPad 2026-10-13 23:09:22 (Kept Live on): the stop still blocked
+        // 939 ms. isActive went false BEFORE the teardown, so the hidden
+        // docked container turned visible and the store reset's epoch bump
+        // re-ran the tile's task while the tile animated out for 0.9 s; the
+        // deferred reattach then re-enabled video and seeked a player Kept
+        // Live had already released (remux retention keeps the remuxer, not
+        // the AVPlayer). Now: tear the session down first, while the host
+        // is still hidden, with no animation, then end Radio Mode. Nothing
+        // reattaches or seeks on stop; a direct-HLS player Kept Live holds
+        // gets its video back when a tile adopts it.
         suppressReattach = true
         surfaceTimer?.invalidate()
         surfaceTimer = nil
         detachedItem = nil
         #endif
-        isActive = false
         debugLog("[RADIO] stop (\(reason))")
         NowPlayingBridge.shared.teardown()
+        let started = Date()
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            PlayerSession.shared.stop()
+            isActive = false
+        }
         #if os(iOS)
         reattachLayer()
         #endif
-        PlayerSession.shared.stop()
-        #if os(iOS)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            guard let player, player.currentItem != nil else {
-                debugLog("[RADIO] reattach skipped (player torn down)")
-                return
-            }
-            debugLog("[RADIO] reattach deferred (kept live)")
-            RadioModeSession.shared.reattachVideoSurface(player: player)
-        }
-        #endif
+        debugLog("[RADIO] stop teardown \(Int(Date().timeIntervalSince(started) * 1000))ms (no reattach, no seek)")
     }
 
     private func clear(reason: String) {

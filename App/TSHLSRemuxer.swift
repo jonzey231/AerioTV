@@ -5915,12 +5915,22 @@ struct AVPlayerMultiviewTile: View {
         let position = player.currentItem.map { CMTimeGetSeconds($0.currentTime()) } ?? .nan
         let advanced = position.isFinite && lastPosition != nil && position != lastPosition
         let now = Date()
-        let advanceAt = (advanced || lastPosition == nil) ? now : lastAdvance
         let wantsToPlay = player.timeControlStatus != .paused
+        // Paused time is not frozen time: the clock restarts while paused
+        // and at a user resume (Apple TV 2026-10-13: Play after a long
+        // pause counted the paused minutes and showed Reconnecting at once
+        // with 254 s loaded ahead).
+        let resumedAt = progressStore.userResumedAt
+        var advanceAt = (advanced || lastPosition == nil || !wantsToPlay) ? now : lastAdvance
+        if let resumedAt, resumedAt > advanceAt { advanceAt = resumedAt }
         let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
         let frozen = wantsToPlay && !advanced && now.timeIntervalSince(advanceAt) >= Self.stallFrozenSeconds
         let empty = wantsToPlay && ingestSilent && ahead < Self.stallEmptyBuffer
-        let stalled = (waiting && (sawAdvance || advanced)) || frozen || empty
+        // AVPlayer evaluates its buffering rate for a moment after a resume
+        // (waitingToPlay); with a healthy buffer that is not a stall.
+        let resumeGrace = resumedAt.map { now.timeIntervalSince($0) < Self.stallResumeGraceSeconds } ?? false
+            && ahead > Self.stallResumeGraceBuffer
+        let stalled = !resumeGrace && ((waiting && (sawAdvance || advanced)) || frozen || empty)
         if statusText == nil, stalled {
             statusText = Self.reconnectingStatus
             debugLog("[AVP-STREAM] STALL: playback stalled (status=\(player.timeControlStatus.rawValue), frozen=\(frozen)) with "
@@ -5945,6 +5955,10 @@ struct AVPlayerMultiviewTile: View {
     /// while playback is requested, or the buffer effectively empty.
     private static let stallFrozenSeconds: Double = 1
     private static let stallEmptyBuffer: Double = 0.25
+    /// No Reconnecting this soon after a user resume while this much is
+    /// loaded ahead.
+    private static let stallResumeGraceSeconds: Double = 3
+    private static let stallResumeGraceBuffer: Double = 3
 
     /// The upstream closed cleanly (server-side stop). A closed socket is
     /// proof, not a guess, so this re-tunes at once rather than letting
@@ -7163,6 +7177,19 @@ struct AVPlayerMultiviewTile: View {
                                                                  channelID: channelID,
                                                                  engine: .directHLS),
                    let held = entry.direct, held.player.currentItem != nil {
+                    // A player kept from Radio Mode still has its video
+                    // track off (the Radio stop no longer reattaches):
+                    // turn it back on and seek in place so decode restarts
+                    // from the preceding keyframe instead of lazily.
+                    if let item = held.player.currentItem {
+                        let off = item.tracks.filter { $0.assetTrack?.mediaType == .video && !$0.isEnabled }
+                        if !off.isEmpty {
+                            off.forEach { $0.isEnabled = true }
+                            held.player.seek(to: held.player.currentTime(),
+                                             toleranceBefore: .zero, toleranceAfter: .zero) { _ in }
+                            debugLog("[AVP-RETAIN] adopted player video track re-enabled (kept from Radio Mode) channel=\(channelName)")
+                        }
+                    }
                     startPlayer(url: sourceURL, requestHeaders: headers, adoptedPlayer: held.player)
                     LivePrewarm.shared.cancel(reason: "retained direct HLS player adopted")
                     debugLog("[AVP-RETAIN] tile resuming adopted player engine=directHLS channel=\(channelName)")
@@ -8637,7 +8664,13 @@ struct AVPlayerLayerView: UIViewRepresentable {
                         .removeDuplicates()
                         .sink { [weak coordinator] radio in
                             guard let coordinator else { return }
-                            if radio { coordinator.release(reason: "Radio Mode") } else { coordinator.arm() }
+                            if radio { coordinator.release(reason: "Radio Mode") }
+                            // iPad 2026-10-13 23:09:22: the card Stop armed PiP
+                            // (a synchronous AVKit build) on a tile that was
+                            // being torn down. Radio Mode now ends after the
+                            // session reset; arm only for a live session
+                            // (Switch to Video Mode).
+                            else if !MultiviewStore.shared.tiles.isEmpty { coordinator.arm() }
                         }
                 }
                 if RadioModeSession.shared.isActive {
