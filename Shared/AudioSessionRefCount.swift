@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import QuartzCore
 import Network
 
 /// Serialised reference counter for `AVAudioSession.setActive(...)`.
@@ -108,15 +109,30 @@ enum AudioSessionRefCount {
                 return
             }
             #endif
-            do {
-                try AVAudioSession.sharedInstance().setActive(
-                    false,
-                    options: .notifyOthersOnDeactivation
-                )
-                NSLog("[MV-Audio] session deactivated (refcount →0) caller=\(caller)")
-            } catch {
-                // Same tolerance as increment, log and move on.
-                NSLog("AudioSessionRefCount.decrement: setActive(false) failed: \(error)")
+            // iPad 2026-10-14 (Radio Mode card Stop): the decrement runs in
+            // the tile's onDisappear, inside a SwiftUI update, and a
+            // synchronous setActive(false) there is an IPC round trip to
+            // the audio server (the block sat between the tile stop and the
+            // tile's onDisappear end, 77 ms to 724 ms, 77% mach_msg2_trap).
+            // Deactivate on this serial queue after the caller returns; an
+            // increment queued in between runs first and keeps the session.
+            queue.async {
+                guard count == 0 else {
+                    debugLog("[MV-Audio] deferred deactivate skipped: refcount back to \(count) caller=\(caller)")
+                    return
+                }
+                let t0 = CACurrentMediaTime()
+                do {
+                    try AVAudioSession.sharedInstance().setActive(
+                        false,
+                        options: .notifyOthersOnDeactivation
+                    )
+                    NSLog("[MV-Audio] session deactivated (refcount →0) caller=\(caller)")
+                } catch {
+                    // Same tolerance as increment, log and move on.
+                    NSLog("AudioSessionRefCount.decrement: setActive(false) failed: \(error)")
+                }
+                debugLog("[RADIO-STOP] audio session deactivate (off main) \(Int((CACurrentMediaTime() - t0) * 1000))ms caller=\(caller)")
             }
         }
     }

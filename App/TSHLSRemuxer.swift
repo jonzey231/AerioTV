@@ -5469,6 +5469,8 @@ struct AVPlayerMultiviewTile: View {
             start()
         }
         .onDisappear {
+            let disT0 = CACurrentMediaTime()
+            defer { MainActor.assumeIsolated { RadioStopTrace.log("tile onDisappear total", since: disT0) } }
             #if os(iOS)
             // A tile removed mid-grace must still release its background task.
             endBackgroundGrace()
@@ -5492,7 +5494,9 @@ struct AVPlayerMultiviewTile: View {
             if let cu = catchup, cu.nativeChannelUUID != nil {
                 CatchupSupport.revokeNative(playback: cu, currentURL: catchupURL ?? streamURL)
             }
+            let audioT0 = CACurrentMediaTime()
             AudioSessionRefCount.decrement(caller: "avp-tile")
+            MainActor.assumeIsolated { RadioStopTrace.log("audio session decrement (main)", since: audioT0) }
         }
         #if os(iOS)
         // Background lifecycle (field 2026-08-29): quiesce cleanly on the
@@ -8335,6 +8339,22 @@ struct AVPlayerMultiviewTile: View {
         let releaseT0 = CACurrentMediaTime()
         player = nil
         MainActor.assumeIsolated { RadioStopTrace.log("tile player release", since: releaseT0) }
+        // Radio Mode Stop: hold the paused player past the SwiftUI update
+        // that discards this view, then drop the last reference off the
+        // main thread so a teardown inside the AVPlayer deinit (IPC to the
+        // media server) cannot block the update. The line says how long the
+        // final release took (0 ms when something else still held it).
+        if retainedPlayer == nil, let p = releasedPlayer,
+           MainActor.assumeIsolated({ RadioStopTrace.isOn }) {
+            let box = DeferredObjectRelease(p)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                DispatchQueue.global(qos: .utility).async {
+                    let t0 = CACurrentMediaTime()
+                    box.object = nil
+                    debugLog("[RADIO-STOP] player final release (off main) \(Int((CACurrentMediaTime() - t0) * 1000))ms")
+                }
+            }
+        }
         #if os(iOS)
         MultiviewCompositeTaps.shared.unregister(tileID: tileID)
         // Only the route owner releases AirPlay state (device log
@@ -8485,6 +8505,12 @@ struct AVPlayerMultiviewTile: View {
     }
 }
 
+/// Holds one reference so its final release can happen on another queue.
+final class DeferredObjectRelease: @unchecked Sendable {
+    var object: AnyObject?
+    init(_ object: AnyObject) { self.object = object }
+}
+
 /// Bare AVPlayerLayer host: video only, no system chrome, sized by
 /// SwiftUI like any other tile content.
 struct AVPlayerLayerView: UIViewRepresentable {
@@ -8618,6 +8644,13 @@ struct AVPlayerLayerView: UIViewRepresentable {
     }
 
     func makeCoordinator() -> PiPCoordinator { PiPCoordinator() }
+
+    /// Timing only (Radio Mode Stop hunt, iPad 2026-10-14).
+    static func dismantleUIView(_ view: HostView, coordinator: PiPCoordinator) {
+        let t0 = CACurrentMediaTime()
+        view.readyObservation = nil
+        MainActor.assumeIsolated { RadioStopTrace.log("layer host dismantle", since: t0) }
+    }
 
     func makeUIView(context: Context) -> HostView {
         let view = HostView()
